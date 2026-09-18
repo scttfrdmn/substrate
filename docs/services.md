@@ -13654,15 +13654,15 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 | DescribeStreamSummary | |
 | DeleteStream | |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region |
-| UpdateShardCount | `ScalingType` and `TargetShardCount` both required; `UNIFORM_SCALING` is the only published `ScalingType` |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required; `UNIFORM_SCALING` is the only published `ScalingType`. Reports all four published members including `StreamARN`; neither the `ScalingType` enum nor the target range is checked yet, and the stream never reports `UPDATING` |
 | MergeShards | |
 | SplitShard | |
 | PutRecord | |
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
 | GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName` |
-| EnableEnhancedMonitoring | |
-| DisableEnhancedMonitoring | |
+| EnableEnhancedMonitoring | `ShardLevelMetrics` is checked against its published 1–7 range and enum; `ALL` is expanded — see [Shard-level metrics, and the ALL wildcard](#shard-level-metrics-and-the-all-wildcard) |
+| DisableEnhancedMonitoring | Same shape and the same checks as its sibling |
 | AddTagsToStream | `Tags` is a JSON object of key/value pairs, not a list |
 | RemoveTagsFromStream | |
 | ListTagsForStream | Reports `Tags` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) — and pages them with `Limit` and `ExclusiveStartTagKey`; see [Paging the tags on a stream](#paging-the-tags-on-a-stream) |
@@ -13815,6 +13815,62 @@ that operation publishes; substrate models no tag quota for any other service ei
 still push a stream past fifty tags through `TagResources` —
 [#1000](https://github.com/scttfrdmn/substrate/issues/1000) — after which `AddTagsToStream` refuses
 every further add, which is the right answer for a stream over quota however it got there.
+
+### Shard-level metrics, and the ALL wildcard
+
+`API_EnableEnhancedMonitoring` and `API_DisableEnhancedMonitoring` publish a byte-identical
+`ShardLevelMetrics` shape — `Required: Yes`, *"Array Members: Minimum number of 1 item. Maximum number
+of 7 items"*, and an eight-entry `Valid Values` enum: the seven metric names plus `ALL`. Until
+[#999](https://github.com/scttfrdmn/substrate/issues/999) substrate decoded the member and checked none
+of it, so an empty array, a fifty-item array and a misspelled metric name were all accepted and written to
+the stream.
+
+| Request | Answer |
+|---------|--------|
+| An absent `ShardLevelMetrics` | `InvalidArgumentException`/400 — it is the operation's one `Required: Yes` member besides the stream reference |
+| An empty array | `InvalidArgumentException`/400, per the published *"Minimum number of 1 item"*. **The opposite reading from `AddTagsToStream`'s `Tags`**, deliberately: that map publishes a maximum and no minimum, this array publishes both |
+| More than 7 items | `InvalidArgumentException`/400 |
+| A value outside the enum, including a correct name in the wrong case | `InvalidArgumentException`/400, naming the offending value and the enum |
+
+**`ALL` is expanded into the seven metrics and never appears in a response.** The enum's eighth entry is
+listed on the two *response* arrays as well, which would let AWS report the literal `ALL`; substrate
+reads it as an artifact of one `MetricsName` enum shape reused in both directions, because *"The value
+`ALL` enables every metric"* composed with `DesiredShardLevelMetrics`' own description — *"the list of
+all the metrics that would be in the enhanced state after the operation"* — names seven metrics, not one
+wildcard. Expanding is also the only reading under which `DisableEnhancedMonitoring` works: against a
+stored `["ALL"]`, disabling `IncomingBytes` would remove nothing.
+
+**That expansion is what makes the page's eight-value enum consistent with its seven-item maximum.** A
+caller naming every metric *and* `ALL` sends eight items and cannot satisfy both bounds, so substrate
+enforces the maximum AWS states — and such a caller has no reason to ask, since `ALL` alone is one item
+and already means all seven.
+
+**`CurrentShardLevelMetrics` is the set before the operation and `DesiredShardLevelMetrics` the set
+after**, per their own descriptions. Substrate rendered the same slice for both, read after the write, so
+`Current` reported the after-state on every call — and `DisableEnhancedMonitoring` filtered its stored
+slice in place, aliasing the backing array, so the before-state was destroyed as the filter ran. The
+second defect is why the first could not be fixed by swapping two renders.
+
+**An empty set renders as `[]`, never `null`.** Both arrays publish *"Minimum number of 1 item"*, yet
+`Enable`'s own Sample Response carries `"CurrentShardLevelMetrics": []` and `Disable`'s carries
+`"DesiredShardLevelMetrics": []`. The samples are the authority on the shape a caller has to handle, so
+the minimum is not a response guarantee — the same rule as
+[#938](https://github.com/scttfrdmn/substrate/issues/938).
+
+**The response orders the metrics as the pages bullet them**, whatever order the caller sent. Neither
+page states a response ordering and a set has none, so substrate picks a canonical one, following
+`ListTagsForStream`'s choice to sort an unordered map by key rather than report Go's iteration order.
+Two replays of one recorded request therefore render byte-identical bodies.
+
+Both Sample Responses also **omit the published `StreamARN`**. It is reported regardless, from the
+stream the request resolved to rather than from the caller's own account and Region — so an ARN-only
+request naming another account's stream reports that account's ARN. `UpdateShardCount` omitted the same
+member and now reports it too. [#966](https://github.com/scttfrdmn/substrate/issues/966) was
+request-side only: it taught fifteen operations to read a `StreamARN` and gave no response one.
+
+`StreamDescription.EnhancedMonitoring` still reports a flat array of metric names where
+`API_StreamDescription` publishes an array of `EnhancedMetrics` objects; that shape, and
+`UpdateShardCount`'s unchecked `ScalingType` and target range, are tracked separately.
 
 ### CloudFormation resource types
 

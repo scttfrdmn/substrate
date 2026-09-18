@@ -1078,6 +1078,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   additionally records that AWS's `sync-` prefixed endpoint host appears nowhere on this page and that
   substrate does not model it.
 
+- **Three Kinesis responses report the `StreamARN` they publish, `CurrentShardLevelMetrics` reports the
+  set before the operation, and `ShardLevelMetrics` is checked against its own shape** (#999).
+  `UpdateShardCount`, `EnableEnhancedMonitoring` and `DisableEnhancedMonitoring` each publish
+  `StreamARN` and each omitted it. #966 was request-side only — it taught fifteen operations to decode
+  and resolve a `StreamARN`, and gave no response one — so `kinesisStreamARN` existed and rendered the
+  right string with nothing calling it. The ARN is composed from the **resolved target**, not the stored
+  record or the request context, so an ARN-only request naming another account's stream reports that
+  account's ARN rather than the caller's.
+
+  Both monitoring handlers rendered **the same slice** for `CurrentShardLevelMetrics` and
+  `DesiredShardLevelMetrics`, read after the write, where the page says `Current` is *"the current state
+  of the metrics that are in the enhanced state before the operation"*. A second defect made that one
+  unfixable by reordering: `disableEnhancedMonitoring` filtered in place —
+  `kept := stream.EnhancedMonitoring[:0]` aliases the backing array — so the before-state was
+  overwritten as the filter ran, and the slice a reordered render would have read was already clobbered.
+  Both handlers now build two sets. The regression test disables *one* of two metrics rather than all of
+  them, because an aliased filter and a correct one agree when the result is empty.
+
+  `ShardLevelMetrics` publishes `Required: Yes`, *"Minimum number of 1 item. Maximum number of 7
+  items"*, and an eight-value enum; substrate checked none of it, so an empty array, a fifty-item array
+  and a misspelt metric name were accepted and written. All four constraints are now enforced under
+  `InvalidArgumentException`/400 — published on both pages, and the code the sibling tag-constraint
+  refusals already use. **The empty-array reading is the opposite of `AddTagsToStream`'s** and
+  deliberately so: `Tags` publishes a maximum and no minimum, so an empty map is a no-op, while this
+  array publishes both bounds.
+
+  **Three places where AWS's own pages disagree with themselves, each decided and recorded in
+  `docs/services.md` rather than resolved silently.** (1) The enum has eight entries against a
+  seven-item maximum: substrate expands `ALL` into the seven, so it never appears in a response and the
+  maximum is enforceable — a reading that composes *"The value `ALL` enables every metric"* with
+  `DesiredShardLevelMetrics`' *"the list of all the metrics that would be in the enhanced state after
+  the operation"*, and the only one under which `Disable` after an `Enable(ALL)` does anything at all.
+  (2) Both Sample Responses omit the published `StreamARN`; it is reported. (3) Both arrays publish a
+  minimum of 1 item, yet each sample shows one of them as `[]`; an empty set renders `[]` and never
+  `null`, per #938. A fourth reading is substrate's own: neither page states a response ordering, so the
+  metrics are always rendered in the pages' bullet order, which is what makes two replays of one
+  recorded request render byte-identical bodies.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
