@@ -8,9 +8,9 @@ package emulator_test
 // with no cursor: a paging consumer's loop terminated on its first response, and the walk it exists to
 // perform first ran for real against an account holding more elements than one page.
 //
-// The six are added to [apigwPagedCollections] as they land, and every assertion below runs over the
-// whole table, so a collection that pages differently from its siblings fails here rather than in a
-// test written only for it. The assertions are the ones the basepath operation already carries, for
+// All six are now in [apigwPagedCollections], added two at a time as they landed, and every assertion
+// below runs over the whole table, so a collection that pages differently from its siblings fails here
+// rather than in a test written only for it. The assertions are the ones the basepath operation already carries, for
 // the reason those were chosen: the published default of 25 is what distinguishes these operations
 // from an EC2 describe, a walk that repeats or omits an element is the defect a cursor introduces,
 // and a "position" substrate never issued must be refused rather than answered with page one (#915).
@@ -85,6 +85,45 @@ var apigwPagedCollections = []apigwPagedCollection{
 		seed:      apigwSeedAuthorizers,
 		emptyPath: "/restapis/abcde12345/authorizers",
 	},
+	{
+		op:        "GetApiKeys",
+		member:    "name",
+		seed:      apigwSeedAPIKeys,
+		emptyPath: "/apikeys",
+	},
+	{
+		op:        "GetUsagePlans",
+		member:    "name",
+		seed:      apigwSeedUsagePlans,
+		emptyPath: "/usageplans",
+	},
+}
+
+// apigwSeedAPIKeys creates n API keys, which are account-scoped rather than hanging off a REST API.
+func apigwSeedAPIKeys(t *testing.T, srv *emulator.Server, n int) (string, []string) {
+	t.Helper()
+	created := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("key-%03d", i)
+		body := map[string]any{"name": name, "enabled": true}
+		status, raw := apigwPagingCall(t, srv, http.MethodPost, "/apikeys", body)
+		require.Equal(t, http.StatusCreated, status, raw)
+		created = append(created, name)
+	}
+	return "/apikeys", created
+}
+
+// apigwSeedUsagePlans creates n usage plans, also account-scoped.
+func apigwSeedUsagePlans(t *testing.T, srv *emulator.Server, n int) (string, []string) {
+	t.Helper()
+	created := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("plan-%03d", i)
+		status, raw := apigwPagingCall(t, srv, http.MethodPost, "/usageplans", map[string]any{"name": name})
+		require.Equal(t, http.StatusCreated, status, raw)
+		created = append(created, name)
+	}
+	return "/usageplans", created
 }
 
 // apigwSeedAPIForSubcollection creates the REST API the per-API collections hang off and returns its ID.
@@ -352,6 +391,26 @@ func TestAPIGatewayCollections_LimitOutsideThePublishedRangeIsRefused(t *testing
 			})
 		})
 	}
+}
+
+// TestAPIGatewayCollections_GetApiKeysReportsNoWarnings pins the one response member of the six that
+// substrate deliberately does not report.
+//
+// API_GetApiKeys publishes "warnings" alongside "item" and "position": "A list of warning messages
+// logged during the import of API keys when the failOnWarnings option is set to true." failOnWarnings
+// is a parameter of ImportApiKeys, which substrate does not route, so no call that can reach this
+// handler could produce a warning and no state could hold one. Under #1013 an unmodelled member is
+// omitted rather than reported empty, and this asserts the omission on the raw body — an empty array
+// would be a claim that the import ran and warned about nothing.
+func TestAPIGatewayCollections_GetApiKeysReportsNoWarnings(t *testing.T) {
+	srv := apigwPagingServer(t, emulator.NewMemoryStateManager())
+	path, _ := apigwSeedAPIKeys(t, srv, 2)
+
+	_, raw := apigwCollectionListRaw(t, srv, path)
+	var body map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(raw), &body), raw)
+	assert.NotContains(t, body, "warnings", "an unmodelled member is omitted, not reported empty")
+	assert.Contains(t, body, "item", "the elements are still reported")
 }
 
 // TestAPIGatewayCollections_RefuseAPositionTheyDidNotIssue is #915 at these operations: a token
