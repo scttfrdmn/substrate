@@ -300,11 +300,20 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		// The three key-material parameters, decoded because #984 found all three accepted and discarded:
 		// a caller asking for a key with no key material was handed a fully usable one. What substrate
 		// does not model is refused rather than stored — see [kmsResolveKeyOrigin].
-		Origin           string   `json:"Origin"`
-		CustomKeyStoreID string   `json:"CustomKeyStoreId"`
-		XksKeyID         string   `json:"XksKeyId"`
-		MultiRegion      bool     `json:"MultiRegion"`
-		Tags             []KMSTag `json:"Tags"`
+		Origin           string `json:"Origin"`
+		CustomKeyStoreID string `json:"CustomKeyStoreId"`
+		XksKeyID         string `json:"XksKeyId"`
+		// The key policy, decoded because #983 found it accepted and discarded: a caller that attached a
+		// policy at creation time read back a document it had never sent. BypassPolicyLockoutSafetyCheck
+		// stays undecoded beside it, for the reason kms_key_policy.go's preamble records.
+		//
+		// A pointer because absent and empty are different requests on this member: Policy is Required: No
+		// with a minimum length of 1, so omitting it asks for AWS's default document while sending "" is a
+		// document out of range. A string could not tell them apart, and the distinction is observable —
+		// one answers 200 and the other LimitExceededException.
+		Policy      *string  `json:"Policy"`
+		MultiRegion bool     `json:"MultiRegion"`
+		Tags        []KMSTag `json:"Tags"`
 	}
 	// The body stays optional — CreateKey has no required parameter, and an empty request creates the
 	// symmetric encryption key the operation's first guidance section describes — but a body that is present
@@ -341,6 +350,19 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if awsErr := kmsResolveKeyOrigin(input.Origin, input.CustomKeyStoreID, input.XksKeyID); awsErr != nil {
 		return nil, awsErr
 	}
+	// The key policy is validated last of the four and, unlike the other three, is not entangled with any
+	// of them: a document is well-formed or not whatever key spec it will be attached to. It goes last
+	// because the three before it decide what the key *is*, and a policy saying who may use a key means
+	// nothing until the key is creatable — so a request that is wrong about both its origin and its policy
+	// hears about the origin. Nothing is written before this returns; see [kmsValidateKeyPolicy] for the two
+	// refusals and kms_key_policy.go's preamble for the four AWS publishes here that substrate does not
+	// implement. An absent Policy is not a refusal: AWS attaches its own default, which
+	// [kmsDefaultKeyPolicy] renders at read time rather than storing here.
+	if input.Policy != nil {
+		if awsErr := kmsValidateKeyPolicy(*input.Policy); awsErr != nil {
+			return nil, awsErr
+		}
+	}
 
 	keyID := generateKMSKeyID()
 	arn := kmsKeyARN(ctx.Region, ctx.AccountID, keyID)
@@ -366,6 +388,17 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	goCtx := context.Background()
 	if err := p.saveKey(goCtx, key); err != nil {
 		return nil, fmt.Errorf("kms createKey saveKey: %w", err)
+	}
+	// A supplied policy is stored at the key that PutKeyPolicy writes and GetKeyPolicy reads, so the
+	// document a caller attaches here is the one it reads back — the round trip #983 found broken. Only a
+	// supplied one is written: a key with nothing at this state key is what tells GetKeyPolicy to render
+	// AWS's default, so writing the default here would make "the caller sent this" and "AWS attached this"
+	// indistinguishable in the state, for no observable gain.
+	if input.Policy != nil {
+		if err := p.state.Put(goCtx, kmsNamespace,
+			kmsPolicyKey(ctx.AccountID, ctx.Region, keyID), []byte(*input.Policy)); err != nil {
+			return nil, fmt.Errorf("kms createKey policy state.Put: %w", err)
+		}
 	}
 
 	ids, err := p.loadKeyIDs(goCtx, ctx.AccountID, ctx.Region)
@@ -686,6 +719,22 @@ func (p *KMSPlugin) cancelKeyDeletion(ctx *RequestContext, req *AWSRequest) (*AW
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{"KeyId": key.ARN})
 }
 
+// getKeyPolicy answers the key policy attached to a key, which for a key that has never been given one
+// is the document AWS attaches by default.
+//
+// Until #983 the fallback was `{"Version":"2012-10-17","Statement":[]}` — a document that grants
+// nothing, where AWS's default grants the key's own account full control of it. That is not a neutral
+// placeholder: a key policy is the only place a KMS key's own permissions live, so the stand-in said
+// the opposite of what AWS says. [kmsDefaultKeyPolicy] carries the document and its source.
+//
+// The key is now loaded, so a KeyId naming no key answers the NotFoundException both this operation and
+// PutKeyPolicy publish; before #983 neither checked, which `kms_error_status_test.go` recorded as a gap
+// rather than a status. The key state is deliberately not checked — the developer guide's key-state
+// table gives this operation a checkmark in all seven columns; see kms_key_policy.go's preamble.
+//
+// PolicyName is answered from the request after validation rather than hardcoded, which is the same
+// value as before for every request that is not refused, since `default` is the only name that reaches
+// the response.
 func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID      string `json:"KeyId"`
@@ -699,23 +748,51 @@ func (p *KMSPlugin) getKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if err != nil {
 		return nil, err
 	}
-	keyID := target.KeyID
+	if awsErr := kmsValidatePolicyName(input.PolicyName); awsErr != nil {
+		return nil, awsErr
+	}
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, target.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, kmsNotFound("Key not found")
+	}
 
-	data, err := p.state.Get(goCtx, kmsNamespace, kmsPolicyKey(target.AccountID, target.Region, keyID))
+	data, err := p.state.Get(goCtx, kmsNamespace, kmsPolicyKey(target.AccountID, target.Region, target.KeyID))
 	if err != nil {
 		return nil, fmt.Errorf("kms getKeyPolicy state.Get: %w", err)
 	}
-	policy := `{"Version":"2012-10-17","Statement":[]}`
+	// The account is the key's own rather than the caller's, which are the same account here — this
+	// operation is Cross-account: No — but the key is what the document is about, and reading it from the
+	// record is what keeps that true if a later issue widens the operation.
+	policy := kmsDefaultKeyPolicy(key.AccountID)
 	if data != nil {
 		policy = string(data)
 	}
 	out := map[string]interface{}{
 		"Policy":     policy,
-		"PolicyName": "default",
+		"PolicyName": kmsDefaultPolicyName,
 	}
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// putKeyPolicy attaches a key policy to a key, refusing a document KMS would not accept.
+//
+// Three refusals where there were none: a Policy outside its published 1-32768 range
+// ([kmsPolicyTooLong]), a Policy that is not a JSON object ([kmsMalformedPolicyDocument]), and a
+// PolicyName other than `default` ([kmsUnknownPolicyName]). Policy is Required: Yes here, which the
+// range check enforces on its own — a member present and empty satisfies presence — so an absent
+// Policy and an empty one are refused together and for the reason AWS names.
+//
+// The member checks run before the key is loaded, per #991: a request whose document is unusable and
+// whose KeyId names no key hears about the document, which is the half a caller can fix without an AWS
+// account. Both share [kmsValidateKeyPolicy] with createKey, so the two operations cannot disagree
+// about what they will store.
+//
+// No key-state refusal, for the reason kms_key_policy.go's preamble records: the key-state table
+// permits this operation in every state, including PendingDeletion, so KMSInvalidStateException is
+// published-but-unreachable here rather than missing.
 func (p *KMSPlugin) putKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID      string `json:"KeyId"`
@@ -730,8 +807,21 @@ func (p *KMSPlugin) putKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if err != nil {
 		return nil, err
 	}
-	keyID := target.KeyID
-	if err := p.state.Put(goCtx, kmsNamespace, kmsPolicyKey(target.AccountID, target.Region, keyID), []byte(input.Policy)); err != nil {
+	if awsErr := kmsValidatePolicyName(input.PolicyName); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := kmsValidateKeyPolicy(input.Policy); awsErr != nil {
+		return nil, awsErr
+	}
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, target.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, kmsNotFound("Key not found")
+	}
+	if err := p.state.Put(goCtx, kmsNamespace,
+		kmsPolicyKey(target.AccountID, target.Region, target.KeyID), []byte(input.Policy)); err != nil {
 		return nil, fmt.Errorf("kms putKeyPolicy state.Put: %w", err)
 	}
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
