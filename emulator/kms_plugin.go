@@ -1312,10 +1312,15 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 // context is recorded only under a symmetric encryption key, and note that the response publishes no
 // EncryptionContext member at all: what a caller gets back is the blob that carries it.
 //
+// #991 made Plaintext mean what its page says, in two places rather than one. The member's published
+// 1-4096 range and its base64 validity are checked before the key is resolved, and the smaller
+// per-spec, per-algorithm maxima after the key and the algorithm are both known — the split
+// [kmsDecodePlaintext] argues. It also corrected the code: an undecodable Plaintext answered
+// InvalidCiphertextException, which API_Encrypt does not publish and which belongs to the two
+// operations that consume a ciphertext rather than to the one that produces one.
+//
 // Two request members remain unmodeled and each is recorded rather than silently absent: DryRun and
-// GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of. Plaintext's
-// published length range, 1-4096, is likewise unenforced, as are the smaller per-spec maxima AWS
-// publishes for the asymmetric specs.
+// GrantTokens are seedable-outcome and authorization surface substrate has no equivalent of.
 //
 // The response is complete at three members: CiphertextBlob, EncryptionAlgorithm and KeyId. Note that
 // API_Encrypt publishes no KeyMaterialId, unlike Decrypt and ReEncrypt — so #978, which adds that
@@ -1336,6 +1341,18 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	algorithm, algErr := kmsResolveEncryptionAlgorithm("EncryptionAlgorithm", input.EncryptionAlgorithm)
 	if algErr != nil {
 		return nil, algErr
+	}
+
+	// Also before the key, and for the same reason (#991): Plaintext's base64 validity and its
+	// published 1-4096 range are facts about the request, so a caller that sends 5 KB to a key that
+	// does not exist hears about the 5 KB. Only the smaller per-spec maximum waits for the key — see
+	// [kmsDecodePlaintext] for the split, and note this refusal was InvalidCiphertextException, a
+	// code API_Encrypt does not publish and which belongs to an operation that *consumes* ciphertext.
+	// After the algorithm, because the per-spec maximum below is a function of it: a request wrong
+	// about both members has to fix the algorithm before any answer about length means anything.
+	plaintext, plainErr := kmsDecodePlaintext("Plaintext", input.Plaintext)
+	if plainErr != nil {
+		return nil, plainErr
 	}
 
 	goCtx := context.Background()
@@ -1365,10 +1382,12 @@ func (p *KMSPlugin) encrypt(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	if algErr := kmsCheckEncryptionAlgorithmForKey(key, "EncryptionAlgorithm", algorithm); algErr != nil {
 		return nil, algErr
 	}
-
-	plaintext, err := base64.StdEncoding.DecodeString(input.Plaintext)
-	if err != nil {
-		return nil, &AWSError{Code: "InvalidCiphertextException", Message: "invalid base64 plaintext", HTTPStatus: http.StatusBadRequest}
+	// The half of Plaintext's constraint that needed the key, and it needed the algorithm too (#991):
+	// API_Encrypt publishes a maximum per key spec *per algorithm*, an order of magnitude below the
+	// member's own 4096 for every asymmetric spec. Last of the checks, because it is the only one that
+	// depends on the algorithm having been admitted for this key — see [kmsPlaintextSizeError].
+	if sizeErr := kmsPlaintextSizeError(key, algorithm, plaintext); sizeErr != nil {
+		return nil, sizeErr
 	}
 
 	ciphertext := kmsEncryptStub(key, algorithm, input.EncryptionContext, plaintext)

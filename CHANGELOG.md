@@ -148,6 +148,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestSixDescribesNotFoundSurvivesPagination` asserts that **all six** rows of its table carry one
   rather than that some row does.
 
+- **`Encrypt` enforces both of `Plaintext`'s published maximum sizes, and answers a code its own page
+  publishes** (#991). The member carries two constraints at two levels and substrate enforced neither:
+  its own *"Length Constraints: Minimum length of 1. Maximum length of 4096"*, and a per-key table an
+  order of magnitude smaller, published on `API_Encrypt` itself under *"the maximum size of the data
+  that you can encrypt varies with the type of KMS key and the encryption algorithm that you choose"* —
+  4096 bytes for `SYMMETRIC_DEFAULT`, 214/190 for `RSA_2048`, 342/318 for `RSA_3072`, 470/446 for
+  `RSA_4096` and 1024 for `SM2PKE`, the pairs differing by RSA's OAEP padding overhead. The only check
+  the operation made at all was a base64 decode, and it answered `InvalidCiphertextException` — a code
+  `API_Encrypt` does not list among its nine, and which is published on `Decrypt` and `ReEncrypt`,
+  whose `CiphertextBlob` decode is what it exists for. Both of those sites are deliberately untouched:
+  `Encrypt` produces a ciphertext, it does not consume one.
+
+  **The two constraints belong at different points in the handler, and that is the substance of this
+  change rather than the code.** The 1-4096 range and the base64 validity are facts about the request,
+  so they are refused *before* the key is resolved; the per-key maximum is a fact about the request and
+  the key together, so it is the last check the operation makes. This is exactly the split #969
+  established for the algorithm member — `kmsResolveEncryptionAlgorithm` before the key,
+  `kmsCheckEncryptionAlgorithmForKey` after it — applied to the one other member `Encrypt` has to
+  check. The observable consequence is that a caller sending 5 KB to a key that does not exist now
+  hears about the 5 KB, and a caller whose `Plaintext` is unusable hears about it whether the key is
+  absent, disabled, or a signing key. All three are asserted, because no assertion on a code alone can
+  demonstrate an ordering.
+
+  **Neither refusal has a published code**, and `ValidationError`/400 from `CommonErrors.html` is
+  substrate's reading for both — the same landing place #964's waiting period and #969's unpublished
+  algorithm reached, and for the same reason: `API_Encrypt` lists nine errors and not one of them is
+  about a member being out of range. `InvalidKeyUsageException` is the near miss for the per-key
+  maximum and is deliberately **not** reused, even though that condition does involve the key spec and
+  the algorithm. Nothing about the pairing is incompatible — the key admits the algorithm, and a
+  shorter plaintext would succeed — so a caller reading that code would change its algorithm when what
+  it must change is how much data it sends per call. The message names the key spec, the algorithm, the
+  size sent and the maximum, because no two of those determine the answer.
+
+  The per-key check runs after `kmsCheckEncryptionAlgorithmForKey`, not before it, so an RSA key sent
+  no algorithm at all hears that the defaulted `SYMMETRIC_DEFAULT` is incompatible rather than a
+  maximum for a pair that cannot encrypt anything. And `SYMMETRIC_DEFAULT`'s per-key maximum *is* the
+  member's 4096, so the per-key branch is an asymmetric-key observation only — which is the direction
+  that matters, since a consumer that encrypts a password under a symmetric key and later switches to
+  an RSA key crosses a 190-byte boundary without changing its request shape at all. Every published
+  pair is asserted at exactly its maximum as well as one byte past it, which is the only way a
+  boundary written with the wrong comparison shows up.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
