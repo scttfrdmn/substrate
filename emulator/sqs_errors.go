@@ -2,6 +2,37 @@ package emulator
 
 import "net/http"
 
+// sqsInvalidBody returns the refusal for a JSON request body that will not parse (#1007).
+//
+// No SQS operation page publishes an error for an undecodable body, so this comes from the service's
+// own Common Errors page, which lists ValidationError at HTTP 400 and glosses it "The input fails to
+// satisfy the constraints specified by an AWS service" — the step-2 rule #950 established for a class
+// of caller error no operation page names. The page's nearer-looking codes are deliberately not used:
+// InvalidParameterValue names "the input parameter", and a body that will not parse has no parameter to
+// name; MalformedQueryString is published at 404 and describes the query string, not a JSON body;
+// MissingParameter asserts which parameter is absent, which is unknowable when nothing decoded.
+//
+// Fourteen SQS sites discarded this error before #1007: thirteen are refused here, and the fourteenth
+// (sqsRequestedAttributeNames) is unreachable behind ReceiveMessage's own guard and records that rather
+// than refusing twice. Four of the thirteen — GetQueueAttributes, DeleteQueue,
+// ListQueueTags and PurgeQueue — took the discarded value straight into a queue lookup, so a JSON
+// syntax error answered QueueDoesNotExist: the emulator told a caller its queue was missing when the
+// queue was fine and the body was not.
+//
+// The same code answers a body that parses but contradicts a member's type, which is the only shape that
+// reaches the second decode in the nine handlers that read the queue URL through the helper first — a
+// body that will not parse has already been refused one call earlier. The member is not named, because
+// naming it would mean answering InvalidParameterValue for a type mismatch and ValidationError for a
+// syntax error on the same operation, which is the one-plugin-two-codes split #950 removed; the
+// common-errors gloss above is true of both.
+func sqsInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "The input fails to satisfy the constraints specified by an AWS service",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // sqsQueueDoesNotExist returns the error SQS raises for an operation naming a
 // queue that does not exist.
 //

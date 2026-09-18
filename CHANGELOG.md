@@ -254,6 +254,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **SQS and AWS Health refuse a request body that will not parse, where fifteen sites had been
+  discarding the decode error and carrying on with a zero-valued input** (#1007, first slice). Every
+  guarded site wrote `_ = json.Unmarshal(req.Body, &input)`, so a truncated or malformed JSON body was
+  not an error at all: the operation ran against an empty struct. That is worse than answering the
+  wrong code, which #950 and #1003 corrected across fourteen services, because a wrong code is at
+  least a refusal — a discarded one produces a plausible success, or a refusal about something else.
+
+  **Four SQS operations were answering `QueueDoesNotExist` for a JSON syntax error.**
+  `GetQueueAttributes`, `DeleteQueue`, `ListQueueTags` and `PurgeQueue` read the queue URL through one
+  shared helper and passed the result straight into the queue lookup, so a discarded decode yielded an
+  empty URL and the lookup refused it as a missing queue. The emulator told a caller its queue did not
+  exist when the queue was fine and the request was not — the most expensive shape of wrong answer,
+  because it sends the reader to look at infrastructure rather than at the request they just sent. The
+  helper now returns the refusal to its thirteen callers instead of swallowing it, and a test creates
+  the queue before asserting, so a passing assertion is known to come from the new guard rather than
+  from a lookup that failed for its own reasons. A *well-formed* request for an absent queue still
+  answers `QueueDoesNotExist`: the lookup moved, it did not go away.
+
+  **Both codes come from the service's own common-errors page, under the second step of the rule #950
+  established**: a per-operation code where one covers every guarded site, otherwise the service-wide
+  page. No SQS operation page and no AWS Health operation page publishes an error for an undecodable
+  body, so SQS answers `ValidationError`/400 — *"The input fails to satisfy the constraints specified
+  by an AWS service"* — and Health answers `ValidationError`/400 — *"The input doesn't meet the
+  required format or constraints"*. Nearer-looking codes on the same pages are deliberately unused,
+  each because it would misdescribe the fault and send the reader to the wrong place: SQS's
+  `InvalidParameterValue` names *"the input parameter"* and a body that will not parse has none to
+  name, `MalformedQueryString` is published at **404** and describes a query string rather than a JSON
+  body, and `MissingParameter` asserts which parameter is absent, which is unknowable when nothing
+  decoded; Health's `MalformedHttpRequestException` is specifically about a body that cannot be
+  *decompressed* under the declared content encoding, so it would send a caller to check its
+  `Content-Encoding` header over a syntax error in its own JSON.
+
+  **Nine SQS handlers decode the body twice, and the second decode turned out to catch a different
+  fault.** They read the queue URL through the shared helper and then decode the same bytes into their
+  own struct, so a body that will not *parse* has been refused one call earlier and their own guard can
+  never see one. It is still reachable, by a body that parses but contradicts a member's type —
+  `{"QueueUrl": "…", "Attributes": "not-a-map"}` — because the first decode skips a field its target does
+  not declare without type-checking it. That shape answers the same `ValidationError`/400, and the
+  offending member is deliberately not named: naming it would mean `InvalidParameterValue` for a type
+  mismatch and `ValidationError` for a syntax error on the same operation, which is the
+  one-plugin-two-codes split #950 removed.
+
+  `DescribeEventDetails` also parses its body **before** loading event state, so a malformed body is
+  refused without consulting state. Two discards are deliberately retained rather than turned into a
+  second refusal, with their reasoning recorded in place: `sqsRequestedAttributeNames` decodes the same
+  body a second time for `ReceiveMessage`'s attribute selectors and is unreachable behind
+  `ReceiveMessage`'s own guard, and SQS's FIFO deduplication decode reads *stored state* rather than a
+  request — a corrupted state blob is not a caller error, and answering a caller-error code for one
+  would be a new defect rather than a fix. Two adjacent gaps are recorded and filed rather than folded
+  in: `eventArns` is published `Required: Yes` with Array Members 1–10 and is not checked, and SQS's
+  own required-member checks are a different class from this one. `docs/services.md` carries the slice,
+  the two provenance readings and what the remaining two slices of #1007 cover.
+
 - **`GetResources` honours all eight of its published request members, four of which it had been
   discarding and two of which it had not honoured as published either** (#1004, #1010). The operation
   decoded `TagFilters`, `ResourceTypeFilters`, `ResourcesPerPage` and `PaginationToken`, and dropped

@@ -202,6 +202,47 @@ var invalidBodyServices = []invalidBodyService{
 		},
 	},
 	{
+		// SQS, added by #1007. Thirteen sites discarded the unmarshal error, and four of them —
+		// GetQueueAttributes, DeleteQueue, ListQueueTags and PurgeQueue — carried the empty QueueUrl
+		// straight into a queue lookup, so a JSON syntax error answered QueueDoesNotExist: the emulator
+		// told a caller its queue was missing when the queue was fine and the body was not.
+		// TestSQSInvalidBodyIsRefusedBeforeTheQueueLookup covers those four against a queue that exists,
+		// which this table cannot do: it runs every service against an empty server.
+		name:       "sqs",
+		host:       "sqs.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-errors page; no SQS operation page names an undecodable body",
+		cases: []invalidBodyCase{
+			{op: "CreateQueue", target: "AmazonSQS.CreateQueue"},
+			{op: "GetQueueUrl", target: "AmazonSQS.GetQueueUrl"},
+			{op: "ListQueues", target: "AmazonSQS.ListQueues"},
+			{op: "GetQueueAttributes", target: "AmazonSQS.GetQueueAttributes"},
+			{op: "SetQueueAttributes", target: "AmazonSQS.SetQueueAttributes"},
+			{op: "DeleteQueue", target: "AmazonSQS.DeleteQueue"},
+			{op: "TagQueue", target: "AmazonSQS.TagQueue"},
+			{op: "UntagQueue", target: "AmazonSQS.UntagQueue"},
+			{op: "ListQueueTags", target: "AmazonSQS.ListQueueTags"},
+			{op: "SendMessage", target: "AmazonSQS.SendMessage"},
+			{op: "SendMessageBatch", target: "AmazonSQS.SendMessageBatch"},
+			{op: "ReceiveMessage", target: "AmazonSQS.ReceiveMessage"},
+			{op: "DeleteMessage", target: "AmazonSQS.DeleteMessage"},
+			{op: "DeleteMessageBatch", target: "AmazonSQS.DeleteMessageBatch"},
+			{op: "ChangeMessageVisibility", target: "AmazonSQS.ChangeMessageVisibility"},
+			{op: "PurgeQueue", target: "AmazonSQS.PurgeQueue"},
+		},
+	},
+	{
+		// AWS Health, added by #1007. DescribeEventDetails discarded the error and answered 200 with an
+		// empty successfulSet, so a malformed body looked like "none of your events were found".
+		name:       "health",
+		host:       "health.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-error-types page; the operation publishes only UnsupportedLocale",
+		cases: []invalidBodyCase{
+			{op: "DescribeEventDetails", target: "AWSHealth_20160804.DescribeEventDetails"},
+		},
+	},
+	{
 		name:       "efs",
 		host:       "elasticfilesystem.us-east-1.amazonaws.com",
 		code:       "BadRequest",
@@ -379,6 +420,114 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 			assert.Equalf(t, http.StatusNotFound, status, "%s answers 404 past its parse guard", tc.op)
 		})
 	}
+}
+
+// TestSQSInvalidBodyIsRefusedBeforeTheQueueLookup covers the four SQS operations whose discarded
+// unmarshal error was observable as the *wrong code*, not merely as a missing one (#1007).
+//
+// GetQueueAttributes, DeleteQueue, ListQueueTags and PurgeQueue read the queue URL through
+// sqsQueueURLFromRequest and pass it straight to loadQueue. When the decode was discarded, a body that
+// would not parse yielded an empty URL and the lookup answered QueueDoesNotExist — so the emulator told
+// a caller its queue was missing when the queue was fine and the body was not, which is the most
+// expensive kind of wrong answer: it sends the reader to look at infrastructure rather than at the
+// request.
+//
+// The queue is created first, which the shared table cannot do. Without it a passing assertion proves
+// only that the code is not QueueDoesNotExist; with it, the refusal is known to have come from the guard
+// rather than from a lookup that happened to fail for a different reason.
+func TestSQSInvalidBodyIsRefusedBeforeTheQueueLookup(t *testing.T) {
+	const host = "sqs.us-east-1.amazonaws.com"
+	ts := emulator.StartTestServer(t)
+
+	status, code, message := rawUnsignedCall(t, ts, host, "AmazonSQS.CreateQueue", "",
+		[]byte(`{"QueueName":"guarded-queue"}`))
+	require.Emptyf(t, code, "CreateQueue: %s", message)
+	require.Equalf(t, http.StatusOK, status, "CreateQueue: %s", message)
+
+	for _, op := range []string{"GetQueueAttributes", "DeleteQueue", "ListQueueTags", "PurgeQueue"} {
+		t.Run(op, func(t *testing.T) {
+			status, code, message := rawUnsignedCall(t, ts, host, "AmazonSQS."+op, "",
+				[]byte(invalidBodyPayload))
+			assert.Equalf(t, "ValidationError", code,
+				"%s refuses the body rather than reporting the queue missing", op)
+			assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", op)
+			assertNoDecoderText(t, op, message)
+		})
+	}
+
+	// The lookup moved, it did not go away: a well-formed request for a queue that does not exist is
+	// still QueueDoesNotExist. Without this, deleting the lookup would leave every assertion above green.
+	t.Run("absentQueueStillDoesNotExist", func(t *testing.T) {
+		_, code, _ := rawUnsignedCall(t, ts, host, "AmazonSQS.GetQueueAttributes", "",
+			[]byte(`{"QueueUrl":"http://localhost/123456789012/no-such-queue"}`))
+		assert.Equal(t, "QueueDoesNotExist", code,
+			"a well-formed request naming a queue that does not exist is unchanged")
+	})
+}
+
+// TestSQSAMemberOfTheWrongTypeIsRefused covers what the *second* decode in nine SQS handlers is for
+// (#1007).
+//
+// Those handlers read the queue URL through sqsQueueURLFromRequest and then decode the same body again
+// into their own struct, so a body that will not *parse* has already been refused one call earlier and
+// their own guard can never see one. It is still reachable, and this is the shape that reaches it: a
+// body that parses cleanly but contradicts a member's type. The first decode ignores the member because
+// it is not in the helper's struct — encoding/json skips a field the target does not declare without
+// type-checking it — so the type error surfaces only on the second.
+//
+// Without these cases the nine guards would be untested, and an untested guard on an input no test sends
+// is indistinguishable from dead code. The queue is created first because every one of the nine looks the
+// queue up before decoding, so an absent queue would answer QueueDoesNotExist before the guard ran.
+//
+// The code is ValidationError, the same as for an unparseable body: substrate does not inspect
+// *json.UnmarshalTypeError to name the offending member, and SQS's common-errors gloss — "The input fails
+// to satisfy the constraints specified by an AWS service" — is true of both. Naming the member would mean
+// answering InvalidParameterValue for this shape and ValidationError for the other, which is the
+// one-plugin-two-codes split #950 removed.
+func TestSQSAMemberOfTheWrongTypeIsRefused(t *testing.T) {
+	const host = "sqs.us-east-1.amazonaws.com"
+	const queueURL = "http://localhost/123456789012/typed-queue"
+	ts := emulator.StartTestServer(t)
+
+	status, code, message := rawUnsignedCall(t, ts, host, "AmazonSQS.CreateQueue", "",
+		[]byte(`{"QueueName":"typed-queue"}`))
+	require.Emptyf(t, code, "CreateQueue: %s", message)
+	require.Equalf(t, http.StatusOK, status, "CreateQueue: %s", message)
+
+	// One case per handler, each contradicting a member that handler declares and the helper does not.
+	for _, tc := range []struct {
+		op     string
+		member string
+	}{
+		{op: "SetQueueAttributes", member: `"Attributes":"not-a-map"`},
+		{op: "TagQueue", member: `"Tags":["not-a-map"]`},
+		{op: "UntagQueue", member: `"TagKeys":"not-a-list"`},
+		{op: "SendMessage", member: `"DelaySeconds":"not-a-number"`},
+		{op: "SendMessageBatch", member: `"Entries":{"not":"a-list"}`},
+		{op: "ReceiveMessage", member: `"MaxNumberOfMessages":"not-a-number"`},
+		{op: "DeleteMessage", member: `"ReceiptHandle":17`},
+		{op: "DeleteMessageBatch", member: `"Entries":"not-a-list"`},
+		{op: "ChangeMessageVisibility", member: `"VisibilityTimeout":"not-a-number"`},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			body := []byte(`{"QueueUrl":"` + queueURL + `",` + tc.member + `}`)
+			status, code, message := rawUnsignedCall(t, ts, host, "AmazonSQS."+tc.op, "", body)
+			assert.Equalf(t, "ValidationError", code,
+				"%s refuses a member whose type contradicts the model", tc.op)
+			assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.op)
+			assertNoDecoderText(t, tc.op, message)
+		})
+	}
+
+	// The guard refuses the body rather than every request: the same operations must still succeed on a
+	// body whose members are the published types. Without this, a guard that refused everything would
+	// leave all nine assertions above green.
+	t.Run("aWellTypedBodySucceeds", func(t *testing.T) {
+		status, code, message := rawUnsignedCall(t, ts, host, "AmazonSQS.SendMessage", "",
+			[]byte(`{"QueueUrl":"`+queueURL+`","MessageBody":"hello","DelaySeconds":0}`))
+		assert.Emptyf(t, code, "SendMessage on a well-typed body: %s", message)
+		assert.Equal(t, http.StatusOK, status, "SendMessage on a well-typed body answers 200")
+	})
 }
 
 // memberCase is one complaint about a member or an identifier, as opposed to a body that will not parse.

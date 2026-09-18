@@ -104,14 +104,37 @@ func (p *HealthPlugin) describeEvents() (*AWSResponse, error) {
 	return &AWSResponse{Body: body, StatusCode: http.StatusOK}, nil
 }
 
-func (p *HealthPlugin) describeEventDetails(req *AWSRequest) (*AWSResponse, error) {
-	events := p.loadEvents()
+// healthInvalidBody returns the refusal for a request body that will not parse (#1007).
+//
+// `API_DescribeEventDetails` publishes one operation-specific error, `UnsupportedLocale`/400, which
+// describes a locale rather than a body. The code therefore comes from AWS Health's own Common Error
+// Types page, which lists `ValidationError` at HTTP 400 and glosses it "The input doesn't meet the
+// required format or constraints" — #950's step-2 rule for a class of caller error no operation page
+// names. `MalformedHttpRequestException`/400 is on the same page and is the nearer-looking miss: it is
+// specifically about a body that cannot be *decompressed* under the declared content encoding, which is
+// a transport failure rather than malformed JSON, so using it would send a caller to check its
+// `Content-Encoding` header over a syntax error in its own request.
+func healthInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "The input doesn't meet the required format or constraints",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
 
-	// Parse requested ARNs from request body.
+func (p *HealthPlugin) describeEventDetails(req *AWSRequest) (*AWSResponse, error) {
+	// The body is parsed before the events are loaded, so a body that will not parse is refused without
+	// reading state. `eventArns` is Required: Yes with Array Members 1–10, and that check is *not* added
+	// here: substrate answers an empty successfulSet for an absent list, which is a separate divergence
+	// from this one and is filed rather than folded in.
 	var input struct {
 		EventArns []string `json:"eventArns"`
 	}
-	_ = json.Unmarshal(req.Body, &input)
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, healthInvalidBody()
+	}
+
+	events := p.loadEvents()
 
 	var successSet []map[string]interface{}
 	for _, ev := range events {
