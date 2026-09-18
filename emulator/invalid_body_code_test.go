@@ -35,8 +35,12 @@ const invalidBodyPayload = `{"`
 
 // sfnGuardedOperations is every Step Functions operation whose handler guards json.Unmarshal.
 //
-// Twelve are in stepfunctions_plugin.go and three in stepfunctions_tags.go. All fifteen route through
+// Fifteen are in stepfunctions_plugin.go and three in stepfunctions_tags.go. All eighteen route through
 // one host and target in substrate, StartSyncExecution included, so one table covers both files.
+//
+// The three list operations joined the table with #1007: they treat the body as optional and had been
+// discarding the error from a body that was present, which is a different decision from accepting an
+// absent one. TestInvalidBodyLeavesAnAbsentBodyAlone asserts that the second still holds.
 var sfnGuardedOperations = []string{
 	"CreateStateMachine",
 	"DescribeStateMachine",
@@ -53,13 +57,18 @@ var sfnGuardedOperations = []string{
 	"TagResource",
 	"UntagResource",
 	"ListTagsForResource",
+	"ListStateMachines",
+	"ListExecutions",
+	"ListActivities",
 }
 
 // ssmGuardedOperations is every Systems Manager operation whose handler guards json.Unmarshal.
 //
 // Ten answered InvalidRequest and the last two, SendCommand and GetCommandInvocation, answered
 // SerializationException — the same defect under a second code neither more published than the first,
-// and the reason this list is twelve where the issue counted ten.
+// and the reason this list is twelve where the issue counted ten. DescribeParameters is the thirteenth,
+// added by #1007: it treats the body as optional and was discarding the error from a body that was
+// present, which is a different decision from accepting an absent one.
 var ssmGuardedOperations = []string{
 	"PutParameter",
 	"GetParameter",
@@ -73,6 +82,7 @@ var ssmGuardedOperations = []string{
 	"ListTagsForResource",
 	"SendCommand",
 	"GetCommandInvocation",
+	"DescribeParameters",
 }
 
 // TestStepFunctionsInvalidBodyAnswersValidationError asserts every Step Functions guard answers the

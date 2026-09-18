@@ -147,7 +147,9 @@ func (p *FirehosePlugin) listDeliveryStreams(reqCtx *RequestContext, req *AWSReq
 		ExclusiveStartDeliveryStreamName string `json:"ExclusiveStartDeliveryStreamName"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, firehoseInvalidBody()
+		}
 	}
 	limit := input.Limit
 	if limit <= 0 {
@@ -199,7 +201,9 @@ func (p *FirehosePlugin) putRecordBatch(_ *RequestContext, req *AWSRequest) (*AW
 		Records []interface{} `json:"Records"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, firehoseInvalidBody()
+		}
 	}
 
 	nano := p.tc.Now().UnixNano()

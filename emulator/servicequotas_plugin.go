@@ -259,8 +259,11 @@ func (p *ServiceQuotasPlugin) listRequestedServiceQuotaChangeHistory(accountID s
 		ServiceCode string `json:"ServiceCode"`
 		Status      string `json:"Status"`
 	}
-	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+	// This is the one site in the file that decoded the body by hand rather than through [sqUnmarshal],
+	// which is why it was the one site still discarding the error (#1007). The helper's own length check
+	// replaces the one that used to be here.
+	if refusal := sqUnmarshal(req.Body, &input); refusal != nil {
+		return nil, refusal
 	}
 
 	ctx := context.Background()

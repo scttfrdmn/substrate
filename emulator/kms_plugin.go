@@ -468,7 +468,9 @@ func (p *KMSPlugin) listKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		Marker string `json:"Marker"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, kmsInvalidBody()
+		}
 	}
 	if input.Limit <= 0 {
 		input.Limit = 100
@@ -1321,7 +1323,9 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		Marker string `json:"Marker"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, kmsInvalidBody()
+		}
 	}
 	if input.Limit <= 0 {
 		input.Limit = 100

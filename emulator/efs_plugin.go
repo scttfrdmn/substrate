@@ -197,7 +197,9 @@ func (p *EFSPlugin) updateFileSystem(reqCtx *RequestContext, req *AWSRequest, fs
 		ProvisionedThroughputInMibps float64 `json:"ProvisionedThroughputInMibps"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, efsInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
