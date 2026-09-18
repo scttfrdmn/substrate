@@ -439,14 +439,13 @@ var scanScopeServices = []scanScopeService{
 					RepositoryArn string `json:"repositoryArn"`
 				} `json:"repository"`
 			}
-			// A map rather than the list of Key/Value objects ECR's reference publishes, because
-			// substrate's createRepository decodes tags as map[string]string and a list reaches
-			// nothing. Written as substrate parses it, since this row's subject is the scanner's
-			// scope; the shape difference is its own defect, not this test's to assert.
+			// The list of capitalized Key/Value objects ECR's reference publishes. This row sent a
+			// map until #1017, because createRepository decoded one — the shape defect that comment
+			// named as its own, now fixed; tagging_ecr_test.go asserts the shape itself.
 			scanScopeJSON(t, ts, account, "ecr", region, "AmazonEC2ContainerRegistry_V20150921",
 				"CreateRepository", map[string]any{
 					"repositoryName": id,
-					"tags":           scanScopeTagMap(),
+					"tags":           scanScopeTagPairs(),
 				}, &out)
 			require.NotEmptyf(t, out.Repository.RepositoryArn, "CreateRepository %s reports an ARN", id)
 			return out.Repository.RepositoryArn

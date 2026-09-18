@@ -252,11 +252,21 @@ func (f *cfnStampFixture) repositoryTagsFor(t *testing.T, name string) []string 
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 
+	// ECR reports the published array of Tag objects, with capitalized members (#1017). The stamp
+	// writes a map to the record, so this call is also the assertion that the projection reads what
+	// the stamp wrote.
 	var doc struct {
-		Tags map[string]string `json:"tags"`
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"tags"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Body, &doc), "ListTagsForResource body: %s", resp.Body)
-	return cfnSortedTagStrings(doc.Tags)
+	pairs := make(map[string]string, len(doc.Tags))
+	for _, tag := range doc.Tags {
+		pairs[tag.Key] = tag.Value
+	}
+	return cfnSortedTagStrings(pairs)
 }
 
 // clusterTagsFor reads one ECS cluster's tags through ECS's ListTagsForResource.
