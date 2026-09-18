@@ -5949,6 +5949,14 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 	type gpuInfoItem struct {
 		Count int `xml:"gpus>item>count"`
 	}
+	// neuronInfo carries one neuronDevices item per accelerator *type*, the way gpuInfo
+	// carries one gpus item, so a single count is the whole list for every catalog type.
+	// Only count is rendered: NeuronDeviceInfo's name, coreInfo and memoryInfo, and
+	// NeuronInfo's totalNeuronDeviceMemoryInMiB, publish no valid values and no example,
+	// so substrate would be inventing them (#1029).
+	type neuronInfoItem struct {
+		Count int `xml:"neuronDevices>item>count"`
+	}
 	type processorInfo struct {
 		SupportedArchitectures []string `xml:"supportedArchitectures>item"`
 	}
@@ -5969,6 +5977,7 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 		ProcessorInfo         processorInfo    `xml:"processorInfo"`
 		SupportedUsageClasses []usageClassItem `xml:"supportedUsageClasses>item"`
 		GpuInfo               *gpuInfoItem     `xml:"gpuInfo,omitempty"`
+		NeuronInfo            *neuronInfoItem  `xml:"neuronInfo,omitempty"`
 	}
 	type response struct {
 		XMLName       xml.Name           `xml:"DescribeInstanceTypesResponse"`
@@ -5997,6 +6006,11 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 		}
 		if info.GPU > 0 {
 			item.GpuInfo = &gpuInfoItem{Count: info.GPU}
+		}
+		// Never both: the catalog fills one count or the other, so a type that reports a
+		// neuron device reports no gpuInfo and vice versa.
+		if info.NeuronDevices > 0 {
+			item.NeuronInfo = &neuronInfoItem{Count: info.NeuronDevices}
 		}
 		resp.InstanceTypes = append(resp.InstanceTypes, item)
 	}

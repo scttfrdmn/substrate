@@ -16,6 +16,12 @@ type ec2InstanceTypeInfo struct {
 	MemoryMiB int
 	// GPU is the accelerator count reported through gpuInfo when non-zero.
 	GPU int
+	// NeuronDevices is the accelerator count reported through
+	// neuronInfo.neuronDevices when non-zero. It is a separate field from GPU rather
+	// than one count plus a member selector because the two members are separate in
+	// the response: a type reports at most one of them, and a caller reading gpuInfo
+	// for an Inferentia type must get nothing (#1029).
+	NeuronDevices int
 	// SpotPrice is the stub spot price in USD/hour. See [ec2InstanceTypeFamilies].
 	SpotPrice string
 	// SupportedArchs is reported as processorInfo.supportedArchitectures.
@@ -168,22 +174,43 @@ type ec2AcceleratedSize struct {
 	VCpus int
 	// MemoryMiB is the memory size in MiB.
 	MemoryMiB int
-	// Accelerators is the number of accelerator devices the size carries. It is recorded
-	// for every family, including the ones whose count no response reports because AWS
-	// carries it under a member substrate does not model; see [ec2AcceleratedFamily].
+	// Accelerators is the number of accelerator devices the size carries. Which response
+	// member reports it is the family's property, not the size's; see
+	// [ec2AcceleratedFamily.Reports].
 	Accelerators int
 	// SpotPrice is the stub spot price in USD/hour.
 	SpotPrice string
 }
 
+// ec2AcceleratorMember is the InstanceTypeInfo member a family's accelerator count is
+// reported through. Its value is the member's own wire name, so a message or a doc can
+// name it without a second table.
+//
+// The zero value reports the count nowhere, which is deliberately what a family whose
+// member substrate does not model must do: DescribeInstanceTypes splits accelerators
+// across five members (gpuInfo, neuronInfo, inferenceAcceleratorInfo, fpgaInfo,
+// mediaAcceleratorInfo), and a family added later must report nothing until somebody
+// decides which of them AWS populates for it, rather than defaulting into whichever
+// one happens to be modeled.
+type ec2AcceleratorMember string
+
+const (
+	// ec2AcceleratorNone reports the count through no member at all.
+	ec2AcceleratorNone ec2AcceleratorMember = ""
+	// ec2AcceleratorGPU reports the count through gpuInfo.gpus.
+	ec2AcceleratorGPU ec2AcceleratorMember = "gpuInfo"
+	// ec2AcceleratorNeuron reports the count through neuronInfo.neuronDevices.
+	ec2AcceleratorNeuron ec2AcceleratorMember = "neuronInfo"
+)
+
 // ec2AcceleratedFamily describes one accelerated-computing family in the seeded catalog.
 type ec2AcceleratedFamily struct {
 	// Name is the family prefix, e.g. "g5".
 	Name string
-	// ReportedAsGPU says whether DescribeInstanceTypes reports this family's accelerators
-	// through gpuInfo. See [ec2AcceleratedFamilies] for the three members AWS splits
-	// accelerators across and why only one of them is modeled.
-	ReportedAsGPU bool
+	// Reports is the response member DescribeInstanceTypes reports this family's
+	// accelerator count through. See [ec2AcceleratedFamilies] for the five members AWS
+	// splits accelerators across and which of them are modeled.
+	Reports ec2AcceleratorMember
 	// Sizes are the family's members, smallest first.
 	Sizes []ec2AcceleratedSize
 }
@@ -218,17 +245,25 @@ type ec2AcceleratedFamily struct {
 // substrate inventing a spec. A family absent from the catalog is still refused, so
 // widening later is additive.
 //
-// **Which accelerators reach gpuInfo.** DescribeInstanceTypes' InstanceTypeInfo shape has
-// three separate accelerator members: gpuInfo ("Describes the GPU accelerator settings for
-// the instance type"), inferenceAcceleratorInfo and neuronInfo, plus fpgaInfo and
-// mediaAcceleratorInfo. Substrate models gpuInfo only, so the NVIDIA families report their
-// count and the Inferentia and Trainium families report nothing — which is #234's reading
-// for inf1, that "real EC2 does not report [Inferentia] through gpuInfo", carried forward to
-// inf2, trn1 and trn2 on the strength of the shape rather than of a capture. Which of
-// inferenceAcceleratorInfo and neuronInfo real EC2 populates for each of those four is
-// **not** stated by either member's reference page, so modeling them would mean guessing
-// where the count goes; a caller reading gpuInfo for an inf or trn type gets nothing, which
-// is what it gets from AWS.
+// **Which member reports which family's count.** DescribeInstanceTypes' InstanceTypeInfo
+// shape has five separate accelerator members: gpuInfo ("Describes the GPU accelerator
+// settings for the instance type"), neuronInfo, inferenceAcceleratorInfo, fpgaInfo and
+// mediaAcceleratorInfo. Substrate models the first two, so the NVIDIA families report
+// through gpuInfo and the Inferentia and Trainium families through neuronInfo (#1029).
+//
+// The split between the two Inferentia-capable members is decided by AWS's own note on
+// API_InferenceAcceleratorInfo — "Amazon Elastic Inference is no longer available" — which
+// is what that member describes, leaving neuronInfo as the live member for a device the
+// Neuron SDK drives. That supersedes #234's reading, which was that "real EC2 does not
+// report [Inferentia] through gpuInfo" and therefore substrate reports the count nowhere;
+// the first half stands and the second no longer follows.
+//
+// Of NeuronDeviceInfo's four members only `count` is reported. `name`, `coreInfo` and
+// `memoryInfo`, and NeuronInfo's own `totalNeuronDeviceMemoryInMiB`, are omitted because
+// AWS publishes no valid values and no example for any of them — `name` is documented as
+// "The name of the neuron accelerator" and nothing more — so a value substrate emitted
+// there would be its own invention in a member a consumer can match on. An omitted member
+// is honestly empty (#1013); an invented one is not.
 //
 // SpotPrice follows [ec2InstanceTypeFamilies]' rule — a fixed rate per GiB of memory within
 // a family, deterministic stub, never an AWS price. The three #234 values are preserved
@@ -239,27 +274,27 @@ type ec2AcceleratedFamily struct {
 // more per GiB than the one it replaces.
 var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 	// NVIDIA V100. Previous generation, and the only family here that is. 0.918/61 GiB.
-	{Name: "p3", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "p3", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"2xlarge", 8, 62464, 1, "0.918"},
 		{"8xlarge", 32, 249856, 4, "3.672"},
 		{"16xlarge", 64, 499712, 8, "7.344"},
 	}},
 	// NVIDIA A100 40 GiB. One size is the whole family. 0.0175 USD/GiB.
-	{Name: "p4d", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "p4d", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"24xlarge", 96, 1179648, 8, "20.16"},
 	}},
 	// NVIDIA A100 80 GiB — AWS's own family, not a p4d size. 0.0195 USD/GiB.
-	{Name: "p4de", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "p4de", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"24xlarge", 96, 1179648, 8, "22.464"},
 	}},
 	// NVIDIA H100. 0.0225 USD/GiB.
-	{Name: "p5", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "p5", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"4xlarge", 16, 262144, 1, "5.76"},
 		{"48xlarge", 192, 2097152, 8, "46.08"},
 	}},
 	// NVIDIA T4. 0.01175 USD/GiB. The accelerator count is not monotonic in size and AWS
 	// publishes it that way: the 12xlarge carries four and the 16xlarge one.
-	{Name: "g4dn", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "g4dn", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.188"},
 		{"2xlarge", 8, 32768, 1, "0.376"},
 		{"4xlarge", 16, 65536, 1, "0.752"},
@@ -269,7 +304,7 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 	}},
 	// NVIDIA A10G. 0.0125 USD/GiB. Same non-monotonic count as g4dn, plus a 24xlarge that
 	// carries four where the 48xlarge carries eight.
-	{Name: "g5", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "g5", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.2"},
 		{"2xlarge", 8, 32768, 1, "0.4"},
 		{"4xlarge", 16, 65536, 1, "0.8"},
@@ -280,7 +315,7 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 		{"48xlarge", 192, 786432, 8, "9.6"},
 	}},
 	// NVIDIA L4. 0.013 USD/GiB. g6.xlarge is the type #891, #892 and #894 probe.
-	{Name: "g6", ReportedAsGPU: true, Sizes: []ec2AcceleratedSize{
+	{Name: "g6", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.208"},
 		{"2xlarge", 8, 32768, 1, "0.416"},
 		{"4xlarge", 16, 65536, 1, "0.832"},
@@ -291,26 +326,26 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 		{"48xlarge", 192, 786432, 8, "9.984"},
 	}},
 	// AWS Inferentia. 0.0095 USD/GiB. Not reported through gpuInfo; see above.
-	{Name: "inf1", Sizes: []ec2AcceleratedSize{
+	{Name: "inf1", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 8192, 1, "0.076"},
 		{"2xlarge", 8, 16384, 1, "0.152"},
 		{"6xlarge", 24, 49152, 4, "0.456"},
 		{"24xlarge", 96, 196608, 16, "1.824"},
 	}},
 	// AWS Inferentia2. 0.0105 USD/GiB. The count runs 1, 1, 6, 12 — not powers of two.
-	{Name: "inf2", Sizes: []ec2AcceleratedSize{
+	{Name: "inf2", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.168"},
 		{"8xlarge", 32, 131072, 1, "1.344"},
 		{"24xlarge", 96, 393216, 6, "4.032"},
 		{"48xlarge", 192, 786432, 12, "8.064"},
 	}},
 	// AWS Trainium. 0.0115 USD/GiB.
-	{Name: "trn1", Sizes: []ec2AcceleratedSize{
+	{Name: "trn1", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"2xlarge", 8, 32768, 1, "0.368"},
 		{"32xlarge", 128, 524288, 16, "5.888"},
 	}},
 	// AWS Trainium2. 0.0135 USD/GiB. The small size is a 3xlarge, not a 2xlarge.
-	{Name: "trn2", Sizes: []ec2AcceleratedSize{
+	{Name: "trn2", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"3xlarge", 12, 131072, 1, "1.728"},
 		{"48xlarge", 192, 2097152, 16, "27.648"},
 	}},
@@ -340,12 +375,13 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2InstanceTypeInfo) {
 	var catalog []ec2InstanceTypeInfo
 	index := make(map[string]ec2InstanceTypeInfo)
-	add := func(name string, vcpus, memoryMiB, gpu int, spotPrice string) {
+	add := func(name string, vcpus, memoryMiB, gpu, neuron int, spotPrice string) {
 		info := ec2InstanceTypeInfo{
 			InstanceType:          name,
 			VCpus:                 vcpus,
 			MemoryMiB:             memoryMiB,
 			GPU:                   gpu,
+			NeuronDevices:         neuron,
 			SpotPrice:             spotPrice,
 			SupportedArchs:        []string{"x86_64"},
 			SupportedUsageClasses: []string{"on-demand", "spot"},
@@ -355,19 +391,25 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 	}
 	for _, family := range ec2InstanceTypeFamilies {
 		for _, size := range family.Sizes {
-			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, size.SpotPrice)
+			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, 0, size.SpotPrice)
 		}
 	}
 	for _, family := range ec2AcceleratedFamilies {
 		for _, size := range family.Sizes {
-			// A family whose accelerators AWS reports under inferenceAcceleratorInfo or
-			// neuronInfo reports nothing under gpuInfo, so the count is dropped rather
-			// than moved: substrate models gpuInfo only.
-			gpu := 0
-			if family.ReportedAsGPU {
+			// The count reaches exactly one member, or none. A family naming a member
+			// substrate does not model reports nothing rather than falling back to one
+			// that is modeled — a count under the wrong member is worse than an absent
+			// one, because a caller cannot tell it apart from a real answer.
+			var gpu, neuron int
+			switch family.Reports {
+			case ec2AcceleratorGPU:
 				gpu = size.Accelerators
+			case ec2AcceleratorNeuron:
+				neuron = size.Accelerators
+			case ec2AcceleratorNone:
+				// Reported nowhere; the count stays in the table as the record of it.
 			}
-			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, size.SpotPrice)
+			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
 		}
 	}
 	return catalog, index

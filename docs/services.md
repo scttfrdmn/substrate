@@ -7829,23 +7829,39 @@ zero-accelerator instance, and inferring `16` from `trn2.48xlarge` would be subs
 inventing a spec. Graviton-based accelerated families (`g5g`) are out because every
 catalog entry reports `x86_64`. Widening later is additive (#896).
 
-#### Which accelerators reach `gpuInfo`
+#### Which member reports which family's accelerator count
 
-`InstanceTypeInfo` splits accelerators across three members — `gpuInfo`,
-`inferenceAcceleratorInfo` and `neuronInfo` — plus `fpgaInfo` and
-`mediaAcceleratorInfo`. Substrate models **`gpuInfo` only**, so:
+`InstanceTypeInfo` splits accelerators across five members — `gpuInfo`,
+`neuronInfo`, `inferenceAcceleratorInfo`, `fpgaInfo` and `mediaAcceleratorInfo`.
+Substrate models **two** of them, and a type reports its count through exactly one:
 
-- the NVIDIA families (`p3`, `p4d`, `p4de`, `p5`, `g4dn`, `g5`, `g6`) report their
-  accelerator count under `gpuInfo>gpus>item>count`;
-- the Inferentia and Trainium families (`inf1`, `inf2`, `trn1`, `trn2`) render **no
-  `gpuInfo` element at all** — not a zero count.
+| Families | Member | Element |
+|---|---|---|
+| `p3`, `p4d`, `p4de`, `p5`, `g4dn`, `g5`, `g6` | `gpuInfo` | `gpuInfo>gpus>item>count` |
+| `inf1`, `inf2`, `trn1`, `trn2` | `neuronInfo` | `neuronInfo>neuronDevices>item>count` |
 
-The `inf1` half of that matches real EC2 and predates #896. It is carried to `inf2`,
-`trn1` and `trn2` on the strength of the shape rather than of a capture: neither
-`InferenceAcceleratorInfo`'s nor `NeuronInfo`'s reference page states which family
-populates which member, so a count reported under `gpuInfo` would be a real number in
-a member AWS does not put it in. Substrate records the counts internally; nothing
-reports them.
+So an Inferentia or Trainium type renders **no `gpuInfo` element at all** — not a zero
+count — and an NVIDIA type renders no `neuronInfo`. A non-accelerated type renders
+neither.
+
+The `gpuInfo` half of that predates #896 and matches real EC2. The `neuronInfo` half is
+#1029, and it *replaces* an earlier reading: substrate previously held the Inferentia
+and Trainium counts internally and reported them nowhere, on the ground that no
+reference page states which family populates which member. Half of that still stands —
+neither `NeuronInfo` nor `InferenceAcceleratorInfo` names a family — but the conclusion
+does not, because `InferenceAcceleratorInfo`'s own page carries *"Amazon Elastic
+Inference is no longer available"*, which removes it as a candidate and leaves
+`neuronInfo` as the one live member for a device the Neuron SDK drives. Reporting a
+count substrate already had is a smaller reading than silently dropping it.
+
+**Only `count` is reported**, and the omissions are deliberate. `NeuronDeviceInfo`
+publishes `count`, `name`, `coreInfo` and `memoryInfo`, and `NeuronInfo` publishes
+`totalNeuronDeviceMemoryInMiB`; all are `Required: No` and **not one of the four besides
+`count` carries a valid-values list or an example**, so substrate would be inventing a
+device name and two memory figures per type. It reports the count it can source and
+omits the rest rather than reporting a placeholder (#1013's rule: a member substrate
+does not model is absent, not empty). One `neuronDevices` item is rendered per type, the way `gpuInfo` renders one `gpus`
+item: the catalog carries a single count per type, so the list is that count.
 
 Accelerator counts are **not monotonic in size** and AWS publishes them that way, so
 do not derive one from the size: `g4dn`, `g5` and `g6` each have a `12xlarge` carrying
