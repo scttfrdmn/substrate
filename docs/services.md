@@ -10555,8 +10555,8 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | ListAliases | |
 | Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each — see below |
 | Decrypt | Returns plaintext (stub pass-through); same algorithm handling and same refusals as `Encrypt`, and refuses a `KeyId` naming a key other than the ciphertext's — see below |
-| GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members |
-| GenerateDataKeyWithoutPlaintext | Same refusals as `GenerateDataKey` |
+| GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members, plus a refusal of any key spec but `SYMMETRIC_DEFAULT` — see below |
+| GenerateDataKeyWithoutPlaintext | Same refusals as `GenerateDataKey`, through the same helper |
 | ReEncrypt | Checks the key state, the named key and the encryption algorithm of **both** keys independently, and reports the source key's ARN and both algorithms — see below |
 
 ### A `KeyId` is resolved from its own ARN, not from the caller
@@ -11182,14 +11182,17 @@ Two readings are substrate's rather than AWS's:
   that the non-current identities `Decrypt` is documented to still accept are observable.
 - **The two `GenerateDataKey*` operations are held to the same symmetric-encryption-key
   condition as the other four**, although their own pages state none. Both operations
-  *require* a symmetric encryption key at AWS, which is why neither page needs a
-  condition — but substrate does not yet enforce that, since its check tests the key usage
-  rather than the key spec, so an `RSA_2048` key with `KeyUsage` `ENCRYPT_DECRYPT` reaches
-  both ([#988](https://github.com/scttfrdmn/substrate/issues/988)). Reporting
-  unconditionally would put a material ID on a response AWS cannot produce; omitting says
-  nothing about a request that should not have succeeded, which is the honest-empty
-  reading. When #988 refuses the request, the condition stops carrying those two sites and
-  becomes a guard at them.
+  *require* a symmetric encryption key at AWS, which is why neither page needs a condition.
+  Substrate did not enforce that until
+  [#988](https://github.com/scttfrdmn/substrate/issues/988), because its check tested the
+  key usage rather than the key spec, so an `RSA_2048` key with `KeyUsage`
+  `ENCRYPT_DECRYPT` reached both responses; reporting unconditionally would have put a
+  material ID on a response AWS cannot produce, and omitting said nothing about a request
+  that should not have succeeded — the honest-empty reading. **#988 refuses that request, so
+  at those two sites the condition is now a guard rather than a path**: every key reaching
+  either response satisfies it, and no observable behaviour there depends on it. It is kept
+  because one condition in one place is the whole point of the shared helper, and because a
+  key written directly into state by a test can still reach those sites.
 
 Note that *"symmetric encryption key"* is narrower than *"symmetric key"*: the four
 `HMAC_*` specs are symmetric, hold key material, and encrypt nothing, so they report no
@@ -11725,6 +11728,78 @@ deployer sends both unconditionally — so a template naming an asymmetric or HM
 without a `KeyUsage` is now refused where it previously created a key AWS would not have.
 The defaults stay, because they are the resource type's own and because that template is
 invalid at AWS too: the property *"is required for asymmetric KMS keys and HMAC KMS keys"*.
+
+### A data key needs a symmetric encryption key, and the usage check does not say so
+
+The key-usage check above is not the same condition as *"this key can wrap a data key"*, and
+[#988](https://github.com/scttfrdmn/substrate/issues/988) is the gap between them. An
+`RSA_2048` key created with `KeyUsage` `ENCRYPT_DECRYPT` is a pair AWS publishes and
+`CreateKey` must accept, so it passed the usage check — and `GenerateDataKey` handed such a
+caller a wrapped data key and a `200`.
+
+AWS states the restriction four times over between the two pages, twice in a description and
+twice on the `KeyId` parameter itself:
+
+- `API_GenerateDataKey` — *"to generate a data key, specify the symmetric encryption KMS key
+  that will be used to encrypt the data key. You cannot use an asymmetric KMS key to encrypt
+  data keys."*
+- `API_GenerateDataKeyWithoutPlaintext` — *"you cannot use an asymmetric KMS key or a key in
+  a custom key store to generate a data key."*
+- Both, on `KeyId` — *"specifies the symmetric encryption KMS key that encrypts the data key.
+  You cannot specify an asymmetric KMS key or a KMS key in a custom key store."*
+
+**The plural in *"data keys"* is why this is not a condition on `Encrypt` as well.** The
+corresponding sentence there is about *data*, and an RSA encryption key encrypts data
+perfectly well — the algorithm section above is the only thing `Encrypt` owes such a key. The
+observable form of the same rule is that these two operations take no `EncryptionAlgorithm`
+member at all: AWS gives a caller no way to name an asymmetric algorithm here, because no
+asymmetric key belongs here.
+
+| Request | Substrate answers | Provenance |
+|---------|-------------------|------------|
+| `SYMMETRIC_DEFAULT` | 200, wrapping the data key | The only spec either operation accepts |
+| `RSA_2048`, `RSA_3072`, `RSA_4096`, `SM2` with `KeyUsage` `ENCRYPT_DECRYPT` | `InvalidKeyUsageException`/400, naming the key spec | The restriction is published; **the code is substrate's reading** — see below |
+| An `HMAC_*` spec, or any signing or key-agreement spec | `InvalidKeyUsageException`/400, naming the key **usage** | Unreachable at this check: the usage check refuses such a key first, and `CreateKey` will not pair those specs with `ENCRYPT_DECRYPT` at all |
+| A key in a custom key store | — | Unreachable: no stored key can have an origin other than `AWS_KMS` since [#984](https://github.com/scttfrdmn/substrate/issues/984) |
+
+**The code is substrate's reading of an unsplit bullet.** Neither of
+`InvalidKeyUsageException`'s two published bullets describes this condition exactly: the
+key's `KeyUsage` *is* `ENCRYPT_DECRYPT`, which is what the operation wants, and the operation
+specifies no encryption algorithm for the second bullet to find incompatible. What is wrong
+is the `KeySpec` alone — the second bullet's subject, reached by a route it does not describe.
+It is still the right answer on three grounds: it is the only code either page publishes
+about a key being the wrong kind for the operation (the other eight are two 500s, a grant
+token, a dry run, a key state, a disabled key, a missing key and an internal error); the
+restriction it enforces is published four times over; and the wrap has a fixed algorithm, so
+the second bullet does fit on the reading that the operation specifies `SYMMETRIC_DEFAULT`
+implicitly.
+
+**The message names the key spec, where the usage refusal names the key usage.** One code
+carries three conditions across these operations, so the message is the only thing that tells
+them apart — and naming the usage here would be actively wrong, since the usage is the one
+thing about such a key that is correct. It also names `GenerateDataKeyPair`, because AWS sends
+an asymmetric caller there (*"to generate an asymmetric data key pair, use the
+`GenerateDataKeyPair` or `GenerateDataKeyPairWithoutPlaintext` operation"*) and **substrate
+implements neither**. Saying so in the refusal rather than only here is deliberate: this
+refusal is where a caller is standing when it needs to know, and being redirected to an
+operation that answers an unknown-action error would be worse than being told the truth.
+
+**Ordered after the usage check and before the key-state check**, and both halves are
+substrate's reading of conditions AWS states without precedence. Usage first, because a
+request naming a signing key is wrong about the operation rather than about the key material,
+and that refusal is uniform across all five cryptographic operations where this one covers
+two. Key state after, following the rotation section's argument exactly: a key spec is
+permanent — *"you can't change the `KeySpec` after the KMS key is created"* — while a key
+state is transient and has a remedy, so answering the state first would tell a caller that
+enabling the key makes the call succeed, which for an RSA key is false however many times it
+retries. Tests assert each side through the *message*, since the neighbouring refusals are
+one shared code and one shared 400.
+
+**One helper serves both operations**, and that is a claim about this service's history
+rather than a preference: [#961](https://github.com/scttfrdmn/substrate/issues/961) found
+`GenerateDataKeyWithoutPlaintext` refusing *nothing* while its four siblings each refused
+something. A test compares the two refusals to each other, so two sites cannot answer one
+code with two explanations.
 
 ### A key is reachable through the tagging API
 

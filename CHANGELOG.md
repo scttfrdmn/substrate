@@ -49,6 +49,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unreachable **by construction** rather than because nothing read the parameter, which is a stronger
   statement and the reason `Origin` remains a constant.
 
+- **`GenerateDataKey` and `GenerateDataKeyWithoutPlaintext` refuse a key that is not a symmetric
+  encryption key** (#988). The only key-type check either operation made was the key-usage check #977
+  added, and it tests the **usage**: an `RSA_2048` key created with `KeyUsage` `ENCRYPT_DECRYPT` — a
+  pair AWS publishes, and `CreateKey` must accept — passed it, so substrate wrapped a data key under an
+  asymmetric key and answered `200`. AWS states the restriction four times over between the two pages,
+  twice in a description and twice on the `KeyId` parameter itself: *"you cannot use an asymmetric KMS
+  key to encrypt data keys"*, and *"you cannot specify an asymmetric KMS key or a KMS key in a custom
+  key store"*. The plural in *"data keys"* is load-bearing and is why this is **not** a condition on
+  `Encrypt` as well — the corresponding sentence there is about *data*, and an RSA encryption key
+  encrypts data perfectly well. The observable form of the same rule is that these two operations
+  publish no `EncryptionAlgorithm` member at all: AWS gives a caller no way to name an asymmetric
+  algorithm here, because no asymmetric key belongs here.
+
+  **The code is `InvalidKeyUsageException`/400, and it is substrate's reading of an unsplit bullet
+  rather than a published rule.** Neither of that code's two gloss bullets describes this condition
+  exactly: the key's `KeyUsage` *is* `ENCRYPT_DECRYPT`, which is what the operation wants, and the
+  operation specifies no encryption algorithm for the second bullet — *"the encryption algorithm or
+  signing algorithm specified for the operation is incompatible with the type of key material in the
+  KMS key (`KeySpec`)"* — to find incompatible. What is wrong is the `KeySpec` alone, the second
+  bullet's subject reached by a route it does not describe. It is still the right answer: it is the only
+  code either page publishes about a key being the wrong kind for the operation, of the nine each page
+  lists; the restriction is published four times over; and the wrap has a fixed algorithm, so the second
+  bullet does fit on the reading that the operation specifies `SYMMETRIC_DEFAULT` implicitly. **The
+  message names the key spec** where the usage refusal names the key usage, because one code now carries
+  three conditions at these operations and the message is the only thing that separates them — and
+  naming the usage would be actively wrong, since the usage is the one thing about such a key that is
+  correct. It also names `GenerateDataKeyPair`, which AWS directs an asymmetric caller to and substrate
+  does not implement, because this refusal is where a caller is standing when it needs to know that.
+
+  **Ordered after the usage check and before the key-state check.** AWS states all three conditions and
+  no precedence between them, so both halves are substrate's reading. Usage first, because a request
+  naming a signing key is wrong about the operation rather than about the key material, and that refusal
+  is uniform across all five cryptographic operations where this one covers two. Key state after,
+  following the rotation pair's argument exactly: a key spec is permanent — *"you can't change the
+  `KeySpec` after the KMS key is created"* — while a key state is transient and has a remedy, so
+  answering the state first would tell a caller that enabling the key makes the call succeed, which for
+  an RSA key is false however many times it retries. Each side is asserted through the **message**,
+  since both neighbours are indistinguishable by code: the usage refusal shares this one, and a disabled
+  key is the same `400`.
+
+  **One helper serves both operations**, which is a claim about this service's history rather than a
+  preference — #961 found `GenerateDataKeyWithoutPlaintext` refusing *nothing* while its four siblings
+  each refused something — and a test compares the two refusals to each other so two sites cannot answer
+  one code with two explanations. The predicate is the shared `symmetric encryption key` test, not a
+  `!isAsymmetric` comparison, so the four `HMAC_*` specs are on the correct side of it; they are
+  unreachable here regardless, since their usage is `GENERATE_VERIFY_MAC`. The custom-key-store half of
+  AWS's sentence needs no code of its own, because #984 leaves no way to store a key with another
+  origin.
+
+  **#978's workaround at those two sites becomes a guard.** That issue held both `KeyMaterialId` members
+  to a symmetric-encryption-key condition their own pages do not state, precisely because substrate
+  accepted a request AWS refuses and a literal reading would have put a 64-hex material ID on a response
+  AWS cannot produce. The request is now refused, so every key reaching either response satisfies the
+  condition and no observable behaviour there depends on it. The test that pinned the omission asserts
+  the refusal instead.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

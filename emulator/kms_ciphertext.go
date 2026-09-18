@@ -89,6 +89,10 @@ type kmsStubEnvelope struct {
 // read the condition as "not asymmetric" would be wrong on exactly those four specs, which is why this
 // is a named predicate rather than an inline comparison at each site.
 //
+// #988 added the third caller, [kmsDataKeyKeySpecError], which is the first to use it as a *refusal* rather
+// than to decide what a response carries. That is the same published condition read the same way, and
+// sharing it is what makes the refusal and the two omissions agree by construction instead of by review.
+//
 // Origin does not appear in it although two of the four glosses mention one — CurrentKeyMaterialId is
 // "present for symmetric encryption keys with AWS_KMS or EXTERNAL origin" — because substrate mints no
 // other origin (#984), so the origin half of the condition is always satisfied.
@@ -111,8 +115,10 @@ func kmsIsSymmetricEncryptionKey(key *KMSKey) bool {
 // an EncryptionAlgorithm member it has already been through [kmsResolveEncryptionAlgorithm] and
 // [kmsCheckEncryptionAlgorithmForKey], so it is a value the key admits. The two GenerateDataKey*
 // operations take no such member and pass SYMMETRIC_DEFAULT, because the data key they wrap is wrapped
-// under a symmetric encryption key — which is true of every such call AWS accepts, and false only on
-// the RSA path #988 exists to close.
+// under a symmetric encryption key — which is true of every such call AWS accepts, and true of every
+// call substrate accepts since #988 put [kmsDataKeyKeySpecError] ahead of both. Before that the RSA path
+// reached here and recorded an algorithm the key does not admit; the invariant this paragraph asserts is
+// now enforced rather than merely hoped for.
 func kmsEncryptStub(key *KMSKey, algorithm string, encryptionContext map[string]string, plaintext []byte) []byte {
 	envelope := kmsStubEnvelope{
 		Format:    kmsStubFormat,

@@ -41,8 +41,10 @@ import (
 //     would still look well-formed.
 //  5. **Each ReEncrypt member is conditioned on its own key**, so an asymmetric source and a symmetric
 //     destination report the destination member alone.
-//  6. **Encrypt reports none**, and neither does either GenerateDataKey* operation under an asymmetric key
-//     (#988) — the two recorded decisions.
+//  6. **Encrypt reports none**, the one recorded decision left here. This assertion also covered the two
+//     GenerateDataKey* operations under an asymmetric key until #988; that request is now refused outright,
+//     so the case moved to kms_data_key_spec_test.go and what remains at those two sites is that a
+//     *symmetric* key does report one, which assertion 3 already walks.
 //
 // Every call goes over the wire (#765).
 
@@ -274,8 +276,8 @@ func TestKMSKeyMaterialID_EachReEncryptMemberFollowsItsOwnKey(t *testing.T) {
 		"the destination member is unaffected by what the source was")
 }
 
-// TestKMSKeyMaterialID_TheTwoOperationsThatReportNone is assertion 6, and both rows are decisions rather
-// than behavior anyone would infer from the code.
+// TestKMSKeyMaterialID_TheOneOperationThatReportsNone is assertion 6, and it is a decision rather than
+// behavior anyone would infer from the code.
 //
 // **Encrypt** publishes exactly CiphertextBlob, EncryptionAlgorithm and KeyId — no KeyMaterialId — where
 // Decrypt, ReEncrypt and both GenerateDataKey* operations all publish one. The asymmetry is AWS's and is
@@ -283,34 +285,23 @@ func TestKMSKeyMaterialID_EachReEncryptMemberFollowsItsOwnKey(t *testing.T) {
 // that produced the ciphertext it was handed. Asserted so that a sweep over "the operations that report
 // key material" cannot quietly add a fifth site AWS does not have.
 //
-// **GenerateDataKey under an asymmetric key** is the workaround #988 will remove. Neither
-// GenerateDataKey's page nor GenerateDataKeyWithoutPlaintext's conditions the member on the key type,
-// because both operations require a symmetric encryption key — a guarantee substrate does not yet enforce,
-// since its check tests the usage rather than the spec. Reporting unconditionally would put a material ID
-// on a response AWS cannot produce; omitting says nothing about a request that should not have succeeded.
-// When #988 lands, this row's request is refused outright and the assertion changes shape.
-func TestKMSKeyMaterialID_TheTwoOperationsThatReportNone(t *testing.T) {
+// It had a second half until #988: both GenerateDataKey* operations under an asymmetric key, which reported
+// no material ID because reporting one would have put a value on a response AWS cannot produce. That was
+// #978's stated workaround for substrate accepting a request AWS refuses, and the request is now refused —
+// see TestKMSDataKeySpec_AnAsymmetricKeyIsRefused, which asserts the refusal in place of the omission. The
+// omission itself is now unreachable at those two sites and is a guard; [kmsReportsKeyMaterialID] records
+// that.
+func TestKMSKeyMaterialID_TheOneOperationThatReportsNone(t *testing.T) {
 	t.Parallel()
 	ts := arnGuardServer(t)
 
-	t.Run("Encrypt publishes no such member", func(t *testing.T) {
-		_, keyID := createKMSKey(t, ts)
-		out := kmsRawBody(t, ts, "Encrypt", map[string]any{
-			"KeyId":     keyID,
-			"Plaintext": base64.StdEncoding.EncodeToString([]byte("the plaintext")),
-		})
-		assert.NotContains(t, out, "KeyMaterialId",
-			"API_Encrypt's Response Syntax is CiphertextBlob, EncryptionAlgorithm and KeyId")
-		assert.Equal(t, []string{"CiphertextBlob", "EncryptionAlgorithm", "KeyId"},
-			kmsMetadataMembers(out), "and those three exactly")
+	_, keyID := createKMSKey(t, ts)
+	out := kmsRawBody(t, ts, "Encrypt", map[string]any{
+		"KeyId":     keyID,
+		"Plaintext": base64.StdEncoding.EncodeToString([]byte("the plaintext")),
 	})
-
-	for _, op := range []string{"GenerateDataKey", "GenerateDataKeyWithoutPlaintext"} {
-		t.Run(op+" under an asymmetric key", func(t *testing.T) {
-			_, rsaKeyID := createKMSKeySpecUsage(t, ts, "RSA_2048", "ENCRYPT_DECRYPT")
-			out := kmsRawBody(t, ts, op, map[string]any{"KeyId": rsaKeyID, "KeySpec": "AES_256"})
-			assert.NotContains(t, out, "KeyMaterialId",
-				"a request AWS refuses (#988) reports no invented material identity")
-		})
-	}
+	assert.NotContains(t, out, "KeyMaterialId",
+		"API_Encrypt's Response Syntax is CiphertextBlob, EncryptionAlgorithm and KeyId")
+	assert.Equal(t, []string{"CiphertextBlob", "EncryptionAlgorithm", "KeyId"},
+		kmsMetadataMembers(out), "and those three exactly")
 }

@@ -1542,8 +1542,9 @@ func (p *KMSPlugin) checkNamedKeyMatches(goCtx context.Context, ctx *RequestCont
 //
 // The wrap is recorded as SYMMETRIC_DEFAULT because AWS requires a symmetric encryption key here — "you
 // cannot use an asymmetric KMS key to encrypt data keys" — and takes no EncryptionAlgorithm member at all.
-// Substrate's usage check still admits an RSA key, which is #988; until that lands, such a call records an
-// algorithm the key does not admit, and the honest reading is that the call should not have succeeded.
+// #988 made that requirement true of substrate as well: [kmsDataKeyKeySpecError] refuses the RSA key the
+// usage check admitted, so the algorithm recorded into the blob is now one the key does admit rather than
+// one it does not.
 //
 // KeySpec and NumberOfBytes are decoded and unused: substrate always mints 32 bytes, so neither the
 // AES_128 spec nor the published 1-1024 range is honored, and AWS's "specify either... but not both" is
@@ -1578,6 +1579,13 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if usageErr := kmsKeyUsageError(key); usageErr != nil {
 		return nil, usageErr
 	}
+	// Then the key spec, added by #988, which the usage check above does not cover: an RSA_2048 key with
+	// KeyUsage ENCRYPT_DECRYPT satisfies it and still cannot wrap a data key. [kmsDataKeyKeySpecError]
+	// argues both sides of the position — after the usage, before the state — and is shared with
+	// GenerateDataKeyWithoutPlaintext so the two operations cannot diverge.
+	if specErr := kmsDataKeyKeySpecError(key); specErr != nil {
+		return nil, specErr
+	}
 	// [kmsKeyStateError] rather than a bare !key.Enabled test: the two states this can be in owe two
 	// different codes, and until #961 both answered DisabledException.
 	if stateErr := kmsKeyStateError(key); stateErr != nil {
@@ -1596,9 +1604,10 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	// KeyMaterialId, added by #978. This page states no key-type condition on the member — it bounds it
 	// only by the unmodeled Recipient parameter — because the operation already requires a symmetric
-	// encryption key. Substrate applies the condition anyway; [kmsReportsKeyMaterialID] records why, and
-	// the short version is that substrate's usage check still admits an RSA key here — #988 — so reporting
-	// unconditionally would invent a value for a response AWS cannot produce.
+	// encryption key. Substrate applies the condition anyway, and since #988 the two readings agree at this
+	// site: [kmsDataKeyKeySpecError] above refuses every key the condition would have omitted it for, so
+	// the member is now always present here and [kmsReportsKeyMaterialID] is a guard rather than the
+	// workaround it was.
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
@@ -1638,6 +1647,14 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	if usageErr := kmsKeyUsageError(key); usageErr != nil {
 		return nil, usageErr
 	}
+	// And the same key-spec refusal its sibling makes, through the same helper and in the same position —
+	// #988. This page carries the restriction in stronger terms than GenerateDataKey's, naming the custom
+	// key store as well: "you cannot use an asymmetric KMS key or a key in a custom key store to generate a
+	// data key." Both halves land in [kmsDataKeyKeySpecError], where the store half is recorded as
+	// unreachable since #984 rather than left unguarded.
+	if specErr := kmsDataKeyKeySpecError(key); specErr != nil {
+		return nil, specErr
+	}
 	// Added by #961, where the other four cryptographic operations only had the wrong code for one of
 	// two states: this one refused *nothing*, so a disabled key and a key pending deletion both minted a
 	// data key and answered 200. Its row in the key-state table is identical to Encrypt's.
@@ -1655,7 +1672,8 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 	// KeyMaterialId, added by #978. Its gloss here is the shortest of the five — "the identifier of the
 	// key material used to encrypt the data key", with no condition at all — because this operation takes
 	// no Recipient parameter and so has not even that caveat. Held to the same condition as the other
-	// four for the reason [kmsReportsKeyMaterialID] gives.
+	// four for the reason [kmsReportsKeyMaterialID] gives, and since #988 that condition is satisfied by
+	// every key reaching this line, exactly as at its sibling.
 	kmsPutKeyMaterialID(out, "KeyMaterialId", key)
 	return kmsJSONResponse(http.StatusOK, out)
 }
