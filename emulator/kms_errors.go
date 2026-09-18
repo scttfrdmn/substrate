@@ -380,6 +380,99 @@ func kmsInadmissibleKeyUsage(keySpec, keyUsage string) *AWSError {
 	}
 }
 
+// kmsUnknownKeyOrigin reports a CreateKey Origin outside the published set.
+//
+// ValidationError at 400, for [kmsUnknownKeySpec]'s reasons exactly: no operation-specific code on
+// API_CreateKey describes a malformed member, so it comes from CommonErrors.html, and a value that names
+// no origin is a spelling problem rather than a statement about the key. It is deliberately not
+// [kmsUnsupportedKeyOrigin]'s code — see kms_key_origin.go's preamble for why the two must stay apart.
+//
+// The four are listed because that is what a caller has to choose from next, and because three of them
+// are then refused for a different reason: naming the set here and the boundary there is what makes the
+// pair of refusals legible in sequence.
+func kmsUnknownKeyOrigin(origin string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"Origin is %q, which is not one of %s",
+			origin, strings.Join(kmsKeyOrigins, ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsXksKeyIDNotValidForOrigin reports an XksKeyId sent with an Origin that does not take one.
+//
+// ValidationError at 400, and this is the one refusal in #984's set that is not about substrate's scope:
+// AWS states the condition itself — "this parameter is required for a KMS key with an Origin value of
+// EXTERNAL_KEY_STORE. It is not valid for KMS keys with any other Origin value" — so a caller reading
+// this has a request real KMS would also reject. AWS attaches no code to that sentence, so the code is
+// substrate's reading, and it is the same one #977 took for every other malformed-member refusal on this
+// operation: a member that does not belong in the request is a defect of the request.
+//
+// XksKeyInvalidConfigurationException is the near miss and is not chosen, for the reason
+// kms_key_origin.go's preamble gives: that code is about an external key's configuration in a store,
+// which presupposes the store this refusal exists because substrate does not have.
+//
+// The origin is named because it is the half of the pair the caller can change — sending the parameter is
+// correct for exactly one origin, and the message has to say which request the caller actually made.
+func kmsXksKeyIDNotValidForOrigin(origin string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"XksKeyId is not valid for a key with Origin %q; it is valid only for Origin %s",
+			origin, kmsKeyOriginExternalKeyStore),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsUnsupportedKeyOrigin reports a published Origin substrate does not create a key for.
+//
+// UnsupportedOperationException at 400, published on API_CreateKey and glossed "the request was rejected
+// because a specified parameter is not supported or a specified resource is not valid for this
+// operation". A well-formed parameter this operation will not accept is the first half of that gloss,
+// which is the reading [kmsInadmissibleKeyUsage] and [kmsRotationUnsupportedKeySpec] already took for the
+// same code — so all three agree about what it means, the consistency #923 exists to hold.
+//
+// Unlike those two, the boundary here is substrate's rather than KMS's: real KMS honors every value in
+// [kmsKeyOrigins]. That is stated in the message rather than left to the code, because a caller whose
+// import workflow stops here needs to know it is testing against an emulator that models no imported key
+// material, not that its request is wrong. Both facts are in the message for that reason: what substrate
+// does support, and that this is a boundary rather than a rejection.
+func kmsUnsupportedKeyOrigin(origin string) *AWSError {
+	return &AWSError{
+		Code: "UnsupportedOperationException",
+		Message: fmt.Sprintf(
+			"Origin %q is not supported: substrate creates key material itself and models neither imported "+
+				"key material nor a custom key store, so %s is the only supported origin",
+			origin, kmsKeyOriginAWSKMS),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsUnsupportedCustomKeyStore reports a CustomKeyStoreId substrate has no store to resolve.
+//
+// UnsupportedOperationException at 400, for [kmsUnsupportedKeyOrigin]'s reasons and reached only for an
+// AWS_KMS origin, since every other origin is refused before this check.
+//
+// It is not CustomKeyStoreNotFoundException, although API_CreateKey publishes that code and it would
+// describe the immediate fact. That code says *no store has this ID*, which invites a caller to create
+// one — and CreateCustomKeyStore does not exist either, so the caller would loop. This one says the
+// parameter is unsupported, which is the accurate and actionable answer. The distinction is the same one
+// [kmsUnsupportedKeyOrigin] draws, and it is why neither of the two store-specific errors is constructed
+// anywhere: each presupposes a modeled store.
+//
+// The ID is quoted because a caller reading its own value back is how they confirm the parameter reached
+// substrate at all, which is precisely what was in doubt before #984.
+func kmsUnsupportedCustomKeyStore(customKeyStoreID string) *AWSError {
+	return &AWSError{
+		Code: "UnsupportedOperationException",
+		Message: fmt.Sprintf(
+			"CustomKeyStoreId %q is not supported: substrate models no custom key store",
+			customKeyStoreID),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsIncorrectKey reports that a caller named a key that is not the one which encrypted the ciphertext.
 //
 // IncorrectKeyException at 400, published on API_Decrypt and API_ReEncrypt and glossed identically on

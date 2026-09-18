@@ -10534,7 +10534,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 
 | Operation | Notes |
 |-----------|-------|
-| CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder — see below |
+| CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder; validates `KeySpec`/`KeyUsage` and their pairing, and refuses an `Origin`, `CustomKeyStoreId` or `XksKeyId` substrate does not model rather than discarding it — see below |
 | DescribeKey | Accepts all four `KeyId` forms; answers 16 of `KeyMetadata`'s 26 members, including `AWSAccountId`, `KeyManager`, `Origin` and the key's algorithm list; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
 | ListKeys | |
 | EnableKey | Refuses a key pending deletion, so recovery stays two calls — see below |
@@ -10961,13 +10961,69 @@ build from here rather than growing a third map.
 |--------|-------|-------------------------------------------------|
 | `AWSAccountId` | The key's own account | Not the caller's. A cross-account `DescribeKey` is the only call that separates the two, so that is the call the test makes |
 | `KeyManager` | `CUSTOMER` | Substrate mints no AWS managed key; every key in state came from a `CreateKey` request in the caller's own account |
-| `Origin` | `AWS_KMS` | Substrate implements neither `ImportKeyMaterial` nor any custom key store, so no request can produce another origin |
+| `Origin` | `AWS_KMS` | Substrate creates its own key material and models no custom key store, and since #984 `CreateKey` **refuses** every other published origin rather than discarding the member — so a stored key with another origin is unreachable by construction, which is what keeps this a constant |
 
 `KeyManager` is also why `EnableKeyRotation`'s *"you cannot enable or disable automatic
 rotation of AWS managed KMS keys"* is recorded as **unreachable** rather than
 unenforced, and `Origin` is why three further members are: `ExpirationModel` and
 `ValidTo` are published *"only when `Origin` is `EXTERNAL`"*, and
 `XksKeyConfiguration` only for an external key store.
+
+#### `CreateKey`'s three key-material parameters
+
+Until #984 `CreateKey` decoded none of `Origin`, `CustomKeyStoreId` or `XksKeyId`. All
+three were accepted and thrown away, so `CreateKey` with `Origin: "EXTERNAL"` — the first
+call of every key-import workflow — answered `200` with `Origin: "AWS_KMS"`, `KeyState:
+"Enabled"` and `Enabled: true`. A consumer got a fully usable key where AWS answers one in
+`PendingImport` that no cryptographic operation will touch, so the workflow passed at step
+one and failed at step two, where `GetParametersForImport` turns out not to exist either.
+
+Substrate models neither imported key material nor a custom key store, and per CLAUDE.md's
+boundary that is defensible: the key material itself and an HSM cluster's contents are
+resource-internal. **The request parameters are not** — they are observable through an API
+call — so the choice was between modelling them, refusing them, and the third thing
+substrate was doing. Accepting a parameter and discarding it is the worst of the three,
+because it is the only one a caller cannot detect. They are now decoded, and what substrate
+does not model is refused with a code `API_CreateKey` publishes.
+
+**Two refusals, two codes.** The split is not cosmetic: the two answer different questions
+about whether the caller did anything wrong, and both are `400`, so the code is the only
+thing that can say which.
+
+| Request | Substrate answers | Whose refusal it is |
+|---------|-------------------|---------------------|
+| `Origin` outside the published four | `ValidationError`/400, naming the value and the four | AWS's. A malformed member, from `CommonErrors.html` — the reading #977 recorded for a misspelled `KeySpec` |
+| `XksKeyId` with any `Origin` but `EXTERNAL_KEY_STORE` | `ValidationError`/400, naming the origin sent and the one the member is for | AWS's. The page states it itself: *"this parameter is required for a KMS key with an `Origin` value of `EXTERNAL_KEY_STORE`. It is not valid for KMS keys with any other `Origin` value"* — so this refusal holds against real KMS. AWS attaches no code to the sentence; `ValidationError` is substrate's reading, the same one every other malformed-member refusal on this operation answers |
+| `Origin` published and not `AWS_KMS` | `UnsupportedOperationException`/400, naming both origins | Substrate's. Real KMS honours all four. The message says so, because a consumer whose import workflow stops here needs to know it has reached a boundary of the emulator rather than written a bad request |
+| `CustomKeyStoreId`, any value | `UnsupportedOperationException`/400, quoting the ID | Substrate's, for the same reason |
+
+The order matters at one point and is asserted: `XksKeyId` is checked against the
+*requested* origin **before** the origin's own support, so a caller sending it with
+`AWS_KMS` reads AWS's own refusal, while `EXTERNAL_KEY_STORE` with an `XksKeyId` — the one
+combination AWS accepts — falls through and is told the truth about the store.
+
+`CustomKeyStoreNotFoundException` is the near miss for the fourth row and is **not** used,
+although `API_CreateKey` publishes it. It says *no store has this ID*, which invites the
+caller to create one, and `CreateCustomKeyStore` does not exist either — so the caller would
+loop. The same reasoning keeps `CustomKeyStoreInvalidStateException`,
+`CloudHsmClusterInvalidConfigurationException`, `XksKeyAlreadyInUseException`,
+`XksKeyNotFoundException` and `XksKeyInvalidConfigurationException` unconstructed: each
+presupposes a modelled store or external key.
+
+Three published constraints are **unreachable by construction** and are recorded rather than
+implemented, because a constraint no request can reach is not enforcement and writing one
+implies the parameter is modelled: `CustomKeyStoreId`'s 1–64 length, `XksKeyId`'s 1–128
+length and `^[a-zA-Z0-9-_.]+$` pattern, and the spec-dependent conditions on `Origin` itself
+(*"the `EXTERNAL` origin value is valid only for symmetric KMS keys"*, and the
+`SYMMETRIC_DEFAULT` requirement for `AWS_CLOUDHSM` and `EXTERNAL_KEY_STORE`). The resolver
+is nevertheless ordered **after** the key spec resolves, so that whichever of those is ever
+modelled has a resolved spec to read.
+
+Modelling `Origin: EXTERNAL` as a `PendingImport` key state, and modelling a custom key
+store, both remain open and are each larger than this. A refusal now forecloses neither, and
+it converts five of the absent `KeyMetadata` members below from *nothing reads the
+parameter* into *the request that would produce them is refused* — a stronger statement, and
+the one the table's `Why it would need` column now records.
 
 #### One algorithm list, selected by the key usage
 
@@ -11058,8 +11114,8 @@ member joins that decision rather than introducing a second.
 
 | Member | What it would need |
 |--------|--------------------|
-| `CloudHsmClusterId`, `CustomKeyStoreId`, `XksKeyConfiguration` | A custom or external key store, which substrate does not implement |
-| `ExpirationModel`, `ValidTo` | An `EXTERNAL` origin, which the `Origin` section above records as unreachable — substrate's key material is always `AWS_KMS` |
+| `CloudHsmClusterId`, `CustomKeyStoreId`, `XksKeyConfiguration` | A custom or external key store, which substrate does not implement — and since #984 `CreateKey` refuses the request that would ask for one |
+| `ExpirationModel`, `ValidTo` | An `EXTERNAL` origin, which the `Origin` section above records as unreachable — substrate's key material is always `AWS_KMS`, and since #984 by refusal rather than by omission |
 | `MultiRegionConfiguration` | Published *"only when the value of the `MultiRegion` field is `True`"*. Substrate stores the flag but models no replica, so it would have to report a primary with an empty `ReplicaKeys` list — a shape describing a multi-Region key nothing can replicate |
 | `PendingDeletionWindowInDays` | `KeyState` `PendingReplicaDeletion`, which only a multi-Region primary that still has replicas reaches. Its range is 1–365, not `ScheduleKeyDeletion`'s 7–30, so reporting the waiting period under it would be wrong twice over |
 | `RotationEnabled` | Nothing — AWS does not publish it, per #971 above |
