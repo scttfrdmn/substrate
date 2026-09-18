@@ -6529,16 +6529,57 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 // An unknown ID or name still yields an empty set rather than
 // InvalidLaunchTemplateId.NotFound, which AWS publishes: that code has no [ec2IDKind] entry,
 // and #713 recorded inventing one as out of its scope. docs/services.md states the gap.
+//
+// It paginates as of #1024, the last of the sixteen routed describes that published MaxResults and
+// NextToken and implemented neither. Its range is the only one in the set whose floor is not five:
+// API_DescribeLaunchTemplates publishes "Valid Range: Minimum value of 1. Maximum value of 200." and
+// repeats it in prose, the same sentence API_DescribeLaunchTemplateVersions states in prose alone, so
+// both launch-template pages share [ec2MinLaunchTemplateResults] and [ec2MaxLaunchTemplateResults]
+// without either borrowing from the other (#671).
+//
+// What the two siblings do **not** share is what an absent MaxResults means. Here it reports the
+// whole listing with no token, which is [ec2MaxResults]' contract and what this operation answered
+// before it paginated, so a caller that never sent the parameter sees no wire change; versions pages
+// at 200 instead, a default that operation shipped with and that #917 kept deliberately. Neither
+// page publishes a default, so both readings are substrate's and they are recorded rather than
+// reconciled.
+//
+// LaunchTemplateId.N is a resource-ID list, so naming it with MaxResults is refused
+// ([ec2RefuseIDsWithMaxResults]); LaunchTemplateName.N is not, and the two coexist. That is the
+// reading #917 recorded for DescribeSecurityGroups' GroupName.N: the service-wide rule in
+// Query-Requests.html names "a list of IDs", and a name is not an ID.
+//
+// The page is cut after the answer is assembled and filtered, so a page holds MaxResults *matching*
+// templates. The offset names the same template on two calls because the listing is walked in
+// [loadStringIndex] order, which is ascending launch-template ID — that index is kept sorted by
+// [updateStringIndex] rather than in creation order, so no sort is needed here and the ordering is
+// recorded rather than assumed, per the obligation getRestAPIs states.
+//
+// IncludeManagedResources is published and read nowhere: substrate has no notion of a launch
+// template a service owns, so there is nothing for the parameter to include or hide. It is recorded
+// in docs/services.md rather than refused, since refusing a published parameter is the larger
+// divergence.
 func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	var lts []EC2LaunchTemplate
 
+	filterIDs := extractIndexedParams(req.Params, "LaunchTemplateId")
+	filterNames := extractIndexedParams(req.Params, "LaunchTemplateName")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "LaunchTemplateId", filterIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinLaunchTemplateResults, ec2MaxLaunchTemplateResults)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if err := ec2LaunchTemplateFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
-	filterIDs := extractIndexedParams(req.Params, "LaunchTemplateId")
-	filterNames := extractIndexedParams(req.Params, "LaunchTemplateName")
 
 	switch {
 	case len(filterIDs) > 0 || len(filterNames) > 0:
@@ -6581,6 +6622,7 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		XMLName         xml.Name               `xml:"DescribeLaunchTemplatesResponse"`
 		XMLNS           string                 `xml:"xmlns,attr"`
 		LaunchTemplates []ec2LaunchTemplateXML `xml:"launchTemplates>item"`
+		NextToken       string                 `xml:"nextToken,omitempty"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -6590,6 +6632,7 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		}
 		resp.LaunchTemplates = append(resp.LaunchTemplates, ec2LaunchTemplateSummary(&lts[i]))
 	}
+	resp.LaunchTemplates, resp.NextToken = ec2Page(resp.LaunchTemplates, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 

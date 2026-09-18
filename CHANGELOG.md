@@ -582,6 +582,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to make again: a paginated walk is only comparable against the whole answer element for element if
   the helper knows exactly what the listing holds.
 
+- **`DescribeLaunchTemplates` pages, and with it no routed EC2 describe publishes `MaxResults` and
+  `NextToken` while implementing neither** (#1024). It was the sixteenth and last of the audited set,
+  and the third and final part of this issue: seven were converted by #917, three publishing no range
+  and five publishing a floor of five came earlier in this release, and this one is a part of its own
+  because `API_DescribeLaunchTemplates` publishes `Valid Range: Minimum value of 1. Maximum value of
+  200.` — the only page in the whole set whose floor is **1** rather than 5. As at the other fifteen,
+  a caller that sends neither parameter sees no wire change: an absent `MaxResults` reports the whole
+  listing with no `nextToken` element.
+
+  **The range is shared with `DescribeLaunchTemplateVersions` and the default is not.** Both pages
+  publish 1 to 200 — the templates page as a `Valid Range` line repeated in prose, the versions page
+  in prose alone — so one pair of constants (`ec2MinLaunchTemplateResults`,
+  `ec2MaxLaunchTemplateResults`, moved beside the other published ranges) serves both without either
+  borrowing the other's bound, which is the distinction #671 turns on. Neither page publishes a
+  *default*, and the two answer an absent `MaxResults` differently: the versions operation pages at
+  200, which is what it shipped with and what #917 deliberately kept, and this one reports everything,
+  which is `ec2MaxResults`' contract and what it answered before it paginated. Both readings are
+  substrate's, so they are recorded at their call sites rather than reconciled by changing behaviour a
+  consumer already depends on. That the floor of 1 is *published* here where the identical floor at
+  seven other pages is substrate's reading of a page publishing no range at all is why those remain
+  separate constants even though the number agrees.
+
+  **`LaunchTemplateId.N` refuses `MaxResults`; `LaunchTemplateName.N` does not.** The service-wide rule
+  in Query-Requests.html is stated against *"a list of IDs"*, and #917 already read that narrowly for
+  `DescribeSecurityGroups`' `GroupName.N`. This is the second operation it applies to and the only one
+  where the two selectors **union**, so the reading is asserted in both directions: a name list pages
+  like any other listing, and a request naming a name list, an ID list and `MaxResults` is still
+  refused, because the rule is about the ID list appearing rather than about it being the only
+  selector.
+
+  **Two further readings are recorded rather than left implicit.** The offset counts positions in the
+  account's launch-template index, which `updateStringIndex` keeps **sorted by ID** — so, uniquely among
+  the converted describes, the ordering comes from an index rather than from `StateManager.List`'s
+  lexicographic guarantee (#865), and no explicit sort is needed. And `IncludeManagedResources` is
+  published and read nowhere: substrate models no launch template another service owns, so the
+  parameter has nothing to include or hide. It is documented as inert rather than refused, since
+  refusing a published parameter is the larger divergence — the call the EC2 gaps list already records
+  for `IncludeAllInstances`, `IncludeUnsupportedInRegion` and `AllRegions`.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

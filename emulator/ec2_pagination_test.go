@@ -8,14 +8,14 @@ package emulator_test
 // estimated — this comment used to say "roughly twenty", which #1024 corrects here and in
 // ec2_pagination.go, because an estimate invites the reader to assume the sweep was complete.
 //
-// The flat listings converted so far are the table below: DescribeVolumes and DescribeSnapshots in
-// #917's first part, DescribeImages, DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in
-// its second, DescribeInstanceStatus and DescribeFleets in #1024's first, and
-// DescribeInternetGateways, DescribeNatGateways and DescribeRouteTables in its second. The two
-// operations that already paginated — DescribeTags and DescribeLaunchTemplateVersions — carried a
-// private copy of the same three rules each, and their behavior is unchanged by the conversion,
-// which TestEC2_DescribeTags_Pagination and TestEC2_DescribeLaunchTemplateVersions' own MaxResults
-// cases are the regression guard for.
+// The flat listings converted are the table below: DescribeVolumes and DescribeSnapshots in #917's
+// first part, DescribeImages, DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in its second,
+// DescribeInstanceStatus and DescribeFleets in #1024's first, DescribeInternetGateways,
+// DescribeNatGateways and DescribeRouteTables in its second, and DescribeLaunchTemplates in its
+// third. The two operations that already paginated — DescribeTags and
+// DescribeLaunchTemplateVersions — carried a private copy of the same three rules each, and their
+// behavior is unchanged by the conversion, which TestEC2_DescribeTags_Pagination and
+// TestEC2_DescribeLaunchTemplateVersions' own MaxResults cases are the regression guard for.
 //
 // Three converted operations are **not** in the table, because every case here creates the listing
 // it walks and theirs cannot be created: all three are assembled from the instance-type catalog.
@@ -65,17 +65,18 @@ type ec2PagedOp struct {
 	//
 	// API_DescribeVpcs, API_DescribeSubnets, API_DescribeSecurityGroups, API_DescribeInternetGateways
 	// and API_DescribeNatGateways publish "Valid Range: Minimum value of 5. Maximum value of 1000.";
-	// API_DescribeRouteTables publishes the same floor and a ceiling of **100**; and
+	// API_DescribeRouteTables publishes the same floor and a ceiling of **100**;
+	// API_DescribeLaunchTemplates publishes "Minimum value of 1. Maximum value of 200."; and
 	// API_DescribeVolumes, API_DescribeSnapshots, API_DescribeImages, API_DescribeInstanceStatus and
 	// API_DescribeFleets publish no range at all, only "The maximum number of items to return for
 	// this request", where the floor of one is substrate's reading (see ec2MinUnpublishedMaxResults).
 	//
-	// A pair rather than the boolean this column started as (#1024): two published ranges now appear
-	// in this table alongside the pages that publish none, and DescribeLaunchTemplates' 1–200 is a
-	// third still to convert, so a boolean would force them to collapse into one bound, which #671
-	// forbids. Naming each operation's bounds here is also what lets the cases derive their values
-	// from the bounds instead of hardcoding one range's edges — which is how one table asserts that
-	// MaxResults=1000 is accepted at DescribeNatGateways and refused at DescribeRouteTables.
+	// A pair rather than the boolean this column started as (#1024): three published ranges appear in
+	// this table alongside the five pages that publish none, so a boolean would force them to collapse
+	// into one bound, which #671 forbids. Naming each operation's bounds here is also what lets the
+	// cases derive their values from the bounds instead of hardcoding one range's edges — which is how
+	// one table asserts that MaxResults=1000 is accepted at DescribeNatGateways and refused at both
+	// DescribeRouteTables and DescribeLaunchTemplates.
 	minMaxResults int
 	maxMaxResults int
 	// create makes n records through real calls and returns their IDs.
@@ -111,10 +112,10 @@ func ec2MaxResultsMessage(minResults, maxResults int) string {
 
 // ec2PagedPageSize is the MaxResults every walk below is driven at.
 //
-// Five, because it is the smallest value the whole table accepts: six of the eleven pages publish a
-// floor of five and the other five a floor of one (substrate's reading, see
-// ec2MinUnpublishedMaxResults), so one page size exercises the walk at every operation without the
-// cases having to know which range each carries. That the floors really do differ is asserted
+// Five, because it is the smallest value the whole table accepts: six of the twelve pages publish a
+// floor of five, one publishes a floor of one and the remaining five publish no range at all, where
+// the floor of one is substrate's reading (see ec2MinUnpublishedMaxResults) — so one page size
+// exercises the walk at every operation without the cases having to know which range each carries. That the floors really do differ is asserted
 // separately, by TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused.
 const ec2PagedPageSize = 5
 
@@ -219,6 +220,21 @@ func ec2PagedOps() []ec2PagedOp {
 			maxMaxResults: 100,
 			create:        ec2CreatePagedRouteTables,
 			describe:      ec2DescribePagedRouteTables,
+		},
+		{
+			// The one row whose published floor is one: API_DescribeLaunchTemplates publishes
+			// "Minimum value of 1. Maximum value of 200.", so the floor here is published where the
+			// same floor on the five rows above it is substrate's reading of a page that publishes no
+			// range. The boundary cases cannot tell the two apart — which is the point of asserting
+			// them from each row's own bounds — but "one below the published floor" is skipped here
+			// and at those five for the same arithmetic reason, and "the published ceiling itself"
+			// runs only here and at the ranged rows.
+			name:          "DescribeLaunchTemplates",
+			idParam:       "LaunchTemplateId",
+			minMaxResults: 1,
+			maxMaxResults: 200,
+			create:        ec2CreatePagedLaunchTemplates,
+			describe:      ec2DescribePagedLaunchTemplates,
 		},
 	}
 }
@@ -605,6 +621,41 @@ func ec2DescribePagedRouteTables(t *testing.T, ts *httptest.Server, extra map[st
 	return ids, decoded.NextToken
 }
 
+// ec2CreatePagedLaunchTemplates creates n launch templates and returns their IDs.
+//
+// Each is created with the same launch-template data and a distinct name, because the name is the
+// second way a template is selected and a listing of n templates sharing one would be selectable
+// only by ID — which is exactly the selector MaxResults may not accompany.
+func ec2CreatePagedLaunchTemplates(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		ids = append(ids, createLaunchTemplate(t, ts, "paged-lt-"+strconv.Itoa(i), map[string]string{
+			"LaunchTemplateData.ImageId":      ec2TestImage,
+			"LaunchTemplateData.InstanceType": "t3.micro",
+		}))
+	}
+	return ids
+}
+
+// ec2DescribePagedLaunchTemplates reads a DescribeLaunchTemplates page.
+func ec2DescribePagedLaunchTemplates(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName         xml.Name `xml:"DescribeLaunchTemplatesResponse"`
+		LaunchTemplates []struct {
+			LaunchTemplateID string `xml:"launchTemplateId"`
+		} `xml:"launchTemplates>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeLaunchTemplates", extra), &decoded)
+	ids := make([]string, 0, len(decoded.LaunchTemplates))
+	for _, lt := range decoded.LaunchTemplates {
+		ids = append(ids, lt.LaunchTemplateID)
+	}
+	return ids, decoded.NextToken
+}
+
 // ec2DescribePagedFleets reads a DescribeFleets page.
 func ec2DescribePagedFleets(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
 	t.Helper()
@@ -809,17 +860,16 @@ func TestEC2_OffsetPagination_TokenIsRefusedBeforeStateIsRead(t *testing.T) {
 // one its own page publishes, and nothing wider.
 //
 // Five pages in the table publish "Valid Range: Minimum value of 5. Maximum value of 1000.";
-// API_DescribeRouteTables publishes that floor with a ceiling of **100**; and the other five say
-// only "The maximum number of items to return for this request", type Integer, with no Valid Range
-// line at all. Per #671 substrate does not borrow the published range by analogy, and both
-// directions are asserted because that is what pins it: 1 and 5000 are **accepted** where no range
-// is published and **refused** where 5–1000 is, and 1000 itself is accepted at DescribeNatGateways
-// and refused at DescribeRouteTables — so a helper that had defaulted to one range for the family
-// would fail on most of the rows.
+// API_DescribeRouteTables publishes that floor with a ceiling of **100**; API_DescribeLaunchTemplates
+// publishes 1 to 200; and the other five say only "The maximum number of items to return for this
+// request", type Integer, with no Valid Range line at all. Per #671 substrate does not borrow the
+// published range by analogy, and both directions are asserted because that is what pins it: 1 and
+// 5000 are **accepted** where no range is published and **refused** where 5–1000 is, and 1000 itself
+// is accepted at DescribeNatGateways and refused at DescribeRouteTables and DescribeLaunchTemplates —
+// so a helper that had defaulted to one range for the family would fail on most of the rows.
 //
 // The boundary values come from each operation's own [ec2PagedOp] bounds rather than from literals,
-// so the table asserts the edges of whichever range the operation publishes — which is also what
-// DescribeLaunchTemplates' 1–200 needs when #1024's last part converts it.
+// so the table asserts the edges of whichever range the operation publishes.
 //
 // Where no range is published the floor of one is substrate's reading, forced by the published
 // pagination rule — a page of zero items describes a walk that answers nothing and hands back a
@@ -938,4 +988,48 @@ func TestEC2_OffsetPagination_AnIDListWithMaxResultsIsRefused(t *testing.T) {
 			})
 		})
 	}
+}
+
+// TestEC2_OffsetPagination_ALaunchTemplateNameListCoexistsWithMaxResults is the other side of that
+// refusal, and it is the reason the rule is read narrowly.
+//
+// Query-Requests.html names "a list of IDs", and LaunchTemplateName.N is not one: it selects the same
+// templates by their other identity, so a request naming both it and MaxResults is answered rather
+// than refused. That is the reading #917 recorded for DescribeSecurityGroups' GroupName.N, and
+// DescribeLaunchTemplates is the second operation it applies to — the only one where the two lists
+// union, so the case is worth pinning here rather than left to the shared table, which has no column
+// for a selector that is not an ID.
+//
+// A page is asserted rather than just a 200, since a handler that refused MaxResults for any selector
+// at all would still answer 200 to the name list alone.
+func TestEC2_OffsetPagination_ALaunchTemplateNameListCoexistsWithMaxResults(t *testing.T) {
+	ts := newEC2TestServer(t)
+	ec2CreatePagedLaunchTemplates(t, ts, 3)
+
+	ids, token := ec2DescribePagedLaunchTemplates(t, ts, map[string]string{
+		"LaunchTemplateName.1": "paged-lt-0",
+		"LaunchTemplateName.2": "paged-lt-1",
+		"LaunchTemplateName.3": "paged-lt-2",
+		"MaxResults":           "2",
+	})
+	assert.Len(t, ids, 2, "the name list pages like any other listing")
+	assert.NotEmpty(t, token, "a further template exists, so the page carries a token")
+
+	rest, token := ec2DescribePagedLaunchTemplates(t, ts, map[string]string{
+		"LaunchTemplateName.1": "paged-lt-0",
+		"LaunchTemplateName.2": "paged-lt-1",
+		"LaunchTemplateName.3": "paged-lt-2",
+		"NextToken":            token,
+	})
+	assert.Len(t, rest, 1)
+	assert.Empty(t, token)
+
+	// Naming a name **and** an ID with MaxResults is still refused, because the ID list is present:
+	// the rule is about the ID list appearing, not about it being the only selector.
+	_, code, _ := ec2ErrorDetail(t, ts, ec2PagedParams("DescribeLaunchTemplates", map[string]string{
+		"LaunchTemplateName.1": "paged-lt-0",
+		"LaunchTemplateId.1":   ids[0],
+		"MaxResults":           "2",
+	}))
+	assert.Equal(t, "InvalidParameterCombination", code)
 }
