@@ -466,6 +466,17 @@ const IAMAccessDeniedCodeForTest = iamAccessDeniedCode
 // literal.
 const PricingAccessDeniedCodeForTest = pricingErrAccessDenied
 
+// PricingCtrlNamespaceForTest and PricingSeededOfferKeyForTest locate a seeded
+// offer document in state, exposed so that a test can plant a record the seed
+// endpoint would have refused to store (#1033). That is the only way to reach the
+// skip-and-warn path in [PriceListPlugin.seededOffers], which exists precisely
+// because a record the endpoint did not write is the one it cannot vouch for.
+const PricingCtrlNamespaceForTest = pricingCtrlNamespace
+
+// PricingSeededOfferKeyForTest is the state key a seeded offer document is stored
+// under — see [PricingCtrlNamespaceForTest].
+func PricingSeededOfferKeyForTest(sku string) string { return pricingSeededOfferKey(sku) }
+
 // MarshalAWSErrorForTest wraps marshalAWSError, selecting the protocol by one of
 // the ErrProto*ForTest names. status is the HTTP status the error carries, which
 // the S3 arm needs because it builds a whole response rather than a body alone.
