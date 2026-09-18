@@ -129,7 +129,14 @@ func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		DomainIDEquals        string `json:"DomainIdEquals"`
 		UserProfileNameEquals string `json:"UserProfileNameEquals"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	// Both members are filters, so ListApps accepts no body at all — hence the length check, which every
+	// other list operation in the tree already had and this one did not. A body that is present and will
+	// not parse is refused (#1007); an absent one still lists everything.
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, sagemakerInvalidBody()
+		}
+	}
 
 	goCtx := context.Background()
 	keysKey := "app_keys:" + ctx.AccountID + "/" + ctx.Region

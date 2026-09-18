@@ -550,7 +550,9 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 		NextToken  string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssmInvalidBody()
+		}
 	}
 	if input.MaxResults <= 0 {
 		input.MaxResults = 10

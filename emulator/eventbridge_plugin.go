@@ -177,7 +177,9 @@ func (p *EventBridgePlugin) listRules(ctx *RequestContext, req *AWSRequest) (*AW
 		Limit        int    `json:"Limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, ebInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()

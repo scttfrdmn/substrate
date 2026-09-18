@@ -209,7 +209,9 @@ func (p *ACMPlugin) listCertificates(ctx *RequestContext, req *AWSRequest) (*AWS
 		MaxItems            int      `json:"MaxItems"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, acmInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()

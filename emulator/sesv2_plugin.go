@@ -154,7 +154,9 @@ func (p *SESv2Plugin) listEmailIdentities(reqCtx *RequestContext, req *AWSReques
 		NextToken string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sesv2InvalidBody()
+		}
 		if input.PageSize > 0 {
 			pageSize = input.PageSize
 		}
@@ -284,7 +286,9 @@ func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		} `json:"Content"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sesv2InvalidBody()
+		}
 	}
 
 	body := input.Content.Simple.Body.Text.Data

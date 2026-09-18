@@ -98,6 +98,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "ListTagsForStream", target: "Kinesis_20131202.ListTagsForStream"},
 			{op: "EnableEnhancedMonitoring", target: "Kinesis_20131202.EnableEnhancedMonitoring"},
 			{op: "DisableEnhancedMonitoring", target: "Kinesis_20131202.DisableEnhancedMonitoring"},
+			{op: "ListStreams", target: "Kinesis_20131202.ListStreams"},
 		},
 	},
 	{
@@ -113,6 +114,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "RemoveTargets", target: "AWSEvents.RemoveTargets"},
 			{op: "ListTargetsByRule", target: "AWSEvents.ListTargetsByRule"},
 			{op: "PutEvents", target: "AWSEvents.PutEvents"},
+			{op: "ListRules", target: "AWSEvents.ListRules"},
 		},
 	},
 	{
@@ -127,6 +129,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "CreateTrainingJob", target: "SageMaker.CreateTrainingJob"},
 			{op: "DescribeTrainingJob", target: "SageMaker.DescribeTrainingJob"},
 			{op: "StopTrainingJob", target: "SageMaker.StopTrainingJob"},
+			{op: "ListApps", target: "SageMaker.ListApps"},
 		},
 	},
 	{
@@ -141,6 +144,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "AddTagsToCertificate", target: "CertificateManager.AddTagsToCertificate"},
 			{op: "RemoveTagsFromCertificate", target: "CertificateManager.RemoveTagsFromCertificate"},
 			{op: "ListTagsForCertificate", target: "CertificateManager.ListTagsForCertificate"},
+			{op: "ListCertificates", target: "CertificateManager.ListCertificates"},
 		},
 	},
 	{
@@ -152,6 +156,8 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "CreateDeliveryStream", target: "Firehose_20150804.CreateDeliveryStream"},
 			{op: "DescribeDeliveryStream", target: "Firehose_20150804.DescribeDeliveryStream"},
 			{op: "DeleteDeliveryStream", target: "Firehose_20150804.DeleteDeliveryStream"},
+			{op: "ListDeliveryStreams", target: "Firehose_20150804.ListDeliveryStreams"},
+			{op: "PutRecordBatch", target: "Firehose_20150804.PutRecordBatch"},
 		},
 	},
 	{
@@ -189,6 +195,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "GetAWSDefaultServiceQuota", target: "ServiceQuotasV20190624.GetAWSDefaultServiceQuota"},
 			{op: "RequestServiceQuotaIncrease", target: "ServiceQuotasV20190624.RequestServiceQuotaIncrease"},
 			{op: "GetRequestedServiceQuotaChange", target: "ServiceQuotasV20190624.GetRequestedServiceQuotaChange"},
+			{op: "ListRequestedServiceQuotaChangeHistory", target: "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistory"},
 		},
 	},
 	{
@@ -261,6 +268,7 @@ var invalidBodyServices = []invalidBodyService{
 		provenance: "all five operation pages",
 		cases: []invalidBodyCase{
 			{op: "CreateEmailIdentity", path: "/v2/email/identities"},
+			{op: "SendEmail", path: "/v2/email/outbound-emails"},
 		},
 	},
 	{
@@ -463,6 +471,123 @@ func TestSQSInvalidBodyIsRefusedBeforeTheQueueLookup(t *testing.T) {
 		assert.Equal(t, "QueueDoesNotExist", code,
 			"a well-formed request naming a queue that does not exist is unchanged")
 	})
+}
+
+// invalidBodyMethodCase is a guarded operation the table above cannot reach, because it is routed on a
+// method other than POST.
+type invalidBodyMethodCase struct {
+	// name is the subtest name, and is the operation's own name so a failure points at the page to read.
+	name string
+	// host, path and method reach the operation. All six are REST-routed, so none carries a target.
+	host   string
+	path   string
+	method string
+	// code and status are what the guard must answer, from the service's own constructor.
+	code   string
+	status int
+}
+
+// invalidBodyMethodCases is every guard #1007's second slice added that POST does not reach.
+//
+// The table above has no method column on purpose — every guard it covers is reachable on POST, because
+// a guard only runs on a method that carries a body. These six are reachable on a method that carries one
+// too, and a reader would reasonably assume they are simply missing, so they are here rather than absent:
+// four Lambda updates and one EFS update are routed on PUT, and ListEmailIdentities is routed on GET with
+// its filters in the body.
+//
+// The Lambda four are reachable without an existing function only since #1007 moved their parse above the
+// lookup. Leaving the lookup first would have answered 404 for an unparseable body naming an absent
+// function, where AddPermission and TagResource — moved by #1006 — answer 400 for the same request: one
+// plugin, two codes, for one class of caller error, which is what #950 removed.
+var invalidBodyMethodCases = []invalidBodyMethodCase{
+	{
+		name: "UpdateFunctionCode", host: "lambda.us-east-1.amazonaws.com",
+		path: "/2015-03-31/functions/absent-fn/code", method: http.MethodPut,
+		code: "InvalidParameterValueException", status: http.StatusBadRequest,
+	},
+	{
+		name: "UpdateFunctionConfiguration", host: "lambda.us-east-1.amazonaws.com",
+		path: "/2015-03-31/functions/absent-fn/configuration", method: http.MethodPut,
+		code: "InvalidParameterValueException", status: http.StatusBadRequest,
+	},
+	{
+		name: "PutFunctionEventInvokeConfig", host: "lambda.us-east-1.amazonaws.com",
+		path: "/2015-03-31/functions/absent-fn/event-invoke-config", method: http.MethodPut,
+		code: "InvalidParameterValueException", status: http.StatusBadRequest,
+	},
+	{
+		name: "UpdateEventSourceMapping", host: "lambda.us-east-1.amazonaws.com",
+		path: "/2015-03-31/event-source-mappings/no-such-uuid", method: http.MethodPut,
+		code: "InvalidParameterValueException", status: http.StatusBadRequest,
+	},
+	{
+		name: "UpdateFileSystem", host: "elasticfilesystem.us-east-1.amazonaws.com",
+		path: "/2015-02-01/file-systems/fs-12345678", method: http.MethodPut,
+		code: "BadRequest", status: http.StatusBadRequest,
+	},
+	{
+		name: "ListEmailIdentities", host: "email.us-east-1.amazonaws.com",
+		path: "/v2/email/identities", method: http.MethodGet,
+		code: "BadRequestException", status: http.StatusBadRequest,
+	},
+}
+
+// TestInvalidBodyOnANonPostOperation asserts the six guards the POST table cannot reach (#1007).
+func TestInvalidBodyOnANonPostOperation(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	for _, tc := range invalidBodyMethodCases {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, message := rawUnsignedMethodCall(t, ts, tc.host, "", tc.path, tc.method,
+				[]byte(invalidBodyPayload))
+			assert.Equalf(t, tc.code, code, "%s answers its service's published code", tc.name)
+			assert.Equalf(t, tc.status, status, "%s answers %d", tc.name, tc.status)
+			assertNoDecoderText(t, tc.name, message)
+		})
+	}
+}
+
+// TestInvalidBodyLeavesAnAbsentBodyAlone is the other half of the second slice, and the half a table of
+// refusals cannot assert (#1007).
+//
+// Fourteen of the twenty sites sat inside an `if len(req.Body) > 0` check, because their operation
+// publishes no required member and AWS accepts no body at all. Checking the decode error there must not
+// turn an absent body into a refusal: these are list operations whose whole answer for an empty request is
+// "everything". A guard that refused an empty body would satisfy every assertion in the tables above and
+// break every consumer that lists without filters.
+//
+// The three Lambda updates are deliberately not here. They carry no length check and refuse an empty body,
+// which matches AddPermission and TagResource: an update that names nothing to update is a caller error,
+// not a request for a default.
+func TestInvalidBodyLeavesAnAbsentBodyAlone(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	for _, tc := range []struct {
+		name   string
+		host   string
+		target string
+		path   string
+		method string
+	}{
+		{name: "kinesis/ListStreams", host: "kinesis.us-east-1.amazonaws.com", target: "Kinesis_20131202.ListStreams"},
+		{name: "eventbridge/ListRules", host: "events.us-east-1.amazonaws.com", target: "AWSEvents.ListRules"},
+		{name: "sagemaker/ListApps", host: "api.sagemaker.us-east-1.amazonaws.com", target: "SageMaker.ListApps"},
+		{name: "acm/ListCertificates", host: "acm.us-east-1.amazonaws.com", target: "CertificateManager.ListCertificates"},
+		{name: "firehose/ListDeliveryStreams", host: "firehose.us-east-1.amazonaws.com", target: "Firehose_20150804.ListDeliveryStreams"},
+		{name: "kms/ListKeys", host: "kms.us-east-1.amazonaws.com", target: "TrentService.ListKeys"},
+		{name: "kms/ListAliases", host: "kms.us-east-1.amazonaws.com", target: "TrentService.ListAliases"},
+		{name: "stepfunctions/ListStateMachines", host: "states.us-east-1.amazonaws.com", target: "AWSStepFunctions.ListStateMachines"},
+		{name: "stepfunctions/ListActivities", host: "states.us-east-1.amazonaws.com", target: "AWSStepFunctions.ListActivities"},
+		{name: "ssm/DescribeParameters", host: "ssm.us-east-1.amazonaws.com", target: "AmazonSSM.DescribeParameters"},
+		{name: "servicequotas/ListRequestedServiceQuotaChangeHistory", host: "servicequotas.us-east-1.amazonaws.com", target: "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistory"},
+		{name: "sesv2/ListEmailIdentities", host: "email.us-east-1.amazonaws.com", path: "/v2/email/identities", method: http.MethodGet},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, code, message := rawUnsignedMethodCall(t, ts, tc.host, tc.target, tc.path, tc.method, nil)
+			assert.Emptyf(t, code, "%s on an absent body: %s", tc.name, message)
+			assert.Equalf(t, http.StatusOK, status, "%s on an absent body answers 200", tc.name)
+		})
+	}
 }
 
 // TestSQSAMemberOfTheWrongTypeIsRefused covers what the *second* decode in nine SQS handlers is for

@@ -247,7 +247,9 @@ func (p *KinesisPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Limit                    int    `json:"Limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, kinesisInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()

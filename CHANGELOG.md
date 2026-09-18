@@ -254,6 +254,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **Twenty more sites refuse a body that will not parse, in the twelve services whose own
+  `*InvalidBody()` constructor already held the answer** (#1007, second slice). Lambda (4), Step Functions
+  (3), KMS (2), SES v2 (2), Firehose (2), and one each in EventBridge, EFS, Systems Manager, Service
+  Quotas, SageMaker, Kinesis and ACM. No new AWS reading was needed for any of them — each file's
+  constructor already carries the provenance #950 and #1003 established — which is why this slice is
+  separable from the first and why it is twenty sites rather than one service.
+
+  **Fourteen of the twenty were hiding behind a true statement.** They sat inside
+  `if len(req.Body) > 0 { _ = json.Unmarshal(…) }`, and six carried the comment
+  `//nolint:errcheck // optional body`. The body *is* optional on all fourteen — they are list operations
+  whose answer to an empty request is "everything" — but that is what the length check is for. Discarding
+  the error from a body that is **present** is a second and separate decision, and the stated reason for
+  the first was covering it. Both now hold at once, and a new test asserts the half a table of refusals
+  cannot see: an absent body still lists everything. Without it, a guard that refused an empty body would
+  satisfy every refusal assertion added here and break every consumer that lists without filters.
+
+  Three sites needed more than the error checked. **`ListApps` had no length check at all**, so a plain
+  guard would have refused the empty body AWS accepts; it gained the check the other thirteen already had.
+  **Service Quotas' site was bypassing `sqUnmarshal`**, a helper in its own file that already handles the
+  absent body and returns the refusal — it was the only site in that file decoding by hand, which is
+  exactly why it was the only one still discarding. And **Lambda's four update operations parsed below
+  their resource lookup**, so adding the guard there would have answered `404` for an unparseable body
+  naming an absent function while `AddPermission` and `TagResource` — moved above the lookup by #1006 —
+  answer `400` for the same request. One plugin, two codes, for one class of caller error is what #950
+  removed, so all six of Lambda's guarded sites now parse first. This does not settle the tree-wide
+  ordering question `docs/services.md` records; it makes one plugin answer one code.
+
+  Six of the twenty are not reachable on `POST` — four Lambda updates and EFS's `UpdateFileSystem` are
+  routed on `PUT`, `ListEmailIdentities` on `GET` with its filters in the body — so they carry their own
+  table rather than being quietly absent from the `POST` one. A stale comment in
+  `kms_error_status_test.go` is also corrected: it recorded `ListKeys` and `ListAliases` as excluded
+  because "all three treat the body as optional and ignore a parse failure, which is a different decision
+  and not one this issue disturbs". #1007 is the issue that disturbs it. Sixty sites remain, in the
+  twenty-three files that answer with an inline literal rather than through a constructor.
+
 - **SQS and AWS Health refuse a request body that will not parse, where fifteen sites had been
   discarding the decode error and carrying on with a zero-valued input** (#1007, first slice). Every
   guarded site wrote `_ = json.Unmarshal(req.Body, &input)`, so a truncated or malformed JSON body was

@@ -263,9 +263,14 @@ func TestKMSErrorStatus_ADisabledKeyIsRefusedAt400(t *testing.T) {
 // glossed "one or more tags are not valid" and would be wrong on the eighteen of these that take no
 // tags.
 //
-// The body is sent raw, since a marshaled map cannot be invalid JSON. CreateKey, ListKeys and
-// ListAliases are absent from the list because all three treat the body as optional and ignore a
-// parse failure, which is a different decision and not one this issue disturbs.
+// The body is sent raw, since a marshaled map cannot be invalid JSON.
+//
+// ListKeys and ListAliases were absent from this list until #1007, on the ground that both treat the body
+// as optional and ignore a parse failure. #1007 is the issue that disturbs that: treating an *absent* body
+// as an empty one and discarding the error from a body that is *present* are two different decisions, and
+// both handlers were making the second under cover of the first. Both now refuse a present body that will
+// not parse and still list everything for an absent one, which
+// TestInvalidBodyLeavesAnAbsentBodyAlone asserts. CreateKey gained its guard with #985.
 func TestKMSErrorStatus_AnUnparseableBodyIsAValidationError(t *testing.T) {
 	ts := arnGuardServer(t)
 
@@ -274,7 +279,7 @@ func TestKMSErrorStatus_AnUnparseableBodyIsAValidationError(t *testing.T) {
 		"GetKeyPolicy", "PutKeyPolicy", "GetKeyRotationStatus", "EnableKeyRotation",
 		"DisableKeyRotation", "TagResource", "UntagResource", "ListResourceTags", "CreateAlias",
 		"DeleteAlias", "UpdateAlias", "Encrypt", "Decrypt", "GenerateDataKey",
-		"GenerateDataKeyWithoutPlaintext", "ReEncrypt",
+		"GenerateDataKeyWithoutPlaintext", "ReEncrypt", "ListKeys", "ListAliases",
 	} {
 		t.Run(op, func(t *testing.T) {
 			status, code := kmsRawCall(t, ts, op, []byte(`{"KeyId": `))

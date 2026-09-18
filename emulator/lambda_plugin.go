@@ -437,11 +437,10 @@ func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSRespon
 }
 
 func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
-	if err != nil {
-		return nil, err
-	}
-
+	// Parsed before the lookup, for the reasons given on addPermission (#1006) and now for one more: with
+	// the guard added (#1007), leaving the lookup first would answer 404 here and 400 there for the same
+	// unparseable body naming the same absent function — one plugin, two codes, for one class of caller
+	// error, which is what #950 removed.
 	var body struct {
 		ZipFile         string `json:"ZipFile"`
 		S3Bucket        string `json:"S3Bucket"`
@@ -449,7 +448,14 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 		S3ObjectVersion string `json:"S3ObjectVersion"`
 		ImageURI        string `json:"ImageUri"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, lambdaInvalidBody()
+	}
+
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+	if err != nil {
+		return nil, err
+	}
 
 	// CodeSha256 is "the SHA256 hash of the function's deployment package", so it is
 	// derived from the package below when there are bytes to hash rather than being a
@@ -492,11 +498,8 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 }
 
 func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
-	if err != nil {
-		return nil, err
-	}
-
+	// Parsed before the lookup; see updateFunctionCode above for why all six of Lambda's guarded sites now
+	// answer 400 rather than three of them answering 404.
 	var body struct {
 		Handler     string `json:"Handler"`
 		Runtime     string `json:"Runtime"`
@@ -508,7 +511,14 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, lambdaInvalidBody()
+	}
+
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+	if err != nil {
+		return nil, err
+	}
 
 	if body.Handler != "" {
 		fn.Handler = body.Handler
@@ -868,15 +878,18 @@ func (p *LambdaPlugin) getPolicy(ctx *RequestContext, name string) (*AWSResponse
 }
 
 func (p *LambdaPlugin) putFunctionEventInvokeConfig(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
-		return nil, err
-	}
-
+	// Parsed before the lookup; see updateFunctionCode above.
 	var body struct {
 		MaximumRetryAttempts     int `json:"MaximumRetryAttempts"`
 		MaximumEventAgeInSeconds int `json:"MaximumEventAgeInSeconds"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, lambdaInvalidBody()
+	}
+
+	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
+		return nil, err
+	}
 
 	cfg := LambdaEventInvokeConfig{
 		FunctionName:             name,
@@ -1501,6 +1514,19 @@ func (p *LambdaPlugin) getEventSourceMapping(_ *RequestContext, uuid string) (*A
 }
 
 func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSRequest, uuid string) (*AWSResponse, error) {
+	// Parsed before the lookup; see updateFunctionCode above. Both members are optional, so an absent body
+	// is still a no-op update rather than a refusal — only a body that is present and will not parse is
+	// refused (#1007).
+	var input struct {
+		BatchSize int   `json:"BatchSize"`
+		Enabled   *bool `json:"Enabled"`
+	}
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, lambdaInvalidBody()
+		}
+	}
+
 	esm, err := p.loadESM(context.Background(), uuid)
 	if err != nil {
 		return nil, err
@@ -1515,13 +1541,6 @@ func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSReque
 
 	prevState := esm.State
 
-	var input struct {
-		BatchSize int   `json:"BatchSize"`
-		Enabled   *bool `json:"Enabled"`
-	}
-	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
-	}
 	if input.BatchSize > 0 {
 		esm.BatchSize = input.BatchSize
 	}

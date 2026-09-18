@@ -484,7 +484,9 @@ so a body that would not parse was not refused at all. That is worse than a wron
 wrong code is at least an error: a discarded one produces a plausible success, or a refusal about
 something else entirely. It is filed as
 [#1007](https://github.com/scttfrdmn/substrate/issues/1007) and is being corrected in slices, since
-each service needs its own published code under the two-step rule above.
+each service needs its own published code under the two-step rule above. Thirty-five are corrected; the
+remaining sixty are the twenty-three files that answer a body-parse failure with an inline literal rather
+than through a constructor.
 
 **SQS and AWS Health are the first slice**, and they are first because they were the only files in the
 inventory with no checked guard anywhere to copy a code from — the other 35 files already contained
@@ -530,6 +532,40 @@ attribute selectors, and `ReceiveMessage` has already refused an unparseable bod
 before that helper runs. `sqs_plugin.go`'s FIFO deduplication decode is also left alone, because it
 reads *stored state* rather than a request — a corrupted state blob is not a caller error and answering
 a caller-error code for one would be a new defect.
+
+**The second slice is the twelve services that already had the answer.** Twenty sites in files whose own
+`*InvalidBody()` constructor was sitting a few hundred lines away, carrying the provenance #950 and #1003
+established for it — Lambda (4), Step Functions (3), KMS (2), SES v2 (2), Firehose (2), and one each in
+EventBridge, EFS, Systems Manager, Service Quotas, SageMaker, Kinesis and ACM. No new AWS reading was
+needed for any of them, which is the whole reason this slice is separable from the first.
+
+**Fourteen of the twenty were hiding behind a true statement.** They sat inside
+`if len(req.Body) > 0 { _ = json.Unmarshal(…) }`, and six carried the comment
+`//nolint:errcheck // optional body`. The body *is* optional on all fourteen — they are list operations
+whose answer to an empty request is "everything" — but that is what the length check is for. Discarding
+the error from a body that is **present** is a second, separate decision, and the stated reason for the
+first was covering it. Both now hold at once: an absent body still lists everything, and a present body
+that will not parse is refused. `TestInvalidBodyLeavesAnAbsentBodyAlone` asserts the first, because a
+guard that refused an empty body would satisfy every refusal assertion in the tables and break every
+consumer that lists without filters.
+
+Three of the twenty needed more than the error checked:
+
+- **`ListApps` had no length check at all**, so a plain guard would have refused the empty body AWS
+  accepts. It gained the check the other thirteen already had. Both of its members are filters.
+- **Service Quotas' site was bypassing `sqUnmarshal`, a helper in its own file** that already handles the
+  absent body and returns the refusal. It was the only site in that file decoding by hand, which is why it
+  was the only one still discarding. It now goes through the helper.
+- **Lambda's four update operations parsed below their resource lookup**, so adding the guard there would
+  have answered `404` for an unparseable body naming an absent function while `AddPermission` and
+  `TagResource` — moved above the lookup by [#1006] — answer `400` for the same request. One plugin, two
+  codes, for one class of caller error is what [#950] removed, so all six now parse first. This does not
+  settle the tree-wide question recorded under *"Whether a body is parsed before the resource is looked
+  up"* below; it makes one plugin answer one code.
+
+Six of the twenty are not reachable on `POST` — four Lambda updates and EFS's `UpdateFileSystem` are
+routed on `PUT`, and `ListEmailIdentities` on `GET` with its filters in the body — so they carry their own
+table rather than being quietly absent from the `POST` one.
 
 Two adjacent gaps are recorded rather than folded in: `DescribeEventDetails` publishes `eventArns` as
 `Required: Yes` with Array Members 1–10 and substrate answers an empty `successfulSet` for an absent
