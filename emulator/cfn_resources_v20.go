@@ -22,7 +22,17 @@ func (d *StackDeployer) deployStepFunctionsStateMachine(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "StateMachineName", logicalID, cctx)
-	def := marshalToJSON(props["DefinitionString"])
+	// DefinitionString is a CloudFormation *string* property holding an ASL document, so a template that
+	// supplies one has already done the encoding. Passing it through marshalToJSON quoted and escaped it
+	// a second time, and the state machine was then stored holding a JSON string literal rather than an
+	// object — a definition substrate could not read back, which StartExecution and StartSyncExecution
+	// then reported as a caller error (#996). The marshal is kept for anything that is not a string,
+	// because an unresolved intrinsic arrives here as a map and marshaling it at least stores something
+	// readable. The sibling object-valued property, Definition, is not read at all — a separate gap.
+	def, ok := props["DefinitionString"].(string)
+	if !ok {
+		def = marshalToJSON(props["DefinitionString"])
+	}
 	if def == "" {
 		def = `{"Comment":"stub","StartAt":"Start","States":{"Start":{"Type":"Pass","End":true}}}`
 	}

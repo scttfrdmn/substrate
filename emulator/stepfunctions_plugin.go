@@ -363,6 +363,13 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 	if input.Name == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
 	}
+	// The definition is checked before anything is stored, so substrate cannot hold one it is unable to
+	// read back (#996). See [sfnValidateDefinition] for what is and is not checked. The parsed form is
+	// discarded here on purpose: nothing at create time executes it, and StateMachineState stores the
+	// caller's own string so that DescribeStateMachine returns what was sent rather than a re-render.
+	if _, defErr := sfnValidateDefinition(input.Definition); defErr != nil {
+		return nil, defErr
+	}
 	smType := input.Type
 	if smType == "" {
 		smType = "STANDARD"
@@ -451,7 +458,15 @@ func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequ
 		return nil, err
 	}
 
+	// A definition is optional here — API_UpdateStateMachine publishes both definition and roleArn as
+	// Required: No — but one that is supplied is checked before it replaces the stored copy, for
+	// [sfnValidateDefinition]'s reason. Absent the check an update could make a working state machine
+	// unexecutable, which is worse than the create case: the caller's own 200 would be the last
+	// observation before the failure.
 	if input.Definition != "" {
+		if _, defErr := sfnValidateDefinition(input.Definition); defErr != nil {
+			return nil, defErr
+		}
 		sm.Definition = input.Definition
 	}
 	if input.RoleArn != "" {
@@ -649,13 +664,24 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 	}
 
 	// Parse and execute the ASL definition synchronously.
-	var def StateMachineDefinition
-	if parseErr := json.Unmarshal([]byte(sm.Definition), &def); parseErr != nil {
+	//
+	// This failure is unreachable since #996 made createStateMachine and updateStateMachine validate the
+	// definition before storing it; it survives for a replayed event log written before that, and for the
+	// same reason the sibling path in startSyncExecution does. The shape is deliberately different from
+	// that sibling's: a started execution that cannot proceed is an execution-level failure, which is what
+	// API_StartExecution's asynchronous contract has to report, rather than a request refusal.
+	//
+	// The name was "InvalidDefinition", which is an API error code published at CreateStateMachine and
+	// UpdateStateMachine and has no business appearing as an execution's error. States.Runtime is the
+	// Amazon States Language name for an execution that "failed due to some exception that could not be
+	// processed", which is exactly this.
+	def, defErr := sfnValidateDefinition(sm.Definition)
+	if defErr != nil {
 		exec.Status = "FAILED"
 		exec.StopDate = p.tc.Now()
-		exec.ErrorDetails = "InvalidDefinition: " + parseErr.Error()
+		exec.ErrorDetails = "States.Runtime: " + defErr.Message
 	} else {
-		_, _ = p.executeASL(&def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
+		_, _ = p.executeASL(def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 	}
 
 	if err := p.saveExecution(goCtx, target.Name, exec); err != nil {
@@ -693,16 +719,19 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	if sm.Type != "EXPRESS" {
-		return nil, &AWSError{
-			Code:       "InvalidDefinition",
-			Message:    "StartSyncExecution is only supported for EXPRESS workflows",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, sfnStateMachineTypeNotSupported(sm.Type)
 	}
 
-	var def StateMachineDefinition
-	if parseErr := json.Unmarshal([]byte(sm.Definition), &def); parseErr != nil {
-		return nil, &AWSError{Code: "InvalidDefinition", Message: "invalid ASL: " + parseErr.Error(), HTTPStatus: http.StatusBadRequest}
+	// The stored definition was validated when it was stored (#996), so a parse failure here is an
+	// internal inconsistency rather than anything the caller did: it means substrate wrote a definition
+	// it cannot read, or replayed an event log that predates the validation. That is a 500 through the
+	// error return, not an AWSError — InvalidDefinition is published only where a definition arrives in
+	// the request, and reporting substrate's own bookkeeping fault as a 400 told the caller to fix
+	// something that is not theirs.
+	def, defErr := sfnValidateDefinition(sm.Definition)
+	if defErr != nil {
+		return nil, fmt.Errorf("stepfunctions startSyncExecution: stored definition for %s is unreadable: %s",
+			sm.StateMachineArn, defErr.Message)
 	}
 
 	execName := input.Name
@@ -724,7 +753,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 		History:         []HistoryEvent{},
 	}
 
-	_, _ = p.executeASL(&def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
+	_, _ = p.executeASL(def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 
 	out := map[string]interface{}{
 		"executionArn": exec.ExecutionArn,

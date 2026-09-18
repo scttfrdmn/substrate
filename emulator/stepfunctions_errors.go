@@ -133,3 +133,41 @@ func sfnExecutionDoesNotExist(arn string) *AWSError {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// sfnStateMachineTypeNotSupported reports that an operation does not serve this state machine's type.
+//
+// API_StartSyncExecution publishes StateMachineTypeNotSupported — "State machine type is not
+// supported." — at HTTP 400, and it is the code for the one restriction that page states outright:
+// "StartSyncExecution is not available for STANDARD workflows." Substrate answered InvalidDefinition
+// here, which is a real Step Functions code at CreateStateMachine and UpdateStateMachine, where a
+// definition arrives in the request — but not on this page, and not about this fact. A consumer
+// branching on the code saw a claim about the ASL document when what was wrong was the workflow type
+// (#996).
+//
+// The message is AWS's verbatim, with the offending type appended: the published sentence does not say
+// which type was rejected, and a caller holding one ARN of each needs to know.
+func sfnStateMachineTypeNotSupported(smType string) *AWSError {
+	return &AWSError{
+		Code:       "StateMachineTypeNotSupported",
+		Message:    "State machine type is not supported: " + smType,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnInvalidDefinition reports that a definition is not one substrate will store.
+//
+// API_CreateStateMachine and API_UpdateStateMachine both publish InvalidDefinition — "The provided
+// Amazon States Language definition is not valid." — at HTTP 400. These are the only two operations
+// that publish it, and they are exactly the two where a definition arrives in the request, which is
+// why it is wrong anywhere else; see [sfnStateMachineTypeNotSupported].
+//
+// What substrate checks is narrower than what AWS checks, and [sfnValidateDefinition] states the
+// boundary. The reason is appended to AWS's sentence rather than replacing it, so a caller matching on
+// the published text still matches.
+func sfnInvalidDefinition(reason string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidDefinition",
+		Message:    "The provided Amazon States Language definition is not valid: " + reason,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
