@@ -667,6 +667,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after its last tag was removed, which is #938's rule. The stamp is set where the fact becomes true
   so that rule rests on the flag's meaning rather than on every remover deriving it.
 
+- **EventBridge Scheduler checks every constraint `CreateSchedule` and `UpdateSchedule` publish, and an
+  empty schedule name no longer answers a listing** (#1008, #1009). Both pages publish three
+  `Required: Yes` body members — `ScheduleExpression`, `Target` and `FlexibleTimeWindow` — plus a
+  required `Name` in the URI, and the plugin validated none of them: `POST /schedules/my-schedule` with
+  a body of `{}` answered success, and `GetSchedule` then reported a live schedule with no expression
+  and no target. A consumer testing a scheduling workflow got a resource that could not describe when it
+  would fire or what it would invoke, and nothing in the exchange said so. The new
+  `scheduler_errors.go` carries each bound as a named constant beside the message that renders it, so
+  the guard and the refusal cannot drift: `Name` and `GroupName` length 1–64 with pattern
+  `[0-9a-zA-Z-_.]+`, `ScheduleExpression` 1–256, `Description` 0–512, `Target.Arn` and `Target.RoleArn`
+  required and 1–1600, `FlexibleTimeWindow.Mode` required with `Valid Values` OFF | FLEXIBLE,
+  `MaximumWindowInMinutes` in 1–1440, `State` in ENABLED | DISABLED. All of them answer
+  `ValidationException`/400, the only refusal either page publishes for a constraint failure, which is
+  why the message names the member and the bound — the code cannot.
+
+  **`MaximumWindowInMinutes` is a pointer, and that is the whole reason the range is checkable.** Its
+  published range starts at 1 while the member is `Required: No`, so an explicit `0` is a refusal and an
+  absent member is acceptance — a distinction a plain `int32` cannot express, since both arrive as zero.
+  AWS does **not** publish that a `FLEXIBLE` window requires the bound, so substrate does not invent
+  that rule: a `FLEXIBLE` window with no maximum is accepted, and only the published range is enforced.
+  `Target.RoleArn`'s IAM-role ARN **pattern** is deliberately not checked and the omission is recorded —
+  substrate models no role, so refusing a string that is not an ARN would refuse a call it otherwise
+  serves without ever needing the value to resolve. `StartDate`, `EndDate`, `KmsKeyArn`,
+  `ActionAfterCompletion` and the templated-target objects are published and unmodelled, so they are
+  neither decoded, validated, nor reported, per #1013.
+
+  **A defect neither issue names had to be fixed first: the handlers decoded a caller's body into
+  substrate's storage types**, whose JSON tags are snake_case, so `Target.RoleArn`,
+  `Target.RetryPolicy` and `FlexibleTimeWindow.MaximumWindowInMinutes` never survived the request and
+  `GetSchedule` reported them empty however they were sent. Validating `RoleArn`'s `Required: Yes` was
+  impossible until the decode kept it — a member that is always dropped is always missing. Both
+  operations now decode request types spelled as AWS publishes them and fold those into the stored
+  shape. `CreateSchedule` also answers **200** rather than 201, because that is what its Response Syntax
+  states; `UpdateSchedule` still merges the optional members where the page publishes full replacement,
+  which is a distinct divergence and is filed separately.
+
+  **Nine parse guards across three routers were unreachable, not the five in two that #1009 reported.**
+  `parseKafkaOperation` and `parseSESv2Operation` opened with `strings.TrimRight(path, "/")`, and
+  `parseSchedulerOperation` normalised the same way through an explicit `path == "/schedules/"` arm — a
+  fold no `TrimRight` search could see, which is why Scheduler's four guards went unreported. The
+  consequence on Scheduler was the worst of the three: `GET /schedules/`, the path a caller builds from
+  an empty variable, answered 200 with **every schedule in the group** to a request for one. All three
+  routers now stop normalising, so an empty path parameter reaches the operation the caller actually
+  named and is refused there naming the parameter. That follows `parseEFSOperation`, which never trimmed
+  and whose nine equivalent guards were always reachable — two routers in one tree answering differently
+  on the same input class was the defect. **AWS publishes nothing about a trailing slash** for any of
+  these services, so this is substrate's reading, stated as one: a refusal is recoverable where a wrong
+  operation is not. CloudFront is the same defect inverted — `/distribution/` reaches `GetDistribution`
+  with an empty ID and there is no guard below it to reach, so the fix is a guard to add rather than a
+  fold to remove, and it is filed separately. `docs/services.md` carries the whole-tree inventory,
+  replacing the note that these guards cannot be reached.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

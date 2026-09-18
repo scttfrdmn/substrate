@@ -81,7 +81,7 @@ func TestScheduler_CreateGetDelete(t *testing.T) {
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/my-schedule", createBody)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readSchedulerBody(t, resp)
 	var createResp struct {
 		ScheduleArn string `json:"ScheduleArn"`
@@ -128,10 +128,15 @@ func TestScheduler_UpdateSchedule(t *testing.T) {
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/update-test", createBody)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Update the schedule expression.
-	updateBody := `{"ScheduleExpression": "cron(0 12 * * ? *)"}`
+	// Update the schedule expression. UpdateSchedule publishes the same three Required: Yes members as
+	// the create, so an update naming only the expression is refused (#1008); the caller restates them.
+	updateBody := `{
+		"ScheduleExpression": "cron(0 12 * * ? *)",
+		"Target": {"Arn": "arn:aws:lambda:us-east-1:123456789012:function:my-fn", "RoleArn": "arn:aws:iam::123456789012:role/my-role"},
+		"FlexibleTimeWindow": {"Mode": "OFF"}
+	}`
 	resp = schedulerRequest(t, ts, http.MethodPut, "/schedules/update-test", updateBody)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readSchedulerBody(t, resp)
@@ -165,7 +170,7 @@ func TestScheduler_CreateDuplicate(t *testing.T) {
 
 	// First create should succeed.
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/dup-test", createBody)
-	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Second create of same name should return 409 Conflict.
 	resp = schedulerRequest(t, ts, http.MethodPost, "/schedules/dup-test", createBody)
@@ -184,7 +189,7 @@ func TestScheduler_ListSchedules(t *testing.T) {
 	for _, name := range []string{"alpha-1", "alpha-2", "beta-1"} {
 		body := fmt.Sprintf(`{"ScheduleExpression": "rate(1 hour)", "Target": %s, "FlexibleTimeWindow": %s}`, target, ftw)
 		resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/"+name, body)
-		require.Equal(t, http.StatusCreated, resp.StatusCode, "create %s", name)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create %s", name)
 	}
 
 	// List all schedules — expect 3.
@@ -227,7 +232,7 @@ func TestScheduler_ListPagination(t *testing.T) {
 		name := fmt.Sprintf("page-sched-%d", i)
 		body := fmt.Sprintf(`{"ScheduleExpression": "rate(1 hour)", "Target": %s, "FlexibleTimeWindow": %s}`, target, ftw)
 		resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/"+name, body)
-		require.Equal(t, http.StatusCreated, resp.StatusCode, "create %s", name)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create %s", name)
 	}
 
 	// First page: maxResults=2.
@@ -286,7 +291,7 @@ func TestScheduler_TimestampFormat(t *testing.T) {
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/ts-test", createBody)
-	require.Equal(t, http.StatusCreated, resp.StatusCode)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// GetSchedule — verify CreationDate is numeric.
 	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules/ts-test", "")
