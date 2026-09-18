@@ -853,8 +853,9 @@ page at the documented minimum of twenty and create twenty-odd records to reach 
 ### A pagination token substrate never issued is refused, not answered with page one
 
 [#915](https://github.com/scttfrdmn/substrate/issues/915) is the second half of the tier-2 defect
-above, at the four operations the RDS and ElastiCache fix did not reach. Each decoded its token and
-discarded the error:
+above, at the four operations the RDS and ElastiCache fix did not reach; the tagging API's
+`GetResources` joined them with #1010, which is why the table below has five rows for a four-operation
+issue. Each decoded its token and discarded the error:
 
 ```go
 if decoded, decErr := base64.StdEncoding.DecodeString(nextToken); decErr == nil {
@@ -878,6 +879,7 @@ The code and the message are per operation, and their provenance differs:
 | SSM `DescribeParameters` | `InvalidNextToken` / 400 | The specified token isn't valid. | **Published**, on the operation's own page. |
 | SSM `GetParametersByPath` | `InvalidNextToken` / 400 | The specified token isn't valid. | **Published**, identically. |
 | S3 `ListObjectsV2` | `InvalidArgument` / 400 | The continuation token provided is incorrect. | **Substrate's reading.** `API_ListObjectsV2` publishes exactly one error, `NoSuchBucket` at 404, and says nothing about an unusable `continuation-token`; the S3 `ErrorResponses` page returns an empty body to automated fetches. It follows the choice already recorded for `ListBuckets`, and the two operations taking this cursor now decode it through one helper, so they cannot refuse it differently. |
+| Resource Groups Tagging `GetResources` | `InvalidParameterException` / 400 | PaginationToken is not a token this API issued | **Substrate's reading**, added by #1010 as the fifth operation of this class. `API_GetResources` publishes `PaginationTokenExpiredException` as well, and it is deliberately *not* the code used here: an unissued token is malformed, not expired, and the two imply different consumer actions. `InvalidParameterException`'s own gloss covers "a provided string parameter is malformed". |
 
 Two rules decide what counts as issuable, and both are stated once, in
 `emulator/offset_pagination_token.go`, rather than agreed on at each site:
@@ -900,7 +902,9 @@ much state happened to exist. This is the ordering rule `ec2_describetags.go` re
 refusal to arrive anyway. `ListObjectsV2` is the one exception, deliberately: its
 bucket-existence `404` keeps its precedence over the token refusal, because the bucket is the
 resource the request addresses and AWS publishes nothing about which of the two wins. Only the
-object listing is guaranteed unread.
+object listing is guaranteed unread. `GetResources` follows the same rule: its whole eight-member
+validation runs ahead of the account-wide scan, so a refusal does not depend on how many resources
+happen to exist.
 
 **What this does not fix.** CloudWatch `DescribeAlarms` and both Systems Manager listings still page
 by *offset*, so a record added or removed behind the cursor still shifts every later page — the
@@ -9382,7 +9386,7 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 
 | Operation | Notes |
 |-----------|-------|
-| GetResources | Supports ResourceTypeFilters, TagFilters; base64 pagination token; reports tagged and previously tagged resources only |
+| GetResources | All eight published request members honoured; base64 pagination token, refused unless substrate issued it; reports tagged and previously tagged resources only |
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
@@ -9579,6 +9583,124 @@ This is the anchored-segment rule of #910 and #918 applied one layer up. Those f
 `strings.Contains(arn, ":stateMachine:")` and `strings.LastIndex(arn, "distribution/")` in
 the ARN *resolvers*; the filter matcher is the one comparison of that kind whose left-hand
 side comes from the caller, and it was in neither pass.
+
+### `GetResources` honours all eight of its request parameters
+
+`API_GetResources` publishes eight request members, all `Required: No`. Substrate decoded
+four of them, and until #1004 and #1010 two of those four were not honoured as published
+either:
+
+| Member | Before | Now |
+|---|---|---|
+| `TagFilters` | honoured | honoured |
+| `ResourceTypeFilters` | honoured | honoured |
+| `ResourcesPerPage` | **clamped** — any value ≤ 0 became 100, and 5000 was served | refused outside 1–100 |
+| `PaginationToken` | **both decode errors discarded** — an unissued token meant page one | refused unless substrate issued it |
+| `ResourceARNList` | **dropped** — and its three exclusions unenforced | selects the named ARNs |
+| `TagsPerPage` | dropped | cuts the page by tag count |
+| `IncludeComplianceDetails` | dropped | renders `ComplianceDetails` |
+| `ExcludeCompliantResources` | dropped | refused without its companion |
+
+Every refusal is `InvalidParameterException` at HTTP 400, the operation's only published
+code for a bad request; its own gloss names the two conditions — "a provided string
+parameter is malformed" and "a provided parameter value is out of range". The message is
+therefore what distinguishes one refusal from another, and each one names the parameter
+and the bound it violated.
+
+**`ResourcesPerPage` is refused, not clamped.** AWS states "[y]ou can specify a minimum of
+1 and a maximum value of 100" in the member's own prose rather than as a Length Constraint,
+which an Integer member does not carry. Substrate's single `if in.ResourcesPerPage <= 0 {
+in.ResourcesPerPage = 100 }` arm was doing two jobs — supplying the default and swallowing
+an out-of-range value — and only the first was correct. The worse direction was upward:
+`5000` was honoured, so one call could return every resource in the account on a page size
+AWS refuses, and a consumer's paging loop was never exercised. The member is now a pointer,
+because `Required: No` with a published minimum above zero means an omitted integer and an
+explicit `0` are different requests: absent is the default of 100, and `0` is out of range.
+
+**`ResourceARNList` was the costliest omission, and not because it was unimplemented.** The
+page publishes it as mutually exclusive with `ResourceTypeFilters`, with `TagFilters`, and
+with all three pagination members — three sentences, each promising an "`Invalid Parameter`
+exception". So substrate accepted three request shapes AWS refuses, and in every one of
+them answered the account-wide scan: a caller asking for the tags on five ARNs was handed a
+superset at HTTP 200 with nothing in the response to say the request served was not the
+request sent. All three are now refused, and the third is why #1004 and #1010 are one
+change: distinguishing an absent `ResourcesPerPage` from a sent one is exactly the pointer
+above.
+
+The ARN comparison is exact. `ResourceARNList` takes ARNs and an ARN identifies one
+resource, so a prefix or case-folded match would return resources the caller did not name.
+An ARN naming nothing is not an error — "if a resource specified by this parameter doesn't
+exist, it doesn't generate an error; it simply isn't included in the response" — so a list
+of entirely absent ARNs is an empty list at 200. Its published bounds are enforced: 1–100
+items, each 1–1011 characters. An empty `ResourceARNList: []` is refused rather than read as
+absent, because a caller that sent the member asked to filter by ARN and filtering by none
+of them is not the account-wide scan.
+
+**`TagsPerPage` is implemented rather than refused**, because the page publishes exact and
+deterministic behaviour for it: the 100–500 range, "a resource with no tags is counted as
+having one tag (one key and value pair)", "does not split a resource and its associated
+tags across pages", and a worked example — `TagsPerPage` 100 against 22 resources of 10 tags
+each yielding pages of 10, 10 and 2 — that pins the comparison as inclusive. Both page
+members apply when both are sent, the page breaking at whichever limit is reached first.
+Note the minimum is 100 and not 1: the member counts tags rather than resources.
+
+One departure, unobservable and recorded anyway: **at least one resource is always taken.**
+Read literally, "a `PaginationToken` is returned in place of the affected resource and its
+tags" would have a first resource whose own tags exceed the whole budget yield an empty page
+and a token pointing at the same resource, so a caller looping to a null token would never
+terminate. The case cannot arise — the minimum `TagsPerPage` is 100 and no service substrate
+models admits more than 50 tags on a resource — but progress is guaranteed rather than left
+to depend on that, because a hang is a worse failure than a page one tag over budget.
+
+**`ComplianceDetails` renders three of its four published members, and omits
+`ComplianceStatus`.** It was `*struct{}`, so the only two documents it could produce were
+"absent" and `{}`, neither of which is the published shape. The three key arrays —
+`KeysWithNoncompliantValues`, `MissingTagKeys`, `NoncompliantKeys` — are each defined
+against the *effective tag policy* by their own descriptions, and substrate models no
+organization with tag policies enabled (they are "available only in an organization that has
+all features enabled"), so no key can be a member of any of them. `[]` is the derived
+answer, not a placeholder for one, and it is `[]` rather than `null` for #938's reason.
+
+`ComplianceStatus` cannot be derived that way, and reporting `true` would be the tempting
+answer — nothing can be noncompliant with a policy that does not exist. The Organizations
+tag-policies guide settles it the other way: "[u]ntagged resources or tags that aren't
+defined in the tag policy aren't evaluated for compliance with the tag policy." Not
+evaluated is not compliant, so a `true` here would claim an evaluation that never happened.
+The member is `Required: No`, so a document without it is still the published shape.
+
+It follows that **`ExcludeCompliantResources: true` excludes nothing**, since no resource is
+evaluated as compliant — stated here rather than left for a caller to discover from an
+unexpectedly full response. The page's own constraint on it is enforced regardless and needs
+no tag-policy model: it "can be used only if the `IncludeComplianceDetails` parameter is
+also set to `true`". An explicit `false` is accepted, which is substrate's reading — it asks
+for nothing, and AWS's own Sample Request sends the member with a non-meaningful value.
+
+**`PaginationToken` is emitted on every response**, `omitempty` removed. The evidence is the
+operation's own Sample Response, which carries `"PaginationToken": ""` on a complete result,
+plus the prose "repeat the query … until you receive a `null` value" — a consumer cannot
+receive a value from a member that is absent. One sample is a reading rather than a
+citation, and is recorded as one.
+
+Two things this does **not** do, so the new checks are not read as complete coverage.
+`ResourceTypeFilters`' per-item 0–256 length and its 100-item array bound, and `TagFilters`'
+50-key and 20-values-per-key bounds, are **not** enforced; adding a bound without walking
+its citations is how an emulator starts refusing what AWS accepts. And
+`PaginationTokenExpiredException` stays unreachable: the expiry it reports is wall-clock
+(fifteen minutes), which no substrate behaviour may depend on, and it is not the code for an
+unissued token in any case — a token substrate never issued is *malformed*, not *expired*,
+and the two imply different consumer actions ("your code composed this wrong" against "start
+again from page one").
+
+Per-member checks run before the cross-member exclusions. No ordering avoids every
+two-round-trip case, so the criterion is the one #991's plaintext guard and #983's policy
+document already use: name what is wrong with a single member before what is wrong with the
+request as a whole, because the first is fixable from that member's own documentation while
+the second makes the caller decide which of two features it wanted.
+
+One documentation curiosity, recorded because a reader searching AWS's page for the exact
+string would otherwise conclude the sentence is missing: the two exclusion sentences written
+on `ResourceTypeFilters` and `TagFilters` both spell the member `ResourceArnList`, where it
+is `ResourceARNList` everywhere else on the same page.
 
 ### An ARN resolves to the state key its own service uses
 

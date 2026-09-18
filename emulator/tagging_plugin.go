@@ -2,14 +2,12 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -63,12 +61,8 @@ func (p *TaggingPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (
 
 // ----- GetResources --------------------------------------------------------
 
-type getResourcesInput struct {
-	TagFilters          []tagFilter `json:"TagFilters"`
-	ResourceTypeFilters []string    `json:"ResourceTypeFilters"`
-	ResourcesPerPage    int         `json:"ResourcesPerPage"`
-	PaginationToken     string      `json:"PaginationToken"`
-}
+// getResourcesInput and the members it decodes live in `tagging_get_resources.go` (#1004, #1010),
+// which is also where the published constraints and the readings behind them are recorded.
 
 type tagFilter struct {
 	Key    string   `json:"Key"`
@@ -76,9 +70,14 @@ type tagFilter struct {
 }
 
 type resourceTagMapping struct {
-	ResourceARN       string       `json:"ResourceARN"`
-	Tags              []taggingTag `json:"Tags"`
-	ComplianceDetails *struct{}    `json:"ComplianceDetails,omitempty"`
+	ResourceARN string       `json:"ResourceARN"`
+	Tags        []taggingTag `json:"Tags"`
+
+	// ComplianceDetails is reported only when the caller sets IncludeComplianceDetails. It was
+	// `*struct{}` until #1010 — a shape that could render only as absent or as `{}`, never as the
+	// published four members. See [taggingComplianceDetails] for which of the four substrate
+	// answers and why `ComplianceStatus` is not among them.
+	ComplianceDetails *taggingComplianceDetails `json:"ComplianceDetails,omitempty"`
 
 	// everTagged is the scanned record's previously-tagged flag. It is unexported because it is not a
 	// response member: AWS reports the history by including the resource with an empty tag set, not by
@@ -91,20 +90,35 @@ type taggingTag struct {
 	Value string `json:"Value"`
 }
 
+// getResourcesOutput is the GetResources response.
+//
+// `PaginationToken` carries no `omitempty` since #1010: AWS's own Sample Response for this operation
+// emits `"PaginationToken": ""` on a complete result, and the prose tells a caller to repeat the
+// query "until you receive a null value" — which a caller cannot do if the member is absent on the
+// last page. That is one sample rather than a citation, so it is recorded as substrate's reading in
+// `tagging_get_resources.go`.
 type getResourcesOutput struct {
 	ResourceTagMappingList []resourceTagMapping `json:"ResourceTagMappingList"`
-	PaginationToken        string               `json:"PaginationToken,omitempty"`
+	PaginationToken        string               `json:"PaginationToken"`
 }
 
+// getResources answers the tagged and previously-tagged resources in the caller's account and
+// Region, honoring all eight of the operation's published request members.
+//
+// Every refusal, every published bound and every reading substrate makes where the page is silent is
+// recorded in `tagging_get_resources.go`, which also states which of the request members' constraints
+// this function deliberately does not enforce. The validation runs before the scan, so a request AWS
+// would refuse costs no state read.
 func (p *TaggingPlugin) getResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in getResourcesInput
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &in); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+			return nil, taggingInvalidParameter("invalid JSON body")
 		}
 	}
-	if in.ResourcesPerPage <= 0 {
-		in.ResourcesPerPage = 100
+	perPage, offset, awsErr := taggingValidateGetResources(&in)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	all, err := p.scanAllResources(reqCtx)
@@ -112,10 +126,17 @@ func (p *TaggingPlugin) getResources(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, err
 	}
 
-	// Sort by ARN for stable, deterministic pagination.
+	// Sort by ARN for stable, deterministic pagination. This is the ordering the offset in a
+	// PaginationToken is an offset into, so it has to happen before any cut.
 	sort.Slice(all, func(i, j int) bool {
 		return all[i].ResourceARN < all[j].ResourceARN
 	})
+
+	// Filter by ResourceARNList. Mutually exclusive with both filters below, so the three arms
+	// cannot combine — the refusal for that is in taggingValidateARNListExclusions.
+	if len(in.ResourceARNList) > 0 {
+		all = taggingFilterByARNList(all, in.ResourceARNList)
+	}
 
 	// Filter by ResourceTypeFilters.
 	if len(in.ResourceTypeFilters) > 0 {
@@ -139,24 +160,25 @@ func (p *TaggingPlugin) getResources(reqCtx *RequestContext, req *AWSRequest) (*
 		all = filtered
 	}
 
-	// Pagination.
-	offset := 0
-	if in.PaginationToken != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(in.PaginationToken); err == nil {
-			if n, err := strconv.Atoi(string(decoded)); err == nil && n > 0 {
-				offset = n
-			}
+	page, nextToken := pageByOffsetToken(all, offset, perPage)
+
+	// TagsPerPage cuts the page a second time, by tag count rather than resource count, and reissues
+	// the token at the shorter boundary. Both members apply when both are sent, the page breaking at
+	// whichever limit is reached first; nothing here runs when the member is absent, so a caller that
+	// never sends it pages exactly as before.
+	if in.TagsPerPage != nil {
+		if kept := taggingTagBudget(page, *in.TagsPerPage); kept < len(page) {
+			page = page[:kept]
+			nextToken = encodeOffsetPaginationToken(offset + kept)
 		}
 	}
-	if offset > len(all) {
-		offset = len(all)
-	}
-	page := all[offset:]
-	var nextToken string
-	if len(page) > in.ResourcesPerPage {
-		page = page[:in.ResourcesPerPage]
-		nextOffset := offset + in.ResourcesPerPage
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
+
+	// ComplianceDetails is attached only when asked for, and ExcludeCompliantResources removes
+	// nothing — see [taggingNoEffectiveTagPolicy] for why no resource is evaluated as compliant.
+	if in.IncludeComplianceDetails {
+		for i := range page {
+			page[i].ComplianceDetails = taggingNoEffectiveTagPolicy()
+		}
 	}
 
 	out := getResourcesOutput{

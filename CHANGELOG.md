@@ -253,6 +253,118 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and reports a policy, so that a later sweep completing the key-state checks cannot read the published
   code as a missing refusal.
 
+### Fixed
+- **`GetResources` honours all eight of its published request members, four of which it had been
+  discarding and two of which it had not honoured as published either** (#1004, #1010). The operation
+  decoded `TagFilters`, `ResourceTypeFilters`, `ResourcesPerPage` and `PaginationToken`, and dropped
+  `ResourceARNList`, `TagsPerPage`, `IncludeComplianceDetails` and `ExcludeCompliantResources`. Of the
+  four it decoded, `ResourcesPerPage` was clamped where AWS refuses and `PaginationToken` discarded
+  both of its decode errors.
+
+  **`ResourcesPerPage` is refused outside its published 1–100 range rather than clamped into it**
+  (#1004). One arm, `if in.ResourcesPerPage <= 0 { in.ResourcesPerPage = 100 }`, was doing two jobs:
+  supplying the default for an absent member and swallowing an out-of-range value. Only the first was
+  correct. Downward, `0` and `-5` became 100; upward — the direction that matters — `5000` was
+  honoured, so a single call could return every resource in the account on a page size AWS rejects,
+  and a consumer's paging loop was never exercised at all. The bounds are published in the member's
+  own prose (*"a minimum of 1 and a maximum value of 100"*) rather than as Length Constraints, which
+  an Integer member does not carry. The field is now a `*int`, because `Required: No` with a published
+  minimum above zero makes an omitted integer and an explicit `0` different requests: absent is the
+  default, `0` is out of range. Only the *shape* of #868's `iamValidateMaxItems` transferred — named
+  constants carrying the citation, a refusal rather than a clamp, a message naming the range — since
+  that helper reads presence from `req.Params`, which `parser.go` fills from the query string and form
+  body, and this is a JSON-body service.
+
+  **`ResourceARNList` was the costliest of the four omissions, and not because it was
+  unimplemented** (#1010). The page publishes it as mutually exclusive with `ResourceTypeFilters`,
+  with `TagFilters`, and with all three pagination members — three sentences — so substrate accepted
+  three request shapes AWS refuses, and in every one of them answered the account-wide scan. A caller
+  asking for the tags on five ARNs was handed a superset at HTTP 200 with nothing in the response to
+  say the request served was not the request sent. That third exclusion is also why #1004 and #1010
+  are one change rather than two: enforcing it requires distinguishing an absent `ResourcesPerPage`
+  from a sent one, which is exactly the pointer above. The ARN comparison is exact, since an ARN
+  identifies one resource and a loose match would return resources the caller did not name; an ARN
+  naming nothing is silently absent, published verbatim as *"it doesn't generate an error; it simply
+  isn't included in the response"*; and the member's 1–100 array bound and 1–1011 per-item length are
+  enforced, with an empty `ResourceARNList: []` refused rather than read as absent — a caller that
+  sent the member asked to filter by ARN, and filtering by none of them is not the account-wide scan.
+
+  **A `PaginationToken` substrate never issued is refused rather than answered with page one.** This
+  is the fifth site of #915's class and the one the plan folded into this change because it lives in
+  the same function; the decode discarded both the base64 and the integer error, so a token from
+  another operation, a truncated copy or an offset left over from an older recording left the offset
+  at zero and the operation answered a well-formed first page — the one wrong answer a paginating
+  caller cannot detect. It now decodes through `decodeOffsetPaginationToken`, whose round-trip rule
+  also refuses `+5` and `05`, and the published 0–2048 length is checked with its own message so a
+  caller can tell a token that is too long from one that is merely wrong.
+  `PaginationTokenExpiredException` is deliberately **not** the code: its expiry is wall-clock
+  (fifteen minutes), which no substrate behaviour may depend on, and an unissued token is *malformed*
+  rather than *expired* — a distinction a consumer acts on, since expired means "start again" and
+  malformed means "your code composed this wrong". `PaginationToken` also lost its `omitempty`, on the
+  evidence of the operation's own Sample Response emitting `"PaginationToken": ""` on a complete
+  result: a consumer indexing the member rather than using a defaulting read raised against substrate
+  and worked against AWS.
+
+  **`TagsPerPage` is implemented rather than refused**, against the issue's own lean, because the page
+  publishes exact and fully deterministic behaviour for it: the 100–500 range, *"a resource with no
+  tags is counted as having one tag (one key and value pair)"*, *"does not split a resource and its
+  associated tags across pages"*, and a worked example — 100 against 22 resources of 10 tags each
+  yielding pages of 10, 10 and 2 — that pins the comparison as inclusive. That is about fifteen lines
+  and no invention, and validating a parameter only to ignore it is the very defect this release is
+  about. Both page members apply when both are sent, the page breaking at whichever is reached first.
+  One documented departure, unobservable: **at least one resource is always taken**, where a literal
+  reading of *"a `PaginationToken` is returned in place of the affected resource"* would have a first
+  resource whose tags exceed the whole budget yield an empty page and a token pointing back at it, so
+  a caller looping to a null token would never terminate. The case cannot arise — the minimum
+  `TagsPerPage` is 100 and no service substrate models admits more than 50 tags — but a hang is a
+  worse failure than a page one tag over budget.
+
+  **`ComplianceDetails` renders three of its four published members and omits `ComplianceStatus`,
+  which is a decision rather than an omission.** The field was `*struct{}`, so the only two documents
+  it could produce were "absent" and `{}`, neither of which is the published shape. The three key
+  arrays are *derivable*: each is defined against the effective tag policy by its own description, and
+  substrate models no organization with tag policies enabled — they are *"available only in an
+  organization that has all features enabled"* — so no key can be a member of any of them, and `[]`
+  is the derived answer rather than a placeholder for one (`[]` and not `null`, per #938).
+  `ComplianceStatus` cannot be derived that way, and `true` is the tempting answer: nothing can be
+  noncompliant with a policy that does not exist. The Organizations tag-policies guide settles it the
+  other way — *"[u]ntagged resources or tags that aren't defined in the tag policy aren't evaluated
+  for compliance with the tag policy"* — so not evaluated is not compliant, and a `true` here would
+  claim an evaluation that never happened. It is not a struct field at all, so it cannot be reported
+  by accident later. It follows that `ExcludeCompliantResources: true` excludes nothing, since no
+  resource is evaluated as compliant; that is recorded in `docs/services.md` rather than left for a
+  caller to discover from an unexpectedly full response. The page's own constraint on the member is
+  enforced regardless and needs no tag-policy model — it may be used *"only if the
+  `IncludeComplianceDetails` parameter is also set to `true`"* — and an explicit `false` is accepted,
+  since it asks for nothing and AWS's own Sample Request sends the member with a non-meaningful value.
+
+  **A previously-tagged resource named in `ResourceARNList` is returned, with the empty tag set #938
+  established**, and that is substrate's reading rather than a citation: the page scopes `"Tags": []`
+  to the no-`TagFilters` case and says nothing about `ResourceARNList`. The argument is the
+  operation's own scoping sentence, *"GetResources does not return untagged resources"* — a resource
+  that ever held a tag is not untagged, which is precisely why AWS publishes the empty form for it, so
+  narrowing to named ARNs selects among the eligible resources without redefining which are eligible.
+  A test pins it, so the opposite reading has to argue with a failing assertion rather than with a
+  comment.
+
+  Every refusal is `InvalidParameterException` at HTTP 400, the operation's only published code for a
+  bad request; its gloss names two of the conditions outright (*"a provided string parameter is
+  malformed"*, *"a provided parameter value is out of range"*). The three exclusion sentences promise
+  an *"`Invalid Parameter` exception"* — spaced and capitalised — that is not an entry in the Errors
+  section at all, so mapping it to `InvalidParameterException` is a one-step reading, recorded as one.
+  Per-member checks run before the cross-member exclusions: no ordering avoids every two-round-trip
+  case, so the criterion is the one #991's plaintext guard and #983's policy document already use —
+  name what is wrong with a single member before what is wrong with the request as a whole, because
+  the first is fixable from that member's own documentation while the second makes the caller decide
+  which of two features it wanted.
+
+  **Two published constraints are deliberately left unenforced**, stated so the new checks are not
+  read as complete coverage: `ResourceTypeFilters`' per-item 0–256 length with its 100-item array
+  bound, and `TagFilters`' 50-key and 20-values-per-key bounds. They belong to neither issue, and
+  adding a bound without walking its citations is how an emulator starts refusing what AWS accepts.
+  One curiosity is recorded for the next reader: AWS's own page misspells the member as
+  `ResourceArnList` in the two exclusion sentences written on `ResourceTypeFilters` and `TagFilters`.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
