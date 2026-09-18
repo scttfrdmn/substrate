@@ -286,6 +286,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   *decompressed* under the declared content encoding, so it would send a caller to check its
   `Content-Encoding` header over a syntax error in its own JSON.
 
+  **Nine SQS handlers decode the body twice, and the second decode turned out to catch a different
+  fault.** They read the queue URL through the shared helper and then decode the same bytes into their
+  own struct, so a body that will not *parse* has been refused one call earlier and their own guard can
+  never see one. It is still reachable, by a body that parses but contradicts a member's type —
+  `{"QueueUrl": "…", "Attributes": "not-a-map"}` — because the first decode skips a field its target does
+  not declare without type-checking it. That shape answers the same `ValidationError`/400, and the
+  offending member is deliberately not named: naming it would mean `InvalidParameterValue` for a type
+  mismatch and `ValidationError` for a syntax error on the same operation, which is the
+  one-plugin-two-codes split #950 removed.
+
   `DescribeEventDetails` also parses its body **before** loading event state, so a malformed body is
   refused without consulting state. Two discards are deliberately retained rather than turned into a
   second refusal, with their reasoning recorded in place: `sqsRequestedAttributeNames` decodes the same

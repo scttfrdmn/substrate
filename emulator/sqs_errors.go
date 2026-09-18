@@ -18,6 +18,13 @@ import "net/http"
 // ListQueueTags and PurgeQueue — took the discarded value straight into a queue lookup, so a JSON
 // syntax error answered QueueDoesNotExist: the emulator told a caller its queue was missing when the
 // queue was fine and the body was not.
+//
+// The same code answers a body that parses but contradicts a member's type, which is the only shape that
+// reaches the second decode in the nine handlers that read the queue URL through the helper first — a
+// body that will not parse has already been refused one call earlier. The member is not named, because
+// naming it would mean answering InvalidParameterValue for a type mismatch and ValidationError for a
+// syntax error on the same operation, which is the one-plugin-two-codes split #950 removed; the
+// common-errors gloss above is true of both.
 func sqsInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "ValidationError",

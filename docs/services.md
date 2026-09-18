@@ -514,6 +514,16 @@ queue first so that a passing assertion is known to come from the guard rather t
 happened to fail for another reason — while a *well-formed* request for an absent queue still answers
 `QueueDoesNotExist`, so the lookup moved rather than went away.
 
+**Nine SQS handlers decode the body twice, and the second decode catches a different fault.** They read
+the queue URL through the shared helper and then decode the same bytes into their own struct, so a body
+that will not *parse* has been refused one call earlier and their own guard can never see one. It is
+still reachable, by a body that parses cleanly but contradicts a member's type — `{"QueueUrl": "…",
+"Attributes": "not-a-map"}` — because the first decode skips a field its target does not declare without
+type-checking it. That shape answers the same `ValidationError`/400, and the offending member is
+deliberately **not** named: naming it would mean answering `InvalidParameterValue` for a type mismatch
+and `ValidationError` for a syntax error on the same operation, which is exactly the one-plugin-two-codes
+split #950 removed. The common-errors gloss covers both.
+
 One discard in this slice is **retained**, with its reachability recorded rather than a second refusal
 invented: `sqsRequestedAttributeNames` decodes the same body a second time for `ReceiveMessage`'s
 attribute selectors, and `ReceiveMessage` has already refused an unparseable body through its own guard
