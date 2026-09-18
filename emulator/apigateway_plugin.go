@@ -77,7 +77,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetDeployment":
 		return p.getDeployment(ctx, params["apiId"], params["deployId"])
 	case "GetDeployments":
-		return p.getDeployments(ctx, params["apiId"])
+		return p.getDeployments(ctx, req, params["apiId"])
 	case "DeleteDeployment":
 		return p.deleteDeployment(ctx, params["apiId"], params["deployId"])
 	case "CreateStage":
@@ -95,7 +95,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetAuthorizer":
 		return p.getAuthorizer(ctx, params["apiId"], params["authId"])
 	case "GetAuthorizers":
-		return p.getAuthorizers(ctx, params["apiId"])
+		return p.getAuthorizers(ctx, req, params["apiId"])
 	case "DeleteAuthorizer":
 		return p.deleteAuthorizer(ctx, params["apiId"], params["authId"])
 	case "CreateApiKey":
@@ -864,7 +864,22 @@ func (p *APIGatewayPlugin) getDeployment(ctx *RequestContext, apiID, deployID st
 	return apigwJSONResponse(http.StatusOK, deploymentWire(dep))
 }
 
-func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+// getDeployments reports one page of a REST API's deployments.
+//
+// It read neither "limit" nor "position", both of which its URI publishes, and answered every
+// deployment with no cursor (#1025); both are read now through [apigwPageParams].
+//
+// The order is the API's deployment index, ascending deployment ID, for the reason [getRestAPIs]
+// gives. AWS publishes no order here either, and the one a reader would expect — newest deployment
+// first, or oldest — is not what this reports: a deployment ID is generated, so the ordering carries
+// no relation to createdDate. Sorting by createdDate would read better and emulate worse; it is not
+// the order this operation answered in before it paged, and nothing published asks for it.
+func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -883,7 +898,8 @@ func (p *APIGatewayPlugin) getDeployments(ctx *RequestContext, apiID string) (*A
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[deploymentOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[deploymentOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteDeployment(ctx *RequestContext, apiID, deployID string) (*AWSResponse, error) {
@@ -1075,7 +1091,23 @@ func (p *APIGatewayPlugin) getAuthorizer(ctx *RequestContext, apiID, authID stri
 	return apigwJSONResponse(http.StatusOK, authorizerWire(auth))
 }
 
-func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+// getAuthorizers reports one page of a REST API's authorizers.
+//
+// It read neither "limit" nor "position", both of which its URI publishes, and answered every
+// authorizer with no cursor (#1025); both are read now through [apigwPageParams].
+//
+// The order is the API's authorizer index, ascending authorizer ID, for the reason [getRestAPIs]
+// gives. AWS publishes no order here either. An authorizer carries a caller-chosen name, so this is
+// the one of the six where sorting by a published member would be predictable from a caller's own
+// inputs — and it is still not done, for the same reason: it is not the order this operation answered
+// in before it paged, so imposing it would reorder the collection under a caller that was reading it
+// whole.
+func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -1094,7 +1126,8 @@ func (p *APIGatewayPlugin) getAuthorizers(ctx *RequestContext, apiID string) (*A
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[authorizerOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[authorizerOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteAuthorizer(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {

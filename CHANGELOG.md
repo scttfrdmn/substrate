@@ -406,6 +406,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `GetUsagePlans` — follow in the same shape. Each needs the signature change this one did, since six
   of the eight v1 collection handlers took no request at all and so could not reach a query parameter.
 
+- **`GetDeployments` and `GetAuthorizers` read the same pair, the third and fourth of the six**
+  (#1025). Both answered every element with no `position`, for the reasons and with the consequences
+  the entry above states in full; each reads the pair through the shared helper that entry introduced,
+  so neither restates a bound or a refusal, and neither adds one. An API holding more than 25
+  deployments or authorizers now answers 25 and a cursor.
+
+  **One order note that is theirs rather than inherited.** `GetDeployments` walks its deployments in
+  ascending deployment ID, which is *not* newest-first and not oldest-first: the ID is generated, so
+  the order carries no relation to the `createdDate` the element publishes. That is the order the
+  operation already answered in, and sorting by `createdDate` instead — the order a reader of a
+  deployment list expects — would read better and emulate worse. `GetAuthorizers` is the one of the six
+  whose elements carry a caller-chosen `name`, so it is the one where sorting by a published member
+  would have been predictable from a caller's own inputs; it is still not done, because that is not the
+  order the operation had either.
+
+  Both join the table the two converted collections are asserted through, rather than getting tests of
+  their own, so a collection that comes to page differently from its siblings fails at the shared
+  assertions. `GetApiKeys` and `GetUsagePlans` are what remain.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
