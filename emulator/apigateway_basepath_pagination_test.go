@@ -8,11 +8,10 @@ package emulator_test
 // paging consumer's loop terminated on its first response here and first ran for real against a
 // domain holding more mappings than one page.
 //
-// This collection is the one v1 collection that pages, so it is also the one that can carry the
-// "position" member at all; the other seven answer everything in one page and leave it unset,
-// because a caller must not be handed a token for a page that does not exist. Six of those seven
-// publish both parameters and so are the same defect this test closes here (#1025); the seventh,
-// GetStages, publishes neither and has no "position" response member, so its single page is right.
+// This was the first v1 collection to page, and for a while the only one that could carry the
+// "position" member at all. The six others that publish the pair are converted under #1025 and
+// asserted in apigateway_collection_pagination_test.go; the eighth, GetStages, publishes neither
+// parameter and has no "position" response member, so its single page is right.
 //
 // Unlike every EC2 describe, "limit" publishes a **default**: "The maximum number of returned
 // results per page. The default value is 25 and the maximum value is 500." So the absent-parameter
