@@ -13131,13 +13131,13 @@ routes both.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
+| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object — see below (#996) |
 | DescribeStateMachine | Addressed by ARN — see below |
-| UpdateStateMachine | Addressed by ARN — see below |
+| UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996) |
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
 | ListStateMachines | Scoped to the caller's own account and Region |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
-| StartSyncExecution | EXPRESS only; the express execution ARN is minted in the state machine's account and Region, and no record is stored for it |
+| StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it |
 | DescribeExecution | Transitions to SUCCEEDED on describe; addressed by ARN |
 | StopExecution | Addressed by ARN |
 | ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
@@ -13243,6 +13243,8 @@ integration is not dispatched to Lambda at all and returns the empty-object stub
 | ActivityDoesNotExist | 400 | A well-formed activity ARN names an activity that does not exist |
 | ExecutionDoesNotExist | 400 | A well-formed execution ARN names an execution that does not exist, including any express execution ARN |
 | ResourceNotFound | 400 | The tagging operations' code for a state machine or activity that does not exist, and `ListExecutions`' answer for a `mapRunArn` |
+| StateMachineTypeNotSupported | 400 | `StartSyncExecution` against a `STANDARD` state machine (#996) |
+| InvalidDefinition | 400 | `CreateStateMachine` or `UpdateStateMachine` was given a definition substrate could not read back — see below (#996) |
 | ValidationError | 400 | The request body is not valid JSON, at all fifteen operations that decode one — the common error, for the reasons in *A request body that will not parse* above (#950) |
 
 **Every one of these is 400, not 404.** All eleven Step Functions API reference
@@ -13261,7 +13263,8 @@ publishes**, which is why there are four rather than one:
 `ResourceNotFound` at the three tagging operations. The two deletes used to answer
 a code their own pages do **not** publish, and no longer do — see *The two deletes
 are idempotent* below. `StartSyncExecution`'s refusal of a `STANDARD` state
-machine is still an unpublished code today, and is #996.
+machine used to answer an unpublished code too; see *StartSyncExecution refuses a
+workflow type, not a definition* (#996).
 
 ### The two deletes are idempotent
 
@@ -13331,6 +13334,74 @@ Modelling the transition is a separate piece of work, and per substrate's scope 
 would be driven by the simulated clock or by a countdown of observations rather
 than by wall-clock time. A test pins the current answer, so whoever models it
 finds a failing assertion naming this decision rather than a silent widening.
+
+### StartSyncExecution refuses a workflow type, not a definition
+
+`StartSyncExecution` against a `STANDARD` state machine answers
+`StateMachineTypeNotSupported`/400, *"State machine type is not supported."*, with
+the rejected type appended. It answered `InvalidDefinition` before #996 —
+a real Step Functions code, published at `CreateStateMachine` and
+`UpdateStateMachine` where a definition arrives in the request, but not on this
+page and not about this fact. `API_StartSyncExecution` publishes nine errors, all
+400, and states the restriction outright: *"`StartSyncExecution` is not available
+for `STANDARD` workflows."* A consumer branching on the code was told the ASL
+document was wrong when what was wrong was the workflow type.
+
+The page says **nothing** about an endpoint host. At AWS this operation is served
+on a `sync-` prefixed host, and that fact comes from the endpoints reference rather
+than from this page; **substrate does not model it** and serves
+`StartSyncExecution` on the same `states.{region}.amazonaws.com` endpoint as every
+other operation. A consumer whose client is configured against the AWS `sync-`
+host will not reach substrate.
+
+### A definition substrate cannot read back is refused when it is stored
+
+`CreateStateMachine` and `UpdateStateMachine` answer `InvalidDefinition`/400,
+*"The provided Amazon States Language definition is not valid."*, for a definition
+that is empty, is not valid JSON, or does not describe a JSON object.
+
+Neither operation checked the definition at all before #996: both stored whatever
+string arrived. So substrate could accept a definition, report `200`, and then be
+unable to execute it — and both execution operations reported that as a caller
+error. `StartSyncExecution` answered `InvalidDefinition` for it, which is the same
+unpublished code as above at the same operation, and `StartExecution` failed the
+execution with the error name `InvalidDefinition`, which is an API error code and
+not an Amazon States Language error name at all.
+
+The CloudFormation deployer was a concrete producer of exactly that, not a
+hypothetical one. `DefinitionString` is a CloudFormation **string** property, and
+the deployer marshalled it to JSON, which quotes and escapes a string that is
+already the document — so every `AWS::StepFunctions::StateMachine` deployed from a
+`DefinitionString` stored a JSON string literal rather than an ASL object, and its
+executions failed for a reason the template author could do nothing about. Fixed in
+the same change; the sibling object-valued `Definition` property is still not read
+at all.
+
+Both residual paths are now unreachable, and both are stated rather than removed.
+In `StartSyncExecution` an unreadable stored definition is a `500` through Go's
+error return rather than an `AWSError`, because it means substrate wrote something
+it cannot read — or replayed an event log written before the validation — and that
+is not the caller's fault. In `StartExecution` it stays an execution-level failure,
+which is the shape an asynchronous start has to use, but the error name is now
+`States.Runtime`, the published ASL name for an execution that failed due to an
+exception that could not be processed.
+
+**What is checked is narrower than what AWS checks, and a `200` here is not ASL
+approval.** Substrate checks only that it can read the definition back. `{}` is
+accepted, although AWS refuses it: the Amazon States Language requires a state
+machine to carry a string field named `StartAt` and an object field named `States`,
+and `StartAt` to name one of those states, and substrate checks none of the three.
+Validating ASL conformance is a larger job with its own citation trail and is not
+part of #996.
+
+This is also where `API_StartSyncExecution` itself draws the line, which is worth
+recording because it is the only guidance either page gives: *"Error codes are
+reserved for errors that prevent your execution from running, such as permissions
+errors, limit errors, or issues with your state machine code and configuration."*
+An unreadable definition is an issue with the state machine's code, so AWS puts it
+on the error-code side — but publishes no code for it, because AWS would never have
+stored such a definition in the first place. Checking on the way in is the only
+reading that leaves both sides consistent.
 
 `ListTagsForResource` returns `tags` sorted by key. AWS documents no order for
 it; lexicographic is substrate's reading, justified by the replay promise — a

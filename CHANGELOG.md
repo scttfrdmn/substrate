@@ -1034,6 +1034,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resources survive every cross-account and cross-Region delete, a repeated delete leaves the name index
   intact and a sibling untouched, and `Describe` still refuses — only the delete is idempotent.
 
+- **`StartSyncExecution` refuses a workflow type rather than a definition, and a definition substrate
+  cannot read back is refused when it is stored** (#996). `StartSyncExecution` answered
+  `InvalidDefinition`/400 for a `STANDARD` state machine. That is a real Step Functions code — published
+  at `CreateStateMachine` and `UpdateStateMachine`, where a definition arrives in the request — but not
+  on this page and not about this fact. `API_StartSyncExecution` publishes nine errors, all 400, and
+  states the restriction outright: *"`StartSyncExecution` is not available for `STANDARD` workflows."*
+  It now answers `StateMachineTypeNotSupported`/400, *"State machine type is not supported."*, with the
+  rejected type appended because the published sentence does not say which type was refused.
+
+  **Neither `CreateStateMachine` nor `UpdateStateMachine` checked the definition at all**, which is why
+  the same code appeared a second time in the same handler. Both stored whatever string arrived, so
+  substrate could accept a definition, report `200`, and then be unable to execute it — reporting that
+  to the caller as the caller's fault. Both now answer `InvalidDefinition`/400, *"The provided Amazon
+  States Language definition is not valid."*, for a definition that is empty, is not valid JSON, or does
+  not describe a JSON object, and nothing is stored when they do.
+
+  **The CloudFormation deployer was a live producer of exactly that**, not a hypothetical caller.
+  `DefinitionString` is a CloudFormation *string* property, and `deployStepFunctionsStateMachine`
+  marshalled it to JSON — which quotes and escapes a string that is already the document. Every
+  `AWS::StepFunctions::StateMachine` deployed from a `DefinitionString` therefore stored a JSON string
+  literal rather than an ASL object, and its executions failed for a reason the template author could do
+  nothing about. The string is now passed through unchanged; the marshal is kept for anything that is not
+  a string. The sibling object-valued `Definition` property is still not read at all, and is filed.
+
+  Both residual paths become unreachable and are stated rather than deleted. In `StartSyncExecution` an
+  unreadable stored definition is now a `500` through Go's error return rather than an `AWSError`,
+  because it means substrate wrote something it cannot read — or replayed an event log predating the
+  validation — which is not the caller's fault. In `StartExecution` it stays an execution-level failure,
+  the shape an asynchronous start has to use, but the error name changes from `InvalidDefinition` to
+  `States.Runtime`: the former is an API error code with no business appearing as an execution's error,
+  the latter is the published Amazon States Language name for an execution that failed due to an
+  exception that could not be processed.
+
+  **What is checked is narrower than what AWS checks, and `docs/services.md` says so** — `{}` is
+  accepted although AWS refuses it, because the ASL requirements (a string field `StartAt`, an object
+  field `States`, and `StartAt` naming one of those states) are a separate body of rules and validating
+  them is not part of this issue. The narrow check is exactly the property whose absence produced the
+  defect: that substrate can read back what it stored. This is also where the page itself draws the line
+  — *"Error codes are reserved for errors that prevent your execution from running, such as permissions
+  errors, limit errors, or issues with your state machine code and configuration"* — while publishing no
+  code for an unreadable stored definition, because AWS would never have stored one. `docs/services.md`
+  additionally records that AWS's `sync-` prefixed endpoint host appears nowhere on this page and that
+  substrate does not model it.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
