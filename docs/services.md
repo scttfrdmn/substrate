@@ -12933,12 +12933,58 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 
 | Operation | Notes |
 |-----------|-------|
-| CreateRepository | |
+| CreateRepository | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
 | DescribeRepositories | |
 | DeleteRepository | |
 | GetAuthorizationToken | Returns base64("AWS:password") |
 | PutImage | |
 | BatchGetImage | |
+| TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
+| UntagResource | `tagKeys` is an array of strings, as published |
+| ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
+
+### ECR's `tags` is an array with capitalized members
+
+`tags` is **an array of `Tag` objects** on `CreateRepository`'s and `TagResource`'s requests and on
+`ListTagsForResource`'s response, and each entry's members are the capitalized `Key` and `Value`:
+
+```json
+{"tags": [{"Key": "env", "Value": "prod"}]}
+```
+
+That casing contradicts every other member in the service — `repositoryName`, `resourceArn`,
+`tagKeys` are all lowerCamelCase — so it reads like a defect and is not one. `API_Tag` publishes
+`Key` and `Value` with a capital, both `Required: Yes`, and the Request Syntax of
+`API_CreateRepository` and `API_TagResource` and the Response Syntax and sample response of
+`API_ListTagsForResource` all spell them that way. It is recorded here because a future reader will
+otherwise "fix" it.
+
+Substrate decoded and rendered a JSON *object* at all three sites until #1017. Since an array does
+not unmarshal into a `map[string]string`, and each of these handlers refuses a body it cannot
+unmarshal, the observable result was not a dropped tag: `aws ecr create-repository --tags
+Key=env,Value=prod` answered `InvalidParameterException`/400, and ECR tagging was unusable from any
+SDK. The round-trip rule #765 established could not catch it, because both halves of the round trip
+shared the wrong shape — only the published Request and Response Syntax settles a shape question,
+which is why the tests assert raw JSON.
+
+Three readings are substrate's rather than AWS's:
+
+- **The order** is lexicographic by key. `API_ListTagsForResource` publishes no order and its sample
+  response carries one entry; sorting is what makes a recorded run replay byte-identically (#862),
+  and ranging a Go map put map order on the wire.
+- **An empty set is `[]`**, not `null` and not an absent member, per the rule #938 established for
+  the tagging API: an SDK decoding `null` into a list cannot tell "no tags" from "the service did
+  not answer".
+- **An entry with no `Key` is refused** with `InvalidParameterException`/400, the code all three
+  operations publish. An empty **value** is accepted, because `API_CreateRepository` describes a tag
+  as "a key and an *optional* value" where `API_Tag` marks `Value` `Required: Yes` — the page
+  contradicts itself, and the narrower reading refuses only what both sentences agree is required.
+
+Storage is unchanged: the record holds a `map[string]string`, which is what the Resource Groups
+Tagging API's `mergeResourceTags` arm and the CloudFormation tag stamp operate on, so those paths
+needed no edit. A tag written through `TagResources` is reported by `ListTagsForResource` and one
+written through ECR's own `TagResource` is reported by `GetResources` — #765 in both directions, which
+is what proves the two halves now agree about the wire as well as about the record.
 
 ### CloudFormation resource types
 

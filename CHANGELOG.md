@@ -621,6 +621,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusing a published parameter is the larger divergence — the call the EC2 gaps list already records
   for `IncludeAllInstances`, `IncludeUnsupportedInRegion` and `AllRegions`.
 
+- **ECR's `tags` is an array of `Tag` objects, so tagging a repository from an SDK no longer answers
+  400** (#1017). ECR decoded and rendered `tags` as a JSON *object* at all three of its wire sites —
+  `CreateRepository`'s and `TagResource`'s requests and `ListTagsForResource`'s response — where AWS
+  publishes an array of `Tag` objects. An array does not unmarshal into a `map[string]string`, and each
+  of those handlers refuses a body it cannot unmarshal, so the observable result was not a silently
+  dropped tag: `aws ecr create-repository --tags Key=env,Value=prod` answered
+  `InvalidParameterException`/400. ECR tagging was unusable from the AWS CLI and from every SDK.
+
+  The published shape's members are the **capitalized** `Key` and `Value`, inside a service whose every
+  other member — `repositoryName`, `resourceArn`, `tagKeys` — is lowerCamelCase. `API_Tag` publishes
+  both with a capital and both `Required: Yes`, and the Request Syntax of `API_CreateRepository` and
+  `API_TagResource` and the Response Syntax and sample response of `API_ListTagsForResource` all spell
+  them that way. It is exactly the kind of shape that cannot be inferred from the service around it,
+  and `docs/services.md` now records it as AWS's rather than leaving a future reader to "correct" it.
+
+  **The round-trip rule could not have caught this**, which is the more general lesson. #765 requires
+  that a tag written through the tagging API be readable through the owning service's own call, and
+  ECR passed that check throughout: both halves shared the same wrong shape, and a round trip is blind
+  to an error its two ends agree on. Only the published Request and Response Syntax settles a shape
+  question, so the tests assert **raw JSON** — a decoded `[]struct{Key, Value string}` accepts `key`
+  and `value` too under Go's case-insensitive field matching, the trap `iam_shape_members_test.go`
+  recorded — and they assert #765 in both directions as well, which is what proves the record was left
+  where the tagging API expects it.
+
+  **Only the wire changed.** Storage stays a `map[string]string` on the record, which is what every
+  other service's tag store holds and what `mergeResourceTags` and the CloudFormation tag stamp operate
+  on, so the Resource Groups Tagging API path needed no edit — the fix is a wire projection at three
+  sites, per #1013's rule that a persisted record projects through a wire struct.
+
+  Three readings are substrate's rather than AWS's, and are recorded at their call sites. The order is
+  lexicographic by key, since `API_ListTagsForResource` publishes none and a recorded run has to replay
+  byte-identically (#862). An empty tag set renders as `[]` rather than `null` or an absent member,
+  per the rule #938 established — which is why the renderer deliberately does not follow
+  `mapToTaggingTags`, whose empty case is `nil`. And an entry with no `Key` is refused with
+  `InvalidParameterException`/400, the code all three operations publish, while an empty **value** is
+  accepted: `API_CreateRepository` describes a tag as "a key and an *optional* value" where `API_Tag`
+  marks `Value` `Required: Yes`, so the page contradicts itself and only what both sentences agree is
+  required is enforced.
+
+  `CreateRepository` now also sets the previously-tagged flag when the request carries tags — a line
+  that was unreachable before this fix, since a create carrying tags was a 400. No observation
+  changes: `UntagResource` and the tagging API's untag arm each recompute the flag from the count they
+  saw before deleting keys, so a repository born tagged already stayed reported by `GetResources`
+  after its last tag was removed, which is #938's rule. The stamp is set where the fact becomes true
+  so that rule rests on the flag's meaning rather than on every remover deriving it.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

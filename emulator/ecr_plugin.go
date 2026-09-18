@@ -114,8 +114,8 @@ func ecrImageTagsKey(accountID, region, repo string) string {
 
 func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		RepositoryName             string            `json:"repositoryName"`
-		Tags                       map[string]string `json:"tags"`
+		RepositoryName             string   `json:"repositoryName"`
+		Tags                       []ecrTag `json:"tags"`
 		ImageScanningConfiguration struct {
 			ScanOnPush bool `json:"scanOnPush"`
 		} `json:"imageScanningConfiguration"`
@@ -128,6 +128,13 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if body.RepositoryName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "repositoryName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// The tag set is folded before any state is read, so a malformed entry is refused whether or not
+	// the repository name is free — the shape of the request does not depend on what is stored.
+	tags, awsErr := ecrTagsToMap(body.Tags)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	goCtx := context.Background()
@@ -151,9 +158,18 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		RegistryID:     ctx.AccountID,
 		RepositoryURI:  fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", ctx.AccountID, ctx.Region, body.RepositoryName),
 		CreatedAt:      p.tc.Now(),
-		Tags:           body.Tags,
+		Tags:           tags,
 		AccountID:      ctx.AccountID,
 		Region:         ctx.Region,
+		// Set where the fact becomes true: this repository has carried a tag. No observation depends
+		// on it today — every remover recomputes the flag from the count it saw before deleting, so
+		// UntagResource (:945) and the Resource Groups Tagging API's untag arm
+		// (tagging_plugin.go:2119) each stamp it themselves — which is why deleting this line breaks
+		// no test. It is here so #938's rule (a resource that has been tagged stays reported with an
+		// empty tag set) rests on the flag meaning what it says rather than on every future remover
+		// remembering to derive it. The line was unreachable before #1017, when a create carrying
+		// tags answered 400.
+		EverTagged: taggingEverTagged(false, 0, len(tags)),
 	}
 	repo.ImageScanningConfiguration.ScanOnPush = body.ImageScanningConfiguration.ScanOnPush
 	repo.EncryptionConfiguration.EncryptionType = encType
@@ -878,11 +894,17 @@ func (p *ECRPlugin) deleteRepositoryPolicy(ctx *RequestContext, req *AWSRequest)
 
 func (p *ECRPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		ResourceArn string            `json:"resourceArn"`
-		Tags        map[string]string `json:"tags"`
+		ResourceArn string   `json:"resourceArn"`
+		Tags        []ecrTag `json:"tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	// Folded before the repository is loaded, as in createRepository: the request's own shape is
+	// decidable without state.
+	tags, awsErr := ecrTagsToMap(body.Tags)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	goCtx := context.Background()
@@ -891,11 +913,11 @@ func (p *ECRPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, err
 	}
 
-	repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), len(body.Tags))
+	repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), len(tags))
 	if repo.Tags == nil {
 		repo.Tags = make(map[string]string)
 	}
-	for k, v := range body.Tags {
+	for k, v := range tags {
 		repo.Tags[k] = v
 	}
 
@@ -954,9 +976,9 @@ func (p *ECRPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	type response struct {
-		Tags map[string]string `json:"tags"`
+		Tags []ecrTag `json:"tags"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{Tags: repo.Tags})
+	return ecrJSONResponse(http.StatusOK, response{Tags: ecrTagList(repo.Tags)})
 }
 
 // --- Internal helpers --------------------------------------------------------

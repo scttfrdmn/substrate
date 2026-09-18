@@ -539,10 +539,12 @@ func TestECRPlugin_Tags(t *testing.T) {
 	}
 	arn := repoOut.Repository.RepositoryArn
 
-	// TagResource.
+	// TagResource. The body is the array of Tag objects AWS publishes; this test sent a JSON object
+	// until #1017, which is how the wrong shape survived — the handler and the test agreed with each
+	// other rather than with the page. tagging_ecr_test.go asserts the shape itself.
 	tagResp, err := p.HandleRequest(ctx, ecrRequest(t, "TagResource", map[string]any{
 		"resourceArn": arn,
-		"tags":        map[string]string{"env": "prod"},
+		"tags":        []map[string]string{{"Key": "env", "Value": "prod"}},
 	}))
 	if err != nil {
 		t.Fatalf("TagResource: %v", err)
@@ -562,7 +564,10 @@ func TestECRPlugin_Tags(t *testing.T) {
 		t.Fatalf("want status 200, got %d", listResp.StatusCode)
 	}
 	var listOut struct {
-		Tags map[string]string `json:"tags"`
+		Tags []struct {
+			Key   string `json:"Key"`
+			Value string `json:"Value"`
+		} `json:"tags"`
 	}
 	if err := json.Unmarshal(listResp.Body, &listOut); err != nil {
 		t.Fatalf("unmarshal: %v", err)
