@@ -5200,16 +5200,30 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package |
 | GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image) |
 | UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
-| UpdateFunctionConfiguration | |
+| UpdateFunctionConfiguration | [Drops the function's warm container](#which-operations-drop-a-warm-container) when `Handler`, `Runtime` or `Environment` changes |
 | DeleteFunction | |
 | ListFunctions | |
-| InvokeFunction | Returns stub `{"statusCode":200,"body":"null"}` |
+| Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
+| InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference |
+| AddPermission | Adds a statement to the function's resource policy; the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up) |
+| RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
+| GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
+| PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup |
 | CreateEventSourceMapping | |
+| GetEventSourceMapping | By UUID |
+| UpdateEventSourceMapping | `BatchSize` and `Enabled` only; both optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops the SQS poller |
 | DeleteEventSourceMapping | |
 | ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2) |
 | TagResource | |
 | UntagResource | |
 | ListTags | |
+
+The row that used to sit here read `InvokeFunction`, which **is not a Lambda API
+operation** — the operation is `Invoke`, and `InvokeFunction` is the IAM action name. So
+the one `Invoke`-shaped row in the table named something no caller can call, while the
+eight operations the plugin actually routes had no row at all (#1015). Rows are now
+listed in the router's own order, which is the order a reader checking one against the
+other needs.
 
 ### What CodeSize and CodeSha256 report
 
