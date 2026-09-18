@@ -663,6 +663,15 @@ cannot express is still a rule. The script's allowlist is keyed by file and each
 reason, because the reason is the thing being reviewed; an allowlist without one is a suppression. It
 holds exactly one entry, `sqs_messageattributes.go`, the retained discard described in the first slice.
 
+**Every one of the hundred and six changed sites is asserted over the wire.** The inventory test's service
+table carries 189 operations, the forty-six folded-in guards among them — a changed code that no test reads
+is a code that can drift back. Three sites a bare server cannot reach have their own test, which creates the
+prerequisite first: API Gateway v2 `UpdateApi`, AppSync `CreateApiKey` and Backup `UpdateBackupPlan` each sit
+below a lookup of the resource their path names, so the lookup answers before the guard runs. That is the
+lookup-first convention recorded under [Whether a body is parsed before the resource is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up)
+rather than a defect in this slice — but an unreached guard is an unchecked code, and `appsyncInvalidBody`
+would otherwise have had no caller any test exercises at all.
+
 **Which tail operations must still answer 200 for an absent body was measured, not reasoned.** Every one
 was called with no body at all and the ones answering 200 were listed; fourteen of those are what their
 page publishes and are now pinned. Nine more answer 200 where their page marks a member `Required: Yes`,

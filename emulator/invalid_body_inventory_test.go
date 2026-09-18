@@ -70,11 +70,17 @@ type invalidBodyService struct {
 	cases []invalidBodyCase
 }
 
-// invalidBodyServices is every service and operation #950 corrected, less the two Step Functions and
-// Systems Manager tables and the two Lambda operations that need a function to exist first.
+// invalidBodyServices is every POST-routed body-parse guard #950, #1003 and #1007 settled, less the Step
+// Functions and Systems Manager tables in invalid_body_code_test.go, the two Lambda operations that need a
+// function to exist first, and the three in TestInvalidBodyBelowAResourceLookup.
 //
-// Sixty-four cases. The counts per service are the counts in docs/services.md's inventory table, and a
-// case removed from here without a reason is a site that stops being checked.
+// One hundred and eighty-nine cases across thirty-six entries. A case removed from here without a reason
+// is a site that stops being checked, which is the whole point of listing operations rather than samples.
+//
+// #1007's third slice grew this table twice over. Forty-six of the rows are guards that predate that
+// slice, in the five services whose code it corrected: their codes had to change too, or the service would
+// answer two different codes for one caller error, and a changed code that no test reads is a code that
+// can drift back.
 var invalidBodyServices = []invalidBodyService{
 	{
 		name:       "kinesis",
@@ -372,6 +378,7 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "DeleteResourceShare", path: "/deleteresourceshare"},
 			{op: "AssociateResourceShare", path: "/associateresourceshare"},
 			{op: "DisassociateResourceShare", path: "/disassociateresourceshare"},
+			{op: "CreateResourceShare", path: "/createresourceshare"},
 		},
 	},
 	{
@@ -497,6 +504,12 @@ var invalidBodyServices = []invalidBodyService{
 		provenance: "the common-errors page; CloudTrail publishes no parse or serialization code anywhere",
 		cases: []invalidBodyCase{
 			{op: "DescribeTrails", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails"},
+			{op: "CreateTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"},
+			{op: "GetTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrail"},
+			{op: "GetTrailStatus", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrailStatus"},
+			{op: "UpdateTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.UpdateTrail"},
+			{op: "DeleteTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DeleteTrail"},
+			{op: "StartLogging", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.StartLogging"},
 		},
 	},
 	{
@@ -509,6 +522,32 @@ var invalidBodyServices = []invalidBodyService{
 		provenance: `every Glue operation page, "The input provided was not valid."`,
 		cases: []invalidBodyCase{
 			{op: "GetTables", target: "AWSGlue.GetTables"},
+			{op: "CreateDatabase", target: "AWSGlue.CreateDatabase"},
+			{op: "GetDatabase", target: "AWSGlue.GetDatabase"},
+			{op: "UpdateDatabase", target: "AWSGlue.UpdateDatabase"},
+			{op: "DeleteDatabase", target: "AWSGlue.DeleteDatabase"},
+			{op: "CreateTable", target: "AWSGlue.CreateTable"},
+			{op: "GetTable", target: "AWSGlue.GetTable"},
+			{op: "UpdateTable", target: "AWSGlue.UpdateTable"},
+			{op: "DeleteTable", target: "AWSGlue.DeleteTable"},
+			{op: "CreateConnection", target: "AWSGlue.CreateConnection"},
+			{op: "GetConnection", target: "AWSGlue.GetConnection"},
+			{op: "UpdateConnection", target: "AWSGlue.UpdateConnection"},
+			{op: "DeleteConnection", target: "AWSGlue.DeleteConnection"},
+			{op: "CreateCrawler", target: "AWSGlue.CreateCrawler"},
+			{op: "GetCrawler", target: "AWSGlue.GetCrawler"},
+			{op: "UpdateCrawler", target: "AWSGlue.UpdateCrawler"},
+			{op: "DeleteCrawler", target: "AWSGlue.DeleteCrawler"},
+			{op: "CreateJob", target: "AWSGlue.CreateJob"},
+			{op: "GetJob", target: "AWSGlue.GetJob"},
+			{op: "UpdateJob", target: "AWSGlue.UpdateJob"},
+			{op: "DeleteJob", target: "AWSGlue.DeleteJob"},
+			{op: "StartJobRun", target: "AWSGlue.StartJobRun"},
+			{op: "GetJobRun", target: "AWSGlue.GetJobRun"},
+			{op: "GetJobRuns", target: "AWSGlue.GetJobRuns"},
+			{op: "TagResource", target: "AWSGlue.TagResource"},
+			{op: "UntagResource", target: "AWSGlue.UntagResource"},
+			{op: "GetTags", target: "AWSGlue.GetTags"},
 		},
 	},
 	{
@@ -520,6 +559,8 @@ var invalidBodyServices = []invalidBodyService{
 		provenance: `the FSx operation pages, "A generic error indicating a failure with a client request."`,
 		cases: []invalidBodyCase{
 			{op: "DescribeFileSystems", target: "AWSSimbaAPIService_v20180301.DescribeFileSystems"},
+			{op: "CreateFileSystem", target: "AWSSimbaAPIService_v20180301.CreateFileSystem"},
+			{op: "DeleteFileSystem", target: "AWSSimbaAPIService_v20180301.DeleteFileSystem"},
 		},
 	},
 	{
@@ -534,6 +575,17 @@ var invalidBodyServices = []invalidBodyService{
 		cases: []invalidBodyCase{
 			{op: "ListWebACLs", target: "AWSWAF_20190729.ListWebACLs"},
 			{op: "ListIPSets", target: "AWSWAF_20190729.ListIPSets"},
+			{op: "CreateWebACL", target: "AWSWAF_20190729.CreateWebACL"},
+			{op: "GetWebACL", target: "AWSWAF_20190729.GetWebACL"},
+			{op: "UpdateWebACL", target: "AWSWAF_20190729.UpdateWebACL"},
+			{op: "DeleteWebACL", target: "AWSWAF_20190729.DeleteWebACL"},
+			{op: "AssociateWebACL", target: "AWSWAF_20190729.AssociateWebACL"},
+			{op: "DisassociateWebACL", target: "AWSWAF_20190729.DisassociateWebACL"},
+			{op: "GetWebACLForResource", target: "AWSWAF_20190729.GetWebACLForResource"},
+			{op: "CreateIPSet", target: "AWSWAF_20190729.CreateIPSet"},
+			{op: "GetIPSet", target: "AWSWAF_20190729.GetIPSet"},
+			{op: "UpdateIPSet", target: "AWSWAF_20190729.UpdateIPSet"},
+			{op: "DeleteIPSet", target: "AWSWAF_20190729.DeleteIPSet"},
 		},
 	},
 	{
@@ -1292,20 +1344,117 @@ func TestOpenSearchInvalidBodyIsNotAnAWSError(t *testing.T) {
 	}
 }
 
-// invalidBodyTailUncovered records the three sites in #1007's tail that no table above reaches, and why.
+// TestInvalidBodyBelowAResourceLookup covers the three tail sites no table above can reach (#1007).
 //
-// Each sits below a resource lookup that runs first, so against an empty server the lookup wins and the
-// parse guard is never reached. They are listed rather than omitted because a site absent from every table
-// is a site whose code has stopped being checked, and the arithmetic below is what makes that visible.
+// Each sits below a lookup of the resource its path names, so against an empty server the lookup answers
+// first — NotFoundException for API Gateway v2, the loader's own error for AppSync and Backup — and the
+// parse guard never runs. That is the lookup-first convention recorded under "Whether a body is parsed
+// before the resource is looked up" in docs/services.md, not a defect in this slice; #1007's scope is that
+// a discarded decode error is checked, which these three now satisfy.
 //
-// They are not a defect in this slice and not evidence for the lookup-first/parse-first question either
-// way: #1007's scope is "a discarded decode error is checked", which they now satisfy. Whether the lookup
-// should move above the guard is the question recorded under "Whether a body is parsed before the resource
-// is looked up" in docs/services.md, which #1006 deliberately settled for Lambda alone.
-var invalidBodyTailUncovered = map[string]string{
-	"apigatewayv2/UpdateApi":  "p.state.Get then a nil check answers NotFoundException before the guard",
-	"appsync/CreateApiKey":    "p.loadAPI errors before the guard; needs a real GraphQL API",
-	"backup/UpdateBackupPlan": "p.loadPlan errors before the guard; needs a real backup plan",
+// It does mean a table of refusals against a bare server cannot see them, and a site no test reaches is a
+// site whose code has stopped being checked. So the prerequisite is created first and the refusal asserted
+// second, the same shape as TestLambdaInvalidBodyBelowAFunctionLookup. Without this, appsyncInvalidBody
+// would have no caller any test exercises at all, since CreateApiKey is AppSync's only site in the slice.
+func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	for _, tc := range []struct {
+		name string
+		host string
+		// createPath and createBody bring the resource the guard sits below into existence.
+		createPath string
+		createBody string
+		// idKey is the member of the create response holding the new resource's identifier, found at any
+		// depth so that a wire shape which nests it (AppSync's graphqlApi) needs no separate column.
+		idKey string
+		// refusePath renders the path the refusal is asserted on, given that identifier.
+		refusePath func(id string) string
+		method     string
+		code       string
+	}{
+		{
+			name:       "apigatewayv2/UpdateApi",
+			host:       "apigateway.us-east-1.amazonaws.com",
+			createPath: "/v2/apis",
+			createBody: `{"Name":"below-lookup","ProtocolType":"HTTP"}`,
+			idKey:      "apiId",
+			refusePath: func(id string) string { return "/v2/apis/" + id },
+			method:     http.MethodPatch,
+			code:       "BadRequestException",
+		},
+		{
+			name:       "appsync/CreateApiKey",
+			host:       "appsync.us-east-1.amazonaws.com",
+			createPath: "/v1/apis",
+			createBody: `{"name":"below-lookup","authenticationType":"API_KEY"}`,
+			idKey:      "apiId",
+			refusePath: func(id string) string { return "/v1/apis/" + id + "/ApiKeys" },
+			method:     http.MethodPost,
+			code:       "BadRequestException",
+		},
+		{
+			name:       "backup/UpdateBackupPlan",
+			host:       "backup.us-east-1.amazonaws.com",
+			createPath: "/backup/plans",
+			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup"}}`,
+			idKey:      "BackupPlanId",
+			refusePath: func(id string) string { return "/backup/plans/" + id },
+			method:     http.MethodPost,
+			code:       "InvalidRequestException",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, raw := rawUnsignedRawBody(t, ts, tc.host, tc.createPath, http.MethodPost,
+				[]byte(tc.createBody))
+			require.Truef(t, status == http.StatusOK || status == http.StatusCreated,
+				"creating the prerequisite for %s answers 200 or 201, got %d: %s", tc.name, status, raw)
+			id := jsonMemberAnyDepth(t, raw, tc.idKey)
+
+			status, code, message := rawUnsignedMethodCall(t, ts, tc.host, "", tc.refusePath(id),
+				tc.method, []byte(invalidBodyPayload))
+			assert.Equalf(t, tc.code, code, "%s answers its service's published code: %s", tc.name, message)
+			assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.name)
+			assertNoDecoderText(t, tc.name, message)
+		})
+	}
+}
+
+// jsonMemberAnyDepth returns the first string value of key in a JSON object, searching nested objects.
+//
+// Searching by depth rather than by path keeps the table above to one column per resource: AppSync nests
+// the identifier under graphqlApi where Backup and API Gateway v2 put it at the top level, and which of
+// those a service chose is not what the test is about.
+func jsonMemberAnyDepth(t *testing.T, raw, key string) string {
+	t.Helper()
+
+	var doc any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("decode the create response looking for %q: %v: %s", key, err, raw)
+	}
+
+	var walk func(any) (string, bool)
+	walk = func(node any) (string, bool) {
+		obj, ok := node.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		if v, found := obj[key].(string); found && v != "" {
+			return v, true
+		}
+		for _, child := range obj {
+			if v, found := walk(child); found {
+				return v, true
+			}
+		}
+		return "", false
+	}
+
+	v, found := walk(doc)
+	if !found {
+		t.Fatalf("no %q member in the create response: %s", key, raw)
+	}
+	return v
 }
 
 // TestInvalidBodyTailIsFullyCovered asserts the sixty sites #1007's third slice changed are all accounted
@@ -1321,13 +1470,11 @@ func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
 		inServiceTables = 49 // POST-routed, refused with an AWSError
 		inMethodTable   = 5  // four API Gateway v1 PUTs and Backup's CreateBackupVault
 		inOpenSearch    = 3  // the domain's own REST API, refused with the engine's envelope
+		belowALookup    = 3  // reachable only once the resource the guard sits below exists
 	)
 
-	uncovered := len(invalidBodyTailUncovered)
-	assert.Equalf(t, tailSites, inServiceTables+inMethodTable+inOpenSearch+uncovered,
-		"every one of the %d sites #1007's third slice changed is covered by a table or listed as "+
-			"uncovered with a reason", tailSites)
-	assert.Equal(t, 3, uncovered, "the three sites below a resource lookup, each with its reason recorded")
+	assert.Equalf(t, tailSites, inServiceTables+inMethodTable+inOpenSearch+belowALookup,
+		"every one of the %d sites #1007's third slice changed is reached by a test above", tailSites)
 }
 
 // rawUnsignedRawBody is [rawUnsignedMethodCall] returning the response body verbatim.

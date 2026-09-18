@@ -330,6 +330,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   JSON syntax. Any code in the tree sourced from a per-service Common Errors page before the
   consolidation may now cite a page that no longer says it; filed as its own sweep.
 
+  **Every one of the hundred and six changed sites is asserted over the wire, including the three that a
+  bare server cannot reach.** `invalid_body_inventory_test.go`'s service table carries 189 operations — the
+  forty-six folded-in guards among them, because a changed code no test reads is a code that can drift
+  back — and `TestInvalidBodyBelowAResourceLookup` creates the prerequisite first for the three sites
+  sitting below a resource lookup (API Gateway v2 `UpdateApi`, AppSync `CreateApiKey`, Backup
+  `UpdateBackupPlan`), where the lookup would otherwise answer before the guard ran. Without it
+  `appsyncInvalidBody` would have had no caller any test exercises, since `CreateApiKey` is AppSync's only
+  site in the slice.
+
   **Which tail sites must still answer 200 for an absent body was measured, not reasoned.** Every tail
   operation was called with no body and the ones answering 200 were listed; fourteen of them are what
   their page publishes and are now pinned by `TestInvalidBodyLeavesAnAbsentBodyAlone`. Nine more answer
