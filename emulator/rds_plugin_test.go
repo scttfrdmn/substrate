@@ -690,17 +690,20 @@ func TestRDSPlugin_DeleteSubnetAndParamGroups(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteDBSubnetGroup status %d: %s", resp.StatusCode, body)
 	}
-	// Confirm gone (returns empty list, not error).
+	// Confirm gone. This asserted an empty 200 until #1020: API_DescribeDBSubnetGroups publishes
+	// DBSubnetGroupNotFoundFault/404 for a name that refers to no group, and a describe filtered by
+	// the name of a group that has just been deleted is exactly that request. The old assertion had
+	// pinned the divergence as intended behavior.
 	resp = rdsRequest(t, ts, map[string]string{
 		"Action":            "DescribeDBSubnetGroups",
 		"DBSubnetGroupName": "del-sg",
 	})
 	body = rdsBody(t, resp)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DescribeDBSubnetGroups after delete status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("DescribeDBSubnetGroups after delete status %d, want 404: %s", resp.StatusCode, body)
 	}
-	if strings.Contains(body, "del-sg") {
-		t.Error("DescribeDBSubnetGroups should not return deleted group")
+	if !strings.Contains(body, "DBSubnetGroupNotFoundFault") {
+		t.Errorf("body does not report DBSubnetGroupNotFoundFault: %s", body)
 	}
 
 	// Create and delete a parameter group.

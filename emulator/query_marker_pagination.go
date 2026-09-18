@@ -181,6 +181,68 @@ func queryMaxRecords(raw string) (int, *AWSError) {
 	return n, nil
 }
 
+// queryMarkerFault is the not-found fault one describe publishes for its single-resource
+// filter: the code its own page names, the resource noun the message leads with, and the
+// status the page states.
+//
+// All three are per-operation because AWS's are. The status is a field rather than a constant
+// because API_DescribeCacheSubnetGroups publishes **400** where the other five publish 404 —
+// the outlier that makes a shared constant wrong. The code is spelled as AWS spells it, which
+// means three of the six carry a `Fault` suffix (DBSubnetGroupNotFoundFault,
+// ReplicationGroupNotFoundFault, CacheSubnetGroupNotFoundFault) and three do not
+// (DBSnapshotNotFound, DBParameterGroupNotFound, CacheParameterGroupNotFound); a sweep that
+// "tidied" that into one form would break every consumer matching on the code.
+type queryMarkerFault struct {
+	Code       string
+	Kind       string
+	HTTPStatus int
+}
+
+// queryMarkerFilterNotFound reports the fault a single-resource filter owes when it matched no
+// record, and nil when the caller named no filter or the record was found (#1020).
+//
+// Six of the nine describes publish exactly one such fault, and every gloss names the *filter
+// parameter* rather than the listing — "`DBSnapshotIdentifier` doesn't refer to an existing DB
+// snapshot", "`DBSubnetGroupName` doesn't refer to an existing DB subnet group", "The requested
+// cache subnet group name does not refer to an existing cache subnet group". So the condition
+// belongs to the filter: an unfiltered listing with no records is an empty 200, and a filtered
+// one that matched nothing is the fault. Five of the six answered the empty 200 in both cases
+// until #1020, which is the divergence that matters — a consumer's error path for a resource
+// that has been deleted is dead code that first executes against real AWS.
+//
+// **Pagination cannot make the fault fire for a record that exists**, and that is by
+// construction rather than by ordering two checks: the filter runs inside the [queryMarkerPage]
+// record callback, so a non-matching record answers ok=false and consumes no page slot, and at
+// most one record can match a single-resource filter while [queryMaxRecordsMin] is 20 — so a
+// filtered page never truncates and never carries a Marker. That is the trap #916 named, closed
+// here by where the filter sits.
+//
+// One case remains and is a recorded reading: a caller that sends *both* a Marker and a filter
+// for a record sorting at or before that marker gets the fault, because the cursor skipped the
+// record. No page says anything about combining the two, and substrate reads a Marker as naming
+// a position in the listing — so such a request has asked about a stretch of records that does
+// not include its own, and "not found" is the honest answer for the request as asked.
+//
+// matched is a bool rather than the page itself because DescribeDBSnapshots publishes two
+// filters and a fault for only one of them: DBInstanceIdentifier's own constraint ("if supplied,
+// must match the identifier of an existing DBInstance") has no Errors entry, so an unknown
+// instance is an empty 200 and only DBSnapshotIdentifier can produce the fault.
+//
+// The message is uniform — "<Kind> <identifier> not found." — because none of the six pages
+// publishes message text, only the gloss above. It is the form the two DBSnapshotNotFound sites
+// already in rds_plugin.go and the DescribeReplicationGroups site already used, so this
+// consolidates rather than invents.
+func queryMarkerFilterNotFound(filter string, matched bool, fault queryMarkerFault) *AWSError {
+	if filter == "" || matched {
+		return nil
+	}
+	return &AWSError{
+		Code:       fault.Code,
+		Message:    fault.Kind + " " + filter + " not found.",
+		HTTPStatus: fault.HTTPStatus,
+	}
+}
+
 // queryMarkerPage collects one page of records from keys, resuming after cursor and
 // reporting the Marker for the page after it.
 //

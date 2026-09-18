@@ -806,6 +806,11 @@ func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest)
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	filterSnap := req.Params["DBSnapshotIdentifier"]
 	filterInst := req.Params["DBInstanceIdentifier"]
+	// Set when a snapshot with the requested identifier exists, whatever the instance filter says
+	// about it, because DBSnapshotNotFound's gloss is about DBSnapshotIdentifier alone (#1020). A
+	// snapshot that exists but belongs to another instance is an empty 200, not a claim that it
+	// does not exist. See [queryMarkerFilterNotFound].
+	var snapshotExists bool
 
 	// Both pagination parameters are validated before any state is read, so a request
 	// substrate cannot serve is refused rather than answered with page one (#916).
@@ -837,11 +842,23 @@ func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest)
 			if filterSnap != "" && snap.DBSnapshotIdentifier != filterSnap {
 				return xmlDBSnapshotItem{}, false
 			}
+			snapshotExists = true
 			if filterInst != "" && snap.DBInstanceIdentifier != filterInst {
 				return xmlDBSnapshotItem{}, false
 			}
 			return dbSnapshotToXML(snap), true
 		})
+
+	// API_DescribeDBSnapshots publishes DBSnapshotNotFound/404 as its only error, glossed
+	// "DBSnapshotIdentifier doesn't refer to an existing DB snapshot"; substrate answered an empty
+	// 200 (#1020).
+	if fault := queryMarkerFilterNotFound(filterSnap, snapshotExists, queryMarkerFault{
+		Code:       "DBSnapshotNotFound",
+		Kind:       "DBSnapshot",
+		HTTPStatus: http.StatusNotFound,
+	}); fault != nil {
+		return nil, fault
+	}
 
 	type result struct {
 		DBSnapshots []xmlDBSnapshotItem `xml:"DBSnapshots>DBSnapshot"`
@@ -975,6 +992,16 @@ func (p *RDSPlugin) describeDBSubnetGroups(reqCtx *RequestContext, req *AWSReque
 			return dbSubnetGroupToXML(sg), true
 		})
 
+	// API_DescribeDBSubnetGroups publishes DBSubnetGroupNotFoundFault/404 as its only error,
+	// glossed "DBSubnetGroupName doesn't refer to an existing DB subnet group" (#1020).
+	if fault := queryMarkerFilterNotFound(filterName, len(page) > 0, queryMarkerFault{
+		Code:       "DBSubnetGroupNotFoundFault",
+		Kind:       "DBSubnetGroup",
+		HTTPStatus: http.StatusNotFound,
+	}); fault != nil {
+		return nil, fault
+	}
+
 	type result struct {
 		DBSubnetGroups []xmlDBSubnetGroupItem `xml:"DBSubnetGroups>DBSubnetGroup"`
 		Marker         string                 `xml:"Marker,omitempty"`
@@ -1087,6 +1114,20 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 			}
 			return dbParamGroupToXML(pg), true
 		})
+
+	// API_DescribeDBParameterGroups publishes DBParameterGroupNotFound/404 as its only error,
+	// glossed "DBParameterGroupName doesn't refer to an existing DB parameter group" (#1020). Note
+	// that the same page's *constraint* on the parameter says "must match the name of an existing
+	// DBClusterParameterGroup" — an AWS slip, since this operation describes DB parameter groups
+	// and DescribeDBClusterParameterGroups is a different one; the Errors gloss is the statement
+	// this follows.
+	if fault := queryMarkerFilterNotFound(filterName, len(page) > 0, queryMarkerFault{
+		Code:       "DBParameterGroupNotFound",
+		Kind:       "DBParameterGroup",
+		HTTPStatus: http.StatusNotFound,
+	}); fault != nil {
+		return nil, fault
+	}
 
 	type result struct {
 		DBParameterGroups []xmlDBParamGroupItem `xml:"DBParameterGroups>DBParameterGroup"`

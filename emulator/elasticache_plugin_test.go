@@ -616,17 +616,20 @@ func TestElastiCachePlugin_DeleteSubnetAndParamGroups(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteCacheSubnetGroup status %d", resp.StatusCode)
 	}
-	// Confirm gone (returns empty 200).
+	// Confirm gone. This asserted an empty 200 until #1020: API_DescribeCacheSubnetGroups publishes
+	// CacheSubnetGroupNotFoundFault, and at **400** rather than the 404 the RDS faults use - the one
+	// status outlier among the six describes, which is why it is asserted here rather than assumed to
+	// match its sibling.
 	resp = ecRequest(t, ts, map[string]string{
 		"Action":               "DescribeCacheSubnetGroups",
 		"CacheSubnetGroupName": "del-sg",
 	})
 	body := ecBody(t, resp)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("DescribeCacheSubnetGroups after delete status %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("DescribeCacheSubnetGroups after delete status %d, want 400: %s", resp.StatusCode, body)
 	}
-	if strings.Contains(body, "del-sg") {
-		t.Error("DescribeCacheSubnetGroups should not return deleted group")
+	if !strings.Contains(body, "CacheSubnetGroupNotFoundFault") {
+		t.Errorf("body does not report CacheSubnetGroupNotFoundFault: %s", body)
 	}
 
 	// ParameterGroup.
