@@ -975,11 +975,15 @@ func TestEC2_SpotPriceFilters_FiveOfSix(t *testing.T) {
 	t.Run("ProductDescription.N is read at every index", func(t *testing.T) {
 		// Only ProductDescription.1 was consulted before #695, so a caller asking for
 		// two platforms was answered as if it had asked for the first.
+		//
+		// This case carried `MaxResults: "0"` until #1024, which is where the parameter
+		// stopped being inert: it is now refused as a page that can never advance, and the
+		// case never needed it — the AvailabilityZone and InstanceType selectors already cut
+		// the answer to one item.
 		items := describe(map[string]string{
 			"Action":                 "DescribeSpotPriceHistory",
 			"ProductDescription.1":   "Windows",
 			"ProductDescription.2":   "Linux/UNIX",
-			"MaxResults":             "0",
 			"AvailabilityZone":       one.AvailabilityZone,
 			"InstanceType.1":         one.InstanceType,
 			"ProductDescription.foo": "ignored",

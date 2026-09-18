@@ -1440,8 +1440,32 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 // IncludeAllInstances is not implemented: AWS returns only running instances by default, and
 // substrate returns every instance regardless. Stated in docs/services.md rather than guessed
 // at, because narrowing it would change what a caller with no filters sees.
+//
+// It paginates as of #1024: API_DescribeInstanceStatus publishes MaxResults and NextToken and
+// substrate read neither, so a caller paging this listing saw one page here and several in
+// production. The three rules are [ec2MaxResults], [ec2NextTokenOffset] and [ec2Page]. The page
+// publishes **no** range for MaxResults — only "The maximum number of items to return for this
+// request", type Integer — so the bound is [ec2MinUnpublishedMaxResults] with
+// [ec2NoMaxResultsCeiling] rather than the 5–1000 three sibling describes publish, per #671.
+//
+// This is also the one page of the sixteen besides API_DescribeInstances that repeats the
+// service-wide ID-list prohibition against its own parameter — "You cannot specify this parameter
+// and the instance IDs parameter in the same request" — so [ec2RefuseIDsWithMaxResults] is
+// published here twice over rather than only service-wide.
 func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InstanceId"), ec2InstanceIDKind)
+	instanceIDs := extractIndexedParams(req.Params, "InstanceId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "InstanceId", instanceIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(instanceIDs, ec2InstanceIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -1462,9 +1486,10 @@ func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSReque
 		} `xml:"instanceState"`
 	}
 	type response struct {
-		XMLName xml.Name     `xml:"DescribeInstanceStatusResponse"`
-		XMLNS   string       `xml:"xmlns,attr"`
-		Items   []statusItem `xml:"instanceStatusSet>item"`
+		XMLName   xml.Name     `xml:"DescribeInstanceStatusResponse"`
+		XMLNS     string       `xml:"xmlns,attr"`
+		Items     []statusItem `xml:"instanceStatusSet>item"`
+		NextToken string       `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 
@@ -1495,6 +1520,10 @@ func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSReque
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	// Cut after the whole answer is assembled and after the ID list is resolved, for the reason
+	// [EC2Plugin.describeVPCs] gives: an unresolved ID is an error about the request, so it must not
+	// depend on which page the walk is on.
+	resp.Items, resp.NextToken = ec2Page(resp.Items, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -5988,7 +6017,36 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 // empty history rather than InvalidInstanceType. That is the opposite of
 // DescribeInstanceTypes, whose InstanceType.N asserts existence; see
 // [ec2CheckInstanceTypesExist].
+//
+// It paginates as of #1024: API_DescribeSpotPriceHistory publishes MaxResults and NextToken and
+// substrate read neither. The page publishes no range for MaxResults, so the bound is
+// [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling].
+//
+// It is the one operation #1024 converts that gets **no** [ec2RefuseIDsWithMaxResults] call: the
+// service-wide rule is stated against "a list of IDs", and this page has no ID-list parameter at
+// all. InstanceType.N is documented as "Filters the results by the specified instance types", and a
+// type is not a resource ID — the same reading that makes an unknown type an empty history here
+// rather than InvalidInstanceType.
+//
+// The offset counts positions in the catalog-by-Availability-Zone product this operation
+// assembles, which is a fixed slice ([ec2InstanceTypeCatalog]) walked in a fixed AZ order, so a
+// token names the same price on two calls. That is the same stability [ec2Page] needs from
+// StateManager.List elsewhere, reached without any state at all.
+//
+// One divergence the page invites and substrate does not take: its Example Response shows
+// `<nextToken/>` on a last page, and the element is documented as "an empty string ("") or null
+// when there are no more items". Substrate omits the element instead, which is the other of the two
+// published shapes and the one every other converted describe answers; a caller decoding into a
+// string reads "" either way.
 func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	wantedTypes := map[string]bool{}
 	for _, t := range indexedParams(req.Params, "InstanceType.%d") {
 		wantedTypes[t] = true
@@ -6012,6 +6070,7 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 		XMLName          xml.Name           `xml:"DescribeSpotPriceHistoryResponse"`
 		XMLNS            string             `xml:"xmlns,attr"`
 		SpotPriceHistory []ec2SpotPriceItem `xml:"spotPriceHistorySet>item"`
+		NextToken        string             `xml:"nextToken,omitempty"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -6041,6 +6100,7 @@ func (p *EC2Plugin) describeSpotPriceHistory(reqCtx *RequestContext, req *AWSReq
 			resp.SpotPriceHistory = append(resp.SpotPriceHistory, item)
 		}
 	}
+	resp.SpotPriceHistory, resp.NextToken = ec2Page(resp.SpotPriceHistory, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 

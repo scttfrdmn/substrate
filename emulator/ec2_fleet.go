@@ -792,9 +792,32 @@ func (p *EC2Plugin) createFleetResponse(fleet *EC2Fleet) (*AWSResponse, error) {
 
 // describeFleets handles DescribeFleets. Mirroring AWS, an instant fleet appears
 // only when its ID is named explicitly.
+//
+// It paginates as of #1024: API_DescribeFleets publishes MaxResults and NextToken and substrate
+// read neither, so a caller paging this listing saw one page here and several in production. The
+// rules are [ec2MaxResults], [ec2NextTokenOffset], [ec2Page] and — because FleetId.N is documented
+// as "The IDs of the EC2 Fleets" — [ec2RefuseIDsWithMaxResults]. The page publishes no range for
+// MaxResults, so the bound is [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling].
+//
+// Those two published rules meet here in a way no other converted operation reproduces: an instant
+// fleet "appears only when its ID is named", and naming an ID list forbids MaxResults, so **an
+// instant fleet is never on a paginated page**. That is AWS's arithmetic rather than substrate's —
+// both halves are published, one on this page and one service-wide — and it is why a walk over this
+// listing is a walk over the request and maintain fleets only.
 func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	ids := extractIndexedParams(req.Params, "FleetId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "FleetId", ids); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinUnpublishedMaxResults, ec2NoMaxResultsCeiling)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if err := ec2FleetFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
@@ -833,9 +856,10 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Errors []fleetDescribeErr `xml:"errorSet>item,omitempty"`
 	}
 	type response struct {
-		XMLName xml.Name    `xml:"DescribeFleetsResponse"`
-		XMLNS   string      `xml:"xmlns,attr"`
-		Fleets  []fleetItem `xml:"fleetSet>item"`
+		XMLName   xml.Name    `xml:"DescribeFleetsResponse"`
+		XMLNS     string      `xml:"xmlns,attr"`
+		Fleets    []fleetItem `xml:"fleetSet>item"`
+		NextToken string      `xml:"nextToken,omitempty"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -894,6 +918,7 @@ func (p *EC2Plugin) describeFleets(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 		resp.Fleets = append(resp.Fleets, item)
 	}
+	resp.Fleets, resp.NextToken = ec2Page(resp.Fleets, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
