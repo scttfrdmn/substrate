@@ -99,8 +99,13 @@ const kmsAbsentKeyID = "00000000-0000-0000-0000-000000000000"
 // no key. Every one publishes NotFoundException at HTTP 400 on its own reference page.
 //
 // Decrypt and ReEncrypt are absent because their key comes from the ciphertext rather than from a
-// member; they have their own test. GetKeyPolicy and PutKeyPolicy are absent because substrate does
-// not check the key exists on either — a separate gap, not a status.
+// member; they have their own test.
+//
+// GetKeyPolicy and PutKeyPolicy joined the table in #983, which is what made them answerable: until
+// then neither handler loaded the key at all, and this comment recorded that as a separate gap rather
+// than a status. PutKeyPolicy's entry carries a well-formed Policy on purpose — its document is
+// validated before the key is looked up, so a body without one would be refused for the document and
+// never reach the site this test is about.
 var kmsKeyIDOperations = []struct {
 	name string
 	body func(keyID string) map[string]any
@@ -128,6 +133,10 @@ var kmsKeyIDOperations = []struct {
 	}},
 	{"GenerateDataKeyWithoutPlaintext", func(k string) map[string]any {
 		return map[string]any{"KeyId": k, "KeySpec": "AES_256"}
+	}},
+	{"GetKeyPolicy", func(k string) map[string]any { return map[string]any{"KeyId": k} }},
+	{"PutKeyPolicy", func(k string) map[string]any {
+		return map[string]any{"KeyId": k, "Policy": kmsMinimalPolicy}
 	}},
 }
 

@@ -190,6 +190,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   pair is asserted at exactly its maximum as well as one byte past it, which is the only way a
   boundary written with the wrong comparison shows up.
 
+- **A key with no policy reports the default policy AWS attaches, `CreateKey`'s `Policy` is recorded
+  rather than discarded, and both policy operations refuse what their pages publish** (#983). Two
+  defects with one cause. `createKey` decoded no `Policy` member at all, so a caller that attached a
+  policy at creation time read back a document it had never sent; and `getKeyPolicy` answered a
+  hardcoded `{"Version":"2012-10-17","Statement":[]}` for any key that had never had `PutKeyPolicy`
+  called on it. The second is the one that matters beyond fidelity. A key policy is the only place a
+  KMS key's own permissions live — an IAM policy cannot grant access to a key whose key policy does not
+  delegate to IAM — so an empty-statement document is not a neutral placeholder. It says the *opposite*
+  of what AWS attaches, and a consumer that reads a key policy to decide whether a principal has access
+  would conclude that nobody does.
+
+  **The default document is transcribed from `API_GetKeyPolicy`'s own Example Response**, not from the
+  developer guide's *Default key policy* page that describes it in prose. The reference page is the
+  stronger source because it shows the whole thing, including an `Id` member — `"key-default-1"` — that
+  the prose does not mention: `Version` `2012-10-17`, `Id` `key-default-1`, and one statement with `Sid`
+  *Enable IAM User Permissions*, `Effect` `Allow`, `Principal` the account root, `Action` `kms:*`,
+  `Resource` `*`. The example's `111122223333` is AWS's documentation placeholder and the **key's own
+  account** is substituted for it, since the entire content of the statement is that this key's account
+  controls it and a document naming a foreign root would grant nothing to anyone who can reach the key.
+  The document is synthesized at read time rather than written at create time: the two are
+  observationally identical, and only the first makes keys created by earlier releases start reporting
+  the default rather than needing a migration.
+
+  **Three refusals, each with a code its own page publishes.** A `Policy` outside the published
+  1–32768 range is `LimitExceededException`/400 — a transcription rather than an inference, because
+  `API_CreateKey`'s `Policy` member names the code for this condition in its own sentence (*"if the key
+  policy exceeds the length constraint, AWS KMS returns a `LimitExceededException`"*), which is what
+  settles an oversize document's otherwise plausible claim on
+  `MalformedPolicyDocumentException`. The length is checked **before** the document is parsed, so 40 KB
+  of valid JSON is told its size. A value that is not JSON, or is JSON but not an object, is
+  `MalformedPolicyDocumentException`/400 — the second condition being what a caller reaches by confusing
+  the document with its `Statement` array. And a `PolicyName` other than `default` is
+  `NotFoundException`/400, which is a one-step reading rather than a transcription: neither page
+  publishes a code *for* `PolicyName`, but both state `default` is the only valid value and both publish
+  `NotFoundException` glossed *"the specified entity or resource could not be found"* — a name that
+  names no policy is that gloss exactly, which keeps the refusal among the page's own codes instead of
+  reaching for `CommonErrors`' `ValidationError`. An absent or empty `PolicyName` is the documented
+  default rather than a refusal. Both handlers now call `loadKey`, so both answer `NotFoundException`
+  for a key that does not exist — a gap `kms_error_status_test.go` had recorded as unanswerable — and
+  the member checks run **before** the lookup, following #991: a request wrong about both hears about
+  the part it can fix without an AWS account.
+
+  **Four things AWS publishes here are recorded rather than half-built.** The key-policy lockout safety
+  check, and therefore `BypassPolicyLockoutSafetyCheck`, which stays undecoded on both operations: the
+  check is a policy evaluation against the calling principal — #671's machinery — and with no check to
+  bypass, `true` and `false` are observationally identical, so decoding the member would create exactly
+  the parameter-read-by-nobody defect #984 just closed. Statement-level validation, declined on AWS's
+  own words: a statement missing `Action` or `Resource` *"has no effect"* while *"the `CreateKey` and
+  `PutKeyPolicy` API requests succeed"*, so `MalformedPolicyDocumentException`'s *"semantically
+  correct"* gloss is narrower than it reads. The `Policy` character-class pattern, for which neither
+  page publishes a code. And `InvalidArnException`, since nothing walks the principals.
+
+  **A fifth is unreachable for a stronger reason, and a test pins it.** Both pages publish
+  `KMSInvalidStateException`, and the plan for this release said to use it. The developer guide's
+  key-state table settles it the other way: `GetKeyPolicy` and `PutKeyPolicy` carry a green checkmark
+  in **all seven** state columns — Enabled, Disabled, Pending deletion, Pending import, Unavailable,
+  Creating, Updating — with no footnote on any of them, where `TagResource` two rows below is refused
+  at Pending deletion under footnote [3]. So no key state refuses either operation, adding one would be
+  a divergence rather than fidelity, and neither `kmsKeyStateError` nor `kmsInvalidKeyState` is called.
+  `TestKMSKeyPolicy_NeitherOperationRefusesAKeyForItsState` asserts a key pending deletion still takes
+  and reports a policy, so that a later sweep completing the key-state checks cannot read the published
+  code as a missing refusal.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

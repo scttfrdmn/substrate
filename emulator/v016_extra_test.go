@@ -1059,6 +1059,13 @@ func TestKMSPlugin_TagAndUntagResource(t *testing.T) {
 	assert.Len(t, tags4, 1)
 }
 
+// TestKMSPlugin_KeyPolicy is the original policy round trip, and #983 is what made it one.
+//
+// The document it writes is byte-identical to the fallback `getKeyPolicy` answered before #983, so
+// until then this test would have passed against a `PutKeyPolicy` that stored nothing whatsoever — the
+// read hit the stand-in and the stand-in was the expectation. It is left as written because it now
+// proves what it always appeared to; the assertions #983 needs are in `kms_key_policy_test.go`, where
+// the caller's document differs from the default in more than one member for exactly this reason.
 func TestKMSPlugin_KeyPolicy(t *testing.T) {
 	srv := newKMSTestServer(t)
 

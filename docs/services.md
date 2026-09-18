@@ -10595,15 +10595,15 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 
 | Operation | Notes |
 |-----------|-------|
-| CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder; validates `KeySpec`/`KeyUsage` and their pairing, and refuses an `Origin`, `CustomKeyStoreId` or `XksKeyId` substrate does not model rather than discarding it — see below |
+| CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder; validates `KeySpec`/`KeyUsage` and their pairing, and refuses an `Origin`, `CustomKeyStoreId` or `XksKeyId` substrate does not model rather than discarding it; records the `Policy` it was given, and refuses one outside 1–32768 bytes or not a JSON object — see below |
 | DescribeKey | Accepts all four `KeyId` forms; answers 16 of `KeyMetadata`'s 26 members, including `AWSAccountId`, `KeyManager`, `Origin` and the key's algorithm list; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
 | ListKeys | |
 | EnableKey | Refuses a key pending deletion, so recovery stays two calls — see below |
 | DisableKey | Same refusal as `EnableKey` |
 | ScheduleKeyDeletion | Waiting period range-checked at 7–30; refuses a key already pending deletion — see below |
 | CancelKeyDeletion | Requires a key pending deletion, and leaves it `Disabled` — see below |
-| GetKeyPolicy | |
-| PutKeyPolicy | |
+| GetKeyPolicy | Answers AWS's default key policy for a key that has never been given one, naming the key's own account root; refuses a `KeyId` naming no key and a `PolicyName` other than `default` — see below |
+| PutKeyPolicy | Refuses a `Policy` outside 1–32768 bytes and one that is not a JSON object, both before the key is read; refuses a `PolicyName` other than `default`; accepts a key in every state, including pending deletion — see below |
 | GetKeyRotationStatus | Reports the bare key ID and, while rotation is on, `RotationPeriodInDays` and `NextRotationDate`; answers `false` for a key pending deletion and answers in every key state substrate can produce — see below |
 | EnableKeyRotation | Range-checks `RotationPeriodInDays` at 90–2560 and stores it with the date it ran; refuses a key whose spec is not `SYMMETRIC_DEFAULT`, and refuses a disabled key and a key pending deletion with a different code for each — see below |
 | DisableKeyRotation | Same refusals as `EnableKeyRotation`; leaves the stored rotation period and enable date alone |
@@ -11260,6 +11260,95 @@ Note that *"symmetric encryption key"* is narrower than *"symmetric key"*: the f
 material identity. All seventeen key specs are walked by a test for exactly that reason —
 an implementation reading the condition as "not asymmetric" passes every other row and
 fails those four.
+
+### A key with no policy has AWS's default policy, not an empty one
+
+Substrate answered `{"Version":"2012-10-17","Statement":[]}` from `GetKeyPolicy` for any key
+that had never had `PutKeyPolicy` called on it, and `CreateKey` decoded no `Policy` member at
+all ([#983](https://github.com/scttfrdmn/substrate/issues/983)). So a caller that attached a
+policy at creation time read back a document it had never sent, and every other key reported
+a policy that grants nothing.
+
+The second half is the one that matters beyond fidelity. A key policy is the only place a KMS
+key's own permissions live — an IAM policy cannot grant access to a key whose key policy does
+not delegate to IAM — so an empty-statement document is not a neutral placeholder. It states
+the opposite of what AWS attaches.
+
+**The document comes from `API_GetKeyPolicy`'s own Example Response**, which carries it in
+full, rather than from the developer guide's *Default key policy* page that describes it in
+prose. The reference page is the stronger source in one concrete way: it carries an `Id`
+member, `key-default-1`, that the prose does not mention.
+
+| Member | Value |
+|--------|-------|
+| `Version` | `2012-10-17` |
+| `Id` | `key-default-1` |
+| `Statement[0].Sid` | `Enable IAM User Permissions` |
+| `Statement[0].Effect` | `Allow` |
+| `Statement[0].Principal.AWS` | `arn:aws:iam::{account}:root` |
+| `Statement[0].Action` | `kms:*` |
+| `Statement[0].Resource` | `*` |
+
+The account is the **key's own**, where AWS's example shows its documentation placeholder
+`111122223333`: the whole content of the statement is that this key's account controls it, so a
+document naming a foreign root would grant nothing to anyone who can reach the key. The
+document is synthesised when it is read rather than written when the key is created, which is
+observationally identical and also means a key created by an earlier release reports the
+default rather than the old stand-in. Whitespace is not preserved from the example — AWS
+formats the document with spaces around its colons — because a consumer parses the string.
+
+**Three refusals, each with the code its page publishes.**
+
+| Request | Answer |
+|---------|--------|
+| `Policy` outside 1–32768 bytes, on `CreateKey` or `PutKeyPolicy` | `LimitExceededException`/400 |
+| `Policy` that is not JSON, or is JSON but not an object | `MalformedPolicyDocumentException`/400 |
+| `PolicyName` other than `default`, on `GetKeyPolicy` or `PutKeyPolicy` | `NotFoundException`/400 |
+| `KeyId` naming no key, on either operation | `NotFoundException`/400 |
+
+`LimitExceededException` for a length violation is not an inference from that error's gloss —
+`CreateKey`'s `Policy` member names the code itself: *"if the key policy exceeds the length
+constraint, AWS KMS returns a `LimitExceededException`"*. The length is checked before the
+document is parsed, so a caller sending 40 KB of valid JSON hears about the size. On
+`PutKeyPolicy`, where `Policy` is `Required: Yes`, the range is also what refuses an empty
+member, since a member present and empty satisfies presence.
+
+`NotFoundException` for a `PolicyName` is substrate's one-step reading: neither page publishes
+a code *for* that member, but both state that `default` is the only valid value and both publish
+`NotFoundException` glossed *"the specified entity or resource could not be found"* — which a
+name that names no policy is exactly. It keeps the refusal among the codes the page publishes
+rather than reaching for `CommonErrors`.
+
+Both member checks run **before** the key is looked up, following the same reading `Encrypt`'s
+`Plaintext` guard follows: a request whose document is unusable and whose `KeyId` names no key
+is told about the document, which is the half it can fix without an AWS account.
+
+**Four things AWS publishes here that substrate does not implement**, recorded rather than
+half-built:
+
+- **The key policy lockout safety check, and therefore `BypassPolicyLockoutSafetyCheck`.** AWS
+  requires that a supplied policy *"allow the calling principal to make a subsequent
+  `PutKeyPolicy` request"* — a policy evaluation against the caller's principal, which is
+  authorization machinery rather than this operation's business. With no lockout check,
+  bypassing it is unobservable, so the member stays undecoded on both operations rather than
+  becoming a parameter read by nobody.
+- **Statement-level validation.** `MalformedPolicyDocumentException` is glossed *"not
+  syntactically or semantically correct"*, but AWS's own `Policy` description narrows the
+  semantic half almost to nothing: a statement missing `Action` or `Resource` *"has no
+  effect"* while *"the `CreateKey` and `PutKeyPolicy` API requests succeed"*. There is no
+  published statement-level refusal to implement, so substrate accepts such a document.
+- **The `Policy` pattern**, which admits tab, line feed, carriage return and the printable
+  range through U+00FF. Neither page publishes a code for a pattern violation.
+- **`InvalidArnException`**, glossed *"a specified ARN, or an ARN in a key policy, is not
+  valid"*. Nothing walks the principals, so it stays unreachable.
+
+**Neither operation refuses a key for its state, and that is deliberate.** Both publish
+`KMSInvalidStateException`, which reads like a missing refusal — but the developer guide's
+key-state table gives `GetKeyPolicy` and `PutKeyPolicy` a checkmark in **all seven** state
+columns, footnote-free, where `TagResource` two rows below is refused at pending deletion
+under footnote [3]. A key pending deletion still takes a policy and still reports one, and a
+test pins that so a later sweep completing the key-state checks cannot read the published code
+as a gap.
 
 ### Cancelling a deletion leaves the key disabled, not enabled
 
