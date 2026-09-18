@@ -1110,8 +1110,8 @@ order, so it is sorted by UUID before the page is cut. Without that the same `Ma
 different positions depending on whether the caller passed `FunctionName`.
 
 **What the same audit found still unconverted is counted, not estimated.** Nine routed EC2 describes
-published `MaxResults` and `NextToken` and read neither; #1024 converts them three at a time,
-grouped by the range each page publishes, and the six that remain are listed with those ranges in
+published `MaxResults` and `NextToken` and read neither; #1024 converts them in three parts,
+grouped by the range each page publishes, and the one that remains is named with its range in
 [One offset paginator, shared](#one-offset-paginator-shared). Six routed API Gateway v1 collections
 were in that state too; all six were converted under #1025, two at a time — see the next section.
 Lambda's `ListFunctions` is a third case of the narrower defect: it pages, but
@@ -5534,23 +5534,23 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | RevokeSecurityGroupEgress | |
 | CreateInternetGateway | Renders the same gateway `DescribeInternetGateways` does — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | AttachInternetGateway | |
-| DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids); **all six** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `ownerId`, `attachmentSet` and `tagSet` |
+| DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids); **all six** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `ownerId`, `attachmentSet` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters. `zoneId` takes AWS's published shape (`use1-az1`) and always maps zone `a` to `-az1` — see [Zone IDs](#zone-ids-take-aws-s-published-shape-and-always-map-zone-a-to-az1) |
 | DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
-| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
-| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error |
-| DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — the one converted describe with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range and counting offerings rather than types — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — one of the three converted describes with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
-| DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
+| DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range — the ceiling two of its siblings do not share, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
 | CreateSnapshot | `VolumeId` is required and checked; `volumeSize` and `encrypted` come from the source volume, and `status` is `completed` at once — see [A snapshot has a real size](#a-snapshot-has-a-real-size) |
 | DescribeSnapshots | [Explicit resource IDs](#explicit-resource-ids); ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `Owner.N` and `RestorableBy.N` — see [A snapshot filters on its own members](#a-snapshot-filters-on-its-own-members-and-scopes-by-account). Paginates on `MaxResults`/`NextToken`, as do `DescribeVolumes` and `DescribeImages` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSnapshot | `SnapshotId` is required and checked; refuses one a registered AMI still references with `InvalidSnapshot.InUse`, and is **not** idempotent — see [Deleting a snapshot](#deleting-a-snapshot-refuses-what-aws-refuses) |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
-| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name) |
+| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | CreateLaunchTemplate | Creates version 1. [Does not validate the AMI](#runinstances-requires-a-resolvable-ami), matching AWS, which reports mapping problems here through `warning`. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
 | DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters. **All four** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `LaunchTemplateId.N` and `LaunchTemplateName.N` are read at every index and [union](#twelve-describes-gained-filters) |
 | DeleteLaunchTemplate | |
@@ -5830,12 +5830,13 @@ the template is resolved, so a typo answers `InvalidParameterValue` rather than
 
 - **No pagination was added.** `DescribeAddresses`, `DescribeKeyPairs`,
   `DescribeAvailabilityZones` and `DescribePlacementGroups` document **no** `MaxResults` or
-  `NextToken` at all, so there is nothing to add. `DescribeInternetGateways`,
-  `DescribeInstanceTypes` and `DescribeLaunchTemplates` document both and still answer in one page.
+  `NextToken` at all, so there is nothing to add. `DescribeLaunchTemplates` documents both and still
+  answers in one page, and it is now the last EC2 describe of which that is true.
   `DescribeVpcs` was in that list until #917 converted it, along with `DescribeSubnets`,
   `DescribeSecurityGroups`, `DescribeInstances`, `DescribeImages`, `DescribeVolumes` and
-  `DescribeSnapshots`; #1024 converted `DescribeInstanceStatus` and `DescribeSpotPriceHistory` out
-  of it as well, and is converting the three that remain — see
+  `DescribeSnapshots`; #1024 converted `DescribeInstanceStatus`, `DescribeSpotPriceHistory` and
+  `DescribeFleets` out of it, then `DescribeInternetGateways`, `DescribeNatGateways`,
+  `DescribeRouteTables`, `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` — see
   [One offset paginator, shared](#one-offset-paginator-shared).
 - **`IncludeAllInstances` is not read** on `DescribeInstanceStatus`. AWS defaults it to `false`,
   meaning "running instances only"; substrate reports every instance whatever its state, so a
@@ -8604,18 +8605,24 @@ with no token**, which is the one divergence a paginating caller cannot see: the
 on the first page against substrate and finds a second page in production. #917 replaced the two
 copies with one shared paginator and converted seven of the sixteen onto it, so the count of
 implementations went down rather than up. #1024 converts the remaining nine, in three parts
-grouped by the range each page publishes, of which the first is the three publishing **no** range:
-`DescribeInstanceStatus`, `DescribeSpotPriceHistory` and `DescribeFleets`.
+grouped by the range each page publishes: the first is the three publishing **no** range —
+`DescribeInstanceStatus`, `DescribeSpotPriceHistory` and `DescribeFleets` — the second is the five
+publishing a floor of five, `DescribeInternetGateways`, `DescribeNatGateways`,
+`DescribeRouteTables`, `DescribeInstanceTypes` and `DescribeInstanceTypeOfferings`, and
+`DescribeLaunchTemplates` alone is the third, because its is the one page in the set whose
+published floor is **not** five.
 
-The twelve that page are therefore `DescribeTags` and `DescribeLaunchTemplateVersions`, which
+The seventeen that page are therefore `DescribeTags` and `DescribeLaunchTemplateVersions`, which
 already did, plus `DescribeVolumes`, `DescribeSnapshots`, `DescribeImages`, `DescribeVpcs`,
 `DescribeSubnets`, `DescribeSecurityGroups` and `DescribeInstances` from #917, plus
-`DescribeInstanceStatus`, `DescribeSpotPriceHistory` and `DescribeFleets` from #1024. Wire
-behaviour for a caller that sends neither parameter is unchanged at every one of them. The
-remaining six are listed at the end of this section: the count is exact and audited, rather than
-the "roughly twenty" this paragraph used to estimate.
+`DescribeInstanceStatus`, `DescribeSpotPriceHistory` and `DescribeFleets` from #1024's first part
+and `DescribeInternetGateways`, `DescribeNatGateways`, `DescribeRouteTables`,
+`DescribeInstanceTypes` and `DescribeInstanceTypeOfferings` from its second. Wire behaviour for a
+caller that sends neither parameter is unchanged at every one of them. The one still to convert is
+named at the end of this section: the count is exact and audited, rather than the "roughly twenty"
+this paragraph used to estimate.
 `DescribeCapacityReservations` joined the paginating set later (#891) rather than being converted,
-so it is a thirteenth: its published range is 1–1000, and it reads both parameters from the start.
+so it is an eighteenth: its published range is 1–1000, and it reads both parameters from the start.
 
 AWS publishes the mechanism **once for the whole service**, in the Query Requests page's
 *Pagination* section rather than per operation, and two of its sentences decide the design:
@@ -8640,16 +8647,26 @@ otherwise loop forever.
 | An offset past the end | Clamped to an empty last page rather than refused — a caller resuming a walk after a record was deleted holds a token that was valid when it was issued |
 | An ID list **and** `MaxResults` | `InvalidParameterCombination` / 400. Checked before the ID list's own syntax: whether two parameters may appear together does not depend on either being well formed. Which refusal AWS answers first is not published, so the ordering is substrate's |
 
-**The range is per operation, and seven of the twelve pages publish none.** `API_DescribeVpcs`,
-`API_DescribeSubnets` and `API_DescribeSecurityGroups` publish `Valid Range: Minimum value of 5.
-Maximum value of 1000.`; `API_DescribeTags` (5–1000) and `API_DescribeLaunchTemplateVersions`
-(1–200) state theirs in prose only; `API_DescribeInstances`, `API_DescribeImages`,
-`API_DescribeVolumes`, `API_DescribeSnapshots`, `API_DescribeInstanceStatus`,
-`API_DescribeSpotPriceHistory` and `API_DescribeFleets` publish **no bound at all** — only "the
-maximum number of items to return for this request", type `Integer`. Substrate does not borrow
-5–1000 from the siblings at those seven, per the scope rule that only what the API model states is
-modelled: `MaxResults=5000` is accepted on all seven, and `MaxResults=1` is accepted there and
-refused on VPCs, subnets and security groups.
+**The range is per operation, and seven of the seventeen pages publish none.** `API_DescribeVpcs`,
+`API_DescribeSubnets`, `API_DescribeSecurityGroups`, `API_DescribeInternetGateways`,
+`API_DescribeNatGateways` and `API_DescribeInstanceTypeOfferings` publish `Valid Range: Minimum
+value of 5. Maximum value of 1000.`; `API_DescribeRouteTables` and `API_DescribeInstanceTypes`
+publish the same floor with `Maximum value of 100.`; `API_DescribeTags` (5–1000) and
+`API_DescribeLaunchTemplateVersions` (1–200) state theirs in prose only; `API_DescribeInstances`,
+`API_DescribeImages`, `API_DescribeVolumes`, `API_DescribeSnapshots`,
+`API_DescribeInstanceStatus`, `API_DescribeSpotPriceHistory` and `API_DescribeFleets` publish **no
+bound at all** — only "the maximum number of items to return for this request", type `Integer`.
+Substrate does not borrow 5–1000 from the siblings at those seven, per the scope rule that only
+what the API model states is modelled: `MaxResults=5000` is accepted on all seven, and
+`MaxResults=1` is accepted there and refused on the eight that publish a floor of five.
+
+**The ceiling is per operation too, and two neighbouring pages disagree about the same value.**
+`MaxResults=1000` is accepted on `DescribeNatGateways` and **refused** on `DescribeRouteTables`,
+which publishes 100 — two operations a caller reaches in the same breath while wiring a VPC, whose
+requests substrate must answer differently because their pages do. `DescribeInstanceTypes` (100)
+sits beside `DescribeInstanceTypeOfferings` (1000) the same way. Harmonising either pair would be a
+one-character edit and would make substrate accept a request AWS rejects, which is the direction of
+divergence that matters: the code would work here and fail in production.
 
 The floor of **one** at those seven pages is *substrate's reading*, and it is the single bound the
 published pagination rule forces. `MaxResults=0` under "you continue to call the action until
@@ -8693,12 +8710,19 @@ group name is not an ID; it is not what `InvalidGroup.NotFound` is about either 
 the combination, so refusing the name form would mean extending a published rule to a parameter it
 does not name.
 
-**`DescribeSpotPriceHistory` has no ID-list parameter at all**, so it is the one paginating
-describe that carries no `InvalidParameterCombination` refusal. `InstanceType.N` is the closest
-candidate and is documented as "Filters the results by the specified instance types" — a filter,
-and an instance type is not a resource ID. That is the same reading that makes an unknown type an
-empty history there rather than `InvalidInstanceType`. `MaxResults` and `InstanceType.N` are
-therefore read together, which is asserted rather than assumed, because a sweep is exactly where a
+**Three paginating describes carry no `InvalidParameterCombination` refusal at all**, because the
+service-wide rule is stated against "a list of IDs" and none of the three has one.
+`DescribeInstanceTypeOfferings` is the plainest: its whole request is `DryRun`, `Filter.N`,
+`LocationType`, `MaxResults` and `NextToken`, so there is no candidate parameter even to argue
+about. `DescribeSpotPriceHistory`'s `InstanceType.N` is documented as "Filters the results by the
+specified instance types" — a filter, and an instance type is not a resource ID, which is the same
+reading that makes an unknown type an empty history there rather than `InvalidInstanceType`.
+
+`DescribeInstanceTypes` is the interesting one, and it lands the same way. Its `InstanceType.N` is a
+*stronger* parameter than the spot-price namesake — it asserts the types exist, so an unknown one is
+refused with `InvalidInstanceType` — but what it names are catalog members rather than resources the
+account holds, and the published rule is about resource IDs. So `MaxResults` and `InstanceType.N` are
+read together at all three, which is asserted rather than assumed, because a sweep is exactly where a
 published rule gets applied one operation too far.
 
 The opposite case is **`DescribeInstanceStatus`, where the prohibition is published twice over**:
@@ -8719,26 +8743,18 @@ or null when there are no more items". Both shapes are published, and substrate 
 — the answer every other converted describe gives, and one a caller decoding into a string reads
 as `""` either way.
 
-**Six routed describes still publish both parameters and read neither**, and the count is stated
-here because an estimate invites the reader to assume the sweep was complete. Each answers its
-whole listing with no `nextToken`, which is the same divergence the conversions above removed;
-#1024's remaining two parts convert them, grouped by range:
+**One routed describe still publishes both parameters and reads neither** — `DescribeLaunchTemplates`,
+which answers its whole listing with no `nextToken`, the same divergence the conversions above
+removed. The count is stated exactly because an estimate invites the reader to assume the sweep was
+complete, and it is one rather than six because #1024's second part converted the five publishing a
+floor of five. `API_DescribeLaunchTemplates` publishes **1–200**, the only page in the whole set
+whose floor is 1 rather than 5, which is why it is a part of its own rather than a sixth row of that
+one; #1024's third part converts it.
 
-| Operation | Published `MaxResults` range |
-|---|---|
-| `DescribeInternetGateways` | 5–1000 |
-| `DescribeRouteTables` | 5–100 |
-| `DescribeNatGateways` | 5–1000 |
-| `DescribeInstanceTypes` | 5–100 |
-| `DescribeInstanceTypeOfferings` | 5–1000 |
-| `DescribeLaunchTemplates` | 1–200 — the only page in the whole set whose published floor is 1 rather than 5 |
-
-One thing the ranges above settle before the work starts: the bound is **per operation** and must
-not be harmonised — 5–100 at two of them where a sibling publishes 5–1000, and 1–200 at a third.
-
-`GetSpotPlacementScores` is the sharpest illustration of the first point and sits outside the table
-because it reads both parameters: its published floor is **10**, higher than any `Describe*` in the
-service. A shared floor would accept `MaxResults=1` there, which AWS refuses.
+`GetSpotPlacementScores` is the sharpest illustration of the range being per operation, and it is
+not part of that count because it reads both parameters already: its published floor is **10**,
+higher than any `Describe*` in the service. A shared floor would accept `MaxResults=1` there, which
+AWS refuses.
 
 Seven further routed `Describe*` operations publish **neither** parameter and so are not part of
 that count: `DescribeKeyPairs`, `DescribePlacementGroups`, `DescribeAvailabilityZones`,
