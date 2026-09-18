@@ -341,6 +341,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   code as a missing refusal.
 
 ### Fixed
+- **Lambda's reference table documented an operation that does not exist and omitted eight that do**
+  (#1015, in part). The one `Invoke`-shaped row read **`InvokeFunction`** — which is the *IAM action*
+  name, not a Lambda API operation — so the row named something no caller can call, while `Invoke`,
+  `InvokeAsync`, `AddPermission`, `RemovePermission`, `GetPolicy`, `PutFunctionEventInvokeConfig`,
+  `GetEventSourceMapping` and `UpdateEventSourceMapping` had no row at all. Thirteen rows for twenty
+  routed operations, one of them fictional. Rows are now in the router's own order, since that is the
+  order a reader checking one against the other needs, and the correction is stated in the page rather
+  than only here.
+
+  Two of the eight document behaviour a caller would otherwise have to read the source to find:
+  `InvokeAsync` always answers `202` and queues nothing, and `UpdateEventSourceMapping` treats an
+  **absent** body as a no-op update while refusing a present-but-unparseable one — the distinction
+  #1007 drew, which is invisible from the operation name.
+
+  **This is a sliver of #1015, and the issue stays open.** Its headline finding — ~30% of routed
+  operations have no row, and thirteen services have no section at all — is confirmed, and its
+  acceptance criterion (a check that fails when a routed operation has no row) turns out to be blocked
+  on something the issue does not name: **only 77 of `docs/services.md`' 14 394 lines are generated**,
+  that block being just the 67-row plugin matrix, and neither `Plugin` nor `PluginRouting` carries an
+  operation list for a checker to enumerate. Meeting it needs a new ~950-entry operation catalog
+  exported from `emulator` — a larger job than writing the 287 missing rows, and the prerequisite for
+  any drift check. That, the thirteen absent sections, and EC2's 26 documented of 92 are filed
+  separately; the counts and the blocker are recorded on the issue.
 - **A warm Lambda container outlived the code it was started from, so `UpdateFunctionCode` then
   `Invoke` ran the previous code** (#1035). The executor pools a container by **function ARN alone**
   and its handle records no code identity at all — no `CodeSha256`, no `RevisionId`, no image URI — so
