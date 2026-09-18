@@ -35,8 +35,13 @@ import (
 // PhysicalID is deliberately not changed to carry these values. It is what
 // DescribeStackResources reports, what most aws:cloudformation:* tag state keys are built from
 // (cfnResolveStampTarget), and the key the deletion path and drift detection address a resource
-// by, so the Ref value is *derived* here instead. Whether the reported PhysicalResourceId
-// should also become per-type is #837.
+// by, so the Ref value is *derived* here instead. The reported PhysicalResourceId stays the
+// stored identifier and is deliberately *not* per-type (#837, decided): API_StackResource
+// publishes one description for every type, the one type AWS names explicitly is an EC2
+// instance reporting its InstanceId, and the only PhysicalResourceId values published anywhere
+// are API_DescribeStackResources' own samples, MyStack_DB1 and MyStack_ASG1 — names, not ARNs.
+// Ref is per-type because AWS documents it per type on each Template Reference page; there is
+// no such documentation for PhysicalResourceId, so deriving one would invent a divergence.
 //
 // Two earlier justifications for that are corrected here rather than left standing, because
 // both were checkable and neither held (#837). A redeploy does *not* recognize a resource by

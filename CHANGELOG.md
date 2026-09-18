@@ -63,6 +63,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   seeded error. A test asserts the two seeds are independent in that direction.
 
 ### Changed
+- **`PhysicalResourceId` stays the stored identifier and is documented as deliberately *not* per
+  type** (#837). #827 made `Ref` resolve per resource type and scoped this out; the open question was
+  whether the value `DescribeStackResources`, `DescribeStackEvents` and `DescribeStackResourceDrifts`
+  report should follow. The answer is no, and **the reason is a citation rather than a preference**,
+  which is why this is a documented decision and not a deferral: `Ref` is per-type because each
+  type's Template Reference page documents its own return value, and **no equivalent documentation
+  exists for `PhysicalResourceId`**. `API_StackResource` publishes one description for every type
+  (*"The name or unique identifier that corresponds to a physical instance ID of a resource supported
+  by CloudFormation"*), the one type AWS names explicitly is an EC2 instance reporting its
+  `InstanceId` — a name-or-ID, which is what substrate already stores — and the only worked values
+  published anywhere are `API_DescribeStackResources`' own samples, `MyStack_DB1` and `MyStack_ASG1`:
+  generated names, not ARNs. Deriving a per-type value would be substrate inventing a divergence AWS
+  does not publish, the inverse of what #827 corrected.
+
+  **So the per-type audit this was filed for is not deferred — it has no citable source to be
+  conducted against**, and that is now recorded in `docs/services.md` rather than left standing as an
+  open question. No behaviour changes.
+
+  Two arguments made for keeping the stored value are corrected rather than repeated, since #819
+  already found both wrong in the tree: a redeploy does **not** recognise a resource by its physical
+  ID (it matches on logical ID, and recognition is `clearUnchangedRedeploys`, whose reason the
+  physical ID cannot be the key is that a refused create returns none at all), and the stamp claim
+  was "*every*" tag state key, which the four ELBv2 types disprove by finding their record by ARN.
+  What does hold is that most `aws:cloudformation:*` keys are composed from the stored value, so the
+  safety rule now stated is that a stored identifier may change only if no tag state key is composed
+  from it and it is stable across a redeploy.
+
+  Two of the issue's own citations were wrong and the second one mattered: there is no
+  `CFNStackResource` type (the field is `DeployedResource.PhysicalID`), and the cited line is the
+  **plural** `DescribeStackResources`, which already accepts `PhysicalResourceId` as a selector — so
+  the round trip AWS describes is satisfied today. `DescribeStackResource` (singular) and
+  `ListStackResources` remain unimplemented, and the docs now say so in this context.
 - **`CreateKey` decodes `Origin`, `CustomKeyStoreId` and `XksKeyId`, and refuses what substrate does
   not model rather than discarding it** (#984). All three members were accepted and thrown away, so
   `CreateKey` with `Origin: "EXTERNAL"` — the first call of every key-import workflow — answered `200`
