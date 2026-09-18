@@ -119,10 +119,13 @@ func sqsRequestedAttributeNames(req *AWSRequest) []string {
 		var input struct {
 			MessageAttributeNames []string `json:"MessageAttributeNames"`
 		}
-		// A body that does not parse yields no selectors, which is the same outcome
-		// as a request that named none: attributes are withheld rather than
-		// returned by accident.
-		_ = json.Unmarshal(req.Body, &input)
+		// This decode cannot fail in practice, and the discard is retained rather than turned into a
+		// second refusal: ReceiveMessage is the only caller (sqs_plugin.go), and it parses the same
+		// body through its own guard before it reaches here, so a body that will not parse has already
+		// answered ValidationError/400 (#1007). Were it reachable, no selectors would be the honest
+		// outcome anyway — the same as a request that named none, so attributes are withheld rather
+		// than returned by accident.
+		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // unreachable; see above
 		return input.MessageAttributeNames
 	}
 	var names []string

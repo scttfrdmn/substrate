@@ -476,6 +476,57 @@ both answered `ResourceNotFoundException`/404 and never reached the guard at all
 were therefore only reachable with a function in place, and a test that did not create one
 would have reported success while asserting nothing.
 
+### A guard that was never there: the discarded unmarshal error
+
+The 110 sites above answered the *wrong* code. A second, larger class answered **no** code: 95 sites
+across 38 files wrote `_ = json.Unmarshal(req.Body, &input)` and carried on with a zero-valued input,
+so a body that would not parse was not refused at all. That is worse than a wrong code, because a
+wrong code is at least an error: a discarded one produces a plausible success, or a refusal about
+something else entirely. It is filed as
+[#1007](https://github.com/scttfrdmn/substrate/issues/1007) and is being corrected in slices, since
+each service needs its own published code under the two-step rule above.
+
+**SQS and AWS Health are the first slice**, and they are first because they were the only files in the
+inventory with no checked guard anywhere to copy a code from — the other 35 files already contained
+one, which is why 80 of the 95 sites need no fresh archaeology. Both resolve to step 2:
+
+| Service | Code | Status | Provenance |
+|---------|------|--------|------------|
+| SQS | `ValidationError` | 400 | Common Errors: *"The input fails to satisfy the constraints specified by an AWS service"*. No SQS operation page names an undecodable body. |
+| AWS Health | `ValidationError` | 400 | Common Error Types: *"The input doesn't meet the required format or constraints"*. `DescribeEventDetails` publishes only `UnsupportedLocale`. |
+
+Nearer-looking codes on the same pages are deliberately unused, and the reason is the same each time —
+a code that misdescribes the fault sends the reader to the wrong place. SQS's `InvalidParameterValue`
+names *"the input parameter"*, and a body that will not parse has no parameter to name;
+`MalformedQueryString` is published at **404** and describes a query string; `MissingParameter` asserts
+which parameter is absent, which is unknowable when nothing decoded. Health's
+`MalformedHttpRequestException`/400 is specifically about a body that cannot be *decompressed* under
+the declared content encoding, so it would send a caller to check its `Content-Encoding` header over a
+syntax error in its own JSON.
+
+**Four SQS operations were answering an actively misleading code.** `GetQueueAttributes`,
+`DeleteQueue`, `ListQueueTags` and `PurgeQueue` read the queue URL through one shared helper and passed
+it straight to the queue lookup, so a discarded decode yielded an empty URL and the lookup answered
+`QueueDoesNotExist`: the emulator reported a missing queue when the queue was fine and the body was
+not. That is the most expensive kind of wrong answer, because it sends the reader to look at
+infrastructure rather than at the request. The helper now returns the refusal, and a test creates the
+queue first so that a passing assertion is known to come from the guard rather than from a lookup that
+happened to fail for another reason — while a *well-formed* request for an absent queue still answers
+`QueueDoesNotExist`, so the lookup moved rather than went away.
+
+One discard in this slice is **retained**, with its reachability recorded rather than a second refusal
+invented: `sqsRequestedAttributeNames` decodes the same body a second time for `ReceiveMessage`'s
+attribute selectors, and `ReceiveMessage` has already refused an unparseable body through its own guard
+before that helper runs. `sqs_plugin.go`'s FIFO deduplication decode is also left alone, because it
+reads *stored state* rather than a request — a corrupted state blob is not a caller error and answering
+a caller-error code for one would be a new defect.
+
+Two adjacent gaps are recorded rather than folded in: `DescribeEventDetails` publishes `eventArns` as
+`Required: Yes` with Array Members 1–10 and substrate answers an empty `successfulSet` for an absent
+list, and SQS's own required-member checks are not part of this class. Both are separate divergences
+from "a malformed body is not refused", and are filed rather than mixed into a sweep whose whole value
+is being mechanical.
+
 ### Whether a body is parsed before the resource is looked up
 
 [#1006](https://github.com/scttfrdmn/substrate/issues/1006) settled this for Lambda's two sites

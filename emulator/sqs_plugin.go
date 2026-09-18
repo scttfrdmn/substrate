@@ -126,15 +126,17 @@ func sqsJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 
 // sqsQueueURLFromRequest extracts the QueueUrl from the request, supporting
 // both query protocol (Params["QueueUrl"]) and JSON protocol (body field "QueueUrl").
-func sqsQueueURLFromRequest(req *AWSRequest) string {
+func sqsQueueURLFromRequest(req *AWSRequest) (string, *AWSError) {
 	if sqsIsJSONProtocol(req) {
 		var input struct {
 			QueueURL string `json:"QueueUrl"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
-		return input.QueueURL
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return "", sqsInvalidBody()
+		}
+		return input.QueueURL, nil
 	}
-	return req.Params["QueueUrl"]
+	return req.Params["QueueUrl"], nil
 }
 
 // --- State helpers -----------------------------------------------------------
@@ -248,7 +250,9 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			QueueName  string            `json:"QueueName"`
 			Attributes map[string]string `json:"Attributes"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		name, attrs = input.QueueName, input.Attributes
 		if attrs == nil {
 			attrs = make(map[string]string)
@@ -361,7 +365,9 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		var input struct {
 			QueueName string `json:"QueueName"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		name = input.QueueName
 	} else {
 		name = req.Params["QueueName"]
@@ -406,7 +412,10 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -469,7 +478,10 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -483,7 +495,9 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		var input struct {
 			Attributes map[string]string `json:"Attributes"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		attrs = input.Attributes
 	} else {
 		attrs = parseSQSAttributes(req.Params)
@@ -515,7 +529,10 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -574,7 +591,9 @@ func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		var input struct {
 			QueueNamePrefix string `json:"QueueNamePrefix"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		prefix = input.QueueNamePrefix
 	} else {
 		prefix = req.Params["QueueNamePrefix"]
@@ -619,7 +638,10 @@ func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 }
 
 func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -636,7 +658,9 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		var input struct {
 			Tags map[string]string `json:"Tags"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		for k, v := range input.Tags {
 			q.Tags[k] = v
 		}
@@ -675,7 +699,10 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 }
 
 func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -690,7 +717,9 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		var input struct {
 			TagKeys []string `json:"TagKeys"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		for _, k := range input.TagKeys {
 			delete(q.Tags, k)
 		}
@@ -723,7 +752,10 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 }
 
 func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -770,7 +802,10 @@ func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // --- Message operations ------------------------------------------------------
 
 func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -790,7 +825,9 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			MessageDeduplicationID string                         `json:"MessageDeduplicationId"`
 			MessageAttributes      map[string]SQSMessageAttribute `json:"MessageAttributes"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		msgBody = input.MessageBody
 		if input.DelaySeconds > 0 {
 			delayStr = strconv.Itoa(input.DelaySeconds)
@@ -1020,7 +1057,10 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1068,7 +1108,9 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 				MessageAttributes map[string]SQSMessageAttribute `json:"MessageAttributes"`
 			} `json:"Entries"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		sizes := make([]int, 0, len(input.Entries))
 		for _, entry := range input.Entries {
 			sizes = append(sizes, sqsMessageSize(entry.MessageBody, entry.MessageAttributes))
@@ -1236,7 +1278,10 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 }
 
 func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1252,7 +1297,9 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			MaxNumberOfMessages int `json:"MaxNumberOfMessages"`
 			VisibilityTimeout   int `json:"VisibilityTimeout"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		maxNum = input.MaxNumberOfMessages
 		if maxNum <= 0 {
 			maxNum = 1
@@ -1427,7 +1474,10 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 }
 
 func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1441,7 +1491,9 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		var input struct {
 			ReceiptHandle string `json:"ReceiptHandle"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		receiptHandle = input.ReceiptHandle
 	} else {
 		receiptHandle = req.Params["ReceiptHandle"]
@@ -1494,7 +1546,10 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1525,7 +1580,9 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 				ReceiptHandle string `json:"ReceiptHandle"`
 			} `json:"Entries"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		for _, entry := range input.Entries {
 			for _, msgID := range ids {
 				msg, loadErr := p.loadMsg(context.Background(), urlKey, msgID)
@@ -1606,7 +1663,10 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
@@ -1622,7 +1682,9 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 			ReceiptHandle     string `json:"ReceiptHandle"`
 			VisibilityTimeout int    `json:"VisibilityTimeout"`
 		}
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, sqsInvalidBody()
+		}
 		receiptHandle = input.ReceiptHandle
 		vis = input.VisibilityTimeout
 	} else {
@@ -1666,7 +1728,10 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 }
 
 func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	queueURL := sqsQueueURLFromRequest(req)
+	queueURL, refusal := sqsQueueURLFromRequest(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	q, err := p.loadQueue(context.Background(), queueURL)
 	if err != nil {
 		return nil, err
