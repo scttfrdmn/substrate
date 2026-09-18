@@ -274,18 +274,20 @@ func TestInvalidBodyAnswersThePublishedCode(t *testing.T) {
 	}
 }
 
-// TestLambdaInvalidBodyBelowAFunctionLookup covers the two Lambda guards that sit below a
-// function-existence check, which is why they are not in the table above.
+// TestLambdaInvalidBodyBelowAFunctionLookup covers Lambda's two parse guards, which used to sit below a
+// function-existence check and since #1006 sit above one.
 //
-// AddPermission calls loadFunction and TagResource calls findFunctionByARN before either reaches
-// json.Unmarshal, so on an empty server both answer ResourceNotFoundException at 404 and the guard is
+// AddPermission called loadFunction and TagResource called findFunctionByARN before either reached
+// json.Unmarshal, so on an empty server both answered ResourceNotFoundException at 404 and the guard was
 // unreachable — and a site that cannot be reached is a site whose code goes unchecked. Both answered
 // ValidationException before #950, a code Lambda publishes on neither page.
 //
-// Which answer AWS gives for a malformed body naming a function that does not exist is unverified: no
-// Lambda page states the precedence, and it is not observable from the published Errors sections, which
-// list both codes without ordering them. This test asserts the code the guard answers once reached, not
-// that the guard runs first, so it holds whichever way that question is later settled.
+// Which answer AWS gives is still unverified: no Lambda page states the precedence, the published Errors
+// sections list both codes without ordering them, and substrate vendors no Smithy model to read it off.
+// The absent-function subtests below therefore pin *substrate's stated reading* — a request whose shape
+// is wrong is refused without consulting state — rather than a published fact, and the comment on
+// addPermission is where that reading is argued. The two cases with a function in place are the
+// published half, and hold whichever way the precedence is later settled.
 func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 	const host = "lambda.us-east-1.amazonaws.com"
 	ts := emulator.StartTestServer(t)
@@ -332,6 +334,39 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, status, "AddPermission answers 400")
 		assert.Contains(t, message, "StatementId is required", "the message names the member")
 		assertNoDecoderText(t, "AddPermission/memberComplaint", message)
+	})
+
+	// #1006's own assertion: the same two bodies, naming a function that does not exist. Before the
+	// reorder each answered ResourceNotFoundException/404, so a caller debugging a malformed request was
+	// told its function was missing. The absent ARN is derived from the created one by substituting the
+	// name, so account and Region cannot differ — a hand-built ARN that dispatched nowhere would answer
+	// 404 for the wrong reason and pass this test while proving nothing.
+	absentARN := strings.TrimSuffix(arn, "guarded-fn") + "absent-fn"
+	require.NotEqual(t, arn, absentARN, "the absent ARN differs from the created one only in its name")
+
+	for _, tc := range []invalidBodyCase{
+		{op: "AddPermission", path: "/2015-03-31/functions/absent-fn/policy"},
+		{op: "TagResource", path: "/2015-03-31/tags/" + absentARN},
+	} {
+		t.Run(tc.op+"/absentFunction", func(t *testing.T) {
+			status, code, message := rawUnsignedCall(t, ts, host, "", tc.path, []byte(invalidBodyPayload))
+			assert.Equalf(t, "InvalidParameterValueException", code,
+				"%s refuses a body that will not parse without consulting state (#1006)", tc.op)
+			assert.Equalf(t, http.StatusBadRequest, status,
+				"%s answers 400, not the 404 it answered before the reorder", tc.op)
+			assertNoDecoderText(t, tc.op+"/absentFunction", message)
+		})
+	}
+
+	// A parsable body naming an absent function must still be a 404: the reorder moved the lookup, it did
+	// not remove it. Without this, deleting the lookup outright would leave every assertion above green.
+	t.Run("AddPermission/absentFunctionStillNotFound", func(t *testing.T) {
+		status, code, _ := rawUnsignedCall(t, ts, host, "",
+			"/2015-03-31/functions/absent-fn/policy",
+			[]byte(`{"StatementId":"s1","Action":"lambda:InvokeFunction","Principal":"s3.amazonaws.com"}`))
+		assert.Equal(t, "ResourceNotFoundException", code,
+			"a well-formed request for a function that does not exist is still a 404")
+		assert.Equal(t, http.StatusNotFound, status, "AddPermission answers 404 past its parse guard")
 	})
 }
 

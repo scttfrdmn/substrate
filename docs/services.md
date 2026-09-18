@@ -469,23 +469,48 @@ the assertion that matters is that no site was missed.
 plus **35 member-complaint sites in nine** (below), and `emulator/invalid_body_code_test.go` the
 Step Functions and Systems Manager sites #1003 fixed.
 
-Two of the 66 needed a resource to exist first, which is worth recording because it is the one
+Two of the 66 needed a resource to exist first, which was worth recording because it is the one
 way a guard can be present, correct and still untested. Lambda's `AddPermission` and
-`TagResource` look up the function **before** they parse the body, so on an empty emulator both
-answer `ResourceNotFoundException`/404 and never reach the guard at all. The two sites are
-therefore only reachable with a function in place, and a test that did not create one would
-have reported success while asserting nothing.
+`TagResource` looked up the function **before** they parsed the body, so on an empty emulator
+both answered `ResourceNotFoundException`/404 and never reached the guard at all. The two sites
+were therefore only reachable with a function in place, and a test that did not create one
+would have reported success while asserting nothing.
 
-**Which of the two answers AWS gives is unverified**, and the ordering is left as it stands
-rather than changed on a guess. A case is available either way: a caller naming a function that
-does not exist arguably wants to hear that rather than that their JSON is malformed, while a
-REST-JSON frontend that deserializes a request before dispatching it would refuse the body
-first and never reach the lookup. No Lambda page states the precedence, and it is not
-observable from the published Errors sections, both of which list the two codes without
-ordering them. Filed as [#1006](https://github.com/scttfrdmn/substrate/issues/1006) rather
-than settled here, because #950's rule is about *which code* a guard answers, not about which
-guard runs first — and if the body is refused first the pattern is not Lambda's alone, so it is
-an inventory rather than two moved lines.
+### Whether a body is parsed before the resource is looked up
+
+[#1006](https://github.com/scttfrdmn/substrate/issues/1006) settled this for Lambda's two sites
+and, deliberately, for nothing else. **Lambda now parses first**: `AddPermission` and
+`TagResource` refuse an unparseable body with `InvalidParameterValueException`/400 whether or
+not the function exists, and a *well-formed* request for an absent function is still a 404, so
+the lookup moved rather than went away. `AddPermission`'s required-member check moved with the
+parse guard, because a body that will not parse and a body with no `StatementId` are both
+mistakes visible in the request alone, and answering 404 for one and 400 for the other on the
+same request is exactly the one-plugin-two-codes inconsistency #950 corrected.
+
+**Which answer AWS gives is unverified, and this is substrate's reading rather than a published
+fact.** No Lambda page states the precedence; both Errors sections list the two codes without
+ordering them; substrate vendors no Smithy model or SDK, so the wire order is not citable from
+this repository — which is why #1006's first acceptance criterion could not be met as written.
+The reading is that a request whose shape is wrong is wrong whatever state exists, so it is
+refused without consulting state. The case for the other order is real and is why this is
+recorded rather than asserted: a caller naming a function that does not exist arguably wants to
+hear that first.
+
+**The tree does not follow one convention, and this release does not impose one.** Lookup-first
+handlers remain elsewhere — AppSync's updates and creates, Backup's `UpdateBackupPlan` and
+`CreateBackupSelection`, and Lambda's own `UpdateFunctionCode`, `UpdateFunctionConfiguration`,
+`PutFunctionEventInvokeConfig` and `UpdateEventSourceMapping` among them — and the opposite
+order is *documented with its own reasoning* where the question arises in its cursor form:
+`ListObjectsV2` states that "the bucket-existence 404 above keeps precedence over this refusal …
+the bucket is the resource the request addresses" (see *A cursor substrate did not issue*). A
+tree-wide flip would therefore overrule stated reasoning rather than fill a gap, so it is out of
+scope here and is deliberately not filed: the honest position is that substrate holds two
+orders, each argued where it applies, and that AWS's own documentation is what leaves the
+question open. A single shared hook is also the wrong shape for it — `Server.handleAWSRequest`
+is one of three entry points (`StackDeployer.dispatch` and `Server.stateAtSequence` bypass the
+gates), and it would need a per-service code table that does not exist. The two sites #1006
+moved are the ones where the old order made a guard **unreachable**, which is a coverage fact
+rather than a fidelity opinion, and that is the whole of what it settles.
 
 **The member-complaint half of the inventory is covered the same way**, in
 `TestMemberComplaintAnswersThePublishedCode` — every site in the *"+ N member"* column above,

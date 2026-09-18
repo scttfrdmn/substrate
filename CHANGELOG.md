@@ -719,6 +719,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fold to remove, and it is filed separately. `docs/services.md` carries the whole-tree inventory,
   replacing the note that these guards cannot be reached.
 
+- **Lambda's `AddPermission` and `TagResource` refuse a body that will not parse without consulting
+  state, so a malformed request naming a function that does not exist answers 400 rather than 404**
+  (#1006). Both handlers looked the function up first, which left the parse guard **unreachable on an
+  empty emulator**: #950 corrected the code those guards answer, and nothing could observe the
+  correction until a function existed. A consumer debugging a malformed `AddPermission` body was told
+  its function was missing, which is a different bug to go looking for. `AddPermission`'s
+  required-member check moved with the parse guard, because a body that will not parse and a body with
+  no `StatementId` are both mistakes visible in the request alone, and answering 404 for one and 400 for
+  the other on the same request is the one-plugin-two-codes inconsistency #950 exists to remove. The
+  lookup moved rather than went away — a *well-formed* request for an absent function is still
+  `ResourceNotFoundException`/404, and a test asserts it, so deleting the lookup outright cannot pass.
+
+  **This is substrate's reading, not a published fact, and it is scoped to these two sites.** No Lambda
+  page states the precedence, both Errors sections list `ResourceNotFoundException` and
+  `InvalidParameterValueException` without ordering them, and substrate vendors no Smithy model or SDK —
+  so #1006's first acceptance criterion, which asked for AWS's precedence cited from the repository,
+  cannot be met as written, and that is recorded rather than quietly skipped. The reading is that a
+  request whose shape is wrong is wrong whatever state exists, so it is refused without consulting
+  state. The case for the other order is real: a caller naming a function that does not exist arguably
+  wants to hear that first.
+
+  **The tree-wide flip is deliberately not filed.** Lookup-first handlers remain in AppSync, Backup and
+  Lambda's own update operations, and where the same precedence question arises in its cursor form S3
+  documents the *opposite* answer with its reasoning — `ListObjectsV2`'s "the bucket-existence 404 above
+  keeps precedence over this refusal … the bucket is the resource the request addresses". Flipping the
+  tree would overrule stated reasoning rather than fill a gap, and a shared hook is the wrong shape for
+  it besides: `Server.handleAWSRequest` is one of three entry points, and `StackDeployer.dispatch` and
+  `Server.stateAtSequence` bypass the gates. What #1006 settles is the two sites where the old order made
+  a guard unreachable, which is a coverage fact rather than a fidelity opinion. `docs/services.md`
+  replaces its "the ordering is left as it stands" note with the split stated as a split.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

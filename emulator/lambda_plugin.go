@@ -730,12 +730,20 @@ func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {
 	}, nil
 }
 
+// addPermission adds a statement to a function's resource policy.
+//
+// The body is parsed and its required member checked **before** the function is looked up (#1006).
+// Both orders have a case — a caller naming a function that does not exist arguably wants to hear
+// that rather than that its JSON will not parse — and no Lambda page states the precedence: both
+// Errors sections list `ResourceNotFoundException` and `InvalidParameterValueException` without
+// ordering them, and substrate vendors no Smithy model to read the answer off. Substrate's reading is
+// that a request whose shape is wrong is wrong whatever state exists, so it is refused without
+// consulting state. That is also the only order answering one code per class of caller error: a body
+// that will not parse and a body with no `StatementId` are both mistakes visible in the request
+// alone, and answering 404 for one and 400 for the other on the same request would be the
+// inconsistency #950 corrected elsewhere. This is Lambda's two sites only — `docs/services.md`
+// records the convention split across the rest of the tree, which this does not settle.
 func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
-	if err != nil {
-		return nil, err
-	}
-
 	var body struct {
 		StatementID      string `json:"StatementId"`
 		Action           string `json:"Action"`
@@ -750,6 +758,11 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 	}
 	if body.StatementID == "" {
 		return nil, lambdaInvalidParameterValue("StatementId is required")
+	}
+
+	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+	if err != nil {
+		return nil, err
 	}
 
 	// Load existing policy or create new one.
@@ -915,16 +928,21 @@ func (p *LambdaPlugin) findFunctionByARN(arn string) (*LambdaFunction, error) {
 	return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Function not found: " + arn, HTTPStatus: http.StatusNotFound}
 }
 
+// tagResource merges a tag set onto a function.
+//
+// The body is parsed before the function is looked up, for the reasons given on addPermission above: a
+// body that will not parse names nothing, so there is nothing for a lookup to be about.
 func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
-	fn, err := p.findFunctionByARN(arn)
-	if err != nil {
-		return nil, err
-	}
 	var body struct {
 		Tags map[string]string `json:"Tags"`
 	}
 	if unmarshalErr := json.Unmarshal(req.Body, &body); unmarshalErr != nil {
 		return nil, lambdaInvalidBody()
+	}
+
+	fn, err := p.findFunctionByARN(arn)
+	if err != nil {
+		return nil, err
 	}
 	fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), len(body.Tags))
 	if fn.Tags == nil {
