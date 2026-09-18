@@ -12,6 +12,7 @@ package emulator_test
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -187,42 +188,80 @@ func TestEC2_AcceleratedCatalog_ReportsTheGuidesSpecs(t *testing.T) {
 	}
 }
 
-// TestEC2_AcceleratedCatalog_InferentiaAndTrainiumReportNoGpuInfo asserts that the four
-// families whose accelerators AWS carries outside gpuInfo render no gpuInfo element.
+// TestEC2_AcceleratedCatalog_InferentiaAndTrainiumReportNeuronInfo asserts that all twelve
+// Inferentia and Trainium types report their accelerator count through neuronInfo and none
+// of them through gpuInfo (#1029).
 //
-// This is #234's reading for inf1 — "real EC2 does not report [Inferentia] through gpuInfo" —
-// carried to inf2, trn1 and trn2. InstanceTypeInfo splits accelerators across gpuInfo,
-// inferenceAcceleratorInfo and neuronInfo, and substrate models the first only; neither of
-// the other two members' reference pages says which family populates which, so reporting a
-// count under gpuInfo would be putting a real number in a member AWS does not put it in.
+// #234's reading — "real EC2 does not report [Inferentia] through gpuInfo" — still holds and
+// is the first half of this. Its second half, that the count therefore reaches no member at
+// all, does not follow: InstanceTypeInfo splits accelerators across five members, and AWS's
+// own note on API_InferenceAcceleratorInfo ("Amazon Elastic Inference is no longer
+// available") leaves neuronInfo as the live member for a device the Neuron SDK drives. So a
+// count substrate already held, and dropped at catalog-build time, is now reported where AWS
+// reports it.
 //
-// The assertion is on raw bytes because a decoder cannot tell an absent gpuInfo from one
-// carrying a zero count, and zero is what the wrong fix would produce.
-func TestEC2_AcceleratedCatalog_InferentiaAndTrainiumReportNoGpuInfo(t *testing.T) {
+// Both halves are asserted per type: the count through a decoder, and gpuInfo's absence on
+// raw bytes, because a decoder cannot tell an absent gpuInfo from one carrying a zero count
+// and zero is exactly what the wrong fix produces. The counts are the guide's own and three
+// of them are the non-obvious ones — inf1.24xlarge 16 where inf2.48xlarge is 12, and inf2's
+// 1, 1, 6, 12 ladder.
+func TestEC2_AcceleratedCatalog_InferentiaAndTrainiumReportNeuronInfo(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	for _, name := range []string{
-		"inf1.xlarge", "inf1.24xlarge",
-		"inf2.xlarge", "inf2.24xlarge", "inf2.48xlarge",
-		"trn1.2xlarge", "trn1.32xlarge",
-		"trn2.3xlarge", "trn2.48xlarge",
+	for _, tc := range []struct {
+		name    string
+		devices int
+	}{
+		{"inf1.xlarge", 1}, {"inf1.2xlarge", 1}, {"inf1.6xlarge", 4}, {"inf1.24xlarge", 16},
+		{"inf2.xlarge", 1}, {"inf2.8xlarge", 1}, {"inf2.24xlarge", 6}, {"inf2.48xlarge", 12},
+		{"trn1.2xlarge", 1}, {"trn1.32xlarge", 16},
+		{"trn2.3xlarge", 1}, {"trn2.48xlarge", 16},
 	} {
-		t.Run(name, func(t *testing.T) {
-			body := ec2DescribeBody(t, ts, map[string]string{
-				"Action": "DescribeInstanceTypes", "InstanceType.1": name,
-			})
-			assert.Contains(t, body, "<instanceType>"+name+"</instanceType>")
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]string{
+				"Action": "DescribeInstanceTypes", "InstanceType.1": tc.name,
+			}
+			var doc struct {
+				XMLName xml.Name `xml:"DescribeInstanceTypesResponse"`
+				Items   []struct {
+					InstanceType  string `xml:"instanceType"`
+					NeuronDevices int    `xml:"neuronInfo>neuronDevices>item>count"`
+				} `xml:"instanceTypeSet>item"`
+			}
+			ec2DescribeXML(t, ts, params, &doc)
+			require.Len(t, doc.Items, 1)
+			assert.Equal(t, tc.name, doc.Items[0].InstanceType)
+			assert.Equal(t, tc.devices, doc.Items[0].NeuronDevices)
+
+			body := ec2DescribeBody(t, ts, params)
 			assert.NotContains(t, body, "gpuInfo")
+			// The whole element, open tag to close: count is the only child, so this is
+			// also the assertion that name, coreInfo, memoryInfo and
+			// totalNeuronDeviceMemoryInMiB are omitted rather than invented. AWS
+			// publishes not one valid value or example between the four of them.
+			assert.Contains(t, body, fmt.Sprintf(
+				"<neuronInfo><neuronDevices><item><count>%d</count></item>"+
+					"</neuronDevices></neuronInfo>", tc.devices))
 		})
 	}
 
-	// The control: a NVIDIA family in the same catalog does carry it, so the assertion above
-	// is about these families rather than about gpuInfo never being rendered.
+	// The control, in both directions: a NVIDIA family in the same catalog reports gpuInfo
+	// and no neuronInfo, so neither assertion above is about the element never being
+	// rendered at all.
 	body := ec2DescribeBody(t, ts, map[string]string{
 		"Action": "DescribeInstanceTypes", "InstanceType.1": "g6.xlarge",
 	})
 	assert.Contains(t, body, "gpuInfo")
+	assert.NotContains(t, body, "neuronInfo")
+
+	// And a non-accelerated type reports neither, which is what makes the two members a
+	// property of the family rather than of the response shape.
+	body = ec2DescribeBody(t, ts, map[string]string{
+		"Action": "DescribeInstanceTypes", "InstanceType.1": "c5.xlarge",
+	})
+	assert.NotContains(t, body, "gpuInfo")
+	assert.NotContains(t, body, "neuronInfo")
 }
 
 // TestEC2_AcceleratedCatalog_SpotPriceIsAFixedRatePerGiB asserts the calibration rule the

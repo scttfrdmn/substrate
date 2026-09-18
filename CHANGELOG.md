@@ -8,6 +8,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **The twelve Inferentia and Trainium instance types report their accelerator count through
+  `neuronInfo`** (#1029). `DescribeInstanceTypes` already held a count for every one of them — `inf1`,
+  `inf2`, `trn1` and `trn2`, twelve types whose counts are the accelerated-computing guide's own,
+  including the non-obvious `inf1.24xlarge` 16 above `inf2.48xlarge`'s 12 and `inf2`'s 1, 1, 6, 12
+  ladder — and threw it away when the catalog was built, so a caller sizing a Neuron workload read
+  nothing at all. The count now reaches `neuronInfo>neuronDevices>item>count`, where an NVIDIA family
+  reaches `gpuInfo>gpus>item>count` and a non-accelerated type reaches neither.
+
+  **This reverses half of #234's reading, and only half.** Its first half — that real EC2 does not
+  report an Inferentia device through `gpuInfo` — is still true and is still asserted: none of the
+  twelve renders a `gpuInfo` element, and asserting that on raw bytes rather than through a decoder is
+  the point, because a decoder cannot tell an absent `gpuInfo` from one carrying a zero count and zero
+  is exactly what the wrong fix produces. Its second half — that the count therefore reaches no member
+  at all — does not follow. `InstanceTypeInfo` splits accelerators across five members, and
+  `API_InferenceAcceleratorInfo` carries *"Amazon Elastic Inference is no longer available"*, which
+  removes the only other candidate and leaves `neuronInfo` as the live member for a device the Neuron
+  SDK drives. Dropping a count substrate already had is the larger invention of the two.
+
+  **Only `count` is reported, and that is the substance of the change rather than a shortcut.**
+  `NeuronDeviceInfo` publishes `count`, `name`, `coreInfo` and `memoryInfo`, and `NeuronInfo` publishes
+  `totalNeuronDeviceMemoryInMiB`; every one is `Required: No`, and **not one of the four besides
+  `count` carries a valid-values list or an example**, so there is nothing to source a device name or
+  either memory figure from. They are omitted, per #1013's rule, and the test asserts the entire
+  `<neuronInfo>…</neuronInfo>` element as one string precisely so that the omission is pinned on the
+  wire: a later commit that invents a `name` fails rather than passes.
+
+  The catalog's family table carried a `ReportedAsGPU bool`, which is now a member enum whose values are
+  the wire member names. A boolean has no way to say *neither*, so an FPGA or media-accelerator family
+  added later would have defaulted into `neuronInfo` silently; the enum's zero value reports the count
+  nowhere, which is what a family whose member substrate does not model must do. `inferenceAcceleratorInfo`,
+  `fpgaInfo` and `mediaAcceleratorInfo` stay unmodelled — no catalog family sits behind them.
 - **The Price List corpus is seedable, so a rate substrate does not bundle can be tested** (#1033).
   `POST`/`DELETE /v1/pricing/offers` takes one offer document in the shape `GetProducts` serves it, and
   a seeded SKU participates in `GetProducts` filtering and paging, `DescribeServices` and
