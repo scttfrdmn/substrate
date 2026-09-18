@@ -10408,13 +10408,15 @@ re-seeding, exactly as the account default's does above.
 ### Which failure gets which error code
 
 A `FailedResourcesMap` entry carries one of the two codes `FailureInfo`
-enumerates, split three ways:
+enumerates, split three ways, plus one case that carries the owning service's own
+code:
 
 | Case | Code | Status |
 |------|------|--------|
 | A well-formed ARN naming a resource type substrate cannot key | `InternalServiceException` | 500 |
 | A well-formed ARN of a type substrate keys, naming a resource that does not exist | `InvalidParameterException` | 400 |
 | Not an ARN: no `arn:` prefix, or fewer than six colon-separated segments | `InvalidParameterException` | 400 |
+| The merge would leave the resource over its owning service's published per-resource tag quota | that service's own code | that service's own status |
 
 `FailureInfo` documents `InternalServiceException` as covering "the resource type
 in the request is not supported by the Resource Groups Tagging API", and tells the
@@ -10443,9 +10445,13 @@ AWS publishes a contradiction about this field, recorded here rather than resolv
 `FailureInfo.ErrorCode` carries "Valid Values: `InternalServiceException` |
 `InvalidParameterException`", while the same member's prose says it "can also
 include any valid error code returned by the AWS service that hosts the resource
-that the ARN key represents" and offers `AccessDeniedException` as an example.
-Substrate reports only the two enumerated codes, because the enumeration is the
-part a caller can switch on.
+that the ARN key represents" and offers `AccessDeniedException` — which is in neither
+enumerated value — as its example. Substrate reads the enumeration for every failure
+it can express that way, because the enumeration is the part a caller can switch on,
+and the prose for the one it cannot: a quota refusal (the table's fourth row). Neither
+enumerated code says "this resource is full", so reporting one would leave the caller
+to retry a request that can only fail again, which is the same reasoning that moved
+the "does not exist" case off `InternalServiceException` in #939.
 
 Substrate does **not** distinguish "AWS's tagging API does not support this type"
 from "AWS supports it and substrate has no arm yet". AWS publishes no list that
@@ -10468,6 +10474,56 @@ permission for the type. Substrate authorizes the tagging action alone.
 An `ErrorMessage` never carries a state key. The detail naming the offending
 resource portion goes to the log instead, because a state-key layout is
 substrate's internal business and not something an API response should publish.
+
+### A tag quota belongs to the service that owns the resource
+
+`API_TagResources` states the rule itself — *"Each resource can have up to 50
+tags"* — and four of the twenty-three namespace arms enforce a per-resource quota on
+their **own** tagging operations: EC2, ELBv2, IAM and Kinesis, all four at 50. Until
+[#1000](https://github.com/scttfrdmn/substrate/issues/1000) the shared merge consulted
+none of them, so `TagResources` was the one way in substrate to put a resource over its
+own service's quota — after which that service's own tagging operation refused every
+further add, leaving a resource in a state substrate's own reference says cannot exist,
+reached through substrate's own API. Two earlier statements in this file and in
+`CHANGELOG.md` claimed Kinesis was the first quota of any service and that the merge
+covered sixteen arms; both were wrong when written and are corrected with that issue.
+
+**Each service's own checker is called rather than a shared count, because the four
+disagree in ways a shared count would have to flatten:**
+
+| Service | Code | Status | Reserved `aws:` keys |
+|---------|------|--------|----------------------|
+| EC2 | `TagLimitExceeded` | 400 | Excluded from the count |
+| ELBv2 | `TooManyTags` | 400 | Excluded from the count |
+| IAM | `LimitExceeded` | **409** | Counted |
+| Kinesis | `LimitExceededException` | 400 | Counted |
+
+The reserved-key column is what each service publishes, not a choice: EC2's and ELB's
+restrictions state that *"[t]ags with the aws: prefix do not count against your tags
+per resource limit"* and no IAM or Kinesis page says anything of the kind. It is
+unobservable through this API either way — a reserved key is refused upstream, so only
+the CloudFormation deployer's stamp can write one — and it is recorded rather than
+unified because unifying it would mean overruling one of the four pages.
+
+The count is over the **post-merge key set**, so rewriting the value of a key a
+resource already carries succeeds at the quota where adding a new key is refused, and
+`UntagResources` is never checked at all: a removal only shrinks the key set, so it
+cannot exceed a quota, and the slot it frees is usable. That also keeps a resource
+written over a quota before #1000 reportable and removable rather than untouchable.
+
+A refusal writes **nothing** — the check runs before the merge, per #965 — and it is
+one entry in the `FailedResourcesMap`, so the other ARNs in the same request are tagged.
+
+The nineteen remaining arms publish no quota substrate models, and this path does not
+invent one for them. SQS is the case in point: `API_TagQueue` states a 50-tag limit in
+its own prose, but `TagQueue` does not enforce it either, and enforcing it here alone
+would make substrate's two tagging APIs disagree in the opposite direction from the
+defect being fixed. The two CloudFormation writers that share this merge do not enforce
+the quota either — the stamp writes only `aws:`-prefixed keys, which two of the four
+services exclude by their own statement, and nothing AWS publishes says what
+CloudFormation does when propagating a stack's tags would exceed a resource's quota. That gap is filed
+as [#1077](https://github.com/scttfrdmn/substrate/issues/1077) rather than guessed at: the two candidate
+behaviours are a failed deploy and a resource over quota, and choosing between them needs a source.
 
 ### Cost
 
@@ -13809,12 +13865,16 @@ the specified tag keys"* — so re-tagging a stream that is already at the quota
 carries is a rewrite and succeeds, and `RemoveTagsFromStream` frees slots for a later add. A refused
 request writes **nothing**, not even the tags that would have fit.
 
-**The Resource Groups Tagging API does not enforce this quota.** `TagResources` merges tags for sixteen
-services through one helper, and refusing there needs the per-resource `FailedResourcesMap` semantics
-that operation publishes; substrate models no tag quota for any other service either. So a caller can
-still push a stream past fifty tags through `TagResources` —
-[#1000](https://github.com/scttfrdmn/substrate/issues/1000) — after which `AddTagsToStream` refuses
-every further add, which is the right answer for a stream over quota however it got there.
+**The Resource Groups Tagging API enforces this same quota**, under this same code, since
+[#1000](https://github.com/scttfrdmn/substrate/issues/1000). It did not until then: `TagResources`
+merges tags for twenty-three services through one helper that consulted no quota at all, so a caller
+could push a stream past fifty tags through it and `AddTagsToStream` would then refuse every further
+add — the right answer for a stream over quota however it got there, but reached through substrate's
+own API. That issue also corrects two claims first published here: Kinesis was **not** substrate's
+first per-resource tag quota (EC2, ELBv2 and IAM each enforced one already, and all three are reachable
+through the tagging API), and the merge covers twenty-three arms rather than sixteen. See
+[A tag quota belongs to the service that owns the resource](#a-tag-quota-belongs-to-the-service-that-owns-the-resource)
+for the four services' codes, which differ.
 
 ### Shard-level metrics, and the ALL wildcard
 

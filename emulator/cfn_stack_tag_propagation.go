@@ -126,8 +126,11 @@ func cfnPropagateRecordStackTags(
 	if len(write) == 0 && len(remove) == 0 {
 		return true, nil
 	}
+	// skipTagQuota: these are the caller's own stack tags, so a quota could legitimately refuse them,
+	// but nothing published says what CloudFormation does when propagation would exceed a resource's
+	// quota — see [taggingCheckTagQuota] for why that is filed (#1077) rather than guessed (#1000).
 	if err := mergeResourceTags(
-		context.Background(), state, target.namespace, target.stateKey, write, remove,
+		context.Background(), state, target.namespace, target.stateKey, write, remove, skipTagQuota,
 	); err != nil {
 		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
 	}

@@ -1546,13 +1546,27 @@ func (p *TaggingPlugin) tagResolveFailure(arn string, err error) failedResources
 // retry a request that could only fail again, and left "substrate cannot tag this type" and "this
 // resource does not exist" indistinguishable.
 //
-// AWS publishes a contradiction about this field that substrate records rather than resolves:
-// FailureInfo's ErrorCode carries "Valid Values: InternalServiceException |
-// InvalidParameterException" while the same member's prose says it "can also include any valid
-// error code returned by the AWS service that hosts the resource that the ARN key represents",
-// offering AccessDeniedException as an example. Substrate reports only the two enumerated codes,
-// because the enumeration is the part a caller can switch on.
+// AWS publishes a contradiction about this field: FailureInfo's ErrorCode carries "Valid Values:
+// InternalServiceException | InvalidParameterException" while the same member's prose says it "can
+// also include any valid error code returned by the AWS service that hosts the resource that the ARN
+// key represents", offering AccessDeniedException — which is neither of the two — as its example.
+// Substrate reads the enumeration for every failure it can express that way, because the enumeration
+// is the part a caller can switch on, and the prose for the one it cannot: a per-resource tag quota
+// (#1000). Neither enumerated code says "this resource is at its tag limit", and the four services
+// that publish a quota publish four different codes at two different statuses, so reporting the
+// owning service's own is the only answer that tells a caller what happened and matches what its own
+// tagging operation would have said.
 func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesInfo {
+	var quota *taggingQuotaError
+	if errors.As(err, &quota) {
+		p.logger.Warn("tagging API refused a merge that would exceed a service's tag quota",
+			"arn", arn, "code", quota.awsErr.Code, "error", err)
+		return failedResourcesInfo{
+			ErrorCode:    quota.awsErr.Code,
+			ErrorMessage: quota.awsErr.Message,
+			StatusCode:   quota.awsErr.HTTPStatus,
+		}
+	}
 	if errors.Is(err, errTagResourceNotFound) {
 		p.logger.Warn("tagging API found no resource at the ARN", "arn", arn, "error", err)
 		return failedResourcesInfo{
@@ -1962,8 +1976,12 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 //
 // A thin wrapper over [mergeResourceTags], which holds the behavior so the tagging plugin
 // and the CloudFormation deployer cannot drift into two merge semantics.
+//
+// This is the path that enforces the owning service's published per-resource tag quota, where the
+// deployer's stamp does not; see the comment on [taggingCheckTagQuota] for why the two differ
+// (#1000).
 func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags map[string]string, removeKeys []string) error {
-	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys)
+	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
 }
 
 // errTagResourceNotFound reports that ns/key addressed no record, so there was nothing for a tag
@@ -1994,9 +2012,13 @@ var errTagResourceNotFound = errors.New("no resource at the resolved state key")
 // ([cfnStampResourceTags], [cfnPropagateRecordStackTags]), so for those the arms are the only
 // thing between a stamp aimed at an unhandled namespace and a silent success — the defect
 // class #845 exists to remove, not to relocate.
+// quota says whether the owning service's published per-resource tag quota is enforced. It is a
+// parameter rather than always-on because the CloudFormation stamp path writes `aws:`-prefixed keys,
+// which the services that publish a quota either exclude from the count or never receive from a
+// caller at all; [taggingCheckTagQuota] records the reasoning (#1000).
 func mergeResourceTags(
 	goCtx context.Context, state StateManager, ns, key string,
-	addTags map[string]string, removeKeys []string,
+	addTags map[string]string, removeKeys []string, quota tagQuotaMode,
 ) error {
 	raw, err := state.Get(goCtx, ns, key)
 	if err != nil {
@@ -2004,6 +2026,14 @@ func mergeResourceTags(
 	}
 	if raw == nil {
 		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, ns, key)
+	}
+
+	// Before the switch, so a refused request writes nothing — the rule #965 established for the
+	// service-side quotas this reuses.
+	if quota == enforceTagQuota {
+		if quotaErr := taggingCheckTagQuota(ns, key, raw, addTags, removeKeys); quotaErr != nil {
+			return quotaErr
+		}
 	}
 
 	switch ns {

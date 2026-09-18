@@ -166,10 +166,25 @@ func iamReservedTagError(what, value string) *AWSResponse {
 //
 // The status is 409, as the operations document it — which differs from EC2's 400 for the
 // equivalent refusal, and is the reason IAM cannot reuse EC2's constructor.
+//
+// Built from [iamTagLimitAWSError] rather than alongside it so the code, message and status are
+// written once: the Resource Groups Tagging API reports this same refusal through an *AWSError inside
+// a FailureInfo, where every IAM handler reports it as a rendered *AWSResponse (#1000).
 func iamTagLimitError(count int) *AWSResponse {
-	return iamErrorResponse("LimitExceeded", fmt.Sprintf(
-		"Cannot exceed %d tags on an IAM resource; the request would leave %d.",
-		iamMaxTagsPerResource, count), http.StatusConflict)
+	awsErr := iamTagLimitAWSError(count)
+	return iamErrorResponse(awsErr.Code, awsErr.Message, awsErr.HTTPStatus)
+}
+
+// iamTagLimitAWSError returns the LimitExceeded an over-limit tag set answers, in the [AWSError]
+// shape a caller outside the IAM plugin needs. See [iamTagLimitError] for the 409.
+func iamTagLimitAWSError(count int) *AWSError {
+	return &AWSError{
+		Code: "LimitExceeded",
+		Message: fmt.Sprintf(
+			"Cannot exceed %d tags on an IAM resource; the request would leave %d.",
+			iamMaxTagsPerResource, count),
+		HTTPStatus: http.StatusConflict,
+	}
 }
 
 // iamValidateTagSet returns the response to answer with when any tag in tags is illegal, or nil
@@ -307,6 +322,16 @@ func iamCreateTagSet(tags []IAMTag, caseRule iamTagCase) ([]IAMTag, *AWSResponse
 func iamCheckTagLimit(merged []IAMTag) *AWSResponse {
 	if len(merged) > iamMaxTagsPerResource {
 		return iamTagLimitError(len(merged))
+	}
+	return nil
+}
+
+// iamCheckTagLimitAWSError is [iamCheckTagLimit] in the [AWSError] shape, for the Resource Groups
+// Tagging API's merge path, which reports a refusal inside a FailureInfo rather than as a response
+// body (#1000). Same argument, same threshold, same count.
+func iamCheckTagLimitAWSError(merged []IAMTag) *AWSError {
+	if len(merged) > iamMaxTagsPerResource {
+		return iamTagLimitAWSError(len(merged))
 	}
 	return nil
 }
