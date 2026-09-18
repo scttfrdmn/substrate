@@ -1643,7 +1643,7 @@ func (p *EC2Plugin) describeVPCs(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "VpcId", vpcIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -1789,7 +1789,7 @@ func (p *EC2Plugin) describeSubnets(reqCtx *RequestContext, req *AWSRequest) (*A
 	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "SubnetId", subnetIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -1940,7 +1940,7 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "GroupId", groupIDs); awsErr != nil {
 		return nil, awsErr
 	}
-	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults)
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -2225,8 +2225,29 @@ func ec2InternetGatewayXML(igw EC2InternetGateway) ec2InternetGatewayItem {
 	return item
 }
 
+// describeInternetGateways reports the internet gateways the account holds in the region, narrowed
+// by InternetGatewayId.N and by the filters [ec2InternetGatewayFilterSpec] evaluates, one page at a
+// time.
+//
+// It paginates as of #1024: API_DescribeInternetGateways publishes MaxResults with "Valid Range:
+// Minimum value of 5. Maximum value of 1000." and NextToken, and substrate implemented neither. The
+// rules are the shared ones — [ec2MaxResults], [ec2NextTokenOffset], [ec2Page] and
+// [ec2RefuseIDsWithMaxResults] — and the pagination parameters are read first, so a refusal cannot
+// depend on how many gateways the account holds (#887's ordering).
 func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "InternetGatewayId"), ec2InternetGatewayIDKind)
+	igwIDs := extractIndexedParams(req.Params, "InternetGatewayId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "InternetGatewayId", igwIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(igwIDs, ec2InternetGatewayIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -2239,9 +2260,10 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("ec2 describeInternetGateways: %w", err)
 	}
 	type response struct {
-		XMLName xml.Name                 `xml:"DescribeInternetGatewaysResponse"`
-		XMLNS   string                   `xml:"xmlns,attr"`
-		IGWs    []ec2InternetGatewayItem `xml:"internetGatewaySet>item"`
+		XMLName   xml.Name                 `xml:"DescribeInternetGatewaysResponse"`
+		XMLNS     string                   `xml:"xmlns,attr"`
+		IGWs      []ec2InternetGatewayItem `xml:"internetGatewaySet>item"`
+		NextToken string                   `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -2264,6 +2286,10 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	// Cut after the whole answer is assembled and after the ID list is resolved, for the reason
+	// [EC2Plugin.describeVPCs] records: an unresolved ID is an error about the request and must not
+	// depend on which page the walk is on.
+	resp.IGWs, resp.NextToken = ec2Page(resp.IGWs, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -2415,8 +2441,28 @@ func routeTableHasSubnet(rtb EC2RouteTable, subnetIDs []string) bool {
 	return false
 }
 
+// describeRouteTables reports the route tables the account holds in the region, narrowed by
+// RouteTableId.N and by the filters [ec2RouteTableFilterSpec] evaluates, one page at a time.
+//
+// It paginates as of #1024: API_DescribeRouteTables publishes MaxResults and NextToken and substrate
+// implemented neither. Its published range is "Minimum value of 5. Maximum value of 100." — a
+// **hundred**, not the thousand three sibling describes publish, so it takes
+// [ec2MaxPublishedMaxResults100]. Collapsing the two would be the borrowing #671 forbids, and it is
+// the reason MaxResults=1000 is refused here and accepted at DescribeNatGateways.
 func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := newEC2IDFilter(extractIndexedParams(req.Params, "RouteTableId"), ec2RouteTableIDKind)
+	rtbIDs := extractIndexedParams(req.Params, "RouteTableId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "RouteTableId", rtbIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults100)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	ids := newEC2IDFilter(rtbIDs, ec2RouteTableIDKind)
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
@@ -2448,6 +2494,7 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 		XMLName     xml.Name  `xml:"DescribeRouteTablesResponse"`
 		XMLNS       string    `xml:"xmlns,attr"`
 		RouteTables []rtbItem `xml:"routeTableSet>item"`
+		NextToken   string    `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -2483,6 +2530,7 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 	if err := ids.unresolved(); err != nil {
 		return nil, err
 	}
+	resp.RouteTables, resp.NextToken = ec2Page(resp.RouteTables, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -5659,8 +5707,27 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	})
 }
 
+// describeNatGateways reports the NAT gateways the account holds in the region, narrowed by
+// NatGatewayId.N and by the filters [ec2NatGatewayFilterSpec] evaluates, one page at a time.
+//
+// It paginates as of #1024: API_DescribeNatGateways publishes MaxResults with "Valid Range: Minimum
+// value of 5. Maximum value of 1000." and NextToken, and substrate implemented neither. The rules
+// are the shared ones, and the ceiling is the same thousand DescribeInternetGateways publishes
+// rather than the hundred DescribeRouteTables does.
 func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	filterIDs := newEC2IDFilter(extractIndexedParams(req.Params, "NatGatewayId"), ec2NatGatewayIDKind)
+	natIDs := extractIndexedParams(req.Params, "NatGatewayId")
+	if awsErr := ec2RefuseIDsWithMaxResults(req.Params, "NatGatewayId", natIDs); awsErr != nil {
+		return nil, awsErr
+	}
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	filterIDs := newEC2IDFilter(natIDs, ec2NatGatewayIDKind)
 	if err := filterIDs.validate(); err != nil {
 		return nil, err
 	}
@@ -5692,6 +5759,7 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 		XMLName     xml.Name  `xml:"DescribeNatGatewaysResponse"`
 		XMLNS       string    `xml:"xmlns,attr"`
 		NatGateways []natItem `xml:"natGatewaySet>item"`
+		NextToken   string    `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -5730,6 +5798,7 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 	if err := filterIDs.unresolved(); err != nil {
 		return nil, err
 	}
+	resp.NatGateways, resp.NextToken = ec2Page(resp.NatGateways, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -5841,7 +5910,29 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 //
 // InstanceType.N is honored, and unlike a filter it is an assertion that the types exist.
 // IncludeUnsupportedInRegion is not read; the catalog is the same in every region.
+//
+// It paginates as of #1024: API_DescribeInstanceTypes publishes MaxResults with "Valid Range:
+// Minimum value of 5. Maximum value of 100." and NextToken, and substrate read neither, so a caller
+// paging the catalog saw one page here and several in production. The hundred is this page's own,
+// shared only with DescribeRouteTables ([ec2MaxPublishedMaxResults100]).
+//
+// It gets **no** [ec2RefuseIDsWithMaxResults] call, for the reason
+// [EC2Plugin.describeSpotPriceHistory] gives at greater length: the service-wide prohibition is
+// published against "a list of IDs", and an instance type is not a resource ID. InstanceType.N is
+// the only candidate here and it is a stronger parameter than the spot-price one — it asserts the
+// types exist rather than filtering by them — but what it names are catalog members, not resources
+// the account holds, so refusing the combination would extend a published rule to a parameter it
+// does not name. The two are therefore read together, which
+// TestEC2_CatalogPagination_TheTypeSelectorAndMaxResultsCoexist pins.
 func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults100)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	requested := indexedParams(req.Params, "InstanceType.%d")
 	if err := ec2CheckInstanceTypesExist(requested); err != nil {
 		return nil, err
@@ -5883,6 +5974,7 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 		XMLName       xml.Name           `xml:"DescribeInstanceTypesResponse"`
 		XMLNS         string             `xml:"xmlns,attr"`
 		InstanceTypes []instanceTypeItem `xml:"instanceTypeSet>item"`
+		NextToken     string             `xml:"nextToken,omitempty"`
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
@@ -5908,6 +6000,10 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 		}
 		resp.InstanceTypes = append(resp.InstanceTypes, item)
 	}
+	// The offset is a position in the catalog slice, which is fixed order built once
+	// ([buildEC2InstanceTypeCatalog]) rather than StateManager.List's — so unlike every other
+	// converted describe, the same offset names the same type in a fresh account.
+	resp.InstanceTypes, resp.NextToken = ec2Page(resp.InstanceTypes, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
@@ -5927,7 +6023,27 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 // InvalidInstanceType. That is deliberately the opposite of DescribeInstanceTypes'
 // InstanceType.N; see [ec2CheckInstanceTypesExist] for why, and #485 for the real-AWS
 // diff of both.
+//
+// It paginates as of #1024: API_DescribeInstanceTypeOfferings publishes MaxResults with "Valid
+// Range: Minimum value of 5. Maximum value of 1000." and NextToken, and substrate read neither.
+// This is the one converted describe whose page has **no ID-list parameter at all** — its whole
+// request is DryRun, Filter.N, LocationType, MaxResults and NextToken, the list #485 quotes — so
+// [ec2RefuseIDsWithMaxResults] has nothing to be called with, where DescribeInstanceTypes and
+// DescribeSpotPriceHistory at least had a candidate parameter to argue about.
+//
+// The pagination parameters are read before LocationType and before the filter names, so a
+// malformed token is refused identically whichever location a caller asked for. The offset counts
+// offerings — type × location pairs — and not types, because an offering is what the answer's items
+// are.
 func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	maxResults, awsErr := ec2MaxResults(req.Params, ec2MinPublishedMaxResults, ec2MaxPublishedMaxResults1000)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	offset, awsErr := ec2NextTokenOffset(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	// The bespoke check this replaced iterated the filter *map*, so with two undocumented
 	// names it reported whichever one Go's map order surfaced first (#687). The shared
 	// spec walks Filter.N in request order instead, which is deterministic.
@@ -5980,6 +6096,7 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 		XMLName               xml.Name       `xml:"DescribeInstanceTypeOfferingsResponse"`
 		XMLNS                 string         `xml:"xmlns,attr"`
 		InstanceTypeOfferings []offeringItem `xml:"instanceTypeOfferingSet>item"`
+		NextToken             string         `xml:"nextToken,omitempty"`
 	}
 
 	// Both filters are looked up with the two-value form because an absent filter and a
@@ -6005,6 +6122,7 @@ func (p *EC2Plugin) describeInstanceTypeOfferings(reqCtx *RequestContext, req *A
 			})
 		}
 	}
+	resp.InstanceTypeOfferings, resp.NextToken = ec2Page(resp.InstanceTypeOfferings, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 

@@ -517,6 +517,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   inert and is now refused as a page that can never advance. The parameter was never that case's
   subject and is removed.
 
+- **`DescribeInternetGateways`, `DescribeNatGateways`, `DescribeRouteTables`, `DescribeInstanceTypes`
+  and `DescribeInstanceTypeOfferings` page, the five EC2 describes whose pages publish a `MaxResults`
+  floor of five** (#1024). Each published both parameters and read neither, so each answered its whole
+  listing with no `nextToken` — the divergence a paginating caller cannot see, because the loop
+  terminates on the first page against substrate and finds a second in production. All five convert
+  onto #917's shared paginator, so this adds no pagination implementation, and wire behaviour for a
+  caller that sends neither parameter is unchanged at all five.
+
+  **They are grouped by published range, and this group is the one whose floor is five** —
+  `API_DescribeInternetGateways`, `API_DescribeNatGateways`, `API_DescribeRouteTables`,
+  `API_DescribeInstanceTypes` and `API_DescribeInstanceTypeOfferings` each publish `Valid Range:
+  Minimum value of 5.`, the same line the three describes #917 converted carry, verified on the pages
+  rather than taken from substrate's own table. That is five operations and not the four this
+  release's plan predicted: the plan counted the remaining nine as three unbounded, four with a floor
+  of five and `DescribeLaunchTemplates`, which is eight. The audit was right and the arithmetic was
+  wrong, so the split is 3 + 5 + 1 and `DescribeLaunchTemplates` alone remains — a third change rather
+  than a sixth row of this one, because its published floor is **1**, not 5.
+
+  **The ceiling is per operation, and two of these five disagree with the other three about the same
+  value.** `API_DescribeRouteTables` and `API_DescribeInstanceTypes` publish `Maximum value of 100.`
+  where their three siblings publish `Maximum value of 1000.`, so `MaxResults=1000` is now accepted at
+  `DescribeNatGateways` and **refused** at `DescribeRouteTables` — two calls a caller makes in the same
+  breath while wiring a VPC. Borrowing either ceiling for the other is the harmonisation #671 forbids,
+  and it is the direction of divergence that costs a consumer real time: substrate would accept a
+  request AWS rejects, so the code would pass here and fail in production. The two values are therefore
+  named for themselves — `ec2MaxPublishedMaxResults1000` and `ec2MaxPublishedMaxResults100`, following
+  `GetSpotPlacementScores`' own per-operation pair — so that collapsing them would be a visible edit
+  rather than a one-character one, and the shared test table asserts both directions from one row set.
+  The floor stays a single constant because the published sentence is literally the same sentence at
+  eight pages now: one fact, not eight that happen to agree. All five pages have an empty `Errors`
+  section, so `InvalidParameterValue`/400 rests on the service-wide Query Requests page — the same
+  reading the shared paginator already records.
+
+  **Two of the five gain no `InvalidParameterCombination`, and one of those is a reading rather than an
+  absence.** `DescribeInstanceTypeOfferings` has no list parameter at all — its whole request is
+  `DryRun`, `Filter.N`, `LocationType`, `MaxResults` and `NextToken` — so the service-wide rule against
+  *"a list of IDs"* has nothing to be applied to. `DescribeInstanceTypes` does have `InstanceType.N`,
+  and it is a **stronger** parameter than `DescribeSpotPriceHistory`'s namesake: it asserts the types
+  exist, so an unknown one is refused with `InvalidInstanceType` rather than answering nothing. It is
+  still not an ID list, because what it names are catalog members and not resources the account holds,
+  so refusing the combination would extend a published rule to a parameter it does not name. The two
+  are read together, asserted rather than assumed, since a sweep is exactly where that goes one
+  operation too far. The other three each get the refusal against their own ID list, where the rule
+  applies unremarkably.
+
+  **The two catalog describes cannot join the shared pagination table, for the reason
+  `DescribeSpotPriceHistory` could not**: every case in that table begins by *creating* the listing it
+  walks, and these listings are the instance-type catalog — crossed with the request's locations at the
+  offerings operation — so both exist in a fresh account at a size no test chose. They get their own
+  file asserting the same properties against those fixed listings, plus two the table cannot reach:
+  that the offset is stable over a listing built from no state at all, since the order is
+  `buildEC2InstanceTypeCatalog`'s fixed slice rather than `StateManager.List`'s (#865), and that
+  neither page has an ID list for `MaxResults` to conflict with. At the offerings operation the offset
+  counts **offerings** — type × location pairs — rather than types, because an offering is what the
+  answer's items are, and the pagination parameters are read before `LocationType` and before the
+  filter names, so a malformed token is refused identically whichever location a caller asked for.
+
+  **`DescribeRouteTables` is the one converted describe whose listing is not empty before a test
+  creates anything.** `CreateVpc` mints the VPC's main route table, which is a genuine member of the
+  answer rather than an artifact, so the table's helper reads that table back and creates *n*−1 more
+  instead of assuming a fresh VPC holds nothing — the first draft assumed the opposite and the boundary
+  cases caught it by counting one row too many. It is recorded here because the same assumption is easy
+  to make again: a paginated walk is only comparable against the whole answer element for element if
+  the helper knows exactly what the listing holds.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

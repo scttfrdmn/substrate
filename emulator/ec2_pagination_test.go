@@ -10,16 +10,18 @@ package emulator_test
 //
 // The flat listings converted so far are the table below: DescribeVolumes and DescribeSnapshots in
 // #917's first part, DescribeImages, DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in
-// its second, and DescribeInstanceStatus and DescribeFleets under #1024. The two operations that
-// already paginated — DescribeTags and DescribeLaunchTemplateVersions — carried a private copy of
-// the same three rules each, and their behavior is unchanged by the conversion, which
-// TestEC2_DescribeTags_Pagination and TestEC2_DescribeLaunchTemplateVersions' own MaxResults cases
-// are the regression guard for.
+// its second, DescribeInstanceStatus and DescribeFleets in #1024's first, and
+// DescribeInternetGateways, DescribeNatGateways and DescribeRouteTables in its second. The two
+// operations that already paginated — DescribeTags and DescribeLaunchTemplateVersions — carried a
+// private copy of the same three rules each, and their behavior is unchanged by the conversion,
+// which TestEC2_DescribeTags_Pagination and TestEC2_DescribeLaunchTemplateVersions' own MaxResults
+// cases are the regression guard for.
 //
-// DescribeSpotPriceHistory converted alongside those two and is **not** in the table, because every
-// case here creates the listing it walks and that operation's listing cannot be created: it is
-// assembled from the instance-type catalog. Its cases are in
-// ec2_spotpricehistory_pagination_test.go and assert the same five properties.
+// Three converted operations are **not** in the table, because every case here creates the listing
+// it walks and theirs cannot be created: all three are assembled from the instance-type catalog.
+// DescribeSpotPriceHistory's cases are in ec2_spotpricehistory_pagination_test.go, and
+// DescribeInstanceTypes' and DescribeInstanceTypeOfferings' in ec2_catalog_pagination_test.go; each
+// file asserts the same five properties against the listing it is given rather than one it built.
 //
 // What the shared helpers must get right comes from Query-Requests.html → Pagination, which is
 // where AWS publishes the mechanism once rather than per operation:
@@ -61,17 +63,19 @@ type ec2PagedOp struct {
 	// minMaxResults and maxMaxResults are the MaxResults range the operation's own page
 	// publishes, with maxMaxResults of [ec2PagedNoCeiling] meaning it publishes no maximum.
 	//
-	// API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups publish "Valid Range:
-	// Minimum value of 5. Maximum value of 1000."; API_DescribeVolumes, API_DescribeSnapshots,
-	// API_DescribeImages, API_DescribeInstanceStatus and API_DescribeFleets publish no range at
-	// all, only "The maximum number of items to return for this request", where the floor of one
-	// is substrate's reading (see ec2MinUnpublishedMaxResults).
+	// API_DescribeVpcs, API_DescribeSubnets, API_DescribeSecurityGroups, API_DescribeInternetGateways
+	// and API_DescribeNatGateways publish "Valid Range: Minimum value of 5. Maximum value of 1000.";
+	// API_DescribeRouteTables publishes the same floor and a ceiling of **100**; and
+	// API_DescribeVolumes, API_DescribeSnapshots, API_DescribeImages, API_DescribeInstanceStatus and
+	// API_DescribeFleets publish no range at all, only "The maximum number of items to return for
+	// this request", where the floor of one is substrate's reading (see ec2MinUnpublishedMaxResults).
 	//
-	// A pair rather than the boolean this column started as (#1024): the six operations still to
-	// convert publish 5–100, 5–1000 and 1–200 between them, so a boolean would force three
-	// ranges to collapse into one shared bound, which is exactly what #671 forbids. Naming each
-	// operation's bounds here is also what lets the cases derive their values from the bounds
-	// instead of hardcoding one range's edges.
+	// A pair rather than the boolean this column started as (#1024): two published ranges now appear
+	// in this table alongside the pages that publish none, and DescribeLaunchTemplates' 1–200 is a
+	// third still to convert, so a boolean would force them to collapse into one bound, which #671
+	// forbids. Naming each operation's bounds here is also what lets the cases derive their values
+	// from the bounds instead of hardcoding one range's edges — which is how one table asserts that
+	// MaxResults=1000 is accepted at DescribeNatGateways and refused at DescribeRouteTables.
 	minMaxResults int
 	maxMaxResults int
 	// create makes n records through real calls and returns their IDs.
@@ -86,22 +90,29 @@ type ec2PagedOp struct {
 const ec2PagedNoCeiling = 0
 
 // maxResultsMessage is the refusal message the operation's own range produces.
+func (op ec2PagedOp) maxResultsMessage() string {
+	return ec2MaxResultsMessage(op.minMaxResults, op.maxMaxResults)
+}
+
+// ec2MaxResultsMessage is the refusal message a published range of minResults..maxResults produces,
+// where maxResults of [ec2PagedNoCeiling] means the page publishes no maximum.
 //
 // The wording is substrate's — no page publishes one — so it is asserted literally rather than
 // derived: a message naming the wrong range would tell a caller to send a value the operation then
-// refuses.
-func (op ec2PagedOp) maxResultsMessage() string {
-	if op.maxMaxResults == ec2PagedNoCeiling {
-		return "MaxResults must be at least " + strconv.Itoa(op.minMaxResults)
+// refuses. It is a free function rather than a method because the catalog describes' cases
+// (ec2_catalog_pagination_test.go) assert the same messages from their own table.
+func ec2MaxResultsMessage(minResults, maxResults int) string {
+	if maxResults == ec2PagedNoCeiling {
+		return "MaxResults must be at least " + strconv.Itoa(minResults)
 	}
-	return "MaxResults must be between " + strconv.Itoa(op.minMaxResults) +
-		" and " + strconv.Itoa(op.maxMaxResults)
+	return "MaxResults must be between " + strconv.Itoa(minResults) +
+		" and " + strconv.Itoa(maxResults)
 }
 
 // ec2PagedPageSize is the MaxResults every walk below is driven at.
 //
-// Five, because it is the smallest value the whole table accepts: three of the eight pages publish
-// a floor of five and the other five a floor of one (substrate's reading, see
+// Five, because it is the smallest value the whole table accepts: six of the eleven pages publish a
+// floor of five and the other five a floor of one (substrate's reading, see
 // ec2MinUnpublishedMaxResults), so one page size exercises the walk at every operation without the
 // cases having to know which range each carries. That the floors really do differ is asserted
 // separately, by TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused.
@@ -112,8 +123,9 @@ const ec2PagedPageSize = 5
 //
 // DescribeInstances is deliberately absent: its answer nests reservationSet > item > instancesSet,
 // so it pages through ec2PageReservations rather than ec2Page and its cases live in
-// ec2_pagination_instances_test.go. DescribeSpotPriceHistory is absent for the reason this file's
-// preamble gives — its listing is assembled from a fixed catalog, not created.
+// ec2_pagination_instances_test.go. DescribeSpotPriceHistory, DescribeInstanceTypes and
+// DescribeInstanceTypeOfferings are absent for the reason this file's preamble gives — their
+// listings are assembled from a fixed catalog, not created.
 func ec2PagedOps() []ec2PagedOp {
 	return []ec2PagedOp{
 		{
@@ -179,6 +191,34 @@ func ec2PagedOps() []ec2PagedOp {
 			maxMaxResults: ec2PagedNoCeiling,
 			create:        ec2CreatePagedFleets,
 			describe:      ec2DescribePagedFleets,
+		},
+		{
+			name:          "DescribeInternetGateways",
+			idParam:       "InternetGatewayId",
+			minMaxResults: 5,
+			maxMaxResults: 1000,
+			create:        ec2CreatePagedInternetGateways,
+			describe:      ec2DescribePagedInternetGateways,
+		},
+		{
+			name:          "DescribeNatGateways",
+			idParam:       "NatGatewayId",
+			minMaxResults: 5,
+			maxMaxResults: 1000,
+			create:        ec2CreatePagedNatGateways,
+			describe:      ec2DescribePagedNatGateways,
+		},
+		{
+			// The one row whose ceiling is a hundred: API_DescribeRouteTables publishes "Minimum
+			// value of 5. Maximum value of 100." where its two siblings in this part publish a
+			// thousand, so this row is what makes the boundary cases prove the bound is per
+			// operation rather than per family (#671).
+			name:          "DescribeRouteTables",
+			idParam:       "RouteTableId",
+			minMaxResults: 5,
+			maxMaxResults: 100,
+			create:        ec2CreatePagedRouteTables,
+			describe:      ec2DescribePagedRouteTables,
 		},
 	}
 }
@@ -437,6 +477,134 @@ func ec2DescribePagedInstanceStatuses(t *testing.T, ts *httptest.Server, extra m
 	return ids, decoded.NextToken
 }
 
+// ec2CreatePagedInternetGateways creates n internet gateways and returns their IDs.
+//
+// Unattached, because an attachment is not part of the listing: CreateInternetGateway takes no
+// arguments at all, so these n gateways are the whole answer with nothing the account acquired
+// implicitly — the property [ec2CreatePagedSecurityGroups] needed a comment to arrange.
+func ec2CreatePagedInternetGateways(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var created struct {
+			InternetGatewayID string `xml:"internetGateway>internetGatewayId"`
+		}
+		ec2DescribeXML(t, ts, map[string]string{"Action": "CreateInternetGateway"}, &created)
+		require.NotEmpty(t, created.InternetGatewayID)
+		ids = append(ids, created.InternetGatewayID)
+	}
+	return ids
+}
+
+// ec2CreatePagedNatGateways creates n NAT gateways in one subnet and returns their IDs.
+//
+// One subnet and one elastic IP per gateway: a public NAT gateway names an AllocationId, and reusing
+// one would leave every gateway reporting the same publicIp — harmless to the offset but it would
+// make a duplicated record indistinguishable from a correct one in the walk's comparison.
+func ec2CreatePagedNatGateways(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
+	subnetID := ec2CreateTaggedSubnet(t, ts, vpcID, "10.0.1.0/24", "us-east-1a", nil)
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var addr struct {
+			AllocationID string `xml:"allocationId"`
+		}
+		ec2DescribeXML(t, ts, map[string]string{"Action": "AllocateAddress", "Domain": "vpc"}, &addr)
+		require.NotEmpty(t, addr.AllocationID)
+		var created struct {
+			NatGatewayID string `xml:"natGateway>natGatewayId"`
+		}
+		ec2DescribeXML(t, ts, map[string]string{
+			"Action":       "CreateNatGateway",
+			"SubnetId":     subnetID,
+			"AllocationId": addr.AllocationID,
+		}, &created)
+		require.NotEmpty(t, created.NatGatewayID)
+		ids = append(ids, created.NatGatewayID)
+	}
+	return ids
+}
+
+// ec2CreatePagedRouteTables returns the IDs of n route tables in one VPC, one of which the VPC
+// brought with it.
+//
+// Unlike every other row, the listing is not empty before this helper creates anything: CreateVpc
+// mints the VPC's main route table (createRouteTableForVPC with main true), and that table is a
+// genuine member of DescribeRouteTables' answer rather than an artifact — so n-1 are created here
+// and the main one is read back rather than guessed. Returning it is what keeps the listing exactly
+// n, which is what lets a walk be compared against the whole answer element for element.
+func ec2CreatePagedRouteTables(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	require.Positive(t, n, "the main route table alone makes a listing of one")
+	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
+	ids, token := ec2DescribePagedRouteTables(t, ts, nil)
+	require.Len(t, ids, 1, "a fresh VPC holds exactly one route table, its main one")
+	require.Empty(t, token)
+	for i := 0; i < n-1; i++ {
+		ids = append(ids, ec2CreateRouteTableID(t, ts, vpcID))
+	}
+	return ids
+}
+
+// ec2DescribePagedInternetGateways reads a DescribeInternetGateways page.
+func ec2DescribePagedInternetGateways(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeInternetGatewaysResponse"`
+		IGWs    []struct {
+			InternetGatewayID string `xml:"internetGatewayId"`
+		} `xml:"internetGatewaySet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeInternetGateways", extra), &decoded)
+	ids := make([]string, 0, len(decoded.IGWs))
+	for _, igw := range decoded.IGWs {
+		ids = append(ids, igw.InternetGatewayID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedNatGateways reads a DescribeNatGateways page.
+func ec2DescribePagedNatGateways(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName     xml.Name `xml:"DescribeNatGatewaysResponse"`
+		NatGateways []struct {
+			NatGatewayID string `xml:"natGatewayId"`
+		} `xml:"natGatewaySet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeNatGateways", extra), &decoded)
+	ids := make([]string, 0, len(decoded.NatGateways))
+	for _, gw := range decoded.NatGateways {
+		ids = append(ids, gw.NatGatewayID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedRouteTables reads a DescribeRouteTables page.
+//
+// The ID is read as a direct child of routeTableSet>item for the reason
+// [ec2DescribePagedVolumes] gives: an association carries a routeTableAssociationId, and a decoder
+// matching loosely would over-collect.
+func ec2DescribePagedRouteTables(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName     xml.Name `xml:"DescribeRouteTablesResponse"`
+		RouteTables []struct {
+			RouteTableID string `xml:"routeTableId"`
+		} `xml:"routeTableSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeRouteTables", extra), &decoded)
+	ids := make([]string, 0, len(decoded.RouteTables))
+	for _, rtb := range decoded.RouteTables {
+		ids = append(ids, rtb.RouteTableID)
+	}
+	return ids, decoded.NextToken
+}
+
 // ec2DescribePagedFleets reads a DescribeFleets page.
 func ec2DescribePagedFleets(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
 	t.Helper()
@@ -640,17 +808,18 @@ func TestEC2_OffsetPagination_TokenIsRefusedBeforeStateIsRead(t *testing.T) {
 // TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused asserts each operation's bound is the
 // one its own page publishes, and nothing wider.
 //
-// API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups publish "Valid Range:
-// Minimum value of 5. Maximum value of 1000."; the other five pages in the table say only "The
-// maximum number of items to return for this request", type Integer, with no Valid Range line at
-// all. Per #671 substrate does not borrow the published range by analogy, and both directions are
-// asserted because that is what pins it: 1 and 5000 are **accepted** where no range is published
-// and **refused** where 5–1000 is, so a helper that had defaulted to one range for the family would
-// fail on half the rows.
+// Five pages in the table publish "Valid Range: Minimum value of 5. Maximum value of 1000.";
+// API_DescribeRouteTables publishes that floor with a ceiling of **100**; and the other five say
+// only "The maximum number of items to return for this request", type Integer, with no Valid Range
+// line at all. Per #671 substrate does not borrow the published range by analogy, and both
+// directions are asserted because that is what pins it: 1 and 5000 are **accepted** where no range
+// is published and **refused** where 5–1000 is, and 1000 itself is accepted at DescribeNatGateways
+// and refused at DescribeRouteTables — so a helper that had defaulted to one range for the family
+// would fail on most of the rows.
 //
 // The boundary values come from each operation's own [ec2PagedOp] bounds rather than from literals,
-// so the table asserts the edges of whichever range the operation publishes — which is what the six
-// operations #1024 has still to convert need, publishing 5–100 and 1–200 between them.
+// so the table asserts the edges of whichever range the operation publishes — which is also what
+// DescribeLaunchTemplates' 1–200 needs when #1024's last part converts it.
 //
 // Where no range is published the floor of one is substrate's reading, forced by the published
 // pagination rule — a page of zero items describes a walk that answers nothing and hands back a
