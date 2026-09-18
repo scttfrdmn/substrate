@@ -425,6 +425,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their own, so a collection that comes to page differently from its siblings fails at the shared
   assertions. `GetApiKeys` and `GetUsagePlans` are what remain.
 
+- **`GetApiKeys` and `GetUsagePlans` read the same pair, and with them every API Gateway v1 collection
+  that publishes `limit` and `position` reads both** (#1025). Seven of the eight v1 collections publish
+  the pair; the eighth, `GetStages`, publishes neither and is correctly unpaginated. These last two are
+  the account-scoped pair, so an account with more than 25 API keys or usage plans now answers 25 and a
+  cursor where it answered everything and none. Both read through the shared helper, so like the pair
+  before them they add no bound, no code and no message of their own.
+
+  **`GetApiKeys`' `warnings` member is left out rather than reported empty**, which settles the last of
+  this issue's questions from the page rather than by analogy. `API_GetApiKeys` publishes `warnings`
+  beside `item` and `position`, described as *"A list of warning messages logged during the import of
+  API keys when the `failOnWarnings` option is set to true."* `failOnWarnings` belongs to
+  `ImportApiKeys`, which substrate does not route — so no call that can reach this handler could
+  produce a warning and no state could hold one. Under #1013's rule the member is omitted, because `[]`
+  would be a claim that the import ran and warned about nothing. Asserted on the raw body, so an
+  encoder change cannot start sending it.
+
+  **Five request parameters across three of the six stay unread, and that is stated rather than
+  implied**: `GetResources`' `embed`, `GetApiKeys`' `customerId`, `includeValues` and `nameQuery`, and
+  `GetUsagePlans`' `keyId`. Each *narrows* what is reported, so honouring one would over-report before
+  and under-report after — the opposite direction from the cursor defect, and a compatibility break that
+  wants its own issue and its own citation. One spelling is recorded for whoever files it: the
+  parameter AWS documents as `nameQuery` travels on the query string as **`name`**, so grepping for the
+  documented name finds nothing.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

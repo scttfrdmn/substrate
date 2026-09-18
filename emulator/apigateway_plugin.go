@@ -103,7 +103,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetApiKey":
 		return p.getAPIKey(ctx, params["keyId"])
 	case "GetApiKeys":
-		return p.getAPIKeys(ctx)
+		return p.getAPIKeys(ctx, req)
 	case "DeleteApiKey":
 		return p.deleteAPIKey(ctx, params["keyId"])
 	case "CreateUsagePlan":
@@ -111,7 +111,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetUsagePlan":
 		return p.getUsagePlan(ctx, params["planId"])
 	case "GetUsagePlans":
-		return p.getUsagePlans(ctx)
+		return p.getUsagePlans(ctx, req)
 	case "DeleteUsagePlan":
 		return p.deleteUsagePlan(ctx, params["planId"])
 	case "CreateUsagePlanKey":
@@ -1200,7 +1200,29 @@ func (p *APIGatewayPlugin) getAPIKey(ctx *RequestContext, keyID string) (*AWSRes
 	return apigwJSONResponse(http.StatusOK, apiKeyWire(key))
 }
 
-func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext) (*AWSResponse, error) {
+// getAPIKeys reports one page of the account's API keys.
+//
+// It read neither "limit" nor "position", both of which its URI publishes, and answered every key
+// with no cursor (#1025); both are read now through [apigwPageParams]. The order is the account's
+// API-key index, ascending key ID, for the reason [getRestAPIs] gives.
+//
+// This URI publishes three further parameters, and all three stay unread: "customerId",
+// "includeValues", and the one documented as "nameQuery" but spelled "name" on the query string. Each
+// narrows what is reported, so reading one is a divergence in the opposite direction from the cursor
+// this fixes, and belongs to its own issue with its own citation — the argument [getResources] records
+// for "embed".
+//
+// The "warnings" member of the response is not reported either, and that is settled by what the page
+// says it holds: "A list of warning messages logged during the import of API keys when the
+// failOnWarnings option is set to true." failOnWarnings belongs to ImportApiKeys, which substrate does
+// not route, so no call reaching this handler could produce a warning and no state could hold one.
+// Under #1013 an unmodelled member is left out rather than reported empty.
+func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region))
 	if err != nil {
@@ -1219,7 +1241,8 @@ func (p *APIGatewayPlugin) getAPIKeys(ctx *RequestContext) (*AWSResponse, error)
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[apiKeyOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[apiKeyOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteAPIKey(ctx *RequestContext, keyID string) (*AWSResponse, error) {
@@ -1284,7 +1307,21 @@ func (p *APIGatewayPlugin) getUsagePlan(ctx *RequestContext, planID string) (*AW
 	return apigwJSONResponse(http.StatusOK, usagePlanWire(plan))
 }
 
-func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext) (*AWSResponse, error) {
+// getUsagePlans reports one page of the account's usage plans, the last of the six collections #1025
+// found publishing "limit" and "position" and reading neither.
+//
+// Both are read now through [apigwPageParams]. The order is the account's usage-plan index, ascending
+// plan ID, for the reason [getRestAPIs] gives.
+//
+// "keyId" stays unread, on the argument [getAPIKeys] and [getResources] record for their own narrowing
+// parameters: it selects the plans a given API key is attached to, so reading it would report fewer
+// plans rather than more, which is a divergence of the opposite kind from the cursor.
+func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region))
 	if err != nil {
@@ -1303,7 +1340,8 @@ func (p *APIGatewayPlugin) getUsagePlans(ctx *RequestContext) (*AWSResponse, err
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[usagePlanOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[usagePlanOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteUsagePlan(ctx *RequestContext, planID string) (*AWSResponse, error) {

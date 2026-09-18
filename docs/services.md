@@ -1112,8 +1112,8 @@ different positions depending on whether the caller passed `FunctionName`.
 **What the same audit found still unconverted is counted, not estimated.** Nine routed EC2 describes
 publish `MaxResults` and `NextToken` and read neither (#1024, listed with their published ranges in
 [One offset paginator, shared](#one-offset-paginator-shared)). Six routed API Gateway v1 collections
-were in that state too; they are being converted under #1025, two at a time — see the next section
-for which have landed. Lambda's `ListFunctions` is a third case of the narrower defect: it pages, but
+were in that state too; all six were converted under #1025, two at a time — see the next section.
+Lambda's `ListFunctions` is a third case of the narrower defect: it pages, but
 accepts a `Marker` it never issued and range-checks no `MaxItems`.
 
 ### Six more v1 collections read the pair they publish
@@ -1126,9 +1126,10 @@ AWS's two sentences byte-identically, so this is one rule six times rather than 
 bounds, the default, the absent minimum and the `BadRequestException` / 400 to refuse with are read
 in one place for all seven.
 
-**Converted so far: `GetRestApis`, `GetResources`, `GetDeployments` and `GetAuthorizers`.** Each
-gained the request parameter its signature could not previously reach — six of the eight v1 collection
-handlers took no request at all — so this lands two operations at a time rather than as one sweep.
+**All six now page**, converted two at a time. Each gained the request parameter its signature could
+not previously reach — six of the eight v1 collection handlers took no request at all — which is why
+this was three changes rather than one sweep. With `GetBasePathMappings`, every v1 collection whose URI
+publishes the pair now reads it.
 
 **The order each collection is paged in is *substrate's reading*, because no page publishes one, and
 it is the order the collection already had.** These six are walked in **ascending element ID**: each
@@ -1147,11 +1148,23 @@ things a reader may expect not to hold:
   order carries no relation to the `createdDate` the element publishes. The same argument applies:
   sorting by `createdDate` would read better and emulate worse.
 
-**`GetResources`' third parameter is still unread, and that is a different divergence.** Its URI also
-publishes `embed`, whose only accepted value is `methods`, and substrate answers every resource with
-its `resourceMethods` populated regardless. That over-reports where the cursor defect under-reported,
-so it is not fixed here: narrowing a response member a caller may already be reading is a
-compatibility break that wants its own issue and its own citation.
+**Five further request parameters across three of the six are still unread, and they are a different
+divergence.** `GetResources` publishes `embed`, whose only accepted value is `methods`, and substrate
+answers every resource with its `resourceMethods` populated regardless. `GetApiKeys` publishes
+`customerId`, `includeValues`, and the parameter documented as `nameQuery` but spelled **`name`** on the
+query string — worth recording, since a later reader will grep for the documented name and find
+nothing. `GetUsagePlans` publishes `keyId`. Every one of the five *narrows* what is reported, so
+honouring one would over-report before and under-report after — the opposite direction from the cursor
+defect these conversions fix, and not the rest of it. Narrowing a response a caller may already be
+reading is a compatibility break that wants its own issue and its own citation.
+
+**`GetApiKeys` publishes a third response member, `warnings`, and it is deliberately absent rather than
+reported empty.** The page says it holds "a list of warning messages logged during the import of API
+keys when the `failOnWarnings` option is set to true", and `failOnWarnings` belongs to `ImportApiKeys`,
+which substrate does not route. So no call that can reach this handler could produce a warning and no
+state could hold one; under [#1013](https://github.com/scttfrdmn/substrate/issues/1013)'s rule an
+unmodelled member is omitted rather than sent empty, because `[]` would be a claim that the import ran
+and warned about nothing.
 
 ### A tag set read back out of a map
 
@@ -12513,21 +12526,20 @@ collection responses nest their elements under **`item`** — singular, because 
 is the `locationName` of the `items` member. `GetUsage` uses a third spelling,
 `values`, and is not routed.
 
-**Five collections carry a pagination `position`: `GetBasePathMappings`,
-`GetRestApis`, `GetResources`, `GetDeployments` and `GetAuthorizers`**, each reading
-the `limit` and `position` parameters its URI publishes — see [Two more cursors
-published and unread](#two-more-cursors-published-and-unread-outside-ec2) for the
-first and [Six more v1 collections read the
-pair](#six-more-v1-collections-read-the-pair-they-publish) for the rest. A
-collection that fits in one page leaves the member unset, so it is omitted rather
+**Every collection whose URI publishes `limit` and `position` now reads the pair** —
+`GetBasePathMappings`, `GetRestApis`, `GetResources`, `GetDeployments`,
+`GetAuthorizers`, `GetApiKeys` and `GetUsagePlans`, seven of the eight — see [Two
+more cursors published and
+unread](#two-more-cursors-published-and-unread-outside-ec2) for the first and [Six
+more v1 collections read the
+pair](#six-more-v1-collections-read-the-pair-they-publish) for the other six (#1025).
+A collection that fits in one page leaves the member unset, so it is omitted rather
 than sent empty: a caller must not be handed a token for a page that does not exist.
-**Two still publish `limit` and `position` and read neither** — `GetApiKeys` and
-`GetUsagePlans` — both carrying AWS's `limit` sentence byte-identically, so it is one
-rule twice rather than two rules (#1025). The eighth collection, `GetStages`, publishes neither parameter and lists no
+The eighth collection, `GetStages`, publishes neither parameter and lists no
 `position` response member, so its single page is what AWS describes rather than a
 gap. Seven of the eight handlers also could not read a query parameter as written —
 their signatures took no request — which is why `GetBasePathMappings` converted
-without a signature change and each of the six that page needs one; `GetStages` has
+without a signature change and each of the six needed one; `GetStages` has
 nothing to read, so its signature stays as it is. Earlier releases sent
 PascalCase members under an `items` envelope, which an AWS SDK parsed to an empty
 result with no error (#529).
@@ -12557,6 +12569,14 @@ result with no error (#529).
 | CreateAuthorizer | |
 | GetAuthorizer | |
 | GetAuthorizers | Pages on `limit`/`position`; ascending authorizer ID (#1025) |
+| CreateApiKey | |
+| GetApiKey | |
+| GetApiKeys | Pages on `limit`/`position`; ascending key ID. `customerId`, `includeValues` and `name` unread; the published `warnings` member is unmodelled and omitted (#1025) |
+| DeleteApiKey | |
+| CreateUsagePlan | |
+| GetUsagePlan | |
+| GetUsagePlans | Pages on `limit`/`position`; ascending plan ID. `keyId` unread (#1025) |
+| DeleteUsagePlan | |
 
 ### CloudFormation resource types
 
