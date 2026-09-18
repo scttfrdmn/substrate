@@ -217,7 +217,14 @@ type StateMachineState struct {
 	// Name is the state machine name.
 	Name string `json:"Name"`
 
-	// Status is the state machine status: ACTIVE or DELETING.
+	// Status is the state machine status. It is always ACTIVE.
+	//
+	// API_DescribeStateMachine publishes two values, ACTIVE and DELETING, and this field claimed both
+	// until #995 went looking for the writer that set DELETING and found none. Nothing can: the delete
+	// removes the record synchronously, so there is no observation between "ACTIVE" and "gone" for a
+	// DELETING to occupy. Saying so here rather than naming a value no writer sets is the point —
+	// modeling the transition is a separate piece of work, and until it happens the honest statement is
+	// that this emulator has one status. See docs/services.md for what a caller loses by it.
 	Status string `json:"Status"`
 
 	// Definition is the Amazon States Language definition as raw JSON.

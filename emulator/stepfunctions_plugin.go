@@ -468,6 +468,31 @@ func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequ
 	return statesJSONResponse(http.StatusOK, out)
 }
 
+// deleteStateMachine removes a state machine, and answers 200 for one that is not there.
+//
+// It is the one state-machine operation that does not go through [StepFunctionsPlugin.requireStateMachine]
+// (#995). API_DeleteStateMachine publishes exactly two errors — InvalidArn/400 and
+// ValidationException/400 — and StateMachineDoesNotExist is not among them, although it is published at
+// DescribeStateMachine, UpdateStateMachine, StartExecution, StartSyncExecution and ListExecutions. So
+// the code substrate answered here was a real Step Functions code at the wrong operation, borrowed from
+// the five siblings this handler used to share a helper with.
+//
+// Reading the omission as idempotence is substrate's reading, and it is weaker evidence than SNS's
+// #992, where API_DeleteTopic states the property outright. Two things carry it. The error list is the
+// only thing either page says on the matter, and CommonErrors frames a page's list as the errors the
+// operation returns. And the page's own description makes an idempotent delete the behavior a caller
+// needs: "This is an asynchronous operation. It sets the state machine's status to DELETING and begins
+// the deletion process. A state machine is deleted only when all its executions are completed." A
+// caller that has issued a delete and retries cannot distinguish "already gone" from "still DELETING",
+// which is the situation an idempotent delete exists for. The contrary reading — that the list is
+// incomplete and AWS does refuse — rests on nothing either page says, only on the code existing
+// elsewhere in the service.
+//
+// The parse stays ahead of the load, so every shape refusal survives: a malformed ARN, a non-states
+// ARN, an activity or execution ARN, and a version or alias ARN are all still InvalidArn/400.
+// Idempotence licenses an ARN that names nothing, not a string that is not the right kind of ARN.
+//
+// The DELETING status is deliberately not modeled; see [StateMachineState] and docs/services.md.
 func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
@@ -477,9 +502,18 @@ func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequ
 	}
 
 	goCtx := context.Background()
-	_, target, err := p.requireStateMachine(goCtx, input.StateMachineArn)
+	target, arnErr := sfnParseStateMachineARN(input.StateMachineArn)
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	sm, err := p.loadStateMachine(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
+	}
+	if sm == nil {
+		// Nothing to remove, and nothing to correct: the record and the name index below come off
+		// together, so an absent record cannot leave a name behind in the index.
+		return statesJSONResponse(http.StatusOK, map[string]interface{}{})
 	}
 
 	// The record and the name index are both removed under the ARN's own account and Region, not the
@@ -1035,6 +1069,14 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 	return statesJSONResponse(http.StatusOK, out)
 }
 
+// deleteActivity removes an activity, and answers 200 for one that is not there.
+//
+// See [StepFunctionsPlugin.deleteStateMachine] for the reasoning, which applies here a little more
+// strongly: API_DeleteActivity publishes exactly **one** error, InvalidArn/400, where
+// API_DescribeActivity publishes ActivityDoesNotExist as one of only two. The same page documents the
+// success as "an HTTP 200 response with an empty HTTP body". The two operations answer alike because an
+// absent state machine and an absent activity cannot sensibly disagree about whether a delete is
+// idempotent.
 func (p *StepFunctionsPlugin) deleteActivity(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ActivityArn string `json:"activityArn"`
@@ -1044,9 +1086,17 @@ func (p *StepFunctionsPlugin) deleteActivity(_ *RequestContext, req *AWSRequest)
 	}
 
 	goCtx := context.Background()
-	_, target, err := p.requireActivity(goCtx, input.ActivityArn)
+	target, arnErr := sfnParseActivityARN(input.ActivityArn)
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	act, err := p.loadActivity(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
+	}
+	if act == nil {
+		// See deleteStateMachine: the record and the name index come off together.
+		return statesJSONResponse(http.StatusOK, map[string]interface{}{})
 	}
 
 	// See deleteStateMachine: the record and the name index come off under the ARN's account and
