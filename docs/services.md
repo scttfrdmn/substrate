@@ -1126,9 +1126,9 @@ AWS's two sentences byte-identically, so this is one rule six times rather than 
 bounds, the default, the absent minimum and the `BadRequestException` / 400 to refuse with are read
 in one place for all seven.
 
-**Converted so far: `GetRestApis` and `GetResources`.** Each gained the request parameter its
-signature could not previously reach — six of the eight v1 collection handlers took no request at all
-— so this lands two operations at a time rather than as one sweep.
+**Converted so far: `GetRestApis`, `GetResources`, `GetDeployments` and `GetAuthorizers`.** Each
+gained the request parameter its signature could not previously reach — six of the eight v1 collection
+handlers took no request at all — so this lands two operations at a time rather than as one sweep.
 
 **The order each collection is paged in is *substrate's reading*, because no page publishes one, and
 it is the order the collection already had.** These six are walked in **ascending element ID**: each
@@ -1143,6 +1143,9 @@ things a reader may expect not to hold:
   resource's, so `/` falls wherever that ID sorts, and a first page of a large API need not contain
   it. Sorting by `path` instead would make a nicer collection to read and a worse emulator: it is not
   the order this operation answered in before it paged, and nothing published asks for it.
+- `GetDeployments` is **not** newest-first, or oldest-first. A deployment ID is generated too, so the
+  order carries no relation to the `createdDate` the element publishes. The same argument applies:
+  sorting by `createdDate` would read better and emulate worse.
 
 **`GetResources`' third parameter is still unread, and that is a different divergence.** Its URI also
 publishes `embed`, whose only accepted value is `methods`, and substrate answers every resource with
@@ -12510,18 +12513,17 @@ collection responses nest their elements under **`item`** — singular, because 
 is the `locationName` of the `items` member. `GetUsage` uses a third spelling,
 `values`, and is not routed.
 
-**Three collections carry a pagination `position`: `GetBasePathMappings`,
-`GetRestApis` and `GetResources`**, each reading the `limit` and `position`
-parameters its URI publishes — see [Two more cursors published and
-unread](#two-more-cursors-published-and-unread-outside-ec2) for the first and [Six
-more v1 collections read the
+**Five collections carry a pagination `position`: `GetBasePathMappings`,
+`GetRestApis`, `GetResources`, `GetDeployments` and `GetAuthorizers`**, each reading
+the `limit` and `position` parameters its URI publishes — see [Two more cursors
+published and unread](#two-more-cursors-published-and-unread-outside-ec2) for the
+first and [Six more v1 collections read the
 pair](#six-more-v1-collections-read-the-pair-they-publish) for the rest. A
 collection that fits in one page leaves the member unset, so it is omitted rather
 than sent empty: a caller must not be handed a token for a page that does not exist.
-**Four still publish `limit` and `position` and read neither** — `GetDeployments`,
-`GetAuthorizers`, `GetApiKeys` and `GetUsagePlans` — all carrying AWS's `limit`
-sentence byte-identically, so it is one rule four times rather than four rules
-(#1025). The eighth collection, `GetStages`, publishes neither parameter and lists no
+**Two still publish `limit` and `position` and read neither** — `GetApiKeys` and
+`GetUsagePlans` — both carrying AWS's `limit` sentence byte-identically, so it is one
+rule twice rather than two rules (#1025). The eighth collection, `GetStages`, publishes neither parameter and lists no
 `position` response member, so its single page is what AWS describes rather than a
 gap. Seven of the eight handlers also could not read a query parameter as written —
 their signatures took no request — which is why `GetBasePathMappings` converted
@@ -12549,8 +12551,12 @@ result with no error (#529).
 | GetIntegration | |
 | CreateDeployment | |
 | GetDeployment | |
+| GetDeployments | Pages on `limit`/`position`; ascending deployment ID, which is unrelated to `createdDate` (#1025) |
 | CreateStage | |
 | GetStage | |
+| CreateAuthorizer | |
+| GetAuthorizer | |
+| GetAuthorizers | Pages on `limit`/`position`; ascending authorizer ID (#1025) |
 
 ### CloudFormation resource types
 

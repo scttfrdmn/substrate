@@ -73,6 +73,68 @@ var apigwPagedCollections = []apigwPagedCollection{
 		seed:      apigwSeedResources,
 		emptyPath: "/restapis/abcde12345/resources",
 	},
+	{
+		op:        "GetDeployments",
+		member:    "description",
+		seed:      apigwSeedDeployments,
+		emptyPath: "/restapis/abcde12345/deployments",
+	},
+	{
+		op:        "GetAuthorizers",
+		member:    "name",
+		seed:      apigwSeedAuthorizers,
+		emptyPath: "/restapis/abcde12345/authorizers",
+	},
+}
+
+// apigwSeedAPIForSubcollection creates the REST API the per-API collections hang off and returns its ID.
+func apigwSeedAPIForSubcollection(t *testing.T, srv *emulator.Server) string {
+	t.Helper()
+	status, raw := apigwPagingCall(t, srv, http.MethodPost, "/restapis", map[string]any{"name": "paging"})
+	require.Equal(t, http.StatusCreated, status, raw)
+	var api struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(raw), &api), raw)
+	require.NotEmpty(t, api.ID)
+	return api.ID
+}
+
+// apigwSeedDeployments creates one REST API and n deployments under it.
+//
+// The description is what identifies a deployment here, because it is the only member of the element
+// CreateDeployment lets a caller choose — the ID is generated and the createdDate comes from the
+// simulated clock, which stands still, so every deployment in a run shares one.
+func apigwSeedDeployments(t *testing.T, srv *emulator.Server, n int) (string, []string) {
+	t.Helper()
+	apiID := apigwSeedAPIForSubcollection(t, srv)
+
+	collection := "/restapis/" + apiID + "/deployments"
+	created := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		description := fmt.Sprintf("dep-%03d", i)
+		status, raw := apigwPagingCall(t, srv, http.MethodPost, collection, map[string]any{"description": description})
+		require.Equal(t, http.StatusCreated, status, raw)
+		created = append(created, description)
+	}
+	return collection, created
+}
+
+// apigwSeedAuthorizers creates one REST API and n authorizers under it.
+func apigwSeedAuthorizers(t *testing.T, srv *emulator.Server, n int) (string, []string) {
+	t.Helper()
+	apiID := apigwSeedAPIForSubcollection(t, srv)
+
+	collection := "/restapis/" + apiID + "/authorizers"
+	created := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		name := fmt.Sprintf("auth-%03d", i)
+		body := map[string]any{"name": name, "type": "TOKEN", "identitySource": "method.request.header.Auth"}
+		status, raw := apigwPagingCall(t, srv, http.MethodPost, collection, body)
+		require.Equal(t, http.StatusCreated, status, raw)
+		created = append(created, name)
+	}
+	return collection, created
 }
 
 // apigwSeedRestAPIs creates n REST APIs, whose names are zero-padded so a failure reads clearly, and
