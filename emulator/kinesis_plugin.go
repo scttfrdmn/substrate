@@ -293,8 +293,13 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 
+	// StreamARN is one of the four members API_UpdateShardCount publishes and was the one substrate
+	// omitted (#999). It is rendered from the resolved target rather than the stored record so it names
+	// the stream the request addressed — an ARN-only request resolves to the ARN's own account and
+	// Region, which need not be the caller's (#966).
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamName":        stream.StreamName,
+		"StreamName":        target.Name,
+		"StreamARN":         kinesisStreamARN(target),
 		"CurrentShardCount": current,
 		"TargetShardCount":  body.TargetShardCount,
 	})
@@ -882,30 +887,32 @@ func (p *KinesisPlugin) enableEnhancedMonitoring(ctx *RequestContext, req *AWSRe
 		return nil, refErr
 	}
 
+	// The request's own shape is checked before the stream is loaded, matching addTagsToStream's
+	// ordering: a parameter refusal does not depend on the stream existing.
+	if metricsErr := kinesisValidateShardLevelMetrics(body.ShardLevelMetrics); metricsErr != nil {
+		return nil, metricsErr
+	}
+
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
 	}
 
-	existing := map[string]struct{}{}
-	for _, m := range stream.EnhancedMonitoring {
-		existing[m] = struct{}{}
+	// The before-state is rendered from its own set, built before the merge, because
+	// CurrentShardLevelMetrics publishes exactly that and substrate reported the after-state on both
+	// members (#999).
+	before := kinesisShardLevelMetricSet(stream.EnhancedMonitoring)
+	after := kinesisShardLevelMetricSet(stream.EnhancedMonitoring)
+	for metric := range kinesisShardLevelMetricSet(body.ShardLevelMetrics) {
+		after[metric] = struct{}{}
 	}
-	for _, m := range body.ShardLevelMetrics {
-		if _, ok := existing[m]; !ok {
-			stream.EnhancedMonitoring = append(stream.EnhancedMonitoring, m)
-		}
-	}
+	stream.EnhancedMonitoring = kinesisRenderShardLevelMetrics(after)
 
 	if err := p.saveStream(stream); err != nil {
 		return nil, err
 	}
 
-	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamName":               stream.StreamName,
-		"CurrentShardLevelMetrics": stream.EnhancedMonitoring,
-		"DesiredShardLevelMetrics": stream.EnhancedMonitoring,
-	})
+	return kinesisEnhancedMonitoringResponse(target, before, after)
 }
 
 func (p *KinesisPlugin) disableEnhancedMonitoring(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -921,32 +928,32 @@ func (p *KinesisPlugin) disableEnhancedMonitoring(ctx *RequestContext, req *AWSR
 		return nil, refErr
 	}
 
+	// Checked before the load, as on the sibling enable: the constraint is the member's own.
+	if metricsErr := kinesisValidateShardLevelMetrics(body.ShardLevelMetrics); metricsErr != nil {
+		return nil, metricsErr
+	}
+
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
 	}
 
-	remove := map[string]struct{}{}
-	for _, m := range body.ShardLevelMetrics {
-		remove[m] = struct{}{}
+	// The removal builds a second set rather than filtering the stored slice. The old code's
+	// kept := stream.EnhancedMonitoring[:0] aliased the backing array, so the before-state was
+	// overwritten as the filter ran — which is why reordering the two renders would not have been
+	// enough to report CurrentShardLevelMetrics correctly (#999).
+	before := kinesisShardLevelMetricSet(stream.EnhancedMonitoring)
+	after := kinesisShardLevelMetricSet(stream.EnhancedMonitoring)
+	for metric := range kinesisShardLevelMetricSet(body.ShardLevelMetrics) {
+		delete(after, metric)
 	}
-	kept := stream.EnhancedMonitoring[:0]
-	for _, m := range stream.EnhancedMonitoring {
-		if _, ok := remove[m]; !ok {
-			kept = append(kept, m)
-		}
-	}
-	stream.EnhancedMonitoring = kept
+	stream.EnhancedMonitoring = kinesisRenderShardLevelMetrics(after)
 
 	if err := p.saveStream(stream); err != nil {
 		return nil, err
 	}
 
-	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamName":               stream.StreamName,
-		"CurrentShardLevelMetrics": stream.EnhancedMonitoring,
-		"DesiredShardLevelMetrics": stream.EnhancedMonitoring,
-	})
+	return kinesisEnhancedMonitoringResponse(target, before, after)
 }
 
 // --- Helpers ----------------------------------------------------------------
