@@ -180,7 +180,9 @@ func (p *SSOPlugin) describePermissionSet(reqCtx *RequestContext, req *AWSReques
 		PermissionSetArn string `json:"PermissionSetArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	ps, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn)
 	if err != nil {
@@ -199,7 +201,9 @@ func (p *SSOPlugin) updatePermissionSet(reqCtx *RequestContext, req *AWSRequest)
 		RelayState       string `json:"RelayState"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	ps, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn)
 	if err != nil {
@@ -232,7 +236,9 @@ func (p *SSOPlugin) deletePermissionSet(reqCtx *RequestContext, req *AWSRequest)
 		PermissionSetArn string `json:"PermissionSetArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	if _, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn); err != nil {
 		return nil, err
@@ -267,7 +273,9 @@ func (p *SSOPlugin) attachManagedPolicy(reqCtx *RequestContext, req *AWSRequest)
 		ManagedPolicyArn string `json:"ManagedPolicyArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	if _, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn); err != nil {
 		return nil, err
@@ -284,7 +292,9 @@ func (p *SSOPlugin) detachManagedPolicy(reqCtx *RequestContext, req *AWSRequest)
 		ManagedPolicyArn string `json:"ManagedPolicyArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	if _, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn); err != nil {
 		return nil, err
@@ -300,7 +310,9 @@ func (p *SSOPlugin) listManagedPolicies(reqCtx *RequestContext, req *AWSRequest)
 		PermissionSetArn string `json:"PermissionSetArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 	if _, err := p.loadPermissionSet(reqCtx.AccountID, input.PermissionSetArn); err != nil {
 		return nil, err
@@ -334,7 +346,9 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 		PrincipalID      string `json:"PrincipalId"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 
 	assignment := SSOAccountAssignment{
@@ -383,7 +397,9 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 		PrincipalID      string `json:"PrincipalId"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -409,7 +425,9 @@ func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSReque
 		AccountID        string `json:"AccountId"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ssoInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()

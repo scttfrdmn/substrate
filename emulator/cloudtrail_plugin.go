@@ -83,7 +83,7 @@ func (p *CloudTrailPlugin) createTrail(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 	if input.Name == "" {
@@ -138,7 +138,7 @@ func (p *CloudTrailPlugin) getTrail(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 
@@ -158,7 +158,7 @@ func (p *CloudTrailPlugin) getTrailStatus(reqCtx *RequestContext, req *AWSReques
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 
@@ -194,7 +194,7 @@ func (p *CloudTrailPlugin) updateTrail(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 
@@ -248,7 +248,7 @@ func (p *CloudTrailPlugin) deleteTrail(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 
@@ -273,7 +273,9 @@ func (p *CloudTrailPlugin) describeTrails(reqCtx *RequestContext, req *AWSReques
 		TrailNameList       []string `json:"trailNameList"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, cloudtrailInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -319,7 +321,7 @@ func (p *CloudTrailPlugin) setLogging(reqCtx *RequestContext, req *AWSRequest, e
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidParameterCombinationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, cloudtrailInvalidBody()
 		}
 	}
 

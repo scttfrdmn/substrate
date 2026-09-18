@@ -74,7 +74,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "MalformedQueryString", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, ramInvalidBody()
 		}
 	}
 	if input.Name == "" {
@@ -126,7 +126,9 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 		ResourceShareArns []string `json:"resourceShareArns"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ramInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -171,7 +173,9 @@ func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest)
 		AllowExternalPrincipals *bool  `json:"allowExternalPrincipals"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ramInvalidBody()
+		}
 	}
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
@@ -205,7 +209,9 @@ func (p *RAMPlugin) deleteResourceShare(reqCtx *RequestContext, req *AWSRequest)
 		ResourceShareArn string `json:"resourceShareArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ramInvalidBody()
+		}
 	}
 	// Also check query params (DELETE requests may pass ARN as query param).
 	if input.ResourceShareArn == "" {
@@ -234,7 +240,9 @@ func (p *RAMPlugin) associateResourceShare(reqCtx *RequestContext, req *AWSReque
 		ResourceArns     []string `json:"resourceArns"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ramInvalidBody()
+		}
 	}
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
@@ -268,7 +276,9 @@ func (p *RAMPlugin) disassociateResourceShare(reqCtx *RequestContext, req *AWSRe
 		ResourceArns     []string `json:"resourceArns"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ramInvalidBody()
+		}
 	}
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)

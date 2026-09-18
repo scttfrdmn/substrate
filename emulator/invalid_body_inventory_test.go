@@ -70,11 +70,17 @@ type invalidBodyService struct {
 	cases []invalidBodyCase
 }
 
-// invalidBodyServices is every service and operation #950 corrected, less the two Step Functions and
-// Systems Manager tables and the two Lambda operations that need a function to exist first.
+// invalidBodyServices is every POST-routed body-parse guard #950, #1003 and #1007 settled, less the Step
+// Functions and Systems Manager tables in invalid_body_code_test.go, the two Lambda operations that need a
+// function to exist first, and the three in TestInvalidBodyBelowAResourceLookup.
 //
-// Sixty-four cases. The counts per service are the counts in docs/services.md's inventory table, and a
-// case removed from here without a reason is a site that stops being checked.
+// One hundred and eighty-nine cases across thirty-six entries. A case removed from here without a reason
+// is a site that stops being checked, which is the whole point of listing operations rather than samples.
+//
+// #1007's third slice grew this table twice over. Forty-six of the rows are guards that predate that
+// slice, in the five services whose code it corrected: their codes had to change too, or the service would
+// answer two different codes for one caller error, and a changed code that no test reads is a code that
+// can drift back.
 var invalidBodyServices = []invalidBodyService{
 	{
 		name:       "kinesis",
@@ -279,6 +285,11 @@ var invalidBodyServices = []invalidBodyService{
 		cases: []invalidBodyCase{
 			{op: "SubmitJob", path: "/v1/submitjob"},
 			{op: "DescribeJobs", path: "/v1/describejobs"},
+			// Added by #1007's third slice. Routed on POST here rather than on its other spelling,
+			// DELETE /v1/jobs/{id}: the handler reads jobId from the body on this path and from the path
+			// segment on that one, and the body is what this table is about. The length check added with
+			// the guard is what keeps the DELETE spelling working — see the comment at the site.
+			{op: "TerminateJob", path: "/v1/terminatejob"},
 		},
 	},
 	{
@@ -299,6 +310,297 @@ var invalidBodyServices = []invalidBodyService{
 		cases: []invalidBodyCase{
 			{op: "ApplyGuardrail", path: "/guardrail/gr-1/version/1/apply"},
 			{op: "CreateModelInvocationJob", path: "/model-invocation-job"},
+		},
+	},
+
+	// #1007's third slice: the inline-literal tail. Everything below is a site that spelled its refusal
+	// as an &AWSError{…} literal rather than through a constructor, which is why this slice is the one
+	// that found four services answering a code they do not publish — see invalid_body_refusals.go.
+	//
+	// Five of the sixty sites are not in any table here, each for a stated reason rather than by
+	// omission, and TestInvalidBodyTailIsFullyCovered below counts them so the arithmetic cannot drift.
+	{
+		name:       "sso",
+		host:       "sso.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "the Identity Store and SSO Admin operation pages",
+		cases: []invalidBodyCase{
+			{op: "DescribePermissionSet", target: "SWBExternalService.DescribePermissionSet"},
+			{op: "UpdatePermissionSet", target: "SWBExternalService.UpdatePermissionSet"},
+			{op: "DeletePermissionSet", target: "SWBExternalService.DeletePermissionSet"},
+			{op: "AttachManagedPolicyToPermissionSet", target: "SWBExternalService.AttachManagedPolicyToPermissionSet"},
+			{op: "DetachManagedPolicyFromPermissionSet", target: "SWBExternalService.DetachManagedPolicyFromPermissionSet"},
+			{op: "ListManagedPoliciesInPermissionSet", target: "SWBExternalService.ListManagedPoliciesInPermissionSet"},
+			{op: "CreateAccountAssignment", target: "SWBExternalService.CreateAccountAssignment"},
+			{op: "DeleteAccountAssignment", target: "SWBExternalService.DeleteAccountAssignment"},
+			{op: "ListAccountAssignments", target: "SWBExternalService.ListAccountAssignments"},
+		},
+	},
+	{
+		// Four more API Gateway v1 sites are routed on PUT and carry their own table below.
+		name:       "apigateway",
+		host:       "apigateway.us-east-1.amazonaws.com",
+		code:       "BadRequestException",
+		provenance: "the REST API reference, on every operation that takes a body",
+		cases: []invalidBodyCase{
+			{op: "CreateDeployment", path: "/restapis/my-api/deployments"},
+			{op: "CreateApiKey", path: "/apikeys"},
+			{op: "CreateUsagePlan", path: "/usageplans"},
+		},
+	},
+	{
+		// A separate entry from apigateway above, not a merged one, for the same reason apigwv2InvalidBody
+		// is a separate constructor: v1 and v2 are separate APIs with separate references, and a merged
+		// row would let a v2 regression pass on a v1 citation. The `/v2/` prefix is what refineAPIGateway-
+		// Version dispatches on, so it is load-bearing rather than cosmetic.
+		name:       "apigatewayv2",
+		host:       "apigateway.us-east-1.amazonaws.com",
+		code:       "BadRequestException",
+		provenance: "the API Gateway v2 operation pages",
+		cases: []invalidBodyCase{
+			{op: "CreateIntegration", path: "/v2/apis/my-api/integrations"},
+			{op: "CreateAuthorizer", path: "/v2/apis/my-api/authorizers"},
+			{op: "CreateDeployment", path: "/v2/apis/my-api/deployments"},
+		},
+	},
+	{
+		// The code here is a correction, not a carry-forward: these five answered MalformedQueryString,
+		// which RAM does not publish at all — it is a 404 on the Query-protocol page and describes the URL
+		// query string. See ramInvalidBody for why the common code beats the operation page's
+		// InvalidParameterException.
+		name:       "ram",
+		host:       "ram.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-errors page; RAM's operation code names a parameter that was never read",
+		cases: []invalidBodyCase{
+			{op: "GetResourceShares", path: "/getresourceshares"},
+			{op: "UpdateResourceShare", path: "/updateresourceshare"},
+			{op: "DeleteResourceShare", path: "/deleteresourceshare"},
+			{op: "AssociateResourceShare", path: "/associateresourceshare"},
+			{op: "DisassociateResourceShare", path: "/disassociateresourceshare"},
+			{op: "CreateResourceShare", path: "/createresourceshare"},
+		},
+	},
+	{
+		name:       "ecs",
+		host:       "ecs.us-east-1.amazonaws.com",
+		code:       "InvalidParameterException",
+		provenance: "every ECS operation page; it is the only 400 ECS publishes for caller error",
+		cases: []invalidBodyCase{
+			{op: "DescribeClusters", target: "AmazonEC2ContainerServiceV20141113.DescribeClusters"},
+			{op: "ListTaskDefinitions", target: "AmazonEC2ContainerServiceV20141113.ListTaskDefinitions"},
+			{op: "ListServices", target: "AmazonEC2ContainerServiceV20141113.ListServices"},
+			{op: "ListTasks", target: "AmazonEC2ContainerServiceV20141113.ListTasks"},
+		},
+	},
+	{
+		name:       "cloudwatchlogs",
+		host:       "logs.us-east-1.amazonaws.com",
+		code:       "InvalidParameterException",
+		provenance: "the CloudWatch Logs operation pages; the metrics plugin's own code is different",
+		cases: []invalidBodyCase{
+			{op: "DescribeLogGroups", target: "Logs_20140328.DescribeLogGroups"},
+			{op: "DescribeLogStreams", target: "Logs_20140328.DescribeLogStreams"},
+			{op: "GetLogEvents", target: "Logs_20140328.GetLogEvents"},
+			{op: "FilterLogEvents", target: "Logs_20140328.FilterLogEvents"},
+		},
+	},
+	{
+		name:       "athena",
+		host:       "athena.us-east-1.amazonaws.com",
+		code:       "InvalidRequestException",
+		provenance: "every Athena operation page",
+		cases: []invalidBodyCase{
+			{op: "ListQueryExecutions", target: "AmazonAthena.ListQueryExecutions"},
+			{op: "ListWorkGroups", target: "AmazonAthena.ListWorkGroups"},
+		},
+	},
+	{
+		name:       "cognito-identity",
+		host:       "cognito-identity.us-east-1.amazonaws.com",
+		code:       "InvalidParameterException",
+		provenance: "the Cognito Identity operation pages",
+		cases: []invalidBodyCase{
+			{op: "ListIdentityPools", target: "AWSCognitoIdentityService.ListIdentityPools"},
+			{op: "GetCredentialsForIdentity", target: "AWSCognitoIdentityService.GetCredentialsForIdentity"},
+		},
+	},
+	{
+		// A separate entry from cognito-identity for the same reason the constructors are separate: user
+		// pools and identity pools are different APIs that happen to publish the same code.
+		name:       "cognito-idp",
+		host:       "cognito-idp.us-east-1.amazonaws.com",
+		code:       "InvalidParameterException",
+		provenance: "the Cognito user-pools operation pages",
+		cases: []invalidBodyCase{
+			{op: "ListUserPools", target: "AWSCognitoIdentityProviderService.ListUserPools"},
+		},
+	},
+	{
+		name:       "redshift-data",
+		host:       "redshift-data.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "every Redshift Data API operation page",
+		cases: []invalidBodyCase{
+			{op: "DescribeStatement", target: "RedshiftData.DescribeStatement"},
+			{op: "GetStatementResult", target: "RedshiftData.GetStatementResult"},
+		},
+	},
+	{
+		// Timestream is two entries rather than one because it is two endpoints: ListTables is on the
+		// ingest host and Query on the query host, and a single row would have to pick one and silently
+		// stop covering the other.
+		name:       "timestream-write",
+		host:       "ingest.timestream.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "the Timestream Write operation pages",
+		cases: []invalidBodyCase{
+			{op: "ListTables", target: "Timestream_20181101.ListTables"},
+		},
+	},
+	{
+		name:       "timestream-query",
+		host:       "query.timestream.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "the Timestream Query operation pages",
+		cases: []invalidBodyCase{
+			{op: "Query", target: "Timestream_20181101.Query"},
+		},
+	},
+	{
+		name:       "secretsmanager",
+		host:       "secretsmanager.us-east-1.amazonaws.com",
+		code:       "InvalidRequestException",
+		provenance: "every Secrets Manager operation page",
+		cases: []invalidBodyCase{
+			{op: "ListSecrets", target: "secretsmanager.ListSecrets"},
+		},
+	},
+	{
+		name:       "emrserverless",
+		host:       "emr-serverless.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "every EMR Serverless operation page",
+		cases: []invalidBodyCase{
+			{op: "StartJobRun", path: "/applications/my-app/jobruns"},
+		},
+	},
+	{
+		name:       "ecr",
+		host:       "api.ecr.us-east-1.amazonaws.com",
+		code:       "InvalidParameterException",
+		provenance: "the ECR operation pages",
+		cases: []invalidBodyCase{
+			{op: "DescribeRepositories", target: "AmazonEC2ContainerRegistry_V20150921.DescribeRepositories"},
+		},
+	},
+	{
+		// Another correction: this answered InvalidParameterCombinationException, which means two
+		// parameters that cannot be used together and is not on LookupEvents' seven-code Errors list at
+		// all. A body that will not parse yields no parameters to combine.
+		name:       "cloudtrail",
+		host:       "cloudtrail.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-errors page; CloudTrail publishes no parse or serialization code anywhere",
+		cases: []invalidBodyCase{
+			{op: "DescribeTrails", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails"},
+			{op: "CreateTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.CreateTrail"},
+			{op: "GetTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrail"},
+			{op: "GetTrailStatus", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.GetTrailStatus"},
+			{op: "UpdateTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.UpdateTrail"},
+			{op: "DeleteTrail", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DeleteTrail"},
+			{op: "StartLogging", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.StartLogging"},
+		},
+	},
+	{
+		// Corrected from InvalidParameterValueException, which appears nowhere in Glue: not on its
+		// Common Errors page, not on CreateDatabase/GetTables/StartJobRun, and not among the thirty-six
+		// AWSGlueException subclasses.
+		name:       "glue",
+		host:       "glue.us-east-1.amazonaws.com",
+		code:       "InvalidInputException",
+		provenance: `every Glue operation page, "The input provided was not valid."`,
+		cases: []invalidBodyCase{
+			{op: "GetTables", target: "AWSGlue.GetTables"},
+			{op: "CreateDatabase", target: "AWSGlue.CreateDatabase"},
+			{op: "GetDatabase", target: "AWSGlue.GetDatabase"},
+			{op: "UpdateDatabase", target: "AWSGlue.UpdateDatabase"},
+			{op: "DeleteDatabase", target: "AWSGlue.DeleteDatabase"},
+			{op: "CreateTable", target: "AWSGlue.CreateTable"},
+			{op: "GetTable", target: "AWSGlue.GetTable"},
+			{op: "UpdateTable", target: "AWSGlue.UpdateTable"},
+			{op: "DeleteTable", target: "AWSGlue.DeleteTable"},
+			{op: "CreateConnection", target: "AWSGlue.CreateConnection"},
+			{op: "GetConnection", target: "AWSGlue.GetConnection"},
+			{op: "UpdateConnection", target: "AWSGlue.UpdateConnection"},
+			{op: "DeleteConnection", target: "AWSGlue.DeleteConnection"},
+			{op: "CreateCrawler", target: "AWSGlue.CreateCrawler"},
+			{op: "GetCrawler", target: "AWSGlue.GetCrawler"},
+			{op: "UpdateCrawler", target: "AWSGlue.UpdateCrawler"},
+			{op: "DeleteCrawler", target: "AWSGlue.DeleteCrawler"},
+			{op: "CreateJob", target: "AWSGlue.CreateJob"},
+			{op: "GetJob", target: "AWSGlue.GetJob"},
+			{op: "UpdateJob", target: "AWSGlue.UpdateJob"},
+			{op: "DeleteJob", target: "AWSGlue.DeleteJob"},
+			{op: "StartJobRun", target: "AWSGlue.StartJobRun"},
+			{op: "GetJobRun", target: "AWSGlue.GetJobRun"},
+			{op: "GetJobRuns", target: "AWSGlue.GetJobRuns"},
+			{op: "TagResource", target: "AWSGlue.TagResource"},
+			{op: "UntagResource", target: "AWSGlue.UntagResource"},
+			{op: "GetTags", target: "AWSGlue.GetTags"},
+		},
+	},
+	{
+		// Corrected from a bare InvalidRequest, which is an Amazon S3 code and appears nowhere in FSx.
+		// The wire code has no Exception suffix even though the Java class does.
+		name:       "fsx",
+		host:       "fsx.us-east-1.amazonaws.com",
+		code:       "BadRequest",
+		provenance: `the FSx operation pages, "A generic error indicating a failure with a client request."`,
+		cases: []invalidBodyCase{
+			{op: "DescribeFileSystems", target: "AWSSimbaAPIService_v20180301.DescribeFileSystems"},
+			{op: "CreateFileSystem", target: "AWSSimbaAPIService_v20180301.CreateFileSystem"},
+			{op: "DeleteFileSystem", target: "AWSSimbaAPIService_v20180301.DeleteFileSystem"},
+		},
+	},
+	{
+		// Not a correction but a judgement, and the tree had already made it: WAFInvalidParameterException
+		// is published at 400, but wafv2_createipset_validation_test.go records from #755 that it is for a
+		// present-but-invalid *value* while an absent required member is ValidationError. A body that will
+		// not parse has no members at all.
+		name:       "wafv2",
+		host:       "wafv2.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-errors page; the operation code presupposes a parameter substrate read",
+		cases: []invalidBodyCase{
+			{op: "ListWebACLs", target: "AWSWAF_20190729.ListWebACLs"},
+			{op: "ListIPSets", target: "AWSWAF_20190729.ListIPSets"},
+			{op: "CreateWebACL", target: "AWSWAF_20190729.CreateWebACL"},
+			{op: "GetWebACL", target: "AWSWAF_20190729.GetWebACL"},
+			{op: "UpdateWebACL", target: "AWSWAF_20190729.UpdateWebACL"},
+			{op: "DeleteWebACL", target: "AWSWAF_20190729.DeleteWebACL"},
+			{op: "AssociateWebACL", target: "AWSWAF_20190729.AssociateWebACL"},
+			{op: "DisassociateWebACL", target: "AWSWAF_20190729.DisassociateWebACL"},
+			{op: "GetWebACLForResource", target: "AWSWAF_20190729.GetWebACLForResource"},
+			{op: "CreateIPSet", target: "AWSWAF_20190729.CreateIPSet"},
+			{op: "GetIPSet", target: "AWSWAF_20190729.GetIPSet"},
+			{op: "UpdateIPSet", target: "AWSWAF_20190729.UpdateIPSet"},
+			{op: "DeleteIPSet", target: "AWSWAF_20190729.DeleteIPSet"},
+		},
+	},
+	{
+		// SerializationException is the one code in the slice that no AWS reference publishes. It is
+		// observed Coral-protocol wire behavior, emitted before the request reaches DynamoDB at all,
+		// which is why the service never documents it — see ddbInvalidBody. Asserted anyway, because the
+		// wire is what an SDK's retry classifier reads.
+		name:       "dynamodb",
+		host:       "dynamodb.us-east-1.amazonaws.com",
+		code:       "SerializationException",
+		provenance: "observed wire behavior, not the API model",
+		cases: []invalidBodyCase{
+			{op: "ListTables", target: "DynamoDB_20120810.ListTables"},
+			{op: "ListStreams", target: "DynamoDB_20120810.ListStreams"},
+			{op: "GetRecords", target: "DynamoDB_20120810.GetRecords"},
 		},
 	},
 }
@@ -530,6 +832,41 @@ var invalidBodyMethodCases = []invalidBodyMethodCase{
 		path: "/v2/email/identities", method: http.MethodGet,
 		code: "BadRequestException", status: http.StatusBadRequest,
 	},
+
+	// #1007's third slice adds five more. Four are API Gateway v1 operations whose REST reference routes
+	// them on PUT, and one is Backup's CreateBackupVault, which is a PUT with the vault name in the path.
+	//
+	// The API Gateway four take path parameters the handler never resolves — it reads the method and
+	// integration out of the body — so a literal identifier is enough and no resource has to exist. That is
+	// what makes the guard reachable against an empty server, which is the property this table needs.
+	{
+		name: "PutMethod", host: "apigateway.us-east-1.amazonaws.com",
+		path: "/restapis/my-api/resources/my-res/methods/GET", method: http.MethodPut,
+		code: "BadRequestException", status: http.StatusBadRequest,
+	},
+	{
+		name: "PutIntegration", host: "apigateway.us-east-1.amazonaws.com",
+		path: "/restapis/my-api/resources/my-res/methods/GET/integration", method: http.MethodPut,
+		code: "BadRequestException", status: http.StatusBadRequest,
+	},
+	{
+		name: "PutIntegrationResponse", host: "apigateway.us-east-1.amazonaws.com",
+		path: "/restapis/my-api/resources/my-res/methods/GET/integration/responses/200", method: http.MethodPut,
+		code: "BadRequestException", status: http.StatusBadRequest,
+	},
+	{
+		name: "PutMethodResponse", host: "apigateway.us-east-1.amazonaws.com",
+		path: "/restapis/my-api/resources/my-res/methods/GET/responses/200", method: http.MethodPut,
+		code: "BadRequestException", status: http.StatusBadRequest,
+	},
+	{
+		// The vault name must be non-empty because the required-member check on the path segment runs
+		// *before* the parse guard. The already-exists check runs after it, so a literal name reaches the
+		// guard on an empty server without anything being created.
+		name: "CreateBackupVault", host: "backup.us-east-1.amazonaws.com",
+		path: "/backup-vaults/my-vault", method: http.MethodPut,
+		code: "InvalidRequestException", status: http.StatusBadRequest,
+	},
 }
 
 // TestInvalidBodyOnANonPostOperation asserts the six guards the POST table cannot reach (#1007).
@@ -547,18 +884,29 @@ func TestInvalidBodyOnANonPostOperation(t *testing.T) {
 	}
 }
 
-// TestInvalidBodyLeavesAnAbsentBodyAlone is the other half of the second slice, and the half a table of
-// refusals cannot assert (#1007).
+// TestInvalidBodyLeavesAnAbsentBodyAlone is the other half of the second and third slices, and the half a
+// table of refusals cannot assert (#1007).
 //
-// Fourteen of the twenty sites sat inside an `if len(req.Body) > 0` check, because their operation
-// publishes no required member and AWS accepts no body at all. Checking the decode error there must not
-// turn an absent body into a refusal: these are list operations whose whole answer for an empty request is
-// "everything". A guard that refused an empty body would satisfy every assertion in the tables above and
-// break every consumer that lists without filters.
+// Fourteen of the second slice's twenty sites sat inside an `if len(req.Body) > 0` check, because their
+// operation publishes no required member and AWS accepts no body at all. Checking the decode error there
+// must not turn an absent body into a refusal: these are list operations whose whole answer for an empty
+// request is "everything". A guard that refused an empty body would satisfy every assertion in the tables
+// above and break every consumer that lists without filters.
 //
 // The three Lambda updates are deliberately not here. They carry no length check and refuse an empty body,
 // which matches AddPermission and TagResource: an update that names nothing to update is a caller error,
 // not a request for a default.
+//
+// The third slice's fourteen are the second block below. Membership was measured rather than reasoned:
+// every tail site was called with no body and the ones answering 200 were listed, then narrowed to the
+// ones where 200 is what AWS publishes. Nine of the measured 200s are *not* here, because their page
+// marks a member `Required: Yes` and answering 200 for an absent body is a defect this test would
+// otherwise pin: sso CreateAccountAssignment / DeleteAccountAssignment / ListAccountAssignments (three
+// required ARNs each), cognito-identity ListIdentityPools and cognito-idp ListUserPools (`MaxResults`),
+// glue GetTables (`DatabaseName`), wafv2 ListWebACLs and ListIPSets (`Scope`), and dynamodb GetRecords
+// (`ShardIterator`). Those belong to the missing-required-member class, not to this one — filed
+// separately — and the distinction is the reason this test asserts 200 on a hand-checked list rather than
+// on whatever the tree happens to answer.
 func TestInvalidBodyLeavesAnAbsentBodyAlone(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 
@@ -581,6 +929,22 @@ func TestInvalidBodyLeavesAnAbsentBodyAlone(t *testing.T) {
 		{name: "ssm/DescribeParameters", host: "ssm.us-east-1.amazonaws.com", target: "AmazonSSM.DescribeParameters"},
 		{name: "servicequotas/ListRequestedServiceQuotaChangeHistory", host: "servicequotas.us-east-1.amazonaws.com", target: "ServiceQuotasV20190624.ListRequestedServiceQuotaChangeHistory"},
 		{name: "sesv2/ListEmailIdentities", host: "email.us-east-1.amazonaws.com", path: "/v2/email/identities", method: http.MethodGet},
+
+		// The third slice. Each of these publishes no required member, so an absent body means "no filter".
+		{name: "ecs/DescribeClusters", host: "ecs.us-east-1.amazonaws.com", target: "AmazonEC2ContainerServiceV20141113.DescribeClusters"},
+		{name: "ecs/ListTaskDefinitions", host: "ecs.us-east-1.amazonaws.com", target: "AmazonEC2ContainerServiceV20141113.ListTaskDefinitions"},
+		{name: "ecs/ListServices", host: "ecs.us-east-1.amazonaws.com", target: "AmazonEC2ContainerServiceV20141113.ListServices"},
+		{name: "ecs/ListTasks", host: "ecs.us-east-1.amazonaws.com", target: "AmazonEC2ContainerServiceV20141113.ListTasks"},
+		{name: "cloudwatchlogs/DescribeLogGroups", host: "logs.us-east-1.amazonaws.com", target: "Logs_20140328.DescribeLogGroups"},
+		{name: "athena/ListQueryExecutions", host: "athena.us-east-1.amazonaws.com", target: "AmazonAthena.ListQueryExecutions"},
+		{name: "athena/ListWorkGroups", host: "athena.us-east-1.amazonaws.com", target: "AmazonAthena.ListWorkGroups"},
+		{name: "timestream-write/ListTables", host: "ingest.timestream.us-east-1.amazonaws.com", target: "Timestream_20181101.ListTables"},
+		{name: "secretsmanager/ListSecrets", host: "secretsmanager.us-east-1.amazonaws.com", target: "secretsmanager.ListSecrets"},
+		{name: "ecr/DescribeRepositories", host: "api.ecr.us-east-1.amazonaws.com", target: "AmazonEC2ContainerRegistry_V20150921.DescribeRepositories"},
+		{name: "cloudtrail/DescribeTrails", host: "cloudtrail.us-east-1.amazonaws.com", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails"},
+		{name: "fsx/DescribeFileSystems", host: "fsx.us-east-1.amazonaws.com", target: "AWSSimbaAPIService_v20180301.DescribeFileSystems"},
+		{name: "dynamodb/ListTables", host: "dynamodb.us-east-1.amazonaws.com", target: "DynamoDB_20120810.ListTables"},
+		{name: "dynamodb/ListStreams", host: "dynamodb.us-east-1.amazonaws.com", target: "DynamoDB_20120810.ListStreams"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, code, message := rawUnsignedMethodCall(t, ts, tc.host, tc.target, tc.path, tc.method, nil)
@@ -946,4 +1310,200 @@ func rawUnsignedMethodCall(t *testing.T, ts *emulator.TestServer, host, target, 
 		code = code[i+1:]
 	}
 	return resp.StatusCode, code, errShape.Message
+}
+
+// TestOpenSearchInvalidBodyIsNotAnAWSError covers the three sites in #1007's tail that are not an AWS
+// control-plane operation at all.
+//
+// These are the OpenSearch domain's own REST search API, so no AWS reference publishes a code for them and
+// the refusal cannot be an AWSError: it is the engine's error envelope, a JSON body carrying a `type` and
+// an HTTP status. openSearchInvalidBody answers json_parse_exception/400, following the file's existing
+// convention of the engine's own lowercased exception name (resource_already_exists_exception,
+// illegal_argument_exception). The provenance is engine behavior, which is why these are asserted apart
+// from the published-code tables rather than folded into them with a fabricated citation.
+func TestOpenSearchInvalidBodyIsNotAnAWSError(t *testing.T) {
+	const host = "search-mydomain-abc123.us-east-1.es.amazonaws.com"
+	ts := emulator.StartTestServer(t)
+
+	for _, tc := range []struct {
+		op     string
+		path   string
+		method string
+	}{
+		{op: "Search", path: "/my-index/_search", method: http.MethodPost},
+		{op: "Scroll", path: "/_search/scroll", method: http.MethodPost},
+		{op: "ClearScroll", path: "/_search/scroll", method: http.MethodDelete},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			status, body := rawUnsignedRawBody(t, ts, host, tc.path, tc.method, []byte(invalidBodyPayload))
+			assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.op)
+			assert.Containsf(t, body, "json_parse_exception",
+				"%s answers the engine's own exception name, not an AWS code: %s", tc.op, body)
+			assertNoDecoderText(t, tc.op, body)
+		})
+	}
+}
+
+// TestInvalidBodyBelowAResourceLookup covers the three tail sites no table above can reach (#1007).
+//
+// Each sits below a lookup of the resource its path names, so against an empty server the lookup answers
+// first — NotFoundException for API Gateway v2, the loader's own error for AppSync and Backup — and the
+// parse guard never runs. That is the lookup-first convention recorded under "Whether a body is parsed
+// before the resource is looked up" in docs/services.md, not a defect in this slice; #1007's scope is that
+// a discarded decode error is checked, which these three now satisfy.
+//
+// It does mean a table of refusals against a bare server cannot see them, and a site no test reaches is a
+// site whose code has stopped being checked. So the prerequisite is created first and the refusal asserted
+// second, the same shape as TestLambdaInvalidBodyBelowAFunctionLookup. Without this, appsyncInvalidBody
+// would have no caller any test exercises at all, since CreateApiKey is AppSync's only site in the slice.
+func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+
+	for _, tc := range []struct {
+		name string
+		host string
+		// createPath and createBody bring the resource the guard sits below into existence.
+		createPath string
+		createBody string
+		// idKey is the member of the create response holding the new resource's identifier, found at any
+		// depth so that a wire shape which nests it (AppSync's graphqlApi) needs no separate column.
+		idKey string
+		// refusePath renders the path the refusal is asserted on, given that identifier.
+		refusePath func(id string) string
+		method     string
+		code       string
+	}{
+		{
+			name:       "apigatewayv2/UpdateApi",
+			host:       "apigateway.us-east-1.amazonaws.com",
+			createPath: "/v2/apis",
+			createBody: `{"Name":"below-lookup","ProtocolType":"HTTP"}`,
+			idKey:      "apiId",
+			refusePath: func(id string) string { return "/v2/apis/" + id },
+			method:     http.MethodPatch,
+			code:       "BadRequestException",
+		},
+		{
+			name:       "appsync/CreateApiKey",
+			host:       "appsync.us-east-1.amazonaws.com",
+			createPath: "/v1/apis",
+			createBody: `{"name":"below-lookup","authenticationType":"API_KEY"}`,
+			idKey:      "apiId",
+			refusePath: func(id string) string { return "/v1/apis/" + id + "/ApiKeys" },
+			method:     http.MethodPost,
+			code:       "BadRequestException",
+		},
+		{
+			name:       "backup/UpdateBackupPlan",
+			host:       "backup.us-east-1.amazonaws.com",
+			createPath: "/backup/plans",
+			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup"}}`,
+			idKey:      "BackupPlanId",
+			refusePath: func(id string) string { return "/backup/plans/" + id },
+			method:     http.MethodPost,
+			code:       "InvalidRequestException",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, raw := rawUnsignedRawBody(t, ts, tc.host, tc.createPath, http.MethodPost,
+				[]byte(tc.createBody))
+			require.Truef(t, status == http.StatusOK || status == http.StatusCreated,
+				"creating the prerequisite for %s answers 200 or 201, got %d: %s", tc.name, status, raw)
+			id := jsonMemberAnyDepth(t, raw, tc.idKey)
+
+			status, code, message := rawUnsignedMethodCall(t, ts, tc.host, "", tc.refusePath(id),
+				tc.method, []byte(invalidBodyPayload))
+			assert.Equalf(t, tc.code, code, "%s answers its service's published code: %s", tc.name, message)
+			assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.name)
+			assertNoDecoderText(t, tc.name, message)
+		})
+	}
+}
+
+// jsonMemberAnyDepth returns the first string value of key in a JSON object, searching nested objects.
+//
+// Searching by depth rather than by path keeps the table above to one column per resource: AppSync nests
+// the identifier under graphqlApi where Backup and API Gateway v2 put it at the top level, and which of
+// those a service chose is not what the test is about.
+func jsonMemberAnyDepth(t *testing.T, raw, key string) string {
+	t.Helper()
+
+	var doc any
+	if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+		t.Fatalf("decode the create response looking for %q: %v: %s", key, err, raw)
+	}
+
+	var walk func(any) (string, bool)
+	walk = func(node any) (string, bool) {
+		obj, ok := node.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		if v, found := obj[key].(string); found && v != "" {
+			return v, true
+		}
+		for _, child := range obj {
+			if v, found := walk(child); found {
+				return v, true
+			}
+		}
+		return "", false
+	}
+
+	v, found := walk(doc)
+	if !found {
+		t.Fatalf("no %q member in the create response: %s", key, raw)
+	}
+	return v
+}
+
+// TestInvalidBodyTailIsFullyCovered asserts the sixty sites #1007's third slice changed are all accounted
+// for: covered by a table, or listed as uncovered with a reason.
+//
+// This is arithmetic rather than behavior, and it is here because the tables cannot state it themselves.
+// A site quietly dropped from a table still leaves every other assertion green, so the count is the only
+// thing that catches it — the same reason the per-service counts above are pinned to docs/services.md.
+func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
+	// The slice's own numbers, from the inventory in docs/services.md.
+	const (
+		tailSites       = 60
+		inServiceTables = 49 // POST-routed, refused with an AWSError
+		inMethodTable   = 5  // four API Gateway v1 PUTs and Backup's CreateBackupVault
+		inOpenSearch    = 3  // the domain's own REST API, refused with the engine's envelope
+		belowALookup    = 3  // reachable only once the resource the guard sits below exists
+	)
+
+	assert.Equalf(t, tailSites, inServiceTables+inMethodTable+inOpenSearch+belowALookup,
+		"every one of the %d sites #1007's third slice changed is reached by a test above", tailSites)
+}
+
+// rawUnsignedRawBody is [rawUnsignedMethodCall] returning the response body verbatim.
+//
+// Only the OpenSearch test needs it. That plugin's errors are the engine's envelope rather than an
+// AWSError, so there is no Code or __type member to read, and the decode in rawUnsignedMethodCall would
+// report an empty code for a refusal that is plainly there. Returning the bytes lets the assertion name
+// what it is actually looking for.
+func rawUnsignedRawBody(t *testing.T, ts *emulator.TestServer, host, path, method string,
+	body []byte,
+) (status int, raw string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), method, ts.URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("build the request for %s: %v", path, err)
+	}
+	req.Host = host
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("call %s: %v", path, err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the response from %s: %v", path, err)
+	}
+	return resp.StatusCode, string(out)
 }

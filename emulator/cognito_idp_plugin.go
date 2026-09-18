@@ -280,7 +280,11 @@ func (p *CognitoIDPPlugin) listUserPools(ctx *RequestContext, req *AWSRequest) (
 		MaxResults int    `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cognitoIDPInvalidBody()
+		}
+	}
 	if body.MaxResults <= 0 {
 		body.MaxResults = 60
 	}

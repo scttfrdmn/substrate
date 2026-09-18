@@ -123,7 +123,7 @@ func (p *GluePlugin) createDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 		Tags map[string]string `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	name := input.DatabaseInput.Name
 	if name == "" {
@@ -160,7 +160,7 @@ func (p *GluePlugin) getDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	raw, err := p.state.Get(goCtx, glueNamespace, "database:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name)
@@ -211,7 +211,7 @@ func (p *GluePlugin) updateDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 		} `json:"DatabaseInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -248,7 +248,7 @@ func (p *GluePlugin) deleteDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, glueNamespace, "database:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name); err != nil {
@@ -273,7 +273,7 @@ func (p *GluePlugin) createTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		} `json:"TableInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	arn := fmt.Sprintf("arn:aws:glue:%s:%s:table/%s/%s", reqCtx.Region, reqCtx.AccountID, input.DatabaseName, input.TableInput.Name)
@@ -306,7 +306,7 @@ func (p *GluePlugin) getTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		Name         string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "table:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.DatabaseName + "/" + input.Name
@@ -329,7 +329,9 @@ func (p *GluePlugin) getTables(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		DatabaseName string `json:"DatabaseName"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, glueInvalidBody()
+		}
 	}
 	goCtx := context.Background()
 	names, err := loadStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName)
@@ -366,7 +368,7 @@ func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		} `json:"TableInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "table:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.DatabaseName + "/" + input.TableInput.Name
@@ -406,7 +408,7 @@ func (p *GluePlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Name         string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, glueNamespace, "table:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName+"/"+input.Name); err != nil {
@@ -429,7 +431,7 @@ func (p *GluePlugin) createConnection(reqCtx *RequestContext, req *AWSRequest) (
 		Tags map[string]string `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	arn := fmt.Sprintf("arn:aws:glue:%s:%s:connection/%s", reqCtx.Region, reqCtx.AccountID, input.ConnectionInput.Name)
@@ -459,7 +461,7 @@ func (p *GluePlugin) getConnection(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	raw, err := p.state.Get(goCtx, glueNamespace, "connection:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name)
@@ -510,7 +512,7 @@ func (p *GluePlugin) updateConnection(reqCtx *RequestContext, req *AWSRequest) (
 		} `json:"ConnectionInput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "connection:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.Name
@@ -546,7 +548,7 @@ func (p *GluePlugin) deleteConnection(reqCtx *RequestContext, req *AWSRequest) (
 		ConnectionName string `json:"ConnectionName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, glueNamespace, "connection:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.ConnectionName); err != nil {
@@ -568,7 +570,7 @@ func (p *GluePlugin) createCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Tags         map[string]string      `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	arn := fmt.Sprintf("arn:aws:glue:%s:%s:crawler/%s", reqCtx.Region, reqCtx.AccountID, input.Name)
@@ -600,7 +602,7 @@ func (p *GluePlugin) getCrawler(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	raw, err := p.state.Get(goCtx, glueNamespace, "crawler:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name)
@@ -658,7 +660,7 @@ func (p *GluePlugin) updateCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Targets     map[string]interface{} `json:"Targets"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "crawler:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.Name
@@ -691,7 +693,7 @@ func (p *GluePlugin) deleteCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 		Name string `json:"Name"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, glueNamespace, "crawler:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name); err != nil {
@@ -712,7 +714,7 @@ func (p *GluePlugin) createJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		Tags        map[string]string `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	arn := fmt.Sprintf("arn:aws:glue:%s:%s:job/%s", reqCtx.Region, reqCtx.AccountID, input.Name)
@@ -742,7 +744,7 @@ func (p *GluePlugin) getJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRespon
 		JobName string `json:"JobName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	raw, err := p.state.Get(goCtx, glueNamespace, "job:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName)
@@ -792,7 +794,7 @@ func (p *GluePlugin) updateJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		} `json:"JobUpdate"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "job:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.JobName
@@ -825,7 +827,7 @@ func (p *GluePlugin) deleteJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		JobName string `json:"JobName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, glueNamespace, "job:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName); err != nil {
@@ -840,7 +842,7 @@ func (p *GluePlugin) startJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		JobName string `json:"JobName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 
 	goCtx := context.Background()
@@ -878,7 +880,7 @@ func (p *GluePlugin) getJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		RunID   string `json:"RunId"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	key := "jobrun:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + input.JobName + "/" + input.RunID
@@ -901,7 +903,7 @@ func (p *GluePlugin) getJobRuns(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		JobName string `json:"JobName"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, glueNamespace, "jobrun_ids:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName)
@@ -934,7 +936,7 @@ func (p *GluePlugin) tagResource(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		TagsToAdd   map[string]string `json:"TagsToAdd"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)
@@ -954,7 +956,7 @@ func (p *GluePlugin) untagResource(reqCtx *RequestContext, req *AWSRequest) (*AW
 		TagsToRemove []string `json:"TagsToRemove"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)
@@ -973,7 +975,7 @@ func (p *GluePlugin) getTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRespo
 		ResourceArn string `json:"ResourceArn"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidBody()
 	}
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)

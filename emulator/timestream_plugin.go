@@ -256,7 +256,11 @@ func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (
 	var input struct {
 		DatabaseName string `json:"DatabaseName"`
 	}
-	_ = json.Unmarshal(req.Body, &input)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, timestreamInvalidBody()
+		}
+	}
 	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
 	names, _ := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName))
@@ -330,7 +334,11 @@ func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	var input struct {
 		QueryString string `json:"QueryString"`
 	}
-	_ = json.Unmarshal(req.Body, &input)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, timestreamInvalidBody()
+		}
+	}
 
 	result := p.lookupQueryResult(input.QueryString, reqCtx.AccountID, reqCtx.Region)
 

@@ -143,7 +143,7 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Name == "" {
@@ -206,7 +206,7 @@ func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -237,7 +237,7 @@ func (p *WAFv2Plugin) updateWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -295,7 +295,7 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -327,7 +327,9 @@ func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Limit int    `json:"Limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, wafv2InvalidBody()
+		}
 	}
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
@@ -366,7 +368,7 @@ func (p *WAFv2Plugin) associateWebACL(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.ResourceArn == "" {
@@ -392,7 +394,7 @@ func (p *WAFv2Plugin) disassociateWebACL(reqCtx *RequestContext, req *AWSRequest
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.ResourceArn == "" {
@@ -414,7 +416,7 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.ResourceArn == "" {
@@ -453,7 +455,7 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if err := wafv2ValidateCreateIPSet(input.Name, input.Scope, input.IPAddressVersion, input.Addresses); err != nil {
@@ -508,7 +510,7 @@ func (p *WAFv2Plugin) getIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -536,7 +538,7 @@ func (p *WAFv2Plugin) updateIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -583,7 +585,7 @@ func (p *WAFv2Plugin) deleteIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, wafv2InvalidBody()
 		}
 	}
 	if input.Scope == "" {
@@ -614,7 +616,9 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Scope string `json:"Scope"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, wafv2InvalidBody()
+		}
 	}
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"

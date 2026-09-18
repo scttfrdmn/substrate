@@ -576,7 +576,9 @@ func (p *DynamoDBPlugin) listTables(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Limit                   int    `json:"Limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ddbInvalidBody()
+		}
 	}
 
 	limit := input.Limit
@@ -1767,7 +1769,9 @@ func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWS
 		TableName string `json:"TableName"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ddbInvalidBody()
+		}
 	}
 
 	var streams []map[string]string
@@ -1899,7 +1903,9 @@ func (p *DynamoDBPlugin) getRecords(ctx *RequestContext, req *AWSRequest) (*AWSR
 		Limit         int    `json:"Limit"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, ddbInvalidBody()
+		}
 	}
 
 	if input.ShardIterator == "" {

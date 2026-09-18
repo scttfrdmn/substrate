@@ -677,7 +677,9 @@ func (p *APIGatewayPlugin) putMethod(ctx *RequestContext, req *AWSRequest, apiID
 		APIKeyRequired    bool   `json:"apiKeyRequired"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 
 	method := MethodState{
@@ -786,7 +788,9 @@ func (p *APIGatewayPlugin) deleteMethod(ctx *RequestContext, apiID, resID, verb 
 func (p *APIGatewayPlugin) putIntegration(ctx *RequestContext, req *AWSRequest, apiID, resID, verb string) (*AWSResponse, error) {
 	var integration IntegrationState
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &integration)
+		if err := json.Unmarshal(req.Body, &integration); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -803,7 +807,9 @@ func (p *APIGatewayPlugin) putIntegration(ctx *RequestContext, req *AWSRequest, 
 func (p *APIGatewayPlugin) putIntegrationResponse(_ *RequestContext, req *AWSRequest, _, _, _, _ string) (*AWSResponse, error) {
 	var body map[string]interface{}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 	return apigwJSONResponse(http.StatusCreated, body)
 }
@@ -811,7 +817,9 @@ func (p *APIGatewayPlugin) putIntegrationResponse(_ *RequestContext, req *AWSReq
 func (p *APIGatewayPlugin) putMethodResponse(_ *RequestContext, req *AWSRequest, _, _, _, _ string) (*AWSResponse, error) {
 	var body map[string]interface{}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 	return apigwJSONResponse(http.StatusCreated, body)
 }
@@ -823,7 +831,9 @@ func (p *APIGatewayPlugin) createDeployment(ctx *RequestContext, req *AWSRequest
 		Description string `json:"description"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 
 	dep := DeploymentState{
@@ -1148,7 +1158,9 @@ func (p *APIGatewayPlugin) createAPIKey(ctx *RequestContext, req *AWSRequest) (*
 		Tags    map[string]string `json:"tags"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 
 	keyID, err := generateACMCertID()
@@ -1264,7 +1276,9 @@ func (p *APIGatewayPlugin) createUsagePlan(ctx *RequestContext, req *AWSRequest)
 		APIStages   []interface{}     `json:"apiStages"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwInvalidBody()
+		}
 	}
 
 	plan := UsagePlanState{

@@ -373,7 +373,9 @@ func (p *APIGatewayV2Plugin) updateAPI(ctx *RequestContext, req *AWSRequest, api
 		Description string `json:"Description"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &patch)
+		if err := json.Unmarshal(req.Body, &patch); err != nil {
+			return nil, apigwv2InvalidBody()
+		}
 	}
 	if patch.Name != "" {
 		api.Name = patch.Name
@@ -485,7 +487,9 @@ func (p *APIGatewayV2Plugin) createIntegration(ctx *RequestContext, req *AWSRequ
 		PayloadFormatVersion string `json:"PayloadFormatVersion"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwv2InvalidBody()
+		}
 	}
 
 	integ := V2IntegrationState{
@@ -657,7 +661,9 @@ func (p *APIGatewayV2Plugin) createAuthorizerV2(ctx *RequestContext, req *AWSReq
 		JwtConfiguration interface{} `json:"JwtConfiguration"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwv2InvalidBody()
+		}
 	}
 
 	auth := V2AuthorizerState{
@@ -738,7 +744,9 @@ func (p *APIGatewayV2Plugin) createDeploymentV2(ctx *RequestContext, req *AWSReq
 		Description string `json:"Description"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, apigwv2InvalidBody()
+		}
 	}
 
 	dep := V2DeploymentState{

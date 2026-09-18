@@ -356,7 +356,12 @@ func (p *OpenSearchPlugin) search(ctx *RequestContext, req *AWSRequest, index st
 	// Parse request body.
 	var body openSearchSearchRequest
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			// The refusal travels in the response, not the error slot: this is the domain's own
+			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
+			// bad-scroll-state return below.
+			return openSearchInvalidBody(), nil //nolint:nilerr
+		}
 	}
 
 	// Load all documents in this index.
@@ -433,7 +438,12 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 		ScrollID string `json:"scroll_id"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			// The refusal travels in the response, not the error slot: this is the domain's own
+			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
+			// bad-scroll-state return below.
+			return openSearchInvalidBody(), nil //nolint:nilerr
+		}
 		scrollID = body.ScrollID
 	}
 	if scrollID == "" {
@@ -513,7 +523,12 @@ func (p *OpenSearchPlugin) clearScroll(_ *RequestContext, req *AWSRequest) (*AWS
 		ScrollID interface{} `json:"scroll_id"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &body)
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			// The refusal travels in the response, not the error slot: this is the domain's own
+			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
+			// bad-scroll-state return below.
+			return openSearchInvalidBody(), nil //nolint:nilerr
+		}
 	}
 	// Accept single ID or slice.
 	var ids []string
@@ -1008,6 +1023,25 @@ func openSearchStatusOK(status int, body interface{}) *AWSResponse {
 		Body:       b,
 		Headers:    map[string]string{"Content-Type": "application/json"},
 	}
+}
+
+// openSearchInvalidBody reports that a request body would not decode.
+//
+// This is the one plugin in #1007's sweep whose refusal is not an [AWSError]. The
+// three sites behind it — search, scroll and clearScroll — are the OpenSearch
+// domain's own REST API, not an AWS control-plane operation, so there is no AWS
+// API reference publishing a code for them and no `X-Amzn-ErrorType` shape to
+// answer in. They answer the engine's envelope, which is why this returns an
+// *AWSResponse through [openSearchError] rather than an error.
+//
+// The type name follows the file's existing convention of using the engine's own
+// lowercased exception name — `resource_already_exists_exception` at createIndex,
+// `illegal_argument_exception` at scroll — and `json_parse_exception` at 400 is
+// what OpenSearch reports for a body it cannot parse. That provenance is the
+// engine's behavior rather than a published AWS API model, and is recorded as such
+// in docs/services.md.
+func openSearchInvalidBody() *AWSResponse {
+	return openSearchError(http.StatusBadRequest, "json_parse_exception", "request body is not valid JSON")
 }
 
 // openSearchError returns an OpenSearch-style error response.

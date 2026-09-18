@@ -509,7 +509,9 @@ func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest)
 		NextToken  string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input) //nolint:errcheck // optional body
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, smInvalidBody()
+		}
 	}
 	if input.MaxResults <= 0 {
 		input.MaxResults = 100

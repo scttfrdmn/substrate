@@ -171,7 +171,11 @@ func (p *CognitoIdentityPlugin) listIdentityPools(ctx *RequestContext, req *AWSR
 		MaxResults int    `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cognitoIdentityInvalidBody()
+		}
+	}
 	if body.MaxResults <= 0 {
 		body.MaxResults = 60
 	}
@@ -229,7 +233,11 @@ func (p *CognitoIdentityPlugin) getCredentialsForIdentity(ctx *RequestContext, r
 	var body struct {
 		IdentityID string `json:"IdentityId"`
 	}
-	_ = json.Unmarshal(req.Body, &body)
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return nil, cognitoIdentityInvalidBody()
+		}
+	}
 	identityID := body.IdentityID
 	if identityID == "" {
 		identityID = generateIdentityPoolID(ctx.Region)

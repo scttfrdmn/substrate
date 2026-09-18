@@ -79,7 +79,9 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 		EncryptionKeyArn string `json:"EncryptionKeyArn"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, backupInvalidBody()
+		}
 	}
 
 	goCtx := context.Background()
@@ -239,7 +241,9 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 		} `json:"BackupPlan"`
 	}
 	if len(req.Body) > 0 {
-		_ = json.Unmarshal(req.Body, &input)
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, backupInvalidBody()
+		}
 	}
 
 	if input.BackupPlan.BackupPlanName != "" {
