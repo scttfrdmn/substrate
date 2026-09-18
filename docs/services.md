@@ -498,22 +498,39 @@ the parse guard and reaches the member check underneath, where an unparseable bo
 stopped one line earlier — and they assert the message alongside the code, because once every
 site in a service answers one code the message is the only thing distinguishing them.
 
-**Five of those guards cannot be reached by any request, and are recorded rather than tested.**
-`parseKafkaOperation` and `parseSESv2Operation` both open by trimming a trailing slash, so a
-request naming an empty path parameter collapses onto the collection route one case earlier in
-the same switch: `GET /v1/clusters/` dispatches `ListClusters`, not `DescribeCluster` with an
-empty ARN. That makes MSK's `describeCluster`, `deleteCluster` and `describeClusterV2` checks
-and SES v2's `getEmailIdentity` and `deleteEmailIdentity` checks dead code — their codes are
-corrected for consistency with their siblings, but nothing can observe them. MSK's
-`getBootstrapBrokers` and `listNodes` escape only because a literal segment follows the ARN, so
-the empty parameter is interior rather than trailing and `/v1/clusters//nodes` reaches them.
-`parseEFSOperation` does **not** trim, which is why all nine of EFS's equivalent guards are
-reachable and covered — two routers in one tree answering differently on the same input class,
-which is the part worth fixing and is filed as
-[#1009](https://github.com/scttfrdmn/substrate/issues/1009). Whether AWS itself answers a
-validation error, a 404, or the collection operation for a trailing slash is unverified, and
-MSK is the weakest service in the tree to settle that from documentation for the reasons given
-below.
+**Those guards used to be unreachable, and since
+[#1009](https://github.com/scttfrdmn/substrate/issues/1009) every one of them is reached.**
+`parseKafkaOperation` and `parseSESv2Operation` opened by trimming a trailing slash, and
+`parseSchedulerOperation` normalised the same way by testing `path == "/schedules/"` explicitly, so a
+request naming an empty path parameter collapsed onto the collection route one case earlier in the
+same switch: `GET /v1/clusters/` dispatched `ListClusters`, not `DescribeCluster` with an empty ARN,
+and `GET /schedules/` answered every schedule in the group to a caller that had asked for one. The
+inventory is every router in the tree that normalised a trailing slash, with the reachability of each
+empty-parameter guard beneath it:
+
+| Router | Normalisation | Guards below it | Now |
+|---|---|---|---|
+| `parseKafkaOperation` | `strings.TrimRight(path, "/")` | `describeCluster`, `deleteCluster`, `describeClusterV2` | reachable; trim removed |
+| `parseSESv2Operation` | `strings.TrimRight(path, "/")` | `getEmailIdentity`, `deleteEmailIdentity` | reachable; trim removed |
+| `parseSchedulerOperation` | explicit `path == "/schedules/"` arm | `getSchedule`, `createSchedule`, `updateSchedule`, `deleteSchedule` | reachable; the arm and the `name != ""` route condition removed |
+| `parseCloudFrontOperation` | `strings.TrimSuffix(path, "/")` | none — the **inverse** hole, below | filed |
+| `parseAccountOperation` | `strings.TrimSuffix(path, "/")` | none; the service has no path parameters | harmless, left alone |
+
+Nine guards in three routers were dead, not the five in two originally recorded; Scheduler's four were
+invisible to a `TrimRight` search. MSK's `getBootstrapBrokers` and `listNodes` escaped only because a
+literal segment follows the ARN, so the empty parameter was interior rather than trailing and
+`/v1/clusters//nodes` reached them. `parseEFSOperation` never trimmed, which is why all nine of EFS's
+equivalent guards were always reachable, and it is the precedent the three fixed routers now follow:
+an empty path parameter reaches the operation the caller named and is refused there. **AWS publishes
+nothing about a trailing slash** for any of these services — whether it answers a validation error, a
+404 or the collection operation is unverified, and MSK is the weakest service in the tree to settle
+from documentation for the reasons given below. Substrate's reading is that a refusal is recoverable
+where a wrong operation is not: a caller that built a path from an empty variable is told which
+parameter was empty rather than served a listing it did not ask for.
+
+CloudFront is the same defect inverted and is **not** fixed here: `/distribution/` reaches
+`GetDistribution` with an empty ID and there is no guard below it to reach, so the fix is a guard to
+add rather than a fold to remove. It is filed separately.
 
 **One service is outside this rule by design.** CloudWatch speaks Smithy RPC v2 CBOR, and
 its refusal names the modelled shape rather than a code from a common-errors page; neither
@@ -12392,6 +12409,93 @@ CloudWatch Logs ingestion: $0.50 per GB. Storage: $0.03 per GB-month.
 ### Cost
 
 EventBridge custom events: $1.00 per million events.
+
+---
+
+## EventBridge Scheduler
+
+**Endpoint:** `scheduler.{region}.amazonaws.com`
+**Protocol:** REST/JSON (path and HTTP method, no `X-Amz-Target`)
+
+### Supported operations
+
+| Operation | Route | Notes |
+|-----------|-------|-------|
+| CreateSchedule | `POST /schedules/{Name}` | Answers **200**, not 201 — see below |
+| GetSchedule | `GET /schedules/{Name}` | |
+| UpdateSchedule | `PUT /schedules/{Name}` | Merges the optional members where AWS publishes full replacement — filed separately |
+| DeleteSchedule | `DELETE /schedules/{Name}` | |
+| ListSchedules | `GET /schedules` | `GroupName` and `NamePrefix` filters |
+
+### What a create or update is refused for
+
+`API_CreateSchedule` and `API_UpdateSchedule` publish exactly three `Required: Yes` body members, plus
+a required `Name` in the URI, and substrate checked none of them before
+[#1008](https://github.com/scttfrdmn/substrate/issues/1008): a `POST` with an empty body created a
+schedule with no expression and no target, which `GetSchedule` then reported as a live resource. Every
+constraint below is checked before any state is read, and every failure is `ValidationException`/**400**
+— the only refusal either page publishes for an input that fails a constraint, which is why the message
+rather than the code carries which constraint failed.
+
+| Member | Published constraint | Refusal |
+|--------|----------------------|---------|
+| `Name` (URI) | `Required: Yes`, length 1–64, pattern `[0-9a-zA-Z-_.]+` | names `'name'` |
+| `ScheduleExpression` | `Required: Yes`, length 1–256 | names `'scheduleExpression'` |
+| `Target` | `Required: Yes` | names `'target'` |
+| `Target.Arn` | `Required: Yes`, length 1–1600 | names `'target.arn'` |
+| `Target.RoleArn` | `Required: Yes`, length 1–1600 | names `'target.roleArn'` |
+| `FlexibleTimeWindow` | `Required: Yes` | names `'flexibleTimeWindow'` |
+| `FlexibleTimeWindow.Mode` | `Required: Yes`, `Valid Values` OFF \| FLEXIBLE | names `'flexibleTimeWindow.mode'` |
+| `FlexibleTimeWindow.MaximumWindowInMinutes` | `Required: No`, `Valid Range` 1–1440 | 0 and 1441 refused; **absent accepted** |
+| `GroupName` | `Required: No`, length 1–64, pattern `[0-9a-zA-Z-_.]+` | names `'groupName'` |
+| `Description` | length 0–512 | names `'description'` |
+| `State` | `Valid Values` ENABLED \| DISABLED | names `'state'` |
+
+`MaximumWindowInMinutes` is the one member whose *absence* is observably different from a zero, which is
+why the request type holds it as a pointer: an explicit `0` is outside the published range and is
+refused, where an absent member is accepted. **AWS does not publish that a `FLEXIBLE` window requires
+the bound**, so substrate does not invent that rule — a `FLEXIBLE` window with no maximum is accepted.
+
+Three published constraints are deliberately **not** checked, and the omissions are recorded rather
+than silently taken:
+
+- `Target.RoleArn`'s IAM-role ARN **pattern**. Substrate does not model the role, so refusing a string
+  that is not an ARN would refuse a call this emulator otherwise serves without ever needing the value
+  to resolve. Its `Required: Yes` and its length are checked.
+- `StartDate`, `EndDate`, `KmsKeyArn` and `ActionAfterCompletion` are published and unmodelled:
+  substrate decodes none of them, so it validates none of them, and #1013's rule keeps them out of the
+  response as well.
+- The templated-target objects (`EcsParameters`, `EventBridgeParameters`, `KinesisParameters`,
+  `SageMakerPipelineParameters`, `SqsParameters`, `DeadLetterConfig`) are likewise unmodelled, so they
+  are neither decoded nor reported.
+
+### `CreateSchedule` answers 200, not 201
+
+`API_CreateSchedule`'s Response Syntax opens `HTTP/1.1 200`. Substrate answered 201, on the reasonable
+but unpublished reading that a create is a creation; the page is the contract and it says 200.
+
+### The request body is decoded in the published spelling
+
+Both handlers used to unmarshal a caller's body straight into substrate's *storage* types, whose JSON
+tags are snake_case (`role_arn`, `retry_policy`, `maximum_window_in_minutes`). A caller's
+`Target.RoleArn`, `Target.RetryPolicy` and `FlexibleTimeWindow.MaximumWindowInMinutes` therefore never
+survived the request — `GetSchedule` reported them empty however they were sent. The handlers now decode
+into request types carrying the published names and fold those into the stored shape, which is also what
+makes `RoleArn`'s `Required: Yes` checkable at all: a member the decode drops cannot be found missing.
+
+### An empty `Name` reaches the operation the caller named
+
+`parseSchedulerOperation` used to normalise `/schedules/` to `/schedules`, so a caller that built the
+path from an empty variable got `ListSchedules` — every schedule in the group, answered 200, to a
+request for one schedule. All four empty-name guards below the router were therefore dead code. Since
+[#1009](https://github.com/scttfrdmn/substrate/issues/1009) only `/schedules` is the collection route,
+and `/schedules/` reaches `GetSchedule`, `CreateSchedule`, `UpdateSchedule` or `DeleteSchedule` on its
+own verb and is refused there naming `'name'`. See *A request body that will not parse* above for the
+whole-tree inventory of that fold.
+
+### Cost
+
+Not modelled.
 
 ---
 

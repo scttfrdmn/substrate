@@ -64,8 +64,18 @@ func (p *MSKPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // parseKafkaOperation derives the MSK operation and optional cluster ARN from
 // the HTTP method and request path.
+//
+// The path is matched as it arrives. It used to be normalised by strings.TrimRight(path, "/"), which
+// folded an empty path parameter onto the collection route one case earlier in this switch:
+// GET /v1/clusters/ became GET /v1/clusters and answered ListClusters, so a caller who built the URL
+// from an empty variable read a full cluster list as success and three empty-ARN guards below could not
+// be reached by any request (#1009). AWS publishes nothing about a trailing slash for MSK — as #950
+// recorded, this is the weakest service in the tree to reason about from documentation, with no
+// common-errors page and no Errors sections — so routing an empty parameter to the single-cluster
+// operation is substrate's reading. It follows [parseEFSOperation], which never trimmed and whose nine
+// empty-parameter guards are all reachable, on the ground that a refusal a caller can act on beats a
+// different operation's success.
 func parseKafkaOperation(method, path string) (op, clusterARN string) {
-	path = strings.TrimRight(path, "/")
 
 	switch {
 	case path == "/v1/clusters" && method == "POST":
@@ -165,8 +175,8 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 }
 
 func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// TODO(#1009): unreachable. parseKafkaOperation trims a trailing slash, so GET /v1/clusters/
-	// collapses onto the ListClusters arm and no request arrives here with an empty ARN.
+	// Reachable since #1009: GET /v1/clusters/ routes here with an empty ARN rather than onto
+	// ListClusters.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}
@@ -224,8 +234,8 @@ func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 }
 
 func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// TODO(#1009): unreachable. DELETE /v1/clusters/ trims to /v1/clusters, which matches no arm of
-	// parseKafkaOperation, so the request answers unknownRouteError before reaching this handler.
+	// Reachable since #1009: DELETE /v1/clusters/ routes here rather than answering unknownRouteError,
+	// so a delete naming no cluster is refused for the reason it is wrong.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}
@@ -336,9 +346,8 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 
 // describeClusterV2 returns cluster details in the V2 ClusterInfo shape.
 func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
-	// TODO(#1009): unreachable, as in describeCluster — GET /api/v2/clusters/ collapses onto the
-	// ListClustersV2 arm. getBootstrapBrokers and listNodes escape this because a literal segment
-	// follows the ARN, which is why only their guards are covered by a wire test.
+	// Reachable since #1009, as in describeCluster. getBootstrapBrokers and listNodes never had the
+	// problem, because a literal segment follows the ARN and the empty parameter is interior.
 	if clusterARN == "" {
 		return nil, mskBadRequest("cluster ARN is required")
 	}

@@ -68,9 +68,15 @@ func (p *SESv2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 
 // parseSESv2Operation derives the operation name and optional identity name
 // from the HTTP method and request path.
+//
+// The path is matched as it arrives. A strings.TrimRight(path, "/") here used to fold an empty identity
+// name onto the collection route — GET /v2/email/identities/ answered ListEmailIdentities — which made
+// two empty-name guards below unreachable and turned a caller's empty variable into a successful
+// listing (#1009). The comment that introduced it said only "Normalise: strip trailing slash" and gave
+// no reason. AWS publishes nothing about a trailing slash on either route, so routing an empty
+// parameter to the single-identity operation is substrate's reading, consistent with MSK's and with
+// [parseEFSOperation], which never trimmed.
 func parseSESv2Operation(method, path string) (op, identityName string) {
-	// Normalise: strip trailing slash.
-	path = strings.TrimRight(path, "/")
 
 	switch {
 	case path == "/v2/email/identities" && method == "POST":
@@ -207,8 +213,8 @@ func (p *SESv2Plugin) listEmailIdentities(reqCtx *RequestContext, req *AWSReques
 }
 
 func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
-	// TODO(#1009): unreachable. parseSESv2Operation trims a trailing slash, so
-	// GET /v2/email/identities/ collapses onto the ListEmailIdentities arm.
+	// Reachable since #1009: GET /v2/email/identities/ routes here with an empty name rather than
+	// onto ListEmailIdentities.
 	if identityName == "" {
 		return nil, sesv2BadRequest("identity name is required")
 	}
@@ -229,8 +235,8 @@ func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, id
 }
 
 func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
-	// TODO(#1009): unreachable. DELETE /v2/email/identities/ trims to /v2/email/identities, which
-	// matches no arm, so the request answers unknownRouteError before reaching this handler.
+	// Reachable since #1009: DELETE /v2/email/identities/ routes here rather than answering
+	// unknownRouteError.
 	if identityName == "" {
 		return nil, sesv2BadRequest("identity name is required")
 	}

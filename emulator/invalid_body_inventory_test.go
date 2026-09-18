@@ -443,6 +443,9 @@ var memberComplaintServices = []memberService{
 		code: "BadRequestException",
 		cases: []memberCase{
 			{name: "createEmailIdentity", path: "/v2/email/identities", body: "{}", wantMessage: "EmailIdentity is required"},
+			// Reachable since #1009 dropped parseSESv2Operation's trailing-slash trim.
+			{name: "getEmailIdentity", path: "/v2/email/identities/", method: http.MethodGet, body: "{}", wantMessage: "identity name is required"},
+			{name: "deleteEmailIdentity", path: "/v2/email/identities/", method: http.MethodDelete, body: "{}", wantMessage: "identity name is required"},
 		},
 	},
 	{
@@ -451,8 +454,11 @@ var memberComplaintServices = []memberService{
 		code: "BadRequest",
 		cases: []memberCase{
 			{name: "createClusterV2", path: "/api/v2/clusters", body: "{}", wantMessage: "ClusterName is required"},
-			// An empty cluster ARN is only reachable where a literal segment follows it, because
-			// parseKafkaOperation trims a trailing slash — see the unreachable-guard note below.
+			// Every empty-ARN guard is reachable since #1009 dropped parseKafkaOperation's
+			// trailing-slash trim; before it, only the two with a literal segment after the ARN were.
+			{name: "describeCluster", path: "/v1/clusters/", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
+			{name: "deleteCluster", path: "/v1/clusters/", method: http.MethodDelete, body: "{}", wantMessage: "cluster ARN is required"},
+			{name: "describeClusterV2", path: "/api/v2/clusters/", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
 			{name: "getBootstrapBrokers", path: "/v1/clusters//bootstrap-brokers", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
 			{name: "listNodes", path: "/v1/clusters//nodes", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
 			{name: "loadClusterByARN/notAnARN", path: "/v1/clusters/notanarn", method: http.MethodGet, body: "{}", wantMessage: "invalid MSK cluster ARN"},
@@ -486,14 +492,14 @@ var memberComplaintServices = []memberService{
 // TestMemberComplaintAnswersThePublishedCode asserts the non-parse-guard half of the inventory answers
 // the same per-service code, with the message that tells the two apart.
 //
-// **Five guards in this class are unreachable and are deliberately absent**, which is worth stating
-// because an absent case otherwise reads as an oversight. `parseKafkaOperation` and
-// `parseSESv2Operation` both open with `strings.TrimRight(path, "/")`, so a request naming an empty path
-// parameter collapses onto the collection route: `GET /v1/clusters/` dispatches ListClusters, not
-// DescribeCluster with an empty ARN. That makes MSK's describeCluster, deleteCluster and
-// describeClusterV2 checks, and SES v2's getEmailIdentity and deleteEmailIdentity checks, dead code —
-// their codes are corrected for consistency but nothing can reach them. MSK's getBootstrapBrokers and
-// listNodes escape only because a literal segment follows the ARN, which is why those two are here.
+// **The five guards this test used to declare unreachable are now here.** `parseKafkaOperation` and
+// `parseSESv2Operation` both opened with `strings.TrimRight(path, "/")`, so a request naming an empty
+// path parameter collapsed onto the collection route — `GET /v1/clusters/` dispatched ListClusters
+// rather than DescribeCluster with an empty ARN — which made MSK's describeCluster, deleteCluster and
+// describeClusterV2 checks and SES v2's getEmailIdentity and deleteEmailIdentity checks dead code, with
+// codes that no request could verify. #1009 removed both trims, so the five rows above are the proof
+// that each answers its service's published code, and MSK's getBootstrapBrokers and listNodes — which
+// were always reachable, because a literal segment follows the ARN — sit beside them unchanged.
 func TestMemberComplaintAnswersThePublishedCode(t *testing.T) {
 	for _, svc := range memberComplaintServices {
 		t.Run(svc.name, func(t *testing.T) {
