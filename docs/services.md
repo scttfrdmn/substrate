@@ -10614,7 +10614,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | DeleteAlias | |
 | UpdateAlias | Same refusal as `CreateAlias` |
 | ListAliases | |
-| Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each — see below |
+| Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each; refuses a `Plaintext` outside the published 1–4096 bytes before the key is read, and one past the smaller per-spec maximum after — see below |
 | Decrypt | Returns plaintext (stub pass-through); same algorithm handling and same refusals as `Encrypt`, and refuses a `KeyId` naming a key other than the ciphertext's — see below |
 | GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members, plus a refusal of any key spec but `SYMMETRIC_DEFAULT` — see below |
 | GenerateDataKeyWithoutPlaintext | Same refusals as `GenerateDataKey`, through the same helper |
@@ -11630,6 +11630,72 @@ The first bullet of `InvalidKeyUsageException`'s gloss — a `KeyUsage` incompat
 operation, such as an `ENCRYPT_DECRYPT` call against a `SIGN_VERIFY` key — is the next
 section's subject, along with `CreateKey`'s former acceptance of any string as a `KeySpec`
 ([#977](https://github.com/scttfrdmn/substrate/issues/977)).
+
+### `Plaintext` has two maximum sizes, and they are checked in two places
+
+[#991](https://github.com/scttfrdmn/substrate/issues/991). `Encrypt`'s `Plaintext` member
+carries two published constraints at two different levels, and substrate enforced neither
+while answering a code the page does not publish for the one thing it did check.
+
+| Constraint | Where AWS states it | What it depends on |
+|---|---|---|
+| 1–4096 bytes | The member's own **Length Constraints**, repeated in the page's opening sentence: *"encrypts plaintext of up to 4,096 bytes using a KMS key"* | Nothing but the request |
+| A smaller per-key maximum | The page's own list, under *"the maximum size of the data that you can encrypt varies with the type of KMS key and the encryption algorithm that you choose"* | The key spec **and** the encryption algorithm |
+
+| Key spec | Algorithm | Maximum |
+|---|---|---|
+| `SYMMETRIC_DEFAULT` | `SYMMETRIC_DEFAULT` | 4096 bytes |
+| `RSA_2048` | `RSAES_OAEP_SHA_1` / `RSAES_OAEP_SHA_256` | 214 / 190 bytes |
+| `RSA_3072` | `RSAES_OAEP_SHA_1` / `RSAES_OAEP_SHA_256` | 342 / 318 bytes |
+| `RSA_4096` | `RSAES_OAEP_SHA_1` / `RSAES_OAEP_SHA_256` | 470 / 446 bytes |
+| `SM2` | `SM2PKE` | 1024 bytes (China Regions only) |
+
+The numbers are RSA's OAEP padding overhead made observable: the same key spec accepts 24
+fewer bytes under `RSAES_OAEP_SHA_256`, because the padding carries a longer hash. Note that
+AWS's list heads its RSA entries with a **key spec** and its last entry with an
+**algorithm**; substrate keys the table on the pair, which loses nothing because
+`SYMMETRIC_DEFAULT` and `SM2` each admit exactly one algorithm.
+
+**The two constraints belong at different points in the handler**, and that is the finding
+that made this more than a code correction. The range and the base64 decode are facts about
+the request, so they are answered *before* the key is resolved — the same split the
+[encryption algorithm](#an-encryption-algorithm-belongs-to-the-key-spec-not-to-the-key)
+already makes between its enum check and its key-spec check. The per-key maximum cannot be
+answered until the key is loaded and the algorithm resolved, so it is the last check the
+operation makes:
+
+| Request | Substrate answers |
+|---|---|
+| `Plaintext` is not base64 | `ValidationError`/400, before any key is loaded |
+| `Plaintext` decodes to 0 bytes, or to more than 4096 | `ValidationError`/400 naming the range, before any key is loaded |
+| The pair is admissible and the data fits | 200 |
+| The data exceeds the pair's maximum | `ValidationError`/400 naming the key spec, the algorithm, the size sent and the maximum |
+
+So a caller that sends 5 KB to a key that does not exist now hears about the 5 KB, and a
+caller whose `Plaintext` is unusable hears about it whether the key is disabled, is a signing
+key, or is absent. Tests assert all three, because no assertion on a code alone can show an
+ordering.
+
+**Neither refusal has a published code**, and `ValidationError`/400 from `CommonErrors.html`
+is substrate's reading for both — the same landing place as an out-of-range waiting period
+and an unpublished encryption algorithm. `InvalidKeyUsageException` is the near miss for the
+per-key maximum and is deliberately not used, although the condition does involve the key
+spec and the algorithm: nothing about the pairing is incompatible — the key admits the
+algorithm, and a shorter plaintext would succeed — so a caller reading that code would change
+its algorithm when what it has to change is how much data it sends per call.
+
+**The code this replaces was `InvalidCiphertextException`**, which is not among `API_Encrypt`'s
+nine errors and is published on `Decrypt` and `ReEncrypt`, whose `CiphertextBlob` decode is
+what it exists for. Those two sites are untouched: `Encrypt` produces a ciphertext, it does
+not consume one, and a sweep that unified the three would have taken a published code off the
+two operations that own it.
+
+One consequence is worth naming because it looks like a gap. `SYMMETRIC_DEFAULT`'s per-key
+maximum *is* the member's 4096, so the per-key branch is unobservable for a symmetric key —
+a symmetric request one byte over is refused by the range check before any key is read. The
+per-key refusal is therefore an asymmetric-key observation only, which is also the direction
+that matters: a consumer that encrypts a database password under a symmetric key and later
+switches to an RSA key crosses a 190-byte boundary without changing its request shape at all.
 
 ### An encryption context is authenticated data, so the ciphertext has to carry it
 
