@@ -154,6 +154,14 @@ type pricingCorpusEntry struct {
 	termAttributes map[string]string
 
 	dimensions []pricingPriceDimension
+
+	// version and publicationDate override the service's offer-file revision for
+	// this one entry. They are empty on every bundled entry, whose revision comes
+	// from pricingOfferRevisions because it was measured from that file; a seeded
+	// entry (#1033) carries its own, since the file it would otherwise claim to
+	// come from does not contain it.
+	version         string
+	publicationDate string
 }
 
 // termCode reports the offer-term code the entry's term carries, which is the
@@ -368,6 +376,13 @@ func (e pricingCorpusEntry) offerDoc() pricingOfferDoc {
 		termAttrs = map[string]string{}
 	}
 	rev := pricingOfferRevisions[e.serviceCode]
+	version, publicationDate := rev.version, rev.publicationDate
+	if e.version != "" {
+		version = e.version
+	}
+	if e.publicationDate != "" {
+		publicationDate = e.publicationDate
+	}
 	return pricingOfferDoc{
 		Product: pricingProduct{
 			SKU:           e.sku,
@@ -384,8 +399,8 @@ func (e pricingCorpusEntry) offerDoc() pricingOfferDoc {
 				TermAttributes:  termAttrs,
 			}},
 		},
-		Version:         rev.version,
-		PublicationDate: rev.publicationDate,
+		Version:         version,
+		PublicationDate: publicationDate,
 	}
 }
 

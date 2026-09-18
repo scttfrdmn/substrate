@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The Price List corpus is seedable, so a rate substrate does not bundle can be tested** (#1033).
+  `POST`/`DELETE /v1/pricing/offers` takes one offer document in the shape `GetProducts` serves it, and
+  a seeded SKU participates in `GetProducts` filtering and paging, `DescribeServices` and
+  `GetAttributeValues` exactly as a bundled one does.
+
+  The bundled corpus answers *what does AWS charge*: every SKU in it is copied verbatim from a real
+  offer file, and #894 deliberately kept it that way, because a fixture carrying an invented rate is
+  worse than no rate at all — a consumer computing a cost from it is wrong with no way to notice. That
+  is also why the corpus cannot be grown to answer the other question a consumer has, *what does my
+  code do when the rate is X*. `us-east-1` alone publishes 107,022 compute-instance products, so a
+  cost path depending on a rate outside the bundled 39 SKUs had no offline test at all — and neither
+  did an arithmetic edge a caller wants to assert against a hypothetical rate. An invented rate now
+  arrives the one way a deterministic emulator is allowed to produce a different answer: as a seed the
+  caller wrote, in the request that caused it.
+
+  **The seed is not a second code path**, which is the property that makes it worth having. It becomes
+  a corpus entry like any other, so one set of functions serves bundled and seeded products alike.
+  That took rewiring rather than an overlay on the query path, because `DescribeServices` does not go
+  through the corpus lookup at all — it reads the attribute table directly and refuses an unknown
+  `ServiceCode` with `InvalidParameterException` where `GetProducts` and `GetAttributeValues` answer
+  `NotFoundException` through that lookup. An overlay reaching only `GetProducts` would have left a
+  caller querying a SKU the documented discovery path (`DescribeServices` → `GetAttributeValues` → a
+  filter) denies exists. Nothing is mutated to achieve it: the corpus slices, the revision table and
+  the attribute table are read-only reference data by contract, and CLAUDE.md forbids global mutable
+  state independently, so seeds are read from the control-plane namespace and merged at request time.
+
+  **The issue left four questions open; each is answered in the direction that cannot mislead a
+  test.** A seeded service's `AttributeNames` is *computed* — the union of its products' attribute
+  keys — because a declared list could not hold the property the bundled lists hold, that every name
+  reported filters to at least one product. A seed may replace a bundled SKU only with
+  `?replace=true`: overriding a measured rate is useful, and overriding it silently is the one thing
+  the corpus exists to prevent, so the flag does not prevent the override, it puts it in the request
+  that caused it. A seeded document reports its own `version`/`publicationDate` or else
+  `substrate-seeded` / `1970-01-01T00:00:00Z`, deliberately implausible against the 14-digit version a
+  real offer file carries — and a seeded SKU for a bundled service does not inherit that service's
+  measured revision, because the file it would name does not contain the product. Seeds follow the
+  bundled entries sorted by SKU, since the bundled order is fixed precisely so that `NextToken` page
+  boundaries are stable.
+
+  **Most of the work is the refusals**, because a seed emitting a shape AWS does not would let a
+  consumer's parser pass here and fail against the real API — the exact class of bug this corpus was
+  assembled to expose. A 400 naming the member refuses: an empty `product.sku` or `serviceCode`; a
+  product with no `usagetype`; a `terms` key other than `OnDemand` or more than one term, since an
+  entry carries exactly one and a dropped `Reserved` term would serve half of what was seeded; a term
+  key that is not `<sku>.<offerTermCode>`; a dimension key that is not
+  `<sku>.<offerTermCode>.<dimensionCode>` or whose `rateCode` disagrees with it; an empty `unit`,
+  `effectiveDate` or `pricePerUnit`; and a `pricePerUnit` that is not a decimal string — including the
+  JSON *number* a hand-written seed most often carries, where AWS emits every rate as a string.
+
+  One mechanical detail worth recording: seeded offers carry their own state-key prefix. A bare
+  `DELETE /v1/pricing/query-failures` lists the control namespace by the failure prefix and deletes
+  everything it finds, so an offer stored under it would have been swept away by clearing an unrelated
+  seeded error. A test asserts the two seeds are independent in that direction.
+
 ### Changed
 - **`CreateKey` decodes `Origin`, `CustomKeyStoreId` and `XksKeyId`, and refuses what substrate does
   not model rather than discarding it** (#984). All three members were accepted and thrown away, so

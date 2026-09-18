@@ -290,7 +290,7 @@ func (p *PriceListPlugin) getProducts(req *AWSRequest) (*AWSResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := pricingEntriesFor(input.ServiceCode)
+	entries, err := p.entriesFor(input.ServiceCode)
 	if err != nil {
 		return nil, err
 	}
@@ -349,9 +349,15 @@ func (p *PriceListPlugin) describeServices(req *AWSRequest) (*AWSResponse, error
 		return nil, err
 	}
 
-	codes := pricingServiceCodes()
+	attrs := p.serviceAttributes()
+	codes := p.serviceCodes()
 	if input.ServiceCode != "" {
-		if _, ok := pricingServiceAttributes[input.ServiceCode]; !ok {
+		// This handler does not go through entriesFor, so its refusal is a
+		// different code from the NotFoundException GetProducts answers — that is
+		// AWS's own split, and it is why the seed overlay has to reach here too. A
+		// seeded service code that DescribeServices denied would dead-end the
+		// documented discovery path on a SKU a direct GetProducts query serves.
+		if _, ok := attrs[input.ServiceCode]; !ok {
 			return nil, pricingError(pricingErrInvalidParameter,
 				"unknown ServiceCode "+input.ServiceCode)
 		}
@@ -367,7 +373,7 @@ func (p *PriceListPlugin) describeServices(req *AWSRequest) (*AWSResponse, error
 	for _, code := range codes[page.start:page.end] {
 		services = append(services, map[string]interface{}{
 			"ServiceCode":    code,
-			"AttributeNames": pricingServiceAttributes[code],
+			"AttributeNames": attrs[code],
 		})
 	}
 
@@ -404,11 +410,11 @@ func (p *PriceListPlugin) getAttributeValues(req *AWSRequest) (*AWSResponse, err
 	if err != nil {
 		return nil, err
 	}
-	entries, err := pricingEntriesFor(input.ServiceCode)
+	entries, err := p.entriesFor(input.ServiceCode)
 	if err != nil {
 		return nil, err
 	}
-	if !pricingHasAttribute(input.ServiceCode, input.AttributeName) {
+	if !p.hasAttribute(input.ServiceCode, input.AttributeName) {
 		return nil, pricingError(pricingErrInvalidParameter,
 			"unknown AttributeName "+input.AttributeName+" for service "+input.ServiceCode)
 	}
@@ -522,48 +528,6 @@ func pricingLimit(maxResults *int, max int) (int, error) {
 			fmt.Sprintf("MaxResults must be between 1 and %d, got %d", max, *maxResults))
 	}
 	return *maxResults, nil
-}
-
-// pricingEntriesFor returns the corpus entries for a service code.
-//
-// An unknown service code is a NotFoundException. Substrate's corpus is far
-// smaller than AWS's catalog, so a caller asking for a real service substrate
-// does not carry gets a loud error rather than an empty PriceList that reads as
-// "AWS has no such price". A false alarm is visible; a false empty is not.
-func pricingEntriesFor(serviceCode string) ([]pricingCorpusEntry, error) {
-	if _, ok := pricingServiceAttributes[serviceCode]; !ok {
-		return nil, pricingError(pricingErrNotFound,
-			"no offer data for ServiceCode "+serviceCode+
-				"; substrate's corpus covers "+strings.Join(pricingServiceCodes(), ", "))
-	}
-	out := make([]pricingCorpusEntry, 0, len(pricingCorpus))
-	for _, e := range pricingCorpus {
-		if e.serviceCode == serviceCode {
-			out = append(out, e)
-		}
-	}
-	return out, nil
-}
-
-// pricingServiceCodes returns the sorted service codes the corpus covers.
-func pricingServiceCodes() []string {
-	codes := make([]string, 0, len(pricingServiceAttributes))
-	for code := range pricingServiceAttributes {
-		codes = append(codes, code)
-	}
-	sort.Strings(codes)
-	return codes
-}
-
-// pricingHasAttribute reports whether serviceCode declares name as one of its
-// attributes.
-func pricingHasAttribute(serviceCode, name string) bool {
-	for _, a := range pricingServiceAttributes[serviceCode] {
-		if a == name {
-			return true
-		}
-	}
-	return false
 }
 
 // pricingProductFamilyField is the one filterable field that is a sibling of the

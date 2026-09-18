@@ -14565,6 +14565,73 @@ overridden explicitly.
 code would seed an error no SDK catch branch matches — the fallback path would go
 untested while the seed itself appeared to work.
 
+### Seeding an offer document
+
+The bundled corpus answers *what does AWS charge*. Every SKU in it is copied from a
+real offer file, and it can never be grown to answer the other question a consumer
+has — *what does my code do when the rate is X* — because a fixture carrying an
+invented rate is worse than no rate: a caller computing a cost from it is wrong with
+no way to notice. `us-east-1` alone publishes 107,022 compute-instance products, so
+a consumer whose cost path depends on a rate outside the bundled 39 SKUs had no
+offline test at all.
+
+An invented rate therefore arrives the way a deterministic emulator is allowed to
+produce a different answer: as a seed the caller wrote, in the request that caused
+it.
+
+```bash
+# Seed one offer document, in the shape GetProducts serves it.
+curl -X POST http://localhost:4566/v1/pricing/offers -d @offer.json
+
+# Override a SKU the bundled corpus measures — deliberately.
+curl -X POST 'http://localhost:4566/v1/pricing/offers?replace=true' -d @offer.json
+
+# Remove one, or every seed.
+curl -X DELETE 'http://localhost:4566/v1/pricing/offers?sku=SEEDEDRDSSKU0001'
+curl -X DELETE http://localhost:4566/v1/pricing/offers
+```
+
+The body is one `PriceList` element — `product`, `serviceCode`, `terms`, and
+optionally `version` and `publicationDate` — so a seed can be pasted straight out of
+a real offer file or out of a recorded response. `replace` is a query parameter
+rather than a body member for exactly that reason: a body member would make the
+document no longer a document.
+
+**A seeded SKU is not a second code path.** It becomes a corpus entry like any
+other, so `GetProducts` filtering and paging, `DescribeServices` and
+`GetAttributeValues` all see it through the same functions that serve the bundled
+corpus. That matters because the discovery path AWS documents runs
+`DescribeServices` → `GetAttributeValues` → a `GetProducts` filter, and those two
+refuse an unknown `ServiceCode` with a *different* code from `GetProducts`
+(`InvalidParameterException` against `NotFoundException`) — an overlay that reached
+only the last of the three would let a caller query a SKU the first two deny exists.
+
+Four decisions the endpoint makes, each because the alternative would let a test
+pass against something AWS never serves:
+
+| Question | Answer |
+|----------|--------|
+| Does a seeded service appear in `DescribeServices`? | Yes, and its `AttributeNames` is **computed** — the union of its seeded products' attribute keys, plus `productFamily` when one is carried, unioned with the bundled list for a service that is also bundled. A declared list could not hold the property the bundled lists hold, that every name reported filters to at least one product. |
+| May a seed replace a bundled SKU? | Only with `?replace=true`. Overriding a measured rate is useful; overriding it *silently* is the one thing the corpus exists to prevent. The flag does not prevent the override, it puts it in the request that caused it. A seed always replaces an earlier seed, which is what makes the endpoint re-runnable. |
+| Which revision does a seeded document report? | Its own `version`/`publicationDate` when it carries them, otherwise `substrate-seeded` / `1970-01-01T00:00:00Z`. Those are deliberately not plausible — a real offer file reports a 14-digit version — and a seeded SKU for a bundled service does **not** inherit that service's real revision, because the measured file does not contain it. |
+| Where does a seed appear in `PriceList` order? | After the bundled entries, sorted by SKU among themselves. The bundled order is fixed so that page boundaries are stable; a map-ordered overlay would undo that for every seeded query. |
+
+A seed that would emit a shape the real API does not is refused with a 400 naming
+the member, because such a seed would let a consumer's parser pass here and fail
+against AWS — the exact class of bug the corpus was assembled to expose. Refused:
+an empty `product.sku` or `serviceCode`; a product with no `usagetype` (the one
+attribute present on every product in both bundled offer files); a `terms` key other
+than `OnDemand`, or more than one term, since a corpus entry carries exactly one and
+a dropped `Reserved` term would serve half of what was seeded; an on-demand key that
+is not `<sku>.<offerTermCode>`; a price-dimension key that is not
+`<sku>.<offerTermCode>.<dimensionCode>` or whose `rateCode` disagrees with it; an
+empty `unit`, `effectiveDate` or `pricePerUnit`; and a `pricePerUnit` value that is
+not a decimal string — including the JSON *number* a hand-written seed most often
+carries, where AWS emits every rate as a string.
+
+Seeded offers live under their own state prefix, so clearing seeded failures
+(`DELETE /v1/pricing/query-failures`) leaves them in place and vice versa.
+
 ### Cost
 
 Price List API calls are free.

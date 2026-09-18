@@ -24,9 +24,25 @@ import (
 // newPricingTestServer builds a server with PriceListPlugin registered.
 func newPricingTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
+	ts, _ := newPricingTestServerWithState(t)
+	return ts
+}
+
+// newPricingTestServerWithState builds the same server and hands back its state
+// manager, so that a test can plant a record the control endpoints would never
+// store (#1033).
+func newPricingTestServerWithState(t *testing.T) (*httptest.Server, emulator.StateManager) {
+	t.Helper()
+	state := emulator.NewMemoryStateManager()
+	return newPricingTestServerOn(t, state), state
+}
+
+// newPricingTestServerOn builds the same server over a caller-supplied state
+// manager, so that a test can inject a store failure (#1033).
+func newPricingTestServerOn(t *testing.T, state emulator.StateManager) *httptest.Server {
+	t.Helper()
 	registry := emulator.NewPluginRegistry()
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
-	state := emulator.NewMemoryStateManager()
 	tc := emulator.NewTimeController(time.Now())
 	logger := emulator.NewDefaultLogger(0, false)
 
