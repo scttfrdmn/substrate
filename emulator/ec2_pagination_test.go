@@ -1,16 +1,25 @@
 package emulator_test
 
-// Offset pagination shared by the EC2 describes (#917).
+// Offset pagination shared by the EC2 describes (#917, #1024).
 //
-// Roughly twenty EC2 describes published MaxResults and NextToken and implemented neither: a
+// Sixteen routed EC2 describes published MaxResults and NextToken and implemented neither: a
 // request naming either was answered with the whole listing and no token, so a caller paging in one
-// page against substrate found a second page in production. The six flat listings converted so far
-// are the table below — DescribeVolumes and DescribeSnapshots in #917's first part, DescribeImages,
-// DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in its second. The two operations that
+// page against substrate found a second page in production. Sixteen is audited rather than
+// estimated — this comment used to say "roughly twenty", which #1024 corrects here and in
+// ec2_pagination.go, because an estimate invites the reader to assume the sweep was complete.
+//
+// The flat listings converted so far are the table below: DescribeVolumes and DescribeSnapshots in
+// #917's first part, DescribeImages, DescribeVpcs, DescribeSubnets and DescribeSecurityGroups in
+// its second, and DescribeInstanceStatus and DescribeFleets under #1024. The two operations that
 // already paginated — DescribeTags and DescribeLaunchTemplateVersions — carried a private copy of
 // the same three rules each, and their behavior is unchanged by the conversion, which
 // TestEC2_DescribeTags_Pagination and TestEC2_DescribeLaunchTemplateVersions' own MaxResults cases
 // are the regression guard for.
+//
+// DescribeSpotPriceHistory converted alongside those two and is **not** in the table, because every
+// case here creates the listing it walks and that operation's listing cannot be created: it is
+// assembled from the instance-type catalog. Its cases are in
+// ec2_spotpricehistory_pagination_test.go and assert the same five properties.
 //
 // What the shared helpers must get right comes from Query-Requests.html → Pagination, which is
 // where AWS publishes the mechanism once rather than per operation:
@@ -37,11 +46,11 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
-// ec2PagedOp is one operation #917 converted onto the shared offset paginator, with everything a
-// case needs to drive it: how to create a listing, how to read the answer, and the name of the
-// ID-list parameter MaxResults may not accompany.
+// ec2PagedOp is one operation converted onto the shared offset paginator, with everything a case
+// needs to drive it: how to create a listing, how to read the answer, the name of the ID-list
+// parameter MaxResults may not accompany, and the MaxResults range its own page publishes.
 //
-// The two are exercised from one table because the rules under test are the helpers' and not the
+// They are exercised from one table because the rules under test are the helpers' and not the
 // operations' — an assertion written against volumes alone would pass while snapshots, whose page
 // is cut at a different point in the handler, reported a record twice.
 type ec2PagedOp struct {
@@ -49,16 +58,22 @@ type ec2PagedOp struct {
 	name string
 	// idParam is the resource-ID list parameter, unindexed as AWS names it.
 	idParam string
-	// published is true when the operation's page publishes "Valid Range: Minimum value of 5.
-	// Maximum value of 1000." API_DescribeVpcs, API_DescribeSubnets and
-	// API_DescribeSecurityGroups do; API_DescribeVolumes, API_DescribeSnapshots and
-	// API_DescribeImages publish no range at all, only "The maximum number of items to return
-	// for this request".
+	// minMaxResults and maxMaxResults are the MaxResults range the operation's own page
+	// publishes, with maxMaxResults of [ec2PagedNoCeiling] meaning it publishes no maximum.
 	//
-	// It is a column here rather than a test of its own because #671 forbids borrowing the range
-	// by analogy: one table asserting both directions is what pins that the three publishing
-	// pages did not lend their bounds to the three that publish none.
-	published bool
+	// API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups publish "Valid Range:
+	// Minimum value of 5. Maximum value of 1000."; API_DescribeVolumes, API_DescribeSnapshots,
+	// API_DescribeImages, API_DescribeInstanceStatus and API_DescribeFleets publish no range at
+	// all, only "The maximum number of items to return for this request", where the floor of one
+	// is substrate's reading (see ec2MinUnpublishedMaxResults).
+	//
+	// A pair rather than the boolean this column started as (#1024): the six operations still to
+	// convert publish 5–100, 5–1000 and 1–200 between them, so a boolean would force three
+	// ranges to collapse into one shared bound, which is exactly what #671 forbids. Naming each
+	// operation's bounds here is also what lets the cases derive their values from the bounds
+	// instead of hardcoding one range's edges.
+	minMaxResults int
+	maxMaxResults int
 	// create makes n records through real calls and returns their IDs.
 	create func(t *testing.T, ts *httptest.Server, n int) []string
 	// describe sends the operation with extra params and returns the IDs it reported, in the
@@ -66,60 +81,104 @@ type ec2PagedOp struct {
 	describe func(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string)
 }
 
+// ec2PagedNoCeiling is the maxMaxResults meaning the operation's page publishes no maximum, and
+// mirrors ec2NoMaxResultsCeiling in the package under test.
+const ec2PagedNoCeiling = 0
+
+// maxResultsMessage is the refusal message the operation's own range produces.
+//
+// The wording is substrate's — no page publishes one — so it is asserted literally rather than
+// derived: a message naming the wrong range would tell a caller to send a value the operation then
+// refuses.
+func (op ec2PagedOp) maxResultsMessage() string {
+	if op.maxMaxResults == ec2PagedNoCeiling {
+		return "MaxResults must be at least " + strconv.Itoa(op.minMaxResults)
+	}
+	return "MaxResults must be between " + strconv.Itoa(op.minMaxResults) +
+		" and " + strconv.Itoa(op.maxMaxResults)
+}
+
 // ec2PagedPageSize is the MaxResults every walk below is driven at.
 //
-// Five, because it is the smallest value the whole table accepts: three of the six pages publish a
-// floor of five and the other three a floor of one (substrate's reading, see
+// Five, because it is the smallest value the whole table accepts: three of the eight pages publish
+// a floor of five and the other five a floor of one (substrate's reading, see
 // ec2MinUnpublishedMaxResults), so one page size exercises the walk at every operation without the
 // cases having to know which range each carries. That the floors really do differ is asserted
 // separately, by TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused.
 const ec2PagedPageSize = 5
 
-// ec2PagedOps is every flat listing #917 converted onto the shared offset paginator.
+// ec2PagedOps is every flat listing converted onto the shared offset paginator whose records a
+// caller can create.
 //
 // DescribeInstances is deliberately absent: its answer nests reservationSet > item > instancesSet,
 // so it pages through ec2PageReservations rather than ec2Page and its cases live in
-// ec2_pagination_instances_test.go.
+// ec2_pagination_instances_test.go. DescribeSpotPriceHistory is absent for the reason this file's
+// preamble gives — its listing is assembled from a fixed catalog, not created.
 func ec2PagedOps() []ec2PagedOp {
 	return []ec2PagedOp{
 		{
-			name:     "DescribeVolumes",
-			idParam:  "VolumeId",
-			create:   ec2CreatePagedVolumes,
-			describe: ec2DescribePagedVolumes,
+			name:          "DescribeVolumes",
+			idParam:       "VolumeId",
+			minMaxResults: 1,
+			maxMaxResults: ec2PagedNoCeiling,
+			create:        ec2CreatePagedVolumes,
+			describe:      ec2DescribePagedVolumes,
 		},
 		{
-			name:     "DescribeSnapshots",
-			idParam:  "SnapshotId",
-			create:   ec2CreatePagedSnapshots,
-			describe: ec2DescribePagedSnapshots,
+			name:          "DescribeSnapshots",
+			idParam:       "SnapshotId",
+			minMaxResults: 1,
+			maxMaxResults: ec2PagedNoCeiling,
+			create:        ec2CreatePagedSnapshots,
+			describe:      ec2DescribePagedSnapshots,
 		},
 		{
-			name:     "DescribeImages",
-			idParam:  "ImageId",
-			create:   ec2CreatePagedImages,
-			describe: ec2DescribePagedImages,
+			name:          "DescribeImages",
+			idParam:       "ImageId",
+			minMaxResults: 1,
+			maxMaxResults: ec2PagedNoCeiling,
+			create:        ec2CreatePagedImages,
+			describe:      ec2DescribePagedImages,
 		},
 		{
-			name:      "DescribeVpcs",
-			idParam:   "VpcId",
-			published: true,
-			create:    ec2CreatePagedVPCs,
-			describe:  ec2DescribePagedVPCs,
+			name:          "DescribeVpcs",
+			idParam:       "VpcId",
+			minMaxResults: 5,
+			maxMaxResults: 1000,
+			create:        ec2CreatePagedVPCs,
+			describe:      ec2DescribePagedVPCs,
 		},
 		{
-			name:      "DescribeSubnets",
-			idParam:   "SubnetId",
-			published: true,
-			create:    ec2CreatePagedSubnets,
-			describe:  ec2DescribePagedSubnets,
+			name:          "DescribeSubnets",
+			idParam:       "SubnetId",
+			minMaxResults: 5,
+			maxMaxResults: 1000,
+			create:        ec2CreatePagedSubnets,
+			describe:      ec2DescribePagedSubnets,
 		},
 		{
-			name:      "DescribeSecurityGroups",
-			idParam:   "GroupId",
-			published: true,
-			create:    ec2CreatePagedSecurityGroups,
-			describe:  ec2DescribePagedSecurityGroups,
+			name:          "DescribeSecurityGroups",
+			idParam:       "GroupId",
+			minMaxResults: 5,
+			maxMaxResults: 1000,
+			create:        ec2CreatePagedSecurityGroups,
+			describe:      ec2DescribePagedSecurityGroups,
+		},
+		{
+			name:          "DescribeInstanceStatus",
+			idParam:       "InstanceId",
+			minMaxResults: 1,
+			maxMaxResults: ec2PagedNoCeiling,
+			create:        ec2CreatePagedInstanceStatuses,
+			describe:      ec2DescribePagedInstanceStatuses,
+		},
+		{
+			name:          "DescribeFleets",
+			idParam:       "FleetId",
+			minMaxResults: 1,
+			maxMaxResults: ec2PagedNoCeiling,
+			create:        ec2CreatePagedFleets,
+			describe:      ec2DescribePagedFleets,
 		},
 	}
 }
@@ -247,6 +306,40 @@ func ec2CreatePagedSecurityGroups(t *testing.T, ts *httptest.Server, n int) []st
 	return ids
 }
 
+// ec2CreatePagedInstanceStatuses launches n instances and returns their IDs.
+//
+// One RunInstances of n rather than n of one: DescribeInstanceStatus reports a flat
+// instanceStatusSet with no reservation grouping at all, so the launch shape cannot affect its
+// answer, and one call is the cheapest way to reach a listing larger than a page. That its sibling
+// DescribeInstances *does* group them is what ec2_pagination_instances_test.go covers.
+func ec2CreatePagedInstanceStatuses(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	return ec2RunPagedInstances(t, ts, n).InstanceIDs
+}
+
+// ec2CreatePagedFleets creates n maintain fleets from one launch template and returns their IDs.
+//
+// Maintain rather than instant, and it is not a stylistic choice: an instant fleet is reported only
+// when its ID is named, and naming an ID list refuses MaxResults, so an instant fleet can never
+// appear on a paginated page. A listing of them would page as empty at every offset.
+func ec2CreatePagedFleets(t *testing.T, ts *httptest.Server, n int) []string {
+	t.Helper()
+	ltID := newFleetLaunchTemplate(t, ts, "paged-fleets")
+	ids := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var created createFleetResp
+		ec2FleetXML(t, ts, map[string]string{
+			"Action": "CreateFleet",
+			"Type":   "maintain",
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+			"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+		}, &created)
+		require.NotEmpty(t, created.FleetID)
+		ids = append(ids, created.FleetID)
+	}
+	return ids
+}
+
 // ec2DescribePagedImages reads a DescribeImages page.
 func ec2DescribePagedImages(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
 	t.Helper()
@@ -319,6 +412,45 @@ func ec2DescribePagedSecurityGroups(t *testing.T, ts *httptest.Server, extra map
 	ids := make([]string, 0, len(decoded.Groups))
 	for _, group := range decoded.Groups {
 		ids = append(ids, group.GroupID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedInstanceStatuses reads a DescribeInstanceStatus page.
+//
+// The instance ID is read as a direct child of instanceStatusSet>item, per the reason
+// [ec2DescribePagedVolumes] gives.
+func ec2DescribePagedInstanceStatuses(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName  xml.Name `xml:"DescribeInstanceStatusResponse"`
+		Statuses []struct {
+			InstanceID string `xml:"instanceId"`
+		} `xml:"instanceStatusSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeInstanceStatus", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Statuses))
+	for _, status := range decoded.Statuses {
+		ids = append(ids, status.InstanceID)
+	}
+	return ids, decoded.NextToken
+}
+
+// ec2DescribePagedFleets reads a DescribeFleets page.
+func ec2DescribePagedFleets(t *testing.T, ts *httptest.Server, extra map[string]string) ([]string, string) {
+	t.Helper()
+	var decoded struct {
+		XMLName xml.Name `xml:"DescribeFleetsResponse"`
+		Fleets  []struct {
+			FleetID string `xml:"fleetId"`
+		} `xml:"fleetSet>item"`
+		NextToken string `xml:"nextToken"`
+	}
+	ec2DescribeXML(t, ts, ec2PagedParams("DescribeFleets", extra), &decoded)
+	ids := make([]string, 0, len(decoded.Fleets))
+	for _, fleet := range decoded.Fleets {
+		ids = append(ids, fleet.FleetID)
 	}
 	return ids, decoded.NextToken
 }
@@ -509,59 +641,77 @@ func TestEC2_OffsetPagination_TokenIsRefusedBeforeStateIsRead(t *testing.T) {
 // one its own page publishes, and nothing wider.
 //
 // API_DescribeVpcs, API_DescribeSubnets and API_DescribeSecurityGroups publish "Valid Range:
-// Minimum value of 5. Maximum value of 1000."; API_DescribeVolumes, API_DescribeSnapshots and
-// API_DescribeImages say only "The maximum number of items to return for this request", type
-// Integer, with no Valid Range line at all. Per #671 substrate does not borrow the published range
-// by analogy, and the two directions are asserted in one table because that is what pins it: 1 and
-// 5000 are **accepted** where no range is published and **refused** where 5–1000 is, so a helper
-// that had defaulted to one range for the family would fail on half the rows.
+// Minimum value of 5. Maximum value of 1000."; the other five pages in the table say only "The
+// maximum number of items to return for this request", type Integer, with no Valid Range line at
+// all. Per #671 substrate does not borrow the published range by analogy, and both directions are
+// asserted because that is what pins it: 1 and 5000 are **accepted** where no range is published
+// and **refused** where 5–1000 is, so a helper that had defaulted to one range for the family would
+// fail on half the rows.
+//
+// The boundary values come from each operation's own [ec2PagedOp] bounds rather than from literals,
+// so the table asserts the edges of whichever range the operation publishes — which is what the six
+// operations #1024 has still to convert need, publishing 5–100 and 1–200 between them.
 //
 // Where no range is published the floor of one is substrate's reading, forced by the published
 // pagination rule — a page of zero items describes a walk that answers nothing and hands back a
 // token forever. A value that is not a number is refused at every operation, since AWS types the
 // parameter Integer everywhere.
 func TestEC2_OffsetPagination_MaxResultsOutsideTheRangeIsRefused(t *testing.T) {
-	cases := []struct {
+	// Values no published range admits, whatever the operation: no page publishes a floor below
+	// one, and none types the parameter as anything but Integer.
+	refusedEverywhere := []struct {
 		name       string
 		maxResults string
-		// refusedWhenPublished and refusedWhenNot say which operations refuse the value, which is
-		// the whole point of the case: only "0" and "many" are refused by both.
-		refusedWhenPublished bool
-		refusedWhenNot       bool
 	}{
-		{"a page of zero items", "0", true, true},
-		{"a negative page", "-1", true, true},
-		{"not a number", "many", true, true},
-		{"below the published floor", "1", true, false},
-		{"above the published ceiling", "5000", true, false},
-		{"inside the published range", "5", false, false},
+		{"a page of zero items", "0"},
+		{"a negative page", "-1"},
+		{"not a number", "many"},
 	}
 	for _, op := range ec2PagedOps() {
 		t.Run(op.name, func(t *testing.T) {
 			ts := newEC2TestServer(t)
 			created := op.create(t, ts, ec2PagedPageSize+1)
 
-			for _, tc := range cases {
-				t.Run(tc.name, func(t *testing.T) {
-					refused := tc.refusedWhenNot
-					message := "MaxResults must be at least 1"
-					if op.published {
-						refused = tc.refusedWhenPublished
-						message = "MaxResults must be between 5 and 1000"
-					}
-					if !refused {
-						ids, _ := op.describe(t, ts, map[string]string{"MaxResults": tc.maxResults})
-						assert.NotEmpty(t, ids)
-						assert.LessOrEqual(t, len(ids), len(created))
-						return
-					}
-					params := ec2PagedParams(op.name, map[string]string{"MaxResults": tc.maxResults})
-					status, code, got := ec2ErrorDetail(t, ts, params)
-					assert.Equal(t, http.StatusBadRequest, status)
-					assert.Equal(t, "InvalidParameterValue", code)
-					assert.Contains(t, got, message)
+			refuse := func(t *testing.T, maxResults string) {
+				t.Helper()
+				status, code, got := ec2ErrorDetail(t, ts,
+					ec2PagedParams(op.name, map[string]string{"MaxResults": maxResults}))
+				assert.Equal(t, http.StatusBadRequest, status)
+				assert.Equal(t, "InvalidParameterValue", code)
+				assert.Contains(t, got, op.maxResultsMessage())
+			}
+			accept := func(t *testing.T, maxResults string) {
+				t.Helper()
+				ids, _ := op.describe(t, ts, map[string]string{"MaxResults": maxResults})
+				assert.NotEmpty(t, ids)
+				assert.LessOrEqual(t, len(ids), len(created))
+			}
+
+			for _, tc := range refusedEverywhere {
+				t.Run(tc.name, func(t *testing.T) { refuse(t, tc.maxResults) })
+			}
+			t.Run("the published floor itself", func(t *testing.T) {
+				accept(t, strconv.Itoa(op.minMaxResults))
+			})
+			if op.minMaxResults > 1 {
+				t.Run("one below the published floor", func(t *testing.T) {
+					refuse(t, strconv.Itoa(op.minMaxResults-1))
 				})
 			}
+			if op.maxMaxResults == ec2PagedNoCeiling {
+				// The direction that matters most: a value far above every range published
+				// anywhere in the family is accepted here, because this page publishes none.
+				t.Run("a page of 5000 where no ceiling is published", func(t *testing.T) {
+					accept(t, "5000")
+				})
+				return
+			}
+			t.Run("the published ceiling itself", func(t *testing.T) {
+				accept(t, strconv.Itoa(op.maxMaxResults))
+			})
+			t.Run("one above the published ceiling", func(t *testing.T) {
+				refuse(t, strconv.Itoa(op.maxMaxResults+1))
+			})
 		})
 	}
 }

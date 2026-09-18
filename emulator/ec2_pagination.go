@@ -9,10 +9,17 @@ import (
 //
 // Two operations paginated before this file existed — DescribeTags and
 // DescribeLaunchTemplateVersions — and each carried its own copy of the same three rules.
-// Roughly twenty other describes publish MaxResults and NextToken and implemented neither, so
-// converting them one at a time would have meant a third, fourth and fifth copy. These four
-// helpers are that one copy: the two original sites now call them, so the number of
-// implementations went from two to one rather than from two to twenty.
+// **Sixteen** other routed describes published MaxResults and NextToken and implemented
+// neither, so converting them one at a time would have meant a third, fourth and fifth copy.
+// These four helpers are that one copy: the two original sites call them too, so the number of
+// implementations went from two to one rather than from two to eighteen.
+//
+// Sixteen is audited rather than estimated, and this comment used to say "roughly twenty" —
+// #1024's docs criterion, since an estimate invites the reader to assume the sweep was complete.
+// #917 converted seven of the sixteen and #1024 converts the remaining nine, in three parts by
+// published range: DescribeInstanceStatus, DescribeSpotPriceHistory and DescribeFleets — the
+// three whose pages publish no range at all — are the first part. docs/services.md lists the
+// rest with the range each publishes.
 //
 // What AWS publishes about the mechanism is stated once, in Query-Requests.html → Pagination,
 // rather than per operation:
@@ -41,12 +48,14 @@ import (
 // ec2MinUnpublishedMaxResults is the smallest MaxResults substrate accepts at an operation
 // whose page publishes no range.
 //
-// Four of the nine operations #917 names publish no bound at all — API_DescribeInstances,
-// API_DescribeImages, API_DescribeVolumes and API_DescribeSnapshots each say only "The maximum
-// number of items to return for this request", type Integer, no minimum and no maximum — while
-// three publish "Valid Range: Minimum value of 5. Maximum value of 1000." and two state a range
-// in prose. Substrate does not borrow 5–1000 from the siblings, per #671: only what the API
-// model states.
+// Seven pages publish no bound at all — API_DescribeInstances, API_DescribeImages,
+// API_DescribeVolumes and API_DescribeSnapshots of the nine #917 names, plus
+// API_DescribeInstanceStatus, API_DescribeSpotPriceHistory and API_DescribeFleets from #1024 —
+// each saying only "The maximum number of items to return for this request", type Integer, no
+// minimum and no maximum. Three of #917's nine publish "Valid Range: Minimum value of 5. Maximum
+// value of 1000." and two state a range in prose, and #1024's remaining six publish three
+// further ranges between them. Substrate does not borrow 5–1000 from the siblings, per #671:
+// only what the API model states.
 //
 // The floor of one is therefore **substrate's reading**, and it is the one bound the published
 // pagination rule forces. A caller is told to "continue to call the action until nextToken is
@@ -70,7 +79,7 @@ const ec2NoMaxResultsCeiling = 0
 // DescribeTags' and DescribeLaunchTemplateVersions' bounds stay their own
 // ([ec2MinTagResults], [ec2MinLaunchTemplateVersionResults]): the second publishes 1 to 200 and
 // so is a different range, and the first doubles as that operation's default page size, which
-// this pair is not. The four pages publishing no range at all use
+// this pair is not. The seven pages publishing no range at all use
 // [ec2MinUnpublishedMaxResults] with [ec2NoMaxResultsCeiling] instead.
 const (
 	ec2MinPublishedMaxResults = 5
@@ -227,11 +236,11 @@ func ec2PageReservations(reservations []ec2ReservationItem, offset, maxResults i
 //
 // The rule is published once for the whole service rather than per operation, in
 // Query-Requests.html → Pagination: "If you call a describe API action with both a list of IDs
-// and MaxResults, the request fails with the error InvalidParameterCombination." Of the nine
-// operations #917 names, only API_DescribeInstances repeats it against its own parameter — "You
-// cannot specify this parameter and the instance IDs parameter in the same request." The
-// **code** is therefore published and the **message wording** is substrate's, since no page
-// gives one.
+// and MaxResults, the request fails with the error InvalidParameterCombination." Two pages repeat
+// it against their own parameter, in the same words — API_DescribeInstances and
+// API_DescribeInstanceStatus: "You cannot specify this parameter and the instance IDs parameter in
+// the same request." The **code** is therefore published and the **message wording** is
+// substrate's, since no page gives one.
 //
 // This is the refusal that matters most in the divergence direction: without it a request
 // combining the two answers 200 here and InvalidParameterCombination at AWS, so the code works

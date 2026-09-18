@@ -449,6 +449,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   parameter AWS documents as `nameQuery` travels on the query string as **`name`**, so grepping for the
   documented name finds nothing.
 
+- **`DescribeInstanceStatus`, `DescribeSpotPriceHistory` and `DescribeFleets` page, the three EC2
+  describes whose pages publish no `MaxResults` range at all** (#1024). Each published `MaxResults` and
+  `NextToken` and read neither, so each answered its whole listing with no `nextToken` — the divergence
+  a paginating caller cannot see, because the loop terminates on the first page against substrate and
+  finds a second in production. All three convert onto #917's shared paginator, so this adds no
+  pagination implementation; wire behaviour for a caller that sends neither parameter is unchanged at
+  all three.
+
+  **They are grouped by published range rather than by file, and this group is the one that publishes
+  none.** `API_DescribeInstanceStatus`, `API_DescribeSpotPriceHistory` and `API_DescribeFleets` each say
+  only *"The maximum number of items to return for this request"*, type `Integer`, with no `Valid Range`
+  line and an empty `Errors` section — verified on the pages rather than taken from substrate's own
+  table. So all three get `ec2MinUnpublishedMaxResults` with no ceiling, the same treatment the four
+  unbounded operations #917 converted already have, and none of them borrows the 5–1000 three sibling
+  describes publish: `MaxResults=5000` is accepted at all three and `MaxResults=1` is accepted where
+  VPCs, subnets and security groups refuse it. That is #671's rule — only what the API model states —
+  and it is why the remaining six operations are two further changes rather than one sweep.
+
+  **`DescribeSpotPriceHistory` is the one converted describe that gains no
+  `InvalidParameterCombination`**, because the service-wide rule is stated against *"a list of IDs"* and
+  the page has no ID-list parameter. `InstanceType.N` is the only candidate and is documented as
+  *"Filters the results by the specified instance types"* — a filter, and an instance type is not a
+  resource ID, which is the same reading that already makes an unknown type an empty history there
+  rather than `InvalidInstanceType`. That it and `MaxResults` are read **together** is asserted rather
+  than left implicit, since a sweep is exactly where a published rule gets applied one operation too
+  far. `DescribeInstanceStatus` is the opposite case and needed no reading at all: its page repeats the
+  prohibition against its own parameter in the same words `API_DescribeInstances` uses, so there the
+  rule is published twice over.
+
+  **An `instant` fleet can now never appear on a paginated page, and that is AWS's arithmetic rather
+  than substrate's choice.** Two published rules meet at `DescribeFleets`: a fleet of type `instant` is
+  reported only when its ID is named, and naming an ID list forbids `MaxResults`. The two conditions
+  cannot hold at once, so the consequence follows from the pages and is recorded — including in the test
+  helper, which builds `maintain` fleets for that reason and says so.
+
+  **`DescribeSpotPriceHistory`'s offset indexes a listing built from no state at all**, which is the one
+  place this conversion's stability argument differs from every other. Elsewhere the offset is
+  meaningful because `StateManager.List` promises a lexicographic order (#865); here the answer is the
+  instance-type catalog crossed with the Region's Availability Zones, both fixed slices walked in a
+  fixed order, so a token names the same price on two calls for a different reason. It also means the
+  operation cannot join the shared pagination table, every case of which begins by *creating* the
+  listing it walks — so it has its own file asserting the same five properties against a listing that
+  exists in a fresh account.
+
+  **One published shape is not taken.** `API_DescribeSpotPriceHistory`'s Example Response shows
+  `<nextToken/>` on a last page, while the member itself is documented as *"an empty string ("") or null
+  when there are no more items"*. Both are published; substrate omits the element, which is the answer
+  every other converted describe gives and which a caller decoding into a string reads as `""` either
+  way. Recorded rather than silently chosen, because the example is the more specific of the two
+  statements and a future reader will find it.
+
+  **The shared pagination table's `published bool` column becomes a `minMaxResults`/`maxMaxResults`
+  pair**, and its boundary cases are now derived from each operation's own bounds rather than from a
+  flag. A boolean could express two ranges, and the six operations still to convert publish 5–100 and
+  1–200 as well — so it would have forced three published ranges to collapse into one, which is exactly
+  the harmonisation #671 forbids. The change touches every existing row, which is why it lands in the
+  first of these three PRs rather than the last.
+
+  **The "roughly twenty" estimate in `ec2_pagination.go` is corrected to sixteen**, the audited count of
+  routed describes that published both parameters and implemented neither: #917 converted seven, this
+  converts three, and six remain. That estimate was this issue's documentation criterion, since an
+  estimate invites a reader to assume the sweep was complete.
+
+  One green test changed for a reason worth stating: `TestEC2_SpotPriceFilters_FiveOfSix` sent
+  `MaxResults=0` on a case about `ProductDescription.N`, which was harmless while the parameter was
+  inert and is now refused as a page that can never advance. The parameter was never that case's
+  subject and is removed.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added
