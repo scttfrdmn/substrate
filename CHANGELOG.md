@@ -995,6 +995,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read the attribute at all) but because a map cannot see a duplicated `<entry>`, which is the failure
   mode the new merge order could have introduced.
 
+- **Step Functions' two deletes are idempotent, and the `DELETING` status they were documented against
+  is admitted to be unreachable** (#995). `DeleteStateMachine` and `DeleteActivity` refused an ARN naming
+  nothing with `StateMachineDoesNotExist` / `ActivityDoesNotExist`. Both are real Step Functions codes —
+  published at `DescribeStateMachine`, `UpdateStateMachine`, `StartExecution`, `StartSyncExecution`,
+  `ListExecutions` and `DescribeActivity` — but `API_DeleteStateMachine` publishes exactly `InvalidArn`
+  and `ValidationException`, and `API_DeleteActivity` publishes `InvalidArn` alone. Substrate answered
+  them because both handlers went through the same `require*` helper as their published siblings, so the
+  code arrived with the lookup rather than by a decision. Both now parse the ARN, load directly, and
+  answer `200` with an empty body when nothing is there.
+
+  **This is substrate's reading of an absent code, not a published guarantee**, and weaker evidence than
+  SNS's #992 where `API_DeleteTopic` states the property outright. What carries it: the error list is the
+  only thing either page says on the matter, and the description makes an idempotent delete the behaviour
+  a caller needs — *"This is an asynchronous operation. It sets the state machine's status to `DELETING`
+  and begins the deletion process. A state machine is deleted only when all its executions are
+  completed."* A caller that has issued a delete and retries cannot distinguish "already gone" from
+  "still `DELETING`". The ARN parse stays **ahead** of the load in both handlers, so idempotence licenses
+  an ARN that names nothing and not a string that is not the right kind of ARN; every `InvalidArn`
+  refusal is unchanged.
+
+  **The `DELETING` status is not modelled, and `StateMachineState.Status` no longer claims it.** Its doc
+  comment named both `ACTIVE` and `DELETING`, which `API_DescribeStateMachine` publishes; a tree-wide
+  search for a writer found exactly one, writing `"ACTIVE"`. Nothing can write the other, because the
+  delete removes the record synchronously — there is no observation between `ACTIVE` and gone for a
+  `DELETING` to occupy — which also makes `StateMachineDeleting`/400 unreachable at
+  `UpdateStateMachine`, `StartExecution` and `StartSyncExecution`. A caller therefore cannot test a poll
+  loop that waits for a delete to finish. Stated in the type, in `docs/services.md` and in a test that
+  asserts the emulator's actual answer, so modelling the transition later fails an assertion naming this
+  decision instead of silently widening the enum.
+
+  The shared ARN-refusal tables keep both operations rather than dropping them, because three other tests
+  still require both deletes to answer `InvalidArn` for a malformed shape, a wrong resource type and a
+  version- or alias-qualified ARN — only the absent-resource case changed. The three anonymous structs
+  behind those tables collapse into a named `sfnArnOpCall` carrying an `absentIsIdempotent` column, so the
+  operation inventory stays in one place. Because a `200` on a foreign ARN no longer proves by its status
+  that the delete declined to act, the tests assert the state instead: the caller's own same-named
+  resources survive every cross-account and cross-Region delete, a repeated delete leaves the name index
+  intact and a sibling untouched, and `Describe` still refuses — only the delete is idempotent.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

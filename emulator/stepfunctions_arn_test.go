@@ -148,55 +148,53 @@ func sfnArnStart(t *testing.T, ts *emulator.TestServer, account, region, smARN, 
 	return sfnArnMember(t, raw, "executionArn")
 }
 
+// sfnArnOpCall is one operation in an ARN-kind's inventory, with the members it needs to get past body
+// decoding.
+//
+// absentIsIdempotent marks the operations whose page does *not* publish a *DoesNotExist code, which
+// after #995 is the two deletes. It is a column rather than a skip list in the two absent-resource
+// tests, because the whole inventory has to stay in one place: the deletes must still answer InvalidArn
+// for every malformed, wrong-type and qualified ARN — those three tests iterate the same tables — and
+// removing them to express one difference would have lost three kinds of coverage to express it.
+type sfnArnOpCall struct {
+	op                 string
+	body               map[string]any
+	absentIsIdempotent bool
+}
+
 // sfnArnStateMachineOps names every operation that takes a stateMachineArn, with the rest of the
 // members each needs to get past body decoding, so one table drives the refusal tests.
 //
 // ListExecutions is here because its stateMachineArn, although "Required: No" at AWS, resolves the
 // same way when it is supplied — and it was the one operation in the set with no existence check at
 // all, so an ARN naming nothing answered 200 with an empty list.
-func sfnArnStateMachineOps(smARN string) []struct {
-	op   string
-	body map[string]any
-} {
-	return []struct {
-		op   string
-		body map[string]any
-	}{
-		{"DescribeStateMachine", map[string]any{"stateMachineArn": smARN}},
-		{"UpdateStateMachine", map[string]any{"stateMachineArn": smARN, "definition": sfnArnPassDefinition}},
-		{"DeleteStateMachine", map[string]any{"stateMachineArn": smARN}},
-		{"StartExecution", map[string]any{"stateMachineArn": smARN, "name": "e1"}},
-		{"StartSyncExecution", map[string]any{"stateMachineArn": smARN, "name": "e1"}},
-		{"ListExecutions", map[string]any{"stateMachineArn": smARN}},
+func sfnArnStateMachineOps(smARN string) []sfnArnOpCall {
+	return []sfnArnOpCall{
+		{op: "DescribeStateMachine", body: map[string]any{"stateMachineArn": smARN}},
+		{op: "UpdateStateMachine", body: map[string]any{"stateMachineArn": smARN, "definition": sfnArnPassDefinition}},
+		// API_DeleteStateMachine publishes InvalidArn and ValidationException and nothing else.
+		{op: "DeleteStateMachine", body: map[string]any{"stateMachineArn": smARN}, absentIsIdempotent: true},
+		{op: "StartExecution", body: map[string]any{"stateMachineArn": smARN, "name": "e1"}},
+		{op: "StartSyncExecution", body: map[string]any{"stateMachineArn": smARN, "name": "e1"}},
+		{op: "ListExecutions", body: map[string]any{"stateMachineArn": smARN}},
 	}
 }
 
 // sfnArnActivityOps names every operation that takes an activityArn.
-func sfnArnActivityOps(activityARN string) []struct {
-	op   string
-	body map[string]any
-} {
-	return []struct {
-		op   string
-		body map[string]any
-	}{
-		{"DescribeActivity", map[string]any{"activityArn": activityARN}},
-		{"DeleteActivity", map[string]any{"activityArn": activityARN}},
+func sfnArnActivityOps(activityARN string) []sfnArnOpCall {
+	return []sfnArnOpCall{
+		{op: "DescribeActivity", body: map[string]any{"activityArn": activityARN}},
+		// API_DeleteActivity publishes InvalidArn and nothing else at all.
+		{op: "DeleteActivity", body: map[string]any{"activityArn": activityARN}, absentIsIdempotent: true},
 	}
 }
 
 // sfnArnExecutionOps names every operation that takes an executionArn.
-func sfnArnExecutionOps(execARN string) []struct {
-	op   string
-	body map[string]any
-} {
-	return []struct {
-		op   string
-		body map[string]any
-	}{
-		{"DescribeExecution", map[string]any{"executionArn": execARN}},
-		{"StopExecution", map[string]any{"executionArn": execARN}},
-		{"GetExecutionHistory", map[string]any{"executionArn": execARN}},
+func sfnArnExecutionOps(execARN string) []sfnArnOpCall {
+	return []sfnArnOpCall{
+		{op: "DescribeExecution", body: map[string]any{"executionArn": execARN}},
+		{op: "StopExecution", body: map[string]any{"executionArn": execARN}},
+		{op: "GetExecutionHistory", body: map[string]any{"executionArn": execARN}},
 	}
 }
 
@@ -265,13 +263,23 @@ func TestSFNARN_AForeignARNNamingNothingIsARefusalNotTheCallersOwn(t *testing.T)
 	for _, call := range sfnArnStateMachineOps(absentARN) {
 		t.Run(call.op, func(t *testing.T) {
 			status, errCode, raw := sfnArnCall(t, ts, taggingTestAccount, sfnArnEastRegion, call.op, call.body)
+			if call.absentIsIdempotent {
+				// DeleteStateMachine. API_DeleteStateMachine publishes InvalidArn and
+				// ValidationException and nothing else, so an ARN naming nothing is a 200 with an empty
+				// body rather than a borrowed StateMachineDoesNotExist (#995).
+				assert.Emptyf(t, errCode, "%s: %s", call.op, raw)
+				assert.Equalf(t, http.StatusOK, status, "%s: %s", call.op, raw)
+				return
+			}
 			assert.Equalf(t, "StateMachineDoesNotExist", errCode, "%s: %s", call.op, raw)
 			assert.Equalf(t, http.StatusBadRequest, status, "%s: every Step Functions error is 400", call.op)
 		})
 	}
 
 	// And the caller's own is untouched: DeleteStateMachine above must not have removed it, and
-	// UpdateStateMachine must not have rewritten it.
+	// UpdateStateMachine must not have rewritten it. This assertion carries more weight since #995 made
+	// the delete idempotent — a 200 is now the expected answer for the foreign ARN, so nothing about the
+	// status says the delete declined to act, and this is the only thing that does.
 	raw := sfnArnOK(t, ts, taggingTestAccount, sfnArnEastRegion, "DescribeStateMachine",
 		map[string]any{"stateMachineArn": ownARN})
 	assert.Contains(t, sfnArnMember(t, raw, "definition"), `"Comment":"own"`,
@@ -353,11 +361,20 @@ func TestSFNARN_AnAbsentActivityAnswersActivityDoesNotExistAt400(t *testing.T) {
 	for _, call := range sfnArnActivityOps(absentARN) {
 		t.Run(call.op, func(t *testing.T) {
 			status, errCode, raw := sfnArnCall(t, ts, taggingTestAccount, sfnArnEastRegion, call.op, call.body)
+			if call.absentIsIdempotent {
+				// DeleteActivity. API_DeleteActivity publishes InvalidArn and nothing else at all, so an
+				// ARN naming nothing is a 200 with an empty body (#995).
+				assert.Emptyf(t, errCode, "%s: %s", call.op, raw)
+				assert.Equalf(t, http.StatusOK, status, "%s: %s", call.op, raw)
+				return
+			}
 			assert.Equalf(t, "ActivityDoesNotExist", errCode, "%s: %s", call.op, raw)
 			assert.Equalf(t, http.StatusBadRequest, status, "%s", call.op)
 		})
 	}
 
+	// The caller's own survives, which since #995 is the only thing saying the idempotent DeleteActivity
+	// above declined to act: its 200 no longer distinguishes "did nothing" from "deleted something".
 	sfnArnOK(t, ts, taggingTestAccount, sfnArnEastRegion, "DescribeActivity",
 		map[string]any{"activityArn": ownARN})
 }

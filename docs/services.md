@@ -13134,7 +13134,7 @@ routes both.
 | CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
 | DescribeStateMachine | Addressed by ARN — see below |
 | UpdateStateMachine | Addressed by ARN — see below |
-| DeleteStateMachine | Addressed by ARN; synchronous, so no `DELETING` status is observable (#995) |
+| DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
 | ListStateMachines | Scoped to the caller's own account and Region |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
 | StartSyncExecution | EXPRESS only; the express execution ARN is minted in the state machine's account and Region, and no record is stored for it |
@@ -13145,7 +13145,7 @@ routes both.
 | CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
 | DescribeActivity | Addressed by ARN — see below |
 | ListActivities | Scoped to the caller's own account and Region |
-| DeleteActivity | Addressed by ARN; refuses an absent activity (#995) |
+| DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995) |
 | TagResource | State machine or activity — see below |
 | UntagResource | State machine or activity — see below |
 | ListTagsForResource | `tags` sorted by key — see below |
@@ -13258,14 +13258,79 @@ publishes**, which is why there are four rather than one:
 `StartExecution`, `StartSyncExecution` and `ListExecutions`;
 `ActivityDoesNotExist` at `DescribeActivity`; `ExecutionDoesNotExist` at
 `DescribeExecution`, `StopExecution` and `GetExecutionHistory`; and
-`ResourceNotFound` at the three tagging operations. Two operations answer a code
-their own pages do **not** publish — `DeleteStateMachine` and `DeleteActivity`,
-whose error lists are `InvalidArn`/`ValidationException` and `InvalidArn` alone.
-Whether an absent resource makes those two a refusal or an idempotent `200` is
-#995; #912 moved their status to 400 with the rest but deliberately left the
-question open, because the evidence is an *absence* from an error list rather
-than a published idempotence sentence. `StartSyncExecution`'s refusal of a
-`STANDARD` state machine is likewise an unpublished code today, and is #996.
+`ResourceNotFound` at the three tagging operations. The two deletes used to answer
+a code their own pages do **not** publish, and no longer do — see *The two deletes
+are idempotent* below. `StartSyncExecution`'s refusal of a `STANDARD` state
+machine is still an unpublished code today, and is #996.
+
+### The two deletes are idempotent
+
+`DeleteStateMachine` on a state machine that is not there, and `DeleteActivity` on
+an activity that is not there, both answer `200` with an empty body. Neither
+refuses (#995).
+
+Until then both answered a `*DoesNotExist` code, because both went through the
+same lookup helper as their siblings and the code came along with the lookup. The
+codes are real — `StateMachineDoesNotExist` is published at
+`DescribeStateMachine`, `UpdateStateMachine`, `StartExecution`,
+`StartSyncExecution` and `ListExecutions`, and `ActivityDoesNotExist` at
+`DescribeActivity` — just not at these two operations.
+`API_DeleteStateMachine` publishes exactly two errors, `InvalidArn`/400 and
+`ValidationException`/400. `API_DeleteActivity` publishes exactly one,
+`InvalidArn`/400.
+
+**Reading that omission as idempotence is substrate's reading.** It is weaker
+evidence than SNS's `DeleteTopic`, whose page states the property outright —
+here neither page says anything in either direction. Two things carry it. The
+error list is the only thing either page says on the matter, and `CommonErrors`
+frames a page's list as the errors the operation returns. And the page's own
+description makes an idempotent delete the behaviour a caller needs:
+
+> Deletes a state machine. This is an asynchronous operation. It sets the state
+> machine's status to `DELETING` and begins the deletion process. A state machine
+> is deleted only when all its executions are completed.
+
+A caller that has issued a delete and retries cannot distinguish *already gone*
+from *still `DELETING`*, which is the situation an idempotent delete exists for.
+The contrary reading — that the list is incomplete and AWS does refuse — rests on
+nothing either page says, only on the code existing elsewhere in the service. The
+two operations answer alike because an absent state machine and an absent activity
+cannot sensibly disagree about whether a delete is idempotent.
+
+**Only the deletes changed.** `DescribeStateMachine` and `DescribeActivity` still
+refuse an absent resource with the code their own pages publish, so the change is
+about which operations may be idempotent, not about whether absence is observable.
+
+**Idempotence licenses an ARN that names nothing, not a string that is not the
+right kind of ARN.** The parse stays ahead of the load in both handlers, so a
+malformed ARN, a non-`states` ARN, an ARN of the wrong resource type, and a
+version- or alias-qualified ARN are all still `InvalidArn`/400 at both deletes.
+
+The cost of the `200` is that the status no longer proves a delete declined to
+act: a cross-account or cross-Region ARN now answers `200` whether or not it
+touched anything. So the tests assert the caller's own same-named resource
+survives, which is the #912 guarantee restated where it is no longer implied by a
+refusal.
+
+### The DELETING status is not modelled
+
+`API_DescribeStateMachine` publishes two status values, `ACTIVE` and `DELETING`.
+Substrate reports `ACTIVE` and nothing else, and `StateMachineState.Status`
+claimed both until #995 looked for the writer that set `DELETING` and found none.
+
+Nothing can set it: the delete removes the record synchronously, so there is no
+observation between `ACTIVE` and gone for a `DELETING` to occupy. Two consequences
+follow, and both are stated rather than hidden. A consumer cannot exercise a poll
+loop that waits for a delete to finish — the second `DescribeStateMachine` answers
+`StateMachineDoesNotExist` rather than reporting `DELETING`. And
+`StateMachineDeleting`/400 — *"The specified state machine is being deleted.
+Execution will not be started or updated."*, published at `UpdateStateMachine`,
+`StartExecution` and `StartSyncExecution` — is unreachable for the same reason.
+
+Modelling the transition is a separate piece of work, and per substrate's scope it
+would be driven by the simulated clock or by a countdown of observations rather
+than by wall-clock time. A test pins the current answer, so whoever models it
+finds a failing assertion naming this decision rather than a silent widening.
 
 `ListTagsForResource` returns `tags` sorted by key. AWS documents no order for
 it; lexicographic is substrate's reading, justified by the replay promise — a
