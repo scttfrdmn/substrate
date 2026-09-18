@@ -365,6 +365,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   One curiosity is recorded for the next reader: AWS's own page misspells the member as
   `ResourceArnList` in the two exclusion sentences written on `ResourceTypeFilters` and `TagFilters`.
 
+- **`GetRestApis` and `GetResources` read the `limit` and `position` pair their URIs publish, the
+  first two of six API Gateway v1 collections that did not** (#1025). Both answered the whole
+  collection with no `position`, so a consumer's paging loop terminated on its first response and its
+  second iteration first ran for real against an account holding more than one page — the defect #917
+  closed for `GetBasePathMappings` and `ListEventSourceMappings`, at the six collections that audit
+  counted and left. Because `limit` publishes a **default** of 25 rather than "everything", an account
+  with 26 REST APIs now answers 25 and a cursor where it used to answer 26 and none.
+
+  The reading is now held once for all seven paginated v1 collections rather than copied per handler,
+  because AWS's two sentences — *"The maximum number of returned results per page. The default value
+  is 25 and the maximum value is 500."* and *"The current pagination position in the paged result
+  set."* — are byte-identical on all seven pages: the same default, the same maximum, the same absent
+  minimum, and the same `BadRequestException`/400 to refuse with. A `limit` outside 1–500 is refused
+  rather than clamped and a `position` substrate could not have issued is refused rather than answered
+  with page one, both **before any state is read** (#887); one past the end still clamps to an empty
+  final page, since that token was issuable over a collection that has since shrunk. The floor of one
+  remains *substrate's reading* — AWS publishes no minimum.
+
+  **The order each collection pages in is *substrate's reading*, and it is ascending element ID, which
+  corrects the assumption this work started from.** Both collections are built from a string index,
+  and that index is kept **sorted** as it is written rather than appended to, so the order is neither
+  creation order nor a map walk: it is persisted, sorted state, which is what an offset cursor needs —
+  stable between two reads and across a replay. It is also the order these operations already answered
+  in, so gaining a cursor does not reorder the collection under a caller who was reading it whole. Two
+  consequences are stated rather than left to be discovered: an ID is generated rather than chosen, so
+  the order is not one a caller can predict from its own inputs, and a REST API's **root resource is
+  not first** in `GetResources` — `/` falls wherever its generated ID sorts, so a first page of a large
+  API need not contain it. Sorting by `path` would read better and emulate worse: it is not the order
+  the operation had, and nothing published asks for it.
+
+  **`GetResources`' `embed` is still unread, and that is deliberate.** Its URI publishes a third
+  parameter whose only accepted value is `methods`, and substrate answers every resource with
+  `resourceMethods` populated regardless. That over-reports where the cursor under-reported, so it is a
+  distinct divergence rather than the rest of this one; narrowing a response member a caller may
+  already be reading wants its own issue and its own citation. `docs/services.md` records it so the
+  paging fix is not read as the whole page honoured.
+
+  The four remaining collections — `GetDeployments`, `GetAuthorizers`, `GetApiKeys` and
+  `GetUsagePlans` — follow in the same shape. Each needs the signature change this one did, since six
+  of the eight v1 collection handlers took no request at all and so could not reach a query parameter.
+
 ## [v0.118.0] - 2026-09-17
 
 ### Added

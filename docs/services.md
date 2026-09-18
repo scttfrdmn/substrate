@@ -1088,12 +1088,14 @@ most 100 mappings with a `NextMarker`, while `MaxItems=10001` is refused. An **a
 is that same 100, which is *substrate's reading*: the page publishes no default and states the cap
 against every response.
 
-API Gateway is the opposite case and the only paginated operation in the tree with a published
+API Gateway is the opposite case, and the only paginated operations in the tree with a published
 default: "The maximum number of returned results per page. The default value is 25 and the maximum
 value is 500." A request naming no `limit` therefore still pages, at 25, where it used to answer the
 whole collection. No **minimum** is published — the floor of one is *substrate's reading*, for the
 reason the EC2 section gives: a page of zero elements describes a walk that answers nothing and
-hands back a position forever.
+hands back a position forever. The same two sentences appear on all seven paginated v1 collections,
+so that reading is applied once and shared; see [Six more v1 collections read the pair they
+publish](#six-more-v1-collections-read-the-pair-they-publish).
 
 **Neither operation gained an `InvalidParameterCombination`.** EC2's service-wide rule that an ID
 list and `MaxResults` may not appear together has no counterpart on either page: Lambda's
@@ -1109,10 +1111,44 @@ different positions depending on whether the caller passed `FunctionName`.
 
 **What the same audit found still unconverted is counted, not estimated.** Nine routed EC2 describes
 publish `MaxResults` and `NextToken` and read neither (#1024, listed with their published ranges in
-[One offset paginator, shared](#one-offset-paginator-shared)), and six routed API Gateway v1
-collections publish `limit` and `position` and read neither (#1025). Lambda's `ListFunctions` is a
-third case of the narrower defect: it pages, but accepts a `Marker` it never issued and range-checks
-no `MaxItems`.
+[One offset paginator, shared](#one-offset-paginator-shared)). Six routed API Gateway v1 collections
+were in that state too; they are being converted under #1025, two at a time — see the next section
+for which have landed. Lambda's `ListFunctions` is a third case of the narrower defect: it pages, but
+accepts a `Marker` it never issued and range-checks no `MaxItems`.
+
+### Six more v1 collections read the pair they publish
+
+[#1025](https://github.com/scttfrdmn/substrate/issues/1025) is the section above applied to the rest
+of API Gateway v1. Six collections besides `GetBasePathMappings` publish `limit` and `position` on
+their URI and read neither, answering the whole collection with no cursor: `GetRestApis`,
+`GetResources`, `GetDeployments`, `GetAuthorizers`, `GetApiKeys` and `GetUsagePlans`. All six carry
+AWS's two sentences byte-identically, so this is one rule six times rather than six rules, and the
+bounds, the default, the absent minimum and the `BadRequestException` / 400 to refuse with are read
+in one place for all seven.
+
+**Converted so far: `GetRestApis` and `GetResources`.** Each gained the request parameter its
+signature could not previously reach — six of the eight v1 collection handlers took no request at all
+— so this lands two operations at a time rather than as one sweep.
+
+**The order each collection is paged in is *substrate's reading*, because no page publishes one, and
+it is the order the collection already had.** These six are walked in **ascending element ID**: each
+is built from a string index of IDs which is kept sorted as it is written, so the order is persisted
+state rather than a map walk and is therefore stable between two reads and across a replay — the
+obligation an offset cursor imposes. Two consequences are worth stating plainly, because both are
+things a reader may expect not to hold:
+
+- An ID is *generated*, not chosen by the caller, so the order is not one a caller can predict from
+  its own inputs. It is only one it can rely on not to change under it.
+- A REST API's **root resource is not first** in `GetResources`. Its ID is generated like any other
+  resource's, so `/` falls wherever that ID sorts, and a first page of a large API need not contain
+  it. Sorting by `path` instead would make a nicer collection to read and a worse emulator: it is not
+  the order this operation answered in before it paged, and nothing published asks for it.
+
+**`GetResources`' third parameter is still unread, and that is a different divergence.** Its URI also
+publishes `embed`, whose only accepted value is `methods`, and substrate answers every resource with
+its `resourceMethods` populated regardless. That over-reports where the cursor defect under-reported,
+so it is not fixed here: narrowing a response member a caller may already be reading is a
+compatibility break that wants its own issue and its own citation.
 
 ### A tag set read back out of a map
 
@@ -12474,20 +12510,23 @@ collection responses nest their elements under **`item`** — singular, because 
 is the `locationName` of the `items` member. `GetUsage` uses a third spelling,
 `values`, and is not routed.
 
-**One collection carries a pagination `position`: `GetBasePathMappings`**, which
-reads the `limit` and `position` parameters its URI publishes — see [Two more
-cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2).
-Every other collection returns all its elements in one page and leaves the member
-unset, so it is omitted rather than sent empty: a caller must not be handed a token
-for a page that does not exist. Of those seven, **six publish `limit` and `position`
-and read neither** — `GetRestApis`, `GetResources`, `GetDeployments`,
-`GetAuthorizers`, `GetApiKeys` and `GetUsagePlans`, all six carrying AWS's `limit`
-sentence byte-identically, so it is one rule six times rather than six rules (#1025).
-The seventh, `GetStages`, publishes neither parameter and lists no `position`
-response member, so its single page is what AWS describes rather than a gap. Seven of
-the eight handlers also cannot read a query parameter as written — their signatures
-take no request — which is why `GetBasePathMappings` converted without a signature
-change and the other six will not. Earlier releases sent
+**Three collections carry a pagination `position`: `GetBasePathMappings`,
+`GetRestApis` and `GetResources`**, each reading the `limit` and `position`
+parameters its URI publishes — see [Two more cursors published and
+unread](#two-more-cursors-published-and-unread-outside-ec2) for the first and [Six
+more v1 collections read the
+pair](#six-more-v1-collections-read-the-pair-they-publish) for the rest. A
+collection that fits in one page leaves the member unset, so it is omitted rather
+than sent empty: a caller must not be handed a token for a page that does not exist.
+**Four still publish `limit` and `position` and read neither** — `GetDeployments`,
+`GetAuthorizers`, `GetApiKeys` and `GetUsagePlans` — all carrying AWS's `limit`
+sentence byte-identically, so it is one rule four times rather than four rules
+(#1025). The eighth collection, `GetStages`, publishes neither parameter and lists no
+`position` response member, so its single page is what AWS describes rather than a
+gap. Seven of the eight handlers also could not read a query parameter as written —
+their signatures took no request — which is why `GetBasePathMappings` converted
+without a signature change and each of the six that page needs one; `GetStages` has
+nothing to read, so its signature stays as it is. Earlier releases sent
 PascalCase members under an `items` envelope, which an AWS SDK parsed to an empty
 result with no error (#529).
 
@@ -12498,11 +12537,11 @@ result with no error (#529).
 | CreateRestApi | Auto-creates root `/` resource |
 | GetRestApi | |
 | DeleteRestApi | |
-| GetRestApis | |
+| GetRestApis | Pages on `limit`/`position`; ascending API ID (#1025) |
 | CreateResource | |
 | GetResource | |
 | DeleteResource | |
-| GetResources | |
+| GetResources | Pages on `limit`/`position`; ascending resource ID. `embed` unread — methods always reported (#1025) |
 | PutMethod | |
 | GetMethod | |
 | DeleteMethod | |

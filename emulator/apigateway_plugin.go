@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -48,7 +47,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetRestApi":
 		return p.getRestAPI(ctx, params["apiId"])
 	case "GetRestApis":
-		return p.getRestAPIs(ctx)
+		return p.getRestAPIs(ctx, req)
 	case "DeleteRestApi":
 		return p.deleteRestAPI(ctx, params["apiId"])
 	case "UpdateRestApi":
@@ -58,7 +57,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetResource":
 		return p.getResource(ctx, params["apiId"], params["resId"])
 	case "GetResources":
-		return p.getResources(ctx, params["apiId"])
+		return p.getResources(ctx, req, params["apiId"])
 	case "DeleteResource":
 		return p.deleteResource(ctx, params["apiId"], params["resId"])
 	case "PutMethod":
@@ -454,7 +453,28 @@ func (p *APIGatewayPlugin) getRestAPI(ctx *RequestContext, apiID string) (*AWSRe
 	return apigwJSONResponse(http.StatusOK, restAPIWire(api))
 }
 
-func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext) (*AWSResponse, error) {
+// getRestAPIs reports one page of the account's REST APIs in this Region.
+//
+// It read neither of the two parameters AWS publishes on its URI — "GET
+// /restapis?limit={limit}&position={position}" — and answered every API with no cursor, so a paging
+// consumer's loop terminated on its first response (#1025). Both are read now through
+// [apigwPageParams], and because "limit" publishes a default of 25 rather than "everything", an
+// account holding more than 25 APIs answers a first page and a "position" where it used to answer
+// the lot.
+//
+// The order is the account's API index, which [updateStringIndex] keeps sorted, so it is ascending
+// API ID — persisted state rather than a map walk, and therefore stable across calls and across a
+// replay, which is the obligation [pageByOffsetToken] states. AWS publishes no order for this
+// collection, so that is substrate's reading, and it is the order the operation already answered in
+// before it paged: gaining a cursor must not also reorder the collection under a caller who was
+// reading it whole. An ID is generated rather than chosen, so the order is not one a caller can
+// predict from its own inputs — only one it can rely on not to change between two reads.
+func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIIDsKey(ctx.AccountID, ctx.Region))
 	if err != nil {
@@ -473,7 +493,8 @@ func (p *APIGatewayPlugin) getRestAPIs(ctx *RequestContext) (*AWSResponse, error
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[restAPIOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[restAPIOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteRestAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -588,7 +609,30 @@ func (p *APIGatewayPlugin) getResource(ctx *RequestContext, apiID, resID string)
 	return apigwJSONResponse(http.StatusOK, resourceWire(res))
 }
 
-func (p *APIGatewayPlugin) getResources(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+// getResources reports one page of a REST API's resources.
+//
+// It read neither "limit" nor "position", both of which its URI publishes, and answered every
+// resource with no cursor (#1025); both are read now through [apigwPageParams], so an API holding
+// more than the published default of 25 resources answers a first page and a "position".
+//
+// The order is the API's resource index, ascending resource ID, for the reason [getRestAPIs] gives.
+// AWS publishes no order here either, and neither of the two a caller might expect is published: not
+// the tree order, and not the path order. Notably the root resource is *not* first — its ID is
+// generated like any other, so "/" falls wherever that ID sorts, and a first page of a large API need
+// not contain it. Sorting by path instead would be a nicer collection to read and a worse emulator:
+// it is not what this operation answered before it paged, and nothing published asks for it.
+//
+// "embed" is the third parameter this URI publishes, and it is still not read: every resource is
+// answered with its resourceMethods, where AWS populates that member only for "embed=methods". That
+// is a distinct divergence from the cursor this fixes — it over-reports rather than under-reports —
+// and it is recorded in docs/services.md rather than changed here, because narrowing a response
+// member is a compatibility break that wants its own issue and its own citation.
+func (p *APIGatewayPlugin) getResources(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, awsErr := apigwPageParams(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -611,7 +655,8 @@ func (p *APIGatewayPlugin) getResources(ctx *RequestContext, apiID string) (*AWS
 		items = append(items, resourceWire(res))
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwItemsOut[resourceOut]{Item: items})
+	page, position := pageByOffsetToken(items, offset, pageSize)
+	return apigwJSONResponse(http.StatusOK, apigwItemsOut[resourceOut]{Item: page, Position: position})
 }
 
 func (p *APIGatewayPlugin) deleteResource(ctx *RequestContext, apiID, resID string) (*AWSResponse, error) {
@@ -1316,21 +1361,6 @@ func (p *APIGatewayPlugin) createBasePathMapping(ctx *RequestContext, req *AWSRe
 	return apigwJSONResponse(http.StatusCreated, basePathMappingWire(mapping))
 }
 
-// apigwDefaultLimit and apigwMaxLimit are the bounds GetBasePathMappings' "limit" publishes,
-// which it does inside the parameter's own description rather than on a Valid Range line: "The
-// maximum number of returned results per page. The default value is 25 and the maximum value is
-// 500."
-//
-// So unlike every EC2 describe, this operation has a published **default**: a request naming no
-// limit still pages, at 25. No minimum is published; refusing a limit below one is substrate's
-// reading, and it is the bound a paginated listing forces, since a page of zero elements
-// describes a walk that answers nothing and hands back a position forever.
-const (
-	apigwDefaultLimit = 25
-	apigwMaxLimit     = 500
-	apigwMinLimit     = 1
-)
-
 // getBasePathMappings reports one page of a domain name's base path mappings.
 //
 // It read neither of the two parameters AWS publishes on its URI — "GET
@@ -1344,24 +1374,18 @@ const (
 // the BadRequestException/400 this page publishes, rather than silently answering page one — the
 // defect #915 named elsewhere — and it is refused before any state is read, per #887. One past
 // the end of the collection clamps to an empty final page instead, because that token was
-// issuable over a collection that has since shrunk.
+// issuable over a collection that has since shrunk. Both parameters are read through
+// [apigwPageParams], which the six collections #1025 covers share.
 //
 // The order is [StateManager.List]'s lexicographic one over the "basepath:" keys, which is by
 // base path within the domain. AWS publishes no order for this collection, so that is substrate's
 // reading; an offset cursor needs *some* stable order, and the alternative — the order mappings
-// happened to be created in — is not recoverable from state.
+// happened to be created in — is not recoverable from state here, because a mapping is keyed by
+// its base path and no index records the order they arrived in.
 func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
-	pageSize, awsErr := apigwPageLimit(req.Params["limit"])
+	pageSize, offset, awsErr := apigwPageParams(req)
 	if awsErr != nil {
 		return nil, awsErr
-	}
-	offset, tokenOK := decodeOffsetPaginationToken(req.Params["position"])
-	if !tokenOK {
-		return nil, &AWSError{
-			Code:       "BadRequestException",
-			Message:    "Invalid position: " + req.Params["position"],
-			HTTPStatus: http.StatusBadRequest,
-		}
 	}
 
 	goCtx := context.Background()
@@ -1385,30 +1409,6 @@ func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, req *AWSRequ
 
 	page, position := pageByOffsetToken(items, offset, pageSize)
 	return apigwJSONResponse(http.StatusOK, apigwItemsOut[basePathMappingOut]{Item: page, Position: position})
-}
-
-// apigwPageLimit reads a v1 collection's "limit" and returns the number of elements one page may
-// carry.
-//
-// A value outside 1..500 is refused rather than clamped, with the BadRequestException the page
-// publishes — "the submitted request is not valid, for example, the input is incomplete or
-// incorrect" — because a caller asking for 1000 elements per page asked for something the
-// operation cannot do, and silently answering 500 hides it. A non-integer is refused for the same
-// reason. An absent limit is the published default of 25.
-func apigwPageLimit(raw string) (int, *AWSError) {
-	if raw == "" {
-		return apigwDefaultLimit, nil
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < apigwMinLimit || n > apigwMaxLimit {
-		return 0, &AWSError{
-			Code: "BadRequestException",
-			Message: "limit must be between " + strconv.Itoa(apigwMinLimit) +
-				" and " + strconv.Itoa(apigwMaxLimit),
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-	return n, nil
 }
 
 // --- ID generation -----------------------------------------------------------
