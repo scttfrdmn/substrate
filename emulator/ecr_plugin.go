@@ -215,6 +215,8 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		RepositoryNames []string `json:"repositoryNames"`
+		MaxResults      int      `json:"maxResults"`
+		NextToken       string   `json:"nextToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -232,16 +234,39 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 	// entry (#1090).
 	named := len(body.RepositoryNames) > 0
 
+	// API_DescribeRepositories publishes the same sentence on both pagination members: "This
+	// option cannot be used when you specify repositories with `repositoryNames`." So a named
+	// request is unpaginated and combining the two is refused rather than one silently winning
+	// (#1090). The other two ECR listings exclude different members, or none — see
+	// ecr_pagination.go.
+	if named {
+		if body.MaxResults != 0 {
+			return nil, ecrPageExcluded("maxResults", "repositories with repositoryNames")
+		}
+		if body.NextToken != "" {
+			return nil, ecrPageExcluded("nextToken", "repositories with repositoryNames")
+		}
+	}
+
+	pageReq, err := ecrDecodePage(body.MaxResults, body.NextToken)
+	if err != nil {
+		return nil, err
+	}
+
 	var names []string
 	if named {
 		names = body.RepositoryNames
 	} else {
 		idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
-		var err error
 		names, err = loadStringIndex(goCtx, p.state, ecrNamespace, idxKey)
 		if err != nil {
 			return nil, fmt.Errorf("ecr describeRepositories loadIndex: %w", err)
 		}
+		// The offset cursor below is only meaningful over a stable order, and the names index is
+		// in creation order — so a repository created between two pages shifted every later
+		// repository by one. Sorting by name is the same basis StateManager.List guarantees
+		// (#865), and it is the caller-side obligation pageByOffsetToken states.
+		sort.Strings(names)
 	}
 
 	repos := make([]ECRRepository, 0, len(names))
@@ -265,8 +290,21 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 
 	type response struct {
 		Repositories []ecrRepositoryOut `json:"repositories"`
+		NextToken    string             `json:"nextToken,omitempty"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{Repositories: ecrRepositoriesToWire(repos)})
+
+	// The named form answers every repository it was asked for, because both pagination members
+	// are excluded from it. Only the registry-wide form pages. The cut is over the built list
+	// rather than over the names, so an index entry with no record — an internal inconsistency
+	// the loop above skips — shortens the listing rather than the page.
+	if named {
+		return ecrJSONResponse(http.StatusOK, response{Repositories: ecrRepositoriesToWire(repos)})
+	}
+	page, next := pageByOffsetToken(repos, pageReq.offset, pageReq.pageSize)
+	return ecrJSONResponse(http.StatusOK, response{
+		Repositories: ecrRepositoriesToWire(page),
+		NextToken:    next,
+	})
 }
 
 func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -507,12 +545,32 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			ImageDigest string `json:"imageDigest"`
 			ImageTag    string `json:"imageTag"`
 		} `json:"imageIds"`
+		MaxResults int    `json:"maxResults"`
+		NextToken  string `json:"nextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 	if body.RepositoryName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "repositoryName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// API_DescribeImages publishes, on both pagination members, "This option cannot be used when
+	// you specify images with `imageIds`." That is a different excluded member from
+	// DescribeRepositories', and ListImages publishes no exclusion at all, which is why the three
+	// shapes are declared per operation (#1090, see ecr_pagination.go).
+	enumerated := len(body.ImageIDs) > 0
+	if enumerated {
+		if body.MaxResults != 0 {
+			return nil, ecrPageExcluded("maxResults", "images with imageIds")
+		}
+		if body.NextToken != "" {
+			return nil, ecrPageExcluded("nextToken", "images with imageIds")
+		}
+	}
+	pageReq, err := ecrDecodePage(body.MaxResults, body.NextToken)
+	if err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -527,19 +585,33 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
 
 	// Collect requested digests.
+	//
+	// API_DescribeImages publishes ImageNotFoundException/400 — "The image requested does not
+	// exist in the specified repository" — and it had no site to fire from: a tag that resolved
+	// to nothing was dropped from the request and a digest naming no record was dropped from the
+	// answer, so a caller naming one real and one imaginary image got 200 and a short list. That
+	// is the same shape as the DescribeRepositories defect one member up (#1090). It applies only
+	// to the enumerated form; the registry-wide form names no image and so cannot miss one.
 	var requestedDigests []string
-	if len(body.ImageIDs) > 0 {
+	if enumerated {
 		for _, id := range body.ImageIDs {
-			if id.ImageDigest != "" {
+			switch {
+			case id.ImageDigest != "":
 				requestedDigests = append(requestedDigests, id.ImageDigest)
-			} else if id.ImageTag != "" {
-				if d, ok := tagsMap[id.ImageTag]; ok {
-					requestedDigests = append(requestedDigests, d)
+			case id.ImageTag != "":
+				d, ok := tagsMap[id.ImageTag]
+				if !ok {
+					return nil, ecrImageNotFound(body.RepositoryName)
 				}
+				requestedDigests = append(requestedDigests, d)
 			}
 		}
 	} else {
-		// All images: collect all digests from tags map.
+		// All images: one entry per digest, however many tags point at it, because ImageDetail
+		// publishes imageTags as an array. Ranging over the tag map puts them in Go's randomized
+		// map order, so two identical calls could answer the same images in a different order and
+		// no offset cursor over them would mean anything; sorting by digest is the stable basis
+		// pageByOffsetToken requires of its caller.
 		seen := make(map[string]bool)
 		for _, d := range tagsMap {
 			if !seen[d] {
@@ -547,6 +619,7 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 				requestedDigests = append(requestedDigests, d)
 			}
 		}
+		sort.Strings(requestedDigests)
 	}
 
 	type imageDetail struct {
@@ -574,6 +647,12 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			return nil, fmt.Errorf("ecr describeImages state.Get: %w", err)
 		}
 		if data == nil {
+			// A digest the caller named is refused; one derived from the tag map without a record
+			// behind it is substrate's own inconsistency, which is skipped for the same reason
+			// describeRepositories skips an index entry with no record.
+			if enumerated {
+				return nil, ecrImageNotFound(body.RepositoryName)
+			}
 			continue
 		}
 		var img ECRImage
@@ -592,8 +671,16 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 	type response struct {
 		ImageDetails []imageDetail `json:"imageDetails"`
+		NextToken    string        `json:"nextToken,omitempty"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{ImageDetails: details})
+
+	// The enumerated form answers every image it was asked for, because both pagination members
+	// are excluded from it.
+	if enumerated {
+		return ecrJSONResponse(http.StatusOK, response{ImageDetails: details})
+	}
+	page, next := pageByOffsetToken(details, pageReq.offset, pageReq.pageSize)
+	return ecrJSONResponse(http.StatusOK, response{ImageDetails: page, NextToken: next})
 }
 
 func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -678,12 +765,22 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		RepositoryName string `json:"repositoryName"`
+		MaxResults     int    `json:"maxResults"`
+		NextToken      string `json:"nextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 	if body.RepositoryName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "repositoryName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// API_ListImages publishes no exclusion sentence on either pagination member — the third of
+	// the three shapes (#1090). It names no images to be excluded against: its only narrowing
+	// member is `filter`, which selects rather than enumerates, so a filtered listing still pages.
+	pageReq, err := ecrDecodePage(body.MaxResults, body.NextToken)
+	if err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -702,20 +799,32 @@ func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		ImageTag    string `json:"imageTag,omitempty"`
 	}
 
-	// Build de-duplicated list: one entry per digest (with or without tag).
-	seen := make(map[string]bool)
-	var ids []imageID
+	// One entry per image ID — that is, per digest-and-tag pair — not per digest.
+	//
+	// Substrate de-duplicated by digest and kept whichever tag the map yielded first, so an image
+	// carrying two tags was reported under one of them, chosen by Go's randomized map order: the
+	// same repository listed twice could answer two different tags. AWS's own published sample for
+	// this operation answers two entries with the same digest and different tags, and the page's
+	// prose says a TAGGED filter lists "all of the tags in your repository", so the published
+	// listing is over image IDs rather than over images. Sorting by digest then tag is also the
+	// stable order pageByOffsetToken requires of its caller.
+	ids := make([]imageID, 0, len(tagsMap))
 	for tag, digest := range tagsMap {
-		if !seen[digest] {
-			seen[digest] = true
-			ids = append(ids, imageID{ImageDigest: digest, ImageTag: tag})
-		}
+		ids = append(ids, imageID{ImageDigest: digest, ImageTag: tag})
 	}
+	sort.Slice(ids, func(i, j int) bool {
+		if ids[i].ImageDigest != ids[j].ImageDigest {
+			return ids[i].ImageDigest < ids[j].ImageDigest
+		}
+		return ids[i].ImageTag < ids[j].ImageTag
+	})
 
 	type response struct {
-		ImageIDs []imageID `json:"imageIds"`
+		ImageIDs  []imageID `json:"imageIds"`
+		NextToken string    `json:"nextToken,omitempty"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{ImageIDs: ids})
+	page, next := pageByOffsetToken(ids, pageReq.offset, pageReq.pageSize)
+	return ecrJSONResponse(http.StatusOK, response{ImageIDs: page, NextToken: next})
 }
 
 // --- Auth token --------------------------------------------------------------

@@ -14255,14 +14255,14 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | Operation | Notes |
 |-----------|-------|
 | CreateRepository | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `imageTagMutability` defaults to `MUTABLE` and a value outside the published set is refused |
-| DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400) |
+| DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400); the registry-wide form [pages](#the-three-ecr-listings-page-three-different-ways), and the named form cannot |
 | DeleteRepository | Reports the deleted repository in the same shape; a repository holding images needs [`force`](#every-ecr-refusal-is-a-400), and its images go with it |
 | GetAuthorizationToken | Returns base64("AWS:password") |
 | PutImage | |
 | BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages` |
 | BatchDeleteImage | Removes tags from the repository's tag index; an entry that matches nothing is reported in `failures` |
-| DescribeImages | |
-| ListImages | Reports one entry per digest in the tag index |
+| DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException` |
+| ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member |
 | TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
 | UntagResource | `tagKeys` is an array of strings, as published |
 | ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
@@ -14401,6 +14401,52 @@ narrower: a name the **caller** supplied is answered for or refused, while a nam
 substrate's own index is skipped, because a missing record there is an internal inconsistency rather
 than a caller's mistake. Before #1090 every miss was dropped from the list, so a request naming one
 real and one imaginary repository answered 200 with a single entry.
+
+### The three ECR listings page three different ways
+
+`DescribeRepositories`, `DescribeImages` and `ListImages` each publish `maxResults` (Valid Range 1 to
+1000, and "If this parameter is not used, then … returns up to 100 results") and an opaque
+`nextToken`. Substrate decoded neither on any of the three, so every request answered the whole
+listing in one page. A caller written against the published contract — send `maxResults`, follow
+`nextToken` until it is absent — got everything at once and could not tell, because one full page is
+a well-formed answer.
+
+The three pages were read one at a time rather than the rule being taken from the first, and they do
+not agree about the mutual exclusion. That disagreement is why substrate declares the exclusion per
+operation instead of sharing one guard:
+
+| Operation | Published exclusion |
+|-----------|---------------------|
+| `DescribeRepositories` | Both members: "This option cannot be used when you specify repositories with `repositoryNames`." |
+| `DescribeImages` | Both members: "This option cannot be used when you specify images with `imageIds`." |
+| `ListImages` | None. Its `filter` member selects rather than enumerates, so a filtered listing still pages. |
+
+`maxResults` outside 1 to 1000 is **refused**, not clamped: a page of 1000 does not tell a caller who
+asked for 5000 that they misread the contract. The cursor is the base64 offset of
+`offset_pagination_token.go`, so a `nextToken` substrate never issued is refused rather than silently
+answering page one (#915), while an offset past the end of a listing that has since shrunk clamps to
+a final empty page. `InvalidParameterException`/400 is the code for all three of those, because it is
+the only parameter-fault code any of the three pages publishes — there is no ECR equivalent of KMS's
+`InvalidMarkerException`.
+
+Two further divergences were found and fixed in the same change, because an offset cursor is only
+meaningful over a listing with settled membership and a stable order, and neither held:
+
+- **`ListImages` answers one entry per image ID, not per image.** Substrate de-duplicated by digest
+  and kept whichever tag Go's map iteration yielded first, so an image carrying two tags was
+  reported under a randomly chosen one of them and two identical calls could answer differently.
+  AWS's own published sample for the operation answers two entries with the same digest and
+  different tags, and the page says a `TAGGED` filter lists "all of the tags in your repository".
+- **All three listings now sort before they cut.** `DescribeRepositories` walked its names index in
+  creation order, so a repository created mid-walk shifted every later one by a page position; both
+  image operations built their result by ranging over the tag map. Repositories sort by name, image
+  details by digest, image IDs by digest then tag.
+
+`DescribeImages` also publishes `ImageNotFoundException`/400, which had no site: an `imageIds` entry
+naming an unknown tag was dropped from the request and one naming an unknown digest was dropped from
+the answer, so a caller naming one real and one imaginary image was answered 200 with a short list.
+As with `DescribeRepositories`, only an image the **caller** named is refused; a digest derived from
+substrate's own tag index with no record behind it is skipped as an internal inconsistency.
 
 ### CloudFormation resource types
 

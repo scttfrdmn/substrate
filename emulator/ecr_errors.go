@@ -88,6 +88,22 @@ func ecrRepositoryNotEmpty(name string) *AWSError {
 	}
 }
 
+// ecrImageNotFound reports that an image the caller named is not in the repository.
+//
+// API_DescribeImages publishes ImageNotFoundException at 400 — "The image requested does not
+// exist in the specified repository" — and substrate had no site for it: an `imageIds` entry
+// naming an unknown tag was dropped from the request and one naming an unknown digest was
+// dropped from the answer, so a caller naming one real and one imaginary image was answered 200
+// with a short list. The message is the published description, which is the one ECR error whose
+// prose is specific enough to reuse; it names no image, because the published sentence does not.
+func ecrImageNotFound(repositoryName string) *AWSError {
+	return &AWSError{
+		Code:       "ImageNotFoundException",
+		Message:    "The image requested does not exist in the repository with name '" + repositoryName + "'",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // requireRepository reports the published refusal when name addresses no repository in the
 // caller's registry, and nil when it does.
 //
