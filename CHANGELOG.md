@@ -54,6 +54,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then publishes `MissingRequiredParameter` for a request naming *neither*, so a request naming only
   `roleArn` is explicitly legal, which full replacement would turn into one that blanks the definition
   and leaves a state machine the service could not execute.
+- **Stack-tag propagation past a resource's own tag quota is now a decided, asserted divergence rather
+  than a filed gap** (#1077, #1000). Four of the services a stack tag reaches publish a per-resource
+  quota of 50 and enforce it on their own tagging operations — EC2, ELBv2, IAM and Kinesis — and
+  propagation checks none of them, so a stack with enough tags can leave a resource holding more than
+  its own service accepts. #1000 skipped the check and filed the question; the answer is that **AWS
+  publishes no outcome for the case**: `CreateStack` publishes exactly four errors and none is about
+  tags, its quotas page has no tag row at all, and the resource-tagging reference says only that
+  propagation *"varies by resource type"*. What settles it rather than leaving it open is that a refusal
+  would have **no published code to carry** — CloudFormation publishes no tag error, and each service's
+  `TagLimitExceeded` / `TooManyTags` / `LimitExceeded` / `LimitExceededException` is published for that
+  service's *own* tagging operation, so borrowing one is the analogy #671 forbids and would fail a
+  template real CloudFormation deploys. So propagation writes regardless, and the over-quota resource is
+  recorded as substrate's own reading. A test now pins it in both directions on a Kinesis stream — the
+  service whose checker counts reserved keys as well: the deployer takes the stream to 58 tags without a
+  refusal, and Kinesis's own `AddTagsToStream` still refuses a 59th with its published
+  `LimitExceededException` at 400, so the divergence is about one door and not about the limit. Two
+  corrections recorded with it: a quota mode would have reached only **one of the four** propagation
+  arms, since the EC2, ELBv2 and AWS Config arms bypass the shared merge that takes it; and the
+  `aws:`-prefix argument that makes the *stamp* safe covers **two of the four** services, not four,
+  because IAM and Kinesis count reserved keys on substrate's reading of their pages.
 
 ### Changed
 - **Every common-errors citation in `emulator/` re-verified against the page as it reads now, and the

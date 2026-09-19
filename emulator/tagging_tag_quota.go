@@ -37,14 +37,20 @@ import (
 //
 //     [cfnStampResourceTags] writes only `aws:cloudformation:*` keys, and EC2 and ELB state outright
 //     that "[t]ags with the aws: prefix do not count against your tags per resource limit" — so
-//     counting the stamp would refuse a deploy on a rule AWS states about something else.
+//     counting the stamp would refuse a deploy on a rule AWS states about something else. Note that
+//     argument covers **two of the four** services and not all four, per item 3: IAM and Kinesis count
+//     reserved keys on substrate's reading of their pages, so a stamp that enforced would be refused on
+//     a role or a stream. It is inert only because the stamp skips as well (#1077).
 //
 //     [cfnPropagateRecordStackTags] writes the caller's own stack tags, which a quota could
 //     legitimately refuse. It is skipped because nothing published says what CloudFormation does when
-//     propagation would exceed a resource's quota: CloudFormation publishes a 50-tag limit on the
-//     **stack**, and the resource-side interaction is neither in its quotas page nor in any operation's
-//     Errors section. Refusing there would also turn a tag overflow into a failed deploy, which is a
-//     larger decision than #1000 asks for. The gap is filed as #1077 rather than guessed.
+//     propagation would exceed a resource's quota, and because **a refusal there would have no published
+//     code to carry**: CloudFormation's `CreateStack` publishes four errors and none is about tags, its
+//     quotas page has no tag row, and each service's own quota code is published for that service's own
+//     tagging operation rather than for a propagation. #1000 filed that as #1077; #1077 decided it —
+//     substrate writes the tags and records the over-quota resource as a divergence. The decision and
+//     the search behind it are in `cfn_stack_tag_propagation.go`, which also records why a mode would
+//     have reached only one of the four propagation arms: the other three bypass this merge.
 //  3. **Each service's own checker is called rather than a shared count.** The four disagree in ways a
 //     shared implementation would have to flatten: IAM answers `LimitExceeded` at **409** where the
 //     other three answer 400, the codes are four different strings, and EC2 and ELB exclude `aws:`

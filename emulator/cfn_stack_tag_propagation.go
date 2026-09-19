@@ -28,6 +28,43 @@ import (
 // that rather than papering over it, because the alternative — recording which keys the stamp
 // wrote, per resource — is real bookkeeping in the event stream for an ambiguity AWS itself
 // does not resolve (it publishes no per-resource provenance for a propagated tag either).
+//
+// # Propagation does not enforce the target's own tag quota (#1077)
+//
+// None of the four arms below checks the per-resource tag quota the owning service publishes, so a
+// stack carrying enough tags can leave a resource over its own service's limit. **That is substrate's
+// recorded reading of an unpublished case, not an oversight**, and #1000 filed it rather than deciding
+// it. The search that establishes there is nothing to cite:
+//
+//   - `API_CreateStack` publishes exactly four errors — `AlreadyExists`, `InsufficientCapabilities`,
+//     `LimitExceeded` and `TokenAlreadyExists`, all 400 — and none of them is about tags.
+//     `LimitExceeded`'s own description scopes it to *"the quota for the resource … see CloudFormation
+//     quotas"*, and that quotas page has **no row for tags at all**.
+//   - CloudFormation's resource-tagging reference publishes only that *"[t]he propagation of
+//     stack-level tags to resources, including tags with the `aws:` prefix, varies by resource type"*.
+//     It says nothing about a target whose service caps tags below the stack's count.
+//
+// **What makes that decisive rather than merely open is that a refusal has no vocabulary.** To refuse,
+// substrate must answer a published code, and there is none at either layer: CloudFormation publishes
+// no tag error, and each service's own `TagLimitExceeded` / `TooManyTags` / `LimitExceeded` /
+// `LimitExceededException` is published for *that service's own tagging operation*, not for a
+// CloudFormation propagation. Borrowing one would be the analogy #671 forbids, and it would make
+// substrate's deployer fail a template real CloudFormation deploys — a false failure in a consumer's
+// test, which is the worst outcome this emulator can produce.
+//
+// The case is also narrower than it looks, for two published reasons. A caller cannot supply a
+// reserved key — CloudFormation's `Tag` `Key` publishes *"can't be prefixed with `aws:`"* — and the
+// three `aws:cloudformation:*` keys the stamp writes do not count toward a per-resource limit, which
+// EC2's tag restrictions, ELBv2's, Classic ELB's and the general Tag Editor rule (*"a maximum of 50
+// **user created** tags"*) all state. Since CloudFormation caps a stack at 50 tags and each of the four
+// quotas substrate models is 50, a resource carrying no tags of its own can always take a full stack's
+// worth. Reaching the overflow needs a resource tagged independently, through its own service or the
+// tagging API.
+//
+// A quota mode would only reach one arm in any case: `mergeResourceTags` takes it, and only
+// [cfnPropagateRecordStackTags] goes through that merge. [cfnPropagateEC2StackTags],
+// [cfnPropagateELBStackTags] and [cfnPropagateConfigStackTags] each write through their own service's
+// writer and never see it, so enforcing would mean four decisions rather than one parameter.
 
 // cfnStackTagChanges decides what a stack's tags mean for one resource, given the tags the
 // resource already carries and the stack's previous and next tag sets.
@@ -126,9 +163,11 @@ func cfnPropagateRecordStackTags(
 	if len(write) == 0 && len(remove) == 0 {
 		return true, nil
 	}
-	// skipTagQuota: these are the caller's own stack tags, so a quota could legitimately refuse them,
-	// but nothing published says what CloudFormation does when propagation would exceed a resource's
-	// quota — see [taggingCheckTagQuota] for why that is filed (#1077) rather than guessed (#1000).
+	// skipTagQuota: these are the caller's own stack tags, so a quota could legitimately refuse them —
+	// but AWS publishes no outcome for that case and no code a refusal could carry, so substrate writes
+	// them and records the resulting over-quota resource as a divergence. See this file's
+	// "Propagation does not enforce the target's own tag quota" section for the decision and the
+	// search behind it (#1077, decided; #1000 filed it).
 	if err := mergeResourceTags(
 		context.Background(), state, target.namespace, target.stateKey, write, remove, skipTagQuota,
 	); err != nil {
@@ -228,6 +267,10 @@ func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
 // when a key is both written and removed, because the EC2 writer takes a direction rather than
 // a pair of sets; the alternative is a third mode on a function every `CreateTags` goes
 // through, for a case that only arises when a stack tag is replaced by a differently named one.
+//
+// No quota check here either, and not because the mode was forgotten: this arm does not go through
+// [mergeResourceTags], so there is no mode to pass. [ec2CheckTagLimit] would have to be called directly.
+// See the file's quota section for why none of the four arms checks (#1077).
 func cfnPropagateEC2StackTags(
 	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {

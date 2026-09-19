@@ -2,6 +2,9 @@ package emulator_test
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"sort"
 	"testing"
 
@@ -251,6 +254,110 @@ func TestCFN_AStackTagOnAServiceThatModelsNoTagsIsSkippedSilently(t *testing.T) 
 		"the resource that can carry the tag does")
 	assert.NotContains(t, logger.joined(), "could not propagate",
 		"a service that models no tags is skipped in silence")
+}
+
+// cfnKinesisStackTemplate is one named Kinesis stream, the service whose quota checker counts every
+// key including the reserved ones — which is what makes it the sharpest subject for #1077.
+const cfnKinesisStackTemplate = `{
+	"Resources": {
+		"Stream": {"Type": "AWS::Kinesis::Stream", "Properties": {"Name": "quota-stream"}}
+	},
+	"Outputs": {"StackId": {"Value": {"Ref": "AWS::StackId"}}}
+}`
+
+// addTagsToStreamDirectly puts tags on a stream through Kinesis's own AddTagsToStream, which is the
+// door a caller has for tagging a stack's resource independently of the stack.
+//
+// It returns the error rather than requiring success, because half of this test is the refusal.
+func (f *cfnStampFixture) addTagsToStreamDirectly(
+	t *testing.T, name string, tags map[string]string,
+) error {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"StreamName": name, "Tags": tags})
+	require.NoError(t, err)
+
+	_, err = f.kinesis.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "kinesis",
+		Operation: "AddTagsToStream",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{"x-amz-target": "Kinesis_20131202.AddTagsToStream"},
+	})
+	return err
+}
+
+// TestCFN_PropagationWritesPastTheTargetsTagQuota pins #1077's decision: propagation does not enforce
+// the per-resource tag quota the owning service publishes, and the resulting over-quota resource is a
+// recorded divergence rather than a refusal.
+//
+// AWS publishes no outcome for the case — `API_CreateStack`'s four errors are not about tags, its
+// quotas page has no tag row, and the resource-tagging reference says only that propagation "varies by
+// resource type" — and, decisively, a refusal would have no published code to carry: each service's
+// quota code is published for that service's *own* tagging operation. Refusing on no citation would
+// fail a template real CloudFormation deploys, which is worse for a consumer's test than the
+// divergence. See `cfn_stack_tag_propagation.go` for the full search.
+//
+// Kinesis is the subject because its checker counts every key, reserved ones included, so the three
+// `aws:cloudformation:*` stamp tags occupy three of the fifty and the arithmetic below is exact. The
+// stream is tagged through Kinesis's own `AddTagsToStream` rather than through the template, because
+// [StackDeployer.deployKinesisStream] sends `CreateStream` no `Tags` member at all — the issue names
+// tagging "afterwards through the owning service" as the same case, and it is the only one available.
+//
+// Both directions, per #863: the deployer writes past the quota, **and** Kinesis's own operation then
+// refuses a single further tag with its published `LimitExceededException`. The second half is what
+// makes the divergence a statement about the door rather than about the limit — the limit is still
+// enforced everywhere AWS publishes it.
+func TestCFN_PropagationWritesPastTheTargetsTagQuota(t *testing.T) {
+	f := newCFNStampFixture(t, nil)
+	const stackName = "quota-stack"
+	const streamName = "quota-stream"
+
+	// No stack tags on the create, so the stream leaves the deploy holding only the three stamp keys.
+	created, err := f.deployer.DeployWithOptions(context.Background(), cfnKinesisStackTemplate,
+		stackName, nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	require.Empty(t, cfnFailedLogicalIDs(created))
+	stackID := created.Outputs["StackId"]
+	require.Len(t, f.streamTagsFor(t, streamName), 3, "the three aws:cloudformation:* stamp keys")
+
+	// Forty-five of the caller's own tags: 3 + 45 = 48, inside Kinesis's fifty, so its own checker
+	// admits them. This is a legitimate resource state reached through a legitimate call.
+	direct := make(map[string]string, 45)
+	for i := range 45 {
+		direct[fmt.Sprintf("own-%02d", i)] = "caller"
+	}
+	require.NoError(t, f.addTagsToStreamDirectly(t, streamName, direct),
+		"forty-eight tags is inside the published fifty")
+	require.Len(t, f.streamTagsFor(t, streamName), 48)
+
+	// Ten stack tags now propagate onto it, taking the stream to fifty-eight. Nothing refuses.
+	stackTags := map[string]string{}
+	for i := range 10 {
+		stackTags[fmt.Sprintf("stack-%02d", i)] = "propagated"
+	}
+	updated, err := f.deployer.UpdateStack(context.Background(), cfnKinesisStackTemplate,
+		stackName, nil, emulator.CFNDeployOptions{Tags: stackTags})
+	require.NoError(t, err, "the deploy succeeds; a tag overflow is not a stack failure")
+	require.Empty(t, cfnFailedLogicalIDs(updated))
+
+	after := f.streamTagsFor(t, streamName)
+	assert.Len(t, after, 58,
+		"propagation wrote all ten past the published fifty-tag quota, which is #1077's decision")
+	for key := range stackTags {
+		assert.Contains(t, after, key+"=propagated",
+			"every stack tag reached the stream, not just the ones that fit")
+	}
+	assert.Contains(t, after, cfnStampStackIDTag+"="+stackID, "and the stamp is undisturbed")
+
+	// The other direction: the limit is still enforced at the door AWS publishes it for, so the
+	// divergence is the deployer's and not a removal of the quota.
+	err = f.addTagsToStreamDirectly(t, streamName, map[string]string{"one-more": "refused"})
+	require.Error(t, err, "Kinesis's own AddTagsToStream still enforces the quota")
+	var awsErr *emulator.AWSError
+	require.ErrorAs(t, err, &awsErr)
+	assert.Equal(t, "LimitExceededException", awsErr.Code)
+	assert.Equal(t, http.StatusBadRequest, awsErr.HTTPStatus)
+	assert.Len(t, f.streamTagsFor(t, streamName), 58, "and the refusal wrote nothing")
 }
 
 // cfnFailedLogicalIDs names the resources a deployment reports an error for, so a test can say
