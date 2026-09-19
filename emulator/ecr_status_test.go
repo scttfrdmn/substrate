@@ -81,6 +81,52 @@ func TestECR_EveryRefusalIsFourHundred(t *testing.T) {
 			body:      map[string]any{},
 			code:      "InvalidParameterException",
 		},
+		// The remaining RepositoryNotFoundException sites, one per handler, because the status was
+		// wrong at every one of them independently and a table that walked only one would have
+		// left the other seven to be corrected by inspection.
+		{
+			name:      "a push to a repository that does not exist",
+			operation: "PutImage",
+			body: map[string]any{
+				"repositoryName": "absent",
+				"imageManifest":  `{"schemaVersion":2}`,
+			},
+			code: "RepositoryNotFoundException",
+		},
+		{
+			name:      "a policy set on a repository that does not exist",
+			operation: "SetRepositoryPolicy",
+			body:      map[string]any{"repositoryName": "absent", "policyText": "{}"},
+			code:      "RepositoryNotFoundException",
+		},
+		{
+			name:      "a policy read from a repository that does not exist",
+			operation: "GetRepositoryPolicy",
+			body:      map[string]any{"repositoryName": "absent"},
+			code:      "RepositoryNotFoundException",
+		},
+		{
+			name:      "a policy deleted from a repository that does not exist",
+			operation: "DeleteRepositoryPolicy",
+			body:      map[string]any{"repositoryName": "absent"},
+			code:      "RepositoryNotFoundException",
+		},
+		{
+			name:      "a policy deleted from a repository that has none",
+			operation: "DeleteRepositoryPolicy",
+			body:      map[string]any{"repositoryName": "statuses"},
+			code:      "RepositoryPolicyNotFoundException",
+		},
+		{
+			// The tagging doors reach the repository through an ARN rather than a name, which is a
+			// separate lookup (loadRepoByARN) and so was a separate 404.
+			name:      "a tag listing for an ARN naming no repository",
+			operation: "ListTagsForResource",
+			body: map[string]any{
+				"resourceArn": "arn:aws:ecr:us-east-1:000000000000:repository/absent",
+			},
+			code: "RepositoryNotFoundException",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			status, code := ecrErrorStatus(t, ts, tc.operation, tc.body)
