@@ -415,14 +415,18 @@ func TestKinesisARN_AMutationThroughAForeignARNWritesToTheTargetsRecord(t *testi
 	kinesisARNCreate(t, ts, taggingTestAccount, kinesisARNEastRegion, kinesisARNStream, 1)
 	kinesisARNCreate(t, ts, kinesisARNOtherAccount, kinesisARNEastRegion, kinesisARNStream, 1)
 
+	// The target was 6 against a stream of 1 until #1076 taught UpdateShardCount the published
+	// "no more than double your current shard count" bound, which refuses it. 2 is double 1, so it
+	// is the largest target this test can use, and the property it proves — which record the write
+	// lands in — does not depend on how far the count moves, only that it moves.
 	foreign := kinesisStreamARNFor(kinesisARNOtherAccount, kinesisARNEastRegion, kinesisARNStream)
 	kinesisARNOK(t, ts, taggingTestAccount, kinesisARNEastRegion, "UpdateShardCount", map[string]any{
-		"StreamARN": foreign, "TargetShardCount": 6, "ScalingType": "UNIFORM_SCALING",
+		"StreamARN": foreign, "TargetShardCount": 2, "ScalingType": "UNIFORM_SCALING",
 	})
 
 	target := kinesisARNOK(t, ts, kinesisARNOtherAccount, kinesisARNEastRegion, "DescribeStreamSummary",
 		map[string]any{"StreamName": kinesisARNStream})
-	assert.Equalf(t, float64(6), kinesisARNSummaryMember(t, target, "OpenShardCount"),
+	assert.Equalf(t, float64(2), kinesisARNSummaryMember(t, target, "OpenShardCount"),
 		"the update did not reach the ARN's stream: %s", target)
 
 	caller := kinesisARNOK(t, ts, taggingTestAccount, kinesisARNEastRegion, "DescribeStreamSummary",

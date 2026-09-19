@@ -14572,11 +14572,11 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 | Operation | Notes |
 |-----------|-------|
 | CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one |
-| DescribeStream | |
-| DescribeStreamSummary | |
+| DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard) |
+| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
 | DeleteStream | |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region |
-| UpdateShardCount | `ScalingType` and `TargetShardCount` both required; `UNIFORM_SCALING` is the only published `ScalingType`. Reports all four published members including `StreamARN`; neither the `ScalingType` enum nor the target range is checked yet, and the stream never reports `UPDATING` |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. The stream still never reports `UPDATING` — see the section below |
 | MergeShards | |
 | SplitShard | |
 | PutRecord | |
@@ -14794,9 +14794,83 @@ request naming another account's stream reports that account's ARN. `UpdateShard
 member and now reports it too. [#966](https://github.com/scttfrdmn/substrate/issues/966) was
 request-side only: it taught fifteen operations to read a `StreamARN` and gave no response one.
 
-`StreamDescription.EnhancedMonitoring` still reports a flat array of metric names where
-`API_StreamDescription` publishes an array of `EnhancedMetrics` objects; that shape, and
-`UpdateShardCount`'s unchecked `ScalingType` and target range, are tracked separately.
+### The two describe shapes, and the bounds on a reshard
+
+`DescribeStream` answers an `API_StreamDescription` and `DescribeStreamSummary` an
+`API_StreamDescriptionSummary`. Until [#1076](https://github.com/scttfrdmn/substrate/issues/1076) one
+builder served both and emitted the **union** of their members, so each operation answered members its
+own page does not publish:
+
+| Member | `StreamDescription` | `StreamDescriptionSummary` |
+|--------|---------------------|----------------------------|
+| `Shards` | `Required: Yes` | not a member |
+| `HasMoreShards` | `Required: Yes` | not a member |
+| `OpenShardCount` | not a member | `Required: Yes` |
+
+The other six `Required: Yes` members — `StreamName`, `StreamARN`, `StreamStatus`,
+`RetentionPeriodHours`, `StreamCreationTimestamp` and `EnhancedMonitoring` — are common to both and
+substrate answers all of them. Substrate closes no shard, so every shard it holds is open and
+`OpenShardCount` equals the shard count; that the two coincide is a property of substrate's model, not
+of the API.
+
+**`EnhancedMonitoring` is an array of `EnhancedMetrics` objects, not an array of names.** Both pages
+publish it `Required: Yes` and typed *"Array of `EnhancedMetrics` objects"*, each object carrying one
+`ShardLevelMetrics` array. Substrate rendered the stored `[]string` straight through, so a response
+read `["IncomingBytes"]` where AWS answers `[{"ShardLevelMetrics": ["IncomingBytes"]}]` — an SDK
+decoding into the generated type gets an unmarshal error, so this was a hard failure for a real client
+rather than a cosmetic difference, the same class as
+[#1017](https://github.com/scttfrdmn/substrate/issues/1017)'s ECR tags.
+
+**A stream with nothing enhanced answers `"EnhancedMonitoring": []`.** Both readings were open —
+`[]` or `[{"ShardLevelMetrics": []}]` — and `API_EnhancedMetrics` settles it: `ShardLevelMetrics`
+publishes *"Array Members: Minimum number of 1 item"*, so an object holding an empty list is a shape
+the model does not permit, while `EnhancedMonitoring` itself publishes no array minimum. The member is
+present either way, as `Required: Yes` demands, and `[]` invents no impossible inner object. `ALL` is
+expanded here as it is in the two monitoring responses, so a record written before #999 holding the
+literal wildcard reads back as the seven metrics it means.
+
+**`UpdateShardCount` checks four of its published bounds and refuses each with
+`InvalidArgumentException`/400.**
+
+| Request | Answer |
+|---------|--------|
+| An absent `ScalingType` | `InvalidArgumentException`/400 — `Required: Yes` |
+| A `ScalingType` outside the enum, including the right word in the wrong case | `InvalidArgumentException`/400; `UNIFORM_SCALING` is the only published value |
+| An absent `TargetShardCount` | `InvalidArgumentException`/400 — `Required: Yes`, and reported as absent rather than as a zero, so a caller who omitted the member is not told it was too small |
+| `TargetShardCount` below 1 | `InvalidArgumentException`/400, per the published `Valid Range: Minimum value of 1` |
+| `TargetShardCount` above 10 000 | `InvalidArgumentException`/400 |
+| More than double, or less than half, the stream's current shard count | `InvalidArgumentException`/400. The bounds are inclusive: against 4 shards, 8 and 2 are accepted and 9 and 1 are not |
+| A bad shape on a stream that does not exist | `ResourceNotFoundException`/400. Forced rather than chosen — the double and half bounds are stated against *"your current shard count"*, so they cannot be evaluated before the record is loaded |
+
+**The code is `InvalidArgumentException` and not `ValidationException`**, although the page publishes
+both. `ValidationException`'s gloss there is capacity-mode-specific — *"Specifies that you tried to
+invoke this API for a data stream with the on-demand capacity mode"* — so it is not a general
+validation code despite the name, the reading substrate has carried since
+[#950](https://github.com/scttfrdmn/substrate/issues/950). `LimitExceededException` is the other
+candidate and is declined: its gloss is about a resource exceeding a maximum, and the page attributes
+it explicitly to one rule only, the 10 TPS call rate. The double, half and ceiling rules are stated
+inside the `TargetShardCount` parameter entry, and *"a specified parameter exceeds its restrictions"*
+is `InvalidArgumentException`'s own sentence.
+
+**Three published restrictions are deliberately unmodelled**, because each needs state substrate does
+not hold rather than a value in the request:
+
+- *"Scale more than ten times per rolling 24-hour period per stream"* — needs a request history.
+- *"Scale up to more than the shard limit for your account"* — needs an account quota.
+- *"Scale a stream with more than 10000 shards down unless the result is less than 10000 shards"* —
+  unreachable while the 10 000 ceiling above is enforced.
+
+The seventh, *"Make over 10 TPS"*, is a call-rate limit rather than a property of any one request; it
+is the one rule the page attributes to `LimitExceededException` by name.
+
+**The stream still reports `ACTIVE` immediately after a reshard**, where the page says it reports
+`UPDATING` until the split or merge completes. Making that observable means a seeded count of
+observations — the shape `CLAUDE.md` requires and that `ec2SnapshotProgression` established — and it is
+tracked as [#1119](https://github.com/scttfrdmn/substrate/issues/1119) so that it and EC2's instance
+states share one mechanism rather than inventing a second. Capacity mode is unmodelled altogether,
+which is why `ValidationException` has no site at all today;
+[#1118](https://github.com/scttfrdmn/substrate/issues/1118) carries it, together with the
+`StreamModeDetails` member both describe shapes publish `Required: No`.
 
 ### CloudFormation resource types
 
