@@ -220,6 +220,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   substitution key, so it falls through that same untouched case. `DefinitionS3Location` is declined
   explicitly — fetching it would make a deploy depend on a bucket's contents — and a template using it
   lands on the stub, which is now asserted to *execute* rather than merely to be stored.
+- **A failed execution reports why it failed, on both operations that publish the pair** (#1071).
+  `StartSyncExecution` answered five of the **fourteen** members its Response Syntax publishes — the
+  issue's prose says thirteen and then lists fourteen — and `DescribeExecution` seven of its twenty-one.
+  Four gaps were the same four on both pages, and `error`/`cause` were the ones that mattered: a failed
+  execution's reason was written into `ExecutionState.ErrorDetails` and then read by no operation at all.
+  On `StartSyncExecution` that was the whole of the observable failure, because AWS publishes the
+  operation's contract as *"`StartSyncExecution` will return a `200 OK` response, even if your execution
+  fails, because the status code in the API response doesn't reflect function errors."* — so a consumer
+  testing a failure path saw `"status":"FAILED"` and nothing about why. The operation now answers `name`,
+  `stateMachineArn`, `input`, `inputDetails`, `outputDetails`, `error` and `cause`, and
+  `DescribeExecution` — which the issue scopes out, and which is the operation a consumer's wait loop
+  actually polls — gets the same four from the same change. `error` and `cause` are **absent** rather
+  than empty on a succeeded execution, since the page gives no meaning to an empty `error`.
+  `inputDetails`/`outputDetails` carry `included: true`, which is the page's own value (*"Always `true`
+  for API calls."*) rather than a derivation from substrate never truncating; pairing each with the
+  payload member it describes is recorded as substrate's reading, because neither page states when they
+  are present. `billingDetails` and `traceHeader` stay unreported and the service reference says why:
+  billing meters a workload substrate does not run, and a duration on the simulated clock would be `0`
+  for a sync execution completing inside one handler.
+- **`ExecutionState` records an execution's failure as two fields, not one joined string** (#1071).
+  `ErrorDetails` held `code + ": " + cause`, which AWS publishes as two members at two different bounds
+  (`error` max 256, `cause` max 32768), and deriving them back apart is **unsafe** rather than
+  mechanical: a `Fail` state's `Error` is caller-supplied and may itself contain `": "`, so any split
+  can attribute the tail of the caller's error code to the cause. `ErrorCode` and `ErrorCause` replace
+  it at both writers — `aslFail` and the `startExecution` definition-parse path, which the issue does not
+  name. Because the field is **persisted**, this is a state-shape change rather than a response change:
+  `ErrorDetails` survives as a read-only fallback, split on the first `": "`, so a record written by an
+  earlier substrate or replayed from an older event log still reports its failure. That fallback is
+  documented as best-effort for exactly the colon-in-the-code case the new fields exist to fix.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count

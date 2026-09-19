@@ -679,7 +679,8 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 	if defErr != nil {
 		exec.Status = "FAILED"
 		exec.StopDate = p.tc.Now()
-		exec.ErrorDetails = "States.Runtime: " + defErr.Message
+		exec.ErrorCode = "States.Runtime"
+		exec.ErrorCause = defErr.Message
 	} else {
 		_, _ = p.executeASL(def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 	}
@@ -755,15 +756,33 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 
 	_, _ = p.executeASL(def, input.Input, exec, ctx) //nolint:errcheck // status set on exec
 
+	// Nine of the fourteen members API_StartSyncExecution's Response Syntax publishes were absent
+	// (#1071). Seven are answered here. Two stay unreported, deliberately, and docs/services.md
+	// says so (#1013):
+	//
+	//   - billingDetails reports the metering of a workload substrate does not run. Its
+	//     billedMemoryUsedInMB is memory consumed inside the execution, which is resource-internal
+	//     and on the far side of CLAUDE.md's scope boundary; and billedDurationInMilliseconds
+	//     measured against the simulated clock would be 0 for a sync execution that completes
+	//     inside one handler, a duration AWS would never return. Either would be an invented value.
+	//   - traceHeader echoes a request member no path in this plugin decodes, and the page
+	//     publishes a precedence rule for it — the X-Amzn-Trace-Id header wins over the body — so
+	//     answering it means modeling X-Ray's header rather than adding a field.
 	out := map[string]interface{}{
-		"executionArn": exec.ExecutionArn,
-		"startDate":    sfnEpoch(exec.StartDate),
-		"stopDate":     sfnEpoch(exec.StopDate),
-		"status":       exec.Status,
+		"executionArn":    exec.ExecutionArn,
+		"stateMachineArn": exec.StateMachineArn,
+		"name":            exec.Name,
+		"startDate":       sfnEpoch(exec.StartDate),
+		"stopDate":        sfnEpoch(exec.StopDate),
+		"status":          exec.Status,
+	}
+	if exec.Input != "" {
+		out["input"] = exec.Input
 	}
 	if exec.Output != "" {
 		out["output"] = exec.Output
 	}
+	sfnAddExecutionResultMembers(out, exec)
 	return statesJSONResponse(http.StatusOK, out)
 }
 
@@ -1187,6 +1206,11 @@ func execToMap(exec *ExecutionState) map[string]interface{} {
 	if !exec.StopDate.IsZero() {
 		out["stopDate"] = sfnEpoch(exec.StopDate)
 	}
+	// The same four members API_DescribeExecution publishes at the same bounds as
+	// API_StartSyncExecution, and the same four this reported for neither: a *standard* execution
+	// that failed recorded its reason and then answered nothing about it, on the operation a
+	// consumer polls (#1071).
+	sfnAddExecutionResultMembers(out, exec)
 	return out
 }
 
