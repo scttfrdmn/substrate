@@ -14821,9 +14821,13 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 |-----------|-------|
 | CreateDistribution | Distribution IDs: `E{13-char upper alphanum}` |
 | GetDistribution | |
-| UpdateDistribution | |
+| GetDistributionConfig | Answers `DistributionConfig` members only, and two of its five required ones — see [A configuration is not a distribution](#a-configuration-is-not-a-distribution) |
+| UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb |
 | DeleteDistribution | |
 | ListDistributions | |
+| CreateInvalidation | |
+| GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
+| ListInvalidations | Refuses a distribution that does not exist rather than answering an empty list (#1091) |
 | TagResource | Body is a `<Tags>` document; a body of another shape is refused rather than read as an empty tag set (#883) |
 | UntagResource | Body is a `<TagKeys><Items><Key>` document. Removing a key the distribution does not carry succeeds — AWS documents no error for it, so that reading is substrate's (#883) |
 | ListTagsForResource | Reports the `<Tags><Items>` members sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
@@ -14842,6 +14846,51 @@ CloudFront's own operations only. No other CloudFront resource type is reachable
 for why `GetResources` reports a distribution in `us-east-1` alone.
 
 All CloudFront resources are stored under `us-east-1` (global service).
+
+### A configuration is not a distribution
+
+`GetDistribution` returns a `Distribution` and `GetDistributionConfig` returns a
+`DistributionConfig`. They are two published types, one nested in the other, and substrate
+answered the same fields for both until #1091: the configuration carried `Id` and `ARN`, which
+`API_DistributionConfig` publishes nowhere — they are `Distribution` members, one level up. A
+caller reading a distribution's identity out of a configuration found it here and finds nothing
+there against CloudFront itself.
+
+The configuration now carries `Comment` and `Enabled` and nothing else, and `Comment` is answered
+even when empty because `API_DistributionConfig` marks it `Required: Yes` and the Response Syntax
+renders it unconditionally.
+
+**Two divergences remain, and are deliberate.**
+
+`DistributionConfig` marks five members `Required: Yes` — `CallerReference`, `Comment`,
+`DefaultCacheBehavior`, `Enabled` and `Origins` — and substrate can answer two.
+`CreateDistribution` decodes only `Comment` and `Enabled` from its body, so there is no recorded
+value for the other three, and neither page publishes an example of a configuration to copy a
+shape from. An `Origins` needs `Items` and a `Quantity`; a `DefaultCacheBehavior` needs a whole
+subtree. Omitting a member substrate holds no value for is the honest answer; inventing one would
+assert a shape AWS has not published.
+
+`API_GetDistributionConfig` publishes, on its `Id` parameter: *"The distribution's ID. If the ID is
+empty, an empty distribution configuration is returned."* An empty ID is reachable — the path
+`/2020-05-31/distribution//config` routes to the operation with an empty ID — and substrate answers
+`NoSuchDistribution`/404 instead, for the same reason: the "empty distribution configuration" is the
+document with no published example whose five required members would have to be invented. The
+refusal is the code the page publishes at the status it publishes, so a caller is told something
+true; it is simply not what AWS says for this one input.
+
+A path ending in a bare slash is *not* that case. `/2020-05-31/distribution/` has its trailing
+slash trimmed before routing, so it is `ListDistributions` — not a `GetDistribution` with an empty
+ID, which is the natural reading of the routing arithmetic and is wrong.
+
+### Both invalidation codes name something
+
+`API_GetInvalidation` publishes `NoSuchDistribution`/404 and `NoSuchInvalidation`/404, and
+`API_ListInvalidations` publishes `NoSuchDistribution`/404. Neither handler looked at the
+distribution record until #1091: `ListInvalidations` read the invalidation index straight out of
+state and answered 200 with an empty list for any ID at all, and `GetInvalidation` answered
+`NoSuchInvalidation` — telling a caller a batch was missing from a distribution that does not
+exist. Both load the distribution first, so each published code reports the thing that is actually
+absent.
 
 ### A tagging ARN addresses the distribution it names
 

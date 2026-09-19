@@ -251,22 +251,46 @@ func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, d
 	return p.marshalDistributionXML(dist)
 }
 
+// getDistributionConfig answers the distribution's configuration.
+//
+// The response carries `DistributionConfig` members and nothing else. `Id` and `ARN` were
+// rendered here until #1091 and are members of the enclosing `Distribution` type, which this
+// operation does not return — a caller reading `Id` out of a configuration was reading a field
+// AWS publishes one level up, and `GetDistributionConfig`'s own Response Syntax does not carry
+// it (#1013).
+//
+// Two divergences from the published contract remain, recorded rather than papered over:
+//
+//   - `API_DistributionConfig` marks five members `Required: Yes` — `CallerReference`,
+//     `Comment`, `DefaultCacheBehavior`, `Enabled` and `Origins` — and substrate can answer
+//     two. `CreateDistribution` decodes only `Comment` and `Enabled` from its body, so there is
+//     no recorded value for the other three; rendering them would mean inventing a shape (an
+//     `Origins` needs `Items` and a `Quantity`, a `DefaultCacheBehavior` a whole subtree) and
+//     neither this page nor `API_CreateDistribution` publishes an example of a configuration to
+//     copy one from. Omitting a member substrate has no value for is the honest answer.
+//   - `Id` is published as "The distribution's ID. If the ID is empty, an empty distribution
+//     configuration is returned." An empty ID is reachable here — the path
+//     `/2020-05-31/distribution//config` routes to this operation with distID "" — and
+//     substrate answers `NoSuchDistribution`/404 instead, because the "empty distribution
+//     configuration" AWS describes is the shape it publishes no example of and whose five
+//     required members substrate would have to invent. The refusal is the published code at the
+//     published status, so a caller is told something true; it is simply not what AWS says for
+//     this one input. Pinned by TestCloudFront_AnEmptyDistributionIDIsRefusedNotAnswered.
 func (p *CloudFrontPlugin) getDistributionConfig(ctx *RequestContext, _ *AWSRequest, distID string) (*AWSResponse, error) {
 	dist, err := p.loadDistribution(ctx, distID)
 	if err != nil {
 		return nil, err
 	}
 
+	// Comment carries no omitempty: it is Required: Yes and the Response Syntax renders it
+	// unconditionally, so a distribution created without one answers an empty element rather
+	// than dropping a member a caller is entitled to find.
 	type xmlConfig struct {
 		XMLName xml.Name `xml:"DistributionConfig"`
-		ID      string   `xml:"Id"`
-		ARN     string   `xml:"ARN"`
-		Comment string   `xml:"Comment,omitempty"`
+		Comment string   `xml:"Comment"`
 		Enabled bool     `xml:"Enabled"`
 	}
 	return cloudfrontXMLResponse(http.StatusOK, xmlConfig{
-		ID:      dist.ID,
-		ARN:     dist.ARN,
 		Comment: dist.Comment,
 		Enabled: dist.Enabled,
 	})
@@ -413,11 +437,29 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 	})
 }
 
+// getInvalidation answers one invalidation batch of one distribution.
+//
+// API_GetInvalidation publishes NoSuchDistribution/404 and NoSuchInvalidation/404, in that
+// order, and they are not interchangeable: until #1091 an invalidation ID under a distribution
+// that does not exist answered NoSuchInvalidation, telling a caller the batch was missing from
+// a distribution substrate never had. The distribution is loaded first so each of the two
+// published codes reports the thing that is actually absent.
 func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID string) (*AWSResponse, error) {
+	if _, err := p.loadDistribution(ctx, distID); err != nil {
+		return nil, err
+	}
+
 	goCtx := context.Background()
 	data, err := p.state.Get(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID))
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "NoSuchInvalidation", Message: "invalidation not found: " + invID, HTTPStatus: http.StatusNotFound}
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront getInvalidation state.Get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{
+			Code:       "NoSuchInvalidation",
+			Message:    "The specified invalidation does not exist.",
+			HTTPStatus: http.StatusNotFound,
+		}
 	}
 	var inv CloudFrontInvalidation
 	if err := json.Unmarshal(data, &inv); err != nil {
@@ -434,7 +476,19 @@ func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID st
 	})
 }
 
+// listInvalidations answers a distribution's invalidation batches.
+//
+// API_ListInvalidations publishes NoSuchDistribution/404 and substrate had nowhere to answer it
+// until #1091: the handler read the invalidation index straight out of state without ever
+// looking at the distribution record, so any ID at all — including one that exists in no
+// account — was answered 200 with an empty list. A caller could not tell "this distribution has
+// never been invalidated" from "there is no such distribution", which is the same defect
+// ECR's requireRepository fixed for the four ECR image operations (#1090).
 func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string) (*AWSResponse, error) {
+	if _, err := p.loadDistribution(ctx, distID); err != nil {
+		return nil, err
+	}
+
 	goCtx := context.Background()
 	ids, _ := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID))
 
@@ -728,9 +782,14 @@ func (p *CloudFrontPlugin) loadDistributionForAccount(accountID, distID string) 
 		return CloudFrontDistribution{}, fmt.Errorf("cloudfront loadDistribution state.Get: %w", err)
 	}
 	if data == nil {
+		// "The specified distribution does not exist." is the description
+		// API_GetDistributionConfig publishes for NoSuchDistribution, and it names no
+		// distribution. The message read "Distribution not found: " + distID until #1091, which
+		// trailed a bare colon whenever distID was empty — reachable, because
+		// /2020-05-31/distribution//config routes here with an empty ID.
 		return CloudFrontDistribution{}, &AWSError{
 			Code:       "NoSuchDistribution",
-			Message:    "Distribution not found: " + distID,
+			Message:    "The specified distribution does not exist.",
 			HTTPStatus: http.StatusNotFound,
 		}
 	}

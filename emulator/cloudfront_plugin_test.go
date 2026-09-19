@@ -298,17 +298,29 @@ func TestCloudFrontPlugin_GetDistributionConfig(t *testing.T) {
 		t.Fatalf("GetDistributionConfig: want 200, got %d; body=%s", resp.StatusCode, resp.Body)
 	}
 
-	// The response body should contain XML with a DistributionConfig root element.
+	// The response body should contain XML with a DistributionConfig root element carrying the
+	// Comment the distribution was created with.
+	//
+	// This assertion read Id until #1091, which is how the leak survived: Id is a member of
+	// the enclosing Distribution type and is published nowhere in DistributionConfig, so the
+	// test that existed to check the operation was pinning the defect. The absence of Id and
+	// ARN is asserted on the raw document by
+	// TestCloudFront_ADistributionConfigCarriesOnlyItsOwnMembers, since a struct that omits a
+	// member decodes the same whether the member is present or not.
 	stripped := strings.TrimPrefix(string(resp.Body), xml.Header)
 	var result struct {
 		XMLName xml.Name `xml:"DistributionConfig"`
-		ID      string   `xml:"Id"`
+		Comment string   `xml:"Comment"`
+		Enabled bool     `xml:"Enabled"`
 	}
 	if err := xml.Unmarshal([]byte(stripped), &result); err != nil {
 		t.Fatalf("unmarshal GetDistributionConfig response: %v", err)
 	}
-	if result.ID != distID {
-		t.Errorf("want Id=%q, got %q", distID, result.ID)
+	if result.Comment != "test distribution" {
+		t.Errorf("want Comment=%q, got %q", "test distribution", result.Comment)
+	}
+	if !result.Enabled {
+		t.Error("want Enabled=true")
 	}
 }
 
