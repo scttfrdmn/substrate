@@ -112,7 +112,7 @@ func TestCloudFront_AnEmptyCommentIsStillAnswered(t *testing.T) {
 // The code is also what proves the route resolved: an unrouted path answers
 // UnknownOperationException, so NoSuchDistribution means the empty ID reached the handler.
 func TestCloudFront_AnEmptyDistributionIDIsRefusedNotAnswered(t *testing.T) {
-	ts, _ := cloudfrontConfigServer(t,
+	ts, distID := cloudfrontConfigServer(t,
 		`<DistributionConfig><Comment>present</Comment><Enabled>true</Enabled></DistributionConfig>`)
 
 	for _, tc := range []struct {
@@ -168,6 +168,17 @@ func TestCloudFront_AnEmptyDistributionIDIsRefusedNotAnswered(t *testing.T) {
 				"both codes are published and they name different absences")
 		})
 	}
+
+	// The other half of GetInvalidation's pair, which is what makes the two codes a distinction
+	// rather than a rename: a distribution that does exist, and a batch under it that does not,
+	// still answers NoSuchInvalidation.
+	t.Run("GetInvalidation on an absent batch of a present distribution", func(t *testing.T) {
+		status, body := cloudfrontRequest(t, ts, http.MethodGet,
+			"/2020-05-31/distribution/"+distID+"/invalidation/I1234567890123", "", "")
+		assert.Equal(t, http.StatusNotFound, status, "GetInvalidation: %s", body)
+		assert.Equal(t, "NoSuchInvalidation", cloudfrontErrorCode(t, body),
+			"the distribution resolves, so the absence being reported is the batch's")
+	})
 
 	// And the shape that is not an empty ID: a trailing slash is trimmed before routing, so
 	// GET /2020-05-31/distribution/ is ListDistributions and not a GetDistribution with no ID.
