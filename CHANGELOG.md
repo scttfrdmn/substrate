@@ -158,7 +158,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notes are traps in their own right: `bedrock` is aliased to `bedrock-runtime`, so one plugin serves
   a data plane and four control-plane batch-inference operations, and RAM lowercases the path before
   matching and falls back to the bare HTTP method — which matches nothing — for a path it does not
-  recognize. Fifteen divergences were found while writing the rows and **filed rather than fixed**,
+  recognize. Seventeen divergences were found while writing the rows and **filed rather than fixed**,
   since this change is documentation only. Three of them mean an operation does not work as published
   at all: `GetBackupPlan` is unreachable, because `API_GetBackupPlan` publishes a trailing slash after
   the plan ID and the router puts that slash into the ID, so a plan `ListBackupPlans` reports answers
@@ -191,7 +191,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `InvalidParameterValue` and RAM's `MissingRequiredParameter` are both missing the spelling their own
   documentation publishes (#1169). Shared by more: the string-index helpers every one of these plugins
   uses to maintain a listing discard their write error, so a create can report success while the
-  resource is absent from its own list (#1175). Recorded as deliberate rather than filed: Bedrock's
+  resource is absent from its own list (#1175). Two came out of checking the CloudFormation row
+  rather than the API: a backup plan's ARN spells its resource segment `backup-plan` where both the
+  API reference and the CloudFormation reference publish the worked example
+  `arn:aws:backup:us-east-1:123456789012:plan:…` — in the handler and in the deployer alike, while the
+  vault's `backup-vault` is correct, so the asymmetry is AWS's and only half of it is honoured (#1181)
+  — and `AWS::Backup::BackupPlan` answers the logical ID for `Ref` where AWS publishes `BackupPlanId`,
+  supports none of the three published `Fn::GetAtt` attributes, and carries a doc comment asserting
+  the `Ref` behaviour it does not have (#1182). Recorded as deliberate rather than filed: Bedrock's
   guardrail blocklist has no control-plane endpoint, so `GUARDRAIL_INTERVENED` is reachable only by
   writing state directly, and its batch-job status seed accepts any string — both stated on the rows
   that depend on them, because a test author needs to know before writing the test. The disclaimer at

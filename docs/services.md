@@ -18191,7 +18191,7 @@ The published path is given for every operation because one of them cannot be re
 | DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | Five of the seventeen published members, plus [two of Substrate's own](#the-backup-vault-record-goes-out-whole) |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
 | ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of whole vault records; `maxResults`, `nextToken`, `shared` and `vaultType` are all ignored and no `NextToken` is emitted |
-| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read |
+| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated, `AdvancedBackupSettings` is not read, and `CreatorRequestId` is ignored, so the published idempotency — *"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is returned"* — does not hold. The plan ARN [uses the wrong resource segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Unreachable over that path](#getbackupplan-is-unreachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
 | DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers `{}` where [four members are published](#two-backup-plan-responses-carry-the-wrong-members), and ignores [the plan's selections](#which-backup-preconditions-are-enforced) |
@@ -18294,9 +18294,23 @@ no transient failure to report.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| `AWS::Backup::BackupPlan` | the logical ID | A stub. No property is read, and the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. AWS publishes `BackupPlanArn`, `BackupPlanId` and `VersionId` as `Fn::GetAtt` attributes; Substrate supports none of them, and the deploy function's own doc comment claims the `Ref` is the plan ID, which it is not |
+| `AWS::Backup::BackupPlan` | the logical ID | A stub. No property is read — including `BackupPlan`, which is `Required: Yes` — and the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. AWS publishes that `Ref` returns `BackupPlanId`, and `BackupPlanArn`, `BackupPlanId` and `VersionId` as `Fn::GetAtt` attributes; Substrate returns the logical ID and supports no attribute, and the deploy function's own doc comment claims the `Ref` is the plan ID ([#1182](https://github.com/scttfrdmn/substrate/issues/1182)) |
 
 `AWS::Backup::BackupVault` and `AWS::Backup::BackupSelection` are not deployed.
+
+### ARN shapes
+
+| Resource | Substrate | Published |
+|----------|-----------|-----------|
+| vault | `arn:aws:backup:{region}:{account}:backup-vault:{name}` | the same |
+| plan | `arn:aws:backup:{region}:{account}:backup-plan:{planId}` | `…:plan:{planId}` |
+| selection | none — a selection carries no ARN | AWS publishes none either |
+
+The two segments really are spelled differently by the same service: `backup-vault` for a vault and
+`plan` for a plan, each published as a worked example rather than as a format string. Substrate's
+vault matches; its plan does not, in the API handler and in the CloudFormation deployer alike, so an
+IAM policy or an ARN parser written against Substrate's plan ARN matches nothing on AWS
+([#1181](https://github.com/scttfrdmn/substrate/issues/1181)).
 
 ### Cost
 
