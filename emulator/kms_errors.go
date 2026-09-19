@@ -703,6 +703,75 @@ func kmsInvalidBody() *AWSError {
 	}
 }
 
+// kmsInvalidAliasName reports an AliasName CreateAlias would not accept.
+//
+// InvalidAliasNameException at 400 — "the request was rejected because the specified alias name is not
+// valid" — and API_CreateAlias is the only one of the three alias pages that publishes it. That is not an
+// omission on the other two: see kms_alias_validate.go's preamble for which check each page carries and
+// why UpdateAlias needs no code of its own for a malformed name (#1085).
+//
+// The reason is named because the operation publishes three separate rules about this member — a pattern,
+// a length and a reserved prefix — and one sentence cannot tell a caller which of them it broke.
+func kmsInvalidAliasName(aliasName, reason string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidAliasNameException",
+		Message:    fmt.Sprintf("the alias name %q is not valid: %s", aliasName, reason),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsAliasNameTooLong reports an AliasName past the published maximum.
+//
+// LimitExceededException at 400, published on API_CreateAlias and API_UpdateAlias and glossed "the
+// request was rejected because a length constraint or quota was exceeded" — the only published code whose
+// gloss names a length, which is what makes it the citation for AliasName's 1-256 bound rather than a
+// borrowing from the quota half of the same sentence. API_DeleteAlias publishes the bound and not the
+// code, so nothing there answers this (#1085).
+func kmsAliasNameTooLong(length int) *AWSError {
+	return &AWSError{
+		Code: "LimitExceededException",
+		Message: fmt.Sprintf("an alias name is at most %d characters, and this one is %d",
+			kmsAliasNameMaxLength, length),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsAliasAlreadyExists reports that CreateAlias named an alias the account and Region already hold.
+//
+// AlreadyExistsException at 400 — "the request was rejected because it attempted to create a resource
+// that already exists" — published on API_CreateAlias alone among the alias operations, which is the
+// shape of the fix: the same name arriving twice is a refusal at CreateAlias and an idempotent-looking
+// re-point at UpdateAlias, and substrate answered 200 for both. The published rule it rests on is "the
+// alias must be unique in the account and Region, but you can have aliases with the same name in
+// different Regions", so the account and Region are part of the condition rather than of the message
+// (#1085).
+func kmsAliasAlreadyExists(aliasName string) *AWSError {
+	return &AWSError{
+		Code:       "AlreadyExistsException",
+		Message:    fmt.Sprintf("the alias %q already exists in this account and Region", aliasName),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// kmsAliasTargetMismatch reports that UpdateAlias would have moved an alias between two key types.
+//
+// ValidationError at 400, and **this one is substrate's reading rather than a citation**: the restriction
+// is published twice on API_UpdateAlias — once on the operation and once under TargetKeyId — and none of
+// the operation's five published errors describes it. ValidationError is where this plugin lands a request
+// whose members are individually well-formed and jointly wrong, per [kmsUnknownKeySpec]; the alternative,
+// borrowing a code from a sibling page, is what #671 forbids.
+//
+// [kmsCheckAliasTargetMatches] holds the two conditions and states the order. The reason is named because
+// a caller that hit the family arm and a caller that hit the key-usage arm have different repairs.
+func kmsAliasTargetMismatch(aliasName, reason string) *AWSError {
+	return &AWSError{
+		Code: "ValidationError",
+		Message: fmt.Sprintf(
+			"the alias %q cannot move to a key of a different type or key usage: %s", aliasName, reason),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // kmsInvalidARN reports that an ARN is not one KMS accepts, naming the reason so a caller can tell
 // a wrong service from a wrong resource type.
 //
