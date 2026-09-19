@@ -10948,7 +10948,7 @@ Resource Groups Tagging API operations are free.
 |-----------|-------|
 | CreateTopic | Decodes `Tags`, in either published spelling |
 | GetTopicAttributes | Four attributes derived, the rest passed through as stored |
-| SetTopicAttributes | Any attribute name is accepted and stored |
+| SetTopicAttributes | Only the 25 published names are settable; anything else is `InvalidParameter`/400 |
 | DeleteTopic | |
 | ListTopics | Base64 pagination token |
 | Subscribe | Supports lambda, sqs, http, https, email protocols |
@@ -11103,7 +11103,7 @@ that does not exist, not a string that is not an ARN.
 
 ### Which attributes GetTopicAttributes reports
 
-`API_GetTopicAttributes` publishes sixteen attribute names, and substrate's answer
+`API_GetTopicAttributes` publishes seventeen attribute names, and substrate's answer
 splits in two: four are **derived** from state on every read, and the rest are
 reported only if `CreateTopic` or `SetTopicAttributes` stored them.
 
@@ -11115,8 +11115,13 @@ reported only if `CreateTopic` or `SetTopicAttributes` stored them.
 | `SubscriptionsPending` | Derived — always `0`; see below |
 | `SubscriptionsDeleted` | **Not reported**; see below |
 | `Policy` | Stored only; substrate mints no default topic policy |
-| `DeliveryPolicy`, `EffectiveDeliveryPolicy`, `DisplayName`, `SignatureVersion`, `TracingConfig`, `KmsMasterKeyId` | Stored only |
+| `DeliveryPolicy`, `EffectiveDeliveryPolicy`, `DisplayName`, `MaximumMessageSize`, `SignatureVersion`, `TracingConfig`, `KmsMasterKeyId` | Stored only |
 | `ArchivePolicy`, `BeginningArchiveTime`, `ContentBasedDeduplication`, `FifoTopic` | Stored only (FIFO) |
+
+Of those seventeen, **eight are read-only** — `SetTopicAttributes` publishes none of
+them, so substrate refuses a write to any: `TopicArn`, `Owner`, the three
+subscription counts, `EffectiveDeliveryPolicy`, `BeginningArchiveTime` and
+`FifoTopic`. The next section is the other side of that arithmetic.
 
 Until #993 none of that was true. The handler reported a **`SubscriptionsCount`**
 member that appears nowhere on the page — not in the attribute list, not in the
@@ -11152,14 +11157,15 @@ the same key and so unable to disagree about the same topic. Keying the count by
 ARN's target instead would have made them disagree by construction: `0` from the
 count while the list returned the subscriptions.
 
-**A derived attribute cannot be shadowed by a stored one.** `SetTopicAttributes`
-accepts any `AttributeName` and stores it unchecked, and the handler used to merge
+**A derived attribute cannot be shadowed by a stored one.** `SetTopicAttributes` used
+to accept any `AttributeName` and store it unchecked, and the handler used to merge
 the stored map *after* its own literals — so a caller could set `TopicArn` and have
 `GetTopicAttributes` report it, and once the counts became derived could have set
 `SubscriptionsConfirmed` to any value it liked. The derived members are written last
-for that reason. That `SetTopicAttributes` accepts a name its own page does not
-publish — including the five read-only ones — is a separate defect, #1067; once it
-refuses one, this ordering becomes defence in depth rather than the only guard.
+for that reason. Since #1067 the handler refuses all four derived names outright, so
+the ordering is defence in depth rather than the only guard — but it remains the only
+guard for a value that reached the record another way, which is why it stays and why
+its test seeds state directly rather than through the calls the allowlist now refuses.
 
 **`Policy` is unmodelled, not omitted by accident.** The page publishes it and AWS's
 sample response carries a default policy document naming eight actions, but no SNS
@@ -11170,6 +11176,58 @@ creates — and is recorded here rather than answered with an invented document.
 *"If the API response does not include the `SignatureVersion` attribute, it means that
 the `SignatureVersion` for the topic has value 1."* Not inventing it is what the page
 asks for.
+
+### Which attributes SetTopicAttributes accepts
+
+`API_SetTopicAttributes` publishes **twenty-five** settable `AttributeName` values, and
+substrate accepts exactly those. Any other name — including the eight
+`GetTopicAttributes` publishes and this page does not — is `InvalidParameter`/400.
+
+| Group | Names |
+|-------|-------|
+| General | `DeliveryPolicy`, `DisplayName`, `MaximumMessageSize`, `Policy`, `TracingConfig` |
+| Delivery status, per endpoint family | `HTTP`, `Firehose`, `Lambda`, `Application` and `SQS` each × `SuccessFeedbackRoleArn`, `SuccessFeedbackSampleRate`, `FailureFeedbackRoleArn` — fifteen names |
+| Server-side encryption | `KmsMasterKeyId`, `SignatureVersion` |
+| FIFO topics | `ArchivePolicy`, `ContentBasedDeduplication`, `FifoThroughputScope` |
+
+Until #1067 the handler wrote whatever `AttributeName` arrived into the topic record
+with no check of any kind, so `AttributeName=Banana` was stored and
+`GetTopicAttributes` reported it back as though SNS carried it — and so were the eight
+read-only names, of which the merge order described above stopped only four from being
+reported.
+
+**The guard is an allowlist, not a denylist of the derived names**, because the two
+pages do not partition one vocabulary. `Set` publishes 25 names, `Get` publishes 17,
+only **9** appear on both, and the union is 33. Subtracting substrate's four derived
+names from anything would still have accepted `EffectiveDeliveryPolicy`,
+`SubscriptionsDeleted`, `BeginningArchiveTime` and `FifoTopic` — each a fact about the
+topic rather than something a caller sets — and no denylist of any length refuses a
+name neither page publishes.
+
+**The code is substrate's reading of a published gloss, not a published sentence.** The
+page lists `InvalidParameter`/400 with *"Indicates that a request parameter does not
+comply with the associated constraints"*, and `AttributeName`'s constraint is its
+published value list; the page's only prose naming the code is about a
+`MaximumMessageSize` above 256 KiB on a topic that cannot carry it. The refusal
+*messages* are substrate's own, because the page publishes none. `AttributeName` is
+`Required: Yes`, so an absent one is the same code; `AttributeValue` is
+`Required: No`, so an empty value is accepted — CloudFormation's own
+`AWS::SNS::TopicPolicy` deletion depends on it, since there is no
+`DeleteTopicPolicy` and a policy is removed by setting it to the empty string.
+
+**Divergence: sixteen settable names are reported back where AWS would not report
+them.** Those sixteen — the fifteen delivery-status names and `FifoThroughputScope` —
+are absent from `GetTopicAttributes`' seventeen, so on AWS they are write-only.
+Substrate stores them and `GetTopicAttributes` reports the whole stored map, so it
+reports them. That is **recorded rather than filtered**: the value the caller set is
+real, and hiding it would make `SetTopicAttributes` look like a no-op, which is #1067's
+failure mode in the other direction. A consumer asserting on the key set
+`GetTopicAttributes` publishes must take AWS's page as the authority here, not
+substrate's answer.
+
+**The name check runs before the topic is resolved**, so an unpublished name is refused
+whether or not the topic exists. The page publishes both `InvalidParameter`/400 and
+`NotFound`/404 and orders them nowhere, so that is substrate's choice.
 
 ### CloudFormation resource types
 

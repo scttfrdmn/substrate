@@ -1594,3 +1594,44 @@ func CFNPropagateConfigStackTagsForTest(
 ) (bool, error) {
 	return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 }
+
+// SeedSNSTopicAttributeForTest writes name=value into a topic record's stored attribute map, bypassing
+// SetTopicAttributes.
+//
+// It exists because #1067 closed the only route a test had to the property
+// TestSNSStoredAttributeCannotShadowADerivedOne exists to pin. getTopicAttributes merges the stored map
+// first and its derived members over the top, so a stored TopicArn cannot shadow the real one — but the
+// four derived names are read-only on AWS's own page and SetTopicAttributes now refuses all four, so
+// there is no request that can put one in the map. Seeding through state keeps the assertion about the
+// merge order rather than about the refusal, which is a different test.
+//
+// The key is built through [snsTopicStateKey] from the same account and Region the record carries, so
+// the seed lands on exactly the record requireTopic will load rather than on a key nothing reads.
+func SeedSNSTopicAttributeForTest(
+	ctx context.Context, state StateManager, accountID, region, topicName, name, value string,
+) error {
+	key := snsTopicStateKey(accountID, region, topicName)
+	data, err := state.Get(ctx, snsNamespace, key)
+	if err != nil {
+		return fmt.Errorf("seed sns topic attribute state.Get: %w", err)
+	}
+	if data == nil {
+		return fmt.Errorf("seed sns topic attribute: no topic at %s/%s", snsNamespace, key)
+	}
+	var topic SNSTopic
+	if err := json.Unmarshal(data, &topic); err != nil {
+		return fmt.Errorf("seed sns topic attribute unmarshal: %w", err)
+	}
+	if topic.Attributes == nil {
+		topic.Attributes = make(map[string]string)
+	}
+	topic.Attributes[name] = value
+	encoded, err := json.Marshal(&topic)
+	if err != nil {
+		return fmt.Errorf("seed sns topic attribute marshal: %w", err)
+	}
+	if err := state.Put(ctx, snsNamespace, key, encoded); err != nil {
+		return fmt.Errorf("seed sns topic attribute state.Put: %w", err)
+	}
+	return nil
+}

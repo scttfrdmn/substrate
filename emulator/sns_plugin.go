@@ -401,12 +401,13 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	// The stored attributes go in first and the derived ones over the top, which is the reverse of the
-	// order this handler used before #993. setTopicAttributes writes any AttributeName a caller sends
-	// into this map unchecked, so merging it last let a stored TopicArn shadow the real one — and would
-	// have let a stored SubscriptionsConfirmed shadow the derived count, making the emulator report a
-	// subscription count of the caller's choosing. A derived member is a fact about the topic, so it
-	// wins. (That SetTopicAttributes accepts a name its own page does not publish is a separate defect,
-	// #1067; once it refuses one, this ordering is defense in depth rather than the only guard.)
+	// order this handler used before #993. setTopicAttributes used to write any AttributeName a caller
+	// sent into this map unchecked, so merging it last let a stored TopicArn shadow the real one — and
+	// would have let a stored SubscriptionsConfirmed shadow the derived count, making the emulator report
+	// a subscription count of the caller's choosing. A derived member is a fact about the topic, so it
+	// wins. Since #1067 setTopicAttributes refuses all four derived names, so this ordering is defense in
+	// depth rather than the only guard — but it is still the only guard for a value that reached the map
+	// another way, which is why it stays and why its test now seeds state directly.
 	attrs := make(map[string]string, len(t.Attributes)+len(snsDerivedTopicAttributeNames))
 	for k, v := range t.Attributes {
 		attrs[k] = v
@@ -444,9 +445,44 @@ func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	})
 }
 
+// setTopicAttributes stores one of the twenty-five attribute names API_SetTopicAttributes publishes.
+//
+// Until #1067 it stored whatever name arrived, so `AttributeName=Banana` was written into the topic
+// record and GetTopicAttributes reported it back as though SNS carried it. The allowlist is
+// [snsSettableTopicAttributeNames] and the argument for an allowlist over a denylist of the derived
+// names is written there; the short version is that the Set and Get pages publish 25 and 17 names with
+// only 9 in common, so no subtraction of one from the other describes what a caller may set.
+//
+// Both refusals are InvalidParameter/400, which the page publishes with the gloss "Indicates that a
+// request parameter does not comply with the associated constraints" — AttributeName's constraint is its
+// published value list, and it is marked Required: Yes, so both cases are that code. The page's only
+// prose about InvalidParameter is about a MaximumMessageSize above 256 KiB on a topic that cannot carry
+// it, so reading the code onto an unpublished name is substrate's reading of the gloss rather than a
+// sentence AWS wrote; the two *messages* are substrate's own, because the page publishes none.
+//
+// The name is checked before the topic is resolved. The page publishes both InvalidParameter/400 and
+// NotFound/404 without ordering them, so this is substrate's choice, made so that a refusal of an
+// unpublished name does not depend on whether the topic happens to exist. AttributeValue is
+// Required: No and is deliberately not checked for emptiness: CloudFormation's own AWS::SNS::TopicPolicy
+// deleter clears a policy by setting it to the empty string (cfn_delete.go:87).
 func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	attrName := req.Params["AttributeName"]
 	attrValue := req.Params["AttributeValue"]
+
+	if attrName == "" {
+		return nil, &AWSError{
+			Code:       "InvalidParameter",
+			Message:    "AttributeName is required",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if !snsTopicAttributeIsSettable(attrName) {
+		return nil, &AWSError{
+			Code:       "InvalidParameter",
+			Message:    "AttributeName " + attrName + " is not a settable topic attribute",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 
 	goCtx := context.Background()
 	t, _, err := p.requireTopic(goCtx, req.Params["TopicArn"])
