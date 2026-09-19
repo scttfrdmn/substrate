@@ -151,14 +151,18 @@ func TestSNSSubscriptionsConfirmedTracksTheIndex(t *testing.T) {
 
 // TestSNSStoredAttributeCannotShadowADerivedOne pins the merge order.
 //
-// setTopicAttributes writes any AttributeName a caller sends into the topic's stored map unchecked, and
-// the handler used to merge that map *after* its own literals. So a caller could set TopicArn and have
-// GetTopicAttributes report it — and once the counts became derived, could have set
+// setTopicAttributes used to write any AttributeName a caller sent into the topic's stored map unchecked,
+// and the handler used to merge that map *after* its own literals. So a caller could set TopicArn and
+// have GetTopicAttributes report it — and once the counts became derived, could have set
 // SubscriptionsConfirmed to any value it liked. The derived members are written last for that reason,
 // and this test is what keeps them there.
 //
-// That SetTopicAttributes accepts an attribute name its own page does not publish is a separate defect,
-// #1067, which is why the four calls below succeed rather than being refused.
+// The shadow is seeded through state rather than through four SetTopicAttributes calls, which is what
+// this test did until #1067. All four derived names are read-only on API_GetTopicAttributes and
+// API_SetTopicAttributes publishes none of them, so the handler now refuses all four and no request can
+// put one in the stored map. The merge order is still the only thing standing between a stored value and
+// the derived one — a record seeded by a fixture, restored from an event log, or written by a future
+// handler would reach the same merge — so the property is pinned at the layer that still has it.
 func TestSNSStoredAttributeCannotShadowADerivedOne(t *testing.T) {
 	t.Parallel()
 	ts := snsTagServer(t)
@@ -171,12 +175,9 @@ func TestSNSStoredAttributeCannotShadowADerivedOne(t *testing.T) {
 		"SubscriptionsConfirmed": "99",
 		"SubscriptionsPending":   "99",
 	} {
-		snsQueryOK(t, ts, snsEastRegion, map[string]string{
-			"Action":         "SetTopicAttributes",
-			"TopicArn":       arn,
-			"AttributeName":  name,
-			"AttributeValue": value,
-		})
+		require.NoError(t, emulator.SeedSNSTopicAttributeForTest(t.Context(), ts.StateManager(),
+			taggingTestAccount, snsEastRegion, "attrs-no-shadow", name, value),
+			"seed a stored %s the merge must not report", name)
 	}
 
 	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)

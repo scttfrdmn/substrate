@@ -527,6 +527,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   body"* describes. **This is observable**: a consumer asserting 204 on any of the four must now assert
   200. Each of the four had a test asserting the 204, so the tests that existed to check these operations
   were pinning the divergence — which is why it survived.
+- **`SetTopicAttributes` accepts only the twenty-five attribute names its own page publishes** (#1067).
+  The handler wrote `req.Params["AttributeName"]` into the topic record with no check of any kind, so
+  `AttributeName=Banana` was stored and `GetTopicAttributes` reported it back as though SNS carried it —
+  and so were the eight names `API_GetTopicAttributes` publishes and `API_SetTopicAttributes` does not,
+  of which `getTopicAttributes`' merge order stopped only four from being reported. The guard is an
+  **allowlist** rather than a denylist of the four names substrate derives, because the two pages do not
+  partition one vocabulary: `Set` publishes 25 names, `Get` publishes 17, only 9 appear on both, and the
+  union is 33 — so any subtraction would still have accepted `EffectiveDeliveryPolicy`,
+  `SubscriptionsDeleted`, `BeginningArchiveTime` and `FifoTopic`, and no denylist of any length refuses a
+  name neither page publishes. The code is `InvalidParameter`/400 for both an unpublished name and an
+  absent one (`AttributeName` is `Required: Yes`); `AttributeValue` stays `Required: No`, because
+  CloudFormation removes an `AWS::SNS::TopicPolicy` by setting `Policy` to the empty string and there is
+  no `DeleteTopicPolicy`. **This is observable**: a call that set an unpublished name got a 200 and now
+  gets a 400. One test was pinning the defect —
+  `TestSNSStoredAttributeCannotShadowADerivedOne` seeded its shadow through four `SetTopicAttributes`
+  calls on exactly the four names now refused — and it now seeds the record through state, so it still
+  asserts the merge order rather than the refusal.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -705,6 +722,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   creation. `API_StartSchemaCreation` publishes `POST` only, and `API_GetIntrospectionSchema` publishes
   `GET` only on the adjacent `/schema`; both arms are now gated on their published verb, and every other
   method under either segment is unrouted.
+- **The count of `GetTopicAttributes`' published attribute names, in the two places it was stated as
+  sixteen** (#1067, carrying #993's off-by-one). `API_GetTopicAttributes` publishes **seventeen**, and the
+  missing one is `MaximumMessageSize`, which the service reference's per-attribute table also omitted.
+  Neither the code nor the response changed — the handler already passed a stored `MaximumMessageSize`
+  through — but the number was the premise of the allowlist arithmetic above, so it is corrected in
+  `sns_topic_attributes.go` and in `docs/services.md` rather than left to be re-derived.
+- **The service reference's record of the write-only attribute divergence** (#1067). Sixteen of the 25
+  settable names — the fifteen delivery-status names and `FifoThroughputScope` — are absent from
+  `GetTopicAttributes`' seventeen, so AWS accepts them and does not report them back. Substrate stores
+  them and `getTopicAttributes` reports the whole stored map, so it does report them. That is recorded
+  and asserted rather than filtered: the value the caller set is real, and hiding it would make
+  `SetTopicAttributes` look like a no-op, which is #1067's own failure mode in the other direction.
 
 ## [v0.119.0] - 2026-09-18
 

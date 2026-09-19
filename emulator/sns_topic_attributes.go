@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"slices"
 	"strconv"
 )
 
@@ -18,9 +19,73 @@ var snsDerivedTopicAttributeNames = []string{ //nolint:gochecknoglobals // read-
 	"TopicArn",
 }
 
+// snsSettableTopicAttributeNames are the twenty-five AttributeName values API_SetTopicAttributes
+// publishes, in the order and spelling the page lists them: five general, fifteen delivery-status names
+// in five endpoint families, two under server-side encryption, and three under FIFO topics.
+//
+// The check it backs is an allowlist and not a denylist of the names GetTopicAttributes derives,
+// because the two pages do not partition one vocabulary. Set publishes 25 names, Get publishes 17, only
+// 9 appear on both, and the union is 33. A denylist built from [snsDerivedTopicAttributeNames] would
+// have covered 4 of the 8 names Get publishes and Set does not, so a caller could still have written —
+// and then read back — an EffectiveDeliveryPolicy, a SubscriptionsDeleted, a BeginningArchiveTime or a
+// FifoTopic, each of which AWS reports as a fact about the topic rather than as anything a caller sets.
+// And a denylist of any length still accepts a name neither page publishes at all, which is the whole
+// of #1067: setTopicAttributes wrote req.Params["AttributeName"] into the topic record with no check
+// whatsoever, so `AttributeName=Banana` was stored and GetTopicAttributes reported it back.
+//
+// Sixteen of these 25 are absent from Get's 17 — the fifteen delivery-status names and
+// FifoThroughputScope — which is a property of AWS's own pages rather than an omission in either.
+// Substrate accepts all 25 and getTopicAttributes reports the whole stored map, so it reports those
+// sixteen back where AWS would not; that divergence is recorded in docs/services.md rather than papered
+// over by filtering the read, because the value a caller set is real and hiding it would make
+// SetTopicAttributes look like a no-op.
+var snsSettableTopicAttributeNames = []string{ //nolint:gochecknoglobals // read-only reference data, stated once so a test can assert it
+	"DeliveryPolicy",
+	"DisplayName",
+	"MaximumMessageSize",
+	"Policy",
+	"TracingConfig",
+
+	"HTTPSuccessFeedbackRoleArn",
+	"HTTPSuccessFeedbackSampleRate",
+	"HTTPFailureFeedbackRoleArn",
+
+	"FirehoseSuccessFeedbackRoleArn",
+	"FirehoseSuccessFeedbackSampleRate",
+	"FirehoseFailureFeedbackRoleArn",
+
+	"LambdaSuccessFeedbackRoleArn",
+	"LambdaSuccessFeedbackSampleRate",
+	"LambdaFailureFeedbackRoleArn",
+
+	"ApplicationSuccessFeedbackRoleArn",
+	"ApplicationSuccessFeedbackSampleRate",
+	"ApplicationFailureFeedbackRoleArn",
+
+	"SQSSuccessFeedbackRoleArn",
+	"SQSSuccessFeedbackSampleRate",
+	"SQSFailureFeedbackRoleArn",
+
+	"KmsMasterKeyId",
+	"SignatureVersion",
+
+	"ArchivePolicy",
+	"ContentBasedDeduplication",
+	"FifoThroughputScope",
+}
+
+// snsTopicAttributeIsSettable reports whether API_SetTopicAttributes publishes name as an attribute a
+// caller may set.
+//
+// The comparison is case-sensitive, because AWS's list is a list of literal names and a query parameter
+// is not normalised anywhere else in this plugin either.
+func snsTopicAttributeIsSettable(name string) bool {
+	return slices.Contains(snsSettableTopicAttributeNames, name)
+}
+
 // derivedTopicAttributes returns the four GetTopicAttributes members substrate computes from state.
 //
-// API_GetTopicAttributes publishes sixteen attribute names, and substrate's answer splits in two: most
+// API_GetTopicAttributes publishes seventeen attribute names, and substrate's answer splits in two: most
 // are whatever CreateTopic or SetTopicAttributes stored, and these four are facts about the topic that
 // no caller sets. Until #993 the split was wrong in both directions — the handler reported a
 // SubscriptionsCount member the page does not publish anywhere, hardcoded to "0", and reported none of
