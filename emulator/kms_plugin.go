@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -477,31 +476,25 @@ func (p *KMSPlugin) listKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		input.Limit = 100
 	}
 
+	// Pagination via base64 offset marker. A marker substrate did not issue is refused rather
+	// than answered with page one, which API_ListKeys publishes InvalidMarkerException for
+	// (#1086); the offset is meaningful because the key-ID index is written in one order and
+	// read back in it, so a position is stable across the calls of one walk.
+	//
+	// Validated before the index is loaded, which is #887's ordering criterion: a handler that
+	// read first would report a store failure as a 500 for a request it could already have
+	// refused, and the refusal does not depend on anything the store holds.
+	offset, ok := decodeOffsetPaginationToken(input.Marker)
+	if !ok {
+		return nil, kmsInvalidMarker()
+	}
+
 	goCtx := context.Background()
 	ids, err := p.loadKeyIDs(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
-
-	// Pagination via base64 offset marker.
-	offset := 0
-	if input.Marker != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(input.Marker); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(ids) {
-		offset = len(ids)
-	}
-	page := ids[offset:]
-	var nextMarker string
-	if len(page) > input.Limit {
-		page = page[:input.Limit]
-		nextOffset := offset + input.Limit
-		nextMarker = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
-	}
+	page, nextMarker := pageByOffsetToken(ids, offset, input.Limit)
 
 	type keyEntry struct {
 		KeyID  string `json:"KeyId"`
@@ -1433,31 +1426,21 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		input.Limit = 100
 	}
 
+	// Pagination. API_ListAliases publishes InvalidMarkerException too, so an unissued marker is
+	// refused here on the same footing as in listKeys, and before any state is read for the same
+	// reason (#1086). The alias-name index is sorted on every write (see saveAliasNames), so the
+	// order an offset indexes into is lexicographic.
+	offset, ok := decodeOffsetPaginationToken(input.Marker)
+	if !ok {
+		return nil, kmsInvalidMarker()
+	}
+
 	goCtx := context.Background()
 	names, err := p.loadAliasNames(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
-
-	// Pagination.
-	offset := 0
-	if input.Marker != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(input.Marker); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextMarker string
-	if len(page) > input.Limit {
-		page = page[:input.Limit]
-		nextOffset := offset + input.Limit
-		nextMarker = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
-	}
+	page, nextMarker := pageByOffsetToken(names, offset, input.Limit)
 
 	type aliasEntry struct {
 		AliasName   string `json:"AliasName"`

@@ -786,3 +786,26 @@ func kmsInvalidARN(arn, reason string) *AWSError {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// kmsInvalidMarker reports a Marker that is not one substrate issued.
+//
+// InvalidMarkerException at 400, published in the Errors section of both operations in this package
+// that page — API_ListKeys and API_ListAliases — and glossed "the request was rejected because the
+// marker that specifies where pagination should next begin is not valid". So KMS needs no borrowed
+// code for this, which is why it is one of the four services #1086 converts first: each of the nine
+// services in that issue needs its own reference read before its sites can move, which is the
+// issue's own reason for splitting the work per service rather than sweeping the idiom.
+//
+// KMS is also the only one of the four that publishes a Pattern for the token itself —
+// Marker is Length 1-1024, Pattern [\u0020-\u00FF]* — so a marker outside that character range is
+// refusable on the page's own terms and not only on substrate's issuability rule. That is not what
+// this checks: [decodeOffsetPaginationToken] refuses anything the encoder would not have produced,
+// which is the stricter test, and every string it refuses that is inside the Pattern is still a
+// string KMS itself could not have minted.
+func kmsInvalidMarker() *AWSError {
+	return &AWSError{
+		Code:       "InvalidMarkerException",
+		Message:    "the Marker is not a pagination token this service issued",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}

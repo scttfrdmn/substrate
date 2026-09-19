@@ -1322,6 +1322,22 @@ func TestCFNPlugin_DescribeStackEvents(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, code)
 		assert.Equal(t, "MissingParameter", cfnErrorCode(t, missingBody))
 	})
+
+	t.Run("a NextToken substrate did not issue is a ValidationError", func(t *testing.T) {
+		// Until #1086 this answered 200 with page one, which is the one wrong answer a
+		// paginating caller cannot detect. The code is substrate's choice between the two
+		// on CloudFormation's Common Errors page, argued at cfnInvalidNextToken; asserted
+		// on the wire here because the unit case in cfn_events_test.go calls the paginator
+		// directly and cannot show that the plugin surfaces the refusal.
+		code, refusedBody := cfnAction(t, ts, "DescribeStackEvents", map[string]string{
+			"StackName": "eventful",
+			"NextToken": "not-base64-at-all",
+		})
+		assert.Equal(t, http.StatusBadRequest, code, "body was %s", refusedBody)
+		assert.Equal(t, "ValidationError", cfnErrorCode(t, refusedBody))
+		assert.Empty(t, cfnStackEvents(t, refusedBody),
+			"a refused token must not be answered with a page of events")
+	})
 }
 
 // cfnEventMember is the subset of a StackEvent the wire tests assert over.

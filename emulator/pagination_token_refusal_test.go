@@ -446,3 +446,284 @@ func TestPaginationToken_S3ListObjectsV2RefusesATokenItDidNotIssue(t *testing.T)
 		assert.Contains(t, body, "<Code>InvalidArgument</Code>", body)
 	})
 }
+
+// --- #1086: the four services whose pages publish a code of their own ---
+//
+// #915 fixed three operations; the same decode idiom was found at fifteen more, and only four
+// services publish anything a refusal can be answered with. Those four are here. The other eleven
+// sites are recorded as deliberate divergences in docs/services.md rather than fixed, because giving
+// them a code would mean borrowing one from a sibling operation — the analogy #671's binding scope
+// decision forbids.
+//
+// Each test is the shape the three above established: the issued token round-trips first, so a
+// handler that refused everything could not pass; then every unissuable form is refused with the
+// code that service publishes; then the refusal is required to arrive from a store sealed against
+// reads, which is #887's ordering criterion and the half that a decode-only fix would fail.
+
+// tokenRefusalJSONCall posts one JSON-protocol operation and returns the status, the raw body and the
+// bare error code a refusal carries.
+//
+// The body is a string rather than a Go value so that a token which is not valid base64 reaches the
+// handler exactly as written — the same reason [tokenRefusalSSMCall] takes one.
+func tokenRefusalJSONCall(t *testing.T, srv *emulator.Server, host, target, body string) (int, string, string) {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader([]byte(body)))
+	r.Host = host
+	r.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	r.Header.Set("X-Amz-Target", target)
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20240101/"+
+		"us-east-1/service/aws4_request, SignedHeaders=host, Signature=fake")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	resp := w.Result()
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read %s body", target)
+
+	var errShape struct {
+		Type string `json:"__type"`
+	}
+	code := ""
+	if unmarshalErr := json.Unmarshal(raw, &errShape); unmarshalErr == nil {
+		code = awsErrorCode(errShape.Type)
+	}
+	return resp.StatusCode, string(raw), code
+}
+
+// tokenRefusalServer builds a one-plugin server over a caller-supplied state manager, which the
+// per-service test helpers do not allow and the sealed-store assertion needs.
+func tokenRefusalServer(t *testing.T, state emulator.StateManager, plugin emulator.Plugin) *emulator.Server {
+	t.Helper()
+	cfg := emulator.DefaultConfig()
+	registry := emulator.NewPluginRegistry()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+
+	require.NoError(t, plugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(plugin)
+
+	return emulator.NewServer(*cfg, registry, store, state, tc, logger)
+}
+
+// tokenRefusalJSONToken reads a named cursor member out of a JSON response.
+func tokenRefusalJSONToken(t *testing.T, body, member string) string {
+	t.Helper()
+	var out map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(body), &out), "decode %s", body)
+	raw, found := out[member]
+	require.True(t, found, "no %s in %s", member, body)
+	var token string
+	require.NoError(t, json.Unmarshal(raw, &token), "decode %s in %s", member, body)
+	require.NotEmpty(t, token)
+	return token
+}
+
+// --- KMS ListKeys and ListAliases ---
+
+const tokenRefusalKMSHost = "kms.us-east-1.amazonaws.com"
+
+// tokenRefusalKMSCall posts one KMS operation.
+func tokenRefusalKMSCall(t *testing.T, srv *emulator.Server, op, body string) (int, string, string) {
+	t.Helper()
+	return tokenRefusalJSONCall(t, srv, tokenRefusalKMSHost, "TrentService."+op, body)
+}
+
+// TestPaginationToken_KMSListKeysRefusesAMarkerItDidNotIssue is #1086 at the first of the two
+// operations whose own Errors section publishes InvalidMarkerException.
+//
+// The keys are created through CreateKey rather than seeded, per #765: a listing built by writing
+// state directly would not prove the offset indexes into what a caller can observe.
+func TestPaginationToken_KMSListKeysRefusesAMarkerItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.KMSPlugin{})
+	for range 3 {
+		status, body, code := tokenRefusalKMSCall(t, srv, "CreateKey", `{}`)
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+
+	status, page1, code := tokenRefusalKMSCall(t, srv, "ListKeys", `{"Limit":1}`)
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	issued := tokenRefusalJSONToken(t, page1, "NextMarker")
+
+	status, page2, code := tokenRefusalKMSCall(t, srv, "ListKeys",
+		fmt.Sprintf(`{"Limit":1,"Marker":%q}`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.NotEqual(t, page1, page2, "an issued marker must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := tokenRefusalKMSCall(t, srv, "ListKeys",
+				fmt.Sprintf(`{"Limit":1,"Marker":%q}`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidMarkerException", code, body)
+			assert.NotContains(t, body, `"Keys"`, "a refused marker must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.KMSPlugin{})
+		status, body, code := tokenRefusalKMSCall(t, sealedSrv, "ListKeys", `{"Marker":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidMarkerException", code, body)
+	})
+}
+
+// TestPaginationToken_KMSListAliasesRefusesAMarkerItDidNotIssue is the same refusal at the second
+// site, asserted separately because the two decoded their markers with two copies of one block —
+// which is how they came to be fixed twice and can come to diverge again.
+func TestPaginationToken_KMSListAliasesRefusesAMarkerItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.KMSPlugin{})
+	status, keyBody, code := tokenRefusalKMSCall(t, srv, "CreateKey", `{}`)
+	require.Empty(t, code, keyBody)
+	require.Equal(t, http.StatusOK, status, keyBody)
+	var created struct {
+		KeyMetadata struct {
+			KeyID string `json:"KeyId"`
+		} `json:"KeyMetadata"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(keyBody), &created))
+	require.NotEmpty(t, created.KeyMetadata.KeyID)
+
+	for _, alias := range []string{"alias/one", "alias/two", "alias/three"} {
+		status, body, code := tokenRefusalKMSCall(t, srv, "CreateAlias",
+			fmt.Sprintf(`{"AliasName":%q,"TargetKeyId":%q}`, alias, created.KeyMetadata.KeyID))
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+
+	status, page1, code := tokenRefusalKMSCall(t, srv, "ListAliases", `{"Limit":1}`)
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	issued := tokenRefusalJSONToken(t, page1, "NextMarker")
+
+	status, page2, code := tokenRefusalKMSCall(t, srv, "ListAliases",
+		fmt.Sprintf(`{"Limit":1,"Marker":%q}`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.NotEqual(t, page1, page2, "an issued marker must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := tokenRefusalKMSCall(t, srv, "ListAliases",
+				fmt.Sprintf(`{"Limit":1,"Marker":%q}`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidMarkerException", code, body)
+			assert.NotContains(t, body, "alias/one", "a refused marker must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.KMSPlugin{})
+		status, body, code := tokenRefusalKMSCall(t, sealedSrv, "ListAliases", `{"Marker":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidMarkerException", code, body)
+	})
+}
+
+// --- Secrets Manager ListSecrets ---
+
+// TestPaginationToken_SecretsManagerListSecretsRefusesATokenItDidNotIssue is #1086 at the one site
+// whose page publishes a pagination code *separately* from its parameter code, which is why the
+// refusal is InvalidNextTokenException and not InvalidParameterException.
+func TestPaginationToken_SecretsManagerListSecretsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.SecretsManagerPlugin{})
+	call := func(op, body string) (int, string, string) {
+		t.Helper()
+		return tokenRefusalJSONCall(t, srv, "secretsmanager.us-east-1.amazonaws.com", "secretsmanager."+op, body)
+	}
+	for _, name := range []string{"one", "two", "three"} {
+		status, body, code := call("CreateSecret", fmt.Sprintf(`{"Name":%q,"SecretString":"s"}`, name))
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+
+	status, page1, code := call("ListSecrets", `{"MaxResults":1}`)
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	issued := tokenRefusalJSONToken(t, page1, "NextToken")
+
+	status, page2, code := call("ListSecrets", fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.NotEqual(t, page1, page2, "an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := call("ListSecrets", fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidNextTokenException", code, body)
+			assert.NotContains(t, body, "SecretList", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.SecretsManagerPlugin{})
+		status, body, code := tokenRefusalJSONCall(t, sealedSrv, "secretsmanager.us-east-1.amazonaws.com",
+			"secretsmanager.ListSecrets", `{"NextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidNextTokenException", code, body)
+	})
+}
+
+// --- EventBridge ListRules ---
+
+// TestPaginationToken_EventBridgeListRulesRefusesATokenItDidNotIssue is #1086 at the site whose code
+// comes from prose rather than from an Errors section.
+//
+// API_ListRules names InvalidToken and its 400 twice, in the NextToken member's own description —
+// "Using an expired pagination token results in an HTTP 400 InvalidToken error" — and nowhere in its
+// Errors list, which is why #950's sweep of this service missed it and settled for the common-errors
+// fallback. The condition AWS names is an expired token, which substrate has none of; see
+// [ebInvalidToken] for why an unissuable one is the same observation for a caller.
+func TestPaginationToken_EventBridgeListRulesRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.EventBridgePlugin{})
+	call := func(srv *emulator.Server, op, body string) (int, string, string) {
+		t.Helper()
+		return tokenRefusalJSONCall(t, srv, "events.us-east-1.amazonaws.com", "AmazonEventBridge."+op, body)
+	}
+	for _, name := range []string{"rule-a", "rule-b", "rule-c"} {
+		status, body, code := call(srv, "PutRule",
+			fmt.Sprintf(`{"Name":%q,"ScheduleExpression":"rate(5 minutes)"}`, name))
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+
+	status, page1, code := call(srv, "ListRules", `{"Limit":1}`)
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	issued := tokenRefusalJSONToken(t, page1, "NextToken")
+
+	status, page2, code := call(srv, "ListRules", fmt.Sprintf(`{"Limit":1,"NextToken":%q}`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "rule-b", "an issued token must resume after the first page")
+	assert.NotContains(t, page2, "rule-a", "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := call(srv, "ListRules", fmt.Sprintf(`{"Limit":1,"NextToken":%q}`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidToken", code, body)
+			assert.NotContains(t, body, "rule-a", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.EventBridgePlugin{})
+		status, body, code := call(sealedSrv, "ListRules", `{"NextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidToken", code, body)
+	})
+}

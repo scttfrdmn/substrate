@@ -829,7 +829,10 @@ func CFNDeriveStackEventsForTest(s CFNStackState, stackID string) []CFNStackEven
 // CFNPaginateEventsForTest wraps cfnPaginateEvents, so the page boundary can be
 // asserted without deploying a template of more than CFNStackEventsPageSizeForTest
 // resources.
-func CFNPaginateEventsForTest(events []CFNStackEventForTest, token string) ([]CFNStackEventForTest, string) {
+//
+// The refusal is returned as well as the page, because #1086 made an unissued token an
+// error here and a wrapper that dropped it would let the reversal look like an empty page.
+func CFNPaginateEventsForTest(events []CFNStackEventForTest, token string) ([]CFNStackEventForTest, string, *AWSError) {
 	return cfnPaginateEvents(events, token)
 }
 

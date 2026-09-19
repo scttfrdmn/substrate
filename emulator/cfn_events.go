@@ -1,8 +1,6 @@
 package emulator
 
 import (
-	"encoding/base64"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -199,23 +197,33 @@ func cfnResourceEventID(logicalID, status, timestamp string) string {
 // The token is a base64-encoded offset, following the base64-marker shape
 // paginateIAMKeys established. An offset rather than an event ID because the
 // derivation is a pure function of the record: the same call produces the same
-// list in the same order, so position is stable, and an unparseable or
-// out-of-range token starts from the beginning rather than erroring —
-// DescribeStackEvents documents no service-specific errors.
-func cfnPaginateEvents(events []cfnStackEvent, token string) (page []cfnStackEvent, nextToken string) {
-	start := 0
-	if token != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(token); err == nil {
-			if offset, convErr := strconv.Atoi(string(decoded)); convErr == nil && offset > 0 && offset < len(events) {
-				start = offset
-			}
-		}
+// list in the same order, so a position is stable.
+//
+// **A token substrate did not issue is refused, reversing the decision recorded here
+// before #1086.** That decision was that an unparseable token starts from the
+// beginning, because DescribeStackEvents' Errors section is literally empty and there
+// was no code to answer. Two things overturn it. First, the empty Errors section is not
+// the whole of what CloudFormation publishes: its Common Errors page carries
+// ValidationError and InvalidParameterValue, both at 400, and this plugin has a house
+// rule for choosing between them — ValidationError is what it answers for every other
+// malformed parameter, argued at [ErrCFNInvalidTag], so a caller sees one code for one
+// class of mistake rather than a second code invented for this member. Second, the
+// silent-page-one answer is the one failure a caller cannot detect: a loop that feeds
+// back a token from another operation, or a truncated copy, is handed the first page
+// again and either never terminates or processes the same events twice, and nothing in
+// the response says so (#884, #915). Answering nothing is worse than answering an error
+// whose code is substrate's reading of two published candidates.
+//
+// The same reversal fixes a second defect at this site. The old guard required the
+// offset to be `< len(events)`, so a token for a listing that has since shrunk — one
+// substrate itself minted — **reset to page one** rather than clamping to a final empty
+// page, which is exactly what [decodeOffsetPaginationToken] draws the line at and what
+// the old comment claimed to be preserving. [pageByOffsetToken] clamps.
+func cfnPaginateEvents(events []cfnStackEvent, token string) (page []cfnStackEvent, nextToken string, err *AWSError) {
+	offset, ok := decodeOffsetPaginationToken(token)
+	if !ok {
+		return nil, "", cfnInvalidNextToken()
 	}
-	end := start + cfnStackEventsPageSize
-	if end < len(events) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(events)
-	}
-	return events[start:end], nextToken
+	page, nextToken = pageByOffsetToken(events, offset, cfnStackEventsPageSize)
+	return page, nextToken, nil
 }

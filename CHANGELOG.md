@@ -693,6 +693,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ApiKeyValidityOutOfBoundsException`/400 with no site (#1122).
 
 ### Fixed
+- **Five pagination sites in four services answered a well-formed page one for a token substrate
+  never issued** (#1086). KMS `ListKeys` and `ListAliases`, Secrets Manager `ListSecrets`,
+  EventBridge `ListRules` and CloudFormation `DescribeStackEvents` all carried the pre-#915 idiom
+  that decodes a base64 offset and discards both errors, so a token from another operation, a
+  truncated copy or a hand-written string left the offset at zero. All five now go through
+  `decodeOffsetPaginationToken` and refuse. **The code is per service and three of the four are
+  published:** KMS's `InvalidMarkerException`/400 is in the Errors section of both its paging
+  operations; Secrets Manager publishes `InvalidNextTokenException`/400 *separately* from
+  `InvalidParameterException`, so the pagination code is the one to answer and not the parameter one;
+  and EventBridge publishes `InvalidToken`/400 **in prose only** — its `ListRules` Errors section
+  names no pagination code at all, but the `NextToken` member's own description says "Using an
+  expired pagination token results in an HTTP 400 InvalidToken error", which is the correction this
+  release makes to #950's sweep of that service, because that sweep read Errors sections.
+  CloudFormation's is substrate's reading: `DescribeStackEvents` publishes an empty Errors section,
+  so the code comes from its Common Errors page, where `ValidationError`/400 is what this plugin
+  already answers for every other malformed parameter.
+- **The recorded decision that an unparseable `DescribeStackEvents` token starts from the beginning
+  is reversed, in writing rather than by deletion** (#1086). `cfn_events.go` argued the silent answer
+  from the empty Errors section, and `cfn_events_test.go` asserted it with that rationale attached.
+  Two things overturn it: the empty section is not the whole of what CloudFormation publishes, and a
+  well-formed page one is the one wrong answer a paginating caller cannot detect. **The reversal also
+  fixes a second defect at the same site for free:** its guard required the offset to be
+  `< len(events)`, so a token substrate *had* issued, over a listing that has since shrunk, reset to
+  page one instead of clamping to a final empty page — the exact behaviour the old comment claimed to
+  be preserving. `pageByOffsetToken` clamps.
+- **Every one of the five now validates its token before it reads any state** (#1086). Four of the
+  five loaded their index first, so a refusal could depend on how much state happened to exist and a
+  store failure would be reported as a 500 for a request already refusable — #887's ordering
+  criterion. Asserted the way #915's sites assert it, by sealing the state store against reads and
+  requiring the refusal to arrive anyway, rather than by reading the handler.
 - **A `Map` state written with `ItemProcessor` iterated zero times and returned an empty array**
   (#1073). `aslRunMap` read `Iterator` alone, so the spelling AWS marks Required produced a silently
   wrong answer rather than a refusal — the failure mode a validation guard exists to make impossible, not
