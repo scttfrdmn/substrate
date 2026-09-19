@@ -11288,8 +11288,8 @@ Resource Groups Tagging API operations are free.
 | PublishBatch | |
 | AddPermission | Accepted; no policy is stored |
 | RemovePermission | Accepted; no policy is stored |
-| TagResource | `ResourceNotFound`/404 for an absent topic |
-| UntagResource | |
+| TagResource | `ResourceNotFound`/404 for an absent topic; answers an empty `<TagResourceResult>` |
+| UntagResource | Answers an empty `<UntagResourceResult>` |
 | ListTagsForResource | Not paginated, as AWS's reference is not |
 
 ### A topic ARN addresses the topic it names
@@ -11555,6 +11555,45 @@ substrate's answer.
 **The name check runs before the topic is resolved**, so an unpublished name is refused
 whether or not the topic exists. The page publishes both `InvalidParameter`/400 and
 `NotFound`/404 and orders them nowhere, so that is substrate's choice.
+
+### An empty result element is not the same as no result element
+
+Eight SNS operations answer with a body carrying no members, and the query protocol
+spells that two different ways. Whether `<{Operation}Response>` holds an
+`<{Operation}Result>` element at all is decided by the operation's modeled output:
+
+- an output of `smithy.api#Unit` has **no** result element — `DeleteTopic`,
+  `SetTopicAttributes`, `Unsubscribe`, `SetSubscriptionAttributes`, `AddPermission`
+  and `RemovePermission`;
+- an output that is an empty **structure** has the element, empty — `TagResource` and
+  `UntagResource`.
+
+AWS publishes both halves as sample responses: `API_TagResource` and
+`API_UntagResource` show `<TagResourceResult/>` and `<UntagResourceResult/>`, while
+`API_DeleteTopic`, `API_Unsubscribe` and `API_AddPermission` show
+`<ResponseMetadata>` as the response's only child. Substrate emitted the second shape
+for all eight, which is right for six of them (#1141).
+
+**The two tag operations therefore could not be called through an SDK at all**, even
+though they did their work. `aws-sdk-go-v2`'s generated deserializer looks the element
+up by name and fails the operation when it is absent rather than treating a missing
+empty element as an empty one:
+
+```
+operation error SNS: TagResource, https response error StatusCode: 200, RequestID: ,
+deserialization failed, failed to decode response body, TagResourceResult node not found
+```
+
+The tag was already written when that error was returned, so state was right and only
+the envelope was wrong — and every caller that checks its error treated a successful
+tag as a failure. A create → converge → tag deployment sequence could not get past its
+last step.
+
+A hand-written client cannot see the difference, because the element carries nothing,
+which is why the omission survived until a real SDK reached it. The sweep for further
+instances found none: the SDK's SNS deserializer requires a result element for 31
+operations and none of the six `Unit` ones is among them, and no other query-protocol
+service in the tree omits an element its own page publishes.
 
 ### CloudFormation resource types
 
