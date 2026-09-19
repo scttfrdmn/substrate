@@ -39,6 +39,24 @@ package emulator
 // still push a stream past fifty tags through `TagResources`, which is filed separately rather than
 // half-done here; `AddTagsToStream` then refuses every further add, which is the correct answer for a
 // stream over quota however it got there.
+//
+// # CreateStream reaches the same two checks, and one of the two codes is a reading there (#1087)
+//
+// `API_CreateStream` publishes `Tags` with the identical pair of numbers — prose *"A set of up to 50
+// key-value pairs"* over `Map Entries: Maximum number of 200 items` — so both checks above apply
+// unchanged at create time, and #965's argument is not re-derived for them.
+//
+// The provenance is not identical, though, and the difference is worth stating.
+// `InvalidArgumentException` carries the same description on that page and covers the over-200 shape
+// exactly as it does here. `LimitExceededException` **is** in `CreateStream`'s Errors list at 400, but
+// the page attributes it to *"more than five streams in the `CREATING` state"* and to requesting
+// *"more shards than are authorized"* — it says nothing about tag count. Using it for a fifty-first
+// tag at create time is therefore substrate's reading of a code the operation's own page publishes,
+// carried over from the sibling door where the attribution *is* published. It is not the borrowing
+// #671 forbids, which is taking a code a page does not carry at all.
+//
+// Neither check is a reason to refuse an absent member: `Tags` is Required: No on `CreateStream`,
+// which is why [kinesisValidateTagMap]'s nil branch is gated at that call site.
 
 import (
 	"fmt"
@@ -65,7 +83,10 @@ const (
 // 256.
 //
 // An **absent** Tags member is refused, since it is the operation's one Required: Yes member other
-// than the stream reference. An **empty** one is accepted as a no-op, which is substrate's reading:
+// than the stream reference. **That branch is AddTagsToStream's and not universal**: CreateStream
+// publishes the same member as Required: No, so [KinesisPlugin.createStream] calls this only for a
+// map the request actually carries — see the file preamble. An **empty** one is accepted as a no-op,
+// which is substrate's reading:
 // the map publishes a maximum entry count and no minimum, where the sibling RemoveTagsFromStream's
 // TagKeys array publishes "Minimum number of 1 item" — so AWS states a minimum for that operation and
 // declines to for this one, and reading one in anyway would refuse a request its shape admits.
