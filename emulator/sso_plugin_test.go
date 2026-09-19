@@ -499,8 +499,14 @@ func TestSSOPlugin_Errors(t *testing.T) {
 	_ = json.Unmarshal(resp2.Body, &psResult)
 	permSetArn := psResult.PermissionSet.PermissionSetArn
 
-	// ListAccountAssignments (no AccountId filter) — should return all.
+	// ListAccountAssignments over a permission set with nothing assigned to it.
+	//
+	// AccountId is supplied because API_ListAccountAssignments marks it Required: Yes and #1062
+	// made the refusal real; it does not narrow the result, because substrate scopes the listing to
+	// the caller's own account regardless. The call read as "no AccountId filter — should return
+	// all" before #1062, which was describing substrate's own omission rather than the API.
 	resp3, err := p.HandleRequest(ctx, ssoRequest(t, "ListAccountAssignments", map[string]any{
+		"AccountId":        "123456789012",
 		"InstanceArn":      instanceArn,
 		"PermissionSetArn": permSetArn,
 	}))

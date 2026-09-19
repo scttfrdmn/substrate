@@ -899,14 +899,26 @@ func TestInvalidBodyOnANonPostOperation(t *testing.T) {
 //
 // The third slice's fourteen are the second block below. Membership was measured rather than reasoned:
 // every tail site was called with no body and the ones answering 200 were listed, then narrowed to the
-// ones where 200 is what AWS publishes. Nine of the measured 200s are *not* here, because their page
-// marks a member `Required: Yes` and answering 200 for an absent body is a defect this test would
-// otherwise pin: sso CreateAccountAssignment / DeleteAccountAssignment / ListAccountAssignments (three
-// required ARNs each), cognito-identity ListIdentityPools and cognito-idp ListUserPools (`MaxResults`),
-// glue GetTables (`DatabaseName`), wafv2 ListWebACLs and ListIPSets (`Scope`), and dynamodb GetRecords
-// (`ShardIterator`). Those belong to the missing-required-member class, not to this one — filed
-// separately — and the distinction is the reason this test asserts 200 on a hand-checked list rather than
-// on whatever the tree happens to answer.
+// ones where 200 is what AWS publishes.
+//
+// **Nine of the measured 200s were deliberately excluded, and #1062 turned all nine into refusals.**
+// They were left out because their page marks a member `Required: Yes`, so the 200 was a defect this
+// test would otherwise have pinned: sso CreateAccountAssignment / DeleteAccountAssignment /
+// ListAccountAssignments, cognito-identity ListIdentityPools and cognito-idp ListUserPools
+// (`MaxResults`), glue GetTables (`DatabaseName`), wafv2 ListWebACLs and ListIPSets (`Scope`), and
+// dynamodb GetRecords (`ShardIterator`). They are now rows in [memberComplaintServices] instead, which
+// is the table for that class, and the four services #1062 added there are the same four named here.
+//
+// The exclusion is what made the correction possible, so the shape is worth keeping: this test asserts
+// 200 on a hand-checked list rather than on whatever the tree happens to answer. Had the nine been
+// added when they were measured, each would have carried a passing assertion that its defect was
+// correct behavior, and #1062 would have had to argue against this file rather than against the pages.
+//
+// #1062 also found two sites the measurement could not reach, because both refuse an absent body
+// already and so never appeared as a 200: cognito-idp ListUserPoolClients (`UserPoolId`, which
+// unmarshals unconditionally) and the six further wafv2 operations that default `Scope`. An absent body
+// is not the only way to omit a required member — `{}` is the other, and that is what the
+// member-complaint table sends.
 func TestInvalidBodyLeavesAnAbsentBodyAlone(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 
@@ -1063,6 +1075,10 @@ type memberService struct {
 // reaches the member check underneath, where invalidBodyPayload would have stopped one line earlier.
 // Where the identifier comes from the path instead, the body is irrelevant and the path is what carries
 // the case.
+// wafv2ScopedBody supplies the Scope that #1062 made required, so a case can reach the identifier
+// check underneath it. REGIONAL is the value substrate used to invent when the member was absent.
+const wafv2ScopedBody = `{"Scope":"REGIONAL"}`
+
 var memberComplaintServices = []memberService{
 	{
 		name: "eventbridge",
@@ -1200,6 +1216,9 @@ var memberComplaintServices = []memberService{
 			{name: "resolveGlueARN/tooFewFields", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1"}`, wantMessage: "invalid Glue ARN"},
 			{name: "resolveGlueARN/noSlash", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1:123456789012:database"}`, wantMessage: "invalid Glue ARN resource"},
 			{name: "resolveGlueARN/unsupportedType", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1:123456789012:widget/w"}`, wantMessage: "unsupported Glue resource type"},
+			// #1062's one Glue site. DatabaseName is Required: Yes on API_GetTables and went
+			// straight into the state key, so "{}" answered 200 with an empty Tables list.
+			{name: "getTables", target: "AWSGlue.GetTables", body: "{}", wantMessage: "DatabaseName is a required parameter"},
 		},
 	},
 	{
@@ -1232,20 +1251,100 @@ var memberComplaintServices = []memberService{
 		cases: []memberCase{
 			{name: "createWebACL", target: "AWSWAF_20190729.CreateWebACL", body: "{}", wantMessage: "Name is a required parameter"},
 			{name: "getWebACL", target: "AWSWAF_20190729.GetWebACL", body: "{}", wantMessage: "the request identifies no web ACL"},
-			{name: "updateWebACL", target: "AWSWAF_20190729.UpdateWebACL", body: "{}", wantMessage: "Id is a required parameter"},
-			{name: "deleteWebACL", target: "AWSWAF_20190729.DeleteWebACL", body: "{}", wantMessage: "Id is a required parameter"},
 			{name: "associateWebACL", target: "AWSWAF_20190729.AssociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
 			{name: "disassociateWebACL", target: "AWSWAF_20190729.DisassociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
 			{name: "getWebACLForResource", target: "AWSWAF_20190729.GetWebACLForResource", body: "{}", wantMessage: "ResourceArn is a required parameter"},
+			// #1062's eight Scope sites, each twice. Scope is checked before Id, so "{}" now names
+			// Scope at five operations that used to name Id — and the Id rows would have silently
+			// stopped testing the Id check had they been retargeted rather than paired. The second
+			// row of each pair supplies a Scope so the request reaches the Id check underneath,
+			// which is what keeps #1063's six Id/Name refusals pinned.
+			//
 			// loadIPSetByID keeps its check, because API_GetIPSet, API_UpdateIPSet and
 			// API_DeleteIPSet all mark Id Required: Yes and listIPSets reads the index.
-			{name: "getIPSet", target: "AWSWAF_20190729.GetIPSet", body: "{}", wantMessage: "Id is a required parameter"},
-			{name: "updateIPSet", target: "AWSWAF_20190729.UpdateIPSet", body: "{}", wantMessage: "Id is a required parameter"},
-			{name: "deleteIPSet", target: "AWSWAF_20190729.DeleteIPSet", body: "{}", wantMessage: "Id is a required parameter"},
+			{name: "updateWebACL", target: "AWSWAF_20190729.UpdateWebACL", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "updateWebACL/scoped", target: "AWSWAF_20190729.UpdateWebACL", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
+			{name: "deleteWebACL", target: "AWSWAF_20190729.DeleteWebACL", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "deleteWebACL/scoped", target: "AWSWAF_20190729.DeleteWebACL", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
+			{name: "getIPSet", target: "AWSWAF_20190729.GetIPSet", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "getIPSet/scoped", target: "AWSWAF_20190729.GetIPSet", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
+			{name: "updateIPSet", target: "AWSWAF_20190729.UpdateIPSet", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "updateIPSet/scoped", target: "AWSWAF_20190729.UpdateIPSet", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
+			{name: "deleteIPSet", target: "AWSWAF_20190729.DeleteIPSet", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "deleteIPSet/scoped", target: "AWSWAF_20190729.DeleteIPSet", body: wafv2ScopedBody, wantMessage: "Id is a required parameter"},
+			// The two list operations have no second identifier, so a scoped body succeeds and
+			// there is nothing underneath to pair with. Before #1062 both answered 200.
+			{name: "listWebACLs", target: "AWSWAF_20190729.ListWebACLs", body: "{}", wantMessage: "Scope is a required parameter"},
+			{name: "listIPSets", target: "AWSWAF_20190729.ListIPSets", body: "{}", wantMessage: "Scope is a required parameter"},
 			// CreateIPSet answers the same code from wafv2ValidateCreateIPSet, which #755 wrote and
 			// wafv2_createipset_validation_test.go covers in full. One row here proves the two
 			// paths agree rather than duplicating that file.
 			{name: "createIPSet", target: "AWSWAF_20190729.CreateIPSet", body: "{}", wantMessage: "Name is a required parameter"},
+		},
+	},
+	{
+		// #1062's three SSO Admin operations. All three pages publish ValidationException and it is
+		// what the plugin's own two checked guards already answered, so the code is established
+		// rather than chosen — see sso_errors.go, which also records that the published gloss says
+		// "syntax error" rather than "missing parameter".
+		//
+		// Each case names the first member its page lists, because ssoRequireMembers takes them in
+		// page order and "{}" omits all of them.
+		name: "sso",
+		host: "sso.us-east-1.amazonaws.com",
+		code: "ValidationException",
+		cases: []memberCase{
+			{name: "createAccountAssignment", target: "SWBExternalService.CreateAccountAssignment", body: "{}", wantMessage: "InstanceArn is required"},
+			{name: "deleteAccountAssignment", target: "SWBExternalService.DeleteAccountAssignment", body: "{}", wantMessage: "InstanceArn is required"},
+			{name: "listAccountAssignments", target: "SWBExternalService.ListAccountAssignments", body: "{}", wantMessage: "AccountId is required"},
+			// The second member of each, reached by supplying the first — proof the loop does not
+			// stop at one member, which is what a caller omitting several needs.
+			{name: "createAccountAssignment/instanced", target: "SWBExternalService.CreateAccountAssignment", body: `{"InstanceArn":"arn:aws:sso:::instance/ssoins-1234567890abcdef"}`, wantMessage: "PermissionSetArn is required"},
+			{name: "listAccountAssignments/accounted", target: "SWBExternalService.ListAccountAssignments", body: `{"AccountId":"123456789012"}`, wantMessage: "InstanceArn is required"},
+		},
+	},
+	{
+		// #1062's Cognito Identity site. MaxResults is Required: Yes over 1-60 on
+		// API_ListIdentityPools, and this service's InvalidParameterException gloss — "Thrown for
+		// missing or bad input parameter(s)." — names the missing case outright.
+		name: "cognito-identity",
+		host: "cognito-identity.us-east-1.amazonaws.com",
+		code: "InvalidParameterException",
+		cases: []memberCase{
+			{name: "listIdentityPools", target: "AWSCognitoIdentityService.ListIdentityPools", body: "{}", wantMessage: "MaxResults must be between 1 and 60"},
+			{name: "listIdentityPools/aboveMaximum", target: "AWSCognitoIdentityService.ListIdentityPools", body: `{"MaxResults":61}`, wantMessage: "was 61"},
+			{name: "listIdentityPools/negative", target: "AWSCognitoIdentityService.ListIdentityPools", body: `{"MaxResults":-1}`, wantMessage: "was -1"},
+		},
+	},
+	{
+		// #1062's two Cognito user-pools sites. Same code and same published range, but this
+		// service's gloss says "invalid parameter" and not "missing" — so ListUserPools' refusal is
+		// substrate's recorded reading, per cognito_errors.go. ListUserPoolClients is here for its
+		// UserPoolId, which is the required member the issue mistook for a third MaxResults.
+		name: "cognito-idp",
+		host: "cognito-idp.us-east-1.amazonaws.com",
+		code: "InvalidParameterException",
+		cases: []memberCase{
+			{name: "listUserPools", target: "AWSCognitoIdentityProviderService.ListUserPools", body: "{}", wantMessage: "MaxResults must be between 1 and 60"},
+			{name: "listUserPools/aboveMaximum", target: "AWSCognitoIdentityProviderService.ListUserPools", body: `{"MaxResults":61}`, wantMessage: "was 61"},
+			{name: "listUserPoolClients", target: "AWSCognitoIdentityProviderService.ListUserPoolClients", body: "{}", wantMessage: "UserPoolId is required"},
+		},
+	},
+	{
+		// #1062's DynamoDB Streams site, and the one row in this table whose service answers a code
+		// no operation page publishes. API_streams_GetRecords publishes no validation error of any
+		// kind, so the refusal comes from the JSON common list; dynamodb_streams_errors.go records
+		// why ValidationException was declined even though eighteen sites in the same plugin use it.
+		//
+		// The entry is named for the API, not for a host: substrate routes the Streams operations
+		// through DynamoDB's own host and DynamoDB_20120810 target prefix, so nothing on the wire
+		// separates them. That is why this entry's one code scopes to the Streams API rather than to
+		// the plugin, which answers ValidationException at its eighteen control-plane sites.
+		name: "dynamodb-streams",
+		host: "dynamodb.us-east-1.amazonaws.com",
+		code: "ValidationError",
+		cases: []memberCase{
+			{name: "getRecords", target: "DynamoDB_20120810.GetRecords", body: "{}", wantMessage: "ShardIterator is a required parameter"},
 		},
 	},
 }

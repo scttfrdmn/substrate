@@ -333,6 +333,12 @@ func (p *GluePlugin) getTables(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 			return nil, glueInvalidBody()
 		}
 	}
+	// DatabaseName is Required: Yes on API_GetTables. Without this the name went straight into
+	// the state key, so GetTables with no body answered 200 and an empty Tables list — a
+	// caller's "this database has no tables" rather than "you did not name a database".
+	if input.DatabaseName == "" {
+		return nil, glueInvalidInput("DatabaseName is a required parameter")
+	}
 	goCtx := context.Background()
 	names, err := loadStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName)
 	if err != nil {

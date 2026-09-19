@@ -285,8 +285,11 @@ func (p *CognitoIDPPlugin) listUserPools(ctx *RequestContext, req *AWSRequest) (
 			return nil, cognitoIDPInvalidBody()
 		}
 	}
-	if body.MaxResults <= 0 {
-		body.MaxResults = 60
+	// MaxResults is Required: Yes over 1–60 on API_ListUserPools, with no published default.
+	// See cognito_errors.go: the gloss on this service's InvalidParameterException does not name
+	// the missing case, so applying it to an absent member is substrate's recorded reading.
+	if body.MaxResults < cognitoMaxResultsMin || body.MaxResults > cognitoMaxResultsMax {
+		return nil, cognitoIDPInvalidParameter(cognitoMaxResultsOutOfRange(body.MaxResults))
 	}
 
 	goCtx := context.Background()
@@ -464,6 +467,13 @@ func (p *CognitoIDPPlugin) listUserPoolClients(ctx *RequestContext, req *AWSRequ
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	// UserPoolId is Required: Yes on API_ListUserPoolClients and went straight into the state
+	// key, so a request that named no pool answered 200 with an empty Clients list. MaxResults
+	// here is Required: No over 1–60, so the rewrite below is a page-size defect rather than a
+	// required-member one and stays until that issue.
+	if body.UserPoolID == "" {
+		return nil, cognitoIDPInvalidParameter("UserPoolId is required")
 	}
 	if body.MaxResults <= 0 {
 		body.MaxResults = 60

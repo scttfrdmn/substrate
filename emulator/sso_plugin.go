@@ -136,7 +136,7 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 	if input.Name == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ssoValidationException("Name is required")
 	}
 
 	goCtx := context.Background()
@@ -350,6 +350,18 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 			return nil, ssoInvalidBody()
 		}
 	}
+	// API_CreateAccountAssignment and API_DeleteAccountAssignment mark all six of these
+	// Required: Yes. See [ssoRequireMembers] for what answering 200 for none of them meant.
+	if err := ssoRequireMembers(
+		ssoMember{"InstanceArn", input.InstanceArn},
+		ssoMember{"PermissionSetArn", input.PermissionSetArn},
+		ssoMember{"TargetId", input.TargetID},
+		ssoMember{"TargetType", input.TargetType},
+		ssoMember{"PrincipalType", input.PrincipalType},
+		ssoMember{"PrincipalId", input.PrincipalID},
+	); err != nil {
+		return nil, err
+	}
 
 	assignment := SSOAccountAssignment{
 		PermissionSetArn: input.PermissionSetArn,
@@ -401,6 +413,19 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 			return nil, ssoInvalidBody()
 		}
 	}
+	// API_DeleteAccountAssignment marks the same six Required: Yes as its create counterpart
+	// above, and reads them in the same order — the delete is the worse of the two, because it
+	// answered SUCCEEDED for deleting an assignment that named nothing.
+	if err := ssoRequireMembers(
+		ssoMember{"InstanceArn", input.InstanceArn},
+		ssoMember{"PermissionSetArn", input.PermissionSetArn},
+		ssoMember{"TargetId", input.TargetID},
+		ssoMember{"TargetType", input.TargetType},
+		ssoMember{"PrincipalType", input.PrincipalType},
+		ssoMember{"PrincipalId", input.PrincipalID},
+	); err != nil {
+		return nil, err
+	}
 
 	goCtx := context.Background()
 	key := ssoAssignmentKey(reqCtx.AccountID, input.PermissionSetArn, input.TargetID, input.PrincipalType, input.PrincipalID)
@@ -421,6 +446,7 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 
 func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
+		InstanceArn      string `json:"InstanceArn"`
 		PermissionSetArn string `json:"PermissionSetArn"`
 		AccountID        string `json:"AccountId"`
 	}
@@ -428,6 +454,17 @@ func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSReque
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, ssoInvalidBody()
 		}
+	}
+	// API_ListAccountAssignments marks AccountId, InstanceArn and PermissionSetArn all
+	// Required: Yes. InstanceArn was not even decoded before #1062, which is why it is in the
+	// struct above now; substrate scopes the listing by the caller's own account rather than by
+	// AccountId, so the member is read only to be required, not to select.
+	if err := ssoRequireMembers(
+		ssoMember{"AccountId", input.AccountID},
+		ssoMember{"InstanceArn", input.InstanceArn},
+		ssoMember{"PermissionSetArn", input.PermissionSetArn},
+	); err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -465,7 +502,7 @@ func (p *SSOPlugin) listAccountAssignments(reqCtx *RequestContext, req *AWSReque
 // loadPermissionSet loads an SSOPermissionSet from state or returns a not-found error.
 func (p *SSOPlugin) loadPermissionSet(acct, permSetArn string) (*SSOPermissionSet, error) {
 	if permSetArn == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "PermissionSetArn is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ssoValidationException("PermissionSetArn is required")
 	}
 	goCtx := context.Background()
 	data, err := p.state.Get(goCtx, ssoNamespace, ssoPermSetKey(acct, permSetArn))
