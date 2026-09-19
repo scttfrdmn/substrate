@@ -332,36 +332,36 @@ func wafv2InvalidBody() *AWSError {
 // glueInvalidBody reports that an AWS Glue request body would not decode.
 //
 // InvalidInputException at 400, "The input provided was not valid.", published on
-// every Glue operation page — not the InvalidParameterValueException the file's
-// twenty-six other guards answer, which Glue does not publish anywhere: it is
+// every Glue operation page — not the InvalidParameterValueException the plugin's
+// member-and-ARN guards answered, which Glue does not publish anywhere: it is
 // absent from the Common Errors page, from API_CreateDatabase, API_GetTables and
-// API_StartJobRun, and from all thirty-six AWSGlueException subclasses. Those
-// guards are a separate correction (#950's class) and are left for their own
-// change; this one refuses with the code Glue actually publishes.
+// API_StartJobRun, and from all thirty-six AWSGlueException subclasses.
+//
+// #950 deferred those guards and this comment put their number at twenty-six.
+// #1063 counted them: there were **four**, and they now call [glueInvalidInput],
+// which is where the code and the status are decided for the whole plugin. See
+// glue_errors.go for why an ARN that will not parse is not EntityNotFoundException.
 func glueInvalidBody() *AWSError {
-	return &AWSError{
-		Code:       "InvalidInputException",
-		Message:    "invalid request body",
-		HTTPStatus: http.StatusBadRequest,
-	}
+	return glueInvalidInput("invalid request body")
 }
 
 // fsxInvalidBody reports that an Amazon FSx request body would not decode.
 //
 // BadRequest at 400, "A generic error indicating a failure with a client
 // request.", published on the FSx operation pages — not the bare InvalidRequest
-// the file's three other refusals answer, which FSx does not publish: it is absent
-// from its Common Errors page, from API_DescribeFileSystems, and from all
-// thirty-five AmazonFSxException subclasses. InvalidRequest is an Amazon S3 code,
-// the likely provenance of the mistake.
+// the plugin's one member guard answered, which FSx does not publish: it is absent
+// from its Common Errors page, from API_DescribeFileSystems, from
+// API_DeleteFileSystem, and from all thirty-five AmazonFSxException subclasses.
+// InvalidRequest is an Amazon S3 code, the likely provenance of the mistake.
 //
 // The stem is what was wrong, not the suffix: FSx's Java class is
 // BadRequestException but the wire code carries no suffix, so the file's
 // no-suffix instinct was right.
+//
+// #1063 corrected that one member guard, which is in deleteFileSystem and not in
+// describeFileSystems as the issue and this comment's citation both had it; it now
+// calls [fsxBadRequest]. See fsx_errors.go for why the difference decides whether
+// the guard should exist at all.
 func fsxInvalidBody() *AWSError {
-	return &AWSError{
-		Code:       "BadRequest",
-		Message:    "invalid request body",
-		HTTPStatus: http.StatusBadRequest,
-	}
+	return fsxBadRequest("invalid request body")
 }

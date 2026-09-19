@@ -1043,7 +1043,14 @@ type memberService struct {
 	cases []memberCase
 }
 
-// memberComplaintServices is every site whose code string #950 changed that is **not** a parse guard.
+// memberComplaintServices is every site whose code string #950 or #1063 changed that is **not** a parse
+// guard.
+//
+// The first eight services are #950's; the last three are #1063's eleven, which #950 deferred — four in
+// Glue, one in FSx and six in WAFv2 — and they belong in this table rather than in a new one for the
+// reason the table exists: its one `code:` per service is what forced each of those eleven decisions to
+// be made once. Adding a twelfth service here is the cheapest way to state that a plugin answers one
+// code for one class of caller error.
 //
 // These are the second half of the inventory in docs/services.md — the "+ N member" column. They matter
 // as much as the parse guards and are easier to miss: a parse guard is one literal per handler, while
@@ -1169,6 +1176,76 @@ var memberComplaintServices = []memberService{
 			// nor an access point is refused rather than silently stored under a third kind.
 			{name: "mergeEFSTags", path: "/2015-02-01/resource-tags/xyz-12345678", body: `{"Tags":[{"Key":"k","Value":"v"}]}`, wantMessage: "Unknown resource ID prefix"},
 			{name: "loadEFSTags", path: "/2015-02-01/resource-tags/xyz-12345678", method: http.MethodGet, body: "{}", wantMessage: "Unknown resource ID prefix"},
+		},
+	},
+	{
+		// #1063's four Glue sites. #950 corrected the plugin's twenty-seven parse guards to
+		// InvalidInputException and deferred these; they had kept InvalidParameterValueException,
+		// a string that appears on no Glue page, so one plugin answered a published code for a
+		// body it could not read and an unpublished one for an ARN it could not parse.
+		//
+		// The last three rows are resolveGlueARN's remaining failure shapes, and they are here for
+		// the reason the MSK rows above are: they are the evidence that the resolver decides the
+		// code once. Every one of the four is a complaint about the *shape* of the string, which is
+		// why EntityNotFoundException — published at 400 on all three tagging pages — is not the
+		// answer: nothing has been looked up.
+		name: "glue",
+		host: "glue.us-east-1.amazonaws.com",
+		code: "InvalidInputException",
+		cases: []memberCase{
+			{name: "createDatabase", target: "AWSGlue.CreateDatabase", body: "{}", wantMessage: "DatabaseInput.Name is required"},
+			{name: "tagResource", target: "AWSGlue.TagResource", body: "{}", wantMessage: "invalid Glue ARN"},
+			{name: "untagResource", target: "AWSGlue.UntagResource", body: "{}", wantMessage: "invalid Glue ARN"},
+			{name: "getTags", target: "AWSGlue.GetTags", body: "{}", wantMessage: "invalid Glue ARN"},
+			{name: "resolveGlueARN/tooFewFields", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1"}`, wantMessage: "invalid Glue ARN"},
+			{name: "resolveGlueARN/noSlash", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1:123456789012:database"}`, wantMessage: "invalid Glue ARN resource"},
+			{name: "resolveGlueARN/unsupportedType", target: "AWSGlue.GetTags", body: `{"ResourceArn":"arn:aws:glue:us-east-1:123456789012:widget/w"}`, wantMessage: "unsupported Glue resource type"},
+		},
+	},
+	{
+		// #1063's one FSx site, and the issue put it on the wrong operation: it is deleteFileSystem,
+		// where API_DeleteFileSystem marks FileSystemId Required: Yes, not describeFileSystems,
+		// where FileSystemIds is Required: No and an absent list means "describe them all". So the
+		// guard is right and only the code was wrong — InvalidRequest is an Amazon S3 string.
+		name: "fsx",
+		host: "fsx.us-east-1.amazonaws.com",
+		code: "BadRequest",
+		cases: []memberCase{
+			{name: "deleteFileSystem", target: "AWSSimbaAPIService_v20180301.DeleteFileSystem", body: "{}", wantMessage: "FileSystemId is required"},
+		},
+	},
+	{
+		// #1063's six WAFv2 sites, which had answered WAFInvalidParameterException for an omitted
+		// member. #755 had already settled that distinction for CreateIPSet — that code is glossed
+		// "AWS WAF didn't recognize a parameter in the request" and all four of its published
+		// examples are about a value substrate *read* — so the plugin was answering two codes for
+		// one class of caller error, which is the defect wafv2ValidateCreateIPSet's split exists to
+		// prevent. This table is what keeps them together.
+		//
+		// getWebACL is the row that is not about a named member. API_GetWebACL marks ARN, Id, Name
+		// and Scope **all Required: No**, so its refusal cannot say "Id is a required parameter";
+		// it reports that the request addressed nothing, which is why the Id check could not stay
+		// in loadWebACLByID where its other three callers need it.
+		name: "wafv2",
+		host: "wafv2.us-east-1.amazonaws.com",
+		code: "ValidationError",
+		cases: []memberCase{
+			{name: "createWebACL", target: "AWSWAF_20190729.CreateWebACL", body: "{}", wantMessage: "Name is a required parameter"},
+			{name: "getWebACL", target: "AWSWAF_20190729.GetWebACL", body: "{}", wantMessage: "the request identifies no web ACL"},
+			{name: "updateWebACL", target: "AWSWAF_20190729.UpdateWebACL", body: "{}", wantMessage: "Id is a required parameter"},
+			{name: "deleteWebACL", target: "AWSWAF_20190729.DeleteWebACL", body: "{}", wantMessage: "Id is a required parameter"},
+			{name: "associateWebACL", target: "AWSWAF_20190729.AssociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
+			{name: "disassociateWebACL", target: "AWSWAF_20190729.DisassociateWebACL", body: "{}", wantMessage: "ResourceArn is a required parameter"},
+			{name: "getWebACLForResource", target: "AWSWAF_20190729.GetWebACLForResource", body: "{}", wantMessage: "ResourceArn is a required parameter"},
+			// loadIPSetByID keeps its check, because API_GetIPSet, API_UpdateIPSet and
+			// API_DeleteIPSet all mark Id Required: Yes and listIPSets reads the index.
+			{name: "getIPSet", target: "AWSWAF_20190729.GetIPSet", body: "{}", wantMessage: "Id is a required parameter"},
+			{name: "updateIPSet", target: "AWSWAF_20190729.UpdateIPSet", body: "{}", wantMessage: "Id is a required parameter"},
+			{name: "deleteIPSet", target: "AWSWAF_20190729.DeleteIPSet", body: "{}", wantMessage: "Id is a required parameter"},
+			// CreateIPSet answers the same code from wafv2ValidateCreateIPSet, which #755 wrote and
+			// wafv2_createipset_validation_test.go covers in full. One row here proves the two
+			// paths agree rather than duplicating that file.
+			{name: "createIPSet", target: "AWSWAF_20190729.CreateIPSet", body: "{}", wantMessage: "Name is a required parameter"},
 		},
 	},
 }

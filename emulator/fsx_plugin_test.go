@@ -69,6 +69,26 @@ func readFSxBody(t *testing.T, r *http.Response) []byte {
 	return body
 }
 
+// assertFSxError asserts the refusal's code and status together.
+//
+// Every FSx refusal below asserted only the status before #1063, which is how deleteFileSystem came to
+// answer InvalidRequest — an Amazon S3 code that appears on no FSx page — for four releases without a
+// test noticing. A status alone cannot tell BadRequest from InvalidRequest; both are 400.
+func assertFSxError(t *testing.T, r *http.Response, wantCode string) {
+	t.Helper()
+	assert.Equal(t, http.StatusBadRequest, r.StatusCode)
+	var errShape struct {
+		Type    string `json:"__type"`
+		Message string `json:"message"`
+	}
+	require.NoError(t, json.Unmarshal(readFSxBody(t, r), &errShape))
+	code := errShape.Type
+	if i := strings.LastIndex(code, "#"); i >= 0 {
+		code = code[i+1:]
+	}
+	assert.Equal(t, wantCode, code, "message: %s", errShape.Message)
+}
+
 func TestFSx_CreateDescribeDelete(t *testing.T) {
 	srv := newFSxTestServer(t)
 	ts := httptest.NewServer(srv)
@@ -159,7 +179,7 @@ func TestFSx_CreateDescribeDelete(t *testing.T) {
 	})
 	require.NoError(t, err2)
 	resp = fsxRequest(t, ts, "DescribeFileSystems", string(descByIDBody2))
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertFSxError(t, resp, "FileSystemNotFound")
 }
 
 func TestFSx_DescribeNotFound(t *testing.T) {
@@ -172,7 +192,7 @@ func TestFSx_DescribeNotFound(t *testing.T) {
 	})
 	require.NoError(t, err)
 	resp := fsxRequest(t, ts, "DescribeFileSystems", string(body))
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertFSxError(t, resp, "FileSystemNotFound")
 }
 
 func TestFSx_DeleteNotFound(t *testing.T) {
@@ -183,7 +203,23 @@ func TestFSx_DeleteNotFound(t *testing.T) {
 	body, err := json.Marshal(map[string]string{"FileSystemId": "fs-nonexistent"})
 	require.NoError(t, err)
 	resp := fsxRequest(t, ts, "DeleteFileSystem", string(body))
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assertFSxError(t, resp, "FileSystemNotFound")
+}
+
+// TestFSx_DeleteRequiresFileSystemID asserts the refusal #1063 corrected.
+//
+// API_DeleteFileSystem marks FileSystemId Required: Yes and publishes five errors — BadRequest,
+// FileSystemNotFound, IncompatibleParameterError, InternalServerError and ServiceLimitExceeded. The
+// handler answered InvalidRequest, which is on none of them, and #1063 attributed the site to
+// describeFileSystems, where FileSystemIds is Required: No and an absent list means "describe them all"
+// — the behavior TestFSx_CreateDescribeDelete above already relies on. So the guard was in the right
+// place and only the code was wrong.
+func TestFSx_DeleteRequiresFileSystemID(t *testing.T) {
+	srv := newFSxTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	assertFSxError(t, fsxRequest(t, ts, "DeleteFileSystem", "{}"), "BadRequest")
 }
 
 func TestFSx_MultipleFileSystems(t *testing.T) {

@@ -147,7 +147,7 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 	if input.Name == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wafv2MissingMember("Name")
 	}
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
@@ -212,6 +212,13 @@ func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
 	}
+	// API_GetWebACL marks ARN, Id, Name and Scope all Required: No — the ARN alone identifies a
+	// web ACL, and the Name/Id/Scope triple is the alternative. Substrate models only the
+	// triple, so a request supplying none of the four has addressed nothing, which is not a
+	// complaint about one member (#1063).
+	if input.ID == "" {
+		return nil, wafv2ValidationError("the request identifies no web ACL; supply Name, Id and Scope")
+	}
 
 	acl, err := p.loadWebACLByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
 	if err != nil {
@@ -242,6 +249,11 @@ func (p *WAFv2Plugin) updateWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
+	}
+	// Id is Required: Yes on API_UpdateWebACL, which is why the check is here and not in
+	// loadWebACLByID — see that function for the caller that disagrees.
+	if input.ID == "" {
+		return nil, wafv2MissingMember("Id")
 	}
 
 	acl, err := p.loadWebACLByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -300,6 +312,10 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
+	}
+	// Id is Required: Yes on API_DeleteWebACL; see [WAFv2Plugin.loadWebACLByID].
+	if input.ID == "" {
+		return nil, wafv2MissingMember("Id")
 	}
 
 	acl, err := p.loadWebACLByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -372,7 +388,7 @@ func (p *WAFv2Plugin) associateWebACL(reqCtx *RequestContext, req *AWSRequest) (
 		}
 	}
 	if input.ResourceArn == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "ResourceArn is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wafv2MissingMember("ResourceArn")
 	}
 
 	goCtx := context.Background()
@@ -398,7 +414,7 @@ func (p *WAFv2Plugin) disassociateWebACL(reqCtx *RequestContext, req *AWSRequest
 		}
 	}
 	if input.ResourceArn == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "ResourceArn is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wafv2MissingMember("ResourceArn")
 	}
 
 	goCtx := context.Background()
@@ -420,7 +436,7 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 		}
 	}
 	if input.ResourceArn == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "ResourceArn is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wafv2MissingMember("ResourceArn")
 	}
 
 	goCtx := context.Background()
@@ -651,10 +667,19 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 // loadWebACLByID loads a WAFv2WebACL from state by ID or returns a not-found error.
+//
+// It carries no required-member check, and that is the one place in #1063 where correcting
+// the code was not enough: its four callers do not agree about whether Id is required.
+// API_UpdateWebACL and API_DeleteWebACL mark it Required: Yes, listWebACLs supplies an ID out
+// of the index, and **API_GetWebACL marks ARN, Id, Name and Scope all Required: No**, because
+// there the ARN alone identifies a web ACL and the Name/Id/Scope triple is the alternative.
+// A single check here would have reported "Id is a required parameter" from the one operation
+// whose page says it is not, so each caller states its own page's requirement and this
+// function only resolves.
+//
+// An empty ID therefore reaches the lookup below and answers WAFNonexistentItemException.
+// That is unreachable from the four handlers as written, all of which now refuse first.
 func (p *WAFv2Plugin) loadWebACLByID(acct, region, scope, id string) (*WAFv2WebACL, error) {
-	if id == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "Id is required", HTTPStatus: http.StatusBadRequest}
-	}
 	goCtx := context.Background()
 	key := wafv2WebACLKey(acct, region, scope, id)
 	data, err := p.state.Get(goCtx, wafv2Namespace, key)
@@ -672,9 +697,15 @@ func (p *WAFv2Plugin) loadWebACLByID(acct, region, scope, id string) (*WAFv2WebA
 }
 
 // loadIPSetByID loads a WAFv2IPSet from state by ID or returns a not-found error.
+//
+// The required-member check stays here, unlike [WAFv2Plugin.loadWebACLByID]'s, because all
+// four callers agree with each other: API_GetIPSet, API_UpdateIPSet and API_DeleteIPSet each
+// mark Id Required: Yes, and listIPSets supplies an ID read out of the index, which is never
+// empty. So one answer serves every caller and the check belongs at the one place that needs
+// it (#1063).
 func (p *WAFv2Plugin) loadIPSetByID(acct, region, scope, id string) (*WAFv2IPSet, error) {
 	if id == "" {
-		return nil, &AWSError{Code: "WAFInvalidParameterException", Message: "Id is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wafv2MissingMember("Id")
 	}
 	goCtx := context.Background()
 	key := wafv2IPSetKey(acct, region, scope, id)
