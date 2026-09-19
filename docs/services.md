@@ -5691,7 +5691,7 @@ Lambda invocations: $0.0000002 per request.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateQueue | Supports FifoQueue, VisibilityTimeout attributes; [`QueueNameExists`](#queuenameexists) when a name is reused with differing attributes; [seedable `QueueDeletedRecently`](#seeding-queuedeletedrecently) |
+| CreateQueue | Supports FifoQueue, VisibilityTimeout attributes; [`QueueNameExists`](#queuenameexists) when a name is reused with differing attributes; [seedable `QueueDeletedRecently`](#seeding-queuedeletedrecently); stores a [create-time tag set](#a-tag-set-at-create-time-and-the-query-spelling-aws-publishes) |
 | GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
 | GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window); [attribute defaults](#queue-attribute-defaults) |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
@@ -5853,6 +5853,54 @@ what substrate reported until #439. An explicitly requested value is always hono
 These defaults also decide what counts as a
 [`QueueNameExists`](#queuenameexists) conflict, since an existing queue's unset
 attributes are resolved through them before comparing.
+
+### A tag set at create time, and the query spelling AWS publishes
+
+`API_CreateQueue` publishes a `tags` member (`String to string map`, `Required: No`) and its own JSON
+sample sends one. Until [#1087](https://github.com/scttfrdmn/substrate/issues/1087) `createQueue`
+decoded `QueueName` and `Attributes` only, so the call answered 200, the queue existed, and
+`ListQueueTags` reported nothing — a consumer that tags on create, which is the only way to tag
+atomically and the shape CDK and Terraform both emit, could not tell a dropped tag set from a bug in
+its own code.
+
+**The query spelling is the finding.** AWS's query sample is **unindexed**:
+
+```
+&Tag.Key=QueueType&Tag.Value=Production
+```
+
+and that is the sample on `API_TagQueue`'s page as well. AWS publishes **no** `Tag.N.Key` form for
+either operation, anywhere on either page — even though the same `CreateQueue` sample indexes its
+*attributes* (`&Attribute.1.Name=&Attribute.1.Value=`). Substrate's `TagQueue` parsed `Tag.N.Key` and
+nothing else, so it handled a spelling AWS publishes nowhere and dropped the only one it does. The
+indexed form still has to be read, because it is what a query-protocol SDK serialiser emits for a map
+member and therefore the form real calls arrive in, so **both are accepted** — indexed first, and the
+unindexed pair only when the indexed scan matched nothing, so a request carrying both resolves the
+same way every time. One parser serves both operations, which widened `TagQueue` to the published
+form; nothing it accepted before is refused now.
+
+The JSON member differs in case between the two operations — lowercase `tags` on `CreateQueue`,
+capitalised `Tags` on `TagQueue`, AWS's own inconsistency — and needs no code, because `encoding/json`
+falls back to a case-insensitive member match when no exact one is found.
+
+**Substrate enforces no tag limit here, and that is the published contract rather than an omission.**
+The `tags` member carries no `Map Entries` and no `Length` constraint at all; the fifty-tag figure is
+worded as a recommendation — *"Adding more than 50 tags to a queue isn't recommended"* — on both this
+page and `TagQueue`'s; and neither Errors list carries a too-many-tags code. There is nothing to refuse
+with, so sixty tags are stored. Kinesis's `CreateStream` publishes constraints and therefore refuses
+(see [How many tags a stream may carry](#how-many-tags-a-stream-may-carry)); the difference is in the
+references, not in substrate, and is pinned by a test so the missing SQS refusal is not later "fixed"
+by analogy.
+
+**A tag set on an idempotent hit is not applied.** A second `CreateQueue` for an existing queue with
+the same attributes succeeds and reports the same URL; AWS publishes nothing about what happens to
+tags on that request, and substrate's reading is that a call which created nothing tagged nothing.
+`TagQueue` is the door that publishes retagging.
+
+`EverTagged` is deliberately not stamped by either create path, per the recorded decision in
+`tagging_ever_tagged.go`: the flag is only consulted when a record's tag set is empty, and the writer
+that empties it counts the set before removing from it. See
+[GetResources reports what has been tagged](#getresources-reports-what-has-been-tagged-not-what-is-tagged).
 
 ### Message size enforcement
 
@@ -14934,7 +14982,7 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one |
+| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written |
 | DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard) |
 | DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
 | DeleteStream | |
@@ -15104,6 +15152,37 @@ first per-resource tag quota (EC2, ELBv2 and IAM each enforced one already, and 
 through the tagging API), and the merge covers twenty-three arms rather than sixteen. See
 [A tag quota belongs to the service that owns the resource](#a-tag-quota-belongs-to-the-service-that-owns-the-resource)
 for the four services' codes, which differ.
+
+**`CreateStream` reaches the same two checks**, since
+[#1087](https://github.com/scttfrdmn/substrate/issues/1087). `API_CreateStream` publishes `Tags` with
+the identical pair of numbers — prose *"A set of up to 50 key-value pairs"* over *"Map Entries: Maximum
+number of 200 items"* — and the operation's lede states the interaction: *"You can add tags to the
+stream when making a `CreateStream` request by setting the `Tags` parameter."* Substrate decoded
+`StreamName` and `ShardCount` only, so a create-time tag set was silently dropped.
+
+Both checks run **before any state is read**, which is what leaves no stream behind on a refusal: the
+200-entry bound is a property of the request alone, and a stream that does not exist yet holds no tags
+for the quota to merge against. A create that refused after writing its record would be the worse
+failure, because the caller's retry would then hit `ResourceInUseException` for a stream it was told it
+had not created.
+
+Two differences from `AddTagsToStream` are worth stating.
+
+- **`Tags` is `Required: No` here**, so an absent member is not the missing-member refusal.
+  `kinesisValidateTagMap`'s nil branch belongs to `AddTagsToStream`, where the member is
+  `Required: Yes`, and is gated at the create call site. An explicit `null` and an empty map are both
+  accepted, the latter as the same no-op the table above records.
+- **`LimitExceededException`'s attribution on this page is substrate's reading, not a citation.** The
+  code *is* in `CreateStream`'s Errors list at 400, but the page attributes it to *"more than five
+  streams in the `CREATING` state"* and to requesting *"more shards than are authorized"* — it says
+  nothing about tag count. Using it for a fifty-first tag at create time carries the attribution over
+  from the sibling door where it *is* published. That is not the borrowing
+  [#671](https://github.com/scttfrdmn/substrate/issues/671) forbids, which is taking a code the
+  operation's own page does not carry at all. `InvalidArgumentException` needs no such reading: its
+  description covers the over-200 shape on this page exactly as it does on the other.
+
+`EverTagged` is deliberately not stamped by the create path, for the reason recorded under
+[`GetResources` reports what has been tagged](#getresources-reports-what-has-been-tagged-not-what-is-tagged).
 
 ### Shard-level metrics, and the ALL wildcard
 

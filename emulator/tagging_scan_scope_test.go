@@ -326,8 +326,11 @@ var scanScopeServices = []scanScopeService{
 				map[string]any{"QueueName": id}, &out)
 			require.NotEmptyf(t, out.QueueURL, "CreateQueue %s reports a URL", id)
 
-			// Through TagQueue rather than CreateQueue's own tags member, which substrate decodes
-			// nowhere: createQueue reads QueueName and Attributes only.
+			// Through TagQueue rather than CreateQueue's own tags member, which createQueue does read
+			// since #1087. The dedicated door is kept here on purpose: this table asserts what the
+			// RGTA scanner finds, so tagging through the operation that publishes tagging keeps the
+			// two concerns separate. The create-time member's round trip is asserted in
+			// sqs_create_tags_test.go.
 			scanScopeJSON(t, ts, account, "sqs", region, "AmazonSQS", "TagQueue",
 				map[string]any{"QueueUrl": out.QueueURL, "Tags": scanScopeTagMap()}, nil)
 			return id
@@ -474,8 +477,10 @@ var scanScopeServices = []scanScopeService{
 			scanScopeJSON(t, ts, account, "kinesis", region, "Kinesis_20131202", "CreateStream",
 				map[string]any{"StreamName": id, "ShardCount": 1}, nil)
 
-			// Through AddTagsToStream, because CreateStream carries no tags member at all — Kinesis
-			// publishes tagging as a separate operation.
+			// Through AddTagsToStream rather than CreateStream's own Tags member, which createStream
+			// does read since #1087 — the claim that CreateStream carries no tags member was wrong.
+			// The dedicated door is kept here for the same reason as the SQS row above; the
+			// create-time member's round trip is asserted in kinesis_create_tags_test.go.
 			scanScopeJSON(t, ts, account, "kinesis", region, "Kinesis_20131202", "AddTagsToStream",
 				map[string]any{"StreamName": id, "Tags": scanScopeTagMap()}, nil)
 			return ":stream/" + id

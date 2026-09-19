@@ -693,6 +693,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ApiKeyValidityOutOfBoundsException`/400 with no site (#1122).
 
 ### Fixed
+- **SQS `CreateQueue` and Kinesis `CreateStream` dropped a tag set their own pages publish** (#1087).
+  Both decoded every other member and no tag member at all, so a create-with-tags call answered 200,
+  the resource existed, and `ListQueueTags` / `ListTagsForStream` reported nothing — indistinguishable,
+  from the caller's side, from a bug in its own tagging code, and exactly the shape CDK and Terraform
+  emit because tagging at create is the only way to tag atomically. Both now store the member, and both
+  round trips are asserted over the wire through the owning service *and* through `GetResources`, per
+  #765. Measured while fixing: the class of create handlers that initialise an empty tag collection and
+  never read a tag from the request is **four**, not the thirty-eight the plan estimated — the other two
+  are correct as written, because `CreateBucket` and `CreateDistribution` publish no tag member (CloudFront
+  puts create-time tagging in the separate `CreateDistributionWithTags`, which substrate does not route,
+  filed separately).
+- **SQS's published query spelling for a tag is unindexed, and substrate parsed only a spelling AWS
+  publishes nowhere** (#1087). `API_CreateQueue`'s query sample is `&Tag.Key=QueueType&Tag.Value=Production`
+  — and so is `API_TagQueue`'s. Neither page publishes a `Tag.N.Key` form anywhere, though the same
+  `CreateQueue` sample indexes its *attributes*. `tagQueue` read `Tag.N.Key` and nothing else, so the
+  only spelling the reference shows was dropped at both doors. One parser now serves both operations and
+  reads both forms — indexed first, the unindexed pair only when the indexed scan matched nothing, so a
+  request carrying both resolves the same way every time. `TagQueue` is thereby widened to the published
+  form; nothing it accepted before is refused.
+- **Kinesis `CreateStream` now enforces the same two published tag bounds as `AddTagsToStream`, before
+  the stream is written** (#1087). The page states both numbers in one member entry — prose *"A set of up
+  to 50 key-value pairs"* over *"Map Entries: Maximum number of 200 items"* — so #965's split stands
+  unchanged: over 200 entries in one request is `InvalidArgumentException`/400 and a merged set over 50 is
+  `LimitExceededException`/400. Both run before any state is read, which is what leaves no stream behind
+  on a refusal; a create that refused after its `Put` would send the caller's retry into
+  `ResourceInUseException` for a stream it was told it had not created. Two provenance notes are recorded
+  rather than assumed: `Tags` is `Required: No` here where `AddTagsToStream` marks it `Required: Yes`, so
+  `kinesisValidateTagMap`'s nil branch is gated at the create site instead of refusing every request that
+  omits tags; and while `LimitExceededException` *is* in this page's Errors list, the page attributes it to
+  streams in `CREATING` and to shard authorization, never to tag count — using it for a fifty-first tag
+  carries the attribution over from the sibling door and is labelled as substrate's reading, not the
+  cross-page borrowing #671 forbids.
+- **SQS gains no tag-count refusal, and that is now written down and tested** (#1087). Its `tags` member
+  publishes no `Map Entries` and no `Length` constraint, the fifty-tag figure is worded as a
+  *recommendation* on both `CreateQueue`'s page and `TagQueue`'s, and neither Errors list carries a
+  too-many-tags code — so sixty tags are stored, and a test pins it so the asymmetry with Kinesis is not
+  later "fixed" by analogy. Two further readings are recorded at their sites: a tag set on an *idempotent*
+  `CreateQueue` is not applied, because a call that created nothing tagged nothing and AWS publishes
+  nothing about the case; and neither create path stamps `EverTagged`, per the recorded decision in
+  `tagging_ever_tagged.go` that a creation-with-tags path needs no stamp, since the flag is only consulted
+  when a tag set is empty and the writer that empties it counts the set first. Two test comments asserting
+  that substrate "decodes nowhere" / "carries no tags member at all" were true when written and are
+  corrected.
 - **Five pagination sites in four services answered a well-formed page one for a token substrate
   never issued** (#1086). KMS `ListKeys` and `ListAliases`, Secrets Manager `ListSecrets`,
   EventBridge `ListRules` and CloudFormation `DescribeStackEvents` all carried the pre-#915 idiom

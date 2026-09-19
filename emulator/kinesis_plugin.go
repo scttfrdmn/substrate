@@ -98,8 +98,9 @@ func (p *KinesisPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 
 func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		StreamName string `json:"StreamName"`
-		ShardCount int    `json:"ShardCount"`
+		StreamName string            `json:"StreamName"`
+		ShardCount int               `json:"ShardCount"`
+		Tags       map[string]string `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, kinesisInvalidBody()
@@ -109,6 +110,26 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 	if body.ShardCount <= 0 {
 		body.ShardCount = 1
+	}
+
+	// CreateStream is the one operation that mints an ARN rather than resolving one, so the caller's
+	// own account and Region are the right source here and the only place in the file they are. The
+	// target is built before the existence check because the tag refusals below name the ARN.
+	target := kinesisStreamTarget{AccountID: ctx.AccountID, Region: ctx.Region, Name: body.StreamName}
+
+	// Tags is Required: No on this operation, unlike AddTagsToStream's, so an absent member is not the
+	// missing-member refusal [kinesisValidateTagMap] answers for a nil map — only a member the request
+	// actually carries is checked. Both checks run before any state is read, because neither consults
+	// it: the shape bound is a property of the request, and a stream that does not exist yet holds no
+	// tags for the quota to merge against. That ordering is also what leaves no stream behind on a
+	// refusal (#1087).
+	if body.Tags != nil {
+		if refusal := kinesisValidateTagMap(body.Tags); refusal != nil {
+			return nil, refusal
+		}
+		if refusal := kinesisCheckTagQuota(target, nil, body.Tags); refusal != nil {
+			return nil, refusal
+		}
 	}
 
 	goCtx := context.Background()
@@ -127,10 +148,14 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
-	// CreateStream is the one operation that mints an ARN rather than resolving one, so the caller's
-	// own account and Region are the right source here and the only place in the file they are.
-	target := kinesisStreamTarget{AccountID: ctx.AccountID, Region: ctx.Region, Name: body.StreamName}
 	streamARN := kinesisStreamARN(target)
+	tags := body.Tags
+	if tags == nil {
+		tags = map[string]string{}
+	}
+	// EverTagged is deliberately left unwritten even when tags is non-empty, per [taggingEverTagged]'s
+	// "Creating with tags does not stamp it, and does not need to": the flag is only consulted when a
+	// record's tag set is empty, and removeTagsFromStream counts the set before it removes from it.
 	stream := KinesisStream{
 		StreamName:           body.StreamName,
 		StreamArn:            streamARN,
@@ -138,7 +163,7 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		ShardCount:           body.ShardCount,
 		Shards:               generateKinesisShards(body.ShardCount),
 		RetentionPeriodHours: 24,
-		Tags:                 map[string]string{},
+		Tags:                 tags,
 		EnhancedMonitoring:   []string{},
 		CreatedAt:            p.tc.Now(),
 		AccountID:            ctx.AccountID,

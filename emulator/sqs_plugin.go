@@ -277,21 +277,31 @@ func (p *SQSPlugin) deleteMsg(ctx context.Context, urlKey, msgID string) error {
 func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var name string
 	var attrs map[string]string
+	// tags is read alongside the attributes rather than in a second pass over the body, because
+	// CreateQueue publishes both members on one request and decoding twice is how the two could drift.
+	// The JSON member AWS publishes here is lowercase `tags`; see [sqsParseQueryTags] for why one
+	// capitalised struct tag decodes it anyway, and for the two query spellings.
+	var tags map[string]string
 	if sqsIsJSONProtocol(req) {
 		var input struct {
 			QueueName  string            `json:"QueueName"`
 			Attributes map[string]string `json:"Attributes"`
+			Tags       map[string]string `json:"Tags"`
 		}
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, sqsInvalidBody()
 		}
-		name, attrs = input.QueueName, input.Attributes
+		name, attrs, tags = input.QueueName, input.Attributes, input.Tags
 		if attrs == nil {
 			attrs = make(map[string]string)
+		}
+		if tags == nil {
+			tags = make(map[string]string)
 		}
 	} else {
 		name = req.Params["QueueName"]
 		attrs = parseSQSAttributes(req.Params)
+		tags = sqsParseQueryTags(req.Params)
 	}
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "QueueName is required", HTTPStatus: http.StatusBadRequest}
@@ -325,7 +335,10 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			return nil, sqsQueueNameExists(conflict)
 		}
 
-		// Idempotent — return existing URL.
+		// Idempotent — return existing URL. A tag set on the request is deliberately not applied to
+		// the queue that already exists: AWS publishes nothing about tags on an idempotent hit, and
+		// substrate's reading is that a call which created nothing tagged nothing. A caller that
+		// wants the queue retagged has TagQueue, which is the door that publishes retagging.
 		if sqsIsJSONProtocol(req) {
 			return sqsJSONResponse(http.StatusOK, map[string]string{"QueueUrl": existing.QueueURL})
 		}
@@ -347,12 +360,22 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 	now := p.tc.Now().Unix()
 
+	// EverTagged is deliberately left unwritten even when tags is non-empty, per
+	// [taggingEverTagged]'s "Creating with tags does not stamp it, and does not need to": the flag is
+	// only consulted when a record's tag set is empty, and the writer that empties this one —
+	// [SQSPlugin.untagQueue] — counts the set before it removes from it. Stamping here would be inert.
+	//
+	// The tag set is stored unvalidated, which is the whole of SQS's published contract: the `tags`
+	// member carries no Map Entries and no Length constraint, the fifty-tag figure is worded as a
+	// recommendation on both this page and TagQueue's, and neither Errors list carries a
+	// too-many-tags code. Kinesis's CreateStream publishes constraints and so refuses; SQS does not
+	// and so must not. See docs/services.md.
 	q := &SQSQueue{
 		QueueName:             name,
 		QueueURL:              queueURL,
 		QueueARN:              sqsQueueARN(ctx.Region, ctx.AccountID, name),
 		Attributes:            attrs,
-		Tags:                  make(map[string]string),
+		Tags:                  tags,
 		CreatedTimestamp:      now,
 		LastModifiedTimestamp: now,
 		FifoQueue:             isFifo,
@@ -675,13 +698,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 			q.Tags[k] = v
 		}
 	} else {
-		// Parse Tag.N.Key / Tag.N.Value pairs.
-		for i := 1; ; i++ {
-			k := req.Params[fmt.Sprintf("Tag.%d.Key", i)]
-			v := req.Params[fmt.Sprintf("Tag.%d.Value", i)]
-			if k == "" {
-				break
-			}
+		for k, v := range sqsParseQueryTags(req.Params) {
 			q.Tags[k] = v
 		}
 	}
