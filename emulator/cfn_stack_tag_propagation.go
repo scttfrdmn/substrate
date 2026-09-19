@@ -307,17 +307,22 @@ func cfnPropagateEC2StackTags(
 	return true, nil
 }
 
-// cfnPropagateELBStackTags reconciles the tags on one ELBv2 resource, found by its ARN.
+// cfnPropagateELBStackTags reconciles the tags on one Elastic Load Balancing resource, found by its
+// ARN.
 //
-// The ARN for the reason [cfnStampELBResource] gives: it is what ELBv2's resolver takes, and a
-// load balancer's and a target group's physical ID is a name rather than an ARN.
+// The ARN for the reason [cfnStampELBResource] gives: it is what ELB's resolver takes, and a
+// load balancer's and a target group's physical ID is a name rather than an ARN. The resolver is the
+// generation-blind one for the reason given there too — a template names a resource type, not an API
+// version (#844) — and, as that function also records, no template routes a classic resource here
+// until the classic type has a deploy helper.
 func cfnPropagateELBStackTags(
 	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	if dr.ARN == "" {
 		return false, nil
 	}
-	res, _, err := elbResolveTaggedResource(state, reqCtx.AccountID+"/"+reqCtx.Region, dr.ARN)
+	res, _, err := elbResolveAnyGenerationTaggedResource(
+		state, reqCtx.AccountID+"/"+reqCtx.Region, dr.ARN)
 	if err != nil {
 		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.ARN, err)
 	}

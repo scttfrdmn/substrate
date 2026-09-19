@@ -174,6 +174,11 @@ func TestELB_AMalformedParentARNIsRefusedRatherThanMintingAMalformedChild(t *tes
 
 	// The classic-ELB form AWS also publishes — `loadbalancer/<name>`, with no subtype — carries
 	// too few segments to build an ELBv2 listener from, and must not be padded out into one.
+	//
+	// Since #844 that ARN can name a real classic load balancer, which makes the refusal sharper
+	// rather than weaker: `CreateListener` is an operation only the 2015-12-01 API publishes, and a
+	// classic load balancer is not a parent it can hang a listener on whether the record exists or
+	// not. The arity is the whole of the check, and it is the same check either way.
 	classic := "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/web"
 	resp2 := elbRequest(t, ts.URL, map[string]string{
 		"Action":                                 "CreateListener",

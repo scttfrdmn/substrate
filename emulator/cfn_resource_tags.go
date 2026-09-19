@@ -307,14 +307,28 @@ func cfnStampResourceTags(
 	return true, nil
 }
 
-// cfnStampELBResource writes the stamp onto one ELBv2 resource, found by its ARN.
+// cfnStampELBResource writes the stamp onto one Elastic Load Balancing resource, found by its ARN.
 //
-// The ARN rather than the physical ID, because that is what ELBv2's resolver takes and what a
+// The ARN rather than the physical ID, because that is what ELB's resolver takes and what a
 // listener or rule is identified by — [StackDeployer.deployELBListener] sets the physical ID
 // *to* the ARN, while a load balancer's and a target group's physical ID is its name and the
 // ARN is carried beside it. A resource whose create failed has no ARN and never reaches here.
 //
-// [elbResolveTaggedResource]'s refusal is treated as "nothing to stamp" rather than as an
+// The resolver is [elbResolveAnyGenerationTaggedResource] rather than ELBv2's own, because a
+// template deploys resources and not API generations: `AWS::ElasticLoadBalancing::LoadBalancer`
+// names a Classic Load Balancer and `AWS::ElasticLoadBalancingV2::LoadBalancer` an ELBv2 one, and a
+// stack's tags reach whichever it declared. ELBv2's `AddTags` refuses a classic ARN because its own
+// page says it only tags ELBv2 resources; CloudFormation never made that claim (#844).
+//
+// **No template reaches the classic half today**, and the resolver is the generation-blind one
+// anyway: [cfnELBStampableTypes] lists the four ELBv2 types and the classic type has no deploy
+// helper, so a stack declaring one falls through to the generic stub and is not stamped at all. This
+// is the rule written where it belongs rather than a path a caller can take, so that the classic
+// deploy helper — Tier 2 of #844 — is one entry in that map and not a second tagging decision made
+// later under pressure. The live caller of the generation-blind resolver is the Resource Groups
+// Tagging API's arm.
+//
+// The resolver's refusal is treated as "nothing to stamp" rather than as an
 // error: it answers a `LoadBalancerNotFound`-shaped refusal for an ARN naming no record, which
 // for a resource the deployer just created cannot happen, and if it somehow did there is
 // nothing to write. A genuine read failure is still returned.
@@ -325,7 +339,7 @@ func cfnStampELBResource(
 		return false, nil
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	res, _, err := elbResolveTaggedResource(state, scope, dr.ARN)
+	res, _, err := elbResolveAnyGenerationTaggedResource(state, scope, dr.ARN)
 	if err != nil {
 		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.ARN, err)
 	}

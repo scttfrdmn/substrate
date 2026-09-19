@@ -106,6 +106,13 @@ func elbAuthzResources(state StateManager, reqCtx *RequestContext, req *AWSReque
 // A failed read is nil rather than an error for the same reason the tag readers in
 // [AuthController.resourceTagsFor] are: a condition on a tag that cannot be read is
 // unsatisfied, which denies, and that is the safe direction.
+//
+// It resolves through ELBv2's resolver, not the generation-blind one, and #844 left it that way
+// deliberately. No classic operation names a resource by ARN — every one addresses a load balancer
+// by `LoadBalancerNames.member.N` or `LoadBalancerName`, none of which is in [elbAuthzARNParams] —
+// so the only classic ARN that can reach here is one a caller handed to an ELBv2 tag operation,
+// which that operation refuses. Reading no tags for it is the same answer [elbAuthzResources] gives
+// for any ARN naming nothing, and it denies a tag-conditioned statement rather than granting one.
 func elbAuthzTagsFor(state StateManager, scope, arn string) map[string]string {
 	res, awsErr, err := elbResolveTaggedResource(state, scope, arn)
 	if err != nil || awsErr != nil || res == nil {

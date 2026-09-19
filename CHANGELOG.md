@@ -7,6 +7,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **The Classic Load Balancer API is routed by the `Version` a Query request carries** (#844, Tier 1a).
+  Elastic Load Balancing is two APIs at one endpoint: `2012-06-01` and `2015-12-01` share a signing
+  name, an IAM prefix and three action names — `CreateLoadBalancer`, `DescribeLoadBalancers`,
+  `DeleteLoadBalancer` — while publishing different members, shapes and errors under each. Substrate
+  read `Version` nowhere, so ELBv2's handler answered all three whatever the caller sent: a classic
+  `CreateLoadBalancer` got `ValidationError`/400 on `Name is required` (ELBv2's member name for what
+  classic spells `LoadBalancerName`), a classic `DeleteLoadBalancer` got `ValidationError`/400 on a
+  missing `LoadBalancerArn` for an operation that publishes **no errors at all** and documents
+  idempotent success, and a classic `DescribeLoadBalancers` got **HTTP 200 carrying an ELBv2 body**.
+  The third is the worst, and the reason is the wrapper: both generations name their result element
+  `DescribeLoadBalancersResult`, so botocore finds what it is looking for and decodes an **empty
+  list** — no error anywhere, a consumer simply told it owns no classic load balancers. (The issue's
+  own comment predicted a `KeyError`; the shared wrapper means there is none, which is worse.) The
+  three operations now answer their own published shapes: `CreateLoadBalancer` returns **`DNSName`
+  alone**, which is the whole of its Response Elements, prefixed `internal-` for the `internal`
+  scheme per AWS's sample; `DescribeLoadBalancers` returns `LoadBalancerDescriptions.member.N` with
+  each listener inside its published `ListenerDescriptions` wrapper and an empty `PolicyNames`
+  element, because AWS publishes it as one; `DeleteLoadBalancer` succeeds for a load balancer that
+  does not exist, which AWS states outright and on which a delete-then-delete cleanup path depends.
+  **The discriminator is `Version` and nothing else**: an absent or unrecognized version resolves to
+  ELBv2, so every request substrate already answered, every fixture and every recorded event log
+  answers exactly as before, and no code is invented for a version AWS publishes none for. Member
+  names could not serve, because a classic `DescribeLoadBalancers` may carry no members at all.
+  Classic records live in their own key space, so one name can be held by both generations and each
+  generation's describe reports only its own. Eight of `LoadBalancerDescription`'s sixteen members are
+  **absent rather than invented**, each because the operation that would set it is not routed, and
+  `VPCId` is empty because nothing here resolves a subnet to a VPC. Every refusal is a code the
+  operation's own page publishes: `ValidationError`/400 from the consolidated Query Common Errors list
+  (#1064), `UnsupportedProtocol`, `InvalidScheme`, `DuplicateLoadBalancerName` and
+  `LoadBalancerNotFound` at 400, and `InvalidConfigurationRequest` at **HTTP 409** — the one non-400
+  of `CreateLoadBalancer`'s twelve — for two listeners claiming one `LoadBalancerPort`; that last
+  mapping is substrate's reading, because `DuplicateListener` is published on
+  `CreateLoadBalancerListeners` and borrowing it across pages is what #671 forbids. An unissued
+  `Marker` is refused rather than silently restarting the listing (#915). A create's
+  `Tags.member.N` reaches the record rather than being parsed and dropped — the defect #1087 records
+  for two other services, asserted here at the operation's birth — and its published
+  `DuplicateTagKeys`/400 is answered before anything is written, so a refused create leaves no load
+  balancer behind. A store failure in any of the three is answered as a failure: a create whose
+  record could not be written still has a DNS name to report and a describe whose listing could not
+  be read still has an empty list to report, which is the same silent wrong answer arriving by
+  another route. One unreadable *record* among several is the opposite case and is skipped, because
+  failing the call would hide every healthy load balancer behind one bad key.
+- **A classic load-balancer ARN is now taggable through the Resource Groups Tagging API, while ELBv2's
+  own tag operations still refuse it** (#844). The reversal #863's fifth acceptance row needed is
+  **caller-scoped**, not global, because AWS's two pages disagree: ELBv2's `AddTags` enumerates the
+  resources it tags and Classic is absent from that list, with no published code for a
+  wrong-generation ARN, so `AddTags`/`RemoveTags`/`DescribeTags` keep answering
+  `ValidationError`/400 — while RGT matches on the type segment embedded in an ARN, which both
+  generations spell `loadbalancer`, and the Service Authorization Reference lists classic
+  `loadbalancer` under a single `AddTags` action. So a tag written through `TagResources` is readable
+  back through `GetResources`, including under
+  `ResourceTypeFilters=elasticloadbalancing:loadbalancer` — #765's rule, met for a resource that now
+  exists to meet it for. CloudFormation's two tag writers resolve the same way for the reason one step
+  removed — a template names a resource *type*, not an API generation — though **no template reaches
+  the classic half yet**: the classic type has no deploy helper, so a stack declaring one falls
+  through to the generic stub, and the rule is written where the decision belongs rather than being
+  made later under pressure. The arity check #863 added
+  stands and does the work — one segment after `loadbalancer/` is classic, three is ELBv2 — and the
+  generation-blind callers go through a second classifier rather than a loosened one, so ELBv2's three
+  doors are unchanged. A classic ARN naming **nothing** is still refused at the same
+  `InvalidParameterException`/400 every other absent resource answers. Authorization stays ELBv2-only
+  and the argument is recorded: no classic operation names a resource by ARN, so the only classic ARN
+  that can reach the tag reader is one handed to an ELBv2 tag operation, which refuses it.
+  Deliberately out of scope, and stated in `docs/services.md` so that three operations are not read as
+  the whole API: the classic tag trio (whose published cap is **10** against ELBv2's 50, and whose
+  `RemoveTags` takes `Tags.member.N` of `TagKeyOnly`), `RegisterInstancesWithLoadBalancer`,
+  `CreateLoadBalancerListeners`, the health-check and policy operations, the
+  `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper, and `TooManyLoadBalancers` — substrate
+  enforces no ELB quota in either generation, and enforcing one only would be half-fidelity.
+
 ### Fixed
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not
   only `2015-03-31`** (#1142). A REST service puts the version in the path, and Lambda dates each

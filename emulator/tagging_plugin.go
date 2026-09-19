@@ -382,6 +382,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindTargetGroup)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindListener)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindRule)},
+		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindClassicLB)},
 	}
 
 	var all []resourceTagMapping
@@ -1260,21 +1261,23 @@ func (p *TaggingPlugin) scanSSMParameters(_ context.Context, reqCtx *RequestCont
 	return out, nil
 }
 
-// scanELBKind returns the scanner for one of ELBv2's four taggable kinds.
+// scanELBKind returns the scanner for one of ELB's five taggable kinds — ELBv2's four and the
+// Classic Load Balancer #844 added.
 //
-// One parameterized scanner rather than four, because ELB is the one namespace whose kinds share a
-// decoder: [elbDecodeTaggedResource] already reads a load balancer, a target group, a listener or a
-// rule and reports the ARN, the tags and the previously-tagged flag from each. Reusing it is the
-// read-side half of what the resolver arm does by reusing [elbResolveTaggedResource] — the scan
-// reports a resource under exactly the ARN the resolver will accept for it, so #765's
-// cross-readability holds by construction rather than by two parsers agreeing.
+// One parameterized scanner rather than five, because ELB is the one namespace whose kinds share a
+// decoder: [elbDecodeTaggedResource] already reads a classic load balancer, an ELBv2 one, a target
+// group, a listener or a rule and reports the ARN, the tags and the previously-tagged flag from each.
+// Reusing it is the read-side half of what the resolver arm does by reusing
+// [elbResolveAnyGenerationTaggedResource] — the scan reports a resource under exactly the ARN the
+// resolver will accept for it, so #765's cross-readability holds by construction rather than by two
+// parsers agreeing.
 //
 // The prefix goes through [taggingScanPrefix] over [elbKindKeyPrefix], so the scan is narrowed by
 // the same account/Region-qualified prefix ELB's own writers build and every other scanner is
 // narrowed by (#937). A record whose stored ARN puts it elsewhere is still dropped by
 // [taggingResourceInScope].
 //
-// A record that does not decode is skipped rather than reported. The four kinds live under four
+// A record that does not decode is skipped rather than reported. The five kinds live under five
 // distinct prefixes, so the only way that happens is a corrupt record, and reporting a resource
 // with no ARN would put an empty string in the response (#863).
 func (p *TaggingPlugin) scanELBKind(kind string) func(context.Context, *RequestContext) ([]resourceTagMapping, error) {
@@ -1924,9 +1927,10 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		return "", "", unsupportedTagResource("Systems Manager %q is not a taggable resource type", resource)
 
 	case "elasticloadbalancing":
-		// A load balancer, target group, listener or listener rule, found by scanning for the
-		// record whose stored ARN equals this one — through [elbResolveTaggedResource], the same
-		// function ELBv2's own AddTags, RemoveTags and DescribeTags resolve through.
+		// A Classic Load Balancer, or an ELBv2 load balancer, target group, listener or listener
+		// rule, found by scanning for the record whose stored ARN equals this one — through
+		// [elbResolveAnyGenerationTaggedResource], which shares its body with the resolver ELBv2's
+		// own AddTags, RemoveTags and DescribeTags use.
 		//
 		// This is the one arm that reads state, and the reason is structural rather than a
 		// shortcut. Every other arm *builds* a key from the ARN; a listener's key is
@@ -1942,22 +1946,29 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 		// The scope comes from the ARN's own account and Region, never from the caller, per #826
 		// and its successors ([elbARNScope]).
 		//
-		// The two refusals are deliberately different failures. An ARN that names no ELBv2
-		// resource *type* — a classic load balancer's, whose one segment after `loadbalancer/`
-		// [elbResourceKindFromARN] no longer mistakes for ELBv2's three — is unsupported, which is
-		// what the twenty-two other arms answer for a type they do not reach. A well-formed ARN of
-		// a kind substrate does model, naming nothing, is [errTagResourceNotFound], so it answers
-		// the same InvalidParameterException a resolved-but-absent resource answers from
-		// [TaggingPlugin.tagMergeFailure] — the ARN resolved as far as this arm can take it, and
-		// the resource is simply not there (#863).
+		// The generation is deliberately *not* part of what this arm refuses, which is the one
+		// place it differs from ELBv2's own tag doors. The Resource Groups Tagging API's documented
+		// matching rule reads the resource type out of the ARN, and both ELB generations spell that
+		// segment `loadbalancer` — so `ResourceTypeFilters=elasticloadbalancing:loadbalancer`
+		// names both, and an ARN of either is a resource this API tags. AWS's own Service
+		// Authorization Reference agrees from the other side: it lists the classic `loadbalancer`
+		// resource under the single `AddTags` action, because one IAM action spans both APIs. Hence
+		// [elbAnyGenerationKindFromARN] here and [elbResourceKindFromARN] there (#844).
+		//
+		// The two refusals are deliberately different failures. An ARN that names no ELB resource
+		// *type* at all is unsupported, which is what the twenty-two other arms answer for a type
+		// they do not reach. A well-formed ARN of a kind substrate does model, naming nothing, is
+		// [errTagResourceNotFound], so it answers the same InvalidParameterException a
+		// resolved-but-absent resource answers from [TaggingPlugin.tagMergeFailure] — the ARN
+		// resolved as far as this arm can take it, and the resource is simply not there (#863).
 		scope, ok := elbARNScope(arn)
 		if !ok {
 			return "", "", unsupportedTagResource("ELB %q is not an ARN", arn)
 		}
-		if elbResourceKindFromARN(arn) == "" {
+		if elbAnyGenerationKindFromARN(arn) == "" {
 			return "", "", unsupportedTagResource("ELB %q is not a taggable resource type", resource)
 		}
-		res, awsErr, readErr := elbResolveTaggedResource(p.state, scope, arn)
+		res, awsErr, readErr := elbResolveAnyGenerationTaggedResource(p.state, scope, arn)
 		if readErr != nil {
 			return "", "", fmt.Errorf("resolve ELB %q: %w", arn, readErr)
 		}
