@@ -77,6 +77,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `CreateLoadBalancerListeners`, the health-check and policy operations, the
   `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper, and `TooManyLoadBalancers` — substrate
   enforces no ELB quota in either generation, and enforcing one only would be half-fidelity.
+- **All 92 EC2 operations substrate routes have a row in `docs/services.md`** (#1094). The table
+  documented 56 and the dispatch switch handled 92, so **36 operations were routed and undocumented**
+  — the whole of the volume family (`CreateVolume`, `DescribeVolumes`, `DeleteVolume`, `AttachVolume`,
+  `DetachVolume`), the AMI family (`CreateImage`, `RegisterImage`, `DescribeImages`,
+  `DeregisterImage`), key pairs (4), placement groups (3), Elastic IPs (4), the route operations (3)
+  plus `DisassociateRouteTable` and `ReplaceRouteTableAssociation`, `CreateSnapshots`,
+  `CopySnapshot`, the snapshot attribute trio, `CreateNatGateway`/`DeleteNatGateway`,
+  `DetachInternetGateway`, `ModifySubnetAttribute`, `ModifyVpcAttribute` and `RebootInstances`.
+  Thirteen of the 36 appeared **nowhere** in the file under any heading. The gap was self-evidencing:
+  the `DescribeSnapshots` row read *"Paginates on `MaxResults`/`NextToken`, as do `DescribeVolumes`
+  and `DescribeImages`"*, citing two operations the table did not list, so a reader could not look up
+  either one's range. Each new row follows the section's existing standard — what is modelled, what is
+  not, and a link to the `####` subsection where the divergence is recorded — and the cost was lower
+  than when the issue was filed, because the EC2 section has since grown ~40 subsections, several of
+  which already document operations among the 36: `CreateSnapshots`, `CopySnapshot` and the attribute
+  trio needed condensing and linking rather than fresh analysis. Where a row states something the
+  section did not already carry it is grounded on the operation's own reference page, which is why
+  several rows record a **refusal that does not happen**: `RebootInstances` reads `InstanceId.N`
+  nowhere, `DetachInternetGateway` reads a `Required: Yes` `VpcId` without resolving it,
+  `CreateRoute` enforces neither published combination rule and appends a duplicate destination
+  rather than refusing it, `AllocateAddress` publishes `TagSpecification.N` and reads none,
+  `CreateNatGateway` looks up `AllocationId` without resolving it, `DeletePlacementGroup` enforces
+  neither precondition, and `CreateKeyPair` answers an EC P-256 key while reporting `rsa`. The
+  section now **states the 92/92 count**, so the next reader corrects a number rather than
+  re-deriving one. Found while writing the rows and filed rather than fixed, since this change is
+  documentation only: `ModifySubnetAttribute` and `ModifyVpcAttribute` read their attributes under
+  Go-initialism parameter names (`MapPublicIPOnLaunch.Value`, `EnableDNSSupport.Value`,
+  `EnableDNSHostnames.Value`) that AWS does not publish, so every modify from an SDK is answered
+  `return=true` and discarded — the residue of a struct-field rename that moved the wire keys with
+  the fields (#1151).
 
 ### Fixed
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not
