@@ -17539,6 +17539,634 @@ account-list API, which really is REST-JSON) rather than as `sso-admin`, whose m
 
 ---
 
+## Athena
+
+**Endpoint:** `athena.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: AmazonAthena.{Op}`)
+
+**Routing:** Athena's target prefix carries no API version date — `AmazonAthena` is what every SDK
+sends, and `parser.go` aliases `amazonathena` to the `athena` plugin. The service model's API version
+is `2017-05-18` and appears in no wire field.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| StartQueryExecution | `QueryString` required; the query is [already `SUCCEEDED` when the call returns](#a-query-has-already-succeeded-when-startqueryexecution-returns) |
+| GetQueryExecution | Reports `QueryExecutionId`, `Query`, `WorkGroup`, `Status` and `ResultConfiguration.OutputLocation`, and nothing else |
+| GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text); `MaxResults` and `NextToken` are not read |
+| StopQueryExecution | Accepted for any stored execution, including one already `SUCCEEDED` |
+| ListQueryExecutions | `MaxResults` defaults to 50 and is not clamped |
+| CreateWorkGroup | `Name` required |
+| GetWorkGroup | [Synthesises a `primary` workgroup](#the-primary-workgroup-exists-only-for-getworkgroup) if none was created |
+| DeleteWorkGroup | |
+| ListWorkGroups | `MaxResults` defaults to 50 and is not clamped |
+
+### A query has already succeeded when StartQueryExecution returns
+
+`StartQueryExecution` stores the execution with `State: "SUCCEEDED"` and `SubmissionDateTime` equal to
+`CompletionDateTime`, both read from the simulated clock. So `QUEUED`, `RUNNING` and `FAILED` — three
+of the five values `QueryExecutionStatus.State` publishes — cannot be produced by any code path, and
+there is no seed that changes that. `CANCELLED` is reachable, through `StopQueryExecution`.
+
+The consequence for a consumer is that a `GetQueryExecution` poll loop terminates on its first
+observation on every run. That is a useful property for a fast test and a useless one for testing the
+loop: the waiter, the backoff and the failure branch are never entered, so a test cannot distinguish
+"my waiter works" from "my waiter never ran". A failure branch keyed on `State == "FAILED"` is dead
+code against Substrate.
+
+[#1155](https://github.com/scttfrdmn/substrate/issues/1155) covers this across the five services that
+share it, in the shape #514 shipped for EC2 instance state: a seeded **count of observations** in the
+transient state, defaulting to zero so no existing fixture changes.
+
+`StopQueryExecution` writes `CANCELED` with one `L`, where the published enum spells it `CANCELLED` —
+[#1154](https://github.com/scttfrdmn/substrate/issues/1154). A consumer comparing against its SDK's
+generated constant matches neither the stored value nor anything else.
+
+`QueryExecutionStatus`' `StateChangeReason` and `AthenaError` members are not emitted at all, so a
+query has no reason to report even once a failure state can be reached.
+
+### The result set is seeded by SQL text
+
+`GetQueryResults` returns rows from a seeded result set rather than executing anything — executing the
+SQL is workload-internal and out of scope. Seeds are written over the control plane:
+
+```
+POST   /v1/athena/results     {"sql": "SELECT 1", "columnMetadata": [...], "rows": [...]}
+DELETE /v1/athena/results     (all seeds; ?sql=… for one)
+```
+
+Lookup order is exact SQL, then the `"*"` wildcard, then an empty result set. The SQL match is exact
+string equality, so a difference in whitespace or case misses the seed and reports zero rows rather
+than refusing. Seeds live in the `athena-ctrl` namespace keyed `result:{sql}` and are **not** scoped by
+account or Region: one seed serves every caller of the emulator.
+
+### The primary workgroup exists only for GetWorkGroup
+
+Every AWS account has a `primary` workgroup that cannot be deleted. Substrate creates no such record;
+instead `GetWorkGroup` synthesises one when the requested name is `primary` and nothing is stored, so
+`ListWorkGroups` reports it only after something has explicitly created it and `DeleteWorkGroup`
+accepts `primary` without complaint. A consumer that lists workgroups to find the default finds
+nothing.
+
+### What a refusal reports
+
+Athena has one refusal code, and it covers every condition:
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse, or is absent where a member is required | `InvalidRequestException` | 400 |
+| a required member absent or empty | `InvalidRequestException` | 400 |
+| a query execution or workgroup that does not exist | `InvalidRequestException` | 400 |
+| a workgroup name already in use | `InvalidRequestException` | 400 |
+
+The code is published — `GetQueryResults` declares `InternalServerException`/500,
+`InvalidRequestException`/400 and `TooManyRequestsException`/400, and Athena's consolidated
+*Common Error Types* list adds fifteen more — but the **conditions** Substrate attaches to it are
+broader than any page's, and in particular a not-found reports the same code as a missing parameter.
+Nothing in the plugin answers 404 or 500. `MetadataException`, `ResourceNotFoundException` and
+`TooManyRequestsException` are published and have no site.
+
+Both paginators decode a base64 `NextToken` and **discard the decode error**, so a token Substrate
+never issued reads as page one. The commitment to refuse it is recorded under
+*The same idiom at fifteen more sites* above, where Athena's two paginators are named with the code
+their page publishes — in the future tense, because for Athena it has not shipped
+([#1086](https://github.com/scttfrdmn/substrate/issues/1086)).
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::Athena::WorkGroup | Name | A stub: properties are recorded in the CloudFormation stub store, which the Athena plugin does not read, so a workgroup deployed from a template is invisible to `GetWorkGroup` and `ListWorkGroups` |
+
+### Cost
+
+`StartQueryExecution` is attributed $0.000005 per call, standing in for Athena's $5.00 per TB scanned.
+Substrate models no scan volume, so every query costs the same regardless of its SQL or its seeded
+result set.
+
+---
+
+## CloudTrail
+
+**Endpoint:** `cloudtrail.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: CloudTrail_20131101.{Op}`)
+
+**Routing:** two target spellings are accepted — the short `CloudTrail_20131101.{Op}` and the fully
+qualified `com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.{Op}`, both of which SDKs have been
+observed to send. Neither is reached through a service alias, because the long form's first label is
+`com`; the router matches the prefix itself.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateTrail | `Name` required; `S3BucketName` is `Required: Yes` and unchecked; the trail is [logging from birth](#a-trail-is-born-logging-and-gettrailstatus-never-looks) |
+| GetTrail | |
+| GetTrailStatus | Reports `IsLogging: true` [unconditionally](#a-trail-is-born-logging-and-gettrailstatus-never-looks) |
+| UpdateTrail | Merges the supplied members into the stored trail |
+| DeleteTrail | |
+| DescribeTrails | `trailNameList` filters; a name that matches nothing is skipped rather than refused. `IncludeShadowTrails` is parsed and not read |
+| StartLogging | Writes the flag; no endpoint reports it |
+| StopLogging | Writes the flag; no endpoint reports it |
+
+### A trail is born logging and GetTrailStatus never looks
+
+`CreateTrail` stores `IsLogging: true`, where AWS creates a trail that delivers nothing until an
+explicit `StartLogging`. And `GetTrailStatus` builds its response with `IsLogging: true` hardcoded
+rather than reading the stored flag, so `StopLogging` succeeds, changes state, and is invisible to the
+only operation that could report it.
+
+The two compound: because a trail is born logging, a consumer that never calls `StartLogging` also
+sees `true`, so nothing distinguishes the hardcode from a working implementation. A test asserting
+that its own `StopLogging` took effect passes on a no-op.
+[#1157](https://github.com/scttfrdmn/substrate/issues/1157).
+
+### A trail's ARN is always in the aws partition
+
+`CreateTrail` builds the trail ARN with a literal `aws` partition, so a Region in `aws-us-gov` or
+`aws-cn` reports an ARN AWS would not issue. Substrate's Region handling is otherwise
+partition-agnostic.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `InvalidTrailNameException` | 400 |
+| `Name` absent or empty | `InvalidTrailNameException` | 400 |
+| a trail name already in use | `TrailAlreadyExistsException` | 400 |
+| a trail that does not exist | `TrailNotFoundException` | **404** |
+
+The 404 is a divergence: CloudTrail publishes every error at 400, `TrailNotFoundException` included,
+and no CloudTrail page publishes a 404 anywhere. Six operations propagate it — `GetTrail`,
+`GetTrailStatus`, `UpdateTrail`, `DeleteTrail`, `StartLogging` and `StopLogging`; `DescribeTrails`
+swallows it and reports a short list, which is what its page publishes.
+[#1156](https://github.com/scttfrdmn/substrate/issues/1156) covers it together with CodePipeline,
+which has the same defect at the same scale.
+
+`InvalidTrailNameException` is published, and its gloss covers a name that violates the published
+pattern — which Substrate does not check, so the code fires only for an absent name and an unparseable
+body. `S3BucketDoesNotExistException`, `InsufficientS3BucketPolicyException`,
+`TrailNotProvidedException` and the rest of the page's twenty-odd errors have no site: Substrate
+validates nothing about the destination bucket.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::CloudTrail::Trail | TrailName | `Ref` returns the resource name where Substrate's physical ID is the ARN, so the name is recorded in the resource's metadata and read back from there (#827). A stub: the trail is invisible to `GetTrail` and `DescribeTrails` |
+
+### Cost
+
+`CreateTrail` is attributed $0.000002 per call. Real CloudTrail charges nothing for the first copy of
+management events and $2.00 per 100,000 events for additional copies; Substrate counts no events.
+
+---
+
+## CodeBuild
+
+**Endpoint:** `codebuild.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: CodeBuild_20161006.{Op}`)
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateProject | `name` required; `source`, `artifacts` and `environment` are stored as opaque objects and never inspected |
+| BatchGetProjects | An empty `names` array reports an empty list; an empty-string member is reported in `projectsNotFound` rather than refused |
+| UpdateProject | [Reads a `project` wrapper AWS does not send](#updateproject-cannot-be-reached-from-an-sdk) |
+| DeleteProject | [Refuses an absent project](#deleteproject-is-not-idempotent) |
+| ListProjects | Reports names only; `sortBy`, `sortOrder` and `nextToken` are not read |
+| StartBuild | Only `projectName` is read; the build is [`SUCCEEDED` before the call returns](#a-build-has-already-succeeded-when-startbuild-returns) |
+| BatchGetBuilds | An unreadable stored record is reported in `buildsNotFound`, so a store failure is indistinguishable from an absent build |
+
+### UpdateProject cannot be reached from an SDK
+
+`updateProject` decodes its request into a struct whose only member is a `"project"` wrapper, where
+`UpdateProjectInput` is flat — AWS sends `{"name": "…", "description": "…"}`. So a request from any SDK
+or the CLI leaves the name empty and is refused with `InvalidInputException` / *"name is required"*,
+naming a member the request did contain. There is no payload a real client can produce that reaches the
+handler's body.
+
+The operation's *response* is correctly wrapped, which is presumably where the input shape came from:
+`UpdateProjectOutput` publishes a single `project` member.
+[#1158](https://github.com/scttfrdmn/substrate/issues/1158), which also covers the second half — the
+update **merges** member by member, so an optional member such as `description` can never be cleared,
+where AWS replaces the project configuration.
+
+### DeleteProject is not idempotent
+
+`DeleteProject` loads the project first and propagates a `ResourceNotFoundException`, so deleting
+something that is not there is refused. AWS publishes exactly one error on that page,
+`InvalidInputException`/400 — no not-found at all — and an empty successful response, which is the
+shape of an idempotent delete. A teardown path that runs twice succeeds against AWS and raises here,
+under a code the SDK's own model does not associate with the operation.
+[#1159](https://github.com/scttfrdmn/substrate/issues/1159).
+
+### A build has already succeeded when StartBuild returns
+
+`StartBuild` stores the build with `buildStatus: "SUCCEEDED"`, `currentPhase: "COMPLETED"` and
+`startTime` equal to `endTime`. `IN_PROGRESS`, `FAILED`, `FAULT`, `TIMED_OUT` and `STOPPED` cannot be
+produced, and `Build`'s `phases`, `logs`, `artifacts` and `buildComplete` members are not emitted at
+all. Everything the *project* carried about how to build is recorded and ignored — running the build
+is workload-internal and out of scope — but a consumer's wait loop has nothing to wait for.
+[#1155](https://github.com/scttfrdmn/substrate/issues/1155).
+
+`StartBuild` also reads only `projectName`: the twenty-odd `*Override` members AWS publishes, and
+`idempotencyToken`, are neither stored nor refused, so two identical calls mint two builds.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `InvalidInputException` | 400 |
+| a required member absent or empty | `InvalidInputException` | 400 |
+| a project name already in use | `ResourceAlreadyExistsException` | 400 |
+| a project that does not exist | `ResourceNotFoundException` | 400 |
+
+All four are 400, which is what every CodeBuild page publishes — `StartBuild`'s
+`ResourceNotFoundException` included, so CodeBuild is not part of the 404 divergence CloudTrail and
+CodePipeline share. `AccountLimitExceededException` and `OAuthProviderException` are published and
+have no site.
+
+Two bookkeeping members reach the wire: `CodeBuildProject` and `CodeBuildBuild` are marshalled whole
+into their responses, so every project and build carries `accountID` and `region`, which are
+Substrate's own and appear on neither published shape
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::CodeBuild::Project | Name | A stub: properties are recorded in the CloudFormation stub store, which the CodeBuild plugin does not read, so a project deployed from a template is invisible to `BatchGetProjects` and `ListProjects` and cannot be built |
+
+### Cost
+
+`StartBuild` is attributed $0.0001 per call, standing in for CodeBuild's per-build-minute charge
+($0.005/minute for `general1.small` on Linux). Substrate's builds take no time, so the duration term
+has nothing to multiply.
+
+---
+
+## CodePipeline
+
+**Endpoint:** `codepipeline.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: CodePipeline_20150709.{Op}`)
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreatePipeline | `pipeline.name` required; `stages` are stored as opaque objects and never validated |
+| GetPipeline | `version` is [decoded and ignored](#getpipelineexecution-and-getpipeline-answer-for-the-wrong-resource) |
+| UpdatePipeline | Merges `roleArn` and `stages`, increments `version`; reports no `metadata` |
+| DeletePipeline | |
+| ListPipelines | Reports name, version and timestamps; `maxResults` and `nextToken` are not read. A pipeline whose record cannot be loaded is skipped |
+| StartPipelineExecution | The execution is [`Succeeded` before the call returns](#an-execution-has-already-succeeded-when-startpipelineexecution-returns); `clientRequestToken` and `variables` are not read |
+| GetPipelineState | Reports every stage as `Succeeded` with an [empty `pipelineExecutionId`](#getpipelinestate-reports-a-shape-no-execution-produced) |
+| GetPipelineExecution | `pipelineName` is [decoded and ignored](#getpipelineexecution-and-getpipeline-answer-for-the-wrong-resource) |
+
+### An execution has already succeeded when StartPipelineExecution returns
+
+`StartPipelineExecution` stores the execution with `Status: "Succeeded"`, so `InProgress`, `Stopping`,
+`Stopped`, `Superseded`, `Failed` and `Cancelled` cannot be produced. No stage action runs — that is
+workload-internal — but neither does any stage *state* progress, so a consumer polling
+`GetPipelineExecution` for completion is answered on its first observation every time.
+[#1155](https://github.com/scttfrdmn/substrate/issues/1155).
+
+`clientRequestToken` is the published idempotency member and is not read, so a retried start mints a
+second execution where AWS would return the first.
+
+### GetPipelineExecution and GetPipeline answer for the wrong resource
+
+`getPipelineExecution` keys state on the execution ID alone and never reads `pipelineName`, which is
+`Required: Yes` — so a request that omits it succeeds, and an execution ID belonging to pipeline A is
+reported successfully when asked for under pipeline B. AWS's own error text states the cross-check as
+part of the contract: *"…or an execution ID does not belong to the specified pipeline."*
+
+`getPipeline` decodes `version` and always reports the current one, so a request for version 1 of a
+pipeline updated three times answers version 4 at HTTP 200 rather than the published
+`PipelineVersionNotFoundException`. [#1160](https://github.com/scttfrdmn/substrate/issues/1160).
+
+`GetPipelineExecution`'s response is the persisted record marshalled whole, so it carries `accountID`
+and `region`, which are Substrate's own bookkeeping and appear on no published shape
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+### GetPipelineState reports a shape no execution produced
+
+`GetPipelineState` derives one stage state per stored stage definition, each with
+`latestExecution.status: "Succeeded"` and `latestExecution.pipelineExecutionId: ""` — an empty string
+where the member is published as an execution ID, and a success regardless of whether any execution
+has ever run. A pipeline created and never started reports every stage succeeded. `actionStates`,
+`inboundTransitionState` and `beforeEntryConditionState` are not emitted.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `InvalidStructureException` | 400 |
+| a required name absent or empty | `InvalidStructureException` | 400 |
+| a pipeline name already in use | `PipelineNameInUseException` | 400 |
+| a pipeline that does not exist | `PipelineNotFoundException` | **404** |
+| a pipeline execution that does not exist | `PipelineExecutionNotFoundException` | **404** |
+
+Both 404s are divergences — CodePipeline publishes every error at 400 — and six operations propagate
+one of them: `GetPipeline`, `UpdatePipeline`, `DeletePipeline`, `StartPipelineExecution`,
+`GetPipelineState` and `GetPipelineExecution`. `ListPipelines` swallows the refusal and reports a short
+list. [#1156](https://github.com/scttfrdmn/substrate/issues/1156) covers it together with CloudTrail.
+
+`InvalidStructureException` is published, glossed *"The structure was specified in an invalid format"* —
+but `GetPipeline` does not publish it at all (its three errors are `PipelineNotFoundException`,
+`PipelineVersionNotFoundException` and `ValidationException`), so on the four operations that reach it
+through the shared name check it is Substrate's reading rather than that page's vocabulary.
+`ValidationException`, `PipelineVersionNotFoundException`, `ConcurrentModificationException` and
+`LimitExceededException` are published and have no site.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::CodePipeline::Pipeline | Name | A stub: properties are recorded in the CloudFormation stub store, which the CodePipeline plugin does not read, so a pipeline deployed from a template is invisible to `GetPipeline` and `ListPipelines` and cannot be started. The ARN carries no resource-type prefix (`arn:aws:codepipeline:{region}:{account}:{name}`), which is the form AWS publishes |
+
+### Cost
+
+`StartPipelineExecution` is attributed $0.000001 per call. Real CodePipeline charges $1.00 per active
+pipeline per month rather than per execution, so the attribution is a proxy: Substrate has no month.
+
+---
+
+## Redshift Data API
+
+**Endpoint:** `redshift-data.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: RedshiftData.{Op}`)
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| ExecuteStatement | `Sql` required; the statement is [`FINISHED` before the call returns](#the-statement-status-is-seeded-at-execute-time-and-frozen). `SecretArn` is decoded and not stored; `Parameters`, `StatementName`, `WithEvent` and `ClientToken` are not read |
+| DescribeStatement | Reports `Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt` and `Error`, and [nothing else](#describestatement-reports-six-members) |
+| GetStatementResult | Returns [the result set seeded for the statement's SQL](#the-result-set-is-seeded-by-the-statements-sql); `NextToken` is not read and no `NextToken` is emitted |
+
+`BatchExecuteStatement`, `CancelStatement`, `DescribeTable`, `ListDatabases`, `ListSchemas`,
+`ListStatements`, `ListTables` and `GetStatementResultV2` are not routed.
+
+### The statement status is seeded at execute time and frozen
+
+A statement's status is read from the control plane **when `ExecuteStatement` runs** and stored on the
+record; `DescribeStatement` reports what was stored. Four consequences, all of them
+[#1163](https://github.com/scttfrdmn/substrate/issues/1163):
+
+- Seeding *after* `ExecuteStatement` has no effect on that statement.
+- No progression is expressible: a statement cannot be `STARTED` for two observations and then
+  `FINISHED`, which is the shape of every Redshift Data wait loop.
+- The seed is one global value under the literal key `status` — no statement ID, no `"*"` wildcard, no
+  account or Region qualification — so one seed governs every statement in every account, and there is
+  **no `DELETE /v1/redshift-data/status`**, so a seeded `FAILED` persists for the life of the process.
+- Both control-plane reads discard their error, so a store failure is indistinguishable from an absent
+  seed.
+
+```
+POST /v1/redshift-data/status   {"status": "FAILED", "errorMessage": "query timed out"}
+```
+
+The endpoint accepts `FINISHED`, `FAILED`, `ABORTED` and `STARTED`, and refuses anything else with
+HTTP 400 — so `SUBMITTED` and `PICKED`, two of the six values the published enum carries, cannot be
+seeded. `errorMessage` is reported as `Error` only when the status is `FAILED`.
+
+`GetStatementResult` does not consult the status at all: a statement seeded `FAILED` still returns its
+seeded rows at HTTP 200.
+
+### The result set is seeded by the statement's SQL
+
+```
+POST   /v1/redshift-data/results   {"sql": "SELECT 1", "columnMetadata": [...], "records": [...]}
+DELETE /v1/redshift-data/results   (all seeds; ?sql=… for one)
+```
+
+Lookup order is a Go-level in-memory map (exact SQL, then `"*"`), then the control-plane state (exact
+SQL, then `"*"`), then an empty result set. The match is exact string equality on the SQL the statement
+was created with. `TotalNumRows` is the number of seeded records.
+
+### DescribeStatement reports six members
+
+`Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt` and — for a failed statement — `Error`.
+`UpdatedAt` is always exactly `CreatedAt`. Absent are `HasResultSet`, which is the member a consumer
+checks before calling `GetStatementResult`, along with `Duration`, `ResultRows`, `ResultSize`,
+`RedshiftPid`, `RedshiftQueryId`, `WorkgroupName`, `ClusterIdentifier`, `Database`, `DbUser`,
+`SecretArn`, `SessionId`, `SubStatements` and `QueryParameters`. The two timestamps are emitted as
+epoch seconds, which is what the protocol's JSON version specifies.
+
+Responses carry `Content-Type: application/json` where the service's protocol is JSON 1.1 and
+`application/x-amz-json-1.1` is what the rest of the tree emits — also
+[#1163](https://github.com/scttfrdmn/substrate/issues/1163).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `ValidationException` | 400 |
+| `Sql` or `Id` absent or empty | `ValidationException` | 400 |
+| a statement that does not exist | `ResourceNotFoundException` | 400 |
+
+Both codes and both statuses are what `API_DescribeStatement` publishes.
+`ActiveStatementsExceededException`, `ActiveWaitingRequestsExceededException`,
+`BatchExecuteStatementException`, `ExecuteStatementException`, `DatabaseConnectionException` and
+`InternalServerException` are published and have no site: Substrate holds no connection, enforces no
+concurrency ceiling, and has no internal failure to report.
+
+### CloudFormation resource types
+
+None. AWS publishes no CloudFormation resource type for the Redshift Data API — a statement is an
+action, not a resource.
+
+### Cost
+
+Nothing is attributed. The Redshift Data API itself is free; a query's cost falls on the cluster or
+Serverless workgroup that runs it, which Substrate does not model.
+
+---
+
+## SageMaker
+
+**Endpoint:** `api.sagemaker.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: SageMaker.{Op}`)
+
+Two unrelated slices of SageMaker are modelled: the Studio app lifecycle and training jobs.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| ListDomains | Always an empty list — Substrate has no domain records |
+| ListApps | `DomainIdEquals` and `UserProfileNameEquals` filter; `MaxResults`, `NextToken`, `SortBy` and `SortOrder` are not read |
+| CreateApp | Only `AppName` is required; `AppType` and `DomainId` are `Required: Yes` and unchecked |
+| DeleteApp | [Answers 200 for an app that does not exist](#deleteapp-does-not-look-before-deleting) |
+| DescribeApp | Reports the stored record whole |
+| CreatePresignedDomainUrl | A fixed stub URL; no domain, user profile or expiry is read |
+| CreateTrainingJob | Only `TrainingJobName` is read; the job is [`Completed` before the call returns](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint) |
+| DescribeTrainingJob | Applies [the seeded status](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint) |
+| StopTrainingJob | Writes `Stopped` directly; `Stopping` is never observable, and a `Completed` job is stopped without complaint |
+| ListTrainingJobs | [Does not apply the seed](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint); reads no request member at all, so `StatusEquals`, `NameContains`, the four time filters, `SortBy`, `SortOrder`, `MaxResults` and `NextToken` are all ignored |
+
+### A training job is Completed at birth, and the seed drives one endpoint
+
+`CreateTrainingJob` stores `TrainingJobStatus: "Completed"`, so `InProgress` and `Stopping` are
+unreachable without a seed. Nothing in `CreateTrainingJob`'s large published input is read beyond the
+name: the algorithm, the resource configuration, the hyper-parameters and the input data are neither
+stored nor validated. Running the training is out of scope; the seed is what makes the *outcome*
+assertable:
+
+```
+POST   /v1/sagemaker/training-job-status   {"trainingJobName": "job-1", "status": "Failed",
+                                            "failureReason": "CapacityError: …"}
+DELETE /v1/sagemaker/training-job-status    (all seeds; ?trainingJobName=… for one)
+```
+
+`trainingJobName` defaults to the `"*"` wildcard, and lookup is exact name first, then `"*"`. The seed
+overrides what an observation **reports**; it never rewrites the stored record.
+
+Two gaps, both [#1162](https://github.com/scttfrdmn/substrate/issues/1162):
+
+- `ListTrainingJobs` builds its summaries straight from state and does not apply the seed, so a job
+  seeded `Failed` is reported `Completed` by one endpoint and `Failed` by the other **in the same
+  instant** — two API observations of one resource that contradict each other.
+- The control plane checks only that `status` is non-empty, so a misspelling is accepted and reported
+  as a status outside the published enum. Redshift Data's status endpoint, which validates against its
+  four accepted values, is the in-tree counterexample.
+
+### DeleteApp does not look before deleting
+
+`DeleteApp` deletes the state key unconditionally and answers 200 with an empty body, so deleting an
+app that never existed succeeds. `API_DeleteApp` publishes `ResourceNotFound`, which `DescribeApp`
+already answers for the same condition. [#1162](https://github.com/scttfrdmn/substrate/issues/1162).
+
+An app's state key is the account, Region, domain ID, user profile name, app type and app name joined —
+all six, so two apps differing only in type are distinct records, which is what AWS's four-part
+identity implies.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `ValidationException` | 400 |
+| `AppName` or `TrainingJobName` absent or empty | `ValidationException` | 400 |
+| an app or training job that does not exist | `ResourceNotFound` | 400 |
+
+`ResourceNotFound` is spelled without the `Exception` suffix because that is how SageMaker publishes
+it, and at 400, which is the status its pages publish. SageMaker's `ResourceInUse`,
+`ResourceLimitExceeded` and `ConflictException` are published and have no site.
+
+`DescribeApp` and `DescribeTrainingJob` marshal the persisted record whole, so both carry `AccountID`
+and `Region` — Substrate's own bookkeeping, on neither published shape
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+### CloudFormation resource types
+
+None are handled specifically. A `AWS::SageMaker::*` resource in a template falls to the generic stub,
+whose `Ref` is the logical ID, and is invisible to the SageMaker plugin.
+
+### Cost
+
+`CreateTrainingJob` is attributed $0.001 per call and `CreateApp` $0.0001. Real SageMaker bills
+training by instance-second and a Studio app by the instance behind it; Substrate's jobs and apps
+consume no time, so the attribution is a per-call proxy rather than a rate.
+
+---
+
+## WAFv2
+
+**Endpoint:** `wafv2.{region}.amazonaws.com` (and `wafv2.us-east-1.amazonaws.com` for
+`Scope: CLOUDFRONT`)
+**Protocol:** JSON (`X-Amz-Target: AWSWAF_20190729.{Op}`)
+
+**Routing:** `parser.go` aliases `awswaf` to the `wafv2` plugin. Classic WAF (`AWSWAF_20150824`) is not
+routed.
+
+**Scope is part of a resource's identity.** A Web ACL's and an IP set's state keys carry the account,
+the Region and the **scope**, so the same name in `REGIONAL` and `CLOUDFRONT` is two resources, which is
+what AWS's own model implies. An invalid `Scope` is refused everywhere except `GetWebACL`, where AWS
+marks the member `Required: No` and Substrate defaults it to `REGIONAL` deliberately (#1062). The
+`assoc:` keys that record `AssociateWebACL` omit the scope, since a regional resource ARN can only be
+associated with a regional Web ACL.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateWebACL | `Name`, `Scope` and `DefaultAction` are read; `Rules` and `VisibilityConfig` are stored as opaque objects |
+| GetWebACL | `Scope` defaults to `REGIONAL`; resolvable by `ARN` or by the `Name`+`Id`+`Scope` triple |
+| UpdateWebACL | Requires a matching `LockToken`; [merges rather than replaces](#updatewebacl-merges-so-a-member-can-never-be-cleared) |
+| DeleteWebACL | Requires a matching `LockToken` |
+| ListWebACLs | [Does not paginate](#neither-list-operation-paginates) |
+| AssociateWebACL | Records the association; the resource ARN is not checked against any service's state |
+| DisassociateWebACL | |
+| GetWebACLForResource | [Reports an ARN where a WebACL is published](#getwebaclforresource-reports-an-arn-not-a-web-acl) |
+| CreateIPSet | `Name`, `Scope`, `IPAddressVersion` and `Addresses` are read; a CIDR is not validated |
+| GetIPSet | |
+| UpdateIPSet | Requires a matching `LockToken`; merges |
+| DeleteIPSet | Requires a matching `LockToken` |
+| ListIPSets | [Does not paginate](#neither-list-operation-paginates) |
+
+### Neither list operation paginates
+
+`ListWebACLs` and `ListIPSets` declare a `Limit int` member on their shared input struct and read
+neither it nor any cursor: every call returns the whole set and no `NextMarker` is ever emitted. Both
+pages publish `Limit` with a Valid Range of 1–100 and `NextMarker` on request and response.
+
+A consumer that walks `NextMarker` until it is absent works here by accident — one page, no marker,
+loop exits — so a paging bug in the consumer cannot be caught, and a caller that sends `Limit: 1` is
+silently given everything. [#1161](https://github.com/scttfrdmn/substrate/issues/1161).
+
+### GetWebACLForResource reports an ARN, not a Web ACL
+
+The response is `{"WebACL": {"ARN": "…"}}`, a one-member object where AWS publishes the full `WebACL`
+shape. `DefaultAction`, `Id`, `Name` and `VisibilityConfig` are all `Required: Yes` on that shape, so
+the body is not a valid `WebACL` at all, and a caller reading the returned ACL's rules or capacity gets
+a zero value rather than a refusal. Substrate holds the whole record — `GetWebACL` reports it — so this
+is a lookup that was not done. [#1161](https://github.com/scttfrdmn/substrate/issues/1161).
+
+### UpdateWebACL merges, so a member can never be cleared
+
+`UpdateWebACL` and `UpdateIPSet` copy each supplied member over the stored record and leave the others
+alone, where AWS's update operations replace the whole configuration — their inputs mark
+`DefaultAction`, `VisibilityConfig` and `Addresses` `Required: Yes` precisely because the call is a
+replacement. A `Description` set once cannot be removed, and a rule list cannot be emptied.
+
+Both operations do enforce the `LockToken`, which is the part that matters for a consumer's
+optimistic-concurrency handling: a stale token is refused with `WAFOptimisticLockException` and a new
+token is minted on every successful write.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `WAFInvalidParameterException` | 400 |
+| an invalid `Scope` | `WAFInvalidParameterException` | 400 |
+| a Web ACL or IP set that does not exist | `WAFNonexistentItemException` | **404** |
+| a `LockToken` that does not match | `WAFOptimisticLockException` | 400 |
+
+The three 404s are a divergence: every WAFv2 page publishes `WAFNonexistentItemException` at 400.
+[#1098](https://github.com/scttfrdmn/substrate/issues/1098) covers them together with Glue's twelve.
+
+`WAFDuplicateItemException`, `WAFLimitsExceededException`, `WAFInvalidResourceException`,
+`WAFUnavailableEntityException` and `WAFInternalErrorException` are published and have no site:
+Substrate enforces no capacity ceiling, validates no rule statement, and checks no association target.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::WAFv2::WebACL | `name\|id\|scope` | `Ref` is the composite AWS publishes, with the scope spelled as the template spells it (`REGIONAL`/`CLOUDFRONT`) rather than lowercased as the ARN segment is. The ARN comes from `wafv2ARN`, the same builder the plugin uses, so one logical Web ACL cannot report two different ARNs depending on which path created it. A stub otherwise: the Web ACL is invisible to `GetWebACL` and `ListWebACLs` |
+
+### Cost
+
+`CreateWebACL` is attributed $5.00 per call — WAF's real charge is $5.00 per Web ACL per *month*, taken
+here once at creation — and `AssociateWebACL` $0.000001. Per-request WAF charges ($0.60 per million)
+are not modelled, because Substrate sees no traffic through a Web ACL.
+
+---
+
 ## Fault injection
 
 Fault injection is cross-service rather than a plugin, so it lives here rather than in a

@@ -107,6 +107,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `EnableDNSHostnames.Value`) that AWS does not publish, so every modify from an SDK is answered
   `return=true` and discarded — the residue of a struct-field rename that moved the wire keys with
   the fields (#1151).
+- **`docs/services.md` has sections for the seven JSON-protocol services it documented only as matrix
+  rows** (#1093, first of three). Athena, CloudTrail, CodeBuild, CodePipeline, the Redshift Data API,
+  SageMaker and WAFv2 — **58 routed operations** — were registered, functional, and described nowhere
+  below the coverage matrix, so the only way to learn what any of them modelled was to read the
+  plugin. Each now carries the section standard the rest of the file uses: endpoint and protocol, a
+  `Routing` note where the target spelling is not the obvious one, a row per routed operation, a
+  `###`-level subsection per divergence, the refusal table, CloudFormation resource types, and the
+  cost note. The routing notes are the non-obvious part and each is a real trap: CloudTrail accepts
+  **two** target spellings because SDKs have been observed to send the fully qualified
+  `com.amazonaws.cloudtrail.v20131101.…` form as well as the short one; WAFv2 is reached through the
+  `awswaf` alias and its scope is part of a resource's identity, so one name in `REGIONAL` and
+  `CLOUDFRONT` is two resources; Athena's target prefix carries no version date at all. Eight
+  divergences were found while writing the rows and **filed rather than fixed**, since this change is
+  documentation only. The one that changes what a consumer can test at all is shared by five of the
+  seven: an Athena query, a CodeBuild build, a CodePipeline execution, a SageMaker training job and a
+  Redshift Data statement are **already in a terminal state in the request that creates them**, so
+  `QUEUED`/`RUNNING`/`IN_PROGRESS`/`InProgress`/`STARTED` and every failure state are unreachable and
+  a poll loop is answered on its first observation — the shape #514 has just fixed for EC2 instance
+  state, a seeded count of observations rather than a duration (#1155). The rest: Athena writes
+  `CANCELED` where the published enum spells it `CANCELLED` (#1154); CloudTrail and CodePipeline
+  answer **404** at twelve operations from three code sites where every page of both services
+  publishes 400 (#1156, the sibling of #1098's WAFv2 and Glue sites); CloudTrail hardcodes
+  `IsLogging: true` in `GetTrailStatus` *and* creates a trail already logging, so `StopLogging`
+  succeeds, changes state, and is invisible to the only operation that could report it (#1157);
+  CodeBuild's `UpdateProject` decodes a `"project"` wrapper AWS does not send, making it unreachable
+  from every real SDK (#1158) and `DeleteProject` refuses an absent project under a code its page does
+  not publish (#1159); CodePipeline's `GetPipelineExecution` never reads the `Required: Yes`
+  `pipelineName` and `GetPipeline` ignores `version` (#1160); WAFv2's two list operations declare a
+  `Limit` and paginate not at all, and `GetWebACLForResource` answers a one-member object where a full
+  `WebACL` is published (#1161); SageMaker's `ListTrainingJobs` ignores the seed `DescribeTrainingJob`
+  honours, so two endpoints contradict each other in the same instant, and its seed status is
+  unvalidated where Redshift Data's is (#1162); and the Redshift Data status seed is resolved at
+  execute time, keyed on one flat global `status`, has no `DELETE` route and is read with two
+  discarded errors (#1163). Recorded as deliberate rather than filed: a CloudFormation-deployed
+  resource for all five of these services with a stub deployer lives in the CloudFormation stub
+  namespace, which no service plugin reads, so it is invisible to its own API — stated on every
+  affected `CloudFormation resource types` row rather than implied. The disclaimer at the head of the
+  per-service sections still stands; #1093 stays open for the REST-path group and the ten services
+  found while verifying its scope.
 
 ### Fixed
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not
