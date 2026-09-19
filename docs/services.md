@@ -5531,6 +5531,51 @@ worth comparing.
 forwarded as the API spells them, and each goes through the template's `Ref` and
 pseudo-parameter resolution like every other property.
 
+### Docker execution runs an image, never a ZIP
+
+Docker execution is **off unless `lambda.docker_enabled` is set**, which is the default and
+every CI run. With it unset no executor is constructed, no container is ever started, and
+`Invoke` answers the stub payload `{"statusCode":200,"body":"null"}` — or a seeded failure,
+which short-circuits every path (see the `Invoke` row above). Everything in this subsection and
+the next applies only to the configured case.
+
+With it set, there are two paths and they are not equally capable:
+
+| `PackageType` | What the container runs |
+|---|---|
+| `Image` | The image's own code, which substrate neither builds nor inspects |
+| `Zip` (or unset) | **Nothing.** The archive is mounted, not extracted |
+
+The ZIP path writes the stored deployment package into a temporary directory as a single file
+named `function.zip` and mounts that directory at `/var/task:ro`. The Lambda runtime interface
+expects `/var/task` to hold the module tree, so the container sees one archive and no
+`index.py` — the handler cannot be imported whatever the ZIP contains.
+
+**What a caller observes is not a stub, and that is the part worth knowing.** `docker run`
+succeeds, the container passes its readiness check, it is pooled, and the invoke returns what
+the runtime interface answered: **HTTP 200 with an import-error body and
+`X-Amz-Function-Error: Unhandled`**, which substrate forwards verbatim. So `Invoke` reports
+that *the caller's handler raised* — for code that was never loaded, and indistinguishable
+from a genuine `Runtime.ImportModuleError`. The stub is returned only when the `docker` binary
+cannot be run or the container fails to start.
+
+Extraction is deliberately not implemented
+([#1079](https://github.com/scttfrdmn/substrate/issues/1079)). Running a caller's handler is
+outside substrate's scope by name — it is the workload behind the API rather than an
+observation through it — and a test of it could not avoid container-start latency, the
+handler's own I/O
+and clock, and an image pull over the network, all of which this project forbids a test to
+depend on. The ZIP write stays as the **recorded intent** the same boundary asks for: the
+bytes are what `GetFunction`'s `CodeSha256` and `CodeSize` are computed from, and they are
+what an `UpdateFunctionCode` changes.
+
+So the execution semantics a real Lambda has — a timeout firing, a handler exception becoming
+`Handled`, an `Environment` variable reaching the code — are not reachable through either path
+here. `X-Amz-Function-Error` and a function-error payload are still fully testable, because
+they are **seedable** through `POST`/`DELETE /v1/lambda/invoke-error` — which is the mechanism
+substrate offers in place of running the work, and which answers instantly and reproducibly
+where a real handler would not.
+
 ### Which operations drop a warm container
 
 This applies only when Docker execution is configured. Without it there is no executor

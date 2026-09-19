@@ -560,6 +560,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observable** in two ways — the three `p3` rows changed value, and a `current-generation` filter that
   used to select the whole catalog now narrows it — and no test asserted the member beforehand, which is
   how a constant survived five releases of catalog growth.
+- **The Docker ZIP execution path is documented as inert, and what it actually answers is named**
+  (#1079). `startZIPContainer` writes the deployment package into a temporary directory as a single
+  file and mounts that directory at `/var/task:ro`, where the Lambda runtime interface expects the
+  module tree — so no handler can be imported whatever the ZIP contains. The decision the issue asked
+  for is recorded as **option 1: the archive is not extracted.** Extraction would complete in-process
+  execution of a caller's own code, which the scope boundary excludes by name, and no test here could
+  cover it — it would depend on container-start latency, the handler's I/O and clock, and an image
+  pull over the network, all of which `## Testing` forbids. The write stays as the recorded intent the
+  same boundary asks for: those bytes are what `CodeSha256` and `CodeSize` are computed from.
+  **The observable is worse than a stub, which is why documenting it needed more than a sentence:**
+  `docker run` succeeds, the readiness check succeeds, the container is pooled, and `invokePOST`
+  returns the runtime interface's own answer — 200 with an import-error body and
+  `X-Amz-Function-Error: Unhandled`, forwarded verbatim. So `Invoke` reports that the caller's handler
+  raised, for code that was never loaded, indistinguishable from a real `Runtime.ImportModuleError`.
+  The stub is returned only when `docker` cannot be run or the container fails to start. No behaviour
+  changed: `docs/services.md` gains a Lambda subsection stating the two paths and their capability,
+  and `startZIPContainer`, `startImageContainer` and `LambdaExecCfg` say the same in their doc
+  comments. Recorded and filed rather than fixed here: the readiness probe POSTs to the runtime
+  interface's *invocation* endpoint, so starting a container invokes the handler once with an empty
+  payload — harmless on the ZIP path, an unrequested invocation on the image path, which is #1129.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -775,6 +795,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   number now states what it publishes today rather than what it published when the count was taken.
   `TestEC2_InstanceTypeFilters_FiveOfFiftySeven` is renamed
   `TestEC2_InstanceTypeFilters_SixOfFiftySix`, which moves both halves of the figure at once.
+- **`LambdaExecutor`'s doc comment named a field that does not exist** (#1079). It said the executor
+  "falls back to stub responses when Docker is unavailable or `DockerEnabled` is false", but
+  `LambdaExecCfg` has two fields and neither is `DockerEnabled` — the flag is `Lambda.DockerEnabled`
+  on `Config`, read once by `RegisterDefaultPlugins`, which leaves the executor nil when it is unset.
+  So the executor cannot make that fallback: it exists only because the flag was set. The comment now
+  describes the fallback it can make, and `LambdaExecCfg` documents where the gate really is. #1079's
+  last acceptance criterion — that the stub path stays the default — was therefore already satisfied
+  by `config.go`'s `false` default, and only the comment suggested otherwise.
 
 ## [v0.119.0] - 2026-09-18
 

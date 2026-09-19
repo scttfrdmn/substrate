@@ -17,6 +17,16 @@ import (
 )
 
 // LambdaExecCfg holds Docker execution settings for the Lambda engine.
+//
+// Docker execution is off unless [Config].Lambda.DockerEnabled is set, which
+// [RegisterDefaultPlugins] reads: with it unset no executor is constructed at all, so the
+// default — and every CI run — answers invocations from the stub path in [LambdaPlugin].
+// Nothing on this type gates it; a zero LambdaExecCfg belongs to an executor that is
+// already running.
+//
+// Neither execution path runs a caller's handler in the ZIP case. See
+// [LambdaExecutor.startZIPContainer] for what the ZIP path does instead and why the archive
+// is deliberately not extracted (#1079).
 type LambdaExecCfg struct {
 	// ReplayMode selects invocation behavior: "live" or "recorded".
 	ReplayMode string
@@ -33,8 +43,15 @@ type containerHandle struct {
 	lastUsed    time.Time
 }
 
-// LambdaExecutor manages warm Lambda RIE containers and falls back to stub
-// responses when Docker is unavailable or DockerEnabled is false.
+// LambdaExecutor manages warm Lambda RIE containers and falls back to stub responses when
+// the docker binary cannot be run.
+//
+// It does not know whether Docker execution is configured — an executor exists only because
+// [RegisterDefaultPlugins] found the flag set, so the fallback it can make is the narrower
+// one: [LambdaExecutor.isDockerAvailable] failing, or a container failing to start. The
+// pre-#1079 wording here named a DockerEnabled field on [LambdaExecCfg], which has no such
+// field and never did.
+//
 // All public methods are safe for concurrent use.
 type LambdaExecutor struct {
 	mu        sync.Mutex
@@ -131,6 +148,22 @@ func (e *LambdaExecutor) getOrStartContainer(ctx context.Context, fn LambdaFunct
 }
 
 // startZIPContainer writes the ZIP to a temp dir and starts a Lambda RIE container.
+//
+// The archive is written but never extracted, so the container's /var/task holds one file
+// named function.zip and no module tree. A handler cannot be imported from it whatever the
+// ZIP contains, and that is deliberate as of #1079: extracting it would complete in-process
+// execution of a caller's own code, which CLAUDE.md's scope boundary excludes by name and
+// which no test in this repo could cover — it would depend on container-start latency, the
+// handler's I/O and clock, and an image pull over the network. The write stays as the
+// recorded intent the same boundary asks for, and it is what [lambdaZipStateKey]'s bytes are
+// for.
+//
+// What a caller observes is the part worth knowing, because it is not a stub: docker run
+// succeeds, [LambdaExecutor.waitReady] succeeds, and [LambdaExecutor.invokePOST] returns the
+// RIE's own answer — HTTP 200 with an import-error body and X-Amz-Function-Error: Unhandled,
+// which [invokeResponse] forwards. So Invoke reports that the caller's handler raised, for
+// code that was never loaded. [LambdaExecutor.startImageContainer] is the only path that can
+// run real code, and substrate does not build the image it runs.
 func (e *LambdaExecutor) startZIPContainer(fn LambdaFunction, zipBytes []byte) (*containerHandle, error) {
 	port, err := findFreePort()
 	if err != nil {
@@ -142,7 +175,9 @@ func (e *LambdaExecutor) startZIPContainer(fn LambdaFunction, zipBytes []byte) (
 		return nil, fmt.Errorf("create temp dir: %w", err)
 	}
 
-	// Write the ZIP file into the temp dir as "function.zip".
+	// Write the ZIP file into the temp dir as "function.zip". Recorded intent, not a
+	// deployment: nothing extracts it, so the mount below carries the archive rather than
+	// the module tree the runtime interface expects. See the doc comment for why (#1079).
 	if len(zipBytes) > 0 {
 		if writeErr := os.WriteFile(dir+"/function.zip", zipBytes, 0600); writeErr != nil {
 			_ = os.RemoveAll(dir)
@@ -190,6 +225,12 @@ func (e *LambdaExecutor) startZIPContainer(fn LambdaFunction, zipBytes []byte) (
 }
 
 // startImageContainer starts a container from a pre-built Lambda image.
+//
+// This is the only path that can run a caller's code, and only because the code is already
+// inside an image substrate neither builds nor inspects — [LambdaExecutor.startZIPContainer]
+// documents why the archive path deliberately does not (#1079). What that image does is
+// outside substrate's observation either way: an Invoke reports whatever the runtime
+// interface answers.
 func (e *LambdaExecutor) startImageContainer(fn LambdaFunction) (*containerHandle, error) {
 	port, err := findFreePort()
 	if err != nil {
@@ -226,6 +267,12 @@ func (e *LambdaExecutor) startImageContainer(fn LambdaFunction) (*containerHandl
 }
 
 // waitReady polls the RIE endpoint until it responds or the deadline is exceeded.
+//
+// The endpoint it polls is the *invocation* endpoint with an empty payload, so becoming ready
+// means having been invoked once. On the ZIP path that costs nothing because nothing runs;
+// on [LambdaExecutor.startImageContainer]'s path it is an invocation the caller never asked
+// for. Recorded here rather than fixed with #1079, which is about the ZIP path: TODO(#1129):
+// probe readiness without invoking the handler.
 func (e *LambdaExecutor) waitReady(h *containerHandle, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	url := fmt.Sprintf("http://localhost:%d/2015-03-31/functions/function/invocations", h.port)
