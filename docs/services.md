@@ -764,12 +764,48 @@ would otherwise have had no caller any test exercises at all.
 
 **Which tail operations must still answer 200 for an absent body was measured, not reasoned.** Every one
 was called with no body at all and the ones answering 200 were listed; fourteen of those are what their
-page publishes and are now pinned. Nine more answer 200 where their page marks a member `Required: Yes`,
-and those are deliberately left unpinned — SSO's three account-assignment operations, `ListIdentityPools`
+page publishes and are now pinned. Nine more answered 200 where their page marks a member `Required: Yes`,
+and those were deliberately left unpinned — SSO's three account-assignment operations, `ListIdentityPools`
 and `ListUserPools` (`MaxResults`), Glue `GetTables` (`DatabaseName`), WAFv2 `ListWebACLs` and `ListIPSets`
-(`Scope`), and DynamoDB `GetRecords` (`ShardIterator`). Asserting the tree's current answer there would
-turn a missing required-member check into a pinned requirement, so they are recorded as the
+(`Scope`), and DynamoDB Streams `GetRecords` (`ShardIterator`). Asserting the tree's current answer there
+would have turned a missing required-member check into a pinned requirement, so they were recorded as the
 missing-required-member class and filed separately.
+
+**[#1062](https://github.com/scttfrdmn/substrate/issues/1062) is that class, and all nine now refuse.**
+Each answers the code its own page publishes, which is four different codes rather than one:
+`ValidationException`/400 for SSO's three (published on all three pages, and already the plugin's answer
+at its two checked guards), `InvalidParameterException`/400 for the two Cognito services,
+`InvalidInputException`/400 for Glue — the code [#1063](https://github.com/scttfrdmn/substrate/issues/1063)
+centralised one release earlier — and `ValidationError`/400 for WAFv2, which is
+[#755](https://github.com/scttfrdmn/substrate/issues/755)'s reading of the common list, cited rather than
+re-derived.
+
+Two of the nine needed a reading recorded rather than a citation. **Cognito user pools'
+`InvalidParameterException` is glossed "…encounters an invalid parameter" and does not say *missing*,**
+where Cognito Identity's says "Thrown for missing or bad input parameter(s)" — so `ListUserPools`'
+refusal is substrate's reading of an absent required parameter as an invalid one, and `ListIdentityPools`'
+rests on the page. **DynamoDB Streams `GetRecords` publishes no validation error of any kind** — its five
+published errors are about iterators, limits, resources and trimmed data, and even an out-of-range `Limit`
+is assigned to `LimitExceededException` — so its refusal comes from the JSON common list.
+`ValidationException` was declined there even though eighteen sites in the same plugin answer it, because
+those are DynamoDB's control-plane pages and borrowing across API surfaces is what
+[#671](https://github.com/scttfrdmn/substrate/issues/671) settles against.
+
+**The measurement missed sites in one direction only, and #1062 corrected for it.** A site that already
+refuses an absent body never appears as a 200, so two required-member defects were invisible to it:
+Cognito `ListUserPoolClients`, which unmarshals unconditionally and so refuses an absent body while
+ignoring its required `UserPoolId`, and six further WAFv2 operations that default `Scope`. `Scope` is
+`Required: Yes` on eight of the nine operations that read it and `Required: No` only on `GetWebACL`, so
+eight now refuse an absent `Scope` and `GetWebACL` keeps the `REGIONAL` fallback — **a recorded
+divergence, because no WAFv2 page publishes any default for the member** and an optional member's lookup
+still needs a value. A present-but-unrecognised `Scope` answers `WAFInvalidParameterException`/400 at all
+nine, which is #755's omitted-versus-invalid split applied to a second member.
+
+Also corrected while measuring: `MaxResults` is `Required: Yes` over 1–60 on both Cognito list pages with
+no published default, so the silent rewrite of an absent or non-positive value to 60 is gone at those two
+operations — absent, zero, negative and above-60 are each outside the published range and each refuse.
+`ListUserPoolClients` marks the same member `Required: No`, so its rewrite is a page-size defect rather
+than a required-member one and stays for that issue.
 
 ### Whether a body is parsed before the resource is looked up
 

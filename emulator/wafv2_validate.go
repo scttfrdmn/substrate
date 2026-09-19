@@ -86,8 +86,8 @@ func wafv2ValidateCreateIPSet(name, scope, ipAddressVersion string, addresses []
 	if !wafv2IPSetNamePattern.MatchString(name) {
 		return wafv2InvalidParameter("Name", name, `must match the pattern ^[\w\-]+$`)
 	}
-	if scope != "CLOUDFRONT" && scope != "REGIONAL" {
-		return wafv2InvalidParameter("Scope", scope, "must be one of CLOUDFRONT, REGIONAL")
+	if err := wafv2ValidateScopeValue(scope); err != nil {
+		return err
 	}
 	if ipAddressVersion != "IPV4" && ipAddressVersion != "IPV6" {
 		return wafv2InvalidParameter("IPAddressVersion", ipAddressVersion,
@@ -120,6 +120,43 @@ func wafv2ValidateIPSetAddress(addr string) error {
 	if ones, _ := network.Mask.Size(); ones == 0 {
 		return wafv2InvalidParameter("Addresses", addr,
 			"a /0 CIDR range is not supported")
+	}
+	return nil
+}
+
+// wafv2ValidateScope refuses a request whose Scope is omitted or is not one of the two
+// published values, and returns nil for one AWS would accept.
+//
+// Scope is Required: Yes on eight of the nine operations that read it —
+// CreateWebACL, UpdateWebACL, DeleteWebACL, ListWebACLs, GetIPSet, UpdateIPSet, DeleteIPSet
+// and ListIPSets — and Required: No only on GetWebACL, which addresses a web ACL by ARN
+// instead. Every one of those eight defaulted an absent Scope to REGIONAL before #1062, and
+// **no WAFv2 page publishes any default for the member**: the value was substrate's
+// invention, so a caller who omitted it while meaning CLOUDFRONT silently got a REGIONAL
+// lookup and a NotFound, or worse, created a web ACL in the wrong scope. #1062's issue body
+// named two of the eight; correcting only those two would have left the same defect at six
+// sites, which is how #950's eleven deferred sites survived four releases into #1063.
+//
+// GetWebACL keeps its default and calls [wafv2ValidateScopeValue] instead — an optional
+// member cannot be refused for being absent, but the lookup still needs a value to key on,
+// so the REGIONAL fallback there is a recorded divergence rather than something this release
+// can fix.
+func wafv2ValidateScope(scope string) error {
+	if scope == "" {
+		return wafv2MissingMember("Scope")
+	}
+	return wafv2ValidateScopeValue(scope)
+}
+
+// wafv2ValidateScopeValue refuses a Scope that is present but is neither CLOUDFRONT nor
+// REGIONAL, the two values every WAFv2 page publishes for the member.
+//
+// It is separate from [wafv2ValidateScope] because the omitted and invalid cases answer
+// different codes — see [wafv2ValidateCreateIPSet] for #755's argument — and because
+// GetWebACL needs the value check without the presence check.
+func wafv2ValidateScopeValue(scope string) error {
+	if scope != "CLOUDFRONT" && scope != "REGIONAL" {
+		return wafv2InvalidParameter("Scope", scope, "must be one of CLOUDFRONT, REGIONAL")
 	}
 	return nil
 }

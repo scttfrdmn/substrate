@@ -70,6 +70,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeFileSystems` marks `FileSystemIds` `Required: No` and an absent list means *describe them
   all*, which substrate already does and which its own tests rely on. `DeleteFileSystem` marks
   `FileSystemId` `Required: Yes`, so the guard was in the right place and only the code was wrong.
+- **Nine operations that answered 200 for a body omitting a member their page marks `Required: Yes` now
+  refuse, in four different codes** (#1062). Each is the code the operation's own page publishes, and
+  the spread is the finding: `ValidationException`/400 for SSO Admin's `CreateAccountAssignment`,
+  `DeleteAccountAssignment` and `ListAccountAssignments` — published on all three pages and already the
+  plugin's answer at its two checked guards — `InvalidInputException`/400 for Glue `GetTables`, the code
+  #1063 centralised one release earlier, `InvalidParameterException`/400 for the two Cognito services,
+  and `ValidationError`/400 for WAFv2, which is #755's reading of the JSON common list cited rather than
+  re-derived. A single code across all nine would have meant borrowing from a sibling service at six of
+  them, which #671 settles against. `CreateAccountAssignment` with no body answered 200 and a
+  `SUCCEEDED` status for an assignment whose permission set, target and principal were all the empty
+  string, and `DeleteAccountAssignment` answered `SUCCEEDED` for deleting it.
+- **`Scope` is required at eight WAFv2 operations, not the two the issue named, and `GetWebACL` is the
+  one exemption** (#1062). `wafv2_plugin.go` defaulted an absent `Scope` to `REGIONAL` at nine sites;
+  the member is `Required: Yes` on eight of the pages behind them (`CreateWebACL`, `UpdateWebACL`,
+  `DeleteWebACL`, `ListWebACLs`, `GetIPSet`, `UpdateIPSet`, `DeleteIPSet`, `ListIPSets`) and
+  `Required: No` only on `GetWebACL`, which addresses a web ACL by ARN. Correcting the two named sites
+  would have left the same defect at six — the shape that let #950's eleven deferred sites survive four
+  releases into #1063. **No WAFv2 page publishes any default for `Scope`**, so the `REGIONAL` fallback
+  was substrate's invention: a caller who omitted the member while meaning `CLOUDFRONT` was given a
+  regional lookup and a not-found, or a web ACL created in the wrong scope. `GetWebACL` keeps the
+  fallback as a recorded divergence, because an optional member cannot be refused for being absent and
+  the lookup still needs a value. A present-but-unrecognised `Scope` answers
+  `WAFInvalidParameterException`/400 at all nine, which is #755's omitted-versus-invalid split applied
+  to a second member.
+- **`MaxResults` is `Required: Yes` over 1–60 on both Cognito list pages, so the silent rewrite to 60 is
+  gone at those two operations** (#1062). Absent, zero, negative and above-sixty are each outside the
+  published range and each refuse; neither page publishes a default. The two glosses differ and the
+  difference decides how much is substrate's reading: Amazon Cognito Identity publishes *"Thrown for
+  missing or bad input parameter(s)"*, which names the missing case, while Cognito user pools publishes
+  *"…encounters an invalid parameter"*, which does not — so `ListUserPools`' refusal is recorded as
+  substrate reading an absent required parameter as an invalid one. `ListUserPoolClients` marks the same
+  member `Required: No`, so **the issue's third `MaxResults` site is not a required-member site at all**;
+  its required member is the `UserPoolId` nothing checked, which is fixed here, and its page-size rewrite
+  is left to the page-size issue.
+- **DynamoDB Streams `GetRecords` refuses an absent `ShardIterator` with `ValidationError`/400, the one
+  refusal in `dynamodb_plugin.go` that is not `ValidationException`** (#1062). `API_streams_GetRecords`
+  publishes no validation error of any kind — its five are about iterators, limits, resources and
+  trimmed data, and even an out-of-range `Limit` is assigned to `LimitExceededException` — so there is no
+  gap where one was merely left unlisted. `ValidationException` was declined despite eighteen sites in
+  the same plugin answering it: those are DynamoDB's *control-plane* pages, a different API surface
+  reached through the same plugin, and borrowing across it is the analogy #671 forbids. Answering 200
+  with an empty `Records` list told a consumer's poll loop *this shard has no records yet* for a request
+  that named no shard, which is the one answer a poll loop cannot recover from. Only the absent case
+  changes; an iterator that will not decode still answers 200, which is the deliberate accommodation of
+  the stub iterators earlier releases minted.
 
 ### Added
 - **Eleven rows in `memberComplaintServices` and a code assertion on FSx's three refusals** (#1063).
@@ -91,6 +136,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   toward deleting the provenance rather than writing it. It also carries its own control — the same
   predicates must still find a `ValidationError` constructor citing the common page — so a green run
   cannot come from a broken detector.
+- **Twenty-five rows in `memberComplaintServices`, four new service entries, and a WAFv2 `Scope` test
+  file** (#1062). The four entries are SSO, the two Cognito services and DynamoDB Streams — named for
+  the API rather than a host, because substrate routes the Streams operations through DynamoDB's own
+  host and target prefix, so the operation name is the only discriminator. The five WAFv2 rows that used
+  to name `Id` for a `{}` body are now **pairs**: `Scope` is checked first, so retargeting them would
+  have silently stopped testing #1063's `Id` refusals, and the second row of each pair supplies a
+  `Scope` to reach the check underneath. `wafv2_scope_test.go` carries the two halves the one-code table
+  cannot — the invalid-value code at all eight required operations, applied per handler so a handler that
+  forgot the call fails, and `GetWebACL`'s exemption, which needs a message assertion because both of
+  its refusals are `ValidationError`/400.
+- **`emulator/sso_errors.go`, `emulator/cognito_errors.go` and `emulator/dynamodb_streams_errors.go`**
+  (#1062), following the `glue_errors.go`/`fsx_errors.go` shape #1063 established: one constructor per
+  service carrying the code, the status and the published sentence it rests on, so a correction moves one
+  line rather than a plugin's worth of literals. `ssoInvalidBody` and the plugin's two inline
+  `ValidationException` literals now route through `ssoValidationException`, and `wafv2ValidateScope`
+  joins `wafv2ValidateCreateIPSet` in `wafv2_validate.go` so the enum's two published values are written
+  once.
 
 ## [v0.119.0] - 2026-09-18
 

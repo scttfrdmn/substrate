@@ -1908,10 +1908,12 @@ func (p *DynamoDBPlugin) getRecords(ctx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
+	// ShardIterator is Required: Yes on API_streams_GetRecords. Answering 200 with an empty list
+	// told a consumer's poll loop "this shard has no records yet" for a request that named no
+	// shard, which is the one answer a poll loop cannot recover from — it keeps polling. See
+	// [dynamodbStreamsValidationError] for why the code is not the plugin's ValidationException.
 	if input.ShardIterator == "" {
-		return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
-			"Records": []interface{}{},
-		})
+		return nil, dynamodbStreamsValidationError("ShardIterator is a required parameter")
 	}
 
 	b, err := base64.StdEncoding.DecodeString(input.ShardIterator)

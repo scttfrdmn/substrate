@@ -149,8 +149,8 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if input.Name == "" {
 		return nil, wafv2MissingMember("Name")
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	id := generateWAFv2Token()
@@ -209,8 +209,13 @@ func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 			return nil, wafv2InvalidBody()
 		}
 	}
+	// Scope is Required: No here alone, so an absent one keeps substrate's REGIONAL fallback
+	// (a recorded divergence — the page publishes no default) while a present one is still
+	// held to the two published values. See [wafv2ValidateScope].
 	if input.Scope == "" {
 		input.Scope = "REGIONAL"
+	} else if err := wafv2ValidateScopeValue(input.Scope); err != nil {
+		return nil, err
 	}
 	// API_GetWebACL marks ARN, Id, Name and Scope all Required: No — the ARN alone identifies a
 	// web ACL, and the Name/Id/Scope triple is the alternative. Substrate models only the
@@ -247,8 +252,8 @@ func (p *WAFv2Plugin) updateWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 	// Id is Required: Yes on API_UpdateWebACL, which is why the check is here and not in
 	// loadWebACLByID — see that function for the caller that disagrees.
@@ -310,8 +315,8 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 	// Id is Required: Yes on API_DeleteWebACL; see [WAFv2Plugin.loadWebACLByID].
 	if input.ID == "" {
@@ -347,8 +352,8 @@ func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -529,8 +534,8 @@ func (p *WAFv2Plugin) getIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	ipset, err := p.loadIPSetByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -557,8 +562,8 @@ func (p *WAFv2Plugin) updateIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	ipset, err := p.loadIPSetByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -604,8 +609,8 @@ func (p *WAFv2Plugin) deleteIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	ipset, err := p.loadIPSetByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -636,8 +641,8 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			return nil, wafv2InvalidBody()
 		}
 	}
-	if input.Scope == "" {
-		input.Scope = "REGIONAL"
+	if err := wafv2ValidateScope(input.Scope); err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()

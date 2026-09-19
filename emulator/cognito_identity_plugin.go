@@ -176,8 +176,10 @@ func (p *CognitoIdentityPlugin) listIdentityPools(ctx *RequestContext, req *AWSR
 			return nil, cognitoIdentityInvalidBody()
 		}
 	}
-	if body.MaxResults <= 0 {
-		body.MaxResults = 60
+	// MaxResults is Required: Yes over 1–60 on API_ListIdentityPools, with no published
+	// default. See cognito_errors.go for why an absent value is refused rather than defaulted.
+	if body.MaxResults < cognitoMaxResultsMin || body.MaxResults > cognitoMaxResultsMax {
+		return nil, cognitoIdentityInvalidParameter(cognitoMaxResultsOutOfRange(body.MaxResults))
 	}
 
 	goCtx := context.Background()
