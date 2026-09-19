@@ -25,9 +25,11 @@ import (
 // Every assertion here reads the tag back through the **owning service's own tag call** rather
 // than out of state, which is what #765's first criterion asks for and what makes the test
 // meaningful: a stamp written to a state key the service does not read would satisfy a state
-// assertion and satisfy no caller. That is not hypothetical — the key SQS reads is
-// `queue:<account>/<name>` while the Resource Groups Tagging API writes `queue:<name>` (#826),
-// so a reader that agreed with the wrong one would pass while the tag stayed invisible.
+// assertion and satisfy no caller. That is not hypothetical — the key SQS reads was
+// `queue:<account>/<name>` while the Resource Groups Tagging API wrote `queue:<name>` (#826),
+// so a reader that agreed with the wrong one would pass while the tag stayed invisible. Both now
+// derive from [sqsQueueStateKey], which is also how the Region #1088 added reached all three
+// readers at once.
 
 // cfnExpectedStamp is the tag set every stamped resource carries, in the sorted "key=value"
 // form the fixture's readers return.
@@ -112,8 +114,9 @@ func (f *cfnStampFixture) functionTagsFor(t *testing.T, arn string) []string {
 // queueTagsFor reads one queue's tags through SQS's ListQueueTags.
 //
 // The URL is built rather than read off the create response because the fixture drives the
-// plugin directly; `sqsURLKey` keys a queue by the last two components, so this resolves to the
-// same record a caller's URL would.
+// plugin directly; `sqsURLKey` takes the account and name from the URL's last two components and
+// the Region from the request context, which [cfnStampReqCtx] sets to the same `cfnStampRegion`
+// spelled in the host here — so this resolves to the same record a caller's URL would.
 func (f *cfnStampFixture) queueTagsFor(t *testing.T, queueName string) []string {
 	t.Helper()
 	url := "https://sqs." + cfnStampRegion + ".amazonaws.com/" + cfnStampAccount + "/" + queueName

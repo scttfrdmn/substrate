@@ -2180,9 +2180,11 @@ var cfnDriftCheckers = map[string]func(d *StackDeployer, ctx context.Context, ac
 		data, _ := d.state.Get(ctx, "dynamodb", "table:"+acct+"/"+region+"/"+physicalID)
 		return data != nil
 	},
-	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, _, physicalID string) bool {
-		// SQS state key is account/queue-name (no region component).
-		data, _ := d.state.Get(ctx, "sqs", "queue:"+acct+"/"+physicalID)
+	"AWS::SQS::Queue": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
+		// A queue name is unique per account per Region, and since #1088 the key says so, for the
+		// reason [sqsQueueStateKey] records — the same reason the Lambda arm below reads its own
+		// Region. The PhysicalID is the queue name ([StackDeployer.deploySQSQueue]).
+		data, _ := d.state.Get(ctx, "sqs", sqsQueueStateKey(acct, region, physicalID))
 		return data != nil
 	},
 	"AWS::SNS::Topic": func(d *StackDeployer, ctx context.Context, acct, region, physicalID string) bool {
@@ -2427,7 +2429,10 @@ func compareSQSQueueDrift(ctx context.Context, d *StackDeployer, stack *CFNStack
 	if !ok {
 		return nil
 	}
-	data, _ := d.state.Get(ctx, "sqs", "queue:"+d.identity.accountID+"/"+dr.PhysicalID)
+	// The deployer's own Region, as [compareLambdaFunctionDrift] reads for the same reason: a stack
+	// lives in one Region and since #1088 so does a queue record.
+	data, _ := d.state.Get(ctx, "sqs",
+		sqsQueueStateKey(d.identity.accountID, d.identity.region, dr.PhysicalID))
 	if data == nil {
 		return nil
 	}

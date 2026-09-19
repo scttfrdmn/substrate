@@ -5600,7 +5600,7 @@ Lambda invocations: $0.0000002 per request.
 | GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window); [attribute defaults](#queue-attribute-defaults) |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
-| ListQueues | |
+| ListQueues | Scoped to the caller's account and the endpoint's Region; filters on `QueueNamePrefix`; see [One queue name is one queue per Region](#one-queue-name-is-one-queue-per-region) |
 | SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement); stores [message attributes](#message-attributes) and returns `MD5OfMessageAttributes`; enforces the [attribute count, name, type and `Number` rules](#attribute-rules) |
 | SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement); stores [message attributes](#message-attributes) per entry; reports an [attribute-rule violation per entry](#batch-failures-are-per-entry) in `Failed` at HTTP 200 |
 | ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; returns [message attributes](#message-attributes) for the names requested |
@@ -5608,6 +5608,54 @@ Lambda invocations: $0.0000002 per request.
 | DeleteMessageBatch | |
 | ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | PurgeQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+
+### One queue name is one queue per Region
+
+Two Regions can each hold a queue named `orders`, and a `ListQueues` answers for the endpoint
+it was sent to. Until #1088 neither held: the queue's state key was
+`queue:{account}/{name}`, built from the last two components of a queue URL — which skips the
+Region, because a queue URL carries it in the **host**.
+
+The consequence was not merely colliding state. A `CreateQueue` for a name another Region
+already held found that record, took its idempotent branch and **answered the other Region's
+URL** — so the caller's next call addressed the wrong endpoint for a queue it had just created,
+every operation on it succeeded against a record it had not asked for, and nothing refused
+anything. The key is now `queue:{account}/{region}/{name}`, and the `msg:`, `msg_ids:` and
+`fifo_dedup:` keys derived from it carry the same triple.
+
+| Before #1088 | Now |
+|---|---|
+| `CreateQueue` for `orders` in `eu-west-1` after one in `us-east-1` answered the **us-east-1 URL** | each Region answers its own URL, and the two hold separate attributes and messages |
+| A queue URL from another Region resolved that Region's queue | it resolves nothing at this endpoint and answers [`QueueDoesNotExist`](#queuedoesnotexist) |
+| `ListQueues` reported every queue in every account and every Region | it reports the caller's own account's queues in the endpoint's Region |
+
+**The Region comes from the request, not from the queue URL**, and that is the substantive
+choice. Substrate's URL does carry the Region in its host, so a host parse is available — but a
+URL reaching a handler may have been built by an SDK against a custom endpoint whose host says
+nothing about a Region, so parsing it out is a guess at the one value the endpoint already knows
+for certain. `API_GetQueueUrl` publishes **no Region parameter** for the same reason: AWS takes
+it from the endpoint too. Taking it from the request is also what gives the third row above its
+answer, where a host parse would have silently served the other Region's queue.
+
+**The provenance is structural rather than quoted, and that is worth stating plainly.** AWS
+publishes no sentence anywhere scoping a queue name to a Region — unlike DynamoDB's
+`CreateTable`, which says so outright. The whole of the argument is the shape of the identifier
+AWS hands back: the sample queue URL carries the Region in its host on all four published
+protocol variants, and two endpoints are therefore two namespaces or the URL in the response is
+wrong. This is the same reading, and the same kind of reading, that #943 recorded for Lambda —
+see [A Lambda function and a DynamoDB table belong to one account in one Region](#a-lambda-function-and-a-dynamodb-table-belong-to-one-account-in-one-region),
+which sets out when an inference from an ARN's shape is and is not enough. SQS was the last
+service in that class: Budgets, Organizations and IAM are global and legitimately carry no
+Region, and ELB's prefix was already account- and Region-scoped.
+
+**`ListQueues` became scoped in the same change, and it had to.** It read one flat `queue_names`
+key holding every queue URL substrate had ever created, with no account and no Region in the
+key, and filtered on `QueueNamePrefix` alone — so it already crossed accounts before anything
+about the Region changed. Once two Regions can hold one name, an unscoped list answers one
+endpoint with two URLs for the same name, which is incoherent rather than merely over-broad. The
+index is gone: the list is a prefix scan over the queue records themselves, which has no second
+copy to go stale, needs no prune on delete, and takes its scope from the key rather than from a
+filter written beside it.
 
 ### QueueDoesNotExist
 
@@ -10425,15 +10473,16 @@ derived separately, and where they disagree a tag is written to a record nothing
 reads — the call answers `200`, the service reports no tag, and an
 `aws:ResourceTag` condition on the resource never matches.
 
-That is what happened for SQS until #826. A queue is stored under
-`queue:{account}/{name}`, because the SQS plugin keys on the last two components
+That is what happened for SQS until #826. A queue was stored under
+`queue:{account}/{name}`, because the SQS plugin keyed on the last two components
 of a queue URL, but the ARN resolver dropped the account and addressed
 `queue:{name}`. The authorizer derived the same key a third way, from the last
 component of the request's `QueueUrl`, and so had the same blind spot: every
 `aws:ResourceTag/*` condition on an SQS request was unsatisfiable, which turns
-an explicit `Deny` into a silent allow. Both now address
-`queue:{account}/{name}`, and the authorizer calls the SQS plugin's own key
-helper rather than re-deriving it.
+an explicit `Deny` into a silent allow. All three now derive the key from the SQS
+plugin's own builder rather than re-deriving it, which is how the Region #1088
+added ([below](#one-queue-name-is-one-queue-per-region)) reached every reader at
+once: the key is `queue:{account}/{region}/{name}`.
 
 Every other service's arm was audited against its plugin's key at the same time
 and they agreed *for the resource type each arm claims to name*: S3, Lambda,
@@ -10732,7 +10781,11 @@ and an identifier that carries a scope is not an identifier of something outside
 is substrate's reading, not AWS's sentence. It is the same reasoning the ARN-format
 argument gave for SQS in #826 and for DynamoDB in #845, and it points the same way in all
 three cases; recording it as an inference is what distinguishes it from the DynamoDB half
-rather than a reason to doubt it.
+rather than a reason to doubt it. #1088 then applied the same reading to the last service in
+the class — see
+[One queue name is one queue per Region](#one-queue-name-is-one-queue-per-region), where the
+identifier carrying the scope is a queue URL's host rather than an ARN, and where the missing
+Region produced a create that answered another Region's URL rather than a refusal.
 
 **Three sibling keys moved with the function key, and not moving them would have been a new
 leak of its own.** A function's resource policy, its stored zip and its event-invoke

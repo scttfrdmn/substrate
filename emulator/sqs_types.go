@@ -93,3 +93,44 @@ func sqsQueueURL(region, accountID, name string) string {
 func sqsQueueARN(region, accountID, name string) string {
 	return "arn:aws:sqs:" + region + ":" + accountID + ":" + name
 }
+
+// sqsQueueStateKey names the record one queue lives in, qualified by account, Region and name.
+//
+// Until #1088 the key was account and name alone, built by taking the last two components of a queue
+// URL — which skips the Region, because a queue URL carries it in the **host**. So one name was one
+// record across every Region, and the consequence was not merely colliding state: `CreateQueue` for a
+// name another Region already held found that record, took its idempotent branch and answered the
+// **other Region's URL**, so every later call the caller made addressed the wrong endpoint and
+// nothing refused it.
+//
+// AWS publishes no prose scoping a queue name to a Region, so the citation is structural: the sample
+// queue URL carries the Region in the host on all four published protocol variants, and
+// `API_GetQueueUrl` publishes **no Region parameter** — the Region comes from the endpoint alone.
+// Two endpoints are therefore two namespaces, or the URL in the response is wrong.
+//
+// The precedent is [lambdaFunctionStateKey], whose own doc comment records the same defect in the
+// same words for #943; this is that fix in the one service the sweep left, since Budgets,
+// Organizations and IAM are global and ELB's prefix was already account and Region scoped.
+func sqsQueueStateKey(accountID, region, name string) string {
+	return "queue:" + sqsQueueKeyComponent(accountID, region, name)
+}
+
+// sqsQueueKeyComponent is the account/Region/name triple the queue key and every key derived from it
+// share, so a message key and its queue's key cannot disagree about the scope.
+//
+// The `msg:`, `msg_ids:` and `fifo_dedup:` keys are all built from this rather than from the queue
+// key, which is why they moved with it rather than needing their own decision.
+func sqsQueueKeyComponent(accountID, region, name string) string {
+	return accountID + "/" + region + "/" + name
+}
+
+// sqsQueueKeyPrefix is the [sqsQueueStateKey] prefix selecting one account's queues in one Region,
+// for a scan that must not reach another account's or another Region's.
+//
+// Copied from [lambdaFunctionKeyPrefix] along with the key itself, because a Region-qualified key
+// without its prefix leaves every scan to rebuild the shape by hand — which is how
+// `TaggingPlugin.scanSQSQueues` came to hold a literal `"queue:" + accountID + "/"` that stopped
+// being the whole scope the moment the Region went in.
+func sqsQueueKeyPrefix(accountID, region string) string {
+	return "queue:" + accountID + "/" + region + "/"
+}

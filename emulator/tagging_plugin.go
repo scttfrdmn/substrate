@@ -498,13 +498,14 @@ func (p *TaggingPlugin) scanLambdaFunctions(_ context.Context, reqCtx *RequestCo
 
 // scanSQSQueues lists the caller's queues.
 //
-// Account-qualified but not Region-qualified, because that is as far as the key goes: [sqsURLKey]
-// builds it from the last two components of a queue URL and a queue URL's penultimate component is
-// the account, with no Region anywhere in it. The Region half of the scope comes from the queue's own
-// ARN through [taggingResourceInScope] (#937).
+// Account- and Region-qualified since #1088, which put the Region in [sqsQueueStateKey]; until then
+// the key was account and name alone and the Region half of the scope came from the queue's own ARN
+// through [taggingResourceInScope] (#937). That filter still runs and is still what a cross-Region
+// `ResourceARNList` is answered by, so the prefix is a narrowing rather than the whole rule — but it
+// is the narrowing that stops this scan unmarshalling every other Region's record to discard it.
 func (p *TaggingPlugin) scanSQSQueues(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, sqsNamespace, "queue:"+reqCtx.AccountID+"/")
+	keys, err := p.state.List(goCtx, sqsNamespace, sqsQueueKeyPrefix(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("list sqs queues: %w", err)
 	}
@@ -1649,15 +1650,14 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 	case "sqs":
 		// arn:aws:sqs:{region}:{acct}:{name}
 		//
-		// The key is account-qualified because [sqsURLKey] builds it from the last *two*
-		// components of a queue URL, and a queue URL's penultimate component is the account.
-		// Dropping the account addressed a key no queue is ever stored at, so a TagResources
-		// against a real queue wrote a phantom record and answered 200 (#826).
-		//
-		// The account comes from the ARN rather than from the caller's request context, as it
-		// does for the IAM and EC2 arms: an ARN naming another account must resolve that
-		// account's queue or none.
-		return sqsNamespace, "queue:" + parts[4] + "/" + resource, nil
+		// The key is account-qualified because dropping the account addressed a key no queue is
+		// ever stored at, so a TagResources against a real queue wrote a phantom record and
+		// answered 200 (#826); it is Region-qualified since #1088, which is the same defect one
+		// component over — an ARN naming another Region's queue resolved to the caller's own
+		// same-named one. Both components come from the ARN rather than from the caller's request
+		// context, as they do for the Lambda, DynamoDB, IAM and EC2 arms: an ARN naming another
+		// account or Region must resolve that queue or none.
+		return sqsNamespace, sqsQueueStateKey(parts[4], parts[3], resource), nil
 
 	case "dynamodb":
 		// arn:aws:dynamodb:{region}:{acct}:table/{name}

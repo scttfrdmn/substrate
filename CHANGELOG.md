@@ -342,6 +342,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only the pointer was idempotent. The dedup stays alongside the refusal, since a record written before
   this change may already hold the name twice. The refusal is scoped to the account and Region, not to the
   name — *"you can have aliases with the same name in different Regions"*.
+- **An SQS queue's state key carries the Region, so one name is one queue per account *per Region*, and
+  a create in a second Region no longer answers the first Region's URL** (#1088). The key was
+  `queue:{account}/{name}`, built from the last two components of a queue URL — which skips the Region,
+  because a queue URL carries it in the **host**. The consequence went well past colliding state: a
+  `CreateQueue` for a name another Region already held found that record, took its idempotent branch and
+  **answered the other Region's URL**, so the caller's next call addressed the wrong endpoint for a queue
+  it had just created and every operation on it succeeded against a record it had not asked for. The key
+  is now `queue:{account}/{region}/{name}`, and the `msg:`, `msg_ids:` and `fifo_dedup:` keys derived
+  from it moved with it. **The Region comes from the request, not parsed back out of the URL host**:
+  substrate's URL does carry it, but a URL built by an SDK against a custom endpoint may not, so parsing
+  it is a guess at the one value the endpoint already knows — `API_GetQueueUrl` publishes no Region
+  parameter for the same reason. That also gives AWS's answer to a cross-Region URL, `QueueDoesNotExist`,
+  where a host parse would silently serve the other Region's queue. The provenance is **structural, not
+  quoted**: AWS publishes no sentence scoping a queue name to a Region, unlike DynamoDB's `CreateTable`;
+  the argument is that the sample queue URL carries the Region in its host on all four published protocol
+  variants, so two endpoints are two namespaces or the URL in the response is wrong — the same reading
+  #943 recorded for Lambda, in the last service of that class (Budgets, Organizations and IAM are global
+  and ELB was already account- and Region-scoped).
+- **`ListQueues` is scoped to the caller's account and the endpoint's Region, and the global queue index
+  behind it is gone** (#1088). Not in the issue, and the larger of the two defects: `queue_names` was
+  **one flat state key** holding every queue URL substrate had ever created, with no account and no
+  Region in it, and `listQueues` filtered on `QueueNamePrefix` alone — it read neither `ctx.AccountID`
+  nor `ctx.Region` — so `ListQueues` in one account already reported another account's queues, before
+  anything about the Region changed. Once two Regions can hold one name an unscoped list answers one
+  endpoint with two URLs for the same name, which is incoherent rather than merely over-broad, so it had
+  to move in the same commit. The list is now a prefix scan over the queue records themselves: no second
+  copy to go stale, no prune on delete to miss, and the scope is the key rather than a filter written
+  beside it. `MemoryStateManager.List` has sorted since #865, which is what the removed `sort.Strings`
+  was for.
+- **The five readers that built an SQS key by hand now build it from the plugin's own two helpers**
+  (#1088). `sqsQueueStateKey` and `sqsQueueKeyPrefix` follow `lambdaFunctionStateKey` and
+  `lambdaFunctionKeyPrefix` (#943) exactly, and `AWS::SQS::Queue` moved into `cfnRegionalStampKinds`
+  rather than keeping the special-cased arm it only needed while its key was two components. The
+  deployer's drift checker took `_` for the region and its drift comparer read `d.identity.accountID`
+  alone; `TaggingPlugin.resolveARN` took the account from the ARN but not the Region, so an ARN naming
+  another Region's queue resolved the caller's own same-named one — #826's defect one component over.
+  Six tests seeded the literal old key and now call `SQSQueueStateKeyForTest`, exported for the same
+  reason #737's IAM builders are: a test that spells a key by hand has to be found by hand when the key
+  changes.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
