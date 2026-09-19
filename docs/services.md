@@ -2763,6 +2763,57 @@ Three further consequences worth knowing before writing an assertion:
   not name is minted afresh on every update and carries the new tags; the old one keeps the old
   ones until it is swept. That is the deployer's redeploy model rather than anything about tags.
 
+#### Propagation can leave a resource over its service's tag quota
+
+Four of the services a stack tag reaches publish a per-resource tag quota and
+enforce it on their own tagging operations — EC2, ELBv2, IAM and Kinesis, all four
+at 50 ([above](#a-tag-quota-belongs-to-the-service-that-owns-the-resource)).
+**Propagation does not check any of them**, so a stack carrying enough tags can
+leave a resource holding more tags than its own service would accept. That is
+substrate's recorded reading of a case AWS does not publish
+([#1077](https://github.com/scttfrdmn/substrate/issues/1077)), not an oversight.
+
+What AWS publishes, and what it does not:
+
+- `CreateStack` publishes exactly four errors — `AlreadyExists`,
+  `InsufficientCapabilities`, `LimitExceeded` and `TokenAlreadyExists`, all 400 —
+  and **none is about tags**. `LimitExceeded`'s own description scopes it to
+  *"the quota for the resource … see CloudFormation quotas"*, and that quotas page
+  has **no row for tags at all**.
+- The resource-tagging reference publishes only that *"[t]he propagation of
+  stack-level tags to resources, including tags with the `aws:` prefix, varies by
+  resource type"*. Nothing there, or on the console page, addresses a target whose
+  service caps tags below the stack's count.
+
+**What settles it rather than leaving it open is that a refusal would have no
+vocabulary.** CloudFormation publishes no tag error, and each service's own
+`TagLimitExceeded` / `TooManyTags` / `LimitExceeded` / `LimitExceededException` is
+published for *that service's own tagging operation*, not for a CloudFormation
+propagation. Borrowing one is the analogy
+[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids, and it would make
+substrate's deployer fail a template real CloudFormation deploys — a false failure in
+a consumer's test, which is the worst answer this emulator can give.
+
+The case is narrower than it sounds, for two published reasons. A caller cannot
+supply a reserved key — CloudFormation's `Tag` `Key` publishes *"can't be prefixed
+with `aws:`"* — and the three `aws:cloudformation:*` stamp keys do not count toward a
+per-resource limit, which EC2's tag restrictions, ELBv2's, Classic ELB's and the
+general Tag Editor rule (*"a maximum of 50 **user created** tags"*) all state. Since
+a stack is capped at 50 tags and each quota is 50, **a resource carrying no tags of
+its own can always take a full stack's worth**. Reaching the overflow needs a
+resource tagged independently, through its own service or the tagging API.
+
+Two things worth knowing if you assert on this:
+
+- **Enforcing would be four decisions, not one flag.** Propagation dispatches to four
+  arms and only the record-keyed one goes through the shared merge that takes a quota
+  mode; the EC2, ELBv2 and AWS Config arms each write through their own service's
+  writer and would need their own check.
+- **The quota is untouched everywhere AWS publishes it.** A stream the deployer took
+  to fifty-eight tags still refuses a fifty-ninth through Kinesis's own
+  `AddTagsToStream`, with its published `LimitExceededException` at 400. The
+  divergence is about one door, not about the limit.
+
 ### Change sets describe, they do not stage
 
 A change set records the template that would be applied and reports the
@@ -11101,12 +11152,22 @@ The nineteen remaining arms publish no quota substrate models, and this path doe
 invent one for them. SQS is the case in point: `API_TagQueue` states a 50-tag limit in
 its own prose, but `TagQueue` does not enforce it either, and enforcing it here alone
 would make substrate's two tagging APIs disagree in the opposite direction from the
-defect being fixed. The two CloudFormation writers that share this merge do not enforce
-the quota either — the stamp writes only `aws:`-prefixed keys, which two of the four
-services exclude by their own statement, and nothing AWS publishes says what
-CloudFormation does when propagating a stack's tags would exceed a resource's quota. That gap is filed
-as [#1077](https://github.com/scttfrdmn/substrate/issues/1077) rather than guessed at: the two candidate
-behaviours are a failed deploy and a resource over quota, and choosing between them needs a source.
+defect being fixed.
+
+**Neither CloudFormation writer enforces the quota, and the two reasons are
+different.** The stamp writes only `aws:`-prefixed keys, which two of the four
+services exclude from the count by their own statement. Propagation writes the
+caller's own stack tags, which every one of the four would count — and
+[#1077](https://github.com/scttfrdmn/substrate/issues/1077) decided that case rather
+than leaving it filed. The decision is that **propagation writes regardless, and the
+resulting over-quota resource is a recorded divergence**. See [propagation and a
+resource's own tag
+quota](#propagation-can-leave-a-resource-over-its-services-tag-quota) for the search
+behind it; in short, AWS publishes no outcome for the case *and* no code a refusal
+could carry, and refusing on no citation would fail a template real CloudFormation
+deploys — a false failure in a consumer's test, which is worse than the divergence.
+The quota is still enforced at every door AWS publishes it for, including Kinesis's
+own `AddTagsToStream` on the very stream the deployer took past fifty.
 
 ### Cost
 
