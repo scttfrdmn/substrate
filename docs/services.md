@@ -14254,9 +14254,9 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 
 | Operation | Notes |
 |-----------|-------|
-| CreateRepository | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
-| DescribeRepositories | |
-| DeleteRepository | |
+| CreateRepository | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `imageTagMutability` defaults to `MUTABLE` and a value outside the published set is refused |
+| DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others |
+| DeleteRepository | Reports the deleted repository in the same shape |
 | GetAuthorizationToken | Returns base64("AWS:password") |
 | PutImage | |
 | BatchGetImage | |
@@ -14306,6 +14306,54 @@ Tagging API's `mergeResourceTags` arm and the CloudFormation tag stamp operate o
 needed no edit. A tag written through `TagResources` is reported by `ListTagsForResource` and one
 written through ECR's own `TagResource` is reported by `GetResources` — #765 in both directions, which
 is what proves the two halves now agree about the wire as well as about the record.
+
+### A repository response carries the nine published members
+
+`API_Repository` publishes nine members, all `Required: No`, and substrate answers eight of them —
+`repositoryName`, `repositoryArn`, `registryId`, `repositoryUri`, `createdAt`, `imageTagMutability`,
+`imageScanningConfiguration` and `encryptionConfiguration`. The ninth,
+`imageTagMutabilityExclusionFilters`, is unmodelled and therefore **absent** rather than present and
+empty, per #1013's rule; AWS's own `CreateRepository` sample response omits it and
+`encryptionConfiguration.kmsKey` as well, so the absences are shapes the page publishes.
+
+Until #1090 the persisted record was marshalled straight onto the wire at all three sites that answer
+a repository, so each of them also reported fields that are substrate's own:
+
+| Member answered | Published by ECR | Where AWS puts it |
+|-----------------|------------------|-------------------|
+| `AccountID`, `Region` | No — on every response, since neither was optional | `registryId` and the Region embedded in `repositoryArn` |
+| `Tags` | No | `ListTagsForResource` |
+| `LifecyclePolicy` | No | `GetLifecyclePolicy` |
+| `RepositoryPolicy` | No | `GetRepositoryPolicy` |
+| `ever_tagged` | No — substrate's #938 bookkeeping flag | nowhere; it is not an AWS concept |
+
+The two policies were the worst of the set, because a `DescribeRepositories` response publishes no
+policy member at all — a caller inspecting a repository saw a field name that matches no page. The
+repository shape is now a projection (`ecr_wire.go`) rather than the record itself, which is the
+pattern #529 established for API Gateway v1 and #1013 repeated for DynamoDB: a state record grows
+fields for substrate's own bookkeeping, and a projection is what stops the next one from reaching a
+response. The stored record is unchanged, so a recorded run still replays.
+
+`createdAt` is a **JSON number**, not an RFC3339 string. ECR speaks
+`application/x-amz-json-1.1`, whose timestamps are epoch seconds — AWS's sample response answers
+`1.563223656E9` — and the SDK v2 decoder calls `ParseEpochSeconds` on a timestamp member, which a
+quoted string does not satisfy. The persisted `time.Time` rendered as a string until #1090, so an SDK
+caller could not decode the response at all.
+
+`imageTagMutability` is now decoded on `CreateRepository`, stored, and reported from all three sites.
+An omitted member takes `MUTABLE`, which `API_CreateRepository` publishes in as many words ("If this
+parameter is omitted, the default setting of `MUTABLE` will be used"), and a record written before
+#1090 is read the same way, because the member did not exist then. A value outside the published set
+`MUTABLE | IMMUTABLE | IMMUTABLE_WITH_EXCLUSION | MUTABLE_WITH_EXCLUSION` is refused with
+`InvalidParameterException`/400 — the code the page publishes — because the member is reported back,
+so accepting one would put an unpublished string on the wire under a name whose Valid Values are
+published. The two `_WITH_EXCLUSION` forms are accepted even though the filters they accompany are
+unmodelled: those filters are `Required: No`, so a request naming one without them is a request AWS
+accepts, and refusing it would be substrate inventing a bound.
+
+Substrate does not act on the setting — an `IMMUTABLE` repository still accepts a `PutImage` that
+reuses a tag. That is a separate question from whether the response reports what the request set, and
+the setting is recorded intent until an issue models the refusal.
 
 ### CloudFormation resource types
 

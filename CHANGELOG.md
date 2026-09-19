@@ -381,6 +381,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Six tests seeded the literal old key and now call `SQSQueueStateKeyForTest`, exported for the same
   reason #737's IAM builders are: a test that spells a key by hand has to be found by hand when the key
   changes.
+- **An ECR repository response carries the nine members `API_Repository` publishes, and `createdAt` is
+  a number rather than a string** (#1090, first of three). `ECRRepository` is a persisted state record
+  and it was marshalled straight onto the wire at all three sites that answer a repository —
+  `CreateRepository`, `DescribeRepositories` and `DeleteRepository`. Six of its fields are substrate's
+  own, so all three reported members no ECR page publishes: `AccountID` and `Region` on **every**
+  response, because neither carried `omitempty`, and `Tags`, `LifecyclePolicy`, `RepositoryPolicy` and
+  `ever_tagged` from whichever had a value. The two policies are the worst of the six, because a
+  `DescribeRepositories` response publishes no policy member at all, so a caller inspecting a
+  repository saw a field name matching no page; a repository's tags are readable through
+  `ListTagsForResource` and its policies through `GetLifecyclePolicy` and `GetRepositoryPolicy`, which
+  is where AWS puts them. The shape is now a projection (`emulator/ecr_wire.go`) rather than the record
+  itself — the pattern #529 established for API Gateway v1 and #1013 repeated for DynamoDB — and the
+  stored record is untouched, so a recorded run still replays. Fixed in the same projection:
+  `createdAt` rendered as an RFC3339 string where `application/x-amz-json-1.1` timestamps are epoch
+  seconds (AWS's own sample answers `1.563223656E9`), so the SDK v2 decoder's `ParseEpochSeconds`
+  could not read it — an SDK caller could not decode the response at all, which is a stricter failure
+  than a leaked member. `imageTagMutabilityExclusionFilters` stays unmodelled and therefore absent
+  rather than empty, per #1013's rule and AWS's own sample. **Effectively no test caught any of this**:
+  `ecr_plugin_test.go` decodes into a struct naming a few members, and a decode ignores a tenth member
+  silently — which is why the new assertions read the raw body, following
+  `iam_shape_members_test.go`'s template.
+- **`CreateRepository` decodes `imageTagMutability`, defaults it to `MUTABLE`, and reports it**
+  (#1090). The member was never decoded and never reported, so a request setting `IMMUTABLE` was
+  answered as though it had said nothing and `DescribeRepositories` then omitted a published member
+  entirely. An omitted member takes `MUTABLE`, which `API_CreateRepository` publishes in as many words,
+  and a record written before the field existed is read the same way. A value outside the published set
+  — four values, not the two the setting shipped with — is refused with `InvalidParameterException`/400,
+  the code the page publishes, because the member is reported back: accepting one would put an
+  unpublished string on the wire under a name whose Valid Values *are* published. The two
+  `_WITH_EXCLUSION` forms are accepted even though their filters are unmodelled, since those filters
+  are `Required: No` and refusing the value would be substrate inventing a bound. Substrate does not
+  act on the setting — an `IMMUTABLE` repository still accepts a `PutImage` reusing a tag — which is
+  recorded intent under `CLAUDE.md`'s scope boundary rather than a modelled refusal.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count

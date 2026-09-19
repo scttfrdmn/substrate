@@ -116,6 +116,7 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	var body struct {
 		RepositoryName             string   `json:"repositoryName"`
 		Tags                       []ecrTag `json:"tags"`
+		ImageTagMutability         string   `json:"imageTagMutability"`
 		ImageScanningConfiguration struct {
 			ScanOnPush bool `json:"scanOnPush"`
 		} `json:"imageScanningConfiguration"`
@@ -137,6 +138,25 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, awsErr
 	}
 
+	// Checked here for the same reason, and refused rather than silently corrected: the member is
+	// reported back on all three repository responses, so accepting an unpublished value would put
+	// it on the wire under a name whose Valid Values are published (#1090). The code is the page's
+	// own InvalidParameterException, whose gloss — "The specified parameter is invalid. Review the
+	// available parameters for the API request." — is this case.
+	mutability := body.ImageTagMutability
+	if mutability == "" {
+		mutability = ecrImageTagMutabilityDefault
+	}
+	if !ecrImageTagMutabilityValues[mutability] {
+		return nil, &AWSError{
+			Code: "InvalidParameterException",
+			Message: "Invalid parameter at 'imageTagMutability' failed to satisfy constraint: " +
+				"'Member must satisfy enum value set: " +
+				"[MUTABLE, IMMUTABLE, IMMUTABLE_WITH_EXCLUSION, MUTABLE_WITH_EXCLUSION]'",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
 	goCtx := context.Background()
 	stateKey := ecrRepoKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	existing, err := p.state.Get(goCtx, ecrNamespace, stateKey)
@@ -153,14 +173,15 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	repo := ECRRepository{
-		RepositoryName: body.RepositoryName,
-		RepositoryArn:  fmt.Sprintf("arn:aws:ecr:%s:%s:repository/%s", ctx.Region, ctx.AccountID, body.RepositoryName),
-		RegistryID:     ctx.AccountID,
-		RepositoryURI:  fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", ctx.AccountID, ctx.Region, body.RepositoryName),
-		CreatedAt:      p.tc.Now(),
-		Tags:           tags,
-		AccountID:      ctx.AccountID,
-		Region:         ctx.Region,
+		RepositoryName:     body.RepositoryName,
+		RepositoryArn:      fmt.Sprintf("arn:aws:ecr:%s:%s:repository/%s", ctx.Region, ctx.AccountID, body.RepositoryName),
+		RegistryID:         ctx.AccountID,
+		RepositoryURI:      fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", ctx.AccountID, ctx.Region, body.RepositoryName),
+		CreatedAt:          p.tc.Now(),
+		ImageTagMutability: mutability,
+		Tags:               tags,
+		AccountID:          ctx.AccountID,
+		Region:             ctx.Region,
 		// Set where the fact becomes true: this repository has carried a tag. No observation depends
 		// on it today — every remover recomputes the flag from the count it saw before deleting, so
 		// UntagResource (:945) and the Resource Groups Tagging API's untag arm
@@ -186,9 +207,9 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	updateStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName)
 
 	type response struct {
-		Repository ECRRepository `json:"repository"`
+		Repository ecrRepositoryOut `json:"repository"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{Repository: repo})
+	return ecrJSONResponse(http.StatusOK, response{Repository: ecrRepositoryToWire(repo)})
 }
 
 func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -232,9 +253,9 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 	}
 
 	type response struct {
-		Repositories []ECRRepository `json:"repositories"`
+		Repositories []ecrRepositoryOut `json:"repositories"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{Repositories: repos})
+	return ecrJSONResponse(http.StatusOK, response{Repositories: ecrRepositoriesToWire(repos)})
 }
 
 func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -272,9 +293,9 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	removeFromStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName)
 
 	type response struct {
-		Repository ECRRepository `json:"repository"`
+		Repository ecrRepositoryOut `json:"repository"`
 	}
-	return ecrJSONResponse(http.StatusOK, response{Repository: repo})
+	return ecrJSONResponse(http.StatusOK, response{Repository: ecrRepositoryToWire(repo)})
 }
 
 // --- Image operations --------------------------------------------------------
