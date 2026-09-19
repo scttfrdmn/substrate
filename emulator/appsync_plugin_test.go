@@ -129,7 +129,7 @@ func TestAppSync_CreateGetDeleteAPI(t *testing.T) {
 
 	// Delete API.
 	resp4 := appSyncRequest(t, ts, http.MethodDelete, "/v1/apis/"+apiID, nil)
-	if resp4.StatusCode != http.StatusNoContent {
+	if resp4.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteGraphqlApi: got %d", resp4.StatusCode)
 	}
 	resp4.Body.Close() //nolint:errcheck
@@ -179,7 +179,7 @@ func TestAppSync_DataSourceCRUD(t *testing.T) {
 	apiID, _ := body["graphqlApi"].(map[string]interface{})["apiId"].(string)
 
 	// Create DataSource.
-	dsResp := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/DataSources", map[string]any{
+	dsResp := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/datasources", map[string]any{
 		"name": "my-ds",
 		"type": "NONE",
 	})
@@ -193,7 +193,7 @@ func TestAppSync_DataSourceCRUD(t *testing.T) {
 	}
 
 	// List DataSources.
-	lResp := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/DataSources", nil)
+	lResp := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/datasources", nil)
 	if lResp.StatusCode != http.StatusOK {
 		t.Fatalf("ListDataSources: got %d", lResp.StatusCode)
 	}
@@ -204,14 +204,14 @@ func TestAppSync_DataSourceCRUD(t *testing.T) {
 	}
 
 	// Get DataSource.
-	gResp := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/DataSources/my-ds", nil)
+	gResp := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/datasources/my-ds", nil)
 	if gResp.StatusCode != http.StatusOK {
 		t.Fatalf("GetDataSource: got %d", gResp.StatusCode)
 	}
 	gResp.Body.Close() //nolint:errcheck
 
 	// Update DataSource.
-	uResp := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/DataSources/my-ds", map[string]any{
+	uResp := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/datasources/my-ds", map[string]any{
 		"type": "HTTP",
 	})
 	if uResp.StatusCode != http.StatusOK {
@@ -224,8 +224,8 @@ func TestAppSync_DataSourceCRUD(t *testing.T) {
 	}
 
 	// Delete DataSource.
-	dResp := appSyncRequest(t, ts, http.MethodDelete, "/v1/apis/"+apiID+"/DataSources/my-ds", nil)
-	if dResp.StatusCode != http.StatusNoContent {
+	dResp := appSyncRequest(t, ts, http.MethodDelete, "/v1/apis/"+apiID+"/datasources/my-ds", nil)
+	if dResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteDataSource: got %d", dResp.StatusCode)
 	}
 	dResp.Body.Close() //nolint:errcheck
@@ -290,7 +290,7 @@ func TestAppSync_ResolverCRUD(t *testing.T) {
 
 	// Delete resolver.
 	dResp := appSyncRequest(t, ts, http.MethodDelete, "/v1/apis/"+apiID+"/types/Query/resolvers/getUser", nil)
-	if dResp.StatusCode != http.StatusNoContent {
+	if dResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteResolver: got %d", dResp.StatusCode)
 	}
 	dResp.Body.Close() //nolint:errcheck
@@ -342,7 +342,7 @@ func TestAppSync_FunctionCRUD(t *testing.T) {
 
 	// Delete function.
 	dResp := appSyncRequest(t, ts, http.MethodDelete, "/v1/apis/"+apiID+"/functions/"+funcID, nil)
-	if dResp.StatusCode != http.StatusNoContent {
+	if dResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteFunction: got %d", dResp.StatusCode)
 	}
 	dResp.Body.Close() //nolint:errcheck
@@ -512,7 +512,7 @@ func TestAppSync_GetNonexistentDataSource(t *testing.T) {
 	body := appSyncBody(t, resp)
 	apiID, _ := body["graphqlApi"].(map[string]interface{})["apiId"].(string)
 
-	r := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/DataSources/no-such-ds", nil)
+	r := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/datasources/no-such-ds", nil)
 	if r.StatusCode != http.StatusNotFound {
 		t.Fatalf("expected 404 for unknown datasource, got %d", r.StatusCode)
 	}
@@ -647,7 +647,7 @@ func TestAppSync_ApiKeyCRUD(t *testing.T) {
 	}
 
 	// CreateApiKey with a description.
-	resp2 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/ApiKeys", map[string]any{
+	resp2 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/apikeys", map[string]any{
 		"description": "test-key",
 	})
 	if resp2.StatusCode != http.StatusOK {
@@ -671,7 +671,7 @@ func TestAppSync_ApiKeyCRUD(t *testing.T) {
 	}
 
 	// ListApiKeys — should return 1 key.
-	resp3 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	resp3 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/apikeys", nil)
 	if resp3.StatusCode != http.StatusOK {
 		t.Fatalf("ListApiKeys: got %d", resp3.StatusCode)
 	}
@@ -686,13 +686,13 @@ func TestAppSync_ApiKeyCRUD(t *testing.T) {
 	}
 
 	// CreateApiKey again (no description) → 2 keys.
-	resp4 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	resp4 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/"+apiID+"/apikeys", nil)
 	if resp4.StatusCode != http.StatusOK {
 		t.Fatalf("second CreateApiKey: got %d", resp4.StatusCode)
 	}
 	_ = appSyncBody(t, resp4)
 
-	resp5 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/ApiKeys", nil)
+	resp5 := appSyncRequest(t, ts, http.MethodGet, "/v1/apis/"+apiID+"/apikeys", nil)
 	if resp5.StatusCode != http.StatusOK {
 		t.Fatalf("second ListApiKeys: got %d", resp5.StatusCode)
 	}
@@ -703,7 +703,7 @@ func TestAppSync_ApiKeyCRUD(t *testing.T) {
 	}
 
 	// CreateApiKey on nonexistent API → 404.
-	resp6 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/nonexistent/ApiKeys", map[string]any{
+	resp6 := appSyncRequest(t, ts, http.MethodPost, "/v1/apis/nonexistent/apikeys", map[string]any{
 		"description": "should-fail",
 	})
 	if resp6.StatusCode != http.StatusNotFound {

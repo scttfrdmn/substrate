@@ -135,11 +135,11 @@ func generateAppSyncAPIKeyID() string {
 //	GET    /v1/apis/{apiId}                       → GetGraphqlApi
 //	POST   /v1/apis/{apiId}                       → UpdateGraphqlApi
 //	DELETE /v1/apis/{apiId}                       → DeleteGraphqlApi
-//	POST   /v1/apis/{apiId}/DataSources           → CreateDataSource
-//	GET    /v1/apis/{apiId}/DataSources           → ListDataSources
-//	GET    /v1/apis/{apiId}/DataSources/{name}    → GetDataSource
-//	POST   /v1/apis/{apiId}/DataSources/{name}    → UpdateDataSource
-//	DELETE /v1/apis/{apiId}/DataSources/{name}    → DeleteDataSource
+//	POST   /v1/apis/{apiId}/datasources           → CreateDataSource
+//	GET    /v1/apis/{apiId}/datasources           → ListDataSources
+//	GET    /v1/apis/{apiId}/datasources/{name}    → GetDataSource
+//	POST   /v1/apis/{apiId}/datasources/{name}    → UpdateDataSource
+//	DELETE /v1/apis/{apiId}/datasources/{name}    → DeleteDataSource
 //	POST   /v1/apis/{apiId}/types/{typeName}/resolvers           → CreateResolver
 //	GET    /v1/apis/{apiId}/types/{typeName}/resolvers           → ListResolvers
 //	GET    /v1/apis/{apiId}/types/{typeName}/resolvers/{field}   → GetResolver
@@ -151,9 +151,21 @@ func generateAppSyncAPIKeyID() string {
 //	DELETE /v1/apis/{apiId}/functions/{functionId} → DeleteFunction
 //	POST   /v1/apis/{apiId}/schemacreation        → StartSchemaCreation
 //	GET    /v1/apis/{apiId}/schema                → GetIntrospectionSchema
-//	POST   /v1/apis/{apiId}/ApiKeys               → CreateApiKey
-//	GET    /v1/apis/{apiId}/ApiKeys               → ListApiKeys
+//	POST   /v1/apis/{apiId}/apikeys               → CreateApiKey
+//	GET    /v1/apis/{apiId}/apikeys               → ListApiKeys
 //	POST   /graphql                               → ExecuteGraphQL
+//
+// Every segment above is spelled as the operation's own Request Syntax spells it.
+// Until #1065 two of them were not: the data-source segment was matched as
+// "DataSources" and the API-key segment as "ApiKeys", where the pages publish
+// "datasources" and "apikeys". Path matching is case-sensitive, so the five
+// data-source operations and the two API-key ones were unreachable through their
+// published URIs — a caller using any AWS SDK got UnknownOperationException/404
+// for seven operations this plugin implements and dispatches (appsync_plugin.go).
+//
+// The segments AWS spells with no separator ("schemacreation") or in one word
+// ("apikeys", "datasources", "functions", "types", "schema") are the whole of the
+// vocabulary here; there is no camelCase AppSync path segment to get wrong.
 func parseAppSyncOperation(method, path string) (op, apiID, segment, resourceID string) {
 	// GraphQL execution endpoint.
 	if path == "/graphql" || strings.HasPrefix(path, "/graphql?") {
@@ -201,7 +213,7 @@ func parseAppSyncOperation(method, path string) (op, apiID, segment, resourceID 
 	}
 
 	switch segment {
-	case "DataSources":
+	case "datasources":
 		if tail == "" {
 			switch method {
 			case "POST":
@@ -270,17 +282,35 @@ func parseAppSyncOperation(method, path string) (op, apiID, segment, resourceID 
 				return "DeleteFunction", apiID, segment, funcID
 			}
 		}
-	case "ApiKeys":
-		switch method {
-		case "POST":
-			return "CreateApiKey", apiID, segment, ""
-		case "GET":
-			return "ListApiKeys", apiID, segment, ""
+	case "apikeys":
+		// The tail is checked, where this arm used to ignore it, because the two
+		// operations below are the collection's and AWS publishes two more under a key
+		// ID: UpdateApiKey is POST /v1/apis/{apiId}/apikeys/{id} and DeleteApiKey is
+		// DELETE on the same path. Neither is routed here, so both must keep answering
+		// UnknownOperationException/404 — which they did only by accident while the
+		// segment was misspelled. Matching the POST without the tail would have made an
+		// UpdateApiKey call answer 200 having silently minted a *second* credential, so
+		// lowercasing the segment without this gate would have been worse than the
+		// defect it fixed (#1065).
+		if tail == "" {
+			switch method {
+			case "POST":
+				return "CreateApiKey", apiID, segment, ""
+			case "GET":
+				return "ListApiKeys", apiID, segment, ""
+			}
 		}
 	case "schemacreation":
-		return "StartSchemaCreation", apiID, segment, ""
+		// Gated on the verb for the same reason, and this one is the sharper case: the
+		// arm used to answer StartSchemaCreation for any method, so a GET performed a
+		// write. AWS publishes POST only.
+		if method == "POST" {
+			return "StartSchemaCreation", apiID, segment, ""
+		}
 	case "schema":
-		return "GetIntrospectionSchema", apiID, segment, ""
+		if method == "GET" {
+			return "GetIntrospectionSchema", apiID, segment, ""
+		}
 	}
 
 	return "UnknownOperation", apiID, segment, resourceID

@@ -106,6 +106,21 @@ func appsyncJSONResponse(status int, body any) (*AWSResponse, error) {
 	}, nil
 }
 
+// appsyncDeleted is the answer every AppSync delete publishes.
+//
+// All four — `DeleteGraphqlApi`, `DeleteDataSource`, `DeleteResolver` and `DeleteFunction` — open
+// their Response Syntax `HTTP/1.1 200` and say in words: "If the action is successful, the service
+// sends back an HTTP 200 response with an empty HTTP body." Substrate answered 204 at all four until
+// #1065, on the reasonable but unpublished reading that an empty body is a No Content; the pages are
+// the contract and they say 200. The four tests that covered these operations each asserted the 204,
+// so the tests that existed to check them were pinning the divergence.
+//
+// The body stays empty rather than becoming `{}`, because "an empty HTTP body" is the published
+// wording and a `{}` would be a member-less object where the page promises no object at all.
+func appsyncDeleted() (*AWSResponse, error) {
+	return &AWSResponse{StatusCode: http.StatusOK}, nil
+}
+
 // --- GraphQL API operations ---
 
 func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -217,7 +232,7 @@ func (p *AppSyncPlugin) deleteGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("delete appsync api: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID)
-	return &AWSResponse{StatusCode: http.StatusNoContent}, nil
+	return appsyncDeleted()
 }
 
 // --- DataSource operations ---
@@ -314,7 +329,7 @@ func (p *AppSyncPlugin) deleteDataSource(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("delete appsync datasource: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), name)
-	return &AWSResponse{StatusCode: http.StatusNoContent}, nil
+	return appsyncDeleted()
 }
 
 // --- Resolver operations ---
@@ -425,7 +440,7 @@ func (p *AppSyncPlugin) deleteResolver(reqCtx *RequestContext, req *AWSRequest, 
 		return nil, fmt.Errorf("delete appsync resolver: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+fieldName)
-	return &AWSResponse{StatusCode: http.StatusNoContent}, nil
+	return appsyncDeleted()
 }
 
 // --- Function operations ---
@@ -497,7 +512,7 @@ func (p *AppSyncPlugin) deleteFunction(reqCtx *RequestContext, req *AWSRequest, 
 		return nil, fmt.Errorf("delete appsync function: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID)
-	return &AWSResponse{StatusCode: http.StatusNoContent}, nil
+	return appsyncDeleted()
 }
 
 // --- API Key operations ---

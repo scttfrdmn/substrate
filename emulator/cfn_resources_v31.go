@@ -97,7 +97,7 @@ func (d *StackDeployer) deployAppSyncDataSource(
 	req := &AWSRequest{
 		Service:   "appsync",
 		Operation: "POST",
-		Path:      "/v1/apis/" + apiID + "/DataSources",
+		Path:      "/v1/apis/" + apiID + "/datasources",
 		Body:      bodyBytes,
 		Headers:   map[string]string{"Content-Type": "application/json"},
 		Params:    map[string]string{},

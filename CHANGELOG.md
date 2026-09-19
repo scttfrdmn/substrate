@@ -518,6 +518,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestKinesisPlugin_CreateAndDescribeStream` read `OpenShardCount` out of a `StreamDescription` and
   asserted it, so the test that existed to check the operation was pinning the union — it is rewritten
   around `HasMoreShards`, which is a member of that shape and not of the other.
+- **AppSync's four delete operations answer 200 with an empty body, not 204** (#1065).
+  `API_DeleteGraphqlApi`, `API_DeleteDataSource`, `API_DeleteResolver` and `API_DeleteFunction` each open
+  their Response Syntax `HTTP/1.1 200` and say in words *"If the action is successful, the service sends
+  back an HTTP 200 response with an empty HTTP body."* Substrate answered 204 at all four, on the
+  reasonable but unpublished reading that an empty body is a No Content; the pages are the contract. The
+  body stays empty rather than becoming `{}`, because a member-less object is not what *"an empty HTTP
+  body"* describes. **This is observable**: a consumer asserting 204 on any of the four must now assert
+  200. Each of the four had a test asserting the 204, so the tests that existed to check these operations
+  were pinning the divergence — which is why it survived.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -614,6 +623,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   type-match cases assert the *message*, not just the code, and are paired with three accepted moves —
   including two asymmetric keys of different specs — so that a handler refusing everything could not
   satisfy them.
+- **`docs/services.md` has an AppSync section** (#1065, #1093). AppSync was an index row and nothing
+  else, so none of its 24 routed operations, its routes, its ARN shapes or its divergences were
+  documented anywhere. The section carries the operation table with each published route, why path
+  matching is case-sensitive and what that cost, the three arms that carry a verb as well as a name, the
+  200-not-204 reading, what each refusal reports and which published codes have no site, the
+  deterministic ARN and ID shapes, the two ways `ExecuteGraphQL` is reached (`POST /graphql` and any
+  `.appsync-api.` host), that the execution endpoint answers a stub on the `doc.go` boundary, the
+  CloudFormation resource types, and the $4.00-per-million cost model. This is one of the 20 sectionless
+  services #1093 owes; authoring it here rather than twice is deliberate, and #1093 shrinks by one
+  service and 24 operations. Two AppSync wire divergences are recorded there and filed rather than fixed,
+  because each is a persisted-shape change with an in-tree CloudFormation consumer: the `graphqlApi`
+  object spells its ARN `apiArn` where `API_GraphqlApi` publishes `arn` and adds `region` and `accountId`
+  which it publishes nowhere (#1121), and `CreateApiKey` discards the `expires` the caller sends and
+  defaults to 365 days where the page publishes 7, which leaves
+  `ApiKeyValidityOutOfBoundsException`/400 with no site (#1122).
 
 ### Fixed
 - **A `Map` state written with `ItemProcessor` iterated zero times and returned an empty array**
@@ -655,6 +679,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ceiling is enforced. A fourth restriction the issue listed, *"the target cannot equal the current
   count"*, is published nowhere on the page and is not enforced. `UPDATING` remains unobservable and is
   tracked as #1119 so that it and EC2's instance states share one seeded-progression mechanism.
+- **Seven AppSync operations are reachable through the URIs their own Request Syntax publishes**
+  (#1065). `parseAppSyncOperation` matched the data-source segment as `DataSources` and the API-key
+  segment as `ApiKeys`, where `API_CreateDataSource` and `API_CreateApiKey` publish `datasources` and
+  `apikeys`. Path matching is case-sensitive, so the five data-source operations and the two API-key
+  ones were implemented, dispatched and unreachable: a caller using any AWS SDK got
+  `UnknownOperationException`/404 for operations substrate had. Both segments are now spelled as the
+  pages spell them, at every site — including the two internal CloudFormation consumers the issue does
+  not name (`cfn_resources_v31.go`, `cfn_delete.go`), without which deploying an
+  `AWS::AppSync::DataSource` would have broken in exchange for fixing the SDK path. The sweep for other
+  wrong-case segments resolves negatively: `types`, `functions`, `schema` and `schemacreation` are the
+  rest of the vocabulary and AppSync spells none of them in camelCase, so these two were the whole
+  class.
+- **A POST under the API-key segment no longer mints a second credential** (#1065). The `ApiKeys` arm
+  ignored its tail and answered `CreateApiKey` for any POST beneath it. AWS publishes two further
+  operations there — `UpdateApiKey` is `POST /v1/apis/{apiId}/apikeys/{id}` and `DeleteApiKey` is
+  `DELETE` on the same path — and substrate routes neither, so both were 404-ing only by accident while
+  the segment was misspelled. Lowercasing alone would have turned an `UpdateApiKey` call into a 200 that
+  silently issued a new key and reported it as an extended one, which is worse than the 404 it replaced;
+  the arm now requires an empty tail, so both keep answering the `UnknownOperationException`/404 they
+  already answered. The new test asserts the key count either side of the refused call, because the
+  status alone does not distinguish a refusal from a refusal that wrote.
+- **A `GET` on `/schemacreation` no longer performs a write** (#1065). The arm returned
+  `StartSchemaCreation` for every method, so any verb — `GET`, `PUT`, `DELETE` — started a schema
+  creation. `API_StartSchemaCreation` publishes `POST` only, and `API_GetIntrospectionSchema` publishes
+  `GET` only on the adjacent `/schema`; both arms are now gated on their published verb, and every other
+  method under either segment is unrouted.
 
 ## [v0.119.0] - 2026-09-18
 
