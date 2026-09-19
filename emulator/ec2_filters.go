@@ -609,12 +609,26 @@ func ec2RegionFilterSpec() ec2FilterSpec {
 // ec2InstanceTypeFilterSpec is DescribeInstanceTypes' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstanceTypes.html.
 //
-// Fifty-seven names, the widest set in EC2 after DescribeInstances', of which the seeded
-// catalog answers five. That ratio is the whole reason this operation went unfiltered
+// Fifty-six names, the widest set in EC2 after DescribeInstances', of which the seeded
+// catalog answers six. That ratio is the whole reason this operation went unfiltered
 // through v0.106.0: the concern #495 recorded, and #695 settled, was that applying the
 // modellable handful and dropping the rest would repeat #485's silent narrowing. It is no
-// longer a silent drop — the five are applied, and the fifty-two are accepted and listed,
+// longer a silent drop — the six are applied, and the fifty are accepted and listed,
 // which is the distinction [ec2FilterSpec] exists to draw.
+//
+// Fifty-six, not the fifty-seven every count site said until #1028: the two lists below hold
+// exactly the names the page publishes, re-diffed against it name by name on 2026-09-19 with
+// nothing missing and nothing extra, and they come to fifty-six. Whether the page once carried
+// a fifty-seventh that has since been withdrawn is not recoverable from it, so the number
+// states what it publishes now. There is no tag filter to account for the difference —
+// tagValueFilter is false here, because an instance type is not a taggable resource and the
+// page lists no tag entry.
+//
+// current-generation is the sixth and was the fifty-first inert one until #1028. It moved
+// because the catalog gained the property to answer it with, not because the filter changed:
+// [ec2PreviousGenerationFamilies] made currentGeneration a per-family value instead of a
+// hardcoded true, and an inert filter over a value that now varies would contradict the
+// response bodies beside it.
 //
 // Every inert name describes an instance-type property [ec2InstanceTypeInfo] does not carry:
 // EBS optimization, NVMe support, ENA and EFA, hypervisor, boot mode, disk layout. The
@@ -622,13 +636,13 @@ func ec2RegionFilterSpec() ec2FilterSpec {
 func ec2InstanceTypeFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		evaluated: []string{
-			"instance-type", "memory-info.size-in-mib",
+			"current-generation", "instance-type", "memory-info.size-in-mib",
 			"processor-info.supported-architecture", "supported-usage-class",
 			"vcpu-info.default-vcpus",
 		},
 		accepted: []string{
 			"auto-recovery-supported", "bare-metal", "burstable-performance-supported",
-			"current-generation", "dedicated-hosts-supported",
+			"dedicated-hosts-supported",
 			"ebs-info.attachment-limit-type",
 			"ebs-info.ebs-optimized-info.baseline-bandwidth-in-mbps",
 			"ebs-info.ebs-optimized-info.baseline-iops",

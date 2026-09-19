@@ -544,6 +544,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `TestSNSStoredAttributeCannotShadowADerivedOne` seeded its shadow through four `SetTopicAttributes`
   calls on exactly the four names now refused — and it now seeds the record through state, so it still
   asserts the merge order rather than the refusal.
+- **`DescribeInstanceTypes` reports `currentGeneration` per family, and the `current-generation` filter
+  is evaluated** (#1028). The member was a hardcoded `true` for all ninety-five catalogued types and the
+  filter sat in the accepted-but-inert list, parsed and dropped — and each hid the other, because a
+  constant cannot be narrowed on and a filter that narrows nothing cannot contradict a constant. Both
+  move together: **ninety-two types report `true`, `p3`'s three report `false`**, and
+  `Values=false` now selects exactly `p3.2xlarge`, `p3.8xlarge` and `p3.16xlarge`. Six of the
+  documented filter names are evaluated now rather than five, with fifty inert. The
+  value is derived from a transcription of the fifteen families AWS publishes in the EC2 Instance Types
+  guide's [previous-generation
+  specifications](https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html), not from a `p3`
+  special case, so a family added to the catalog later is classified by AWS's answer; the comparison
+  follows the two in-tree boolean-filter precedents (`is-default`, `is-default-version`) in matching
+  `strconv.FormatBool` against the filter value, since AWS documents no comparison operators. **This is
+  observable** in two ways — the three `p3` rows changed value, and a `current-generation` filter that
+  used to select the whole catalog now narrows it — and no test asserted the member beforehand, which is
+  how a constant survived five releases of catalog growth.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -734,6 +750,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them and `getTopicAttributes` reports the whole stored map, so it does report them. That is recorded
   and asserted rather than filtered: the value the caller set is real, and hiding it would make
   `SetTopicAttributes` look like a no-op, which is #1067's own failure mode in the other direction.
+- **The service reference's claim that `p3` has four rows, and the source AWS list it named** (#1028).
+  `p3` has **three** sizes — `p3.2xlarge`, `p3.8xlarge`, `p3.16xlarge` — which is what the catalog
+  carries and what AWS's previous-generation table publishes. The reopen comment's "eighty-nine types"
+  is also wrong: the catalog is **ninety-five** across eighteen families, so the split is 3/92 rather
+  than 3/86.
+- **Which AWS page the previous-generation family list comes from, recorded because the obvious search
+  finds the wrong one** (#1028). `https://aws.amazon.com/ec2/previous-generation/` omits P3 and P3dn
+  entirely, names G2 where the guide names G3, adds C2, CR1 and HS1, and lists M4, R4 and D2 as
+  *upgrade targets* — i.e. current. Read as authority it would classify every catalogued family as
+  current generation and leave the hardcoded `true` looking correct. The citable enumeration is the
+  EC2 Instance Types guide's previous-generation specifications page; `API_DescribeInstanceTypes` says
+  only *"Indicates whether the instance type is current generation"* and names no family. The
+  divergence between the two AWS lists is now stated in the source, the tests and
+  `docs/services.md`, so the next reader does not re-derive it from the marketing page.
+- **`DescribeInstanceTypes` documents fifty-six filter names, not the fifty-seven every count site
+  said** (#1028, found while moving the count). The figure dates from #695 and was carried into six
+  code comments, a test name and three places in the service reference; only the arithmetic was
+  wrong — `ec2InstanceTypeFilterSpec` transcribes exactly the names the page publishes, re-diffed
+  against it one by one on 2026-09-19 with nothing missing and nothing extra, and they come to
+  fifty-six. No tag filter accounts for the difference: an instance type is not a taggable resource
+  and the page lists no `tag:` entry, so `tagValueFilter` is false for this spec. Whether the page
+  once carried a fifty-seventh that has since been withdrawn is not recoverable from it, so the
+  number now states what it publishes today rather than what it published when the count was taken.
+  `TestEC2_InstanceTypeFilters_FiveOfFiftySeven` is renamed
+  `TestEC2_InstanceTypeFilters_SixOfFiftySix`, which moves both halves of the figure at once.
 
 ## [v0.119.0] - 2026-09-18
 

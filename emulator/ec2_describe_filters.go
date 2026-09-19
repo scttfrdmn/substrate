@@ -392,7 +392,7 @@ func ec2InstanceTypeMatchesFilters(info ec2InstanceTypeInfo, filters map[string]
 // ec2InstanceTypeMatchesFilter evaluates a single DescribeInstanceTypes filter against a
 // catalog entry.
 //
-// Five of fifty-seven, which answered the filter half of the concern #495 recorded. The two
+// Six of fifty-six, which answered the filter half of the concern #495 recorded. The two
 // numeric filters compare the decimal rendering of the stored integer: AWS documents no
 // comparison operators for filters — "greater than or less than comparison is not supported",
 // as the spot-price filter says outright — so `memory-info.size-in-mib=1024` is a string match
@@ -400,8 +400,20 @@ func ec2InstanceTypeMatchesFilters(info ec2InstanceTypeInfo, filters map[string]
 //
 // The two list-valued filters match if any element matches, which is the same any-of rule
 // [ec2InternetGatewayMatchesFilter] applies to the attachment set.
+//
+// current-generation became the sixth in #1028. It was accepted and inert while every catalog
+// type reported currentGeneration true, and an inert filter over a constant is invisible — a
+// query narrowed nothing and the value it would have narrowed on was the same everywhere. Once
+// p3 reports false the two halves have to move together: a filter still inert would answer
+// `Values=true` with the three p3 sizes included, which contradicts the response body in the
+// same document.
 func ec2InstanceTypeMatchesFilter(info ec2InstanceTypeInfo, name string, values []string) bool {
 	switch name {
+	case "current-generation":
+		// The decimal-string rule of the numeric filters applied to a boolean: the filter
+		// value is matched against "true" or "false", following [ec2VPCMatchesFilter]'s
+		// is-default arm and the launch-template default-version one.
+		return ec2FilterAccepts(values, strconv.FormatBool(info.CurrentGeneration))
 	case "instance-type":
 		// AWS documents a wildcard here in the filter's own description — "for example
 		// c5.2xlarge or c5*" — which is the only place in EC2's filter documentation
