@@ -170,7 +170,7 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, backupInvalidBody()
 		}
 	}
 	if input.BackupPlan.BackupPlanName == "" {
@@ -324,7 +324,7 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, backupInvalidBody()
 		}
 	}
 	if input.BackupSelection.SelectionName == "" {

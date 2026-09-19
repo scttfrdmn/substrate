@@ -532,9 +532,17 @@ code together**, since a decoded error struct carries only the code and a consum
 logic branches on the status. Each table names every operation that carries a guard rather
 than a representative sample, because the defect was per-site duplication of one literal and
 the assertion that matters is that no site was missed.
-`emulator/invalid_body_inventory_test.go` carries **66 guarded operations in fourteen services**,
-plus **35 member-complaint sites in nine** (below), and `emulator/invalid_body_code_test.go` the
-Step Functions and Systems Manager sites #1003 fixed.
+`emulator/invalid_body_inventory_test.go` carries **218 guarded operations in 42 services** —
+66 in fourteen when that sentence was first written, grown by #1007's third slice and by #1066's
+thirty-four — plus **35 member-complaint sites in nine** (below), and
+`emulator/invalid_body_code_test.go` the Step Functions and Systems Manager sites #1003 fixed.
+
+Three different **35**s appear in this section and they count three different things, which is worth
+saying once rather than leaving a reader to infer it: the 35 member-complaint sites just named
+([#1062](https://github.com/scttfrdmn/substrate/issues/1062)), the 35 files that already contained a
+checked guard when #1007 began (next section), and the 35 guards that were checked and still leaked
+`encoding/json`'s own error text ([#1066](https://github.com/scttfrdmn/substrate/issues/1066), below).
+No two of the three share a site.
 
 Two of the 66 needed a resource to exist first, which was worth recording because it is the one
 way a guard can be present, correct and still untested. Lambda's `AddPermission` and
@@ -556,8 +564,9 @@ and one site is deliberately retained with its reachability recorded — see the
 check that keeps it the only one.
 
 **SQS and AWS Health are the first slice**, and they are first because they were the only files in the
-inventory with no checked guard anywhere to copy a code from — the other 35 files already contained
-one, which is why 80 of the 95 sites need no fresh archaeology. Both resolve to step 2:
+inventory with no checked guard anywhere to copy a code from — the other 35 **files** already contained
+one, which is why 80 of the 95 sites need no fresh archaeology. (A different 35 from #1062's sites above
+and from #1066's leaks below; this one counts files.) Both resolve to step 2:
 
 | Service | Code | Status | Provenance |
 |---------|------|--------|------------|
@@ -806,6 +815,90 @@ no published default, so the silent rewrite of an absent or non-positive value t
 operations — absent, zero, negative and above-60 are each outside the published range and each refuse.
 `ListUserPoolClients` marks the same member `Required: No`, so its rewrite is a page-size defect rather
 than a required-member one and stays for that issue.
+
+### A guard that was there all along: the decoder's own error text on the wire
+
+The two classes above are a guard answering the wrong code and a guard that was never written. A third
+is narrower and had survived both sweeps: a guard that is present, runs, and answers with
+`Message: "invalid JSON: " + err.Error()`. That hands the caller `encoding/json`'s text — a Go struct
+field name and offset, from an endpoint whose whole purpose is to be indistinguishable from AWS. #950
+removed twenty-two such leaks and #1007's third slice forty-six more;
+[#1066](https://github.com/scttfrdmn/substrate/issues/1066) is the remainder, and it is **35 sites in
+eight services**:
+
+| Service | Sites | Old code | New code |
+|---------|-------|----------|----------|
+| Transfer Family | 9 | `InvalidRequestException`/400 | unchanged |
+| CodeDeploy | 8 | `InvalidInputException`/400 | **`ValidationError`/400** |
+| CodePipeline | 7 | `InvalidStructureException`/400 | **`ValidationException`/400** |
+| CodeBuild | 6 | `InvalidInputException`/400 | unchanged |
+| Backup | 2 | `InvalidRequestException`/400 | unchanged |
+| IAM Identity Center | 1 | `ValidationException`/400 | unchanged |
+| Redshift Data | 1 | `ValidationException`/400 | unchanged |
+| AppSync | 1 | `BadRequestException`/400 | unchanged |
+
+**Why these thirty survived two sweeps is the finding, not the leak.** #1007 went looking for a
+*discarded* decode error, and Transfer, CodeDeploy, CodePipeline and CodeBuild discard none: every
+handler in all four decodes exactly once and checks the error every time — nine, eight, seven and six
+handlers, thirty guards, thirty leaks. So the sweep passed the four services over entirely, and none of
+them had a single row in `invalid_body_inventory_test.go`. `assertNoDecoderText` has been the enforcing
+helper since #950, and a site it never reaches is a site it never enforced. The other five leaks are
+single handlers in services that *did* have rows — each one sitting beside a sibling whose guard #1007
+had routed through a constructor.
+
+**Two codes changed, and neither was visible from inside its own plugin.** In all four `Code*` services
+the same `&AWSError{…}` literal appears at every site, which reads as deliberate consistency; the
+error only shows up once the four codes sit next to each other in
+`emulator/invalid_body_refusals.go`, which is what that file is for.
+
+- **CodePipeline's `InvalidStructureException` is wrong twice over.** Where it *is* published —
+  `CreatePipeline` and `UpdatePipeline` — it is glossed *"The structure was specified in an invalid
+  format."*, meaning the pipeline structure, a value read out of the body after the body has parsed.
+  And it is published on only those two of the seven operations substrate routes: `GetPipeline`,
+  `DeletePipeline`, `StartPipelineExecution`, `GetPipelineState` and `GetPipelineExecution` do not carry
+  it, so five of the seven sites were borrowing a code from a sibling operation, which
+  [#671](https://github.com/scttfrdmn/substrate/issues/671) settles against. `ValidationException`/400,
+  *"The validation was specified in an invalid format."*, is published on **all seven**, and because it
+  is on the operation pages it outranks the common list's `ValidationError` under #950's ordering.
+- **CodeDeploy's `InvalidInputException` is real, well-glossed, and unpublished where six of the eight
+  handlers live.** *"The input was specified in an invalid format."* fits this condition better than
+  anything else in the service, but CodeDeploy publishes it on only `CreateDeployment` and
+  `CreateDeploymentGroup`. The other six publish nothing generic at all — only per-field codes
+  (`ApplicationNameRequiredException`, `InvalidApplicationNameException`,
+  `InvalidDeploymentGroupNameException`, `DeploymentIdRequiredException`,
+  `InvalidDeploymentIdException`). Using the generic code service-wide would borrow it at six sites;
+  using it at two and something else at six would spell one condition two ways in one file, the split
+  #950 removed. A body that will not parse names no field, so the landing place is CodeDeploy's own
+  common-errors `ValidationError`/400 — the same argument as RAM's and CloudTrail's above, reached from
+  the opposite direction, and the third code this class has changed.
+
+**Transfer's and CodeBuild's codes were checked as closely and kept.** Transfer publishes
+`InvalidRequestException`/400 on every page checked, glossed *"This exception is thrown when the client
+submits a malformed request."* — the strongest published fit of the eight services, because the sentence
+names this condition outright. Its common page also publishes `MalformedHttpRequestException`/400, which
+reads like the better name and is not: the gloss is about a body whose content-encoding could not be
+decompressed, a failure that happens before any JSON is seen. CodeBuild publishes
+`InvalidInputException`/400, *"The input value that was provided is not valid."*, everywhere including
+`BatchGetBuilds`, where it is the *only* error listed — the same shape as ECS, a service whose generic
+code is the only choice on offer.
+
+**One site needed the prerequisite created first.** `CreateBackupSelection` loads the backup plan before
+it decodes, so against a bare server the loader answers and the guard never runs — the lookup-first
+convention recorded below. It joins the three sites in `TestInvalidBodyBelowAResourceLookup`, which is
+also why its leak outlived `createBackupPlan`'s in the same file.
+
+**The arithmetic is a second assertion rather than an extension of #1007's.**
+`TestInvalidBodyTailIsFullyCovered` pins `tailSites = 60`, the sites #1007's third slice changed — a
+closed historical figure about guards with a *discarded* error. #1066's thirty-five had no error to
+discard; every one was already checked. The populations are disjoint in both directions, so
+`TestInvalidBodyDecoderTextLeaksAreFullyCovered` counts the thirty-five separately (30 in four new
+service entries, 4 in existing ones, 1 below a lookup) and 60 stays 60.
+
+**Also corrected: four constructor doc comments and the file header overstated their own reach.** Each
+said its service's checked guards "now call this" when what it had established was only that the guard
+it was written beside did. Counting what was left is what found the five leaks in services #1007 had
+already touched, so the comments now say which sweep routed which site, and the file header says that
+`assertNoDecoderText` rather than a claim in a comment is what keeps the rule true.
 
 ### Whether a body is parsed before the resource is looked up
 

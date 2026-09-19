@@ -81,7 +81,7 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "ValidationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, redshiftDataInvalidBody()
 		}
 	}
 	if input.SQL == "" {

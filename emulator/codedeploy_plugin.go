@@ -70,7 +70,7 @@ func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSReq
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 	if input.ApplicationName == "" {
@@ -120,7 +120,7 @@ func (p *CodeDeployPlugin) getApplication(reqCtx *RequestContext, req *AWSReques
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 
@@ -140,7 +140,7 @@ func (p *CodeDeployPlugin) deleteApplication(reqCtx *RequestContext, req *AWSReq
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 
@@ -180,7 +180,7 @@ func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 	if input.ApplicationName == "" || input.DeploymentGroupName == "" {
@@ -233,7 +233,7 @@ func (p *CodeDeployPlugin) getDeploymentGroup(reqCtx *RequestContext, req *AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 
@@ -254,7 +254,7 @@ func (p *CodeDeployPlugin) deleteDeploymentGroup(reqCtx *RequestContext, req *AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 
@@ -281,7 +281,7 @@ func (p *CodeDeployPlugin) createDeployment(reqCtx *RequestContext, req *AWSRequ
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 	if input.ApplicationName == "" {
@@ -333,7 +333,7 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codedeployInvalidBody()
 		}
 	}
 

@@ -116,7 +116,7 @@ func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 		XrayEnabled        bool              `json:"xrayEnabled"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
-		return nil, &AWSError{Code: "BadRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, appsyncInvalidBody()
 	}
 	if input.Name == "" {
 		return nil, &AWSError{Code: "BadRequestException", Message: "name is required", HTTPStatus: http.StatusBadRequest}

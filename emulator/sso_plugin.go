@@ -132,7 +132,7 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "ValidationException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, ssoInvalidBody()
 		}
 	}
 	if input.Name == "" {

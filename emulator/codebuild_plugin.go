@@ -70,7 +70,7 @@ func (p *CodeBuildPlugin) createProject(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 	if input.Name == "" {
@@ -122,7 +122,7 @@ func (p *CodeBuildPlugin) batchGetProjects(reqCtx *RequestContext, req *AWSReque
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 
@@ -156,7 +156,7 @@ func (p *CodeBuildPlugin) updateProject(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 
@@ -204,7 +204,7 @@ func (p *CodeBuildPlugin) deleteProject(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 
@@ -242,7 +242,7 @@ func (p *CodeBuildPlugin) startBuild(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 	if input.ProjectName == "" {
@@ -292,7 +292,7 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidInputException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codebuildInvalidBody()
 		}
 	}
 

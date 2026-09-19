@@ -72,7 +72,7 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	if input.Domain == "" {
@@ -118,7 +118,7 @@ func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID)
@@ -138,7 +138,7 @@ func (p *TransferPlugin) updateServer(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	server, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID)
@@ -174,7 +174,7 @@ func (p *TransferPlugin) deleteServer(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	if _, err := p.loadServer(reqCtx.AccountID, reqCtx.Region, input.ServerID); err != nil {
@@ -236,7 +236,7 @@ func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	if input.ServerID == "" || input.UserName == "" {
@@ -291,7 +291,7 @@ func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
@@ -313,7 +313,7 @@ func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
@@ -351,7 +351,7 @@ func (p *TransferPlugin) deleteUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	if _, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName); err != nil {
@@ -374,7 +374,7 @@ func (p *TransferPlugin) listUsers(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, transferInvalidBody()
 		}
 	}
 	if input.ServerID == "" {
