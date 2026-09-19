@@ -414,6 +414,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are `Required: No` and refusing the value would be substrate inventing a bound. Substrate does not
   act on the setting — an `IMMUTABLE` repository still accepts a `PutImage` reusing a tag — which is
   recorded intent under `CLAUDE.md`'s scope boundary rather than a modelled refusal.
+- **Every ECR refusal answers the status its page publishes, which is 400 at all twelve sites that
+  answered something else** (#1090, second of three). `RepositoryAlreadyExistsException` answered 409
+  and the three `*NotFoundException` codes answered 404; ECR publishes all of them at **400**, and the
+  only status above 400 on any ECR page is `ServerException` at 500, which substrate never answers.
+  Nine pages were read one at a time rather than the rule being generalised from one of them (#671).
+  The codes were right, which is why nothing noticed: `ecr_plugin_test.go` asserted that a refusal
+  happened and which code it carried, never its status — but the status is what a consumer branches on
+  before parsing a body, an SDK's retry classifier reads it, and 409 is what CloudFormation's own
+  create-exists probe looks for. The two `map[string]bool` code sets in `cfn_delete.go` and
+  `cfn_rollback.go` key on the code, so they are unaffected. The twenty-seven
+  `InvalidParameterException` sites were already correct. Routed through new constructors in
+  `emulator/ecr_errors.go`.
+- **Three published ECR refusals now have a site they can fire from** (#1090). `ListImages`,
+  `DescribeImages`, `BatchGetImage` and `BatchDeleteImage` each read a repository's tag index and never
+  its record, so a name addressing nothing read as an empty index and all four answered **200 with an
+  empty result** — indistinguishable from an existing repository holding no images, where all four
+  publish `RepositoryNotFoundException`. `DeleteRepository` decoded `force` into a field nothing read,
+  so a repository full of images was deleted silently where AWS publishes
+  `RepositoryNotEmptyException`; a forced delete now removes the images too, since the tag index used
+  to outlive the repository and a re-created name reported the previous repository's images.
+  Emptiness is measured by the tag index, the same way every operation that reports contents measures
+  it — an image pushed without a tag is entered in no index, so nothing in the plugin can enumerate it.
+  And `DescribeRepositories` dropped a `repositoryNames` entry it could not resolve from the list, so a
+  request naming one real and one imaginary repository answered 200 with a single entry; a name the
+  **caller** supplied is now refused, while a name read out of substrate's own index is still skipped,
+  because a missing record there is an internal inconsistency rather than a caller's mistake.
+  `TestECRPlugin_DeleteRepository` asserted the empty-list reading and was rewritten.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count

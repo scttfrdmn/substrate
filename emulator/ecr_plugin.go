@@ -164,7 +164,7 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("ecr createRepository state.Get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "RepositoryAlreadyExistsException", Message: "Repository already exists: " + body.RepositoryName, HTTPStatus: http.StatusConflict}
+		return nil, ecrRepositoryAlreadyExists(body.RepositoryName)
 	}
 
 	encType := body.EncryptionConfiguration.EncryptionType
@@ -224,8 +224,16 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 
 	goCtx := context.Background()
 
+	// A name the caller asked for is answered for or refused; a name read out of the index is
+	// one substrate wrote itself, so a missing record there is an inconsistency to skip rather
+	// than a caller's mistake. AWS publishes RepositoryNotFoundException on this operation and
+	// it had no site to fire from: every name was looked up and a miss was dropped from the
+	// list, so a request naming one real and one imaginary repository answered 200 with one
+	// entry (#1090).
+	named := len(body.RepositoryNames) > 0
+
 	var names []string
-	if len(body.RepositoryNames) > 0 {
+	if named {
 		names = body.RepositoryNames
 	} else {
 		idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
@@ -243,6 +251,9 @@ func (p *ECRPlugin) describeRepositories(ctx *RequestContext, req *AWSRequest) (
 			return nil, fmt.Errorf("ecr describeRepositories state.Get: %w", err)
 		}
 		if data == nil {
+			if named {
+				return nil, ecrRepositoryNotFound(name)
+			}
 			continue
 		}
 		var repo ECRRepository
@@ -277,7 +288,7 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("ecr deleteRepository state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -285,8 +296,33 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("ecr deleteRepository unmarshal: %w", err)
 	}
 
+	// force is the one request member here that governs whether the delete happens at all, and
+	// it was decoded and never read (#1090). A repository's contents are its tag index: an
+	// image pushed without a tag is written under its digest and entered in no index, so
+	// nothing in this plugin can enumerate it — every image operation reads the tag map — and
+	// emptiness is measured the same way the operations that report contents measure it.
+	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
+	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
+	if len(tagsMap) > 0 && !body.Force {
+		return nil, ecrRepositoryNotEmpty(body.RepositoryName)
+	}
+
 	if err := p.state.Delete(goCtx, ecrNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("ecr deleteRepository state.Delete: %w", err)
+	}
+
+	// The images go with it. Without this the tag index outlived the repository, so a name
+	// re-created after a forced delete reported the previous repository's images.
+	for _, digest := range tagsMap {
+		imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
+		if err := p.state.Delete(goCtx, ecrNamespace, imgKey); err != nil {
+			return nil, fmt.Errorf("ecr deleteRepository state.Delete image: %w", err)
+		}
+	}
+	if len(tagsMap) > 0 {
+		if err := p.state.Delete(goCtx, ecrNamespace, tagsKey); err != nil {
+			return nil, fmt.Errorf("ecr deleteRepository state.Delete tags: %w", err)
+		}
 	}
 
 	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
@@ -322,7 +358,7 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, fmt.Errorf("ecr putImage state.Get repo: %w", err)
 	}
 	if repoData == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	digest := body.ImageDigest
@@ -392,6 +428,12 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	goCtx := context.Background()
+
+	// Verify repository exists. Without this the tag index for a name that addresses no
+	// repository reads as empty and the operation answers 200 (#1090).
+	if err := p.requireRepository(goCtx, ctx, body.RepositoryName); err != nil {
+		return nil, err
+	}
 
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
@@ -474,6 +516,12 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	goCtx := context.Background()
+
+	// Verify repository exists. Without this the tag index for a name that addresses no
+	// repository reads as empty and the operation answers 200 (#1090).
+	if err := p.requireRepository(goCtx, ctx, body.RepositoryName); err != nil {
+		return nil, err
+	}
 
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
@@ -565,6 +613,12 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	goCtx := context.Background()
 
+	// Verify repository exists. Without this the tag index for a name that addresses no
+	// repository reads as empty and the operation answers 200 (#1090).
+	if err := p.requireRepository(goCtx, ctx, body.RepositoryName); err != nil {
+		return nil, err
+	}
+
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
 
@@ -634,6 +688,12 @@ func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 
 	goCtx := context.Background()
 
+	// Verify repository exists. Without this the tag index for a name that addresses no
+	// repository reads as empty and the operation answers 200 (#1090).
+	if err := p.requireRepository(goCtx, ctx, body.RepositoryName); err != nil {
+		return nil, err
+	}
+
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
 
@@ -702,7 +762,7 @@ func (p *ECRPlugin) putLifecyclePolicy(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("ecr putLifecyclePolicy state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -748,7 +808,7 @@ func (p *ECRPlugin) getLifecyclePolicy(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("ecr getLifecyclePolicy state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -756,7 +816,7 @@ func (p *ECRPlugin) getLifecyclePolicy(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("ecr getLifecyclePolicy unmarshal: %w", err)
 	}
 	if repo.LifecyclePolicy == "" {
-		return nil, &AWSError{Code: "LifecyclePolicyNotFoundException", Message: "No lifecycle policy found for repository: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrLifecyclePolicyNotFound(body.RepositoryName)
 	}
 
 	type response struct {
@@ -792,7 +852,7 @@ func (p *ECRPlugin) setRepositoryPolicy(ctx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ecr setRepositoryPolicy state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -838,7 +898,7 @@ func (p *ECRPlugin) getRepositoryPolicy(ctx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ecr getRepositoryPolicy state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -846,7 +906,7 @@ func (p *ECRPlugin) getRepositoryPolicy(ctx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ecr getRepositoryPolicy unmarshal: %w", err)
 	}
 	if repo.RepositoryPolicy == "" {
-		return nil, &AWSError{Code: "RepositoryPolicyNotFoundException", Message: "No policy found for repository: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryPolicyNotFound(body.RepositoryName)
 	}
 
 	type response struct {
@@ -879,7 +939,7 @@ func (p *ECRPlugin) deleteRepositoryPolicy(ctx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("ecr deleteRepositoryPolicy state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
 	var repo ECRRepository
@@ -887,7 +947,7 @@ func (p *ECRPlugin) deleteRepositoryPolicy(ctx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("ecr deleteRepositoryPolicy unmarshal: %w", err)
 	}
 	if repo.RepositoryPolicy == "" {
-		return nil, &AWSError{Code: "RepositoryPolicyNotFoundException", Message: "No policy found for repository: " + body.RepositoryName, HTTPStatus: http.StatusNotFound}
+		return nil, ecrRepositoryPolicyNotFound(body.RepositoryName)
 	}
 
 	oldPolicy := repo.RepositoryPolicy
@@ -1019,7 +1079,7 @@ func (p *ECRPlugin) loadRepoByARN(goCtx context.Context, ctx *RequestContext, ar
 		return nil, "", fmt.Errorf("ecr loadRepoByARN state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, "", &AWSError{Code: "RepositoryNotFoundException", Message: "Repository not found: " + name, HTTPStatus: http.StatusNotFound}
+		return nil, "", ecrRepositoryNotFound(name)
 	}
 	var repo ECRRepository
 	if err := json.Unmarshal(data, &repo); err != nil {
