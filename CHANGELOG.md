@@ -473,6 +473,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DescribeRepositories` defect above. As there, only an image the **caller** named is refused; a
   digest derived from substrate's own tag index with no record behind it is skipped as an internal
   inconsistency.
+- **`GetDistributionConfig` answers `DistributionConfig` members and stops answering `Distribution`
+  ones** (#1091). The document carried `Id` and `ARN`, which `API_DistributionConfig` publishes
+  nowhere — both are members of the enclosing `Distribution` type, which this operation does not
+  return — so a caller could read a distribution's identity out of a configuration here and would find
+  nothing there against CloudFront itself (#1013). `Comment` lost its `omitempty` in the same change,
+  because the member is `Required: Yes` and the Response Syntax renders it unconditionally. The test
+  that existed to check the operation was **asserting the leak** (`cloudfront_plugin_test.go`), which
+  is how six releases of it survived; it now asserts the published members, and a new test asserts the
+  absence of the two on the raw document, since a struct that omits a member decodes the same whether
+  the member is there or not.
+- **Two divergences on that operation are now recorded rather than silently present** (#1091).
+  `DistributionConfig` marks five members `Required: Yes` and substrate can answer two, because
+  `CreateDistribution` decodes only `Comment` and `Enabled` from its body and neither page publishes an
+  example of a configuration to copy a shape from — an `Origins` needs `Items` and a `Quantity`, a
+  `DefaultCacheBehavior` a whole subtree. And `Id` is published as *"If the ID is empty, an empty
+  distribution configuration is returned"*: the empty ID is reachable (`/2020-05-31/distribution//config`
+  routes here with one) and substrate answers the published `NoSuchDistribution`/404 instead, for the
+  same reason — the empty configuration is the document with no published example whose required
+  members would have to be invented. `GetDistributionConfig` publishes no `InvalidArgument`, so a guard
+  could not have been given a published code either (#671). Both are stated in `docs/services.md` and
+  pinned by tests, so a later change to either is deliberate.
+- **`NoSuchDistribution`'s message no longer trails a bare colon** (#1091). It read
+  `"Distribution not found: " + distID`, and an empty ID is reachable, so the answer ended in a colon
+  with nothing after it. It is now the description `API_GetDistributionConfig` publishes for the code,
+  *"The specified distribution does not exist."*, which names no distribution and so has no empty tail.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -578,6 +603,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disagree about which member counts, and a new `StartSyncExecution` test iterates an `ItemProcessor`
   `Map` over three items to pin it. Found while writing #1073's rules; it is why the rule accepts either
   spelling instead of the one the type happened to model.
+- **`ListInvalidations` refuses a distribution that does not exist instead of answering an empty list**
+  (#1091). `API_ListInvalidations` publishes `NoSuchDistribution`/404 and the handler had nowhere to
+  answer it: it read the invalidation index straight out of state without looking at the distribution
+  record, so any ID at all — including one that exists in no account — was answered 200 and an empty
+  `InvalidationList`. A caller could not tell "never invalidated" from "no such distribution", which is
+  the defect `requireRepository` fixed for ECR's four image operations in this same release (#1090).
+- **`GetInvalidation` answers whichever of its two published codes describes what is absent** (#1091).
+  `API_GetInvalidation` publishes `NoSuchDistribution`/404 *and* `NoSuchInvalidation`/404, and they are
+  not interchangeable: an invalidation ID under a distribution that does not exist answered
+  `NoSuchInvalidation`, telling a caller the batch was missing from a distribution substrate never had.
+  The handler also folded a state-read error into that same 404; it is now wrapped and returned.
 
 ## [v0.119.0] - 2026-09-18
 
