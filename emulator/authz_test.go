@@ -569,10 +569,12 @@ func TestABAC_SQS_ResourceTag(t *testing.T) {
 		Tags:      map[string]string{"Team": "ops"},
 	}
 	qRaw, _ := json.Marshal(q)
-	// "queue:<account>/<name>", which is where the SQS plugin itself stores a queue. Seeding
+	// The key the SQS plugin itself stores a queue at, taken from its own builder. Seeding
 	// "queue:ops-queue" is what let this test pass while no real queue's tags were ever readable
-	// by the authorizer at all (#826).
-	require.NoError(t, state.Put(context.Background(), "sqs", "queue:123456789012/ops-queue", qRaw))
+	// by the authorizer at all (#826); the Region joined the key in #1088, and the authorizer takes
+	// it from the request context this test supplies.
+	require.NoError(t, state.Put(context.Background(), "sqs",
+		emulator.SQSQueueStateKeyForTest("123456789012", "us-east-1", "ops-queue"), qRaw))
 
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	auth := emulator.NewAuthController(state, logger)

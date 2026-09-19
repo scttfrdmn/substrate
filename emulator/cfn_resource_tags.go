@@ -66,16 +66,6 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 	case "AWS::S3::Bucket":
 		// A bucket name is globally unique, so the key carries no account or region.
 		return cfnStampTarget{namespace: s3Namespace, stateKey: "bucket:" + dr.PhysicalID}, true
-	case "AWS::SQS::Queue":
-		// `sqsURLKey` (`sqs_plugin.go:98`) keys a queue by the last two components of its URL,
-		// so the record the SQS plugin reads is `queue:<account>/<name>` — the form the
-		// deployer's own drift and deletion reads already use (`cfn_deployer.go:2110`, `:2352`).
-		// [TaggingPlugin.resolveARN] built `queue:<name>` until #826 and so wrote a record the
-		// SQS plugin never reads; it now builds this same key, from the ARN's own account.
-		return cfnStampTarget{
-			namespace: sqsNamespace,
-			stateKey:  "queue:" + accountID + "/" + dr.PhysicalID,
-		}, true
 	case "AWS::CloudFront::Distribution":
 		// [cfDistKey] carries no Region, because CloudFront is global and the distribution's own
 		// ARN has an empty Region field — which is also why the table above cannot hold this one.
@@ -242,6 +232,13 @@ var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::CertificateManager::Certificate": {namespace: acmNamespace, prefix: "cert"},
 	"AWS::RDS::DBCluster":                  {namespace: rdsNamespace, prefix: "dbcluster"},
 	"AWS::RDS::DBSubnetGroup":              {namespace: rdsNamespace, prefix: "dbsubnetgroup"},
+
+	// SQS joined the table in #1088 rather than keeping its own arm below. Its key was
+	// `queue:<account>/<name>`, which is why it needed one; now that [sqsQueueStateKey] carries the
+	// Region it is this table's shape exactly, and the arm it replaced was the last place the old
+	// two-component form was written by hand. [TaggingPlugin.resolveARN] built `queue:<name>` until
+	// #826 and so wrote a record the SQS plugin never reads; both now derive from that one function.
+	"AWS::SQS::Queue": {namespace: sqsNamespace, prefix: "queue"},
 }
 
 // cfnELBStampableTypes are the ELBv2 CFN types whose records substrate keeps tags on.

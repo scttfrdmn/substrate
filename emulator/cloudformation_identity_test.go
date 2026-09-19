@@ -444,12 +444,14 @@ func TestCFNIdentity_PseudoParametersMatchTheStackARN(t *testing.T) {
 // difference — drift silently blind, which IN_SYNC alone cannot distinguish from
 // drift working. Both reads are separately hardcoded, so both are asserted.
 func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
-	// A non-default region throughout, because the SNS, DynamoDB and Lambda keys embed
-	// the region as well as the account: run in us-east-1 and a comparator that threaded
-	// only the account would still find the resource, since us-east-1 is substrate's
-	// default. DynamoDB's and Lambda's keys gained the region with #943, and both
-	// comparators discarded it until then — the DynamoDB one took the account from
-	// `d.identity` and the Lambda one took neither.
+	// A non-default region throughout, because every key in the table embeds the region as
+	// well as the account: run in us-east-1 and a comparator that threaded only the account
+	// would still find the resource, since us-east-1 is substrate's default. DynamoDB's and
+	// Lambda's keys gained the region with #943 and both comparators discarded it until then
+	// — the DynamoDB one took the account from `d.identity` and the Lambda one took neither.
+	// SQS's gained it with #1088, and until then its existence checker took `_` for the
+	// region and its comparator read `d.identity.accountID` alone, so this case asserted
+	// nothing about the region at all.
 	const region = "eu-west-1"
 
 	cases := []struct {
@@ -482,7 +484,7 @@ func TestCFNIdentity_DriftFindsTheCallersResources(t *testing.T) {
 			tmpl: `{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{
 				"QueueName":"drift-queue","VisibilityTimeout":45}}}}`,
 			namespace: "sqs",
-			key:       "queue:" + cfnOtherAccount + "/drift-queue",
+			key:       emulator.SQSQueueStateKeyForTest(cfnOtherAccount, region, "drift-queue"),
 			mutate: func(m map[string]any) {
 				attrs, _ := m["Attributes"].(map[string]any)
 				if attrs == nil {

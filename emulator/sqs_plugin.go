@@ -94,14 +94,29 @@ func (p *SQSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 // --- Queue URL helpers -------------------------------------------------------
 
-// sqsURLKey returns a stable state key component for a queue URL.
-func sqsURLKey(queueURL string) string {
-	// Use the last two path components (accountID/queueName) as the key.
+// sqsURLKey returns a stable state key component for a queue URL, in the Region the request arrived
+// in.
+//
+// The owner account and the queue name come from the URL's last two path components, as they always
+// did. **The Region comes from the request, not from the URL**, and that is the substantive choice
+// here: substrate's queue URL carries the Region in its host, but a URL reaching a handler may have
+// been built by an SDK against a custom endpoint whose host says nothing about a Region, so parsing it
+// out would be a guess at the one value the endpoint already knows for certain. `API_GetQueueUrl`
+// publishes no Region parameter for the same reason — AWS takes it from the endpoint too.
+//
+// It also gives the right answer to the case a host parse would get wrong: a caller in one Region
+// sending another Region's queue URL looks the queue up in its **own** Region, finds nothing and is
+// answered `QueueDoesNotExist`, which is what AWS answers, rather than being silently served the
+// other Region's queue.
+//
+// See [sqsQueueStateKey] for the defect this closes and for why the Region belongs in the key at all.
+func sqsURLKey(region, queueURL string) string {
+	// The last two path components are the owner account and the queue name.
 	parts := strings.Split(strings.TrimRight(queueURL, "/"), "/")
 	if len(parts) >= 2 {
-		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+		return sqsQueueKeyComponent(parts[len(parts)-2], region, parts[len(parts)-1])
 	}
-	return queueURL
+	return sqsQueueKeyComponent("", region, queueURL)
 }
 
 // sqsIsJSONProtocol reports whether req was sent using the SQS JSON protocol
@@ -141,8 +156,12 @@ func sqsQueueURLFromRequest(req *AWSRequest) (string, *AWSError) {
 
 // --- State helpers -----------------------------------------------------------
 
-func (p *SQSPlugin) loadQueue(ctx context.Context, queueURL string) (*SQSQueue, error) {
-	key := "queue:" + sqsURLKey(queueURL)
+// loadQueue reads the queue a URL names, in the Region the request arrived in.
+//
+// The Region is a parameter rather than taken from the URL for the reason [sqsURLKey] records, and it
+// is a parameter rather than a field on the plugin because one plugin instance serves every Region.
+func (p *SQSPlugin) loadQueue(ctx context.Context, region, queueURL string) (*SQSQueue, error) {
+	key := "queue:" + sqsURLKey(region, queueURL)
 	data, err := p.state.Get(ctx, sqsNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("sqs loadQueue state.Get: %w", err)
@@ -157,8 +176,12 @@ func (p *SQSPlugin) loadQueue(ctx context.Context, queueURL string) (*SQSQueue, 
 	return &q, nil
 }
 
-func (p *SQSPlugin) saveQueue(ctx context.Context, q *SQSQueue) error {
-	key := "queue:" + sqsURLKey(q.QueueURL)
+// saveQueue writes the queue under the key for its own Region.
+//
+// The Region is passed rather than parsed back out of `q.QueueURL`, so that a record can only ever be
+// written under the Region the request that built it arrived in — the same rule the load side follows.
+func (p *SQSPlugin) saveQueue(ctx context.Context, region string, q *SQSQueue) error {
+	key := "queue:" + sqsURLKey(region, q.QueueURL)
 	data, err := json.Marshal(q)
 	if err != nil {
 		return fmt.Errorf("sqs saveQueue marshal: %w", err)
@@ -166,28 +189,37 @@ func (p *SQSPlugin) saveQueue(ctx context.Context, q *SQSQueue) error {
 	return p.state.Put(ctx, sqsNamespace, key, data)
 }
 
-func (p *SQSPlugin) loadQueueNames(ctx context.Context) ([]string, error) {
-	data, err := p.state.Get(ctx, sqsNamespace, "queue_names")
+// listQueueURLs reports the URLs of the caller's queues in one Region, in key order.
+//
+// This replaced a `queue_names` state key holding every queue URL substrate had ever created, under
+// one flat name with no account and no Region in it (#1088). Two things were wrong with that index and
+// only the second was visible from the outside. `listQueues` read it and filtered on
+// `QueueNamePrefix` alone — it consulted neither `ctx.AccountID` nor `ctx.Region` — so **ListQueues in
+// one account already reported another account's queues**, before anything about the Region key was
+// changed. And `deleteQueue` rewrote the whole list, so one account's delete wrote a record every
+// other account read.
+//
+// A prefix scan over the queue records themselves has no second copy to go stale and needs no
+// scoping decision of its own: the scope is the key. [MemoryStateManager.List] sorts, so the order is
+// deterministic, which is what the removed `sort.Strings` was for.
+func (p *SQSPlugin) listQueueURLs(ctx context.Context, accountID, region string) ([]string, error) {
+	keys, err := p.state.List(ctx, sqsNamespace, sqsQueueKeyPrefix(accountID, region))
 	if err != nil {
-		return nil, fmt.Errorf("sqs loadQueueNames: %w", err)
+		return nil, fmt.Errorf("sqs listQueueURLs state.List: %w", err)
 	}
-	if data == nil {
-		return nil, nil
+	urls := make([]string, 0, len(keys))
+	for _, key := range keys {
+		data, getErr := p.state.Get(ctx, sqsNamespace, key)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var q SQSQueue
+		if err := json.Unmarshal(data, &q); err != nil {
+			continue
+		}
+		urls = append(urls, q.QueueURL)
 	}
-	var names []string
-	if err := json.Unmarshal(data, &names); err != nil {
-		return nil, fmt.Errorf("sqs loadQueueNames unmarshal: %w", err)
-	}
-	return names, nil
-}
-
-func (p *SQSPlugin) saveQueueNames(ctx context.Context, names []string) error {
-	sort.Strings(names)
-	data, err := json.Marshal(names)
-	if err != nil {
-		return fmt.Errorf("sqs saveQueueNames marshal: %w", err)
-	}
-	return p.state.Put(ctx, sqsNamespace, "queue_names", data)
+	return urls, nil
 }
 
 func (p *SQSPlugin) loadMsgIDs(ctx context.Context, urlKey string) ([]string, error) {
@@ -267,7 +299,7 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	isFifo := strings.HasSuffix(name, ".fifo")
 
 	queueURL := sqsQueueURL(ctx.Region, ctx.AccountID, name)
-	existing, err := p.loadQueue(context.Background(), queueURL)
+	existing, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -326,18 +358,8 @@ func (p *SQSPlugin) createQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		FifoQueue:             isFifo,
 	}
 
-	if err := p.saveQueue(context.Background(), q); err != nil {
+	if err := p.saveQueue(context.Background(), ctx.Region, q); err != nil {
 		return nil, fmt.Errorf("sqs createQueue saveQueue: %w", err)
-	}
-
-	// Update queue names list.
-	names, err := p.loadQueueNames(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	names = append(names, queueURL)
-	if err := p.saveQueueNames(context.Background(), names); err != nil {
-		return nil, fmt.Errorf("sqs createQueue saveQueueNames: %w", err)
 	}
 
 	if sqsIsJSONProtocol(req) {
@@ -376,7 +398,7 @@ func (p *SQSPlugin) getQueueURL(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "MissingParameter", Message: "QueueName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	queueURL := sqsQueueURL(ctx.Region, ctx.AccountID, name)
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -416,7 +438,7 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +504,7 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -510,7 +532,7 @@ func (p *SQSPlugin) setQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	q.LastModifiedTimestamp = p.tc.Now().Unix()
 
-	if err := p.saveQueue(context.Background(), q); err != nil {
+	if err := p.saveQueue(context.Background(), ctx.Region, q); err != nil {
 		return nil, fmt.Errorf("sqs setQueueAttributes saveQueue: %w", err)
 	}
 
@@ -533,7 +555,7 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -541,7 +563,7 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, sqsQueueDoesNotExist()
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 
 	// Delete all messages.
 	msgIDs, err := p.loadMsgIDs(context.Background(), urlKey)
@@ -556,20 +578,8 @@ func (p *SQSPlugin) deleteQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// Delete queue.
 	_ = p.state.Delete(context.Background(), sqsNamespace, "queue:"+urlKey)
 
-	// Remove from names list.
-	names, err := p.loadQueueNames(context.Background())
-	if err != nil {
-		return nil, err
-	}
-	newNames := make([]string, 0, len(names))
-	for _, n := range names {
-		if n != queueURL {
-			newNames = append(newNames, n)
-		}
-	}
-	if err := p.saveQueueNames(context.Background(), newNames); err != nil {
-		return nil, fmt.Errorf("sqs deleteQueue saveQueueNames: %w", err)
-	}
+	// Deleting the record is the whole of the removal: the list side scans the records themselves, so
+	// there is no second copy to prune. See [SQSPlugin.listQueueURLs].
 
 	if sqsIsJSONProtocol(req) {
 		return sqsJSONResponse(http.StatusOK, struct{}{})
@@ -598,25 +608,25 @@ func (p *SQSPlugin) listQueues(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	} else {
 		prefix = req.Params["QueueNamePrefix"]
 	}
-	names, err := p.loadQueueNames(context.Background())
+	// Scoped to the caller's own account and Region, which the old `queue_names` index could not do:
+	// AWS publishes this operation as returning "a list of your queues", and an endpoint is one Region.
+	urls, err := p.listQueueURLs(context.Background(), ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
 
-	filtered := make([]string, 0, len(names))
-	for _, u := range names {
+	filtered := make([]string, 0, len(urls))
+	for _, u := range urls {
 		if prefix == "" {
 			filtered = append(filtered, u)
-		} else {
-			// Check if the queue name (last path segment) starts with prefix.
-			parts := strings.Split(u, "/")
-			qName := parts[len(parts)-1]
-			if strings.HasPrefix(qName, prefix) {
-				filtered = append(filtered, u)
-			}
+			continue
+		}
+		// Check if the queue name (last path segment) starts with prefix.
+		parts := strings.Split(u, "/")
+		if strings.HasPrefix(parts[len(parts)-1], prefix) {
+			filtered = append(filtered, u)
 		}
 	}
-	sort.Strings(filtered)
 
 	if sqsIsJSONProtocol(req) {
 		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"QueueUrls": filtered})
@@ -642,7 +652,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -680,7 +690,7 @@ func (p *SQSPlugin) tagQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	// available before the branch; the merged size is what both agree on. See [taggingEverTagged] (#938).
 	q.EverTagged = taggingEverTagged(q.EverTagged, tagsBefore, len(q.Tags))
 
-	if err := p.saveQueue(context.Background(), q); err != nil {
+	if err := p.saveQueue(context.Background(), ctx.Region, q); err != nil {
 		return nil, fmt.Errorf("sqs tagQueue saveQueue: %w", err)
 	}
 
@@ -703,7 +713,7 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -733,7 +743,7 @@ func (p *SQSPlugin) untagQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		}
 	}
 
-	if err := p.saveQueue(context.Background(), q); err != nil {
+	if err := p.saveQueue(context.Background(), ctx.Region, q); err != nil {
 		return nil, fmt.Errorf("sqs untagQueue saveQueue: %w", err)
 	}
 
@@ -756,7 +766,7 @@ func (p *SQSPlugin) listQueueTags(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -806,7 +816,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -889,7 +899,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			}
 		}
 		// Check deduplication window.
-		urlKey := sqsURLKey(queueURL)
+		urlKey := sqsURLKey(ctx.Region, queueURL)
 		if existing, dupMsgID := p.checkFIFODedup(context.Background(), urlKey, dedupID, p.tc.Now()); existing {
 			// Return success with original message ID (idempotent).
 			//
@@ -1013,7 +1023,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		ReceiveCount:      0,
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	if err := p.saveMsg(context.Background(), urlKey, msg); err != nil {
 		return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", err)
 	}
@@ -1061,7 +1071,7 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,7 +1079,7 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, sqsQueueDoesNotExist()
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	now := p.tc.Now()
 
 	type successEntryXML struct {
@@ -1282,7 +1292,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1342,7 +1352,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	now := p.tc.Now()
 
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
@@ -1478,7 +1488,7 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1498,7 +1508,7 @@ func (p *SQSPlugin) deleteMessage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	} else {
 		receiptHandle = req.Params["ReceiptHandle"]
 	}
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 
 	// Find message by receipt handle.
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
@@ -1550,7 +1560,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1558,7 +1568,7 @@ func (p *SQSPlugin) deleteMessageBatch(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, sqsQueueDoesNotExist()
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
 	if err != nil {
 		return nil, err
@@ -1667,7 +1677,7 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1693,7 +1703,7 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 		vis, _ = strconv.Atoi(visStr)
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
 	if err != nil {
 		return nil, err
@@ -1732,7 +1742,7 @@ func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if refusal != nil {
 		return nil, refusal
 	}
-	q, err := p.loadQueue(context.Background(), queueURL)
+	q, err := p.loadQueue(context.Background(), ctx.Region, queueURL)
 	if err != nil {
 		return nil, err
 	}
@@ -1740,7 +1750,7 @@ func (p *SQSPlugin) purgeQueue(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, sqsQueueDoesNotExist()
 	}
 
-	urlKey := sqsURLKey(queueURL)
+	urlKey := sqsURLKey(ctx.Region, queueURL)
 	ids, err := p.loadMsgIDs(context.Background(), urlKey)
 	if err != nil {
 		return nil, err

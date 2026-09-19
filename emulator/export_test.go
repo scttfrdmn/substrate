@@ -996,6 +996,24 @@ func IAMInlinePolicyKeyForTest(accountID, kind, entityName, policyName string) s
 	return iamInlinePolicyKey(accountID, kind, entityName, policyName)
 }
 
+// --- SQS state keys (#1088) ------------------------------------------------
+//
+// Exported for the same reason the IAM builders above are, and with the same history behind it: six
+// tests spelled `"queue:" + account + "/" + name` by hand, so when #1088 put the Region in the key
+// each of them had to be found and edited rather than moving with the production code. Anything
+// seeding or reading SQS state directly builds its key from these two.
+
+// SQSQueueStateKeyForTest wraps sqsQueueStateKey for external tests.
+func SQSQueueStateKeyForTest(accountID, region, name string) string {
+	return sqsQueueStateKey(accountID, region, name)
+}
+
+// SQSQueueKeyComponentForTest wraps sqsQueueKeyComponent for external tests, for the `msg:`,
+// `msg_ids:` and `fifo_dedup:` keys that carry the same triple under a different prefix.
+func SQSQueueKeyComponentForTest(accountID, region, name string) string {
+	return sqsQueueKeyComponent(accountID, region, name)
+}
+
 // IAMInlinePolicyNamesKeyForTest wraps iamInlinePolicyNamesKey for external tests.
 func IAMInlinePolicyNamesKeyForTest(accountID, kind, entityName string) string {
 	return iamInlinePolicyNamesKey(accountID, kind, entityName)

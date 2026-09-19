@@ -2598,7 +2598,7 @@ func TestCFN_DriftDetection_SQS_Modified(t *testing.T) {
 	assert.Equal(t, "IN_SYNC", result.DriftStatus)
 
 	// Change VisibilityTimeout directly in state.
-	key := "queue:123456789012/drift-q"
+	key := emulator.SQSQueueStateKeyForTest("123456789012", "us-east-1", "drift-q")
 	raw, err := state.Get(context.Background(), "sqs", key)
 	require.NoError(t, err)
 	require.NotNil(t, raw)
@@ -2735,7 +2735,7 @@ func TestCFN_DriftDetection_DeclaredOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	// Set a VisibilityTimeout directly in state — not declared, so not drift.
-	key := "queue:123456789012/declq"
+	key := emulator.SQSQueueStateKeyForTest("123456789012", "us-east-1", "declq")
 	raw, err := state.Get(context.Background(), "sqs", key)
 	require.NoError(t, err)
 	require.NotNil(t, raw)

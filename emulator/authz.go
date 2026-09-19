@@ -1229,8 +1229,9 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		// the last URL component alone, which is not the key the SQS plugin stores a queue at,
 		// so no request against a real queue ever published a tag and every aws:ResourceTag
 		// condition on one was unsatisfiable (#826). Calling the plugin's own helper is what
-		// stops the two drifting apart again.
-		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+sqsURLKey(qurl))
+		// stops the two drifting apart again — and it is why the Region the key gained in #1088
+		// arrived here for free, from the same `region` the lambda arm above already uses.
+		raw, err := a.state.Get(goCtx, sqsNamespace, "queue:"+sqsURLKey(region, qurl))
 		if err != nil || raw == nil {
 			return nil
 		}

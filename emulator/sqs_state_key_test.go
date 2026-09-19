@@ -20,11 +20,12 @@ import (
 
 // One SQS state key, addressed the same way by every reader (#826).
 //
-// The SQS plugin stores a queue under "queue:<account>/<name>" — its own sqsURLKey takes the last
+// The SQS plugin stored a queue under "queue:<account>/<name>" — its own sqsURLKey took the last
 // two components of a queue URL — while the Resource Groups Tagging API and the authorizer both
 // addressed "queue:<name>". Neither reader ever saw a real queue: TagResources created a phantom
 // record and answered 200, and every aws:ResourceTag condition on an SQS request was
-// unsatisfiable.
+// unsatisfiable. The key is "queue:<account>/<region>/<name>" since #1088; every reader here now
+// derives it from sqsQueueStateKey, so the three cannot disagree about its shape again.
 //
 // Every assertion here goes through an API call rather than through state, because the defect was
 // precisely state agreeing with a test that no caller agreed with: the fixtures that covered both

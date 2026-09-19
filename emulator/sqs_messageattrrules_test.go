@@ -782,12 +782,16 @@ func TestSQS_MessageAttributes_ErrorIsDeterministicAcrossRules(t *testing.T) {
 //
 // The queue must hold exactly one message, which every caller here arranges by sending
 // one legal message first.
+//
+// The key comes from the plugin's own builder rather than being spelled here, so that the next
+// change to its shape moves this helper with the production code — #1088 added the Region and this
+// was one of the sites that had to be found by hand.
 func storeIllegalAttributes(t *testing.T, state emulator.StateManager, queueName string,
 	attrs map[string]interface{},
 ) string {
 	t.Helper()
 	ctx := context.Background()
-	urlKey := "123456789012/" + queueName
+	urlKey := emulator.SQSQueueKeyComponentForTest("123456789012", "us-east-1", queueName)
 
 	idsRaw, err := state.Get(ctx, "sqs", "msg_ids:"+urlKey)
 	require.NoError(t, err)
