@@ -37,6 +37,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   update and on no read. It came off the wire *with* the full-replace fix rather than on its own because
   an omitted member now reverts: leaving it would have made an unpublished field start changing under
   callers who never named it. The record keeps it as recorded intent.
+- **`RunInstances`, `StartInstances`, `StopInstances` and `TerminateInstances` answer the transient
+  state AWS publishes in their own sample responses** (#514). Substrate applied every state change in
+  the request that asked for it, so all four reported the *settled* state: `running` where
+  `API_StartInstances` shows `currentState` 0 / `pending` beside `previousState` 80 / `stopped`, and
+  `stopped` where `API_StopInstances` shows 64 / `stopping` beside 16 / `running`. A consumer reading
+  the transition out of the call it just made — which is a waiter's first observation — was told a
+  transition that had already finished. This is a published-response divergence independent of seeding,
+  so it is corrected for every caller rather than behind a seed; the record still settles, so an
+  unseeded describe answers exactly as before and no existing fixture changes. `pending`, `stopping`
+  and `shutting-down` were three of the six codes `instanceState`'s own Valid Values publish and that
+  no code path could produce, and **no test asserted `currentState` anywhere**, which is how they
+  stayed unreachable.
+- **`StartInstances` and `StopInstances` refuse a `terminated` instance instead of resurrecting it**
+  (#514). Both wrote the new state unconditionally, so a stop of a terminated instance produced a
+  `stopped` one and a start produced a `running` one — against the lifecycle page's state table, which
+  says such an instance *"has been permanently deleted and cannot be started"*. The code is
+  `IncorrectInstanceState` / 400, whose published description is the general rule this is an instance
+  of (*"The instance is in an incorrect state for the requested action"*). Provenance differs between
+  the two halves and the doc comment records the difference: the start refusal rests on that sentence
+  directly, while the stop refusal rests on *"permanently deleted"* alone — no page found states a stop
+  precondition — and is substrate's reading rather than letting a stop resurrect a deleted instance
+  into a state it could then start from. Neither operation page publishes an error of its own, so the
+  message text is substrate's.
+- **`docs/services.md` no longer claims a seed replays like any other state** (#1140, found while
+  implementing #514). Seeds do live in the state manager, and that is precisely why: a replay resets the
+  state manager before re-executing, and a control-plane write is not an AWS request and so never
+  enters the event stream at all — so a stream recorded under a seed replays as the *unseeded*
+  sequence, with no event failing to make it visible. General to every seed in substrate; filed as
+  #1140, which carries the three candidate fixes.
 
 ### Added
 - **The full-replacement property is asserted in the shape a merge cannot pass, and the boundary around
@@ -74,6 +103,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   arms, since the EC2, ELBv2 and AWS Config arms bypass the shared merge that takes it; and the
   `aws:`-prefix argument that makes the *stamp* safe covers **two of the four** services, not four,
   because IAM and Kinesis count reserved keys on substrate's reading of their pages.
+- **A seeded instance-state progression, so a wait-until-running loop has something to wait for**
+  (#514). `POST /v1/ec2/instance-state` with `{"instanceId","transientObservations"}` sets how many
+  observations report the published transient state before an instance reports the state its record
+  holds; `DELETE` clears one seed or all of them. `instanceId` takes an ID or `*` (the default), an
+  ID-scoped seed wins over the wildcard, `transientObservations` defaults to `0` — the instantaneous
+  behaviour the existing suite pins — and a negative count is refused. `DescribeInstances` and
+  `DescribeInstanceStatus` read it, the latter both in the body and in its own `instance-state-name`
+  filter, so a filter cannot select a state the body does not report. Every state change restarts the
+  count, which is what makes one seed serve a stop-then-start sequence rather than only its first
+  transition. Three decisions recorded against the in-tree snapshot precedent (#715): the progression
+  is **counted in observations, not measured as a duration**, because the simulated clock advances with
+  wall time and a duration seed would make every "still pending" assertion depend on how long the rest
+  of the test took — which reverses #514's own recommendation, and the issue carries the correction; the
+  count is **per instance** even under a `*` seed, so one describe over five instances does not burn
+  five observations off a shared countdown; and the transient state is **derived, not seedable**,
+  because the lifecycle page fixes it per target (`pending` from a launch or a start, `stopping`,
+  `shutting-down`) where a snapshot's `status` is a free choice from five values.
+- **The seed is asserted to reproduce, and asserted never to rewrite the record** (#514, #1140). #514's
+  criterion asked for a replay of the event log to prove the sequence reproduces, and that cannot hold
+  for any seed in substrate — see #1140 — so two assertions that can hold replace it and say more
+  between them. The sequence is run twice over two servers sharing nothing, asserting the same five
+  observations in the same order; and a replay, which resets the state manager and re-executes the
+  recorded requests alone, is asserted to re-derive the same *record* the recording held. The second is
+  the sharp test of the rule the whole design rests on — a seed governs what an observation reports and
+  never rewrites the record — because a seeded observation written back would have made the recording's
+  record disagree with the replay's. That rule is also why seeding cannot break a caller's own
+  sequence: a `StartInstances` after a `StopInstances` still sees `stopped`, and no operation ever
+  observes a transient state, which is what makes #514's "refuse an operation from a transient state"
+  criterion vacuous by construction rather than declined. Its recorded stream is kept free of any
+  minted instance ID, because a replayed `RunInstances` mints a new one and a recorded request naming
+  the old one is unreplayable (#856).
 
 ### Changed
 - **Every common-errors citation in `emulator/` re-verified against the page as it reads now, and the

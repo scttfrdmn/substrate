@@ -1029,6 +1029,12 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		OwnerID:       reqCtx.AccountID,
 	}
 	for _, inst := range instances {
+		// A freshly launched instance reports `pending` here, which `API_RunInstances`' own sample
+		// response publishes (code 0) and `ec2-instance-lifecycle.html` states as prose: "When you
+		// launch an instance, it enters the pending state." The record already holds `running`, so
+		// the first DescribeInstances settles it unless a seed says otherwise (#514). The loop
+		// variable is a copy, so nothing here reaches state.
+		inst.State = ec2ReportedTransition(inst.State)
 		resp.Instances = append(resp.Instances,
 			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID]))
 	}
@@ -1205,6 +1211,13 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		if !ids.match(inst.InstanceID) {
 			continue
 		}
+		// This observation's state, which for a seeded instance mid-transition is the published
+		// transient one (#514). Substituted onto the local copy *before* the filters rather than
+		// at render time, so `instance-state-name` selects on the state the body reports; a filter
+		// matching `stopped` while the item rendered `stopping` would be an answer no caller could
+		// act on. After the ID filter, so a describe of one instance cannot burn another's
+		// countdown — see [ec2InstObservedKey]. An unseeded instance is returned unchanged.
+		inst.State = p.observeInstanceState(inst)
 		// Apply all DescribeInstances filters, AND-combined.
 		if !ec2InstanceMatchesFilters(inst, filters) {
 			continue
@@ -1295,8 +1308,13 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 			continue
 		}
 		prev := inst.State
-		inst.State = EC2InstanceState{Code: 48, Name: "terminated"}
+		inst.State = EC2InstanceState{Code: 48, Name: ec2StateTerminated}
 		inst.TerminatedTime = p.tc.Now().UTC().Format(time.RFC3339)
+		// The countdown restarts at the transition rather than at seed time, so a seeded instance
+		// that has already settled into `running` observes `shutting-down` from here (#514).
+		if err := p.resetInstanceObservations(inst.InstanceID); err != nil {
+			return nil, err
+		}
 		newData, err := json.Marshal(inst)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 terminateInstances marshal: %w", err)
@@ -1311,9 +1329,13 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 			return nil, err
 		}
 
+		// `shutting-down`, which `API_TerminateInstances`' sample response publishes as
+		// `currentState` (code 32) and the lifecycle page states — "preparing to be terminated"
+		// (#514).
+		cur := ec2ReportedTransition(inst.State)
 		sc := stateChange{InstanceID: inst.InstanceID}
-		sc.CurrentState.Code = inst.State.Code
-		sc.CurrentState.Name = inst.State.Name
+		sc.CurrentState.Code = cur.Code
+		sc.CurrentState.Name = cur.Name
 		sc.PreviousState.Code = prev.Code
 		sc.PreviousState.Name = prev.Name
 		resp.Items = append(resp.Items, sc)
@@ -1362,13 +1384,21 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if err := json.Unmarshal(data, &inst); err != nil {
 			return nil, fmt.Errorf("ec2 stopInstances unmarshal: %w", err)
 		}
+		if inst.State.Name == ec2StateTerminated {
+			return nil, ec2CannotTransitionTerminated("stopped")
+		}
 		prev := inst.State
-		inst.State = EC2InstanceState{Code: 80, Name: "stopped"}
+		inst.State = EC2InstanceState{Code: 80, Name: ec2StateStopped}
 		newData, _ := json.Marshal(inst)
 		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+		if err := p.resetInstanceObservations(id); err != nil {
+			return nil, err
+		}
+		// `stopping`, published as this operation's own `currentState` (code 64) (#514).
+		cur := ec2ReportedTransition(inst.State)
 		sc := stateChange{InstanceID: id}
-		sc.CurrentState.Code = inst.State.Code
-		sc.CurrentState.Name = inst.State.Name
+		sc.CurrentState.Code = cur.Code
+		sc.CurrentState.Name = cur.Name
 		sc.PreviousState.Code = prev.Code
 		sc.PreviousState.Name = prev.Name
 		resp.Items = append(resp.Items, sc)
@@ -1408,13 +1438,21 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if err := json.Unmarshal(data, &inst); err != nil {
 			return nil, fmt.Errorf("ec2 startInstances unmarshal: %w", err)
 		}
+		if inst.State.Name == ec2StateTerminated {
+			return nil, ec2CannotTransitionTerminated("started")
+		}
 		prev := inst.State
-		inst.State = EC2InstanceState{Code: 16, Name: "running"}
+		inst.State = EC2InstanceState{Code: 16, Name: ec2StateRunning}
 		newData, _ := json.Marshal(inst)
 		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+		if err := p.resetInstanceObservations(id); err != nil {
+			return nil, err
+		}
+		// `pending`, published as this operation's own `currentState` (code 0) (#514).
+		cur := ec2ReportedTransition(inst.State)
 		sc := stateChange{InstanceID: id}
-		sc.CurrentState.Code = inst.State.Code
-		sc.CurrentState.Name = inst.State.Name
+		sc.CurrentState.Code = cur.Code
+		sc.CurrentState.Name = cur.Name
 		sc.PreviousState.Code = prev.Code
 		sc.PreviousState.Name = prev.Name
 		resp.Items = append(resp.Items, sc)
@@ -1509,6 +1547,10 @@ func (p *EC2Plugin) describeInstanceStatus(reqCtx *RequestContext, req *AWSReque
 		if !ids.match(inst.InstanceID) {
 			continue
 		}
+		// An observation, exactly as in [EC2Plugin.describeInstances] and for the same reasons —
+		// this operation's `instanceState` is the other place a caller polls a transition, and the
+		// CLI's own `instance-status-ok` waiter reads it (#514).
+		inst.State = p.observeInstanceState(inst)
 		if !ec2InstanceMatchesFilters(inst, filters) {
 			continue
 		}

@@ -6338,12 +6338,12 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
-| StopInstances | [Explicit resource IDs](#explicit-resource-ids) |
-| StartInstances | [Explicit resource IDs](#explicit-resource-ids) |
-| DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone`. Paginates on `MaxResults`/`NextToken`, with no published range — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| StartInstances | [Explicit resource IDs](#explicit-resource-ids); answers `pending` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone`, and a [seeded transient state](#seeding-an-instance-state-progression) both in `instanceState` and to its own `instance-state-name` filter. Paginates on `MaxResults`/`NextToken`, with no published range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
@@ -9776,11 +9776,100 @@ poll:
 A seed governs what an *observation* reports and never rewrites the snapshot record, whose
 `state` stays `completed`. So clearing a seed — or `POST /v1/state/reset`, which clears the
 whole namespace — makes every snapshot read `completed` again, and a snapshot with no seed
-against it is untouched. Seeds live in the state manager, so they replay like any other state.
+against it is untouched.
+
+A seed does **not** survive a replay, and that is general to every seed in substrate rather than
+particular to this one. Seeds live in the state manager, and a replay resets the state manager
+before re-executing the recorded requests — so a stream recorded under a seed replays as the
+*unseeded* sequence: four `pending` observations followed by `completed` come back as five
+`completed`s. No event fails, since the requests themselves all succeed, so nothing surfaces.
+The cause is that a control-plane write is not an AWS request and therefore never enters the event
+stream at all. See [#1140](https://github.com/scttfrdmn/substrate/issues/1140), which is where the
+fix will be decided.
 
 There is no Python helper for this endpoint: `pytest_substrate`'s seeding helpers are hardcoded
 to the Athena, Redshift Data and Timestream result endpoints, so drive this one with raw HTTP,
 as the fleet seed above is driven.
+
+### Seeding an instance-state progression
+
+Every state change substrate applies reached its terminal state in the same request, so
+`pending`, `stopping` and `shutting-down` were three of the six codes AWS publishes for
+`instanceState` that no code path could produce. The loop callers actually write around this API —
+run, start or stop, then poll `DescribeInstances` until the state settles, which is what
+`aws ec2 wait instance-running`, Terraform's `aws_instance` and CDK's own custom resources all do —
+exited on its first iteration, so the retry, timeout and give-up branches those loops carry were
+never taken ([#514](https://github.com/scttfrdmn/substrate/issues/514)).
+
+Two halves, and only the second needs a seed.
+
+**The operation's own response reports the transient state, unconditionally.** AWS publishes it in
+the sample responses of the operations themselves: `API_StartInstances` shows `currentState` 0 /
+`pending` beside `previousState` 80 / `stopped`, and `API_StopInstances` shows 64 / `stopping`
+beside 16 / `running`. Substrate reported the *settled* state at all four write sites, so a
+consumer reading the transition out of the call it just made — which is what a waiter's first
+observation is — saw a transition that had already finished. That is a published-response
+divergence with nothing to do with seeding, so it is corrected for every caller rather than behind
+a seed: `RunInstances` answers `pending`, `StartInstances` `pending`, `StopInstances` `stopping`
+and `TerminateInstances` `shutting-down`, while the record itself settles as before. An unseeded
+test therefore sees the transient state once, in the operation's own response, and the settled
+state on its first describe — AWS with an instantaneous transition.
+
+**How long the transient state is reported is seeded.**
+
+```bash
+# The next two observations of any instance report the transient state; the third settles.
+curl -X POST http://localhost:4566/v1/ec2/instance-state \
+  -d '{"instanceId":"*","transientObservations":2}'
+
+# One instance only, and back to instantaneous.
+curl -X POST http://localhost:4566/v1/ec2/instance-state \
+  -d '{"instanceId":"i-0abc123","transientObservations":5}'
+
+# Clear one seed, or all of them.
+curl -X DELETE 'http://localhost:4566/v1/ec2/instance-state?instanceId=i-0abc123'
+curl -X DELETE http://localhost:4566/v1/ec2/instance-state
+```
+
+`instanceId` matches one instance ID or `*` (the default) for any; an ID-scoped seed wins over the
+wildcard. `transientObservations` defaults to `0`, which is the instantaneous behaviour the whole
+existing suite pins, and a negative count is refused rather than stored. The seed is read by
+`DescribeInstances` and `DescribeInstanceStatus`, the two operations a poll loop uses; every other
+read of an instance is unaffected.
+
+**The transient state is derived, not chosen.** Unlike a snapshot's `status` — a free choice from a
+five-value enumeration, which is why the snapshot seed carries `state` and `finalState` — the state
+on the way to a target is fixed by AWS's own lifecycle: `pending` is "preparing to enter the
+running state … when it is launched or when it is started after being in the stopped state",
+`stopping` is "preparing to be stopped", `shutting-down` is "preparing to be terminated". So the
+seed carries a count and nothing else, and seeding a state substrate would not transition through
+is not offered.
+
+**The progression is counted in observations, not measured as a duration**, for the reason the
+snapshot seed records: the simulated clock advances with wall time from its baseline, so a duration
+seed would make every "still pending" assertion depend on how long the rest of the test took. The
+count is **per instance** even under a `"*"` seed, so one `DescribeInstances` over five instances
+does not burn five observations off a single shared countdown. Every state change restarts the
+count, which is what makes one seed serve a stop-then-start sequence rather than only the first
+transition in it.
+
+**A seed governs what an observation reports and never rewrites the instance record**, which is
+load-bearing here in a way it is not for a snapshot: because the stored state is always the settled
+one, a `StartInstances` that follows a `StopInstances` still sees `stopped` and succeeds, so seeding
+a progression cannot break a caller's own sequence. It is also why no operation ever *observes* a
+transient state, and therefore why substrate refuses nothing on account of one — neither
+`API_StartInstances` nor `API_StopInstances` publishes a state precondition at all, both Errors
+sections being empty.
+
+One refusal is published, and substrate answers it now: **a `terminated` instance can be neither
+started nor stopped.** The lifecycle page's state table says such an instance "has been permanently
+deleted and cannot be started", so the start refusal rests on that sentence directly; the stop
+refusal rests on "permanently deleted" alone, no page found stating a stop precondition, and is
+substrate's reading rather than letting a stop resurrect a deleted instance into `stopped` — from
+which it would then start. The code is `IncorrectInstanceState` / `400`, whose published
+description is the general rule this is an instance of ("The instance is in an incorrect state for
+the requested action"); neither operation page publishes an error of its own, so the message text
+is substrate's.
 
 ### Seeding a Spot placement score
 
@@ -16329,9 +16418,11 @@ ID, as AWS does. The status resolves — to `SUCCEEDED` with an `AccountId` and 
 wall-clock dependence. `ListAccounts` reports the account immediately, before the
 status resolves, matching AWS.
 
-This is advance-on-observation rather than clock-driven on purpose: transitions
-over the simulated clock are the open design question in #514, and picking a shape
-here would front-run it.
+This is advance-on-observation rather than clock-driven on purpose, and #514 has
+since settled that question the same way for EC2 instance states — a count of
+observations rather than a duration over the simulated clock, because the
+simulated clock advances with wall time. See
+[Seeding an instance-state progression](#seeding-an-instance-state-progression).
 
 New accounts land in the **root**. `MoveAccount` is the only way into an OU, and
 a move to the account's current parent is `DuplicateAccountException`, not a
