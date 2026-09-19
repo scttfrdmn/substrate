@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The three updates whose own page publishes full replacement now replace instead of merging**
+  (#1089). `API_UpdateSchedule` states it outright — *"EventBridge Scheduler uses all the information
+  that you have provided and replaces your schedule. You will lose any information that you haven't
+  provided, such as a description"* — and `API_UpdateUserPool` and `API_UpdateUserPoolClient` carry the
+  same Important box word for word: *"If you don't provide a value for an attribute, Amazon Cognito sets
+  it to its default value."* All three handlers assigned each optional member only when the request
+  supplied a non-empty one, so a caller doing exactly what those pages advise — build the request from
+  the current configuration, accept losing what you omit — saw a stale `Description`,
+  `ScheduleExpressionTimezone`, `State`, `Target.Input`, `Target.RetryPolicy`, `Policies`,
+  `LambdaConfig`, `MfaConfiguration`, `UserPoolTags`, `ClientName` or `ExplicitAuthFlows` survive where
+  AWS resets it. The divergence was invisible until something was omitted, and the merge was
+  **unasserted in either direction**, which is how it drifted. Each create now resolves a body through
+  the same function as its update, so the two doors cannot disagree again about what an omitted member
+  means. Full replacement governs only the members an operation *publishes*: `Schema` is absent from
+  `API_UpdateUserPool`'s Request Syntax, so `SchemaAttributes` is preserved rather than cleared, as are
+  `ProviderName`, `Status`, `Arn` and `CreationDate` — an operation cannot reset a member it does not
+  accept.
+- **`UpdateUserPool` answers a byte-empty body, and `PoolName` and `UserPoolTags` are decoded at all**
+  (#1089). Its Response Syntax is `HTTP/1.1 200` followed by nothing, where `UpdateUserPoolClient`'s
+  publishes a `UserPoolClient` object; substrate answered `{}` for both. The two updates differ and each
+  is now answered as its own page publishes rather than made symmetrical — empty rather than `{}`
+  follows AppSync's in-tree precedent, that `{}` is a member-less object where the page promises no
+  object at all. `PoolName` and `UserPoolTags` were published request members the handler never
+  decoded, so neither could be updated; a member the decode drops cannot be replaced either.
+- **`GetSchedule` no longer reports `ClientToken`** (#1089). It is not among that page's fifteen
+  published response elements — it is a request-only idempotency token, published on the create and the
+  update and on no read. It came off the wire *with* the full-replace fix rather than on its own because
+  an omitted member now reverts: leaving it would have made an unpublished field start changing under
+  callers who never named it. The record keeps it as recorded intent.
+
+### Added
+- **The full-replacement property is asserted in the shape a merge cannot pass, and the boundary around
+  it is asserted too** (#1089, #671). Each of the three operations is created with every optional member
+  set, updated naming only the required ones, and read back through `GetSchedule` / `DescribeUserPool` /
+  the update's own response with each optional member at its default. `State`'s `ENABLED` default is the
+  one part of this with no API Reference citation: the entry is byte-identical on all four Scheduler
+  pages carrying it and none publishes a `Default:` line, the CLI and CloudFormation references are
+  equally silent, and `API_GetSchedule` has no Examples section — it is documented in the **User Guide**
+  instead (*"By default, the EventBridge Scheduler enables your schedule"*), and that is the citation
+  applied. The negative half is asserted as well: 41 `update*` handlers live in `emulator/` and 29 guard
+  an assignment on a non-empty member, but only **three** pages publish full replacement, so the other
+  26 keep their guards per #671. Step Functions is the case that proves the rule rather than merely
+  escaping it — `API_UpdateStateMachine` publishes both `definition` and `roleArn` as `Required: No` and
+  then publishes `MissingRequiredParameter` for a request naming *neither*, so a request naming only
+  `roleArn` is explicitly legal, which full replacement would turn into one that blanks the definition
+  and leaves a state machine the service could not execute.
+
 ### Changed
 - **Every common-errors citation in `emulator/` re-verified against the page as it reads now, and the
   reference turns out to have three live generations rather than two** (#1064). #950 and #1007 sourced

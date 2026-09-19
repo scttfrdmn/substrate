@@ -124,8 +124,69 @@ type schedulerFlexibleTimeWindowInput struct {
 	MaximumWindowInMinutes *int32 `json:"MaximumWindowInMinutes"`
 }
 
+// schedulerStateEnabled is the value a schedule carries when a request names no State (#1089).
+//
+// The API Reference publishes no default. The `State` entry is byte-identical on all four pages that
+// carry it — `API_UpdateSchedule`, `API_CreateSchedule`, `API_GetSchedule`, `API_ScheduleSummary` —
+// and each is three lines with no Default: "Specifies whether the schedule is enabled or disabled.
+// Type: String. Valid Values: ENABLED | DISABLED". The CLI reference for `create-schedule --state`
+// and CloudFormation's `AWS::Scheduler::Schedule` are equally silent, and `API_GetSchedule` has no
+// Examples section, so no published sample shows a rendered value either.
+//
+// ENABLED is nonetheless documented, in the User Guide rather than the reference: "By default, the
+// EventBridge Scheduler enables your schedule" (`scheduler/latest/UserGuide/getting-started.html`).
+// That is the citation, and it is the only one — an earlier reading of this defect cited
+// `API_Schedule.html`, which does not exist (it answers 302 to the landing page, and `API_Types.html`
+// publishes `ScheduleSummary` with no `Schedule` type at all).
+const schedulerStateEnabled = "ENABLED"
+
+// applyTo writes every member the operation publishes onto rec, so an omitted optional member reverts
+// to its system default instead of keeping whatever a previous call left there (#1089).
+//
+// `API_UpdateSchedule`'s lede is as explicit as AWS gets: "When you call UpdateSchedule, EventBridge
+// Scheduler uses all values, including empty values, specified in the request and overrides the
+// existing schedule. This is by design. This means that if you do not set an optional field in your
+// request, that field will be set to its system-default value after the update." The User Guide puts
+// the same rule in one sentence: "If you do not specify a parameter that you've previously set, it
+// defaults to null" (`managing-schedule-state.html`). Substrate guarded each optional member on a
+// non-empty value, so an update omitting Description kept the old description and one omitting State
+// kept DISABLED where AWS restores the default — a divergence invisible until a caller omits
+// something, which is precisely the read-modify-write AWS recommends getting wrong.
+//
+// Create and update share this, which is the point: the merge drifted in the first place because two
+// doors each decided independently what a schedule's configuration is. Only the members that are not
+// configuration stay outside — Name, GroupName and ARN are identity, the timestamps are bookkeeping,
+// and none of the four is settable by a request body.
+//
+// `null` is not among State's Valid Values, so an omitted State resolves to [schedulerStateEnabled]
+// rather than to the empty string: reporting a value the page does not publish is what #1013 forbids.
+// Description and ScheduleExpressionTimezone have no published default, so for them the system
+// default *is* absence, which omitempty on the wire already expresses.
+func (in *schedulerScheduleInput) applyTo(rec *SchedulerRecord) {
+	rec.ScheduleExpression = in.ScheduleExpression
+	rec.ScheduleExpressionTimezone = in.ScheduleExpressionTimezone
+	rec.State = in.state()
+	rec.Target = in.Target.record()
+	rec.FlexibleTimeWindow = in.FlexibleTimeWindow.record()
+	rec.Description = in.Description
+	rec.ClientToken = in.ClientToken
+}
+
+// state resolves the request's State to the value the schedule carries, applying the documented
+// default when the member is absent. See [schedulerStateEnabled] for where that default is published.
+func (in *schedulerScheduleInput) state() string {
+	if in.State == "" {
+		return schedulerStateEnabled
+	}
+	return in.State
+}
+
 // record folds a decoded target into the stored shape. A nil receiver folds to the zero target, which
 // only a caller that bypassed [schedulerValidateTarget] can produce.
+//
+// It composes from the receiver alone and never reads the stored record, so a member the request
+// omits cannot survive an update — the replace-not-merge rule [schedulerScheduleInput.applyTo]
+// states, holding one level down for RoleArn, Input and RetryPolicy without a second mechanism.
 func (t *schedulerTargetInput) record() SchedulerTarget {
 	if t == nil {
 		return SchedulerTarget{}
@@ -277,10 +338,6 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	if groupName == "" {
 		groupName = "default"
 	}
-	state := body.State
-	if state == "" {
-		state = "ENABLED"
-	}
 
 	goCtx := context.Background()
 	recKey := schedKey(ctx.AccountID, ctx.Region, groupName, name)
@@ -295,22 +352,18 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	arn := schedARN(ctx.Region, ctx.AccountID, groupName, name)
 
+	// Identity and bookkeeping here, configuration through applyTo, which the update shares so the
+	// two doors cannot disagree about what a body means.
 	rec := SchedulerRecord{
-		Name:                       name,
-		GroupName:                  groupName,
-		ScheduleExpression:         body.ScheduleExpression,
-		ScheduleExpressionTimezone: body.ScheduleExpressionTimezone,
-		State:                      state,
-		Target:                     body.Target.record(),
-		FlexibleTimeWindow:         body.FlexibleTimeWindow.record(),
-		Description:                body.Description,
-		ARN:                        arn,
-		CreationDate:               now,
-		LastModificationDate:       now,
-		ClientToken:                body.ClientToken,
-		AccountID:                  ctx.AccountID,
-		Region:                     ctx.Region,
+		Name:                 name,
+		GroupName:            groupName,
+		ARN:                  arn,
+		CreationDate:         now,
+		LastModificationDate: now,
+		AccountID:            ctx.AccountID,
+		Region:               ctx.Region,
 	}
+	body.applyTo(&rec)
 
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -370,9 +423,9 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 		}
 	}
 	// `API_UpdateSchedule` publishes the same three Required: Yes members as the create, so the same
-	// validator serves both and an update that names only the expression is now refused. What this
-	// does not settle is the page's full-replace statement for the *optional* members, which substrate
-	// still merges — a separate divergence, split out of #1008 rather than folded in here.
+	// validator serves both and an update that names only the expression is refused (#1008). The
+	// page's full-replace statement for the *optional* members is settled too, since #1089: applyTo
+	// below assigns every one of them, so an omitted member reverts rather than persisting.
 	if awsErr := schedulerValidateScheduleInput(name, &body); awsErr != nil {
 		return nil, awsErr
 	}
@@ -397,18 +450,7 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("scheduler updateSchedule unmarshal: %w", err)
 	}
 
-	rec.ScheduleExpression = body.ScheduleExpression
-	rec.Target = body.Target.record()
-	rec.FlexibleTimeWindow = body.FlexibleTimeWindow.record()
-	if body.ScheduleExpressionTimezone != "" {
-		rec.ScheduleExpressionTimezone = body.ScheduleExpressionTimezone
-	}
-	if body.State != "" {
-		rec.State = body.State
-	}
-	if body.Description != "" {
-		rec.Description = body.Description
-	}
+	body.applyTo(&rec)
 	rec.LastModificationDate = p.tc.Now().UTC().Format(time.RFC3339)
 
 	updated, err := json.Marshal(rec)
@@ -558,6 +600,12 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 // schedWireRecord is the full wire-format representation of a schedule as
 // returned by GetSchedule. CreationDate and LastModificationDate are Unix epoch
 // seconds (float64) as required by the AWS SDK.
+//
+// `ClientToken` was rendered here until #1089 and is not one of `API_GetSchedule`'s fifteen published
+// response elements — it is a request-only idempotency token, published on the create and the update
+// and on no read. It came off the wire with the full-replace fix rather than on its own, because an
+// omitted member now reverts instead of persisting: leaving it would have made an unpublished field
+// start changing under callers who never named it. The record keeps it as recorded intent.
 type schedWireRecord struct {
 	Arn                        string                      `json:"Arn"`
 	Name                       string                      `json:"Name"`
@@ -570,7 +618,6 @@ type schedWireRecord struct {
 	Description                string                      `json:"Description,omitempty"`
 	CreationDate               float64                     `json:"CreationDate"`
 	LastModificationDate       float64                     `json:"LastModificationDate"`
-	ClientToken                string                      `json:"ClientToken,omitempty"`
 }
 
 // schedWireTarget is the wire-format representation of a schedule target.
@@ -608,7 +655,6 @@ func schedRecordToWire(rec SchedulerRecord) schedWireRecord {
 		Description:                rec.Description,
 		CreationDate:               float64(ct.Unix()),
 		LastModificationDate:       float64(mt.Unix()),
-		ClientToken:                rec.ClientToken,
 		Target: schedWireTarget{
 			Arn:     rec.Target.ARN,
 			RoleArn: rec.Target.RoleARN,
