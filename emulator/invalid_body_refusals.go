@@ -28,6 +28,14 @@ import "net/http"
 //     purpose is to look like AWS. #950 removed twenty-two such leaks; nine of the
 //     twenty-three files in this slice were still leaking from their *existing*
 //     checked guards, and those sites now call these constructors too.
+//
+//     That sentence was written a site at a time and so overstated its reach: it
+//     read as "the file is clean now" when what each constructor's comment claimed
+//     was only that the guard it was written beside had stopped leaking. #1066
+//     counted what was left — five sites in four of those nine files, plus thirty in
+//     four services the sweep never reached at all — and routed all thirty-five.
+//     `assertNoDecoderText` (invalid_body_code_test.go) is what keeps the rule true
+//     going forward, rather than a claim in a comment.
 //   - A code is used only where the service publishes it, for the condition it
 //     publishes it for. Where a service's operation pages publish only codes that
 //     name a *parameter*, the refusal uses the JSON-protocol common-errors
@@ -41,6 +49,10 @@ import "net/http"
 // answered, and AWS publishes it on the Identity Store and SSO Admin operation
 // pages. The nine sites that reach this were all list operations behind a
 // `len(req.Body) > 0` check, so an absent body still lists everything.
+//
+// createPermissionSet's guard was a tenth, outside that pattern because it requires
+// a body; #1062 edited this file without touching it, deliberately, so #1066's count
+// of leaks would stay honest. #1066 routed it.
 func ssoInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "ValidationException",
@@ -167,7 +179,9 @@ func timestreamInvalidBody() *AWSError {
 // redshiftDataInvalidBody reports that a Redshift Data API request body would not decode.
 //
 // ValidationException at 400 is published on every Redshift Data API operation and
-// is what the file's checked guard answered — minus the err.Error() it was leaking.
+// is what the file's checked guards answered — minus the err.Error() they were
+// leaking. Two were routed by #1007; executeStatement's was the third and #1066
+// routed it.
 func redshiftDataInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "ValidationException",
@@ -204,8 +218,9 @@ func cognitoIDPInvalidBody() *AWSError {
 //
 // InvalidRequestException at 400 is published on the Backup operation pages,
 // glossed as indicating input that is not valid — the closest published fit for a
-// body that cannot be read at all. The file's checked guard already answered it and
-// was leaking err.Error(); this does not.
+// body that cannot be read at all. The file's checked guards already answered it and
+// were leaking err.Error(); this does not. Two of the four were routed by #1007 and
+// createBackupPlan's and createBackupSelection's by #1066.
 func backupInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "InvalidRequestException",
@@ -270,7 +285,8 @@ func ecrInvalidBody() *AWSError {
 //
 // BadRequestException at 400 is published on the AppSync operation pages and is
 // what the file's checked guards answered — three of them leaking err.Error(),
-// which this does not.
+// which this does not. #1007 routed one, createGraphqlAPI's was the last still
+// leaking, and #1066 routed it.
 func appsyncInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "BadRequestException",
@@ -364,4 +380,119 @@ func glueInvalidBody() *AWSError {
 // the guard should exist at all.
 func fsxInvalidBody() *AWSError {
 	return fsxBadRequest("invalid request body")
+}
+
+// #1066's four: the services whose every body-parse guard was already checked, and
+// every one of them leaked encoding/json's own text.
+//
+// These four are the opposite shape from the twenty-two above. #1007's sweep went
+// looking for a *discarded* decode error and found none here — Transfer, CodeDeploy,
+// CodePipeline and CodeBuild check every decode, in every handler, with no exceptions
+// (nine, eight, seven and six handlers; one decode each; all thirty guarded). So the
+// sweep passed them over, and thirty refusals kept answering
+// `"invalid JSON: " + err.Error()` — the first of this file's two rules, broken at
+// every site in four services.
+//
+// Reading the four codes side by side is what the file exists for, and it changed two
+// of them: neither wrong code could be seen from inside its own plugin, where the same
+// literal appears at every site and looks self-consistent.
+
+// transferInvalidBody reports that an AWS Transfer Family request body would not decode.
+//
+// InvalidRequestException at 400, "This exception is thrown when the client submits a
+// malformed request." — the strongest published fit of the four, because the sentence
+// names this condition outright rather than generically. Published on every Transfer
+// page checked: API_CreateServer, API_DescribeServer, API_DeleteUser and API_ListUsers.
+//
+// Transfer's own common-errors page also publishes MalformedHttpRequestException at
+// 400, which reads like the better name and is not: its gloss is about a body whose
+// content-encoding could not be decompressed, a transport-layer failure that happens
+// before any JSON is seen. The better-named code describing a different condition
+// loses to the worse-named one describing this one.
+func transferInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "InvalidRequestException",
+		Message:    "the request body is not valid JSON",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// codedeployInvalidBody reports that a CodeDeploy request body would not decode.
+//
+// ValidationError at 400, from CodeDeploy's common-errors page — the third-generation
+// fifteen-code list #1097 identified, which CodeDeploy carries byte-identically along
+// with Transfer and CodePipeline.
+//
+// The declined alternative is worth stating, because it reads better and was what the
+// eight sites answered. InvalidInputException at 400 is glossed "The input was
+// specified in an invalid format.", which fits this condition precisely — but
+// CodeDeploy publishes it on only two of the eight operations substrate routes,
+// API_CreateDeployment and API_CreateDeploymentGroup. The other six publish nothing
+// generic at all, only per-parameter codes: ApplicationNameRequiredException and
+// InvalidApplicationNameException on the application operations,
+// InvalidDeploymentGroupNameException on the deployment-group ones,
+// DeploymentIdRequiredException and InvalidDeploymentIdException on GetDeployment.
+//
+// So using it service-wide would borrow it from a sibling operation at six sites,
+// which #671 settles against; and using it at two sites and ValidationError at six
+// would spell one condition two ways in one file, which is the defect a single
+// constructor per service exists to prevent. CodeDeploy's shape is the reason: it
+// publishes many narrow per-field exceptions and adds a generic one only on its two
+// largest create surfaces. A body that will not parse has no field to name, so the
+// common list's ValidationError is the only code that covers all eight — the same
+// argument as [ramInvalidBody] and [cloudtrailInvalidBody], reached from the opposite
+// direction.
+func codedeployInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "the request body is not valid JSON",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// codepipelineInvalidBody reports that a CodePipeline request body would not decode.
+//
+// ValidationException at 400, "The validation was specified in an invalid format.",
+// published on all seven of the operations substrate routes: API_CreatePipeline,
+// API_GetPipeline, API_UpdatePipeline, API_DeletePipeline,
+// API_StartPipelineExecution, API_GetPipelineState and API_GetPipelineExecution.
+// Because it is on the operation pages it takes precedence over the common list's
+// ValidationError, per #950's ordering.
+//
+// The seven sites answered InvalidStructureException at 400, which is wrong twice
+// over. It is a wrong-*condition* code where it is published — API_CreatePipeline
+// glosses it "The structure was specified in an invalid format.", meaning the pipeline
+// structure, a value read out of the body once the body has parsed. And it is a
+// *borrowed* code at five of the seven, published only on CreatePipeline and
+// UpdatePipeline, the two operations that accept a structure at all; DeletePipeline,
+// StartPipelineExecution, GetPipelineState, GetPipelineExecution and GetPipeline do
+// not publish it.
+func codepipelineInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "ValidationException",
+		Message:    "the request body is not valid JSON",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// codebuildInvalidBody reports that a CodeBuild request body would not decode.
+//
+// InvalidInputException at 400, "The input value that was provided is not valid.",
+// published on every CodeBuild page checked: API_CreateProject, API_UpdateProject,
+// API_StartBuild, API_BatchGetBuilds, API_BatchGetProjects and API_ListProjects.
+// API_BatchGetBuilds lists it as its *only* error and API_StartBuild lists three of
+// which it is the sole caller-input 400, so CodeBuild is one of the services whose
+// generic-input code is the only choice available — the same shape as
+// [ecsInvalidBody].
+//
+// Kept as filed: the code the six sites answered is the right one, and only the
+// leaked message changes. Recorded because a negative result is the part of a sweep
+// that is not otherwise visible — CodeBuild and Transfer were checked as closely as
+// the two that moved.
+func codebuildInvalidBody() *AWSError {
+	return &AWSError{
+		Code:       "InvalidInputException",
+		Message:    "the request body is not valid JSON",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }

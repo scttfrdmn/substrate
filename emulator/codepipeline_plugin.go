@@ -71,7 +71,7 @@ func (p *CodePipelinePlugin) createPipeline(reqCtx *RequestContext, req *AWSRequ
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 	if input.Pipeline.Name == "" {
@@ -131,7 +131,7 @@ func (p *CodePipelinePlugin) getPipeline(reqCtx *RequestContext, req *AWSRequest
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 
@@ -165,7 +165,7 @@ func (p *CodePipelinePlugin) updatePipeline(reqCtx *RequestContext, req *AWSRequ
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 
@@ -210,7 +210,7 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 
@@ -260,7 +260,7 @@ func (p *CodePipelinePlugin) startPipelineExecution(reqCtx *RequestContext, req 
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 	if input.Name == "" {
@@ -305,7 +305,7 @@ func (p *CodePipelinePlugin) getPipelineState(reqCtx *RequestContext, req *AWSRe
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 
@@ -343,7 +343,7 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, &AWSError{Code: "InvalidStructureException", Message: "invalid JSON: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+			return nil, codepipelineInvalidBody()
 		}
 	}
 

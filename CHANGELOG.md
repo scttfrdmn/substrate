@@ -115,8 +115,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that named no shard, which is the one answer a poll loop cannot recover from. Only the absent case
   changes; an iterator that will not decode still answers 200, which is the deliberate accommodation of
   the stub iterators earlier releases minted.
+- **Thirty-five body-parse refusals stop putting `encoding/json`'s own error text on the wire** (#1066).
+  Each answered `Message: "invalid JSON: " + err.Error()`, handing the caller a Go struct field name and
+  byte offset from an endpoint whose whole purpose is to be indistinguishable from AWS. #950 removed
+  twenty-two such leaks and #1007's third slice forty-six more; these are the remainder, in eight
+  services — Transfer Family 9, CodeDeploy 8, CodePipeline 7, CodeBuild 6, Backup 2, IAM Identity Center
+  1, Redshift Data 1, AppSync 1 — and all thirty-five now route through a single constructor per service
+  in `invalid_body_refusals.go`. **Why thirty of them survived two sweeps is the finding.** #1007 looked
+  for a *discarded* decode error and the four `Code*` services discard none: every handler decodes once
+  and checks the error every time, so the sweep passed all four over and none had a single row in
+  `invalid_body_inventory_test.go`. `assertNoDecoderText` has been the enforcing helper since #950, and
+  a site it never reaches is a site it never enforced. The other five are single handlers in services
+  that did have rows, each sitting beside a sibling #1007 had already routed.
+- **CodePipeline answers `ValidationException`/400 for an undecodable body, not
+  `InvalidStructureException`** (#1066). The old code is wrong twice over. Where it *is* published —
+  `CreatePipeline` and `UpdatePipeline` — it is glossed *"The structure was specified in an invalid
+  format."*, meaning the pipeline structure, a value read out of the body once the body has parsed. And
+  it is published on only those two of the seven operations substrate routes: `GetPipeline`,
+  `DeletePipeline`, `StartPipelineExecution`, `GetPipelineState` and `GetPipelineExecution` do not carry
+  it, so five of the seven sites borrowed a code from a sibling operation, which #671 forbids.
+  `ValidationException`/400, *"The validation was specified in an invalid format."*, is published on all
+  seven, and being on the operation pages it outranks the common list's `ValidationError` under #950's
+  precedence rule.
+- **CodeDeploy answers the common list's `ValidationError`/400, declining a better-glossed code that
+  six of its eight handlers' pages do not publish** (#1066). `InvalidInputException`/400 is real and
+  fits — *"The input was specified in an invalid format."* — but CodeDeploy publishes it on only
+  `CreateDeployment` and `CreateDeploymentGroup`. The other six publish nothing generic at all, only
+  per-field codes (`ApplicationNameRequiredException`, `InvalidApplicationNameException`,
+  `InvalidDeploymentGroupNameException`, `DeploymentIdRequiredException`,
+  `InvalidDeploymentIdException`). Using the generic code service-wide would borrow it at six sites;
+  using it at two and another at six would spell one condition two ways in one file, the split #950
+  removed. A body that will not parse names no field, so the common-errors code is the only one that
+  covers all eight — the RAM and CloudTrail argument reached from the opposite direction, and the third
+  code this class has changed. **Transfer's `InvalidRequestException` and CodeBuild's
+  `InvalidInputException` were checked as closely and kept**, which is recorded because a negative
+  result is the part of a sweep that is not otherwise visible: Transfer's gloss names a malformed client
+  request outright, and CodeBuild's is the only error `BatchGetBuilds` lists at all.
+- **Four constructor doc comments and the header of `invalid_body_refusals.go` overstated their own
+  reach** (#1066). Each said its service's checked guards "now call this" when what it had established
+  was only that the guard it was written beside did — and sso, backup, Redshift Data and AppSync each
+  kept a leaking guard elsewhere in the same file. Counting what was actually left is what found those
+  five; the comments now say which sweep routed which site, and the header records that
+  `assertNoDecoderText` rather than a sentence in a comment is what keeps the rule true.
 
 ### Added
+- **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
+  assertion beside #1007's** (#1066). Transfer Family, CodeDeploy, CodePipeline and CodeBuild had no row
+  in `invalid_body_inventory_test.go` at all, which is the whole explanation for how thirty leaking
+  guards survived: the table is what routes a site past `assertNoDecoderText`. `CreateBackupSelection`
+  goes in `TestInvalidBodyBelowAResourceLookup` instead, because it loads the plan before it decodes —
+  also why its leak outlived `createBackupPlan`'s in the same file.
+  `TestInvalidBodyDecoderTextLeaksAreFullyCovered` is a **sibling** of
+  `TestInvalidBodyTailIsFullyCovered` rather than an extension of it: `tailSites = 60` is a closed count
+  of the sites whose decode error was *discarded*, and these thirty-five had no error to discard, so the
+  two populations are disjoint in both directions and merging them would destroy both. The table's own
+  header count was also corrected — it read "one hundred and eighty-nine cases across thirty-six
+  entries" where the table held 184, so it is now counted (218 across 42) rather than carried.
 - **Eleven rows in `memberComplaintServices` and a code assertion on FSx's three refusals** (#1063).
   Every one of the eleven corrected codes passed the full suite before *and* after the change, which is
   to say nothing pinned any of them — the same gap #1090 records for ECR, and the reason these rows are

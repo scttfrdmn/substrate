@@ -3,9 +3,10 @@ package emulator_test
 // Every remaining body-parse guard in the tree, over the wire (#950).
 //
 // invalid_body_code_test.go covers Step Functions and Systems Manager, the two services #1003 fixed.
-// This file covers the other sixty-six guards, in fourteen services, and it is a table of operations
-// rather than of samples on purpose: the defect was per-site duplication of one literal, so the
-// assertion that matters is that no site was missed, and a representative case cannot make it.
+// This file covers every other guard — forty-two services in the POST table below, plus the method,
+// OpenSearch and below-a-lookup tables further down — and it is a table of operations rather than of
+// samples on purpose: the defect was per-site duplication of one literal, so the assertion that matters
+// is that no site was missed, and a representative case cannot make it.
 //
 // Firehose is the proof of that. InvalidArgumentException is published for CreateDeliveryStream — the
 // page anyone would open first — and for neither of the other two guarded operations, so a test that
@@ -70,17 +71,25 @@ type invalidBodyService struct {
 	cases []invalidBodyCase
 }
 
-// invalidBodyServices is every POST-routed body-parse guard #950, #1003 and #1007 settled, less the Step
-// Functions and Systems Manager tables in invalid_body_code_test.go, the two Lambda operations that need a
-// function to exist first, and the three in TestInvalidBodyBelowAResourceLookup.
+// invalidBodyServices is every POST-routed body-parse guard #950, #1003, #1007 and #1066 settled, less the
+// Step Functions and Systems Manager tables in invalid_body_code_test.go, the two Lambda operations that
+// need a function to exist first, and the four in TestInvalidBodyBelowAResourceLookup.
 //
-// One hundred and eighty-nine cases across thirty-six entries. A case removed from here without a reason
-// is a site that stops being checked, which is the whole point of listing operations rather than samples.
+// Two hundred and eighteen cases across forty-two entries, counted rather than carried: the figure this
+// comment shipped with, "one hundred and eighty-nine cases across thirty-six entries", was right about the
+// entries and five high on the cases at the moment it was written. A case removed from here without a
+// reason is a site that stops being checked, which is the whole point of listing operations rather than
+// samples — and a count written from a plan rather than from the table cannot notice one going missing.
 //
 // #1007's third slice grew this table twice over. Forty-six of the rows are guards that predate that
 // slice, in the five services whose code it corrected: their codes had to change too, or the service would
 // answer two different codes for one caller error, and a changed code that no test reads is a code that
 // can drift back.
+//
+// #1066 grew it by thirty-four more, in six entries, four of them services that had never appeared here.
+// Those four are the reason the growth was needed: their guards were all present and all leaking, so the
+// defect was invisible to a sweep looking for a missing guard and invisible to this file, which had no row
+// to look at.
 var invalidBodyServices = []invalidBodyService{
 	{
 		name:       "kinesis",
@@ -334,6 +343,10 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "CreateAccountAssignment", target: "SWBExternalService.CreateAccountAssignment"},
 			{op: "DeleteAccountAssignment", target: "SWBExternalService.DeleteAccountAssignment"},
 			{op: "ListAccountAssignments", target: "SWBExternalService.ListAccountAssignments"},
+			// #1066. createPermissionSet's guard was outside the nine above because it requires a body
+			// rather than treating an absent one as "list everything"; #1062 left it alone deliberately so
+			// #1066's count of leaks would stay honest, and #1066 routed it.
+			{op: "CreatePermissionSet", target: "SWBExternalService.CreatePermissionSet"},
 		},
 	},
 	{
@@ -444,6 +457,9 @@ var invalidBodyServices = []invalidBodyService{
 		cases: []invalidBodyCase{
 			{op: "DescribeStatement", target: "RedshiftData.DescribeStatement"},
 			{op: "GetStatementResult", target: "RedshiftData.GetStatementResult"},
+			// #1066. The third of the plugin's three guards; the other two were routed by #1007 and this
+			// one kept leaking encoding/json's text for four releases beside them.
+			{op: "ExecuteStatement", target: "RedshiftData.ExecuteStatement"},
 		},
 	},
 	{
@@ -601,6 +617,102 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "ListTables", target: "DynamoDB_20120810.ListTables"},
 			{op: "ListStreams", target: "DynamoDB_20120810.ListStreams"},
 			{op: "GetRecords", target: "DynamoDB_20120810.GetRecords"},
+		},
+	},
+
+	// #1066's six entries: the services whose every body-parse guard was checked, and every one of them
+	// leaked encoding/json's own error text.
+	//
+	// Thirty of the thirty-five sites are in four services that had no row in this file at all — transfer,
+	// codedeploy, codepipeline and codebuild — and that absence is the whole explanation for how the
+	// leaks survived #950 and #1007. assertNoDecoderText has been the enforcing helper since #950; a site
+	// it never reaches is a site it never enforced, and #1007's sweep passed these four over because it
+	// was looking for a *discarded* decode error and they discard none. The remaining five are single
+	// handlers in services whose rows covered their siblings but not them.
+	//
+	// Two of the four codes changed. The four literals looked self-consistent inside their own plugins —
+	// the same &AWSError{…} at every site — which is the failure mode invalid_body_refusals.go exists to
+	// make visible, and it only became visible once the codes sat next to each other there.
+	{
+		name:       "transfer",
+		host:       "transfer.us-east-1.amazonaws.com",
+		code:       "InvalidRequestException",
+		provenance: "every Transfer page checked, glossed as the client submitting a malformed request",
+		cases: []invalidBodyCase{
+			{op: "CreateServer", target: "TransferService.CreateServer"},
+			{op: "DescribeServer", target: "TransferService.DescribeServer"},
+			{op: "UpdateServer", target: "TransferService.UpdateServer"},
+			{op: "DeleteServer", target: "TransferService.DeleteServer"},
+			{op: "CreateUser", target: "TransferService.CreateUser"},
+			{op: "DescribeUser", target: "TransferService.DescribeUser"},
+			{op: "UpdateUser", target: "TransferService.UpdateUser"},
+			{op: "DeleteUser", target: "TransferService.DeleteUser"},
+			{op: "ListUsers", target: "TransferService.ListUsers"},
+		},
+	},
+	{
+		name:       "codedeploy",
+		host:       "codedeploy.us-east-1.amazonaws.com",
+		code:       "ValidationError",
+		provenance: "the common-errors page; InvalidInputException is published on only two of these eight",
+		cases: []invalidBodyCase{
+			{op: "CreateApplication", target: "CodeDeploy_20141006.CreateApplication"},
+			{op: "GetApplication", target: "CodeDeploy_20141006.GetApplication"},
+			{op: "DeleteApplication", target: "CodeDeploy_20141006.DeleteApplication"},
+			{op: "CreateDeploymentGroup", target: "CodeDeploy_20141006.CreateDeploymentGroup"},
+			{op: "GetDeploymentGroup", target: "CodeDeploy_20141006.GetDeploymentGroup"},
+			{op: "DeleteDeploymentGroup", target: "CodeDeploy_20141006.DeleteDeploymentGroup"},
+			{op: "CreateDeployment", target: "CodeDeploy_20141006.CreateDeployment"},
+			{op: "GetDeployment", target: "CodeDeploy_20141006.GetDeployment"},
+		},
+	},
+	{
+		name:       "codepipeline",
+		host:       "codepipeline.us-east-1.amazonaws.com",
+		code:       "ValidationException",
+		provenance: "all seven operation pages; InvalidStructureException is on only two and means the structure",
+		cases: []invalidBodyCase{
+			{op: "CreatePipeline", target: "CodePipeline_20150709.CreatePipeline"},
+			{op: "GetPipeline", target: "CodePipeline_20150709.GetPipeline"},
+			{op: "UpdatePipeline", target: "CodePipeline_20150709.UpdatePipeline"},
+			{op: "DeletePipeline", target: "CodePipeline_20150709.DeletePipeline"},
+			{op: "StartPipelineExecution", target: "CodePipeline_20150709.StartPipelineExecution"},
+			{op: "GetPipelineState", target: "CodePipeline_20150709.GetPipelineState"},
+			{op: "GetPipelineExecution", target: "CodePipeline_20150709.GetPipelineExecution"},
+		},
+	},
+	{
+		name:       "codebuild",
+		host:       "codebuild.us-east-1.amazonaws.com",
+		code:       "InvalidInputException",
+		provenance: "every CodeBuild page checked; BatchGetBuilds lists it as its only error",
+		cases: []invalidBodyCase{
+			{op: "CreateProject", target: "CodeBuild_20161006.CreateProject"},
+			{op: "BatchGetProjects", target: "CodeBuild_20161006.BatchGetProjects"},
+			{op: "UpdateProject", target: "CodeBuild_20161006.UpdateProject"},
+			{op: "DeleteProject", target: "CodeBuild_20161006.DeleteProject"},
+			{op: "StartBuild", target: "CodeBuild_20161006.StartBuild"},
+			{op: "BatchGetBuilds", target: "CodeBuild_20161006.BatchGetBuilds"},
+		},
+	},
+	{
+		name:       "appsync",
+		host:       "appsync.us-east-1.amazonaws.com",
+		code:       "BadRequestException",
+		provenance: "the AppSync operation pages; the same code CreateApiKey's guard already answered",
+		cases: []invalidBodyCase{
+			{op: "CreateGraphqlApi", path: "/v1/apis"},
+		},
+	},
+	{
+		name:       "backup",
+		host:       "backup.us-east-1.amazonaws.com",
+		code:       "InvalidRequestException",
+		provenance: "the Backup operation pages; the same code CreateBackupVault's guard already answered",
+		cases: []invalidBodyCase{
+			// CreateBackupSelection is the plugin's fourth guard and is not here: it sits below a plan
+			// lookup, so it is in TestInvalidBodyBelowAResourceLookup instead.
+			{op: "CreateBackupPlan", path: "/backup/plans"},
 		},
 	},
 }
@@ -1520,7 +1632,8 @@ func TestOpenSearchInvalidBodyIsNotAnAWSError(t *testing.T) {
 	}
 }
 
-// TestInvalidBodyBelowAResourceLookup covers the three tail sites no table above can reach (#1007).
+// TestInvalidBodyBelowAResourceLookup covers the four sites no table above can reach — #1007's three
+// and #1066's one.
 //
 // Each sits below a lookup of the resource its path names, so against an empty server the lookup answers
 // first — NotFoundException for API Gateway v2, the loader's own error for AppSync and Backup — and the
@@ -1576,6 +1689,19 @@ func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
 			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup"}}`,
 			idKey:      "BackupPlanId",
 			refusePath: func(id string) string { return "/backup/plans/" + id },
+			method:     http.MethodPost,
+			code:       "InvalidRequestException",
+		},
+		{
+			// #1066's one site in this shape. createBackupSelection loads the plan before it decodes,
+			// which is why the POST table above cannot reach it and why the leak survived beside
+			// createBackupPlan's, which it can.
+			name:       "backup/CreateBackupSelection",
+			host:       "backup.us-east-1.amazonaws.com",
+			createPath: "/backup/plans",
+			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup-selection"}}`,
+			idKey:      "BackupPlanId",
+			refusePath: func(id string) string { return "/backup/plans/" + id + "/selections" },
 			method:     http.MethodPost,
 			code:       "InvalidRequestException",
 		},
@@ -1651,6 +1777,36 @@ func TestInvalidBodyTailIsFullyCovered(t *testing.T) {
 
 	assert.Equalf(t, tailSites, inServiceTables+inMethodTable+inOpenSearch+belowALookup,
 		"every one of the %d sites #1007's third slice changed is reached by a test above", tailSites)
+}
+
+// TestInvalidBodyDecoderTextLeaksAreFullyCovered is the sibling of the arithmetic above, for #1066.
+//
+// It is a second assertion rather than an extension of that one, because the two count disjoint
+// populations and merging them would destroy both. tailSites is a closed historical figure: the sites
+// #1007's *third slice* changed, every one of which had a discarded decode error. #1066's thirty-five had
+// no such error to discard — every one was already checked, and what leaked was the message. A site can be
+// in one population, in both, or in neither, so one number cannot answer both questions.
+//
+// Five of the thirty-five are in files #1007 did touch, which is the case that makes the distinction
+// concrete: sso, backup ×2, redshift-data and appsync each got a constructor from that sweep and each kept
+// a leaking guard beside the site it was written for.
+func TestInvalidBodyDecoderTextLeaksAreFullyCovered(t *testing.T) {
+	// #1066's own numbers, from the per-file count in docs/services.md.
+	const (
+		leakSites = 35
+		// The four services that had no row in this file at all, one leaking guard per handler:
+		// transfer 9, codedeploy 8, codepipeline 7, codebuild 6.
+		inNewServiceEntries = 30
+		// Guards in services that already had an entry: appsync's CreateGraphqlApi, backup's
+		// CreateBackupPlan, redshift-data's ExecuteStatement, sso's CreatePermissionSet.
+		inExistingEntries = 4
+		// backup's CreateBackupSelection, which loads the plan before it decodes.
+		belowALookupLeak = 1
+	)
+
+	assert.Equalf(t, leakSites, inNewServiceEntries+inExistingEntries+belowALookupLeak,
+		"every one of the %d guards #1066 stopped leaking encoding/json's text is reached by a test above",
+		leakSites)
 }
 
 // rawUnsignedRawBody is [rawUnsignedMethodCall] returning the response body verbatim.
