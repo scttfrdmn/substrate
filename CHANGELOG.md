@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Every common-errors citation in `emulator/` re-verified against the page as it reads now, and the
+  reference turns out to have three live generations rather than two** (#1064). #950 and #1007 sourced
+  error codes from AWS's "Common Errors" pages on the understanding that there were two lists — a
+  fifteen-entry JSON one and a longer Query one — and #1064 existed because a code sourced from a
+  per-service page *before* AWS regenerated it may now cite a page that no longer says it. Twenty-two
+  pages were re-read on 2026-09-18. The JSON list is byte-identical across **sixteen** services (KMS,
+  Systems Manager, Step Functions, Lambda, SageMaker, Firehose, Cost Management, Organizations,
+  EventBridge, ACM, RAM, CloudTrail, Glue, FSx, WAFv2, DynamoDB) and the Query list across **five**
+  (EC2, RDS, IAM, ELB, CloudFormation) — but **SQS is a live counterexample to the consolidation**: its
+  page is an older generation with a different code set, three inverted statuses
+  (`AccessDeniedException` 400, `ThrottlingException` 403, `NotAuthorized` 400) and a different
+  `ValidationError` gloss. So the two glosses in the tree are two page generations rather than one
+  stale citation, and `sqs_errors.go`'s reading is correct precisely because it is not the boilerplate
+  one. The two current generations agree on `ValidationError`'s status and gloss word for word and
+  differ on exactly one status, `IncompleteSignature` (403 JSON, 400 Query). **All fifty-five citations
+  survived, so the sweep produced no code corrections in the #950 class** — that is the result, and it
+  is recorded so the next reader does not re-read twenty-two pages to reach it.
+- **`InvalidAction`/400 for an unmodelled Query-protocol operation is a citation, not substrate's
+  invention** (#1064). #716 recorded it as substrate's choice because AWS had dropped the entry from
+  EC2's, IAM's and SNS's pages. It is gone from all five regenerated Query pages — and still published,
+  at exactly this 400, on the one Query-family list AWS has not regenerated: SQS's. The claim is now
+  scoped rather than overclaimed, because substrate routes `sqs` itself as JSON-RPC and so never
+  answers `InvalidAction` for it; what SQS's page establishes is that the family's code for this
+  condition is still published, not that any one service answers it.
+- **EFS's API-reference common-errors page now exists, and #950's note that it does not is corrected**
+  (#1064). The consolidation did not only change what pages say — it **created pages that did not
+  exist**, which is the one direction this sweep was not looking in. `EFS`'s `BadRequest`/400 is
+  unchanged, and by the rule rather than by luck: step 1 of #950's procedure is the operation's own
+  Errors section and step 2 is the common page, so a common page appearing underneath a satisfied step
+  1 changes nothing. Two services, not three, now publish no such page (Batch and API Gateway v2; MSK's
+  also redirects).
+- **`stepfunctions_errors.go`'s "every refusal here is 400" narrowed to the file it describes**
+  (#1064). Read as a claim about the service it is false on the service's own pages:
+  `API_CreateStateMachine` publishes `ConflictException` at **409** and `API_UpdateStateMachine` adds
+  `ServiceQuotaExceededException` at **402** — each listed twice, under both its own status and a 400.
+  The statuses the plugin answers are #1072's business; this is the citation correction.
+
+### Added
+- **A tripwire asserting that `ValidationError` and `ValidationException` are never sourced to each
+  other's page** (#1064). They are different codes with different sources, a distinction re-derived
+  more than once: `ValidationError` appears *only* on a common-errors page, in all three generations,
+  and `ValidationException` *only* in an operation's own Errors section, on no common-errors page in
+  any generation. ACM publishes both with different glosses, which is why a sentence was not enough.
+  `TestCommonErrors_ValidationExceptionIsNeverSourcedToTheCommonPage` parses every non-test file in
+  `emulator/` and fails any function that answers `ValidationException` while citing a common-errors
+  page in its own doc comment. It allows the negated form ("absent from its Common Errors page"), which
+  is how #950 and #1007 ruled codes out, because a rule that failed those would push the next author
+  toward deleting the provenance rather than writing it. It also carries its own control — the same
+  predicates must still find a `ValidationError` constructor citing the common page — so a green run
+  cannot come from a broken detector.
+
 ## [v0.119.0] - 2026-09-18
 
 ### Added

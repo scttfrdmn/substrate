@@ -40,9 +40,17 @@ package emulator
 //     happens when the request body can't be decompressed using the specified content encoding
 //     algorithm" — and a body that arrived intact and then failed to parse is not that.
 //
-// Every refusal here is 400. That is worth stating because two of them replaced a 404: no Step
-// Functions endpoint answers 404 for a resource that does not exist, so the status carries nothing a
-// caller can branch on and the code is the whole signal (#910).
+// Every refusal *in this file* is 400, and two of them replaced a 404: no Step Functions endpoint
+// answers 404 for a resource that does not exist, so there the status carries nothing a caller can
+// branch on and the code is the whole signal (#910).
+//
+// This used to read "every refusal here is 400" with "here" meaning the service, and #1064's citation
+// sweep found that false on the service's own pages. API_CreateStateMachine publishes
+// ConflictException at **409**, API_UpdateStateMachine publishes ConflictException at 409 *and*
+// ServiceQuotaExceededException at **402**, and both pages list those two codes under a 400 entry as
+// well — AWS documents each of them twice, at two statuses. So the narrow claim above is about this
+// file's own constructors and must not be generalised to the plugin: #1072 corrects the statuses the
+// plugin answers.
 //
 // Messages are substrate's throughout, except where a helper quotes AWS's own gloss because it is
 // already the whole of what the refusal has to say.

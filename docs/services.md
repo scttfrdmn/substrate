@@ -233,13 +233,19 @@ for JSON and
 [Lambda's](https://docs.aws.amazon.com/lambda/latest/api/CommonErrors.html)
 for REST/JSON.
 
-`InvalidAction` is **substrate's choice, not a citation.** AWS's current Common Errors
-pages publish no unknown-action code at all for the Query, `ec2` and REST/XML families:
-the `InvalidAction` entry those pages once carried has been removed, and nothing was put
-in its place — checked on EC2's, IAM's and SNS's. Substrate keeps `InvalidAction` because
-it is the code the Query protocol has always used and an SDK caller's error branch is
-written against it, and because the reference offers no replacement to move to. If AWS
-publishes one, this row changes.
+`InvalidAction` at 400 **is** a citation, which corrects the reading this row carried
+when #716 wrote it. The pages AWS has regenerated publish no unknown-action code for the
+Query, `ec2` and REST/XML families — the eighteen-entry Query list is byte-identical on
+EC2, RDS, IAM, ELB and CloudFormation, and the `InvalidAction` entry it once carried is
+gone from all five. But [#1064](https://github.com/scttfrdmn/substrate/issues/1064) found
+it is not gone from the reference: **SQS's Common Errors page is the one Query-family list
+AWS has not regenerated, and it still publishes `InvalidAction` at exactly this 400.**
+
+The citation is one step removed, and the row says so rather than overclaiming: substrate
+routes `sqs` itself as a JSON-RPC service, so no substrate endpoint reaches this arm for
+SQS. What SQS's page establishes is that the Query family's code for this condition is
+still published, not that any one service answers it. See
+[the three generations](#the-reference-has-three-common-errors-generations-not-two).
 
 ### Two things this is not
 
@@ -322,7 +328,7 @@ choice exists to avoid.
 | ACM | 6 | `InvalidParameterException` | `ValidationError` / 400 | Common page. `InvalidParameterException` is on 3 of 6, `ValidationException` on 5 of 6 |
 | Lambda | 4 parse + 3 member | `ValidationException` | `InvalidParameterValueException` / 400 | All 4 operation pages |
 | Firehose | 3 parse + 3 member | `MalformedData`, `InvalidArgumentException` | `ValidationError` / 400 | Common page. `InvalidArgumentException` is on 1 of 3 |
-| EFS | 4 | `MalformedData` | `BadRequest` / 400 | All 4 operation pages. **No common-errors page exists** |
+| EFS | 4 | `MalformedData` | `BadRequest` / 400 | All 4 operation pages, which is why the answer is unaffected by #1064 finding that EFS's API-reference common-errors page **now exists** |
 | Service Quotas | 3 parse + 1 member | `SerializationException`, `ValidationException` | `IllegalArgumentException` / 400 | All 4 operation pages |
 | Budgets | 5 | `MalformedData` | `InvalidParameterException` / 400 | All 5 operation pages |
 | Cost Explorer | 3 | `MalformedData` | `ValidationError` / 400 | Common page. None of the 3 publishes a validation code |
@@ -360,18 +366,79 @@ verified operation by operation rather than by transfer: **Secrets Manager's com
 page has 24 entries, not fifteen**. Its eleven sites were each checked, and each was
 already correct.
 
-### Three services publish no common-errors page at all
+### The reference has three common-errors generations, not two
 
-EFS, Batch and API Gateway v2 have no fifteen-entry page to fall back to — EFS's
-`CommonErrors` link redirects to the user guide's index, and Batch's and API Gateway v2's do
-not resolve to one either. For all three, step 1 was the only route available, and in all
-three it was open: EFS publishes `BadRequest` at 400 on all four guarded operations
-("Returned if the request is malformed or contains an error such as an invalid parameter
-value or a missing required parameter"), Batch publishes `ClientException`, and API Gateway
-v2's five sites were already correct.
+Re-verified across twenty-two pages on **2026-09-18** for
+[#1064](https://github.com/scttfrdmn/substrate/issues/1064), because a code sourced from one
+of these pages before AWS regenerated it may now cite a page that no longer says it. There
+are three live generations, and which one a service serves decides what step 2 can be cited
+for:
 
-This is the strongest argument for preferring step 1 in general. A rule that depends on a
-page three services do not have is a rule with three holes in it.
+| Generation | Entries | Verified identical on | `ValidationError` gloss |
+|---|---|---|---|
+| JSON / REST-JSON | **15** | KMS, Systems Manager, Step Functions, Lambda, SageMaker, Firehose, Cost Management, Organizations, EventBridge, ACM, RAM, CloudTrail, Glue, FSx, WAFv2, DynamoDB — **sixteen services, byte-identical** | *"The input doesn't meet the required format or constraints. Check that all required parameters are included and that values are valid."* |
+| Query / `ec2` | **18** | EC2, RDS, IAM, ELB, CloudFormation — **five services, byte-identical** | identical to the JSON generation's, word for word |
+| Legacy Query | **18**, a different set | **SQS alone** | *"The input fails to satisfy the constraints specified by an AWS service."* |
+
+Three consequences worth stating once rather than re-deriving per plugin:
+
+- **The two *current* generations agree on `ValidationError`'s status and gloss**, so step 2
+  transfers across the protocol boundary as well as within it. They differ on exactly one
+  status: `IncompleteSignature` is **403** on the JSON list and **400** on the Query list.
+- **SQS is a live counterexample to consolidation, and this is load-bearing twice over.** Its
+  page is the older generation, so `sqsInvalidBody`'s gloss (*"fails to satisfy the
+  constraints"*) is correct for SQS and would be wrong anywhere else — the two spellings in
+  the tree are two page generations, not one stale citation. And SQS's list still carries
+  `InvalidAction` at 400, which is why [the unknown-action row](#where-the-two-rows-come-from)
+  is a citation rather than substrate's invention. SQS also inverts three statuses against the
+  current Query list: `AccessDeniedException` **400** (against 403), `ThrottlingException`
+  **403** (against 400), `NotAuthorized` **400** (against 401).
+- **Every other citation in the tree survived the sweep.** All fifty-five non-test
+  common-errors citations in `emulator/` resolve to a page that still says what they quote, so
+  #1064 produced no code corrections in the #950 class — the two corrections it did produce are
+  both provenance, recorded below.
+
+### `ValidationError` and `ValidationException` are different codes, and ACM publishes both
+
+This distinction has been re-derived more than once, so it is recorded here. **They are not
+spellings of one code:**
+
+- **`ValidationError`/400** is a *common* error. It appears only on a common-errors page, in
+  all three generations, and never in an operation's own Errors section.
+- **`ValidationException`/400** is a *service-specific* error, published by many services in
+  the Errors section of individual operations, and it appears on **no** common-errors page in
+  any generation.
+
+So a doc comment citing "the common-errors page" for `ValidationException` is citing something
+no such page says, and one citing an operation page for `ValidationError` is doing the reverse.
+**ACM is the worked example, because it publishes both with different glosses.** Its
+common-errors page carries `ValidationError`/400 glossed *"The input doesn't meet the required
+format or constraints…"*, while `ListTagsForCertificate` and `DescribeCertificate` each publish
+a three-code Errors section — `InvalidArnException`, `ResourceNotFoundException`,
+`ValidationException`, all 400 — in which `ValidationException` is glossed *"The supplied input
+failed to satisfy constraints of an AWS service."* Substrate answers each from its own source:
+`acmValidationError` cites the operation pages for `ValidationException`, and `acmInvalidBody`
+cites the common page for `ValidationError`.
+
+### Two services publish no common-errors page, and EFS is no longer one of them
+
+Batch and API Gateway v2 have no fifteen-entry page to fall back to: both `CommonErrors` links
+resolve to a `meta refresh` onto the service's welcome page. MSK's does the same. For each of
+them step 1 was the only route available, and in each it was open — Batch publishes
+`ClientException`, API Gateway v2's five sites were already correct.
+
+**#950 recorded EFS as a third such service and #1064 found that stale.** The page that
+redirects is the *user guide's* `api-errors.html`; the API reference's
+[`CommonErrors.html`](https://docs.aws.amazon.com/efs/latest/APIReference/CommonErrors.html) now
+publishes the full fifteen-entry list. This is the one direction the sweep was not looking in:
+consolidation did not only change what a page says, it **created pages that did not exist**.
+
+EFS's answer is unchanged regardless, and by the rule rather than by luck — step 1 outranks step
+2, so a common page appearing underneath a satisfied step 1 changes nothing. `BadRequest`/400
+stays, still cited to the Errors section of all four guarded operations.
+
+This remains the strongest argument for preferring step 1. A rule that depends on a page some
+services do not have is a rule with holes in it — and, as EFS shows, a rule whose holes move.
 
 ### One service publishes nothing to check against
 
@@ -651,8 +718,13 @@ byte-identical fifteen-code lists, distinct from EC2's longer Query-protocol lis
 publishes `ValidationError`/400 — note `ValidationError`, **not** `ValidationException` — and its only
 body-scoped code, `MalformedHttpRequestException`/400, is published as being about decompression and
 content-encoding rather than JSON syntax. Any code in the tree that was sourced from a per-service
-Common Errors page before the consolidation may therefore cite a page that no longer says it, which is
-filed as its own sweep.
+Common Errors page before the consolidation may therefore cite a page that no longer says it.
+
+That risk was swept in #1064 and the result is recorded under
+[the three generations](#the-reference-has-three-common-errors-generations-not-two): the
+consolidation is **not** sitewide, SQS being a live counterexample, and all fifty-five citations in
+`emulator/` survived. The two corrections were both provenance — EFS's page now exists, and
+`InvalidAction` turned out to be citable.
 
 **The "no bare `_ =`" criterion needed a script, because `errcheck` cannot state it.** To errcheck, a
 bare `_ = json.Unmarshal(req.Body, …)` and a `//nolint:errcheck` carrying a written reason are the same
