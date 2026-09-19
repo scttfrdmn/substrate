@@ -619,13 +619,16 @@ func TestCFNGetAtt_UnresolvableAttributeIsEmpty(t *testing.T) {
 // resource has no ARN the answer is empty — never the name that #827 was filed about.
 func TestCFNGetAtt_ARNAttributeNeverAnswersAName(t *testing.T) {
 	d := newRefDeployer(t)
+	// The state machine's DefinitionString is a runnable document rather than the "{}" this test
+	// carried until #1073, which made an empty object a refusal: the Amazon States Language requires
+	// StartAt and States. The definition is incidental here — the subject is GetAtt.
 	tmpl := `{
 		"Resources": {
 			"Topic": {"Type": "AWS::SNS::Topic", "Properties": {"TopicName": "arn-attr-topic"}},
 			"TD": {"Type": "AWS::ECS::TaskDefinition", "Properties": {"Family": "arn-attr-family"}},
 			"SM": {"Type": "AWS::StepFunctions::StateMachine", "Properties": {
 				"StateMachineName": "arn-attr-sm",
-				"DefinitionString": "{}",
+				"DefinitionString": "{\"StartAt\":\"Start\",\"States\":{\"Start\":{\"Type\":\"Pass\",\"End\":true}}}",
 				"RoleArn": "arn:aws:iam::123456789012:role/svc"}}
 		},
 		"Outputs": {
