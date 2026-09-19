@@ -382,15 +382,7 @@ func (p *SNSPlugin) deleteTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		}
 	}
 
-	type response struct {
-		XMLName          xml.Name         `xml:"DeleteTopicResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("DeleteTopic", ctx.RequestID)
 }
 
 func (p *SNSPlugin) getTopicAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -497,15 +489,7 @@ func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("sns setTopicAttributes saveTopic: %w", err)
 	}
 
-	type response struct {
-		XMLName          xml.Name         `xml:"SetTopicAttributesResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("SetTopicAttributes", ctx.RequestID)
 }
 
 func (p *SNSPlugin) listTopics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -706,15 +690,7 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	_ = p.saveSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName), newTopic)
 
-	type response struct {
-		XMLName          xml.Name         `xml:"UnsubscribeResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("Unsubscribe", ctx.RequestID)
 }
 
 func (p *SNSPlugin) listSubscriptions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -850,15 +826,7 @@ func (p *SNSPlugin) getSubscriptionAttributes(ctx *RequestContext, req *AWSReque
 func (p *SNSPlugin) setSubscriptionAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Stub: accept any attribute set and succeed.
 	_ = req.Params["SubscriptionArn"]
-	type response struct {
-		XMLName          xml.Name         `xml:"SetSubscriptionAttributesResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("SetSubscriptionAttributes", ctx.RequestID)
 }
 
 func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1115,28 +1083,12 @@ func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 func (p *SNSPlugin) addPermission(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	// Stub — permissions are tracked by IAM plugin.
-	type response struct {
-		XMLName          xml.Name         `xml:"AddPermissionResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("AddPermission", ctx.RequestID)
 }
 
 func (p *SNSPlugin) removePermission(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	// Stub — permissions are tracked by IAM plugin.
-	type response struct {
-		XMLName          xml.Name         `xml:"RemovePermissionResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsUnitResponse("RemovePermission", ctx.RequestID)
 }
 
 func (p *SNSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1183,15 +1135,7 @@ func (p *SNSPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("sns tagResource saveTopic: %w", err)
 	}
 
-	type response struct {
-		XMLName          xml.Name         `xml:"TagResourceResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsEmptyResultResponse("TagResource", ctx.RequestID)
 }
 
 func (p *SNSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1229,15 +1173,7 @@ func (p *SNSPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, fmt.Errorf("sns untagResource saveTopic: %w", err)
 	}
 
-	type response struct {
-		XMLName          xml.Name         `xml:"UntagResourceResponse"`
-		Xmlns            string           `xml:"xmlns,attr"`
-		ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-	}
-	return snsXMLResponse(http.StatusOK, response{
-		Xmlns:            snsXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
-	})
+	return snsEmptyResultResponse("UntagResource", ctx.RequestID)
 }
 
 func (p *SNSPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

@@ -8,6 +8,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **SNS `TagResource` and `UntagResource` emit the empty result element their pages publish, so an
+  SDK can call them at all** (#1141). Both wrote the tag, saved the topic and answered 200 — and a
+  caller using `aws-sdk-go-v2/service/sns` still saw the operation fail with *"deserialization failed,
+  failed to decode response body, TagResourceResult node not found"*. The query protocol decides
+  whether `<{Operation}Response>` holds an `<{Operation}Result>` by the operation's modeled output, and
+  the two memberless cases look identical from substrate's side: an output of `smithy.api#Unit` has no
+  result element, an output that is an empty **structure** has the element, empty. AWS publishes both
+  halves as samples — `API_TagResource` and `API_UntagResource` show `<TagResourceResult/>` and
+  `<UntagResourceResult/>`, while `API_DeleteTopic`, `API_Unsubscribe` and `API_AddPermission` show
+  `<ResponseMetadata>` as the response's only child — and substrate emitted the second shape for all
+  eight, which is right for six of them. This is the worst shape a divergence can take: the write had
+  already happened, so state was right and only the envelope was wrong, while every caller that checks
+  its error treated a successful tag as a failure, which no create → converge → tag sequence gets past.
+  A hand-written client cannot see the difference, because the element carries nothing, which is why
+  every existing SNS test stayed green; the regression test is a real-SDK journey, and the six `Unit`
+  operations' *absence* of the element is pinned by asserting the response root's children exactly.
+  **The sweep for further instances closes negative**: the SDK's SNS deserializer requires a result
+  element for 31 operations and none of the six is among them, and the two in-tree precedents for the
+  distinction (`cwRenderQueryXML` for CloudWatch, `elbEmptyOKResponse` for ELBv2) already draw it, so
+  these two were the only sites in the tree.
 - **The three updates whose own page publishes full replacement now replace instead of merging**
   (#1089). `API_UpdateSchedule` states it outright — *"EventBridge Scheduler uses all the information
   that you have provided and replaces your schedule. You will lose any information that you haven't
