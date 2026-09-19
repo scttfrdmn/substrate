@@ -360,8 +360,15 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, sfnInvalidBody()
 	}
-	if input.Name == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
+	// Three published constraints that nothing checked before #1072: name is Required: Yes with a
+	// character list and a 1–80 bound, roleArn is Required: Yes, and type has two Valid Values. Each
+	// answers a code this page publishes; the previous InvalidParameterException was on neither create
+	// page's Errors list.
+	if nameErr := sfnValidateName(input.Name); nameErr != nil {
+		return nil, nameErr
+	}
+	if roleErr := sfnValidateRoleArn(input.RoleArn); roleErr != nil {
+		return nil, roleErr
 	}
 	// The definition is checked before anything is stored, so substrate cannot hold one it is unable to
 	// read back (#996). See [sfnValidateDefinition] for what is and is not checked. The parsed form is
@@ -370,9 +377,14 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 	if _, defErr := sfnValidateDefinition(input.Definition); defErr != nil {
 		return nil, defErr
 	}
+	// "The default is STANDARD" is applied before the Valid Values are checked, so an absent type is
+	// the default rather than an unsupported one.
 	smType := input.Type
 	if smType == "" {
 		smType = "STANDARD"
+	}
+	if typeErr := sfnValidateStateMachineType(smType); typeErr != nil {
+		return nil, typeErr
 	}
 
 	goCtx := context.Background()
@@ -381,7 +393,18 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 		return nil, err
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "StateMachineAlreadyExists", Message: "State machine already exists: " + input.Name, HTTPStatus: http.StatusConflict}
+		// AWS publishes this operation as idempotent, and substrate refused unconditionally. A repeat
+		// that matches on every input to the published check answers the existing state machine's ARN
+		// and creation date, and leaves roleArn and tags as they were — see
+		// [sfnStateMachineIsIdempotentCreate]. Only a genuine collision is a refusal, now at the
+		// published 400 rather than 409.
+		if sfnStateMachineIsIdempotentCreate(existing, input.Definition, smType) {
+			return statesJSONResponse(http.StatusOK, map[string]interface{}{
+				"stateMachineArn": existing.StateMachineArn,
+				"creationDate":    sfnEpoch(existing.CreatedDate),
+			})
+		}
+		return nil, sfnStateMachineAlreadyExists(input.Name)
 	}
 
 	tags := make(map[string]string)
@@ -979,8 +1002,10 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, sfnInvalidBody()
 	}
-	if input.Name == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
+	// API_CreateActivity publishes the same name-constraint list as API_CreateStateMachine, word for
+	// word, and InvalidName is the one code both pages publish for breaking it (#1072).
+	if nameErr := sfnValidateName(input.Name); nameErr != nil {
+		return nil, nameErr
 	}
 
 	goCtx := context.Background()
@@ -989,7 +1014,24 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 		return nil, err
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ActivityAlreadyExists", Message: "Activity already exists: " + input.Name, HTTPStatus: http.StatusConflict}
+		// CreateActivity's published idempotency check is on the name alone — "CreateActivity's
+		// idempotency check is based on the activity name. If a following request has different tags
+		// values, Step Functions will ignore these differences and treat it as an idempotent request of
+		// the previous. In this case, tags will not be updated, even if they are different." So a second
+		// create against a name that exists is a success answering the stored record, and returning it
+		// unchanged is what leaves the tags alone.
+		//
+		// **That makes ActivityAlreadyExists unreachable in substrate, and the reason is worth stating
+		// rather than leaving as a silent gap.** The page glosses it "Activity already exists.
+		// EncryptionConfiguration may not be updated." — so the one condition AWS publishes for it is a
+		// differing encryptionConfiguration, which is a request member this handler does not decode and
+		// ActivityState does not hold. Substrate answered it at 409 for a plain duplicate name, which is
+		// neither the published status (400) nor the published condition. Modeling the idempotency is
+		// what removes both divergences at once; the code returns if encryption is ever modeled.
+		return statesJSONResponse(http.StatusOK, map[string]interface{}{
+			"activityArn":  existing.ActivityArn,
+			"creationDate": sfnEpoch(existing.CreatedDate),
+		})
 	}
 
 	tags := make(map[string]string)

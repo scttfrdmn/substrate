@@ -49,8 +49,13 @@ package emulator
 // ConflictException at **409**, API_UpdateStateMachine publishes ConflictException at 409 *and*
 // ServiceQuotaExceededException at **402**, and both pages list those two codes under a 400 entry as
 // well — AWS documents each of them twice, at two statuses. So the narrow claim above is about this
-// file's own constructors and must not be generalised to the plugin: #1072 corrects the statuses the
-// plugin answers.
+// file's own constructors and must not be generalised to the plugin.
+//
+// #1072 then corrected the statuses the plugin itself answered: createStateMachine's 409 became the
+// published 400 ([sfnStateMachineAlreadyExists]) and createActivity's 409 went away entirely, because
+// modeling CreateActivity's published idempotency leaves ActivityAlreadyExists with no reachable
+// condition. Every constructor in this file is still 400, and the two 409s it now has a replacement
+// for were both outside it.
 //
 // Messages are substrate's throughout, except where a helper quotes AWS's own gloss because it is
 // already the whole of what the refusal has to say.
@@ -158,6 +163,70 @@ func sfnStateMachineTypeNotSupported(smType string) *AWSError {
 	return &AWSError{
 		Code:       "StateMachineTypeNotSupported",
 		Message:    "State machine type is not supported: " + smType,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnInvalidName reports a name outside the constraints both create pages publish.
+//
+// API_CreateStateMachine and API_CreateActivity both publish InvalidName — "The provided name is not
+// valid." — at HTTP 400. Both handlers answered InvalidParameterException for an absent name, which
+// is on neither page's Errors list: CreateStateMachine publishes fifteen codes and CreateActivity
+// seven, and it is among neither (#1072).
+//
+// **The choice between InvalidName and ValidationException is recorded here because both are
+// citable on one of the two pages and only one is citable on both.** ValidationException — "The input
+// does not satisfy the constraints specified by an AWS service." — is published on
+// API_CreateStateMachine and *not* on API_CreateActivity, whose seven errors do not include it. So
+// answering ValidationException would make one plugin report two different codes for the same
+// failure, and on CreateActivity it would report a code that page does not publish, which is the
+// defect #1072 exists to remove rather than relocate. InvalidName is also the narrower fit: its gloss
+// is about the name specifically, and every constraint checked here is a name constraint.
+//
+// The reason is appended to AWS's sentence rather than replacing it, so a caller matching on the
+// published text still matches; see [sfnInvalidDefinition], which does the same.
+func sfnInvalidName(reason string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidName",
+		Message:    "The provided name is not valid: " + reason,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnInvalidRoleArn reports a roleArn that is absent, over-long, or not an ARN.
+//
+// API_CreateStateMachine publishes InvalidArn — "The provided Amazon Resource Name (ARN) is not
+// valid." — at HTTP 400, and roleArn is Required: Yes there. Nothing checked it, so a state machine
+// could be stored with no role at all (#1072). [sfnValidateRoleArn] states what is checked and why
+// that is less than parsing the ARN.
+//
+// This is a second constructor for the same code as [sfnInvalidArnError] rather than a reuse of it,
+// because that one appends the offending ARN and there is no ARN to append when the member is absent.
+func sfnInvalidRoleArn(reason string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidArn",
+		Message:    "The provided Amazon Resource Name (ARN) is not valid: " + reason,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnStateMachineAlreadyExists reports a name held by a state machine that differs from the one being
+// created.
+//
+// API_CreateStateMachine publishes StateMachineAlreadyExists — "A state machine with the same name
+// but a different definition or role ARN already exists." — at **HTTP 400**. Substrate answered 409,
+// which is the #910/#912 class one step further along: those swept four codes from 404 to 400 and
+// missed this one because it was a 409 rather than a 404. A consumer branching on the status saw
+// something this endpoint does not send (#1072).
+//
+// The message is AWS's verbatim, with the name appended, and it names a condition narrower than the
+// one substrate refuses on — see [sfnStateMachineIsIdempotentCreate] for the contradiction between
+// this sentence and the page's own idempotency Note, and for why the Note governs.
+func sfnStateMachineAlreadyExists(name string) *AWSError {
+	return &AWSError{
+		Code: "StateMachineAlreadyExists",
+		Message: "A state machine with the same name but a different definition or role ARN " +
+			"already exists: " + name,
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

@@ -13540,7 +13540,7 @@ routes both.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object and a structurally valid state machine — see below (#996, #1073) |
+| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object and a structurally valid state machine — see below (#996, #1073); `name`, `roleArn` and `type` are checked against their published constraints, and a repeat is **idempotent** — see below (#1072) |
 | DescribeStateMachine | Addressed by ARN — see below |
 | UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996, #1073) |
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
@@ -13551,7 +13551,7 @@ routes both.
 | StopExecution | Addressed by ARN |
 | ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
 | GetExecutionHistory | Addressed by ARN |
-| CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region |
+| CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; `name` is checked against the same published constraints as `CreateStateMachine`'s, and a repeat is **idempotent** on the name alone — see below (#1072) |
 | DescribeActivity | Addressed by ARN — see below |
 | ListActivities | Scoped to the caller's own account and Region |
 | DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995) |
@@ -13652,8 +13652,10 @@ integration is not dispatched to Lambda at all and returns the empty-object stub
 | ActivityDoesNotExist | 400 | A well-formed activity ARN names an activity that does not exist |
 | ExecutionDoesNotExist | 400 | A well-formed execution ARN names an execution that does not exist, including any express execution ARN |
 | ResourceNotFound | 400 | The tagging operations' code for a state machine or activity that does not exist, and `ListExecutions`' answer for a `mapRunArn` |
-| StateMachineTypeNotSupported | 400 | `StartSyncExecution` against a `STANDARD` state machine (#996) |
+| StateMachineTypeNotSupported | 400 | `StartSyncExecution` against a `STANDARD` state machine (#996), or a `CreateStateMachine` `type` outside the published `STANDARD`/`EXPRESS` (#1072) |
 | InvalidDefinition | 400 | `CreateStateMachine` or `UpdateStateMachine` was given a definition substrate could not read back (#996), or one that reads back and is not a structurally valid state machine (#1073) — see below |
+| InvalidName | 400 | A `CreateStateMachine` or `CreateActivity` `name` that is absent or breaks the published constraints — see below (#1072) |
+| StateMachineAlreadyExists | 400 | `CreateStateMachine` against a name held by a state machine with a different definition or type — see below (#1072) |
 | ValidationError | 400 | The request body is not valid JSON, at all fifteen operations that decode one — the common error, for the reasons in *A request body that will not parse* above (#950) |
 
 **Every one of these is 400, not 404.** All eleven Step Functions API reference
@@ -13662,6 +13664,22 @@ including the three `*DoesNotExist` codes — unusual enough to be worth stating
 because substrate answered 404 for all four before #910 and #912, which no Step
 Functions endpoint returns. A consumer branching on the status rather than the
 code saw something AWS never sends.
+
+**And not 409 either.** Two create handlers survived those sweeps at 409 rather
+than 404 and were corrected in #1072: `CreateStateMachine`'s
+`StateMachineAlreadyExists`, which `API_CreateStateMachine` publishes at 400, and
+`CreateActivity`'s `ActivityAlreadyExists`, which is no longer answered at all
+(see below). Both handlers also answered `InvalidParameterException` for an
+absent `name` — a code on neither page's Errors list, where
+`API_CreateStateMachine` publishes fifteen and `API_CreateActivity` seven.
+
+Two codes those pages publish at a status other than 400 are **not** in the table
+above and are not answered anywhere, which is deliberate rather than an omission:
+`API_CreateStateMachine` publishes `ConflictException` at 409 *and* at 400 — it is
+listed twice, at two statuses, on the same page — and `API_UpdateStateMachine`
+publishes `ServiceQuotaExceededException` at 402. Both describe concurrency and
+quota conditions substrate does not model, so neither has a site to be answered
+from.
 
 The code a resource's absence carries is the one **its own operation's page
 publishes**, which is why there are four rather than one:
@@ -13674,6 +13692,91 @@ a code their own pages do **not** publish, and no longer do — see *The two del
 are idempotent* below. `StartSyncExecution`'s refusal of a `STANDARD` state
 machine used to answer an unpublished code too; see *StartSyncExecution refuses a
 workflow type, not a definition* (#996).
+
+### The two creates are idempotent, and check what their pages constrain
+
+Both create operations are published as idempotent, and substrate refused a repeat
+unconditionally until #1072. The published Notes differ in what they key on, and
+substrate follows each page rather than generalising one to both.
+
+`CreateStateMachine`:
+
+> `CreateStateMachine` is an idempotent API. Subsequent requests won't create a
+> duplicate resource if it was already created. `CreateStateMachine`'s idempotency
+> check is based on the state machine `name`, `definition`, `type`,
+> `LoggingConfiguration`, `TracingConfiguration`, and `EncryptionConfiguration`
+> The check is also based on the `publish` and `versionDescription` parameters. If
+> a following request has a different `roleArn` or `tags`, Step Functions will
+> ignore these differences and treat it as an idempotent request of the previous.
+> In this case, `roleArn` and `tags` will not be updated, even if they are
+> different.
+
+`CreateActivity`:
+
+> `CreateActivity` is an idempotent API. Subsequent requests won't create a
+> duplicate resource if it was already created. `CreateActivity`'s idempotency
+> check is based on the activity `name`. If a following request has different
+> `tags` values, Step Functions will ignore these differences and treat it as an
+> idempotent request of the previous. In this case, `tags` will not be updated,
+> even if they are different.
+
+So a repeat answers the stored record's own ARN and `creationDate`, byte for byte
+with the first call's response, and leaves `roleArn` and `tags` alone. Of the
+eight inputs to `CreateStateMachine`'s check, substrate compares the three it
+models — `name`, `definition` and `type`. The other five are request members no
+handler in this plugin decodes, so they cannot differ between two requests
+substrate has seen.
+
+**Where the page contradicts itself, the Note governs.**
+`StateMachineAlreadyExists` is glossed *"A state machine with the same name but a
+different definition **or role ARN** already exists"*, which would make a differing
+`roleArn` a refusal — while the Note excludes `roleArn` from the check twice and
+says outright that it "will not be updated, even if [it is] different". The Note is
+the more specific statement, so substrate treats a repeat differing only in
+`roleArn` or `tags` as the idempotent success and refuses only a differing
+`definition` or `type`. That choice is substrate's reading of a page that states
+both things.
+
+**`ActivityAlreadyExists` is consequently unreachable, and that is the page's
+doing rather than a gap.** Its only published condition is its own gloss —
+*"Activity already exists. `EncryptionConfiguration` may not be updated."* — and
+`encryptionConfiguration` is a request member substrate does not decode and
+`ActivityState` does not hold. With the name-keyed idempotency modelled, no input
+reaches the refusal. Substrate previously answered it at 409 for a plain duplicate
+name, which was neither the published status nor the published condition.
+
+Three published constraints are now checked, each answering a code its own page
+publishes:
+
+| Member | Published constraint | Refusal |
+|--------|----------------------|---------|
+| `name` (both operations) | `Required: Yes`; 1–80 characters; no white space; none of the brackets, wildcards and special characters the page lists — `<>{}[]`, `?*`, and `"#%\^~$&,;:/` together with the pipe and the backtick; no control characters (`U+0000-001F`, `U+007F-009F`, `U+FFFE-FFFF`); no surrogates (`U+D800-DFFF`); not `U+10FFFF` | `InvalidName`/400 |
+| `roleArn` (`CreateStateMachine`) | `Required: Yes`; 1–256 characters | `InvalidArn`/400 |
+| `type` (`CreateStateMachine`) | Valid Values `STANDARD` or `EXPRESS`, defaulting to `STANDARD` | `StateMachineTypeNotSupported`/400 |
+
+`InvalidName` rather than `ValidationException` for a bad name, because it is the
+only one of the two published on **both** pages: `CreateStateMachine` publishes
+`ValidationException` and `CreateActivity` does not, so answering that would report
+a code `CreateActivity`'s page does not publish and would make one plugin answer
+two codes for one failure. `InvalidName` is also the narrower fit — every
+constraint checked is a name constraint.
+
+Two clauses of the name list are recorded rather than enforced, both for stated
+reasons. The surrogate range `U+D800-DFFF` cannot be reached: Go's JSON decoder
+substitutes `U+FFFD` for an unpaired surrogate escape and for any byte sequence
+that is not valid UTF-8, so no request can carry one as a surrogate. And the
+page's further sentence — *"To enable logging with CloudWatch Logs, the name should
+only contain 0-9, A-Z, a-z, - and \_"* — is a condition on logging stated with
+"should", not a constraint on the name, and substrate models no logging
+configuration for it to interact with; enforcing it would refuse names AWS accepts.
+
+`roleArn` is checked for presence, for the published length, and for an `arn:`
+prefix — and no further. The page publishes **no Pattern** for the member, so
+splitting the ARN into its six fields and refusing a value that does not name an
+IAM role would invent a validation AWS does not document; that is the same line
+CloudFormation's own `RoleARN` draws. A role that does not exist is deliberately
+not an error either: no code is published for it and substrate does not resolve the
+role at create time.
 
 ### The two deletes are idempotent
 
