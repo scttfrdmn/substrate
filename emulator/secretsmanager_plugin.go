@@ -2,12 +2,10 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
-	"strconv"
 	"time"
 )
 
@@ -503,6 +501,26 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 // removing (#953) — including why the permanent deletion at the end of the window is deliberately
 // unmodelled.
 
+// smInvalidNextToken reports a NextToken that is not one substrate issued.
+//
+// InvalidNextTokenException at 400, which API_ListSecrets publishes in its Errors section and
+// glosses "The NextToken value is invalid." The page's whole Errors list is four entries —
+// InternalServiceError 500, this one, InvalidParameterException 400 and InvalidRequestException
+// 400 — so the pagination code is published separately from the parameter code, and answering
+// InvalidParameterException here would tell a caller the value of some member was wrong when AWS
+// has a code for exactly this. NextToken is Length 1-4096, which the token substrate mints is
+// always inside.
+//
+// The message is substrate's, following the file's other refusals; AWS publishes codes and
+// statuses rather than message text.
+func smInvalidNextToken() *AWSError {
+	return &AWSError{
+		Code:       "InvalidNextTokenException",
+		Message:    "the NextToken is not a pagination token this service issued",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		MaxResults int    `json:"MaxResults"`
@@ -517,31 +535,24 @@ func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest)
 		input.MaxResults = 100
 	}
 
+	// A token substrate did not issue is refused rather than answered with page one, which
+	// API_ListSecrets publishes InvalidNextTokenException for (#1086), and it is refused before the
+	// secret names are read — #887's ordering criterion, since nothing about the refusal depends on
+	// what the store holds.
+	offset, ok := decodeOffsetPaginationToken(input.NextToken)
+	if !ok {
+		return nil, smInvalidNextToken()
+	}
+
 	goCtx := context.Background()
 	names, err := p.loadSecretNames(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
+	// Sorted before the cut, so the offset a token names means the same thing on every call of
+	// one walk.
 	sort.Strings(names)
-
-	offset := 0
-	if input.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(input.NextToken); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextToken string
-	if len(page) > input.MaxResults {
-		page = page[:input.MaxResults]
-		nextOffset := offset + input.MaxResults
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
-	}
+	page, nextToken := pageByOffsetToken(names, offset, input.MaxResults)
 
 	type secretEntry struct {
 		ARN  string `json:"ARN"`

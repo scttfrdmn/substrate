@@ -2,10 +2,12 @@ package emulator_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"testing"
 	"time"
 
@@ -311,12 +313,14 @@ func TestCFNEvents_Paginate(t *testing.T) {
 	events := emulator.CFNDeriveStackEventsForTest(stack, cfnEventsStackID)
 	require.Len(t, events, emulator.CFNStackEventsPageSizeForTest+1)
 
-	page, token := emulator.CFNPaginateEventsForTest(events, "")
+	page, token, tokenErr := emulator.CFNPaginateEventsForTest(events, "")
+	require.Nil(t, tokenErr, "an absent token is the start of the listing, not a refusal")
 	assert.Len(t, page, emulator.CFNStackEventsPageSizeForTest)
 	require.NotEmpty(t, token, "a truncated page must hand back a NextToken")
 	assert.Equal(t, events[:emulator.CFNStackEventsPageSizeForTest], page)
 
-	rest, nextToken := emulator.CFNPaginateEventsForTest(events, token)
+	rest, nextToken, tokenErr := emulator.CFNPaginateEventsForTest(events, token)
+	require.Nil(t, tokenErr, "the token the previous page handed back is one substrate issued")
 	assert.Empty(t, nextToken, "the last page carries no token")
 	require.Len(t, rest, 1)
 	assert.Equal(t, events[len(events)-1], rest[0],
@@ -324,15 +328,66 @@ func TestCFNEvents_Paginate(t *testing.T) {
 
 	// A complete list is one page and no token — the case a substrate-sized stack
 	// almost always hits, and the one a consumer's loop must terminate on.
-	page, token = emulator.CFNPaginateEventsForTest(events[:3], "")
+	page, token, tokenErr = emulator.CFNPaginateEventsForTest(events[:3], "")
+	require.Nil(t, tokenErr)
 	assert.Len(t, page, 3)
 	assert.Empty(t, token)
+}
 
-	// A token substrate did not mint restarts from the beginning rather than
-	// erroring: DescribeStackEvents documents no service-specific errors, so there
-	// is no code to return, and dropping the whole list would be worse.
-	page, _ = emulator.CFNPaginateEventsForTest(events, "not-base64-at-all")
-	assert.Equal(t, events[0], page[0])
+// TestCFNEvents_UnissuedTokenIsRefused pins the reversal #1086 made of a decision this
+// file used to assert the other way round.
+//
+// Until #1086 an unparseable token restarted from the beginning, on the ground that
+// DescribeStackEvents' Errors section is empty and so publishes no code to answer. The
+// reversal's argument is in [emulator.CFNPaginateEventsForTest]'s implementation: page one
+// is the one wrong answer a caller cannot detect, and CloudFormation's Common Errors page
+// does publish ValidationError at 400 for a malformed parameter, which is what this plugin
+// already answers for every other one.
+//
+// The clamp is asserted beside the refusal because the two are one change and pull in
+// opposite directions. A token that is not base64, or whose text is not an offset this
+// encoder would emit, is refused; a token that *is* one substrate issued but now points
+// past the end of a listing that has shrunk is answered with a final empty page. Before
+// #1086 the second case also reset to page one — the old guard required the offset to be
+// `< len(events)` — so the site violated the rule its own comment claimed to keep.
+func TestCFNEvents_UnissuedTokenIsRefused(t *testing.T) {
+	stack := emulator.CFNStackState{
+		StackName: "demo",
+		Status:    "CREATE_COMPLETE",
+		CreatedAt: cfnEventsAt,
+		UpdatedAt: cfnEventsAt,
+	}
+	events := emulator.CFNDeriveStackEventsForTest(stack, cfnEventsStackID)
+	require.NotEmpty(t, events)
+
+	for _, tc := range []struct {
+		name  string
+		token string
+	}{
+		{"not base64 at all", "not-base64-at-all"},
+		{"base64 of something that is not an integer", base64.StdEncoding.EncodeToString([]byte("page-two"))},
+		{"base64 of a negative offset", base64.StdEncoding.EncodeToString([]byte("-1"))},
+		{"a form strconv accepts that the encoder never emits", base64.StdEncoding.EncodeToString([]byte("01"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			page, nextToken, tokenErr := emulator.CFNPaginateEventsForTest(events, tc.token)
+			require.NotNil(t, tokenErr, "an unissued token is refused, not answered with page one")
+			assert.Equal(t, "ValidationError", tokenErr.Code,
+				"the code this plugin answers for every other malformed parameter")
+			assert.Equal(t, http.StatusBadRequest, tokenErr.HTTPStatus)
+			assert.Empty(t, page)
+			assert.Empty(t, nextToken)
+		})
+	}
+
+	// A token substrate did issue, over a listing that has since shrunk, clamps to a final
+	// empty page: it is not a caller's mistake and refusing it would break a legitimate walk
+	// whose stack was deleted mid-loop.
+	past := base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(len(events) + 10)))
+	page, nextToken, tokenErr := emulator.CFNPaginateEventsForTest(events, past)
+	require.Nil(t, tokenErr, "an offset past the end is a token substrate minted, not one it refuses")
+	assert.Empty(t, page, "the listing shrank, so the page is empty rather than the first one again")
+	assert.Empty(t, nextToken, "and it is the last page")
 }
 
 // TestCFNEvents_DerivesWithoutAnEventStore is the guard on #501's design decision.

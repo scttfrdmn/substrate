@@ -572,9 +572,12 @@ func (p *CloudFormationPlugin) describeStackEvents(reqCtx *RequestContext, req *
 		return nil, cfnStackNotFound(name)
 	}
 
-	page, nextToken := cfnPaginateEvents(
+	page, nextToken, tokenErr := cfnPaginateEvents(
 		cfnDeriveStackEvents(*stack, cfnStackID(reqCtx, stack.StackName)),
 		req.Params["NextToken"])
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
 
 	type result struct {
 		Events    []cfnStackEvent `xml:"StackEvents>member"`
@@ -1319,6 +1322,27 @@ func cfnMissingParameter(name string) *AWSError {
 	return &AWSError{
 		Code:       "MissingParameter",
 		Message:    "Missing required parameter " + name,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// cfnInvalidNextToken reports a NextToken that is not one substrate issued.
+//
+// **The code is substrate's choice rather than AWS's**, in the sense [ErrCFNInvalidTag]
+// records: DescribeStackEvents' own Errors section is empty, so nothing on the operation
+// page names this case. CloudFormation's Common Errors page publishes two candidates at
+// 400 — ValidationError and InvalidParameterValue — and ValidationError is the one this
+// plugin already answers for every other malformed parameter, from an unknown stack to a
+// tag over its limit. One code for one class of mistake is worth more to a caller than a
+// second code chosen to be more specific about which member was wrong, since the message
+// says that anyway.
+//
+// Why a refusal at all, when the page publishes no error: see [cfnPaginateEvents], which
+// carries the reversal this replaced and the reason page one is the worse answer.
+func cfnInvalidNextToken() *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "the NextToken is not a pagination token this service issued",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

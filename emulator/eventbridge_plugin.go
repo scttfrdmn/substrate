@@ -2,11 +2,9 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -182,6 +180,15 @@ func (p *EventBridgePlugin) listRules(ctx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
+	// A token substrate did not issue is refused rather than answered with page one; ListRules
+	// publishes InvalidToken for it in the NextToken member's own description (#1086). Refused
+	// before the rule-name index is read, per #887: the refusal depends on nothing the store holds,
+	// and reading first would report a store failure as a 500 for a request already refusable.
+	offset, ok := decodeOffsetPaginationToken(body.NextToken)
+	if !ok {
+		return nil, ebInvalidToken()
+	}
+
 	goCtx := context.Background()
 	idxKey := ebRuleNamesKey(ctx.AccountID, ctx.Region)
 	allNames, err := loadStringIndex(goCtx, p.state, eventbridgeNamespace, idxKey)
@@ -204,28 +211,13 @@ func (p *EventBridgePlugin) listRules(ctx *RequestContext, req *AWSRequest) (*AW
 	if limit <= 0 {
 		limit = 100
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(body.NextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
+	// The offset indexes into the rule-name index, which is appended to in one order and read back
+	// in it, so a position is stable across the calls of one walk — and the prefix filter above
+	// preserves that order rather than rebuilding it.
+	page, nextToken := pageByOffsetToken(names, offset, limit)
 
-	end := offset + limit
-	var nextToken string
-	if end < len(names) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(names)
-	}
-
-	rules := make([]EBRule, 0, end-offset)
-	for _, name := range names[offset:end] {
+	rules := make([]EBRule, 0, len(page))
+	for _, name := range page {
 		data, getErr := p.state.Get(goCtx, eventbridgeNamespace, ebRuleKey(ctx.AccountID, ctx.Region, name))
 		if getErr != nil || data == nil {
 			continue

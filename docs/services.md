@@ -1378,6 +1378,57 @@ other half of the tier-2 defect, and the reason the RDS and ElastiCache describe
 a value-based cursor. Refusing an unissued token and choosing a stable cursor basis are independent
 defects, and only the first is #915.
 
+### The same idiom at fifteen more sites, and why four services went first
+
+[#1086](https://github.com/scttfrdmn/substrate/issues/1086) found the pre-#915 form at fifteen
+further sites across nine services. The decode is mechanical — the helpers above already exist — but
+**the refusal is not, because the services do not share a code**, and that is what decides the
+order the sites move in rather than the size of each edit.
+
+Four services, five sites, went first — three of them because they publish a code that names this
+condition, and CloudFormation because the tree carried a recorded decision at its site that had to
+be resolved one way or the other before the class could move at all:
+
+| Operation | Code | Provenance |
+|---|---|---|
+| KMS `ListKeys` | `InvalidMarkerException` / 400 | **Published**, in the operation's own Errors section, glossed "the request was rejected because the marker that specifies where pagination should next begin is not valid". KMS is also the only one of the four that constrains the token itself — `Marker` is Length 1–1024, Pattern `[\u0020-\u00FF]*` — so a marker outside that range is refusable on the page's own terms as well. Substrate's issuability rule is the stricter test, and every string it refuses that is *inside* the Pattern is still a string KMS could not have minted. |
+| KMS `ListAliases` | `InvalidMarkerException` / 400 | **Published**, identically. Asserted separately from `ListKeys` because the two decoded their markers with two copies of one block, which is how they came to carry the defect twice. |
+| Secrets Manager `ListSecrets` | `InvalidNextTokenException` / 400 | **Published**, and published *separately* from `InvalidParameterException`, which is the whole point: the page's Errors list is four entries and carries a code for the token and a code for a member, so answering `InvalidParameterException` here would tell a caller that the value of some member was wrong when AWS has a code for exactly this condition. `NextToken` is Length 1–4096, which substrate's token is always inside. |
+| EventBridge `ListRules` | `InvalidToken` / 400 | **Published in prose only.** The Errors section is `InternalException`/500 and `ResourceNotFoundException`/400, and `InvalidToken` is absent from EventBridge's common-errors page too — but the `NextToken` member's own description says *"Using an expired pagination token results in an HTTP 400 InvalidToken error."* The code, the status and the condition are all the page's, in the description of the very member being refused. **This corrects #950's sweep of EventBridge**, which read Errors sections and so settled for the common-errors fallback for this condition. AWS names an *expired* token and substrate's tokens do not expire; what substrate refuses is the other way a token fails to be honourable, and both are one observation for a caller — a token this service will not resume from. |
+| CloudFormation `DescribeStackEvents` | `ValidationError` / 400 | **Substrate's reading.** The Errors section is literally empty, so the code comes from CloudFormation's Common Errors page, which carries `ValidationError` and `InvalidParameterValue` both at 400. `ValidationError` is what this plugin already answers for every other malformed parameter, so a caller sees one code per class of mistake rather than a second code invented for this member. |
+
+**This reverses a decision recorded in the tree, rather than deleting it.** `cfn_events.go` argued
+the silent page-one answer *from* that empty Errors section, and a test asserted it with the
+rationale attached. Two things overturn the argument. The empty section is not the whole of what
+CloudFormation publishes — the common page is also published, and this plugin has a house rule for
+choosing between its two 400s. And a well-formed page one is the one wrong answer a paginating
+caller cannot detect, which is the finding the whole class rests on. The reversal also fixes a
+second defect at that site for free: its guard required the offset to be `< len(events)`, so a
+token substrate itself had issued, over a listing that has since shrunk, **reset to page one**
+instead of clamping to a final empty page — the exact behaviour the old comment claimed to be
+preserving.
+
+**All five validate the token before they read any state.** Four of the five loaded their index
+first, so a refusal could depend on how much state happened to exist and a store failure would be
+reported as a 500 for a request that was already refusable. Asserted the way #915's sites assert it:
+by sealing the state store against reads and requiring the refusal to arrive anyway.
+
+**The remaining ten sites, and what their pages do not say.** Thirteen operation references were
+read for the other five services, and **not one publishes a code that AWS attributes to an invalid,
+unusable or expired pagination token** — in an Errors section or in the token member's prose. So each
+of these will refuse under a code that is substrate's reading of a generic code published on the
+operation's own page, the way S3 `ListObjectsV2` and `GetResources` above already do, and none by
+borrowing a sibling operation's code, which
+[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids:
+
+| Sites | Reading available on the page | What the page says |
+|---|---|---|
+| SNS `ListTopics`, `ListSubscriptions`, `ListSubscriptionsByTopic` | `InvalidParameter` / 400 | *"Indicates that a request parameter does not comply with the associated constraints."* The token member's prose is one sentence — *"Token returned by the previous `ListTopics` request."* — and names no code and no constraint. |
+| Athena `ListQueryExecutions`, `ListWorkGroups` | `InvalidRequestException` / 400 | *"Indicates that something is wrong with the input to the request. For example, a required parameter may be missing or out of range."* The only constraint published on the token is Length 1–1024. |
+| CloudWatch Logs `DescribeLogGroups`, `DescribeLogStreams`, `GetLogEvents`, `FilterLogEvents` | `InvalidParameterException` / 400 | *"A parameter is specified incorrectly."* `FilterLogEvents` names this code in prose three times for other parameter violations and never for a token. **These four pages do publish that the token expires** — *"The token expires after 24 hours"*, on the response member — and publish no code for using an expired one, which is the same shape as EventBridge's finding with the conclusion missing. |
+| EventBridge Scheduler `ListSchedules` | `ValidationException` / 400 | *"The input fails to satisfy the constraints specified by an AWS service."* The only constraint published on the token is Length 1–2048, so on this page's own text an in-length but unissuable token is not covered by the gloss. |
+| Batch `DescribeComputeEnvironments`, `DescribeJobQueues`, `DescribeJobDefinitions` (one shared paginator) | `ClientException` / 400 | *"These errors are usually caused by a client action. … Another cause is specifying an identifier that's not valid."* And the same page's token prose says *"Treat this token as an opaque identifier."* That is the closest of the thirteen pages to covering the condition under a generic code — but the page never joins the two sentences, so it is still substrate's reading and not an attribution. |
+
 ### Six describes published a cursor and implemented none of it
 
 [#916](https://github.com/scttfrdmn/substrate/issues/916). The RDS and ElastiCache work above

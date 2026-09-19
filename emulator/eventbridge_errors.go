@@ -24,6 +24,35 @@ import "net/http"
 //
 // The status is unchanged: all thirteen sites already answered 400, and 400 is what the common page
 // publishes.
+//
+// **Correction from #1086: the sweep above missed one code, because it read Errors sections.**
+// API_ListRules publishes no pagination code in its Errors section — that list is InternalException
+// 500 and ResourceNotFoundException 400 — and InvalidToken is absent from EventBridge's
+// CommonErrors.html as well. But the page names it twice in prose, in the NextToken member's own
+// description: "Using an expired pagination token results in an HTTP 400 InvalidToken error." So a
+// bad pagination token is the one client mistake in this service that does have a published code,
+// and the common-errors fallback above is not what it should answer. See [ebInvalidToken].
+
+// ebInvalidToken reports a NextToken that is not one substrate issued.
+//
+// InvalidToken at 400, from the prose quoted in this file's preamble rather than from an Errors
+// section — the only provenance EventBridge offers, and enough: the code, the status and the
+// condition are all stated by the page, in the description of the very member being refused.
+//
+// The condition AWS names is an *expired* token and substrate's tokens do not expire, which is worth
+// being exact about. A substrate token is a base64 array offset, valid for as long as the process
+// holds the listing, so what this refuses is the other way a token fails: one the encoder could not
+// have produced at all (see [decodeOffsetPaginationToken]). Both are the same
+// observation for a caller — a token this service will not resume from — and answering page one
+// instead is the failure #884 named, where a loop that never terminates is indistinguishable from a
+// correct answer.
+func ebInvalidToken() *AWSError {
+	return &AWSError{
+		Code:       "InvalidToken",
+		Message:    "the NextToken is not a pagination token this service issued",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
 
 // ebInvalidBody reports that a request body would not decode.
 //
