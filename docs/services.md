@@ -13786,8 +13786,8 @@ the deployer marshalled it to JSON, which quotes and escapes a string that is
 already the document — so every `AWS::StepFunctions::StateMachine` deployed from a
 `DefinitionString` stored a JSON string literal rather than an ASL object, and its
 executions failed for a reason the template author could do nothing about. Fixed in
-the same change; the sibling object-valued `Definition` property is still not read
-at all.
+the same change; the sibling object-valued `Definition` property was still not read
+at all until #1074, which is below.
 
 Both residual paths are now unreachable, and both are stated rather than removed.
 In `StartSyncExecution` an unreadable stored definition is a `500` through Go's
@@ -13921,7 +13921,53 @@ a tag set at create time could not be read back in a shape any SDK decodes, and
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::StepFunctions::StateMachine | StateMachineArn | |
+| AWS::StepFunctions::StateMachine | StateMachineArn | `DefinitionString`, `Definition` and `DefinitionSubstitutions` are all read and all resolved through the intrinsic context; `DefinitionS3Location` is declined — see below (#1074) |
+| AWS::StepFunctions::Activity | ActivityArn | `Name` only |
+
+#### The definition resolves through the intrinsic context
+
+Every property of `AWS::StepFunctions::StateMachine` was resolved through the
+intrinsic context except the one carrying the definition, which is close to the
+only place a real template *has* to put an intrinsic: an ASL `Task` state's
+`Resource` is a Lambda function ARN, and a template that creates the function
+cannot know the ARN at authoring time. An `Fn::Sub` arrived at the deployer as a
+map and was stored as `{"Fn::Sub":"…"}` — a document that parses, describes an
+object, and has neither `StartAt` nor `States` (#1074).
+
+The three properties substrate reads, and the order it reads them in:
+
+| Property | Type | How it resolves |
+|----------|------|-----------------|
+| `DefinitionString` | String | Resolved through the intrinsic context, so an `Fn::Join` or `Fn::Sub` becomes the document. A literal string passes through untouched and is **not** re-marshalled — doing that once stored a JSON string literal rather than an ASL object (#996) |
+| `Definition` | Json | The object form, resolved at every depth and marshalled **once**. A literal number stays a number; only a resolved intrinsic becomes a string |
+| `DefinitionSubstitutions` | Object | Applied last to whichever of the two supplied the document. Each value is resolved first, so `HelloFunction: !GetAtt Hello.Arn` injects the deployed ARN |
+
+`DefinitionString` wins when both it and `Definition` are present. **This is
+substrate's reading**: both are `Required: No` and no sentence on the resource
+page covers supplying both, and this is the one order that changes nothing for a
+template that already deployed.
+
+An undeclared `${key}` in the document is left **exactly as written**, which is
+why substitution does not reuse `Fn::Sub`'s resolver: that one falls back to
+resolving an unknown name as a `Ref`, which returns the bare name, so an
+unrelated `${…}` would lose its braces instead of being left alone. AWS's second
+published substitution form, `${variable_1,variable_2,…}`, addresses a key-value
+map variable rather than naming a substitution key, so no key can match it and it
+falls through that same untouched case.
+
+**Two things substrate does not do here.** `DefinitionS3Location` is declined: it
+names an S3 object holding the document, and fetching it would make a deploy
+depend on a bucket's contents, so a template using it gets the stub definition
+instead. And `Fn::Sub`'s `${LogicalId.Attribute}` form is unimplemented in the
+**shared** resolver — `${MyFunction.Arn}` resolves to the literal string
+`MyFunction.Arn` — which affects every resource type's properties, not just this
+one, and is tracked separately. A template needing an attribute inside a
+definition should use `DefinitionSubstitutions`, which is AWS's own documented
+mechanism for it, or an explicit `Fn::GetAtt`.
+
+A template that supplies none of the three gets a stub definition, and the stub
+is a runnable state machine rather than a placeholder — which is what lets it
+survive the structural validation above.
 
 ### Cost
 
