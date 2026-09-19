@@ -190,6 +190,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whether a JSONPath resolves. The service reference states each of these, plus the 1 MB definition-size
   quota substrate does not measure, replacing the paragraph that said only that conformance was
   unchecked.
+- **A CloudFormation state machine's definition resolves through the intrinsic context, and the object
+  form is read at all** (#1074). `deployStepFunctionsStateMachine` resolved `StateMachineName`, `RoleArn`
+  and `StateMachineType` through `cctx` and read the definition straight out of the property map — which
+  matters because the definition is close to the *only* place a real template has to put an intrinsic: an
+  ASL `Task` state's `Resource` is a Lambda function ARN, and a template that creates the function cannot
+  know the ARN at authoring time. An `Fn::Sub` arrived as a `map[string]interface{}` and was stored as
+  `{"Fn::Sub":"…"}`, a document that parses, describes an object and has neither `StartAt` nor `States`.
+  #1073 refuses that now, so the deploy reports a resource error rather than succeeding and failing two
+  operations later; resolving it is what makes the deploy correct rather than merely loud.
+  `DefinitionString` goes through `resolveStringProp`, which **is** a drop-in contrary to the issue's
+  assertion — its empty-means-fallback behaviour is exactly the stub rule — and must not go through
+  `marshalToJSON`, because re-encoding a string that is already the document is the #996 defect.
+  `Definition`, the object form, was read nowhere, so a template using it silently deployed the stub and
+  had nothing observable to say so; it now resolves at every depth through `resolveNested` (#526's walk,
+  which the issue's central open question asked whether to write from scratch) and is marshalled once.
+  `DefinitionString` wins when both are supplied — unpublished, so recorded as substrate's reading, and
+  chosen as the one order that changes nothing for a template that already deployed.
+- **`DefinitionSubstitutions` is applied, which is AWS's own documented mechanism for the problem #1074
+  is about** (#1074). The issue reaches for `Fn::Sub`'s `${LogicalId.Attribute}` form and quotes it as
+  AWS's documented shape; **there is no `!Sub` example on the resource page at all** — its five examples
+  are a single-line string, an `Fn::Join`, a tagged version, and two halves of a
+  `DefinitionSubstitutions` walkthrough that injects a Lambda ARN into a `Task` state's `Resource`. Each
+  substitution value resolves through the intrinsic context first, so `HelloFunction: !GetAtt Hello.Arn`
+  injects the deployed ARN. An undeclared `${key}` is left **verbatim**, which is why this does not reuse
+  `substituteTemplate`: that resolver falls back to `resolveRef` for an unknown name and `resolveRef`
+  returns the bare name, so an unrelated `${…}` would lose its braces rather than being left alone. AWS's
+  second published form, `${variable_1,variable_2,…}`, names a key-value map variable rather than a
+  substitution key, so it falls through that same untouched case. `DefinitionS3Location` is declined
+  explicitly — fetching it would make a deploy depend on a bucket's contents — and a template using it
+  lands on the stub, which is now asserted to *execute* rather than merely to be stored.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
