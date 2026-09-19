@@ -168,28 +168,54 @@ func TestSFNUpdateStateMachine_RefusesADefinitionItCouldNotReadBack(t *testing.T
 	}
 }
 
-// TestSFNDefinition_ASLConformanceIsNotChecked records the boundary of the guard, so a 200 here is not
-// read as ASL approval.
+// TestSFNDefinition_ASLStructureIsChecked is the successor to
+// TestSFNDefinition_ASLConformanceIsNotChecked, which pinned these same four definitions as
+// *accepted* and said so deliberately: #996's guard asked only whether substrate could read a
+// definition back, so `{}` created a state machine and answered 200.
 //
-// "{}" parses as an object and is therefore stored, although AWS refuses it: the Amazon States Language
-// requires a state machine to carry a string field named StartAt and an object field named States, and
-// substrate checks neither. What the guard is for is narrower — that substrate can read back what it
-// stored — and that is the property the defect was about.
-func TestSFNDefinition_ASLConformanceIsNotChecked(t *testing.T) {
+// #1073 is the other half. Each of the four is now the refusal AWS publishes, with a message naming
+// the fault, because a caller fixing a generated document cannot act on "the definition is not
+// valid". The rules and their published sentences are in stepfunctions_asl_structure.go;
+// stepfunctions_asl_structure_test.go covers the rest of them and the documents that must still be
+// accepted.
+//
+// `{}` reports the States fault rather than the StartAt one because States is checked first — two
+// faults, one message, and which one is pinned here so the answer cannot drift.
+func TestSFNDefinition_ASLStructureIsChecked(t *testing.T) {
 	ts := sfnArnServer(t)
 
-	for label, definition := range map[string]string{
-		"an empty object":              `{}`,
-		"no StartAt":                   `{"States":{"Start":{"Type":"Pass","End":true}}}`,
-		"no States":                    `{"StartAt":"Start"}`,
-		"StartAt naming no such state": `{"StartAt":"Nowhere","States":{"Start":{"Type":"Pass","End":true}}}`,
+	for label, tc := range map[string]struct{ definition, wantFault string }{
+		"an empty object": {
+			`{}`, "the definition has no States field",
+		},
+		"no StartAt": {
+			`{"States":{"Start":{"Type":"Pass","End":true}}}`, "the definition has no StartAt field",
+		},
+		"no States": {
+			`{"StartAt":"Start"}`, "the definition has no States field",
+		},
+		"StartAt naming no such state": {
+			`{"StartAt":"Nowhere","States":{"Start":{"Type":"Pass","End":true}}}`,
+			`the definition has StartAt "Nowhere", which is not the name of a state in its States object`,
+		},
 	} {
 		t.Run(label, func(t *testing.T) {
-			arn := sfnArnCreateSM(t, ts, taggingTestAccount, sfnArnEastRegion,
-				"lax-"+strings.ReplaceAll(label, " ", "-"), "STANDARD", definition)
-			described := sfnArnOK(t, ts, taggingTestAccount, sfnArnEastRegion, "DescribeStateMachine",
-				map[string]any{"stateMachineArn": arn})
-			assert.Equal(t, definition, sfnArnMember(t, described, "definition"))
+			name := "lax-" + strings.ReplaceAll(label, " ", "-")
+			status, errCode, raw := sfnArnCall(t, ts, taggingTestAccount, sfnArnEastRegion,
+				"CreateStateMachine", map[string]any{
+					"name":       name,
+					"definition": tc.definition,
+					"roleArn":    "arn:aws:iam::" + taggingTestAccount + ":role/StepFunctionsRole",
+				})
+			assert.Equal(t, "InvalidDefinition", errCode, raw)
+			assert.Equal(t, http.StatusBadRequest, status, raw)
+			// Against the decoded message: the raw body escapes the quotes around a state's name.
+			assert.Contains(t, sfnArnMember(t, raw, "Message"), tc.wantFault,
+				"the message must name the fault")
+
+			listed := sfnArnOK(t, ts, taggingTestAccount, sfnArnEastRegion, "ListStateMachines",
+				map[string]any{})
+			assert.NotContains(t, listed, `"name":"`+name+`"`, "a refused definition was stored anyway")
 		})
 	}
 }

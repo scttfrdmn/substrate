@@ -13540,9 +13540,9 @@ routes both.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object — see below (#996) |
+| CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object and a structurally valid state machine — see below (#996, #1073) |
 | DescribeStateMachine | Addressed by ARN — see below |
-| UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996) |
+| UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996, #1073) |
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
 | ListStateMachines | Scoped to the caller's own account and Region |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
@@ -13653,7 +13653,7 @@ integration is not dispatched to Lambda at all and returns the empty-object stub
 | ExecutionDoesNotExist | 400 | A well-formed execution ARN names an execution that does not exist, including any express execution ARN |
 | ResourceNotFound | 400 | The tagging operations' code for a state machine or activity that does not exist, and `ListExecutions`' answer for a `mapRunArn` |
 | StateMachineTypeNotSupported | 400 | `StartSyncExecution` against a `STANDARD` state machine (#996) |
-| InvalidDefinition | 400 | `CreateStateMachine` or `UpdateStateMachine` was given a definition substrate could not read back — see below (#996) |
+| InvalidDefinition | 400 | `CreateStateMachine` or `UpdateStateMachine` was given a definition substrate could not read back (#996), or one that reads back and is not a structurally valid state machine (#1073) — see below |
 | ValidationError | 400 | The request body is not valid JSON, at all fifteen operations that decode one — the common error, for the reasons in *A request body that will not parse* above (#950) |
 
 **Every one of these is 400, not 404.** All eleven Step Functions API reference
@@ -13763,11 +13763,14 @@ than from this page; **substrate does not model it** and serves
 other operation. A consumer whose client is configured against the AWS `sync-`
 host will not reach substrate.
 
-### A definition substrate cannot read back is refused when it is stored
+### A definition that cannot be read back, or cannot run, is refused when it is stored
 
 `CreateStateMachine` and `UpdateStateMachine` answer `InvalidDefinition`/400,
 *"The provided Amazon States Language definition is not valid."*, for a definition
-that is empty, is not valid JSON, or does not describe a JSON object.
+that is empty, is not valid JSON, or does not describe a JSON object — and, since
+#1073, for one that reads back perfectly and still does not name a runnable state
+machine. Every message names the offending state and field, because a caller
+fixing a generated document cannot act on *"the definition is not valid"*.
 
 Neither operation checked the definition at all before #996: both stored whatever
 string arrived. So substrate could accept a definition, report `200`, and then be
@@ -13795,13 +13798,69 @@ which is the shape an asynchronous start has to use, but the error name is now
 `States.Runtime`, the published ASL name for an execution that failed due to an
 exception that could not be processed.
 
-**What is checked is narrower than what AWS checks, and a `200` here is not ASL
-approval.** Substrate checks only that it can read the definition back. `{}` is
-accepted, although AWS refuses it: the Amazon States Language requires a state
-machine to carry a string field named `StartAt` and an object field named `States`,
-and `StartAt` to name one of those states, and substrate checks none of the three.
-Validating ASL conformance is a larger job with its own citation trail and is not
-part of #996.
+**The structural rules: what a definition has to name before it is stored.** #996
+asked only whether substrate could read the document back, so `{}` created a state
+machine and answered `200`. #1073 added the rules below, each one a sentence AWS
+publishes on `amazon-states-language-state-machine-structure.html`, the `Choice`
+page, the `Parallel` page or the inline-`Map` page:
+
+| Rule | AWS's words |
+|------|-------------|
+| `States` is present, and is not an empty object | *"States (Required) An object containing a comma-delimited set of states"* — absent and `{}` answer different messages |
+| `StartAt` is present and names a member of `States` | *"StartAt (Required) A string that must exactly match (is case sensitive) the name of one of the state objects"* |
+| Every state has a `Type`, and it is one of the published eight | `Pass`, `Task`, `Choice`, `Wait`, `Succeed`, `Fail`, `Parallel`, `Map` |
+| `End` is refused on `Choice`, `Succeed` and `Fail` | *"Some state types, such as Choice, or terminal states, such as Succeed workflow state and Fail workflow state, don't support or use the End field"* |
+| Every other type carries exactly one of `Next` or `End` | *"Only one of Next or End can be used in a state"* |
+| A `Choice` state carries no `Next` of its own | *"Choice states do not support the End field. In addition, they use Next only inside their Choices field"* |
+| A `Choice` state has at least one `Choices` rule | *"Choices (Required) … You must define at least one rule in the Choice state"* |
+| Every top-level Choice Rule has a `Next`, and `Default` resolves when present | *"Default (Optional, Recommended) The name of the state to transition to if no Choice Rule evaluates to true"* |
+| A `Next` nested inside `And`, `Or` or `Not` is refused where it stands | *"the Next field can appear only in a top-level Choice Rule"* — not resolved and accepted; refused for being nested |
+| `"And": []` and `"Or": []` are refused, while an absent operator is fine | *"The values of the And and Or operators must be non-empty arrays of Choice Rules"* |
+| Every `Catch` entry has a `Next` | a Catcher with no `Next` has nowhere to send the error |
+| A `Parallel` state has `Branches`, and each branch is checked by these same rules | *"Each such state machine object must have fields named States and StartAt, whose meanings are exactly like those in the top level of a state machine"* |
+| A `Map` state carries exactly one of `ItemProcessor` or `Iterator` | `ItemProcessor` is marked *"(Required)"*; `Iterator` is under *"Deprecated fields"* and still accepted |
+| Every `Next`, `Catch[].Next`, Choice Rule `Next` and `Default` names a state in **its own** `States` object | *"Each branch must be self-contained"* (`Parallel`); *"States within the ItemProcessor field can only transition to each other"* (`Map`) |
+
+A definition with two faults reports the same one on every run: state names are
+walked in sorted order, because a map range would make the refusal a coin flip and
+the event log unreplayable.
+
+**Both spellings of a `Map` state's sub-state-machine are accepted, and both now
+run.** AWS says *"The ItemProcessor field replaces the now deprecated Iterator
+field"* and, on the same page, *"Step Functions Local doesn't currently support the
+ItemProcessor field. We recommend that you use the Iterator field with Step
+Functions Local."* Refusing either spelling would reject a document AWS accepts
+from exactly the class of tool substrate is, so the rule is *exactly one of the
+two*. Carrying both is refused: they name one field and nothing publishes a
+precedence. Before #1073 the executor read `Iterator` alone, so a `Map` written with
+`ItemProcessor` — the spelling AWS marks Required — iterated zero times and returned
+an empty array instead of failing.
+
+**What is still not checked, and a `200` here is still not ASL approval.** The rules
+above are structural: a rule exists only where a published AWS sentence makes the
+document malformed regardless of any input. Left unvalidated, deliberately:
+
+- **A field a state type does not support.** `ASLState` is one flat struct carrying
+  every type's members at once, so an `InputPath` on a `Succeed` state, or a
+  `Seconds` on a `Pass` state, is invisible to the validator. The three cases the
+  pages name outright — `End` on `Choice`, `Succeed` and `Fail` — are checked,
+  because those are the ones a generator actually emits.
+- **A `Next` on a `Succeed` or `Fail` state.** Both are terminal, so the transition
+  can never be taken, but the published sentence covers only `End`. Substrate
+  accepts it rather than borrowing a rule AWS does not state (#671).
+- **Everything that depends on the execution.** Whether a Choice Rule's comparison
+  can ever be true, whether a `Task`'s `Resource` ARN names anything, whether a
+  JSONPath resolves against the state's input, whether a `Retry` interval is
+  sensible — all of those are answers about a run, not about the document, and sit
+  on the workload-internal side of substrate's scope boundary.
+- **Field-level rules inside a state.** Each state type's own page carries
+  requirements about that type's own members — a `Wait` state's alternative timing
+  fields, a `Fail` state's `Error`/`Cause` pair, a `Map` state's `MaxConcurrency`.
+  Those are validation of a field's value rather than of the state machine's shape,
+  and none of them is enforced.
+- **The definition-size quota.** The service-quotas page publishes *"Maximum size of
+  state machine definition — 1 MB — Hard quota"*; substrate does not measure it, and
+  neither page publishes an error code for exceeding it.
 
 This is also where `API_StartSyncExecution` itself draws the line, which is worth
 recording because it is the only guidance either page gives: *"Error codes are

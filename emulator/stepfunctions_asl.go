@@ -372,14 +372,18 @@ func (p *StepFunctionsPlugin) aslRunMap(
 		}
 	}
 
-	if state.Iterator == nil {
+	// Either spelling of the sub-state-machine runs, because AWS accepts both — see
+	// [ASLState.mapWorkflow] for why reading Iterator alone made an ItemProcessor Map
+	// return an empty array instead of iterating.
+	workflow, _ := state.mapWorkflow()
+	if workflow == nil {
 		return []interface{}{}, state.Next, nil
 	}
 
 	results := make([]interface{}, 0, len(arr))
 	for _, item := range arr {
 		itemExec := &ExecutionState{History: []HistoryEvent{}}
-		output, err := p.executeASL(state.Iterator, aslMarshalStr(item), itemExec, reqCtx)
+		output, err := p.executeASL(workflow, aslMarshalStr(item), itemExec, reqCtx)
 		if err != nil {
 			return nil, "", &aslStateError{Error: "States.Runtime", Cause: err.Error()}
 		}

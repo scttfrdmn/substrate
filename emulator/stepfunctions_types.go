@@ -79,8 +79,14 @@ type ASLState struct {
 	// Branches holds the parallel branch definitions for a Parallel state.
 	Branches []StateMachineDefinition `json:"Branches"`
 
-	// Iterator is the sub-state machine for a Map state.
+	// Iterator is the sub-state machine for a Map state, under the spelling AWS has
+	// deprecated in favor of ItemProcessor but still accepts — and still recommends
+	// to Step Functions Local. See [ASLState.mapWorkflow].
 	Iterator *StateMachineDefinition `json:"Iterator"`
+
+	// ItemProcessor is the sub-state machine for a Map state, under the spelling the
+	// Inline Map page marks Required. See [ASLState.mapWorkflow].
+	ItemProcessor *StateMachineDefinition `json:"ItemProcessor"`
 
 	// ItemsPath is the reference path to the input array for a Map state.
 	ItemsPath string `json:"ItemsPath"`

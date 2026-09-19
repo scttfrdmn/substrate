@@ -157,6 +157,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   kept a leaking guard elsewhere in the same file. Counting what was actually left is what found those
   five; the comments now say which sweep routed which site, and the header records that
   `assertNoDecoderText` rather than a sentence in a comment is what keeps the rule true.
+- **`CreateStateMachine` and `UpdateStateMachine` refuse a definition that reads back perfectly and
+  still does not name a runnable state machine** (#1073). #996 made both operations check that the
+  definition was non-empty, valid JSON, a JSON object and free of wrongly-typed members — and stopped
+  there, so `{}` created a state machine and answered `200`, as did a `StartAt` naming no state, a state
+  with no `Type`, and a `Next` in one `Parallel` branch pointing into another. Each of those is now
+  `InvalidDefinition`/400 with a message naming the state and the field, because a caller fixing a
+  generated document cannot act on *"The provided Amazon States Language definition is not valid."*
+  Fourteen rules, each resting on a sentence AWS publishes: `States` present and non-empty (absent and
+  `{}` answer different messages, the distinction #1062 needed for WAFv2's `Addresses`), `StartAt`
+  naming a member of it, a published `Type` on every state, `End` refused on `Choice`/`Succeed`/`Fail`
+  and exactly one of `Next`/`End` required on the other five, `Choices` non-empty with a `Next` on every
+  top-level rule, `Branches` present on a `Parallel`, and every transition — `Next`, `Catch[].Next`, a
+  rule's `Next`, `Default` — resolving inside **its own** `States` object, which is what refuses a branch
+  that transitions out of itself. **Provenance correction:** the three capitalised-"MUST" sentences the
+  issue quotes are states-language.net, which AWS links but does not host; none of the AWS pages read for
+  this uses "MUST" at all, so every rule is cited to
+  `amazon-states-language-state-machine-structure.html` or to the state type's own page in AWS's words.
+  **A fifth trap the issue's rule list does not contain:** the `Choice` page publishes that *"the `Next`
+  field can appear only in a top-level Choice Rule"*, and `ChoiceRule` models a `Next` on every nested
+  rule — so a `Next` inside `And`/`Or`/`Not` is refused *where it stands* rather than resolved against
+  `States` and accepted, which a validator written to the acceptance criteria as phrased would have done.
+  State names are walked in sorted order, so a definition with two faults reports the same one on every
+  run; a map range would have made the refusal a coin flip and the event log unreplayable.
+- **The boundary is structure, not semantics, and `docs/services.md` now lists what is left out**
+  (#1073). A rule exists only where a published sentence makes the document malformed regardless of any
+  input. So a `Next` on a `Succeed` or `Fail` state is **accepted**, although it can never be taken:
+  only `End` is published for those types, and borrowing the rest by analogy is what #671 forbids. A
+  field a state type does not support is invisible — `ASLState` is one flat struct carrying every type's
+  members — apart from the three cases the pages name outright. And everything that depends on a run
+  stays unchecked: whether a comparison can be true, whether a `Task`'s `Resource` names anything,
+  whether a JSONPath resolves. The service reference states each of these, plus the 1 MB definition-size
+  quota substrate does not measure, replacing the paragraph that said only that conformance was
+  unchecked.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -207,6 +240,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValidationException` literals now route through `ssoValidationException`, and `wafv2ValidateScope`
   joins `wafv2ValidateCreateIPSet` in `wafv2_validate.go` so the enum's two published values are written
   once.
+- **`emulator/stepfunctions_asl_structure.go`, and `ASLState.ItemProcessor`** (#1073). One file holds
+  every structural rule with the AWS sentence it rests on beside it, so a correction is a one-place edit
+  and the two boundaries — structure over semantics, and only what AWS itself publishes — are stated
+  where the rules are rather than in a commit message. `ItemProcessor` is the one member the rules needed
+  that the type did not model, so the issue's claim that no schema widening is required is not quite
+  right: AWS marks `ItemProcessor` *"(Required)"* on the inline-`Map` page, lists `Iterator` under
+  *"Deprecated fields"*, and then tells Step Functions Local users to prefer `Iterator` — exactly the
+  class of tool substrate is. Refusing either spelling would therefore reject a document AWS accepts, so
+  the rule is *exactly one of the two*, and carrying both is refused because nothing publishes a
+  precedence between them.
+- **Five tests over the structural rules, including one that pins the determinism** (#1073). A
+  twenty-eight-case refusal table runs at **both** writers, each case asserting the code, the status,
+  AWS's message, the fault named in the decoded `Message`, and that nothing was stored or that the stored
+  definition did not move. An eleven-document acceptance test states what must still create — a `Succeed`
+  with neither `Next` nor `End`, a `Next` on a `Succeed`, nested `And`/`Not` with no `Next`, a
+  self-contained `Parallel`, both `Map` spellings, an `ItemProcessor` carrying an unmodelled
+  `ProcessorConfig` — because a validator is only as good as the documents it leaves alone.
+  `TestSFNASL_TwoFaultsReportTheSameOneEveryTime` runs a two-fault definition twelve times and asserts
+  the response body is byte-identical, which is the property sorted iteration exists for.
+  `TestSFNDefinition_ASLConformanceIsNotChecked` becomes `TestSFNDefinition_ASLStructureIsChecked` over
+  the same four definitions, each with the fault its message must now name.
+
+### Fixed
+- **A `Map` state written with `ItemProcessor` iterated zero times and returned an empty array**
+  (#1073). `aslRunMap` read `Iterator` alone, so the spelling AWS marks Required produced a silently
+  wrong answer rather than a refusal — the failure mode a validation guard exists to make impossible, not
+  merely legal. Both the validator and the executor now read `ASLState.mapWorkflow`, so they cannot
+  disagree about which member counts, and a new `StartSyncExecution` test iterates an `ItemProcessor`
+  `Map` over three items to pin it. Found while writing #1073's rules; it is why the rule accepts either
+  spelling instead of the one the type happened to model.
 
 ## [v0.119.0] - 2026-09-18
 

@@ -26,11 +26,13 @@ import (
 //     already a string, so this check is the one that catches a real in-tree producer rather than a
 //     hypothetical caller.
 //
-// What is **not** checked is Amazon States Language conformance. "{}" is accepted here although AWS
-// refuses it, because the ASL specification's requirements — a state machine MUST have a string field
-// named StartAt and an object field named States, and StartAt MUST name one of them — are a separate
-// body of rules with their own citation trail, and validating them is a larger job than this issue.
-// docs/services.md states the boundary so a consumer does not read a 200 here as ASL approval.
+// Then the structural rules, added by #1073, which #996 deliberately left out: "{}" used to be
+// accepted here although AWS refuses it, and so did a StartAt naming no state and a Next pointing out
+// of its own Parallel branch. Each rule and the AWS sentence it comes from is in
+// stepfunctions_asl_structure.go, along with the boundary against validating semantics — what a rule
+// can assert is that the document is malformed regardless of any input, never how an execution would
+// go. docs/services.md lists what is still unchecked, so a consumer does not read a 200 here as full
+// ASL approval.
 //
 // The parsed definition is returned because every caller needs it, and parsing it twice would let the
 // two copies disagree.
@@ -54,6 +56,15 @@ func sfnValidateDefinition(definition string) (*StateMachineDefinition, *AWSErro
 	var def StateMachineDefinition
 	if err := json.Unmarshal(trimmed, &def); err != nil {
 		return nil, sfnInvalidDefinition("a member of the definition has the wrong type")
+	}
+
+	// #996 stopped here, and `{}` created a state machine. Everything above asks
+	// whether substrate can read the document back; the structural rules ask whether
+	// it names a runnable state machine at all — see stepfunctions_asl_structure.go
+	// for each rule's published sentence and for where the line is drawn against
+	// validating semantics.
+	if awsErr := sfnValidateASLStructure(&def, ""); awsErr != nil {
+		return nil, awsErr
 	}
 	return &def, nil
 }
