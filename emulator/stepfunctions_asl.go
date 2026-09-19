@@ -195,7 +195,11 @@ func (p *StepFunctionsPlugin) aslFail(exec *ExecutionState, histID *int64, errCo
 	exec.History = append(exec.History, ev)
 	exec.Status = "FAILED"
 	exec.StopDate = p.tc.Now()
-	exec.ErrorDetails = errCode + ": " + cause
+	// Two fields, not one joined string (#1071). errCode here can be a Fail state's user-supplied
+	// Error, which may itself contain ": ", so the old `errCode + ": " + cause` could not be split
+	// back apart without attributing part of the caller's error code to the cause.
+	exec.ErrorCode = errCode
+	exec.ErrorCause = cause
 	return "", fmt.Errorf("%s: %s", errCode, cause)
 }
 

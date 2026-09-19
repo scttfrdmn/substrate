@@ -293,7 +293,22 @@ type ExecutionState struct {
 	// History holds the ordered list of events recorded during execution.
 	History []HistoryEvent `json:"History,omitempty"`
 
-	// ErrorDetails holds the error description for FAILED executions.
+	// ErrorCode is the published error code of a failed execution, reported as the response
+	// member `error`.
+	ErrorCode string `json:"ErrorCode,omitempty"`
+
+	// ErrorCause is the published explanation of a failed execution, reported as the response
+	// member `cause`.
+	ErrorCause string `json:"ErrorCause,omitempty"`
+
+	// ErrorDetails is the joined `code: cause` string written before #1071, kept only so a record
+	// persisted by an earlier substrate — or replayed from an event log written by one — still
+	// reports something. Nothing writes it any more; [sfnExecutionFailure] reads it as a fallback.
+	//
+	// It is two published members in one string. AWS publishes `error` as "The error code of the
+	// failure" (max 256) and `cause` as "A more detailed explanation of the cause of the failure"
+	// (max 32768) on both API_StartSyncExecution and API_DescribeExecution, and no operation read
+	// this field at all, so a failed execution's reason was recorded and then never reported.
 	ErrorDetails string `json:"ErrorDetails,omitempty"`
 }
 

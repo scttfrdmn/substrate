@@ -13546,8 +13546,8 @@ routes both.
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
 | ListStateMachines | Scoped to the caller's own account and Region |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
-| StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it |
-| DescribeExecution | Transitions to SUCCEEDED on describe; addressed by ARN |
+| StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it; twelve of the fourteen published response members are answered — see below (#1071) |
+| DescribeExecution | Addressed by ARN. The execution runs to a terminal status at `StartExecution`, so this reports rather than advances it; `error` and `cause` are answered on a failed execution — see below (#1071) |
 | StopExecution | Addressed by ARN |
 | ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
 | GetExecutionHistory | Addressed by ARN |
@@ -13762,6 +13762,49 @@ than from this page; **substrate does not model it** and serves
 `StartSyncExecution` on the same `states.{region}.amazonaws.com` endpoint as every
 other operation. A consumer whose client is configured against the AWS `sync-`
 host will not reach substrate.
+
+### A failed execution reports why it failed
+
+`StartSyncExecution` answered five of the fourteen members its Response Syntax
+publishes, and `DescribeExecution` seven of its twenty-one. Four of the gaps were
+the same four on both pages — `error`, `cause`, `inputDetails` and `outputDetails`
+— and the first two are the ones that mattered, because a failed execution's
+reason was recorded and then reported nowhere (#1071).
+
+On `StartSyncExecution` that is the whole of the observable failure, since AWS
+publishes the operation's contract as *"`StartSyncExecution` will return a `200 OK`
+response, even if your execution fails, because the status code in the API response
+doesn't reflect function errors."* A consumer testing a failure path saw
+`"status":"FAILED"` and nothing else.
+
+| Member | When it is answered |
+|--------|---------------------|
+| `error` | Only on a failed execution — the ASL error code, from a `Fail` state's `Error` or from the runtime |
+| `cause` | Only on a failed execution — the explanation, from a `Fail` state's `Cause` |
+| `input` / `inputDetails` | Whenever the execution carries input |
+| `output` / `outputDetails` | Only on a succeeded execution, per the published rule that `output` *"is set only if the execution succeeds"* |
+| `name`, `stateMachineArn` | Always, on `StartSyncExecution`, which omitted both |
+
+`error` and `cause` are **absent** rather than empty on a succeeded execution: the
+page gives no meaning to an empty `error`. `inputDetails` and `outputDetails` are
+`CloudWatchEventsExecutionDataDetails` objects carrying `included: true`, which is
+the page's own value — *"Always `true` for API calls."* — and not a derivation.
+**Pairing each details member with the payload member it describes is substrate's
+reading**: neither page states when they are present, and details about a payload
+the body does not carry would describe nothing.
+
+`status` on `StartSyncExecution` is one of the narrower three the operation
+publishes, `SUCCEEDED | FAILED | TIMED_OUT`, where `DescribeExecution` publishes
+six.
+
+**Two published members stay unreported, deliberately.** `billingDetails` reports
+the metering of a workload substrate does not run: `billedMemoryUsedInMB` is memory
+consumed inside the execution, which is resource-internal, and
+`billedDurationInMilliseconds` measured on the simulated clock would be `0` for a
+sync execution that completes inside one handler — a duration AWS would never
+return. `traceHeader` echoes a request member no path decodes, and the page
+publishes a precedence rule for it (the `X-Amzn-Trace-Id` header wins over the
+body), so answering it means modeling X-Ray's header rather than adding a field.
 
 ### A definition that cannot be read back, or cannot run, is refused when it is stored
 
