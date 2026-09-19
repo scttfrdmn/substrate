@@ -14255,11 +14255,14 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | Operation | Notes |
 |-----------|-------|
 | CreateRepository | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `imageTagMutability` defaults to `MUTABLE` and a value outside the published set is refused |
-| DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others |
-| DeleteRepository | Reports the deleted repository in the same shape |
+| DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400) |
+| DeleteRepository | Reports the deleted repository in the same shape; a repository holding images needs [`force`](#every-ecr-refusal-is-a-400), and its images go with it |
 | GetAuthorizationToken | Returns base64("AWS:password") |
 | PutImage | |
-| BatchGetImage | |
+| BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages` |
+| BatchDeleteImage | Removes tags from the repository's tag index; an entry that matches nothing is reported in `failures` |
+| DescribeImages | |
+| ListImages | Reports one entry per digest in the tag index |
 | TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
 | UntagResource | `tagKeys` is an array of strings, as published |
 | ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
@@ -14354,6 +14357,50 @@ accepts, and refusing it would be substrate inventing a bound.
 Substrate does not act on the setting — an `IMMUTABLE` repository still accepts a `PutImage` that
 reuses a tag. That is a separate question from whether the response reports what the request set, and
 the setting is recorded intent until an issue models the refusal.
+
+### Every ECR refusal is a 400
+
+Every ECR operation page publishes exactly one status above 400 — `ServerException` at 500, which
+substrate never answers — so every refusal an ECR handler can reach is a 400. That was read off the
+pages one at a time rather than generalised from one of them: `API_CreateRepository`,
+`API_DescribeRepositories`, `API_DeleteRepository`, `API_GetLifecyclePolicy`,
+`API_GetRepositoryPolicy`, `API_ListImages`, `API_DescribeImages`, `API_BatchGetImage` and
+`API_BatchDeleteImage` each publish their errors at 400 and nothing else below 500.
+
+Until #1090 four of substrate's five ECR codes carried a status no page publishes, at twelve sites:
+
+| Code | Was | Published | Sites |
+|------|-----|-----------|-------|
+| `RepositoryAlreadyExistsException` | 409 | 400 | 1 |
+| `RepositoryNotFoundException` | 404 | 400 | 8 |
+| `RepositoryPolicyNotFoundException` | 404 | 400 | 2 |
+| `LifecyclePolicyNotFoundException` | 404 | 400 | 1 |
+
+The codes were right, which is why no test noticed: `ecr_plugin_test.go` asserted that a refusal
+happened and which code it carried, never its status. But the status is the part a consumer branches
+on before it has parsed a body — an SDK's retry classifier reads it, and 409 is what
+CloudFormation's own create-exists probe looks for — so every caller keying on the status was told
+something the service never says. `InvalidParameterException`/400 was already right at the
+twenty-seven sites that answer it.
+
+Two published refusals also had no site they could fire from:
+
+- **`RepositoryNotFoundException` on the four image operations.** `ListImages`, `DescribeImages`,
+  `BatchGetImage` and `BatchDeleteImage` each read the repository's tag index and never the
+  repository record, so a name that addresses nothing read as an empty index and each answered 200
+  with an empty result — indistinguishable from a repository that exists and holds no images.
+- **`RepositoryNotEmptyException` on `DeleteRepository`.** `force` was decoded into a field nothing
+  read, so a repository full of images was deleted silently. A repository's contents are measured by
+  its tag index, the same way every operation that reports contents measures them: an image pushed
+  without a tag is written under its digest and entered in no index, so nothing in this plugin can
+  enumerate it. A forced delete now removes the images too — the index used to outlive the
+  repository, so a name re-created after a delete reported the previous repository's images.
+
+`DescribeRepositories` is the third site where the refusal could not fire, and the reading there is
+narrower: a name the **caller** supplied is answered for or refused, while a name read out of
+substrate's own index is skipped, because a missing record there is an internal inconsistency rather
+than a caller's mistake. Before #1090 every miss was dropped from the list, so a request naming one
+real and one imaginary repository answered 200 with a single entry.
 
 ### CloudFormation resource types
 

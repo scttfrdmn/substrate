@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -288,10 +289,20 @@ func TestECRPlugin_DeleteRepository(t *testing.T) {
 		t.Fatalf("want status 200, got %d", delResp.StatusCode)
 	}
 
-	// Describe should return empty.
-	descResp, err := p.HandleRequest(ctx, ecrRequest(t, "DescribeRepositories", map[string]any{
+	// Describing the name by hand now refuses rather than answering an empty list: the name is
+	// one the caller asked about, and API_DescribeRepositories publishes
+	// RepositoryNotFoundException for it (#1090). The empty-list reading this case used to
+	// assert is what let that refusal never fire.
+	_, err = p.HandleRequest(ctx, ecrRequest(t, "DescribeRepositories", map[string]any{
 		"repositoryNames": []string{"to-delete"},
 	}))
+	var descErr *emulator.AWSError
+	if !errors.As(err, &descErr) || descErr.Code != "RepositoryNotFoundException" {
+		t.Fatalf("want RepositoryNotFoundException describing a deleted repository, got %v", err)
+	}
+
+	// Asking for the whole registry still answers, and the repository is gone from it.
+	descResp, err := p.HandleRequest(ctx, ecrRequest(t, "DescribeRepositories", map[string]any{}))
 	if err != nil {
 		t.Fatalf("DescribeRepositories after delete: %v", err)
 	}
