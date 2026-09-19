@@ -5,12 +5,19 @@ import "net/http"
 // EFS's refusals for a request substrate could not use.
 //
 // #950 found four sites in efs_plugin.go answering MalformedData for a body that would not decode.
-// That code is not EFS's — the string appears nowhere in EFS's documentation — and EFS has no
-// common-errors page to fall back to: the CommonErrors link every operation page prints redirects to
-// the user guide's index, so the fifteen-entry boilerplate other services publish is not available
-// here.
+// That code is not EFS's — the string appears nowhere in EFS's documentation.
 //
-// It does not need to be. BadRequest/400 is in the Errors section of all four guarded operations —
+// #950 also recorded that EFS had no common-errors page to fall back to, because the user guide's
+// api-errors.html redirects to the guide's index. **That is no longer true, and #1064 corrected it:**
+// https://docs.aws.amazon.com/efs/latest/APIReference/CommonErrors.html now publishes the same
+// fifteen-entry boilerplate sixteen other services do, ValidationError/400 included. AWS's
+// consolidation did not only change what a page says — it created pages that did not exist, which is
+// the one direction the #1064 sweep was not looking in.
+//
+// The answer below is unchanged all the same, and the reason is the rule rather than luck: step 1 of
+// #950's procedure is the operation's own Errors section and step 2 is the common page, so a common
+// page appearing underneath a satisfied step 1 changes nothing. BadRequest/400 is in the Errors
+// section of all four guarded operations —
 // CreateFileSystem, CreateAccessPoint, CreateMountTarget and TagResource — glossed, on each of them,
 // "Returned if the request is malformed or contains an error such as an invalid parameter value or a
 // missing required parameter." That describes this condition in AWS's own words, and it is the code

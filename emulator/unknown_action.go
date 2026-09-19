@@ -26,13 +26,20 @@ import (
 //     using." Confirmed on a JSON-RPC service's Common Errors page (DynamoDB) and
 //     a REST-JSON one's (Lambda), which agree on both the code and the 404.
 //
-//   - Query, "ec2" and REST-XML services publish nothing for it. AWS's current
-//     Common Errors pages carry no unknown-action code at all for them — the
-//     InvalidAction entry they once had has been removed, checked on EC2's, IAM's
-//     and SNS's pages — so neither the code nor the message below can be cited to
-//     the live reference. Substrate keeps InvalidAction because it is the code the
-//     Query protocol has always used, an SDK caller's error branch is written
-//     against it, and the reference offers no replacement to move to.
+//   - Query, "ec2" and REST-XML services publish nothing for it on the pages AWS
+//     has regenerated: the eighteen-entry Query list is byte-identical across EC2,
+//     RDS, IAM, ELB and CloudFormation and carries no unknown-action code, so the
+//     InvalidAction entry those pages once had is gone from all five.
+//
+//     #1064 found that it is not gone from the reference. SQS's Common Errors page
+//     is the one Query-family list AWS has not regenerated — eighteen entries, but a
+//     different set and different statuses — and it still publishes InvalidAction at
+//     exactly the 400 below. So the code and status are a live citation rather than
+//     substrate's invention, which is what #950's earlier reading called them. The
+//     citation is one step removed, because substrate routes sqs itself as
+//     errProtoJSONRPC (error_protocol.go) and so never reaches this arm for SQS; what
+//     SQS's page establishes is that the Query family's code for this condition is
+//     still published somewhere, not that any one service answers it.
 //
 // service is the plugin's own [Plugin.Name]. An unregistered service falls back to
 // the Query answer, which is [errorProtocolFor]'s own default with no
