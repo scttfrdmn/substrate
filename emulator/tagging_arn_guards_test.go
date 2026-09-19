@@ -197,12 +197,21 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 			"identities or invalidations\", and substrate stores all three in one namespace, so the " +
 			"type segment is the whole of the boundary",
 	}, {
-		name: "classic load balancer",
-		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/my-classic-lb",
-		why: "one segment after \"loadbalancer/\" is AWS's *classic* shape, where ELBv2's is three " +
-			"(app/<name>/<id>); substrate models no classic load balancer, so there is nothing to read " +
-			"a tag back from, and the arity is what tells the two apart (#863). This row replaced an " +
-			"ELBv2 ARN that went stale the moment #863 gave the service an arm",
+		name: "load balancer arn of neither generation's arity",
+		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/my-alb",
+		why: "the arity after \"loadbalancer/\" is what tells the two ELB generations apart (#863): " +
+			"one segment is classic and three (app/<name>/<id>) is ELBv2, so two segments is neither " +
+			"and no kind claims it. This row has now gone stale twice — it was an ELBv2 ARN until " +
+			"#863 gave the service an arm, and a classic ARN until #844 gave substrate a classic " +
+			"record for the tagging API to resolve, which is why it is written against the arity " +
+			"rule itself rather than against a generation",
+	}, {
+		name: "load balancer arn with no resource part at all",
+		arn:  "arn:aws:elasticloadbalancing:us-east-1:123456789012:",
+		why: "the arm's scope parser is satisfied by six colon-separated fields and does not care " +
+			"that the sixth is empty, so this reaches the two classifiers with nothing for either " +
+			"to read a type out of — the one shape that gets past the scope gate and still names " +
+			"no resource, and the reason both classifiers check rather than assume",
 	}}
 
 	for _, tc := range cases {

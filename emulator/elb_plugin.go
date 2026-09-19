@@ -38,11 +38,28 @@ func (p *ELBPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 // Shutdown is a no-op for ELBPlugin.
 func (p *ELBPlugin) Shutdown(_ context.Context) error { return nil }
 
-// HandleRequest dispatches an ELBv2 query-protocol request to the appropriate handler.
+// HandleRequest dispatches an Elastic Load Balancing query-protocol request to the appropriate
+// handler.
+//
+// One endpoint serves two APIs, and three action names exist in both with different shapes, so the
+// Query protocol's own `Version` member is read first. Only those three names are discriminated:
+// every other action belongs to one generation, and an action only the classic API publishes is
+// still an unrouted action. [elbClassicRequest] and the comment above it carry the whole argument,
+// including why an absent version resolves to ELBv2 (#844).
 func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	action := req.Operation
 	if action == "" {
 		action = req.Params["Action"]
+	}
+	if elbClassicRequest(req) {
+		switch action {
+		case "CreateLoadBalancer":
+			return p.createClassicLoadBalancer(ctx, req)
+		case "DescribeLoadBalancers":
+			return p.describeClassicLoadBalancers(ctx, req)
+		case "DeleteLoadBalancer":
+			return p.deleteClassicLoadBalancer(ctx, req)
+		}
 	}
 	switch action {
 	case "CreateLoadBalancer":

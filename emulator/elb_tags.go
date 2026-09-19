@@ -142,11 +142,17 @@ func elbTooManyTagsError() *AWSError {
 // this table exists rather than one shared NotFound. TrustStoreNotFound is the fifth
 // code those operations list and has no row here because substrate models no trust
 // store, so no ARN can ever name one.
+// The classic row is the same code at the same status, from the classic API's own pages: 2012-06-01
+// `AddTags`, `RemoveTags` and `DescribeTags` each publish `LoadBalancerNotFound` at 400, and that is
+// the code the Resource Groups Tagging API's classic arm turns into
+// [errTagResourceNotFound] (#844). Nothing in ELBv2's three tag operations ever reaches it — they
+// refuse a classic ARN before resolving it, see [elbResolveTaggedResource].
 var elbNotFoundCodes = map[string]string{
 	elbKindLoadBalancer: "LoadBalancerNotFound",
 	elbKindTargetGroup:  "TargetGroupNotFound",
 	elbKindListener:     "ListenerNotFound",
 	elbKindRule:         "RuleNotFound",
+	elbKindClassicLB:    "LoadBalancerNotFound",
 }
 
 // elbNotFoundError returns the refusal for an ARN of a known kind that names nothing.
@@ -179,17 +185,33 @@ func elbNotFoundError(kind, arn string) *AWSError {
 // `…:loadbalancer/app/${LoadBalancerName}/${LoadBalancerId}` — three. A `strings.Contains(arn,
 // ":loadbalancer/")` test, which is what this did before #863, matches both, so a classic ARN was
 // classified as an ELBv2 load balancer and scanned against the `lb:` prefix where only ELBv2
-// records live. Nothing writes a classic record today, so that resolved to nothing rather than to
-// the wrong record — but it answered `LoadBalancerNotFound`, which tells a caller a load balancer
-// of that ARN could exist, and it is the shape a classic writer would turn into a genuine
-// collision. This is [elbChildARN]'s `wantSegments` check applied to the read side.
+// records live. When #863 made this change nothing wrote a classic record, so the substring test
+// resolved to nothing rather than to the wrong record — but it answered `LoadBalancerNotFound`,
+// which tells a caller a load balancer of that ARN could exist. #844 now writes classic records,
+// under [elbClassicLBKeyPrefix] rather than `lb:` precisely so that the collision the substring test
+// was one writer away from cannot happen: a classic `web` and an ELBv2 `web` are two resources and
+// they live under two keys. This is [elbChildARN]'s `wantSegments` check applied to the read side.
 //
-// A classic ARN is therefore *unclassified* rather than mapped to a kind, and every caller here
-// refuses one: [elbResolveTaggedResource] answers `ValidationError`, which is what an ELBv2
-// operation can honestly say about an ARN no ELBv2 resource type has. **That code is substrate's
-// reading** — AddTags, RemoveTags and DescribeTags publish four `*NotFound` codes and no code for
-// an ARN of the wrong generation — chosen because the alternative asserts the resource merely does
-// not exist yet.
+// # This classifier stays ELBv2-only, and that is caller-scoped rather than incidental
+//
+// A classic ARN is *unclassified* here, and every caller of this function refuses one:
+// [elbResolveTaggedResource] answers `ValidationError`, which is what an ELBv2 operation can
+// honestly say about an ARN no ELBv2 resource type has. **That code is substrate's reading** —
+// AddTags, RemoveTags and DescribeTags publish four `*NotFound` codes and no code for an ARN of the
+// wrong generation — chosen because the alternative asserts the resource merely does not exist yet.
+//
+// That refusal is not a gap left by #844; it is what ELBv2 publishes. Its `AddTags` enumerates its
+// taggable resources verbatim — "You can tag your Application Load Balancers, Network Load
+// Balancers, Gateway Load Balancers, target groups, trust stores, listeners, and rules" — and a
+// Classic Load Balancer is absent from the list. So a classic ARN handed to an ELBv2 tag operation
+// is a caller mistake whichever generation substrate models.
+//
+// The generation-blind callers — the Resource Groups Tagging API and CloudFormation's two tag
+// writers — go through [elbAnyGenerationKindFromARN] and [elbResolveAnyGenerationTaggedResource]
+// instead. The split is the whole of why there are two classifiers: IAM and the tagging API are one
+// surface across both generations (the vendored Service Authorization Reference lists the classic
+// `loadbalancer` resource under the single `AddTags` *action*, because one IAM action spans both
+// APIs), while the ELBv2 *API* is not.
 //
 // # Both nested and flat, and why the order is the arity
 //
@@ -240,6 +262,29 @@ func elbResourceKindFromARN(arn string) string {
 	return ""
 }
 
+// elbAnyGenerationKindFromARN reports which kind an ARN names across **both** ELB generations,
+// adding [elbKindClassicLB] to the four [elbResourceKindFromARN] classifies.
+//
+// This is the classifier for the surfaces that are one surface across both APIs: the Resource Groups
+// Tagging API, whose documented rule is that `ResourceTypeFilters` matches the type segment embedded
+// in the ARN — which both generations spell `loadbalancer` — and CloudFormation's two tag writers,
+// which stamp whatever resource a template deployed. Neither has an ELB generation; a caller holding
+// a classic ARN there is not making a mistake about which API it is talking to.
+//
+// ELBv2's own three tag operations deliberately do not use it. [elbResourceKindFromARN] carries the
+// argument for that split, and it is the reason this is a second function rather than a widening of
+// the first: widening it would have moved the refusal out of ELBv2's tag doors, where AWS publishes
+// it.
+func elbAnyGenerationKindFromARN(arn string) string {
+	if kind := elbResourceKindFromARN(arn); kind != "" {
+		return kind
+	}
+	if elbClassicNameFromARN(arn) != "" {
+		return elbKindClassicLB
+	}
+	return ""
+}
+
 // The state-key prefixes the four taggable ELBv2 records are stored under.
 //
 // They are constants rather than literals at each site because three readers outside ELB's own
@@ -271,6 +316,8 @@ func elbKindKeyPrefix(kind string) string {
 		return elbListenerKeyPrefix
 	case elbKindRule:
 		return elbRuleKeyPrefix
+	case elbKindClassicLB:
+		return elbClassicLBKeyPrefix
 	default:
 		return ""
 	}
@@ -312,10 +359,12 @@ const (
 // against one of those would leave an array looking like a record — the failure the same guard
 // prevents for kms, sns, secretsmanager, ssm, rds and acm. Every one of the four taggable kinds
 // spells its tags member the same way, so unlike those six namespaces the guard is the only
-// per-kind discrimination this arm needs.
+// per-kind discrimination this arm needs. [ELBClassicLoadBalancer] spells it the same way too, which
+// is why #844's fifth prefix is one more entry here rather than a second guard.
 func elbKeyIsTaggable(key string) bool {
 	for _, prefix := range []string{
 		elbLBKeyPrefix, elbTGKeyPrefix, elbListenerKeyPrefix, elbRuleKeyPrefix,
+		elbClassicLBKeyPrefix,
 	} {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -428,18 +477,50 @@ func elbDecodeTaggedResource(kind, stateKey string, data []byte) *elbTaggedResou
 				r.EverTagged = everTagged
 				return json.Marshal(r)
 			}}
+	case elbKindClassicLB:
+		return elbClassicDecodeTaggedResource(stateKey, data)
 	default:
 		return nil
 	}
 }
 
-// elbResolveTaggedResource finds the record an ARN names, or the refusal for it.
+// elbResolveTaggedResource finds the **ELBv2** record an ARN names, or the refusal for it.
+//
+// This is the resolver ELBv2's own AddTags, RemoveTags and DescribeTags use, and it refuses a
+// classic ARN: [elbResourceKindFromARN] carries the argument for why the refusal belongs at those
+// three doors. The generation-blind callers use [elbResolveAnyGenerationTaggedResource].
+func elbResolveTaggedResource(state StateManager, scope, arn string) (*elbTaggedResource, *AWSError, error) {
+	return elbResolveTaggedResourceOfKind(state, elbResourceKindFromARN(arn), scope, arn)
+}
+
+// elbResolveAnyGenerationTaggedResource finds the record an ARN names in **either** ELB generation.
+//
+// Used by the Resource Groups Tagging API's ELB arm and by CloudFormation's two ELB tag writers, for
+// the reason [elbAnyGenerationKindFromARN] gives: those three are one surface across both APIs, so a
+// classic ARN reaching them is not a caller mistake. A classic ARN that names no record resolves to
+// `LoadBalancerNotFound` — the code the classic tag operations publish — rather than to the
+// wrong-generation `ValidationError`, because for these callers the generation was never in
+// question (#844).
+func elbResolveAnyGenerationTaggedResource(
+	state StateManager, scope, arn string,
+) (*elbTaggedResource, *AWSError, error) {
+	return elbResolveTaggedResourceOfKind(state, elbAnyGenerationKindFromARN(arn), scope, arn)
+}
+
+// elbResolveTaggedResourceOfKind is the body both resolvers share, taking the kind its caller's
+// classifier resolved.
+//
+// The kind is a parameter rather than something re-derived here so that which classifier ran is the
+// caller's decision and is visible at the call site. An empty kind is the classifier's "this ARN
+// names nothing I handle", and the refusal for it is the same in both directions: the ARN names no
+// resource type the caller can tag.
 //
 // A read that genuinely fails is reported as an error rather than as a NotFound: a
 // broken backend is not an absent resource, and answering LoadBalancerNotFound for one
 // would tell a consumer's retry loop the wrong thing.
-func elbResolveTaggedResource(state StateManager, scope, arn string) (*elbTaggedResource, *AWSError, error) {
-	kind := elbResourceKindFromARN(arn)
+func elbResolveTaggedResourceOfKind(
+	state StateManager, kind, scope, arn string,
+) (*elbTaggedResource, *AWSError, error) {
 	if kind == "" {
 		return nil, elbTagValidationError("'%s' is not a valid Elastic Load Balancing resource ARN", arn), nil
 	}

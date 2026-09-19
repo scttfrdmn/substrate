@@ -267,29 +267,43 @@ func TestELBTagging_TheMergeLeavesTheRestOfTheRecordIntact(t *testing.T) {
 	}
 }
 
-// TestELBTagging_AClassicLoadBalancerARNIsRefused pins the fifth acceptance row of #863: a classic
-// ARN is refused with a documented code rather than silently keyed to a v2 record.
+// TestELBTagging_AClassicLoadBalancerARNIsCallerScoped pins the reversal #844 makes of #863's fifth
+// acceptance row: which door the ARN arrives at decides whether it is accepted.
 //
 // A classic ARN carries one segment after `loadbalancer/` where an ELBv2 one carries three
-// (`app/<name>/<id>`), which is the arity [elbResourceKindFromARN] now discriminates on. Before that
-// it matched the `:loadbalancer/` substring and scanned the `lb:` prefix where v2 load balancers live,
-// so the refusal a caller got — `LoadBalancerNotFound` — asserted that a *v2* load balancer of that
-// ARN could have existed. Substrate models no classic load balancer, so the honest answer is that the
-// type is not one it tags: `ValidationError` from ELBv2's own AddTags, and the
-// unsupported-type refusal from the tagging API. The split is substrate's reading of a `FailureInfo`
-// page that can be read either way; `tagging_arn_guards_test.go` records why.
-func TestELBTagging_AClassicLoadBalancerARNIsRefused(t *testing.T) {
+// (`app/<name>/<id>`), which is the arity [elbResourceKindFromARN] discriminates on, and that arity
+// check stands — it is what keeps a classic ARN off the `lb:` prefix where ELBv2's load balancers
+// live, where it would have been answered `LoadBalancerNotFound` as though a *v2* load balancer of
+// that ARN could have existed. What #863 could not get right is the *answer*, because until #844
+// substrate held no classic record to give.
+//
+// Now it does, and the two callers diverge because AWS's own pages diverge:
+//
+//   - ELBv2's `AddTags` enumerates the resources it tags — "load balancers, target groups, listeners
+//     and rules" — and Classic is absent from that list, with no published code for a
+//     wrong-generation ARN. So the refusal stays, at the code ELBv2's own consolidated Common Errors
+//     page publishes.
+//   - The Resource Groups Tagging API matches on the type segment embedded in an ARN, which both
+//     generations spell `loadbalancer`, and the Service Authorization Reference lists classic
+//     `loadbalancer` under the single `AddTags` action. So RGT accepts it, and a tag written through
+//     RGT is readable back through RGT — #765's rule, which the old answer could not meet because
+//     there was no resource to meet it for.
+//
+// The generation-blind half goes through [elbAnyGenerationKindFromARN]; ELBv2's three tag doors keep
+// [elbResourceKindFromARN].
+func TestELBTagging_AClassicLoadBalancerARNIsCallerScoped(t *testing.T) {
 	t.Parallel()
 	ts := elbTaggingServer(t)
 
-	// A name that a v2 load balancer also has, so a collision would be visible rather than merely
-	// possible. The v2 record is what the classic ARN used to key into.
+	// One name held by both generations, so a collision would be visible rather than merely possible:
+	// the two records are what the arity check keeps apart.
 	v2 := elbCreateLB(t, ts.URL, "collide", nil)
 	taggingTagResources(t, ts, v2, map[string]string{"env": "prod"})
+	elbClassicCreate(t, ts.URL, "collide", nil)
 
 	classic := "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount + ":loadbalancer/collide"
 
-	t.Run("ELBv2 AddTags", func(t *testing.T) {
+	t.Run("ELBv2 AddTags still refuses it", func(t *testing.T) {
 		resp := elbRequest(t, ts.URL, map[string]string{
 			"Action": "AddTags", "ResourceArns.member.1": classic,
 			"Tags.member.1.Key": "env", "Tags.member.1.Value": "classic",
@@ -299,19 +313,28 @@ func TestELBTagging_AClassicLoadBalancerARNIsRefused(t *testing.T) {
 		assert.Equal(t, "ValidationError", elbErrorCode(t, resp))
 	})
 
-	t.Run("tagging API", func(t *testing.T) {
-		for _, op := range []string{"TagResources", "UntagResources"} {
-			failures := tagResourcesFailures(t, ts, op, classic)
-			got, ok := failures[classic]
-			require.True(t, ok, "%s reported no failure for a classic ARN", op)
-			assert.Equal(t, "InternalServiceException", got.ErrorCode, op)
-			assert.Equal(t, 500, got.StatusCode, op)
-		}
+	t.Run("the tagging API accepts it", func(t *testing.T) {
+		taggingTagResources(t, ts, classic, map[string]string{"tier": "classic"})
+		assert.Equal(t, map[string]string{"tier": "classic"}, getResourcesTags(t, ts, classic))
+		assert.Contains(t, getResourcesARNs(t, ts, "elasticloadbalancing:loadbalancer"), classic,
+			"the type segment both generations spell is what the filter matches")
+
+		taggingUntagResources(t, ts, classic, []string{"tier"})
+		assert.Empty(t, getResourcesTags(t, ts, classic))
 	})
 
-	// The v2 load balancer of the same name is untouched by either refusal, which is the collision
+	// The v2 load balancer of the same name carries its own tags throughout, which is the collision
 	// the arity check exists to make impossible.
 	assert.Equal(t, map[string]string{"env": "prod"}, elbDescribeTags(t, ts.URL, v2)[v2])
+
+	// And a classic ARN naming nothing is still refused by the tagging API, at the absent-resource
+	// code [TestELBTagging_AnAbsentELBResourceIsRefusedIndistinguishably] pins: accepting the
+	// generation is not accepting a resource that is not there.
+	absent := "arn:aws:elasticloadbalancing:us-east-1:" + taggingTestAccount + ":loadbalancer/no-such-lb"
+	got, ok := tagResourcesFailures(t, ts, "TagResources", absent)[absent]
+	require.True(t, ok, "TagResources reported no failure for an absent classic load balancer")
+	assert.Equal(t, "InvalidParameterException", got.ErrorCode)
+	assert.Equal(t, 400, got.StatusCode)
 }
 
 // TestELBTagging_AnAbsentELBResourceIsRefusedIndistinguishably asserts that "this resource is not

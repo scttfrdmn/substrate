@@ -2375,7 +2375,9 @@ does not exist in substrate to return:
   value the template already has, and the ARN is the one an `Unsubscribe` takes.
 - `AWS::ElasticLoadBalancing::LoadBalancer` (classic) — documented as the DNS name.
   The classic load balancer has no deploy helper at all and falls through to the
-  generic stub, so there is no DNS name to return.
+  generic stub, so there is no DNS name to return. #844 routed the classic
+  `CreateLoadBalancer`, which does mint a DNS name, but a deploy helper calling it is
+  deliberately not part of that work — so this divergence stands until one exists.
 - `AWS::EC2::SecurityGroupIngress` and `::SecurityGroupEgress` — no per-rule identity
   exists, and `Ref` on the ingress type is not documented.
 - `AWS::EC2::SecurityGroup` — AWS returns the group **name** for a group created
@@ -10163,6 +10165,97 @@ success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRul
 client while substrate's own tests passed, because those tests read the XML directly instead
 of through an SDK's parser.
 
+### The Classic (2012-06-01) API, and the version that routes it
+
+Elastic Load Balancing is two APIs at one endpoint. `elasticloadbalancing.{region}.amazonaws.com`
+serves both the Classic Load Balancer API (`2012-06-01`) and ELBv2 (`2015-12-01`); they share a
+signing name, an IAM prefix (`elasticloadbalancing:`) and three **action names** —
+`CreateLoadBalancer`, `DescribeLoadBalancers` and `DeleteLoadBalancer` — while publishing different
+request members, different response shapes and different errors for each. AWS tells them apart by
+the Query protocol's own `Version` parameter. Substrate read `Version` nowhere, so all three action
+names were answered by the ELBv2 handler whatever the caller sent
+([#844](https://github.com/scttfrdmn/substrate/issues/844)):
+
+| A `Version=2012-06-01` call | answered, before |
+|-----------------------------|------------------|
+| `CreateLoadBalancer` | `ValidationError`/400 on `Name is required` — ELBv2's member name for what classic spells `LoadBalancerName` |
+| `DeleteLoadBalancer` | `ValidationError`/400 on a missing `LoadBalancerArn`, for an operation that publishes **no** errors at all and documents idempotent success |
+| `DescribeLoadBalancers` | **HTTP 200 carrying an ELBv2 body** |
+
+The third is the worst of the three, and the reason is the wrapper: *both* generations name their
+result element `DescribeLoadBalancersResult`, so botocore finds the wrapper it is looking for and
+decodes an **empty `LoadBalancerDescriptions` list**. No error is raised anywhere. A consumer is
+simply told it owns no classic load balancers.
+
+**The discriminator is `Version`, and it applies to those three action names only.** An absent
+`Version` resolves to ELBv2, as does one substrate does not recognize — every request substrate
+already answered, every fixture and every recorded event log therefore answers exactly as it did
+before, and no error is invented for a version AWS publishes no code for. The member names are
+*not* used to discriminate, because a classic `DescribeLoadBalancers` can legitimately carry no
+members at all and would be indistinguishable from an ELBv2 one.
+
+Three operations are routed:
+
+| Operation | Notes |
+|-----------|-------|
+| CreateLoadBalancer | `LoadBalancerName` + `Listeners.member.N` required; accepts `AvailabilityZones`, `Subnets`, `SecurityGroups`, `Scheme`, `Tags.member.N`; answers **`DNSName` alone** |
+| DescribeLoadBalancers | `LoadBalancerNames.member.N`, `Marker`, `PageSize` (1–400, default 400); answers `LoadBalancerDescriptions.member.N` |
+| DeleteLoadBalancer | `LoadBalancerName`; an absent load balancer is a **success** |
+
+Details a consumer can observe:
+
+- **`CreateLoadBalancer` answers `DNSName` and nothing else.** That is the whole of its published
+  Response Elements, where the ELBv2 operation of the same name answers the load balancer it made.
+  An `internal` scheme prefixes the name with `internal-`, following AWS's published sample.
+- **A classic record has its own key space**, so one name can be held by *both* generations at once
+  and each generation's `DescribeLoadBalancers` reports only its own. AWS scopes the name per
+  generation — each `CreateLoadBalancer` publishes its duplicate-name refusal against its own
+  generation only.
+- **A classic ARN carries one segment after `loadbalancer/`** (`…:loadbalancer/<name>`) where an
+  ELBv2 one carries three (`…:loadbalancer/app/<name>/<id>`). That arity is how the two are told
+  apart everywhere, and it comes from AWS's own Service Authorization Reference format strings.
+- **Eight of `LoadBalancerDescription`'s sixteen members are absent**, each because the operation
+  that would set it is not routed: no instance is registered, no health check is configured, no
+  policy or backend-server description exists, and no source security group is minted. `VPCId` is
+  reported empty rather than guessed, because nothing here resolves a subnet to a VPC.
+  `PolicyNames` *is* emitted, as an empty element, because AWS publishes it as one: "The policies.
+  If there are no policies enabled, the list is empty."
+- **Every refusal is a code the operation's own page publishes**: `ValidationError`/400 for a member
+  that is missing or malformed (the consolidated Query Common Errors list), `UnsupportedProtocol`,
+  `InvalidScheme` and `DuplicateLoadBalancerName` at 400, `LoadBalancerNotFound`/400 for a name in
+  `LoadBalancerNames.member.N` that names nothing, and `InvalidConfigurationRequest` at **HTTP
+  409** — the one non-400 among `CreateLoadBalancer`'s twelve published errors — for two listeners
+  claiming one `LoadBalancerPort`. **That last mapping is substrate's reading**: `DuplicateListener`
+  is published on `CreateLoadBalancerListeners`, an operation this one does not have, so borrowing
+  it would invent a code for the page being implemented.
+- **A create's `Tags.member.N` reaches the record**, and its published `DuplicateTagKeys`/400 is
+  answered before the record is written, so a create carrying a tag it cannot legally apply leaves no
+  load balancer behind. The tags are readable through the Resource Groups Tagging API (see the
+  tagging section below); the classic `DescribeTags` is not routed.
+- **A store failure is answered as one, and an unusable record is not.** A create whose record could
+  not be written still has a DNS name to report and a describe whose listing could not be read still
+  has an empty list to report, so both propagate as a 5xx rather than as a plausible success — the
+  same silent wrong answer this section exists to remove, arriving by another route. One record the
+  listing cannot read among several is the opposite case and is skipped, because failing the call
+  would hide every healthy load balancer behind one bad key; the tagging resolvers read such a record
+  as absent for the same reason.
+- **An unissued `Marker` is refused rather than silently restarting the listing**, at
+  `ValidationError`. The operation publishes no token code of its own, so the code comes from the
+  Common Errors page that covers it; the refusal itself is substrate's reading, for the reason
+  [#915](https://github.com/scttfrdmn/substrate/issues/915) records — a paging loop cannot see a
+  cursor that resets.
+
+**What is deliberately not routed**, so that three operations are not read as the whole API: the
+classic tag trio (`AddTags`, `RemoveTags`, `DescribeTags` at `2012-06-01`, whose published tag cap
+is **10** against ELBv2's 50 and whose `RemoveTags` takes `Tags.member.N` of `TagKeyOnly`),
+`RegisterInstancesWithLoadBalancer`, `CreateLoadBalancerListeners`, the health-check and policy
+operations, and the `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper. Any of them answers
+`InvalidAction`/400, which is the Query family's unknown-action answer. `TooManyLoadBalancers` and
+the 20-per-Region quota are not modelled either: substrate enforces no ELB quota in **either**
+generation, and enforcing one only would be half-fidelity. A classic load balancer is therefore
+taggable through its own create and through the Resource Groups Tagging API, and not through
+classic `AddTags`.
+
 ### Account limits
 
 `DescribeAccountLimits` reports 23 Elastic Load Balancing limits. **Nothing in substrate
@@ -10219,8 +10312,8 @@ Two behaviors are substrate's decisions rather than AWS's published text:
 
 | | |
 |---|---|
-| `NextMarker` | **Absent** when the walk is exhausted, not empty. v2 documents "Otherwise, this is null"; classic documents "If there are no additional results, the string is empty" — a present-but-empty element. Following v2 is following the shapes this handler answers; the difference is recorded for #844 |
-| `PageSize` | A value outside the documented 1–400, or a non-numeric one, **falls back to the default** rather than being refused. The default is the documented maximum, so an unparameterized call returns the whole set in one page and a `PageSize` above 400 is indistinguishable from a clamp |
+| `NextMarker` | **Absent** when the walk is exhausted, not empty. v2 documents "Otherwise, this is null"; classic documents "If there are no additional results, the string is empty" — a present-but-empty element. Following v2 is following the shape this handler answers. The classic `DescribeLoadBalancers` #844 routed follows v2 here too, which is a divergence from its own page and is recorded as one |
+| `PageSize` | A value outside the documented 1–400, or a non-numeric one, **falls back to the default** rather than being refused. The default is the documented maximum, so an unparameterized call returns the whole set in one page and a `PageSize` above 400 is indistinguishable from a clamp. The classic `DescribeLoadBalancers` **refuses** the same out-of-range value, and the two operations disagree deliberately: this one's fallback is the decision the citation below argues for, and reversing it would change an answer a consumer already reads |
 
 The `PageSize` choice needs the citation because substrate's own paginators do not agree.
 The Query-protocol family this operation joins — RDS's and ElastiCache's `MaxRecords`,
@@ -10273,8 +10366,11 @@ Per-operation error sets are followed rather than unified, because AWS's are not
   is the ELB API's own choice and not the 404 a reader expects. `TrustStoreNotFound`, the
   fifth code those operations list, cannot occur: substrate models no trust store.
 - An ARN naming no ELB resource type at all answers `ValidationError`. So does a **classic**
-  load-balancer ARN, whose one segment after `loadbalancer/` is an arity no ELBv2 type has —
-  see [An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api).
+  load-balancer ARN, whose one segment after `loadbalancer/` is an arity no ELBv2 type has, and
+  which these three operations refuse even now that substrate holds classic records: ELBv2's
+  `AddTags` enumerates the resources it tags — load balancers, target groups, listeners and rules —
+  and Classic is absent from that list. The tagging API reads the same ARN differently; see
+  [An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api).
 
 Two readings are substrate's rather than AWS's published text, both recorded because a
 consumer can observe them:
@@ -10425,18 +10521,36 @@ ARN naming no such resource is discovered by the resolver rather than by the wri
 answers the same `InvalidParameterException`/400 that every other type's absent resource
 does, because a caller must not be able to tell which stage found it.
 
-**A classic load-balancer ARN is refused, and the refusal is now about arity.** ELB's tagging
-code classified a resource type by substring, so `…:loadbalancer/my-lb` — AWS's classic
-format, one segment after the type where ELBv2's carries three — was read as a load balancer
-and looked for in the store where ELBv2's live. Substrate models no classic load balancer, so
-nothing was ever found; but the code a caller got, `LoadBalancerNotFound`, asserted that an
-ELBv2 load balancer of that ARN could have existed. Classification is now on the segment
-count the vendored format strings publish, so a classic ARN is not a type substrate tags:
-ELBv2's own `AddTags` answers `ValidationError`/400, matching what it already answered for an
-ARN of no ELB type, and the tagging API answers its unsupported-type refusal. **The split is
-substrate's reading**, on the same `FailureInfo` page that can be read either way for any
-unsupported type — see [Resource Groups Tagging](#resource-groups-tagging). Nothing writes a
-classic record, so this is a refusal made principled rather than a collision repaired.
+**A classic load-balancer ARN is accepted here and refused at ELBv2's own tag doors, and which
+door it arrives at is the whole of the difference.** ELB's tagging code once classified a resource
+type by substring, so `…:loadbalancer/my-lb` — AWS's classic format, one segment after the type
+where ELBv2's carries three — was read as a load balancer and looked for in the store where
+ELBv2's live. Nothing was ever found, but the code a caller got, `LoadBalancerNotFound`, asserted
+that an ELBv2 load balancer of that ARN could have existed. Classification is on the segment count
+the vendored format strings publish, and that arity check stands. What changed with
+[#844](https://github.com/scttfrdmn/substrate/issues/844) is that substrate now *holds* classic
+records, and the two callers diverge because AWS's two pages do:
+
+- **ELBv2's `AddTags`, `RemoveTags` and `DescribeTags` still refuse it**, at
+  `ValidationError`/400 — matching what they already answer for an ARN of no ELB type. That page
+  enumerates the resources it tags and Classic is absent from the list, and it publishes no code
+  for a wrong-generation ARN.
+- **The tagging API accepts it.** RGT matches on the type segment embedded in an ARN, which both
+  generations spell `loadbalancer`, and the Service Authorization Reference lists classic
+  `loadbalancer` under a single `AddTags` action. So `TagResources` writes to the classic record and
+  `GetResources` — including under `ResourceTypeFilters=elasticloadbalancing:loadbalancer` — reports
+  it, which is [#765](https://github.com/scttfrdmn/substrate/issues/765)'s cross-readability rule
+  applied to a resource that finally exists.
+- **CloudFormation's two tag writers resolve the same way**, one step removed: a template names a
+  *resource type* (`AWS::ElasticLoadBalancing::LoadBalancer` against
+  `…::ElasticLoadBalancingV2::LoadBalancer`), not an API generation. No template reaches the classic
+  half yet, because the classic type has no deploy helper and falls through to the generic stub —
+  the rule is recorded where the decision belongs, so that adding the helper is one map entry and
+  not a second tagging decision.
+
+A classic ARN naming **nothing** is still refused by the tagging API, at the same
+`InvalidParameterException`/400 every other absent resource answers: accepting the generation is
+not accepting a resource that is not there.
 
 `GetResources` reports an ELB resource that *has been* tagged, including one whose tags have
 since all been removed, which is the general rule
