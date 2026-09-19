@@ -5900,8 +5900,8 @@ func (p *EC2Plugin) describeRegions(_ *RequestContext, req *AWSRequest) (*AWSRes
 // describeInstanceTypes answers from the seeded [ec2InstanceTypeCatalog].
 //
 // Filter.N is applied through [ec2InstanceTypeFilterSpec] and
-// [ec2InstanceTypeMatchesFilters]: five of the fifty-seven documented names are evaluated,
-// the other fifty-two are accepted and inert, and an undocumented one is refused. That is
+// [ec2InstanceTypeMatchesFilters]: six of the fifty-six documented names are evaluated,
+// the other fifty are accepted and inert, and an undocumented one is refused. That is
 // what #695 settled, retiring the filter half of the concern #495 recorded — which was
 // that applying the modellable handful and *silently dropping* the rest would repeat the
 // narrowing defect #485 found on the offerings operation, and the evaluated/accepted split is
@@ -5995,8 +5995,13 @@ func (p *EC2Plugin) describeInstanceTypes(_ *RequestContext, req *AWSRequest) (*
 			continue
 		}
 		item := instanceTypeItem{
-			InstanceType:      info.InstanceType,
-			CurrentGeneration: true,
+			InstanceType: info.InstanceType,
+			// Not a constant since #1028: the catalog derives it per family from AWS's
+			// previous-generation table, so the three p3 sizes report false. The member
+			// carries no omitempty for that reason — a false currentGeneration is an
+			// answer, and dropping the element would make it indistinguishable from a
+			// type substrate declined to classify.
+			CurrentGeneration: info.CurrentGeneration,
 			VCpuInfo:          vcpuInfo{DefaultVCpus: info.VCpus},
 			MemoryInfo:        memoryInfo{SizeInMiB: info.MemoryMiB},
 			ProcessorInfo:     processorInfo{SupportedArchitectures: info.SupportedArchs},

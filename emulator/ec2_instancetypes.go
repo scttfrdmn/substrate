@@ -3,6 +3,7 @@ package emulator
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -28,6 +29,11 @@ type ec2InstanceTypeInfo struct {
 	SupportedArchs []string
 	// SupportedUsageClasses is reported as supportedUsageClasses.
 	SupportedUsageClasses []string
+	// CurrentGeneration is reported as currentGeneration and matched by the
+	// current-generation filter. It is derived from the family name by
+	// [ec2FamilyIsCurrentGeneration] rather than stored per size, because AWS publishes
+	// the generation per family and no family has sizes of two generations.
+	CurrentGeneration bool
 }
 
 // ec2InstanceTypeSize is one size within an [ec2InstanceTypeFamily].
@@ -233,8 +239,8 @@ type ec2AcceleratedFamily struct {
 // guide (https://docs.aws.amazon.com/ec2/latest/instancetypes/ac.html), except p3's, which
 // AWS publishes on the previous-generation page
 // (https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html) — p3 is the one family
-// here AWS lists as previous generation, and DescribeInstanceTypes reports every catalog
-// type as current generation regardless; see docs/services.md.
+// here AWS lists as previous generation, which as of #1028 is also where its
+// currentGeneration value comes from; see [ec2PreviousGenerationFamilies].
 //
 // Bare metal is excluded as it is everywhere else in the catalog, which costs this table one
 // size: g4dn.metal. The families deliberately absent are the ones whose specs could not be
@@ -273,7 +279,8 @@ type ec2AcceleratedFamily struct {
 // for the families with no seeded value are substrate's, ordered so a newer generation costs
 // more per GiB than the one it replaces.
 var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
-	// NVIDIA V100. Previous generation, and the only family here that is. 0.918/61 GiB.
+	// NVIDIA V100. Previous generation, and the only family in either table that is, so the
+	// only one whose types report currentGeneration false. 0.918/61 GiB.
 	{Name: "p3", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"2xlarge", 8, 62464, 1, "0.918"},
 		{"8xlarge", 32, 249856, 4, "3.672"},
@@ -351,6 +358,46 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 	}},
 }
 
+// ec2PreviousGenerationFamilies are the fifteen instance families AWS publishes as previous
+// generation, in the order its own table lists them.
+//
+// Source: the EC2 Instance Types guide's "Specifications for Amazon EC2 previous generation
+// instances" (https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html), whose
+// Instance family / Available instance types table is the only AWS *documentation* that
+// enumerates them — API_DescribeInstanceTypes says of currentGeneration only "Indicates
+// whether the instance type is current generation", naming no family.
+//
+// There is a second AWS list and it is not this one. https://aws.amazon.com/ec2/previous-generation/
+// is narrower — it omits P3 and P3dn entirely, names G2 where the guide names G3, adds C2, CR1
+// and HS1, and lists M4, R4, D2, I3 and G3 as *upgrade targets*, i.e. current. That page is about
+// hardware AWS is steering customers off, not about what the API reports; taking it as the source
+// would classify every type in substrate's catalog as current generation and leave the
+// hardcoded true of #1028 looking correct. The guide is the citable one.
+//
+// Eleven of the fifteen are families the catalog does not carry at all, and P3dn is carried by
+// neither. They are transcribed anyway, whole: the list is a copy of one AWS table rather than
+// the intersection with [ec2InstanceTypeFamilies], so a family added to the catalog later is
+// classified by AWS's answer instead of by whoever adds it remembering to look. Intersected
+// with the catalog's eighteen families today it selects exactly p3 — three of ninety-five types
+// report false and ninety-two report true.
+var ec2PreviousGenerationFamilies = []string{ //nolint:gochecknoglobals // read-only reference data transcribed from one AWS page
+	"a1", "c1", "c3", "c4", "g3", "i2", "m1", "m2", "m3", "m4",
+	"p3", "p3dn", "r3", "r4", "t1",
+}
+
+// ec2FamilyIsCurrentGeneration reports whether DescribeInstanceTypes reports a family's types
+// with currentGeneration true.
+//
+// Current generation is the default and previous generation is the enumerated exception, which
+// is the direction AWS publishes: there is a page listing the previous generations and none
+// listing the current ones, because the current set changes with every launch. A family the
+// catalog carries that AWS has not published as previous generation is therefore current, and
+// a family nobody has classified reads as current rather than as unknown — the same answer AWS
+// gives for a type launched after its previous-generation page was last edited.
+func ec2FamilyIsCurrentGeneration(family string) bool {
+	return !slices.Contains(ec2PreviousGenerationFamilies, family)
+}
+
 // ec2InstanceTypeCatalog is the flattened [ec2InstanceTypeFamilies] followed by the
 // flattened [ec2AcceleratedFamilies], in family and then size order.
 // ec2InstanceTypeIndex is the same data keyed by type name.
@@ -372,10 +419,16 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 // a different architecture or usage class would need this widening first. Graviton-based
 // accelerated families are the nearest real example — g5g is ARM — which is one reason the
 // catalog does not carry them.
+//
+// CurrentGeneration is not applied that way, because it is the one property on which the
+// families disagree: it is derived per family through [ec2FamilyIsCurrentGeneration], which
+// reads AWS's own previous-generation table. Both loops pass the family name rather than
+// re-deriving it from the type name, so the classification cannot drift from the table the
+// size came out of.
 func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2InstanceTypeInfo) {
 	var catalog []ec2InstanceTypeInfo
 	index := make(map[string]ec2InstanceTypeInfo)
-	add := func(name string, vcpus, memoryMiB, gpu, neuron int, spotPrice string) {
+	add := func(family, name string, vcpus, memoryMiB, gpu, neuron int, spotPrice string) {
 		info := ec2InstanceTypeInfo{
 			InstanceType:          name,
 			VCpus:                 vcpus,
@@ -385,13 +438,14 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 			SpotPrice:             spotPrice,
 			SupportedArchs:        []string{"x86_64"},
 			SupportedUsageClasses: []string{"on-demand", "spot"},
+			CurrentGeneration:     ec2FamilyIsCurrentGeneration(family),
 		}
 		catalog = append(catalog, info)
 		index[info.InstanceType] = info
 	}
 	for _, family := range ec2InstanceTypeFamilies {
 		for _, size := range family.Sizes {
-			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, 0, size.SpotPrice)
+			add(family.Name, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, 0, size.SpotPrice)
 		}
 	}
 	for _, family := range ec2AcceleratedFamilies {
@@ -409,7 +463,7 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 			case ec2AcceleratorNone:
 				// Reported nowhere; the count stays in the table as the record of it.
 			}
-			add(family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
+			add(family.Name, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
 		}
 	}
 	return catalog, index

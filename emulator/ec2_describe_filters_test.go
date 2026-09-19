@@ -807,18 +807,30 @@ func TestEC2_RegionFilters_AllThreeEvaluated(t *testing.T) {
 
 // --- DescribeInstanceTypes ---
 
-// TestEC2_InstanceTypeFilters_FiveOfFiftySeven pins the filters the catalog can answer, which
+// TestEC2_InstanceTypeFilters_SixOfFiftySix pins the filters the catalog can answer, which
 // retired the filter half of the concern #495 recorded.
-func TestEC2_InstanceTypeFilters_FiveOfFiftySeven(t *testing.T) {
+//
+// The sixth arrived with #1028: current-generation was among the inert fifty-one while every
+// catalog type reported currentGeneration true, and became answerable when the value became a
+// per-family one. It is asserted here beside the other five rather than only in
+// TestEC2_CurrentGenerationIsPerFamily, because the property this test holds is the
+// evaluated/inert split itself — the subtest below would pass for an inert filter too if it did
+// not also check that the complement is non-empty.
+//
+// Fifty-six is also a correction #1028 carries: the name was SixOfFiftySeven — and FiveOfFiftySeven
+// before that — where the page publishes fifty-six and [ec2InstanceTypeFilterSpec] transcribes
+// exactly those fifty-six.
+func TestEC2_InstanceTypeFilters_SixOfFiftySix(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
 	type itype struct {
-		InstanceType string   `xml:"instanceType"`
-		VCpus        int      `xml:"vCpuInfo>defaultVCpus"`
-		MemoryMiB    int      `xml:"memoryInfo>sizeInMiB"`
-		Archs        []string `xml:"processorInfo>supportedArchitectures>item"`
-		UsageClasses []string `xml:"supportedUsageClasses>item"`
+		InstanceType      string   `xml:"instanceType"`
+		CurrentGeneration bool     `xml:"currentGeneration"`
+		VCpus             int      `xml:"vCpuInfo>defaultVCpus"`
+		MemoryMiB         int      `xml:"memoryInfo>sizeInMiB"`
+		Archs             []string `xml:"processorInfo>supportedArchitectures>item"`
+		UsageClasses      []string `xml:"supportedUsageClasses>item"`
 	}
 	describe := func(params map[string]string) []itype {
 		var doc struct {
@@ -879,6 +891,24 @@ func TestEC2_InstanceTypeFilters_FiveOfFiftySeven(t *testing.T) {
 		require.NotEmpty(t, items)
 		for _, it := range items {
 			assert.Contains(t, it.UsageClasses, "spot")
+		}
+	})
+
+	t.Run("current-generation", func(t *testing.T) {
+		// Both directions, and the two halves must add up to the unfiltered catalog. A
+		// filter that selected everything would satisfy the "true" arm on its own, which
+		// is exactly the inert behavior #1028 replaced.
+		current := describe(ec2OneFilter("DescribeInstanceTypes", "current-generation", "true"))
+		previous := describe(ec2OneFilter("DescribeInstanceTypes", "current-generation", "false"))
+		require.NotEmpty(t, current)
+		require.NotEmpty(t, previous, "the catalog carries at least one previous-generation type")
+		assert.Len(t, all, len(current)+len(previous),
+			"every type is on exactly one side of the split")
+		for _, it := range current {
+			assert.True(t, it.CurrentGeneration, "%s answered the true filter", it.InstanceType)
+		}
+		for _, it := range previous {
+			assert.False(t, it.CurrentGeneration, "%s answered the false filter", it.InstanceType)
 		}
 	})
 

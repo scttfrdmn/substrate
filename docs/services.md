@@ -6170,7 +6170,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 | DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
 | DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters. `zoneId` takes AWS's published shape (`use1-az1`) and always maps zone `a` to `-az1` — see [Zone IDs](#zone-ids-take-aws-s-published-shape-and-always-map-zone-a-to-az1) |
 | DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
-| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Five of fifty-seven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Six of fifty-six filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range and counting offerings rather than types — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — one of the three converted describes with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
@@ -6281,7 +6281,7 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 | DescribePlacementGroups | `group-arn`, `group-name`, `state`, `strategy`, `tag-key`, `tag:<key>` | `spread-level` |
 | DescribeAddresses | `allocation-id`, `association-id`, `instance-id`, `network-interface-id`, `private-ip-address`, `public-ip`, `tag-key`, `tag:<key>` | `network-border-group`, `network-interface-owner-id` |
 | DescribeRegions | `endpoint`, `opt-in-status`, `region-name` — **all three** | — |
-| DescribeInstanceTypes | `instance-type`, `memory-info.size-in-mib`, `processor-info.supported-architecture`, `supported-usage-class`, `vcpu-info.default-vcpus` | the other fifty-two — the `ebs-info.*`, `network-info.*`, `instance-storage-info.*`, `nitro-tpm-info.*`, `vcpu-info.*` (bar `default-vcpus`) and `processor-info.*` (bar `supported-architecture`) families, plus `auto-recovery-supported`, `bare-metal`, `burstable-performance-supported`, `current-generation`, `dedicated-hosts-supported`, `free-tier-eligible`, `hibernation-supported`, `hypervisor`, `instance-storage-supported`, `nitro-enclaves-support`, `nitro-tpm-support`, `reboot-migration-support`, `supported-boot-mode`, `supported-root-device-type` and `supported-virtualization-type` |
+| DescribeInstanceTypes | `current-generation`, `instance-type`, `memory-info.size-in-mib`, `processor-info.supported-architecture`, `supported-usage-class`, `vcpu-info.default-vcpus` | the other fifty — the `ebs-info.*`, `network-info.*`, `instance-storage-info.*`, `nitro-tpm-info.*`, `vcpu-info.*` (bar `default-vcpus`) and `processor-info.*` (bar `supported-architecture`) families, plus `auto-recovery-supported`, `bare-metal`, `burstable-performance-supported`, `dedicated-hosts-supported`, `free-tier-eligible`, `hibernation-supported`, `hypervisor`, `instance-storage-supported`, `nitro-enclaves-support`, `nitro-tpm-support`, `reboot-migration-support`, `supported-boot-mode`, `supported-root-device-type` and `supported-virtualization-type` |
 | DescribeSpotPriceHistory | `availability-zone`, `instance-type`, `product-description`, `spot-price`, `timestamp` | `availability-zone-id` |
 | DescribeLaunchTemplates | `create-time`, `launch-template-name`, `tag-key`, `tag:<key>` — **all four** | — |
 | DescribeLaunchTemplateVersions | `create-time`, `image-id`, `instance-type`, `is-default-version` | `host-resource-group-arn`, `iam-instance-profile`, `kernel-id`, `license-configuration-arn`, `network-card-index`, `ram-disk-id`, and the four `ebs-optimized`/`http-*` metadata filters |
@@ -8150,15 +8150,37 @@ four accelerators and a `16xlarge` carrying one, `g5`/`g6` have a `24xlarge` car
 four below a `48xlarge` carrying eight, and `inf2`'s counts run 1, 1, 6, 12. Read the
 count from `DescribeInstanceTypes`.
 
-#### `currentGeneration` is always `true`, and `p3` is the exception
+#### `currentGeneration` is per family, and `p3` is the one that is `false`
 
-`DescribeInstanceTypes` reports `currentGeneration` as `true` for every catalog type.
-`p3` is the one family AWS publishes on the *previous* generation page, so its four
-rows carry a value AWS would report as `false`. The `current-generation` filter is
-[inert](#what-is-refused-and-what-is-merely-inert), which is why the divergence is not
-visible as a self-contradiction within one response — a filtered query is not narrowed
-either way. Do not use `currentGeneration` to decide whether substrate models a type;
-use the family table above.
+`DescribeInstanceTypes` reports `currentGeneration` from the family, not as a constant:
+**ninety-two of the ninety-five catalogued types report `true` and `p3`'s three report
+`false`**. The `current-generation` filter is evaluated to match, so
+`Name=current-generation,Values=false` selects exactly `p3.2xlarge`, `p3.8xlarge` and
+`p3.16xlarge`, and `Values=true` selects the other ninety-two.
+
+The source is the EC2 Instance Types guide's
+[Specifications for Amazon EC2 previous generation instances](https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html),
+whose `Instance family` table publishes fifteen families — A1, C1, C3, C4, G3, I2, M1, M2,
+M3, M4, **P3**, **P3dn**, R3, R4, T1 — and spells P3 as `p3.2xlarge | p3.8xlarge |
+p3.16xlarge`. `API_DescribeInstanceTypes` describes the member only as *"Indicates whether
+the instance type is current generation"* and names no family, so the guide is where the
+enumeration comes from. Substrate transcribes all fifteen rather than special-casing `p3`,
+so a family added to the catalog later is classified by AWS's answer; fourteen of the
+fifteen are families the catalog does not carry at all.
+
+**There is a second AWS list and it is not the one used here.**
+`https://aws.amazon.com/ec2/previous-generation/` omits P3 and P3dn entirely, names G2 where
+the guide names G3, adds C2, CR1 and HS1, and lists M4, R4 and D2 as *upgrade targets* — i.e.
+current. Taken as authority it would make every catalogued family current generation. It is a
+marketing page about hardware AWS is steering customers off rather than a statement about what
+the API reports, so the documentation page governs.
+
+Until [#1028](https://github.com/scttfrdmn/substrate/issues/1028) this value was a hardcoded
+`true` and the filter was inert, which hid each other: a constant cannot be narrowed on, and a
+filter that narrows nothing cannot contradict a constant. Do not use `currentGeneration` to
+decide whether substrate models a type — the catalog carries current and previous generations
+alike, and a type it does not carry is refused with `InvalidInstanceType` regardless of
+generation. Use the family table above.
 
 #### A type outside the catalog: refused, or empty?
 
@@ -8208,10 +8230,10 @@ will report that type. Closing the divergence means widening the catalog to ever
 a consumer launches, which is the direction #896 took rather than tightening the launch
 path.
 
-`DescribeInstanceTypes` applies **five** of the fifty-seven filter names its reference
-documents — `instance-type`, `memory-info.size-in-mib`,
+`DescribeInstanceTypes` applies **six** of the fifty-six filter names its reference
+documents — `current-generation`, `instance-type`, `memory-info.size-in-mib`,
 `processor-info.supported-architecture`, `supported-usage-class` and
-`vcpu-info.default-vcpus`. The other fifty-two are over response fields the seeded catalog does
+`vcpu-info.default-vcpus`. The other fifty are over response fields the seeded catalog does
 not carry, so they are accepted and inert, and an undocumented name is refused. That split is
 what closed [#495](https://github.com/scttfrdmn/substrate/issues/495)'s filter half: the concern
 was never that the answerable handful should go unapplied, but that dropping the rest
@@ -8219,9 +8241,20 @@ was never that the answerable handful should go unapplied, but that dropping the
 [evaluated/inert table](#what-is-refused-and-what-is-merely-inert) resolves by naming every
 inert one.
 
+**Fifty-six, corrected from fifty-seven.** Every count site said fifty-seven from
+[#695](https://github.com/scttfrdmn/substrate/issues/695) until
+[#1028](https://github.com/scttfrdmn/substrate/issues/1028). The names substrate accepts were
+re-diffed against `API_DescribeInstanceTypes` one by
+one on 2026-09-19 — nothing missing, nothing extra — and they come to **fifty-six**. There is no
+tag filter to account for the difference: an instance type is not a taggable resource and the page
+lists no `tag:` entry. Whether the page once published a fifty-seventh that has since been
+withdrawn cannot be recovered from it, so the number states what it publishes now.
+
 The numeric filters compare as **strings**, because AWS supports no
 greater-than or less-than in a filter value: `memory-info.size-in-mib=4096` selects the types
 with exactly that much memory, and `4097` selects none rather than "more than 4096".
+`current-generation` compares the same way, against the literals `true` and `false` — see
+[`currentGeneration` is per family](#currentgeneration-is-per-family-and-p3-is-the-one-that-is-false).
 
 #### Offerings filters and wildcards
 
