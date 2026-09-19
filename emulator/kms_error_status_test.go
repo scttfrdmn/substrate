@@ -186,10 +186,13 @@ func TestKMSErrorStatus_TheTwoCiphertextOperationsReportAnAbsentKeyAt400(t *test
 // TestKMSErrorStatus_AnAbsentAliasIsReportedAt400 covers the sixteenth not-found site, which is
 // reached through a KeyId rather than through an alias operation.
 //
-// Neither DeleteAlias nor UpdateAlias consults the alias pointer — the first deletes whatever is
-// there and the second overwrites it — so the only way to the followAlias refusal is a KeyId given
-// as an alias. Both accepted forms are exercised, because an alias ARN and an alias name reach it
-// down different arms of the resolver.
+// The comment here used to say that neither DeleteAlias nor UpdateAlias consults the alias pointer, so a
+// KeyId given as an alias was the only way to the followAlias refusal. #1085 made that half false:
+// UpdateAlias now looks the alias up first, because its page's opening sentence requires the alias to
+// exist. DeleteAlias still deletes whatever is there, which its own page's key-state row permits in every
+// state — see kms_alias_validate.go. This test keeps the KeyId route, which is the one that reaches the
+// refusal through the resolver rather than through a handler: both accepted forms are exercised, because
+// an alias ARN and an alias name come down different arms of it.
 func TestKMSErrorStatus_AnAbsentAliasIsReportedAt400(t *testing.T) {
 	ts := arnGuardServer(t)
 

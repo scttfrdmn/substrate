@@ -11573,10 +11573,10 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
 | UntagResource | |
 | ListResourceTags | |
-| CreateAlias | Refuses a `TargetKeyId` outside the caller's account and Region |
-| DeleteAlias | |
-| UpdateAlias | Same refusal as `CreateAlias` |
-| ListAliases | |
+| CreateAlias | Refuses a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; enforces its own published `AliasName` pattern and the reserved `alias/aws/` prefix; refuses a name the account and Region already hold — see below |
+| DeleteAlias | Accepts a name with or without the `alias/` prefix, because its published pattern — unlike the other two — does not require it; answers 200 for an alias that does not exist — see below |
+| UpdateAlias | Refuses an alias that does not exist, a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; refuses a move between two key types or two key usages. The alias's **current** key may be pending deletion — see below |
+| ListAliases | Reports one entry per alias, so a repeated `CreateAlias` no longer duplicates a row |
 | Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each; refuses a `Plaintext` outside the published 1–4096 bytes before the key is read, and one past the smaller per-spec maximum after — see below |
 | Decrypt | Returns plaintext (stub pass-through); same algorithm handling and same refusals as `Encrypt`, and refuses a `KeyId` naming a key other than the ciphertext's — see below |
 | GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members, plus a refusal of any key spec but `SYMMETRIC_DEFAULT` — see below |
@@ -11632,6 +11632,74 @@ discovered: the other fifteen `KeyId` operations do not enforce the Region, so
 `DescribeKey` on a foreign-Region key ARN answers with that key — strictly better
 than describing a local impostor, but real KMS would refuse, and AWS publishes no
 per-operation statement to cite for the other fifteen.
+
+### The three alias operations do not share one set of rules
+
+Until #1085 the two alias writers verified nothing at all. `UpdateAlias` decoded
+two members, prepended `alias/` if it was missing and wrote a state key — so an
+alias that did not exist was *created* by the operation whose first published
+sentence is *"Associates an **existing** AWS KMS alias with a different KMS
+key"*, a `TargetKeyId` naming no key produced a dangling pointer that every later
+resolution of the alias failed on, a key scheduled for deletion could take the
+alias, and a symmetric key's alias could be moved to an RSA one. `CreateAlias`
+checked the same nothing, so all four gaps existed twice in one plugin.
+
+Closing them meant reading all three pages, and the finding is that they publish
+**three different** `AliasName` rules and **three different** sets of codes:
+
+| Operation | Pattern | Codes published for a name |
+|-----------|---------|----------------------------|
+| CreateAlias | `^alias/[a-zA-Z0-9/_-]+$` | `InvalidAliasNameException`, `LimitExceededException` |
+| UpdateAlias | `^alias/[a-zA-Z0-9/_-]+$` | `LimitExceededException` |
+| DeleteAlias | `^[a-zA-Z0-9:/_-]+$` | none |
+
+So the `alias/` prepend is gone from the two writers whose pattern requires the
+prefix and stays at `DeleteAlias`, whose pattern does not require it and admits a
+colon besides. `API_DeleteAlias`'s own prose still says the name "must begin with
+`alias/`", so that page contradicts itself; substrate takes the
+machine-readable half. All three publish the same 1–256 length bound.
+
+`InvalidAliasNameException` is published on `CreateAlias` alone, and that is not a
+gap on `UpdateAlias`: the alias must already exist, and no alias failing
+`CreateAlias`'s pattern can ever have been created, so a malformed name there is
+answered by the `NotFoundException` `UpdateAlias` *does* publish. Nothing is
+borrowed across pages. Over-length is `LimitExceededException` at both, by its own
+gloss — *"a length constraint or quota was exceeded"* — and it is checked before
+the alias is looked up, so the length code wins over the not-found one.
+
+**Only the new target's key state is checked, and the operation pages do not say
+so.** Both say merely *"The KMS key that you use for this operation must be in a
+compatible key state"*, which reads as one condition over one key. The developer
+guide's key-state table resolves it into two: `CreateAlias` carries the footnote
+*"KMSInvalidStateException: `<key ARN>` is pending deletion"*, while `UpdateAlias`
+carries *"If the source KMS key is pending deletion, the command succeeds. If the
+destination KMS key is pending deletion, the command fails."* So an alias whose
+current key is scheduled for deletion may still be re-pointed — which is exactly
+what a caller does to rescue it — and a single "check the key state" guard would
+break that. A **disabled** key is accepted at both: the table gives both a
+checkmark for it and neither page publishes `DisabledException`.
+
+**The type-match refusal is substrate's reading.** AWS publishes the restriction
+twice on `API_UpdateAlias`, verbatim in both places — *"The current and new KMS key
+must be the same type (both symmetric or both asymmetric or both HMAC), and they
+must have the same key usage. This restriction prevents errors in code that uses
+aliases."* — and none of the operation's five published errors describes it.
+Substrate answers `ValidationError`/400, following the two in-tree precedents for a
+malformed KMS request (`kmsUnknownKeySpec`, `kmsUnknownKeyUsage`) rather than
+borrowing a code from a sibling page. The message names which half failed, because
+the code cannot: a deploy that moved an alias across types needs to know whether it
+was the family or the usage. The three families are derived from the algorithm
+tables the rest of the plugin already reads, not listed a fourth time.
+
+Two divergences recorded rather than fixed here. `TargetKeyId` is published as
+*"Specify the key ID or key ARN"*, and substrate additionally accepts an alias
+there, because the shared resolver handles all four `KeyId` forms; a caller
+relying on that is relying on something AWS does not publish. And `DeleteAlias`
+answers 200 for an alias that does not exist where its page publishes
+`NotFoundException`/400. That one is #1107 rather than part of this change,
+because it turns an idempotent teardown into a failing one: CloudFormation stack
+deletion calls it for an alias that may already be gone, so the refusal needs a
+tolerance on the teardown path before it can land.
 
 ### Every KMS refusal is a 400, because KMS publishes no 404
 

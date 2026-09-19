@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1230,6 +1231,16 @@ func (p *KMSPlugin) listResourceTags(ctx *RequestContext, req *AWSRequest) (*AWS
 	return kmsJSONResponse(http.StatusOK, out)
 }
 
+// createAlias points a new alias at a key, refusing what API_CreateAlias publishes a code for.
+//
+// The `alias/` prepend this used to do is gone: the page publishes `Pattern: ^alias/[a-zA-Z0-9/_-]+$` and
+// the sentence "this value must begin with alias/", so a name without the prefix is a request AWS refuses
+// and substrate accepted by rewriting it. kms_alias_validate.go holds the rules and records why
+// `deleteAlias` keeps its prepend (#1085).
+//
+// The order of the four checks is the order a caller can act on: the name is wrong before anything is
+// looked up, then the target must name a key, then that key's state must permit it, then the name must be
+// free. Nothing is written until all four pass.
 func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		AliasName   string `json:"AliasName"`
@@ -1238,8 +1249,8 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
 	}
-	if !strings.HasPrefix(input.AliasName, "alias/") {
-		input.AliasName = "alias/" + input.AliasName
+	if nameErr := kmsValidateCreateAliasName(input.AliasName); nameErr != nil {
+		return nil, nameErr
 	}
 
 	goCtx := context.Background()
@@ -1247,8 +1258,24 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
+	// "A valid KMS key is required. You can't create an alias without a KMS key." Nothing loaded the
+	// record before, so an alias could point at a key ID that was never created — and an empty
+	// TargetKeyId, which the page refuses in its own sentence, reaches here as a key ID naming nothing
+	// and is answered by this same check rather than by a special case.
+	if _, stateErr := p.requireAliasTargetKey(goCtx, ctx, keyID, input.TargetKeyID); stateErr != nil {
+		return nil, stateErr
+	}
 
-	if err := p.state.Put(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
+	aliasStateKey := kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName)
+	existing, err := p.state.Get(goCtx, kmsNamespace, aliasStateKey)
+	if err != nil {
+		return nil, fmt.Errorf("kms createAlias alias lookup: %w", err)
+	}
+	if existing != nil {
+		return nil, kmsAliasAlreadyExists(input.AliasName)
+	}
+
+	if err := p.state.Put(goCtx, kmsNamespace, aliasStateKey, []byte(keyID)); err != nil {
 		return nil, fmt.Errorf("kms createAlias state.Put: %w", err)
 	}
 
@@ -1256,11 +1283,42 @@ func (p *KMSPlugin) createAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	names = append(names, input.AliasName)
+	// The refusal above makes a duplicate unreachable through this handler; the guard stays because the
+	// index and the pointer are two state keys, and a record written before #1085 may already hold the
+	// name twice. ListAliases reads this index, so a duplicate there is a duplicated response entry.
+	if !slices.Contains(names, input.AliasName) {
+		names = append(names, input.AliasName)
+	}
 	if err := p.saveAliasNames(goCtx, ctx.AccountID, ctx.Region, names); err != nil {
 		return nil, fmt.Errorf("kms createAlias saveAliasNames: %w", err)
 	}
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+// requireAliasTargetKey loads the key an alias is about to point at and refuses one that cannot take it.
+//
+// Shared by both alias writers because both publish both refusals — NotFoundException for a key that does
+// not exist, KMSInvalidStateException for one pending deletion — and because the second is the check the
+// developer guide's footnotes make easy to get wrong. It is about the **new** target only: UpdateAlias is
+// footnote [10], under which the alias's current key being pending deletion succeeds, so a caller may
+// re-point an alias away from a key it has scheduled for deletion. See kms_alias_validate.go.
+//
+// A Disabled key is deliberately accepted: the key-state table gives both operations a checkmark for it
+// and neither page publishes DisabledException at all.
+func (p *KMSPlugin) requireAliasTargetKey(
+	goCtx context.Context, ctx *RequestContext, keyID, requested string,
+) (*KMSKey, error) {
+	key, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, keyID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, kmsNotFound("TargetKeyId names no KMS key: " + requested)
+	}
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		return nil, kmsInvalidKeyState(key.KeyID, key.KeyState)
+	}
+	return key, nil
 }
 
 func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1270,8 +1328,18 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
 	}
-	if !strings.HasPrefix(input.AliasName, "alias/") {
-		input.AliasName = "alias/" + input.AliasName
+	// The prepend stays here and was removed from the other two writers, because API_DeleteAlias is the
+	// one alias page whose published pattern does not require the prefix: it is `^[a-zA-Z0-9:/_-]+$`,
+	// against `^alias/[a-zA-Z0-9/_-]+$` on CreateAlias and UpdateAlias. The page's own prose still says
+	// the name "must begin with alias/", so it contradicts itself, and this takes the machine-readable
+	// half. The page also publishes no code for a name at all — no InvalidAliasNameException and no
+	// LimitExceededException — so there is nothing here to refuse with (#1085).
+	//
+	// The one refusal this page does publish, NotFoundException for an alias that is not there, is
+	// #1107 rather than part of #1085: it turns an idempotent teardown into a failing one, because
+	// cfn_delete.go calls this for an alias that may already be gone.
+	if !strings.HasPrefix(input.AliasName, kmsAliasNamePrefix) {
+		input.AliasName = kmsAliasNamePrefix + input.AliasName
 	}
 
 	goCtx := context.Background()
@@ -1293,6 +1361,17 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
+// updateAlias re-points an existing alias, refusing what API_UpdateAlias publishes a code for.
+//
+// This verified nothing before #1085 — the four gaps and the published sentence behind each are set out in
+// kms_alias_validate.go. The first of them is the one that made the operation do a different operation's
+// job: the page's opening sentence is "Associates an **existing** AWS KMS alias with a different KMS key",
+// and a blind Put creates the alias when it is absent, so UpdateAlias silently did CreateAlias's work
+// without CreateAlias's name rules.
+//
+// The alias is looked up before the target, so a caller holding one wrong member learns about the alias
+// first — and because no alias that fails CreateAlias's published pattern can exist, that lookup is also
+// what answers a malformed name here, with the NotFoundException this page publishes.
 func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		AliasName   string `json:"AliasName"`
@@ -1301,15 +1380,38 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, kmsInvalidBody()
 	}
-	if !strings.HasPrefix(input.AliasName, "alias/") {
-		input.AliasName = "alias/" + input.AliasName
+	if lengthErr := kmsValidateAliasNameLength(input.AliasName); lengthErr != nil {
+		return nil, lengthErr
 	}
 
 	goCtx := context.Background()
+	currentKeyID, err := p.followAlias(goCtx, ctx.AccountID, ctx.Region, input.AliasName)
+	if err != nil {
+		return nil, err
+	}
 	keyID, err := p.resolveLocalKeyID(goCtx, ctx, input.TargetKeyID)
 	if err != nil {
 		return nil, err
 	}
+	next, err := p.requireAliasTargetKey(goCtx, ctx, keyID, input.TargetKeyID)
+	if err != nil {
+		return nil, err
+	}
+
+	current, err := p.loadKey(goCtx, ctx.AccountID, ctx.Region, currentKeyID)
+	if err != nil {
+		return nil, err
+	}
+	// A pointer to a key with no record can only come from a substrate that wrote one before #1085 closed
+	// the two paths that produced them. The type match is skipped rather than failed there, because the
+	// restriction is a comparison and there is nothing to compare — and refusing would leave a caller no
+	// way to repair a dangling alias through the operation whose purpose is to re-point it.
+	if current != nil {
+		if matchErr := kmsCheckAliasTargetMatches(input.AliasName, current, next); matchErr != nil {
+			return nil, matchErr
+		}
+	}
+
 	if err := p.state.Put(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName), []byte(keyID)); err != nil {
 		return nil, fmt.Errorf("kms updateAlias state.Put: %w", err)
 	}

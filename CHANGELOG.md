@@ -296,6 +296,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   decode. Both entries in `cfnCreateExistsCodes` therefore changed meaning and neither is removed —
   `cfn_rollback.go` records that dropping the live one would surface a refusal on the update path, which
   is #1077's subject.
+- **KMS's two alias writers verify the four things their pages give them a code for, where they verified
+  nothing** (#1085). `updateAlias` decoded two members and wrote a state key, so the operation whose first
+  published sentence is *"Associates an **existing** AWS KMS alias with a different KMS key"* **created**
+  the alias when it was absent — doing `CreateAlias`'s job without `CreateAlias`'s name rules — while a
+  `TargetKeyId` naming no key wrote a dangling pointer that every later resolution of the alias failed on,
+  a key scheduled for deletion could take the alias, and a symmetric key's alias could be moved to an
+  RSA_2048 one, against a sentence AWS publishes twice and glosses itself: *"This restriction prevents
+  errors in code that uses aliases."* `createAlias` checked the same nothing, so all four gaps existed
+  twice in one plugin and both are fixed through one shared helper. An absent alias is
+  `NotFoundException`, an absent or cross-account target `NotFoundException`, a target pending deletion
+  `KMSInvalidStateException` — all published, all 400.
+- **Only the *new* target's key state is checked, because the developer guide's footnotes say two
+  different things where the operation pages say one** (#1085). Both pages carry the same sentence — *"The
+  KMS key that you use for this operation must be in a compatible key state"* — which reads as one
+  condition over one key, and a single guard written from it is wrong: the key-state table gives
+  `CreateAlias` the footnote *"KMSInvalidStateException: <key ARN> is pending deletion"* but gives
+  `UpdateAlias` *"If the source KMS key is pending deletion, the command succeeds. If the destination KMS
+  key is pending deletion, the command fails."* So an alias whose current key is scheduled for deletion
+  can still be re-pointed, which is exactly what a caller does to rescue it. A **disabled** key is
+  accepted at both: the table gives both a checkmark and neither page publishes `DisabledException`,
+  which is why the refusal is `kmsInvalidKeyState` rather than the constructor that carries both codes.
+  The type match is **substrate's reading and is recorded as one** — the restriction is published twice
+  and none of the operation's five published errors describes it, so it answers `ValidationError`/400
+  after `kmsUnknownKeySpec` and `kmsUnknownKeyUsage` rather than borrowing a code from a sibling page
+  (#671). Its message names which half failed, because the code cannot, and the three families are
+  derived from the algorithm tables the plugin already reads rather than listed a fourth time.
+- **The `alias/` prepend is removed from two of the three alias handlers, because the three pages publish
+  three different patterns** (#1085). All three prepended the prefix when it was missing, so `"app"`
+  became `"alias/app"` and a request AWS refuses was accepted as a different one. `CreateAlias` and
+  `UpdateAlias` publish `^alias/[a-zA-Z0-9/_-]+$`; `DeleteAlias` publishes `^[a-zA-Z0-9:/_-]+$`, which
+  requires no prefix and admits a colon, while its own prose still says the name "must begin with
+  `alias/`" — so that page contradicts itself and substrate takes the machine-readable half, keeping the
+  prepend there alone. The codes differ the same way: `InvalidAliasNameException` is published on
+  `CreateAlias` only, which is **not** a gap on `UpdateAlias`, because no alias failing that pattern can
+  ever have been created and the existence check answers a malformed name with the `NotFoundException`
+  that page does publish. Over-length is `LimitExceededException` at both — the one published code whose
+  gloss names a length — and is checked first, so it wins over the not-found answer. `DeleteAlias`
+  publishes no name code at all and so refuses nothing.
+- **`CreateAlias` answers `AlreadyExistsException` for a name the account and Region hold, and
+  `ListAliases` reports it once** (#1085). Two defects, one of them invisible to a code assertion: the
+  handler appended to the alias-names index with neither a dedup nor an existence check, so a second
+  create not only skipped the published refusal for *"The alias must be unique in the account and
+  Region"* but also duplicated the response row, because the pointer and the index are two state keys and
+  only the pointer was idempotent. The dedup stays alongside the refusal, since a record written before
+  this change may already hold the name twice. The refusal is scoped to the account and Region, not to the
+  name — *"you can have aliases with the same name in different Regions"*.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -379,6 +425,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the response body is byte-identical, which is the property sorted iteration exists for.
   `TestSFNDefinition_ASLConformanceIsNotChecked` becomes `TestSFNDefinition_ASLStructureIsChecked` over
   the same four definitions, each with the fault its message must now name.
+- **`emulator/kms_alias_validate.go`, and ten tests over the three alias operations** (#1085). One file
+  holds the name rules, the three-page table behind them and the key-family derivation, because the rules
+  are per-operation and a reader who found them spread over three handlers would reasonably assume the
+  differences were oversights. As with #1072, **nothing pinned any of the corrected behaviour** — the full
+  suite passed before and after with no test edited, since every existing caller supplies a prefixed name
+  and a real key. Two of the tests exist because the acceptance criteria as written would have passed
+  against the defect: existence is asserted through `DescribeKey` on the alias rather than through
+  `ListAliases`, since `updateAlias` never touched the index and so the alias it fabricated was invisible
+  there either way; and the key-state asymmetry is asserted in **both** directions, because "a key pending
+  deletion is refused" is only half true and a test asserting the half would have pinned a bug. The
+  type-match cases assert the *message*, not just the code, and are paired with three accepted moves —
+  including two asymmetric keys of different specs — so that a handler refusing everything could not
+  satisfy them.
 
 ### Fixed
 - **A `Map` state written with `ItemProcessor` iterated zero times and returned an empty array**
