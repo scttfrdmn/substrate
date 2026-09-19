@@ -1678,7 +1678,7 @@ func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
 			createPath: "/v1/apis",
 			createBody: `{"name":"below-lookup","authenticationType":"API_KEY"}`,
 			idKey:      "apiId",
-			refusePath: func(id string) string { return "/v1/apis/" + id + "/ApiKeys" },
+			refusePath: func(id string) string { return "/v1/apis/" + id + "/apikeys" },
 			method:     http.MethodPost,
 			code:       "BadRequestException",
 		},

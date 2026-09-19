@@ -13648,6 +13648,182 @@ API Gateway HTTP API calls: $1.00 per million calls.
 
 ---
 
+## AppSync
+
+**Endpoint:** `appsync.{region}.amazonaws.com`
+**Protocol:** REST/JSON (path and HTTP method, no `X-Amz-Target`)
+
+**Routing:** every operation is identified by its verb and its path, and Substrate matches the path
+segment by segment in the spelling the operation's own Request Syntax publishes. That is worth stating
+because it was not true until [#1065](https://github.com/scttfrdmn/substrate/issues/1065): the
+data-source segment was matched as `DataSources` and the api-key segment as `ApiKeys`, where AWS
+publishes `datasources` and `apikeys`. Path matching is case-sensitive, so seven implemented
+operations — the five data-source ones and the two api-key ones — were unreachable through the URIs
+every AWS SDK builds, and answered `UnknownOperationException`/404 instead.
+
+### Supported operations
+
+Twenty-four operations are routed. The `Route` column is the published requestUri; nothing in the
+table is a Substrate spelling.
+
+| Operation | Route | Notes |
+|-----------|-------|-------|
+| CreateGraphqlApi | `POST /v1/apis` | `name` is required; `authenticationType` defaults to `API_KEY` |
+| ListGraphqlApis | `GET /v1/apis` | one page, no cursor |
+| GetGraphqlApi | `GET /v1/apis/{apiId}` | |
+| UpdateGraphqlApi | `POST /v1/apis/{apiId}` | |
+| DeleteGraphqlApi | `DELETE /v1/apis/{apiId}` | **200** with an empty body — see below |
+| CreateDataSource | `POST /v1/apis/{apiId}/datasources` | `name` and `type` are required |
+| ListDataSources | `GET /v1/apis/{apiId}/datasources` | one page, no cursor |
+| GetDataSource | `GET /v1/apis/{apiId}/datasources/{name}` | |
+| UpdateDataSource | `POST /v1/apis/{apiId}/datasources/{name}` | merges the members it decodes |
+| DeleteDataSource | `DELETE /v1/apis/{apiId}/datasources/{name}` | **200** with an empty body |
+| CreateResolver | `POST /v1/apis/{apiId}/types/{typeName}/resolvers` | `fieldName` is required; `kind` defaults to `UNIT` |
+| ListResolvers | `GET /v1/apis/{apiId}/types/{typeName}/resolvers` | filtered to the type in the path |
+| GetResolver | `GET /v1/apis/{apiId}/types/{typeName}/resolvers/{fieldName}` | |
+| UpdateResolver | `POST /v1/apis/{apiId}/types/{typeName}/resolvers/{fieldName}` | |
+| DeleteResolver | `DELETE /v1/apis/{apiId}/types/{typeName}/resolvers/{fieldName}` | **200** with an empty body |
+| CreateFunction | `POST /v1/apis/{apiId}/functions` | |
+| ListFunctions | `GET /v1/apis/{apiId}/functions` | one page, no cursor |
+| GetFunction | `GET /v1/apis/{apiId}/functions/{functionId}` | |
+| DeleteFunction | `DELETE /v1/apis/{apiId}/functions/{functionId}` | **200** with an empty body |
+| CreateApiKey | `POST /v1/apis/{apiId}/apikeys` | `expires` is not read — [#1122](https://github.com/scttfrdmn/substrate/issues/1122) |
+| ListApiKeys | `GET /v1/apis/{apiId}/apikeys` | one page, no cursor |
+| StartSchemaCreation | `POST /v1/apis/{apiId}/schemacreation` | stores the definition, answers `PROCESSING` |
+| GetIntrospectionSchema | `GET /v1/apis/{apiId}/schema` | a fixed placeholder schema |
+| ExecuteGraphQL | `POST /graphql` | a stub; see *The execution endpoint answers a stub* below |
+
+`UpdateFunction` is the one operation with a routed sibling under the same segment that Substrate does
+not implement: `POST /v1/apis/{apiId}/functions/{functionId}` resolves to nothing and is refused. The
+same is true of `UpdateApiKey` and `DeleteApiKey` under `apikeys/{id}`, and of every operation AppSync
+publishes outside these five segments — the merged-API operations, `AssociateApi`, the
+`SourceApiAssociation` family, the tagging trio, `EvaluateMappingTemplate`, and the Event API
+operations. All of them answer `UnknownOperationException`/**404**, per *An operation substrate does
+not implement* above.
+
+`ExecuteGraphQL` is reachable two ways, because AWS gives it its own host. A request to
+`POST /graphql` on the control-plane endpoint resolves to it, and so does any request to a host
+containing `.appsync-api.` — the per-API hostname `CreateGraphqlApi` reports back under
+`uris.GRAPHQL`. A consumer that takes the URI from the create response and posts to it therefore
+reaches the same handler without configuring anything.
+
+### A segment carries its verb and its tail, not just its name
+
+Three arms of the router used to match on the segment name alone, and each of the three was a hazard
+of a different size:
+
+- **`apikeys` ignored its tail**, so any `POST` under the segment resolved to `CreateApiKey`. That was
+  invisible while the segment was misspelled, and lowercasing it without a gate would have been *worse
+  than the defect being fixed*: `UpdateApiKey` is `POST /v1/apis/{apiId}/apikeys/{id}`, so a consumer
+  extending a key's expiry would have been answered **200 carrying a second, newly minted
+  credential** instead of the 404 an unimplemented operation owes. Only the bare segment reaches
+  `CreateApiKey` and `ListApiKeys`.
+- **`schemacreation` ignored its verb**, so a `GET` performed a write — it stored the request's
+  `definition` and reported `PROCESSING`. AWS publishes `POST` only, and only `POST` reaches it now.
+- **`schema` ignored its verb** the same way; AWS publishes `GET`.
+
+The `datasources`, `types` and `functions` arms already checked both, which is why only these three
+moved.
+
+### A delete answers 200, not 204
+
+All four delete operations — `DeleteGraphqlApi`, `DeleteDataSource`, `DeleteResolver`,
+`DeleteFunction` — open their Response Syntax `HTTP/1.1 200` and state it in words: *"If the action is
+successful, the service sends back an HTTP 200 response with an empty HTTP body."* Substrate answered
+**204** at all four, on the reasonable but unpublished reading that an empty body is a No Content. The
+body stays empty rather than becoming `{}`, because an empty body is what the pages promise and a
+member-less object is not the same thing.
+
+Each of those four operations had a test, and each test asserted the 204 — so the tests that existed
+to check the operations were pinning the divergence. That is the same shape as CloudFront's `Id` leak
+(#1091) and Kinesis's shared describe builder (#1076): a defect survives precisely where a test
+records it.
+
+### What a refusal reports
+
+Every AppSync page publishes the same small error set, and all of Substrate's refusals come from it:
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `BadRequestException` | 400 |
+| a required member absent | `BadRequestException` | 400 |
+| an API, data source, resolver or function that does not exist | `NotFoundException` | 404 |
+| a verb and path that resolve to no operation | `UnknownOperationException` | 404 |
+
+`BadRequestException` is checked **after** the parent API is resolved on every child operation, so a
+malformed `CreateDataSource` against an absent API reports `NotFoundException`. AppSync's
+`ConcurrentModificationException`/409, `UnauthorizedException`/401 and `InternalFailureException`/500
+are published and have no site: Substrate serialises requests, so no modification is concurrent, and it
+has no fault to report where AWS would report an internal failure. `UnauthorizedException` is the one
+of the three with a condition that could arise, and an AppSync request does pass through the
+cross-service IAM gate like every other service's — but that gate answers its own
+`AccessDeniedException`/403, the code Substrate uses for every JSON-protocol service, not AppSync's
+published 401. So the 401 has no site either.
+
+### The execution endpoint answers a stub
+
+`POST /graphql` answers `{"data": {}, "errors": null}` for any query. Executing a GraphQL document
+against a schema and a resolver chain is running the workload behind the API, not observing the API,
+so it sits on the far side of the boundary `doc.go` draws — the same reading that keeps a Lambda's
+handler from being executed. The schema a caller uploads through `StartSchemaCreation` is stored as
+recorded intent and is not parsed; `GetIntrospectionSchema` answers a fixed placeholder rather than an
+introspection of it.
+
+### ARNs are deterministic
+
+| Resource | ARN |
+|----------|-----|
+| GraphQL API | `arn:aws:appsync:{region}:{account}:apis/{apiId}` |
+| Data source | `arn:aws:appsync:{region}:{account}:apis/{apiId}/datasources/{name}` |
+| Resolver | `arn:aws:appsync:{region}:{account}:apis/{apiId}/types/{typeName}/resolvers/{fieldName}` |
+| Function | `arn:aws:appsync:{region}:{account}:apis/{apiId}/functions/{functionId}` |
+
+An API ID is 13 hex characters and a function or api-key ID is 26, both from the shared random source,
+so they differ between runs but are recorded in the event log and reproduce on replay.
+
+### Known divergences in the wire shape
+
+These are recorded rather than fixed, each with the issue that owns it, so that a consumer reading
+this page is not surprised by a member:
+
+- **The `graphqlApi` object answers `arn` as `apiArn`** and carries two members AppSync publishes
+  nowhere, `region` and `accountId`. An SDK reading `GraphqlApi.Arn` therefore gets an empty string
+  with no error. [#1121](https://github.com/scttfrdmn/substrate/issues/1121) — it is not a rename
+  because the struct is the persisted shape as well as the wire shape.
+- **A data source, resolver and function each answer an `apiId`** their published types do not list.
+  Same issue; it is the class [#756](https://github.com/scttfrdmn/substrate/issues/756) inventories.
+- **An api key expires 365 days out and a caller's `expires` is ignored**, where the page publishes a
+  7-day default and a 1-to-365-day bound enforced by `ApiKeyValidityOutOfBoundsException`/400.
+  [#1122](https://github.com/scttfrdmn/substrate/issues/1122).
+- **Tagging is not modelled.** `CreateGraphqlApi` stores a `tags` map and reports it back, but
+  `TagResource`, `UntagResource` and `ListTagsForResource` are unrouted and an AppSync ARN is not a
+  Resource Groups Tagging resource here — see *Resource Groups Tagging* for the services that are.
+- **No listing pages.** Every collection above answers all of its members and no `nextToken`, so a
+  caller's pagination loop terminates on the first response. See *The order a listing returns its
+  members in* for the tiering that governs which listings are ordered.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::AppSync::GraphQLApi | the API ARN | `Fn::GetAtt ApiId` is the ID; `GraphQLEndpointArn` is empty |
+| AWS::AppSync::DataSource | the data source ARN | |
+| AWS::AppSync::Resolver | the resolver ARN | physical ID is `TypeName.FieldName` |
+| AWS::AppSync::FunctionConfiguration | the function ARN | |
+
+All four `Ref`s are the resource's ARN, which is what each type's Return values section publishes, so a
+child resource must name its API by `Fn::GetAtt ["Api", "ApiId"]` and **not** by `Ref` — the `Ref` form
+builds `/v1/apis/arn:aws:appsync:…/datasources` and reaches no operation. Substrate answers both
+correctly; three of its own CloudFormation tests use the `Ref` form and pass anyway because they assert
+no per-resource error, which is #1123.
+
+### Cost
+
+AppSync query and mutation operations: **$4.00 per million**, charged on `ExecuteGraphQL` and on
+`CreateGraphqlApi`. No other AppSync operation is priced.
+
+---
+
 ## Step Functions
 
 **Endpoint:** `states.{region}.amazonaws.com`

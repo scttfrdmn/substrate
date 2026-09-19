@@ -332,7 +332,7 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	// --- AppSync -------------------------------------------------------------
 	"AWS::AppSync::GraphQLApi": pathDeleter("appsync", "/v1/apis/"),
 	"AWS::AppSync::DataSource": apiGatewayChildDeleter("ApiId",
-		func(api, id string) string { return "/v1/apis/" + api + "/DataSources/" + id }),
+		func(api, id string) string { return "/v1/apis/" + api + "/datasources/" + id }),
 	"AWS::AppSync::FunctionConfiguration": apiGatewayChildDeleter("ApiId",
 		func(api, id string) string { return "/v1/apis/" + api + "/functions/" + id }),
 	"AWS::AppSync::Resolver": func(_ *StackDeployer, dr DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
