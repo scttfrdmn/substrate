@@ -127,7 +127,7 @@ func (p *GluePlugin) createDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	name := input.DatabaseInput.Name
 	if name == "" {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: "DatabaseInput.Name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, glueInvalidInput("DatabaseInput.Name is required")
 	}
 
 	arn := fmt.Sprintf("arn:aws:glue:%s:%s:database/%s", reqCtx.Region, reqCtx.AccountID, name)
@@ -941,7 +941,7 @@ func (p *GluePlugin) tagResource(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)
 	if err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, err
 	}
 	if mergeErr := p.mergeGlueTags(goCtx, ns, key, input.TagsToAdd, nil); mergeErr != nil {
 		return nil, mergeErr
@@ -961,7 +961,7 @@ func (p *GluePlugin) untagResource(reqCtx *RequestContext, req *AWSRequest) (*AW
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)
 	if err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, err
 	}
 	if mergeErr := p.mergeGlueTags(goCtx, ns, key, nil, input.TagsToRemove); mergeErr != nil {
 		return nil, mergeErr
@@ -980,7 +980,7 @@ func (p *GluePlugin) getTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRespo
 	goCtx := context.Background()
 	ns, key, err := resolveGlueARN(input.ResourceArn)
 	if err != nil {
-		return nil, &AWSError{Code: "InvalidParameterValueException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, err
 	}
 	tags, err := p.loadGlueTags(goCtx, ns, key)
 	if err != nil {
@@ -997,16 +997,27 @@ func (p *GluePlugin) getTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRespo
 
 // resolveGlueARN parses a Glue ARN and returns the state (namespace, key).
 // Glue ARN format: arn:aws:glue:{region}:{acct}:{resourceType}/{name}.
+//
+// The error is the refusal itself, a [glueInvalidInput], rather than a bare fmt.Errorf the
+// three tagging handlers each wrapped in a code of their own choosing — which is how all
+// three came to answer InvalidParameterValueException, a string Glue publishes nowhere
+// (#1063). The returned error is always nil or non-nil as a value, never a typed nil, so
+// `err != nil` at a call site is safe.
+//
+// Every failure below is about the shape of the string and none of them reads state, which
+// is why glue_errors.go declines EntityNotFoundException for all four: nothing has been
+// looked up, so there is no entity to report absent. An absent ResourceArn reaches the
+// first arm, since "" has no prefix.
 func resolveGlueARN(arn string) (ns, key string, err error) {
 	const prefix = "arn:aws:glue:"
 	if !strings.HasPrefix(arn, prefix) {
-		return "", "", fmt.Errorf("invalid Glue ARN: %q", arn)
+		return "", "", glueInvalidInput(fmt.Sprintf("invalid Glue ARN: %q", arn))
 	}
 	rest := arn[len(prefix):]
 	// rest = "{region}:{acct}:{resourceType}/{name}"
 	parts := strings.SplitN(rest, ":", 3)
 	if len(parts) < 3 {
-		return "", "", fmt.Errorf("invalid Glue ARN: %q", arn)
+		return "", "", glueInvalidInput(fmt.Sprintf("invalid Glue ARN: %q", arn))
 	}
 	region := parts[0]
 	acct := parts[1]
@@ -1014,7 +1025,7 @@ func resolveGlueARN(arn string) (ns, key string, err error) {
 
 	slashIdx := strings.IndexByte(resource, '/')
 	if slashIdx < 0 {
-		return "", "", fmt.Errorf("invalid Glue ARN resource %q", resource)
+		return "", "", glueInvalidInput(fmt.Sprintf("invalid Glue ARN resource %q", resource))
 	}
 	rtype := resource[:slashIdx]
 	rname := resource[slashIdx+1:]
@@ -1038,7 +1049,7 @@ func resolveGlueARN(arn string) (ns, key string, err error) {
 	case "job":
 		return glueNamespace, "job:" + acct + "/" + region + "/" + rname, nil
 	default:
-		return "", "", fmt.Errorf("unsupported Glue resource type %q in ARN", rtype)
+		return "", "", glueInvalidInput(fmt.Sprintf("unsupported Glue resource type %q in ARN", rtype))
 	}
 }
 

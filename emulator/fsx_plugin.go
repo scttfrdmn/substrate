@@ -285,11 +285,7 @@ func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 	if input.FileSystemID == "" {
-		return nil, &AWSError{
-			Code:       "InvalidRequest",
-			Message:    "FileSystemId is required",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, fsxBadRequest("FileSystemId is required")
 	}
 
 	goCtx := context.Background()

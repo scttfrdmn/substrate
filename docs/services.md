@@ -659,7 +659,7 @@ being replaced:
 | RAM | `MalformedQueryString`/400 | `ValidationError`/400 | Absent from RAM entirely. It is published at **404** on the Query-protocol page and describes the URL query string, not a body. |
 | CloudTrail | `InvalidParameterCombinationException`/400 | `ValidationError`/400 | Means two parameters that cannot be used together; not published on `LookupEvents` at all. A body that will not parse yields no parameters to combine. |
 | Glue | `InvalidParameterValueException`/400 | `InvalidInputException`/400 | Absent from Glue's Common Errors page, from `CreateDatabase`/`GetTables`/`StartJobRun`, and from all thirty-six `AWSGlueException` subclasses. Glue publishes `InvalidInputException`, *"The input provided was not valid."*, on every operation page. |
-| FSx | `InvalidRequest`/400 | `BadRequest`/400 | Absent from FSx's Common Errors page, from `DescribeFileSystems`, and from all thirty-five `AmazonFSxException` subclasses. `InvalidRequest` is an **Amazon S3** code — the likely provenance of the mistake. FSx's Java class is `BadRequestException`, but the wire code carries no suffix, so the file's no-suffix instinct was right and only the stem was wrong. |
+| FSx | `InvalidRequest`/400 | `BadRequest`/400 | Absent from FSx's Common Errors page, from `DescribeFileSystems` and `DeleteFileSystem`, and from all thirty-five `AmazonFSxException` subclasses. `InvalidRequest` is an **Amazon S3** code — the likely provenance of the mistake. FSx's Java class is `BadRequestException`, but the wire code carries no suffix, so the file's no-suffix instinct was right and only the stem was wrong. `BadRequest` is the first of `DeleteFileSystem`'s five published errors, which is where [#1063](https://github.com/scttfrdmn/substrate/issues/1063) landed the required-member refusal below. |
 
 Only these four constructors changed a code outright; WAFv2's is a re-reading recorded below, and the
 other sixteen carry forward what their file already answered. Twenty-one constructors cover twenty-one of
@@ -675,12 +675,30 @@ the forty-six pre-existing body-parse guards were folded in as well (RAM 1, Clou
 WAFv2 11), located by their `"invalid JSON"` message text rather than by hand, which also removed
 forty-six `err.Error()` message leaks.
 
-What still answers the old code in those five services is the **required-member** class, not the
+What #950 left answering the old code in those five services was the **required-member** class, not the
 body-parse one: Glue's `DatabaseInput.Name` check and its three `resolveGlueARN` failures, FSx's
 `FileSystemId` check, and six WAFv2 `WAFInvalidParameterException` required-member literals — the last
 inconsistent with WAFv2's own #755 reading below, under which an omitted member is `ValidationError`.
-Each of those is a per-operation code decision rather than a mechanical edit, so they stay with #950 and
-are filed separately.
+Each of those is a per-operation code decision rather than a mechanical edit, so they were filed
+separately as [#1063](https://github.com/scttfrdmn/substrate/issues/1063) and corrected there: Glue's
+four now answer `InvalidInputException`/400, FSx's one `BadRequest`/400, and WAFv2's six
+`ValidationError`/400, matching each service's body-parse constructor. Three findings came out of doing
+it, each recorded where it applies:
+
+- **FSx's site is in `DeleteFileSystem`, not `DescribeFileSystems`**, where `FileSystemId` is
+  `Required: Yes`. `DescribeFileSystems` marks `FileSystemIds` `Required: No` and an absent list means
+  *describe them all*, which substrate already does — so the guard was in the right place and only the
+  code was wrong.
+- **Glue's `resolveGlueARN` returns the refusal itself** rather than a bare error its three callers wrap.
+  All four of its failures are complaints about the *shape* of the string and none reads state, which is
+  why `EntityNotFoundException` — published at 400 on all three tagging pages — applies to none of them:
+  nothing has been looked up. A well-formed ARN that addresses nothing is that code's condition and is
+  recorded as an open divergence, since `GetTags` on an untagged-and-absent resource answers an empty
+  tag set.
+- **WAFv2's `Id` check could not move wholesale.** `GetWebACL` marks `ARN`, `Id`, `Name` *and* `Scope`
+  all `Required: No`, while `GetWebACL`'s three siblings and all three `IPSet` readers mark theirs
+  `Required: Yes`. So the shared helper's check moved out to the callers that need it, and `GetWebACL`
+  reports that the request addressed nothing rather than naming a member its own page says is optional.
 
 **WAFv2 is a judgement recorded rather than a correction.** Its other guards answer
 `WAFInvalidParameterException`, which *is* published at 400 — so unlike the four above it is not

@@ -44,8 +44,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `API_CreateStateMachine` publishes `ConflictException` at **409** and `API_UpdateStateMachine` adds
   `ServiceQuotaExceededException` at **402** — each listed twice, under both its own status and a 400.
   The statuses the plugin answers are #1072's business; this is the citation correction.
+- **The eleven required-member refusals #950 deferred now answer their service's published code**
+  (#1063). #950 corrected the *body-parse* guards in Glue, FSx and WAFv2 and left the required-member
+  ones behind, because each was a per-operation code decision rather than a mechanical edit. So each of
+  those three plugins answered one code for a body it could not read and a different one for a member
+  that was not there — the one-plugin-two-codes split #950 removed, surviving in the class it did not
+  sweep. Glue's four now answer `InvalidInputException`/400, *"The input provided was not valid."*,
+  published on all four governing pages where `InvalidParameterValueException` appears on none; FSx's
+  one answers `BadRequest`/400, the first of its page's five published errors, where `InvalidRequest`
+  is an Amazon S3 code; and WAFv2's six answer `ValidationError`/400, the reading #755 already
+  established for this plugin — an *omitted* member is the common list's `ValidationError`, a
+  *present-but-invalid value* is `WAFInvalidParameterException`, whose gloss and all four published
+  examples concern a value that was read. Three of the eleven also leaked `err.Error()` into the
+  message; `resolveGlueARN` now returns the refusal itself rather than a bare error its three callers
+  re-code, which is what removes the leak and puts the code next to the sentence it carries.
+- **`GetWebACL`'s refusal names no member, because its page says none is required** (#1063). The `Id`
+  check lived in the helper `loadWebACLByID`, whose four callers do not agree: `API_UpdateWebACL` and
+  `API_DeleteWebACL` mark `Id` `Required: Yes`, but `API_GetWebACL` marks `ARN`, `Id`, `Name` *and*
+  `Scope` all `Required: No` — an ARN alone, or the other three together. A single check there would
+  have reported *"Id is a required parameter"* from the one operation whose page says it is not, so the
+  check moved to the callers that need it and `GetWebACL` reports instead that the request identifies
+  no web ACL. `loadIPSetByID` keeps its check unchanged, because there all four callers do agree.
+- **FSx's refusal is in `DeleteFileSystem`, and the citation shipped in `docs/services.md` is corrected**
+  (#1063). The issue placed it in `describeFileSystems`, which would have made it a check to remove:
+  `DescribeFileSystems` marks `FileSystemIds` `Required: No` and an absent list means *describe them
+  all*, which substrate already does and which its own tests rely on. `DeleteFileSystem` marks
+  `FileSystemId` `Required: Yes`, so the guard was in the right place and only the code was wrong.
 
 ### Added
+- **Eleven rows in `memberComplaintServices` and a code assertion on FSx's three refusals** (#1063).
+  Every one of the eleven corrected codes passed the full suite before *and* after the change, which is
+  to say nothing pinned any of them — the same gap #1090 records for ECR, and the reason these rows are
+  the load-bearing part of the fix rather than a formality. They go in the existing table because its
+  one `code:` per service is what forces a plugin's decision to be made once. FSx's own tests asserted
+  only a 400 status, which cannot distinguish `BadRequest` from the `InvalidRequest` it was answering;
+  `assertFSxError` asserts both, and a new test covers the required-member refusal itself.
 - **A tripwire asserting that `ValidationError` and `ValidationException` are never sourced to each
   other's page** (#1064). They are different codes with different sources, a distinction re-derived
   more than once: `ValidationError` appears *only* on a common-errors page, in all three generations,

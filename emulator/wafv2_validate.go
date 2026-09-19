@@ -75,12 +75,7 @@ func wafv2ValidateCreateIPSet(name, scope, ipAddressVersion string, addresses []
 		{"Addresses", addresses == nil},
 	} {
 		if m.omitted {
-			return &AWSError{
-				Code: "ValidationError",
-				Message: "The input doesn't meet the required format or constraints: " +
-					m.member + " is a required parameter",
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return wafv2MissingMember(m.member)
 		}
 	}
 
@@ -127,6 +122,44 @@ func wafv2ValidateIPSetAddress(addr string) error {
 			"a /0 CIDR range is not supported")
 	}
 	return nil
+}
+
+// wafv2MissingMember builds the ValidationError an omitted required member answers.
+//
+// #755 settled the code for CreateIPSet and wrote the argument out above; #1063 found six
+// further sites that had answered WAFInvalidParameterException for the same condition —
+// createWebACL's Name, the ResourceArn check that associateWebACL, disassociateWebACL and
+// getWebACLForResource each carry, and the Id check in loadWebACLByID and loadIPSetByID —
+// so one plugin answered two codes for one class of caller error, which is the defect
+// [wafv2ValidateCreateIPSet]'s split exists to prevent. They all call this now.
+//
+// The distinction is the one #755 drew and every page re-states verbatim:
+// WAFInvalidParameterException is glossed "The operation failed because AWS WAF didn't
+// recognize a parameter in the request", and all four of its published examples are about a
+// value substrate *read* — a name or value that isn't valid, an unnestable nested statement,
+// an unavailable DefaultAction type, a malformed ARN. An absent member is none of those, and
+// the common list's ValidationError names the case outright: "Check that all required
+// parameters are included."
+//
+// The member name goes in the message because ValidationError's published sentence does not
+// say which parameter was missing and a caller omitting one of four needs to know.
+func wafv2MissingMember(member string) *AWSError {
+	return wafv2ValidationError(member + " is a required parameter")
+}
+
+// wafv2ValidationError builds the common list's ValidationError with detail appended to its
+// published sentence.
+//
+// It exists for the one refusal that is about the request as a whole rather than about a
+// named member — getWebACL, whose four identifiers are each individually Required: No but
+// which cannot address a web ACL when none of them is supplied. [wafv2MissingMember] is the
+// named-member case and the only other caller.
+func wafv2ValidationError(detail string) *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    "The input doesn't meet the required format or constraints: " + detail,
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // wafv2InvalidParameter builds the WAFInvalidParameterException a present but
