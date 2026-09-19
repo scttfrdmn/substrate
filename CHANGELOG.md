@@ -8,6 +8,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fixed
+- **Every routed Lambda operation is reachable under the API version date its own page publishes, not
+  only `2015-03-31`** (#1142). A REST service puts the version in the path, and Lambda dates each
+  operation's URI at the version that operation was introduced — `2014-11-13` for `InvokeAsync`,
+  `2015-03-31` for the function CRUD, `Invoke`, the resource policy and the event source mappings,
+  `2017-03-31` for `TagResource`/`UntagResource`/`ListTags`, and `2019-09-25` for
+  `PutFunctionEventInvokeConfig`. Substrate's parser reached its arms by trimming the literal prefix
+  `/2015-03-31`, so a path under any other date kept its version segment, matched nothing, and fell
+  through to `UnknownOperationException`/404. `lambda.TagResource` against a function substrate had
+  just created answered *"The action POST /2017-03-31/tags/arn:aws:lambda:… is not recognized"* even
+  though the dispatch arm, the handler and the parser's own `/tags/` arm were all there: **three
+  operations were unreachable in a plugin that implements them**, and two more were reachable only at
+  a date AWS does not serve. The dates are confirmed mechanically against
+  `aws-sdk-go-v2/service/lambda`'s serializer, whose 50 distinct URIs carry 17 different dates; of the
+  paths substrate routes, three families were on the wrong one and the rest were right. **A request
+  under an undocumented date is still refused** — the version is matched rather than stripped, because
+  accepting `/2015-03-31/tags/…`, which no SDK emits and AWS does not serve, would make substrate the
+  only implementation that does and would hide the defect until deployment. The cost of matching is
+  that nine of substrate's own tests were posting to the date the parser wanted rather than the one the
+  API publishes; they move with the fix, which is the evidence these routes were never exercised as an
+  SDK drives them, and the one site already using `/2017-03-31/tags/…`
+  (`lambda_warm_container_test.go`) asserted nothing about the status and so passed against the 404.
+  The same parser is Lambda's entry in the operation-name resolver, so authorization, metering and
+  fault injection all saw `Unknown` for a tag call — an IAM policy naming `lambda:TagResource` could
+  neither allow nor deny it, and a seeded fault could not fire; the resource half moves with it, and a
+  tags request is now authorized against the ARN it names verbatim rather than one reassembled from the
+  caller's own account and Region, which would retarget a cross-account ARN at the caller's own
+  function of that name.
 - **SNS `TagResource` and `UntagResource` emit the empty result element their pages publish, so an
   SDK can call them at all** (#1141). Both wrote the tag, saved the topic and answered 200 — and a
   caller using `aws-sdk-go-v2/service/sns` still saw the operation fail with *"deserialization failed,

@@ -87,7 +87,7 @@ func keyScopeFunctionTags(t *testing.T, ts *emulator.TestServer, account, region
 		Tags map[string]string `json:"Tags"`
 	}
 	scanScopeREST(t, ts, account, "lambda", region, http.MethodGet,
-		"/2015-03-31/tags/"+arn, nil, &out)
+		"/2017-03-31/tags/"+arn, nil, &out)
 	return out.Tags
 }
 

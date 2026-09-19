@@ -166,7 +166,7 @@ func TestLambdaPlugin_InvokeAsync(t *testing.T) {
 		"Handler":      "index.handler",
 	})
 
-	resp := lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions/async-test/invoke-async", nil)
+	resp := lambdaRequest(t, srv, http.MethodPost, "/2014-11-13/functions/async-test/invoke-async", nil)
 	assert.Equal(t, http.StatusAccepted, resp.StatusCode)
 }
 
@@ -222,7 +222,7 @@ func TestLambdaPlugin_PutFunctionEventInvokeConfig(t *testing.T) {
 		"Handler":      "index.handler",
 	})
 
-	resp := lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/functions/invoke-cfg/event-invoke-config", map[string]any{
+	resp := lambdaRequest(t, srv, http.MethodPut, "/2019-09-25/functions/invoke-cfg/event-invoke-config", map[string]any{
 		"MaximumRetryAttempts":     2,
 		"MaximumEventAgeInSeconds": 3600,
 	})
@@ -287,13 +287,13 @@ func TestLambdaPlugin_TagResource(t *testing.T) {
 	arn := fnResult["FunctionArn"].(string)
 
 	// TagResource.
-	tagResp := lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/tags/"+arn, map[string]any{
+	tagResp := lambdaRequest(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn, map[string]any{
 		"Tags": map[string]string{"env": "test", "owner": "alice"},
 	})
 	assert.Equal(t, http.StatusNoContent, tagResp.StatusCode)
 
 	// ListTags.
-	listResp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/tags/"+arn, nil)
+	listResp := lambdaRequest(t, srv, http.MethodGet, "/2017-03-31/tags/"+arn, nil)
 	assert.Equal(t, http.StatusOK, listResp.StatusCode)
 	var listResult map[string]any
 	decodeLambdaJSON(t, listResp, &listResult)
@@ -316,17 +316,17 @@ func TestLambdaPlugin_UntagResource(t *testing.T) {
 	arn := fnResult["FunctionArn"].(string)
 
 	// Add tags.
-	lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/tags/"+arn, map[string]any{
+	lambdaRequest(t, srv, http.MethodPost, "/2017-03-31/tags/"+arn, map[string]any{
 		"Tags": map[string]string{"a": "1", "b": "2"},
 	})
 
 	// Untag "a".
-	untagURL := "/2015-03-31/tags/" + arn + "?tagKeys=a"
+	untagURL := "/2017-03-31/tags/" + arn + "?tagKeys=a"
 	untagResp := lambdaRequest(t, srv, http.MethodDelete, untagURL, nil)
 	assert.Equal(t, http.StatusNoContent, untagResp.StatusCode)
 
 	// ListTags — should only have "b".
-	listResp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/tags/"+arn, nil)
+	listResp := lambdaRequest(t, srv, http.MethodGet, "/2017-03-31/tags/"+arn, nil)
 	var listResult map[string]any
 	decodeLambdaJSON(t, listResp, &listResult)
 	tags := listResult["Tags"].(map[string]any)

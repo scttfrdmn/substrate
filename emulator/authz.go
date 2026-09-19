@@ -1008,11 +1008,9 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		// left is an operation naming none of them, whose request resource is "*".
 		return "*"
 	case "lambda":
-		name := lambdaNameFromPath(req.Path)
-		if name != "" {
-			return "arn:aws:lambda:" + region + ":" + acct + ":function:" + name
-		}
-		return "*"
+		// A Lambda request names its resource in the path, and which path — and so which API
+		// version — depends on the operation; see lambdaAuthzResourceARN.
+		return lambdaAuthzResourceARN(req.Path, region, acct)
 	case "dynamodb":
 		if tbl := req.Params["TableName"]; tbl != "" {
 			return "arn:aws:dynamodb:" + region + ":" + acct + ":table/" + tbl
@@ -1117,21 +1115,6 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	default:
 		return "*"
 	}
-}
-
-// lambdaNameFromPath extracts the function name from a Lambda REST path
-// like /2015-03-31/functions/{name}[/...].
-func lambdaNameFromPath(path string) string {
-	const prefix = "/2015-03-31/functions/"
-	rest := strings.TrimPrefix(path, prefix)
-	if rest == path {
-		return ""
-	}
-	// Stop at the next '/'
-	if idx := strings.Index(rest, "/"); idx >= 0 {
-		return rest[:idx]
-	}
-	return rest
 }
 
 // buildS3ARN constructs an S3 resource ARN from the request path.

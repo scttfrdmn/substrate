@@ -97,7 +97,7 @@ func (f *cfnStampFixture) functionTagsFor(t *testing.T, arn string) []string {
 	resp, err := f.lambda.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
 		Service:   "lambda",
 		Operation: "GET",
-		Path:      "/2015-03-31/tags/" + arn,
+		Path:      "/2017-03-31/tags/" + arn,
 		Params:    map[string]string{},
 		Headers:   map[string]string{},
 	})
