@@ -18165,6 +18165,571 @@ Substrate enforces no capacity ceiling, validates no rule statement, and checks 
 here once at creation — and `AssociateWebACL` $0.000001. Per-request WAF charges ($0.60 per million)
 are not modelled, because Substrate sees no traffic through a Web ACL.
 
+## AWS Backup
+
+**Endpoint:** `backup.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON — the operation is the HTTP method plus the URL path, not an `X-Amz-Target`
+header. API version 2018-11-15.
+
+Twelve operations over three resources: backup vaults, backup plans, and a plan's resource
+selections. Every record is keyed by account and Region, so two accounts, or one account in two
+Regions, never see each other's vaults or plans.
+
+Nothing is ever backed up. A plan's `Rules` are stored verbatim as recorded intent and no schedule is
+ever evaluated, so no backup job, recovery point or restore job exists and a vault's
+`NumberOfRecoveryPoints` is `0` for its whole life. That is the boundary in `doc.go`: the API
+observation is modelled, the work behind it is not.
+
+The published path is given for every operation because one of them cannot be reached over it.
+
+### Supported operations
+
+| Operation | Published path | Notes |
+|-----------|----------------|-------|
+| CreateBackupVault | `PUT /backup-vaults/{backupVaultName}` | Routed on the published verb. Answers exactly the three published members. `BackupVaultTags` and `CreatorRequestId` are not read, so a create-time tag set is dropped, and `EncryptionKeyArn` is echoed without the KMS key having to exist |
+| DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | Five of the seventeen published members, plus [two of Substrate's own](#the-backup-vault-record-goes-out-whole) |
+| DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
+| ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of whole vault records; `maxResults`, `nextToken`, `shared` and `vaultType` are all ignored and no `NextToken` is emitted |
+| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated, `AdvancedBackupSettings` is not read, and `CreatorRequestId` is ignored, so the published idempotency — *"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is returned"* — does not hold. The plan ARN [uses the wrong resource segment](#arn-shapes) |
+| GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Unreachable over that path](#getbackupplan-is-unreachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
+| UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
+| DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers `{}` where [four members are published](#two-backup-plan-responses-carry-the-wrong-members), and ignores [the plan's selections](#which-backup-preconditions-are-enforced) |
+| ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; `includeDeleted`, `maxResults` and `nextToken` are ignored |
+| CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
+| GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`; `CreatorRequestId` is not recorded |
+| DeleteBackupSelection | `DELETE /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `{}`, which is the published empty body |
+
+Every other AWS Backup operation is unrouted, including the whole job surface —
+`StartBackupJob`, `DescribeBackupJob`, `ListBackupJobs`, `StartRestoreJob`,
+`ListRecoveryPointsByBackupVault` — as well as `ListBackupSelections`, `ListBackupPlanVersions`,
+`PutBackupVaultAccessPolicy`, `PutBackupVaultLockConfiguration`, `GetBackupPlanFromJSON` and the
+three tag operations. No Backup resource is scanned by the Resource Groups Tagging API either, so a
+vault or plan cannot be found by tag.
+
+A create writes its resource and then adds it to a name or ID index with a helper that discards the
+index write's error, so a create can report success while the resource is missing from
+`ListBackupVaults` or `ListBackupPlans`
+([#1175](https://github.com/scttfrdmn/substrate/issues/1175)).
+
+### GetBackupPlan is unreachable over its published path
+
+`API_GetBackupPlan` publishes `GET /backup/plans/{backupPlanId}/?…` — with a trailing slash before
+the query string. The router treats everything after `/backup/plans/` as the plan ID, so an SDK built
+from the model asks for the ID `abc/` and the lookup misses: a plan that exists, and that
+`ListBackupPlans` reports, answers `ResourceNotFoundException`. Through an SDK the operation does not
+work at all. It is the only routed Backup operation whose published path puts a trailing slash after
+a path parameter; the two creates publish one too, but there the remainder is empty and only the verb
+is wrong. [#1176](https://github.com/scttfrdmn/substrate/issues/1176).
+
+`versionId` is unread for a structural reason rather than an oversight: one record is kept per plan
+and `UpdateBackupPlan` overwrites it, so no previous version exists to fetch.
+
+### The two backup creates are routed on the wrong verb
+
+`API_CreateBackupPlan` publishes `PUT /backup/plans/` and `API_CreateBackupSelection` publishes
+`PUT /backup/plans/{backupPlanId}/selections/`. Both are routed on `POST`, and nothing routes the
+published `PUT`, so an SDK call falls through to the router's fallback and is refused as an unknown
+route. `CreateBackupVault` is on its published `PUT`, so the plugin's three creates do not agree with
+each other. [#1172](https://github.com/scttfrdmn/substrate/issues/1172).
+
+### Two backup plan responses carry the wrong members
+
+`UpdateBackupPlan` answers `BackupPlanId`, `BackupPlanArn`, `VersionId` and an `UpdatedAt` that is on
+no AWS Backup page, while `CreationDate` — published, and already held on the stored record — is
+absent. `DeleteBackupPlan` answers `{}` where the page publishes `BackupPlanArn`, `BackupPlanId`,
+`DeletionDate` and `VersionId`; `VersionId` is the only handle on the version that was deleted, so
+the member identifying what happened is the one missing. `DeleteBackupVault` and
+`DeleteBackupSelection` publish *"an HTTP 200 response with an empty HTTP body"*, so their `{}` is
+faithful. [#1177](https://github.com/scttfrdmn/substrate/issues/1177).
+
+`UpdateBackupPlan` also merges where AWS replaces. `BackupPlan` is `Required: Yes` and describes the
+plan in full, but an omitted `BackupPlanName` or `Rules` leaves the stored value in place, and an
+empty body updates nothing while still minting a new `VersionId` — so an update that drops a rule
+does not drop it here.
+
+### Which backup preconditions are enforced
+
+`API_DeleteBackupPlan` opens with *"A backup plan can only be deleted after all associated selections
+of resources have been deleted."* That is not enforced: a plan with selections is deleted, and
+`GetBackupSelection` then answers HTTP 200 for a selection of a plan that no longer exists, reporting
+the deleted plan's ID. `CreateBackupSelection` does check the plan, so the selection namespace
+accepts reads for a parent it will not accept writes for.
+[#1178](https://github.com/scttfrdmn/substrate/issues/1178).
+
+`API_DeleteBackupVault`'s mirror precondition — *"A vault can be deleted only if it is empty"* — is
+**vacuous** rather than unenforced. No operation creates a recovery point, so
+`NumberOfRecoveryPoints` is `0` for a vault's whole life and the condition cannot fail.
+
+### The backup vault record goes out whole
+
+`DescribeBackupVault` and `ListBackupVaults` marshal the persisted vault straight onto the wire, so
+`AccountID` and `Region` — Substrate's own bookkeeping — appear as response members
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). Five published members are present
+(`BackupVaultName`, `BackupVaultArn`, `EncryptionKeyArn`, `CreationDate`,
+`NumberOfRecoveryPoints`) and twelve are absent, `VaultState`, `Locked`, `MinRetentionDays` and
+`CreatorRequestId` among them. The plan and selection handlers build their responses member by
+member, so the vault is the only Backup record that leaks.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `InvalidRequestException` | 400 |
+| `BackupVaultName`, `BackupPlanName` or `SelectionName` absent | `InvalidRequestException` | 400 |
+| a vault name already in use | `AlreadyExistsException` | 400 |
+| a vault, plan or selection that does not exist | `ResourceNotFoundException` | 404 |
+
+`AlreadyExistsException`/400 is what `API_CreateBackupVault` publishes. The other two diverge, and
+both are [#1173](https://github.com/scttfrdmn/substrate/issues/1173): every Backup page publishes
+`ResourceNotFoundException` at **400**, not 404, and the published code for an absent required member
+is `MissingParameterValueException`. `InvalidRequestException` is published on the delete pages, for
+input that is wrong rather than missing, and on the create pages not at all.
+
+`InvalidParameterValueException`, `LimitExceededException` and `ServiceUnavailableException`/500 are
+published across these pages and have no site here: Substrate enforces no vault or plan quota and has
+no transient failure to report.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| `AWS::Backup::BackupPlan` | the logical ID | A stub. No property is read — including `BackupPlan`, which is `Required: Yes` — and the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. AWS publishes that `Ref` returns `BackupPlanId`, and `BackupPlanArn`, `BackupPlanId` and `VersionId` as `Fn::GetAtt` attributes; Substrate returns the logical ID and supports no attribute, and the deploy function's own doc comment claims the `Ref` is the plan ID ([#1182](https://github.com/scttfrdmn/substrate/issues/1182)) |
+
+`AWS::Backup::BackupVault` and `AWS::Backup::BackupSelection` are not deployed.
+
+### ARN shapes
+
+| Resource | Substrate | Published |
+|----------|-----------|-----------|
+| vault | `arn:aws:backup:{region}:{account}:backup-vault:{name}` | the same |
+| plan | `arn:aws:backup:{region}:{account}:backup-plan:{planId}` | `…:plan:{planId}` |
+| selection | none — a selection carries no ARN | AWS publishes none either |
+
+The two segments really are spelled differently by the same service: `backup-vault` for a vault and
+`plan` for a plan, each published as a worked example rather than as a format string. Substrate's
+vault matches; its plan does not, in the API handler and in the CloudFormation deployer alike, so an
+IAM policy or an ARN parser written against Substrate's plan ARN matches nothing on AWS
+([#1181](https://github.com/scttfrdmn/substrate/issues/1181)).
+
+### Cost
+
+`CreateBackupPlan` is attributed $0.000001 per call. Real AWS Backup charges for protected storage
+and for restores, not for creating a plan; Substrate stores no backups, so the attribution stands in
+for a plan's existence rather than for anything AWS would bill.
+
+---
+
+## Bedrock Runtime
+
+**Endpoint:** `bedrock-runtime.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON, path-routed. Two API versions, because two services are served here: the
+`bedrock-runtime` data plane is 2023-09-30 and the `bedrock` control plane is 2023-04-20.
+
+**Routing:** `bedrock` is aliased to `bedrock-runtime`, because boto3's `bedrock-runtime` client
+signs with `bedrock` as the SigV4 signing name in the credential scope when `AWS_ENDPOINT_URL` is
+set. One plugin therefore serves two AWS services: the `bedrock-runtime` data plane (`InvokeModel`,
+`ApplyGuardrail`) and the four `*ModelInvocationJob` batch-inference operations, which belong to the
+`bedrock` control plane.
+
+No inference is performed. `InvokeModel` answers a seeded body or a canned one, `ApplyGuardrail`
+answers a deterministic verdict, and a batch job's status is a value a seed sets — all of which is
+the point: a consumer's polling and guardrail-handling paths become testable without a model ever
+running.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
+| ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
+| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked |
+| GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports a [seeded status](#seeding-a-batch-job-status) if one is set |
+| ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; the seeded status is applied here too, so a poll on either operation agrees. Every published query filter is ignored and no `nextToken` is emitted |
+| StopModelInvocationJob | `POST /model-invocation-job/{jobIdentifier}/stop`. [Stops a job in any state and skips `Stopping`](#stopping-a-batch-job-is-immediate) |
+
+`InvokeModelWithResponseStream`, `Converse` and `ConverseStream` are not routed, so no streaming or
+Converse-shaped call is served. Nor is the rest of the `bedrock` control plane —
+`ListFoundationModels`, `GetFoundationModel`, `CreateGuardrail`, `GetGuardrail`,
+`CreateModelCustomizationJob` and the provisioned-throughput operations among them.
+
+### InvokeModel reads nothing but the model ID
+
+The handler takes its request as `_ *AWSRequest`, so every part of the call except the path's model ID
+is discarded. Three consequences are worth knowing before writing a test.
+
+`X-Amzn-Bedrock-GuardrailIdentifier` and `X-Amzn-Bedrock-GuardrailVersion` are published request
+headers and are unread, so an invocation that attaches a guardrail is never filtered. The published
+`"amazon-bedrock-guardrailAction": "INTERVENED | NONE"` member therefore never appears in a canned
+body — the only way to observe an intervention is to call `ApplyGuardrail` directly, which is a
+different operation most consumers do not make. The decision itself already exists next door
+([see above](#how-a-guardrail-decides)); what is missing is the header read that would reach it.
+
+The page publishes three conditions under which the *request* is an error, and none is checked: a body
+naming `amazon-bedrock-guardrailConfig` with no guardrail identifier, a guardrail enabled with a
+`contentType` other than `application/json`, and a guardrail identifier with no `guardrailVersion`.
+
+And because the body is never parsed, a malformed or entirely absent one is accepted — the canned
+Claude Messages body comes back regardless.
+[#1183](https://github.com/scttfrdmn/substrate/issues/1183).
+
+### How a guardrail decides
+
+A guardrail's blocklist is a list of substrings held in state. If any of them occurs in the request's
+first text content item, the response is `action: GUARDRAIL_INTERVENED` with a fixed output
+(*"Sorry, I can't help with that."*) and a single fabricated `topicPolicy` assessment naming
+`blocked-topic`; otherwise it is `action: NONE` with the input echoed back and an empty assessment
+list. `usage` is a fixed set of counters in both cases.
+
+Two consequences worth knowing before writing a test. There is no control-plane endpoint for the
+blocklist, so `GUARDRAIL_INTERVENED` is reachable only by writing the blocklist key into state
+directly — every ordinary call gets `NONE`. And the blocklist key is auto-created empty on first use
+and omits both the Region and the guardrail version, so `ApplyGuardrail` can never answer
+`ResourceNotFoundException`: any guardrail identifier, for any version, is valid.
+
+### Seeding a model response
+
+```
+POST   /v1/bedrock-runtime/responses   {"modelId": "anthropic.claude-v2", "body": {…}}
+DELETE /v1/bedrock-runtime/responses   (all, or ?modelId=… for one)
+```
+
+`modelId` defaults to `"*"`, which matches any model; an exact model ID wins over the wildcard.
+`body` is required and is returned verbatim as the response payload, which is what `InvokeModel`
+publishes — the member named `body` *is* the HTTP body — so a seeded response is byte-exact.
+
+### Seeding a batch job status
+
+```
+POST   /v1/bedrock/model-invocation-job-status   {"jobId": "…", "status": "Failed", "message": "…"}
+DELETE /v1/bedrock/model-invocation-job-status   (all, or ?jobId=… for one)
+```
+
+`jobId` defaults to `"*"`. `status` is required and is **not** validated against the ten published
+values, so a misspelled status is reported back as the job's status rather than refused. A seed
+governs what an observation reports; it does not rewrite the stored record, so clearing the seed
+returns the job to the state its own history gave it.
+
+### Stopping a batch job is immediate
+
+`API_GetModelInvocationJob` glosses `Stopping` as the state a job is in *while* it stops and `Stopped`
+as the state after. `StopModelInvocationJob` writes `Stopped` directly, so `Stopping` is never
+observable, and it accepts a job in any state — including `Completed` and `Failed` — where AWS
+refuses with `ConflictException`. It answers `{}`, which is the published empty body.
+[#1174](https://github.com/scttfrdmn/substrate/issues/1174).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse, on `ApplyGuardrail` or `CreateModelInvocationJob` | `ValidationException` | 400 |
+| a batch job that does not exist | `ResourceNotFoundException` | 404 |
+
+Both match what the pages publish. Those two are the only operations that parse a body at all:
+`InvokeModel` [reads nothing but the model ID](#invokemodel-reads-nothing-but-the-model-id), so it has
+no body-parse refusal to answer.
+
+The rest of what the pages publish has no site, because none of the conditions is modelled.
+`InvokeModel` alone publishes ten errors — `AccessDeniedException`/403, `InternalServerException`/500,
+`ModelErrorException`/424, `ModelNotReadyException`/429, `ModelTimeoutException`/408,
+`ResourceNotFoundException`/404, `ServiceQuotaExceededException`/400,
+`ServiceUnavailableException`/503, `ThrottlingException`/429 and `ValidationException`/400 — of which
+Substrate answers none: there is no quota, no model readiness, no timeout and no unknown model, so
+every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop
+and is answered by neither — a duplicate `jobName` is accepted, and so is stopping a finished job.
+`ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
+
+### CloudFormation resource types
+
+None. `AWS::Bedrock::Guardrail` and the other `AWS::Bedrock::*` types are not deployed, so a
+guardrail or batch job exists only if an API call creates it.
+
+### Cost
+
+`InvokeModel` and `CreateModelInvocationJob` are attributed $0.000015 per call and `ApplyGuardrail`
+$0.000075. Real Bedrock bills per input and output token, and batch inference at half the on-demand
+token rate; Substrate counts no tokens, so these are flat per-call proxies that make a cost report
+respond to call volume rather than to model size.
+
+---
+
+## HealthOmics
+
+**Endpoint:** `omics.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON, path-routed. API version 2022-11-28.
+
+Four operations, all on workflow runs. A run's state is keyed by account and Region.
+
+No workflow is executed. `StartRun` records the workflow ID, role and output URI as intent and the
+run is `COMPLETED` the moment it is created, so a consumer's wait loop observes a finished run on its
+first poll.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| StartRun | `POST /run`. Answers HTTP 201 with [one of the eight published members](#startrun-answers-an-id-and-nothing-else) and checks none of the three required ones |
+| GetRun | `GET /run/{id}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)) and eight members stand in for the roughly forty-four published ones — `arn`, `uuid`, `creationTime`, `startTime`, `stopTime`, `runOutputUri` and the whole resource-usage set are absent |
+| ListRuns | `GET /run`. `items` of `id`, `status` and `name` only, where `RunListItem` publishes ten members. `maxResults`, `startingToken`, `name`, `runGroupId` and `status` are ignored and no `nextToken` is emitted |
+| CancelRun | `POST /run/{id}/cancel`, and `DELETE /run/{id}` as well. [Answers 204 where the page publishes 202](#cancelrun-answers-the-wrong-status-and-spells-the-state-with-one-l) |
+
+Nothing else is routed: `DeleteRun`, `ListRunTasks`, `GetRunTask`, the workflow surface
+(`CreateWorkflow`, `GetWorkflow`, `ListWorkflows`), run groups, sequence and reference stores, the
+read-set and annotation-store import jobs, and the three tag operations are all absent. HealthOmics
+resources are not scanned by the Resource Groups Tagging API either.
+
+### StartRun answers an id and nothing else
+
+`API_StartRun` publishes eight response members — `arn`, `configuration`, `id`, `networkingMode`,
+`runOutputUri`, `status`, `tags` and `uuid` — and Substrate answers `{"id": …}`. `status` is the
+absence that matters: a consumer that reads it off the create response, rather than polling `GetRun`,
+reads nothing.
+
+The same operation marks `outputUri`, `requestId` and `roleArn` `Required: Yes` and checks none of
+them, so a run starts with no role and no destination. `requestId` is the idempotency token and is
+not read at all, so the same request twice creates two runs.
+[#1166](https://github.com/scttfrdmn/substrate/issues/1166).
+
+No HealthOmics response carries an ARN anywhere in the plugin, though `API_StartRun` and `API_GetRun`
+both publish `arn`.
+
+### CancelRun answers the wrong status and spells the state with one L
+
+`API_CancelRun` publishes HTTP **202** with an empty body; Substrate answers **204**. An SDK treats
+both as success, so the divergence is invisible through a client and visible in a recorded event log
+or a fixture diff.
+
+The state written is `CANCELED`. The published `RunStatus` enum is
+`PENDING | STARTING | RUNNING | STOPPING | COMPLETED | DELETED | CANCELLED | FAILED` — two L's — so a
+consumer matching the published spelling never sees a cancelled run, and `STOPPING` is never
+observable because the cancel is immediate.
+[#1165](https://github.com/scttfrdmn/substrate/issues/1165).
+
+`DELETE /run/{id}` is also accepted for `CancelRun`. AWS publishes that path for `DeleteRun`, which
+is a different operation; the arm exists because an older SDK generation used it.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `ValidationException` | 400 |
+| a run that does not exist | `ResourceNotFoundException` | 404 |
+
+Both match the published code and status on all three pages that carry them.
+`AccessDeniedException`, `ConflictException`, `InternalServerException`,
+`RequestTimeoutException`, `ServiceQuotaExceededException` and `ThrottlingException` are published
+and have no site: no quota, concurrency conflict or transient failure is modelled.
+
+### Run IDs
+
+A run ID is a ten-digit number drawn from a per-process pseudo-random source that `ResetForRun`
+rewinds, so a recorded run replays with the same run IDs it was recorded with. Nothing checks that a
+freshly minted ID is unused; the sequence makes a collision vanishingly unlikely rather than
+impossible.
+
+### CloudFormation resource types
+
+None. AWS publishes `AWS::Omics::*` types for workflows, run groups and stores, and Substrate deploys
+none of them, so a run exists only if `StartRun` creates it.
+
+### Cost
+
+`StartRun` is attributed $0.001 per call. Real HealthOmics bills a run by the compute and storage it
+consumes for as long as it runs; Substrate runs nothing, so the attribution is a flat per-run proxy
+and no run is more expensive than another.
+
+---
+
+## QuickSight
+
+**Endpoint:** `quicksight.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON, path-routed. API version 2018-04-01.
+
+Four operations over two resources: data sources and data sets, plus a data set's ingestion.
+
+No data is ever read from a source and no ingestion runs. A data source is
+`CREATION_SUCCESSFUL` the moment it is created, and an ingestion is `COMPLETED` with a fixed row
+count the moment it is asked about.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateDataSource | `POST /accounts/{AwsAccountId}/data-sources`. Answers HTTP 201 with the four published members and `CreationStatus: CREATION_SUCCESSFUL`, so `CREATION_IN_PROGRESS` is never observable. `Name` and `Type` are `Required: Yes` and unchecked, so a data source can have neither |
+| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Returns the stored record whole, so `AccountID` and `Region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
+| CreateDataSet | `POST /accounts/{AwsAccountId}/data-sets`. Answers HTTP 201 with `DataSetId`, `Arn`, `IngestionId` and `RequestId`; `PhysicalTableMap`, `ImportMode` and the rest of the definition are not read |
+| DescribeIngestion | `GET /accounts/{AwsAccountId}/data-sets/{DataSetId}/ingestions/{IngestionId}`. [Reports any ingestion ID as `COMPLETED`](#any-ingestion-id-is-reported-completed) |
+
+Every other QuickSight operation is unrouted: the updates and deletes
+(`UpdateDataSource`, `DeleteDataSource`, `UpdateDataSet`, `DeleteDataSet`), the lists
+(`ListDataSources`, `ListDataSets`, `ListIngestions`), `CreateIngestion` and `CancelIngestion`, and
+the whole analysis, dashboard, template, namespace, user and group surface. QuickSight resources are
+not scanned by the Resource Groups Tagging API either, so `Tags` on a create is dropped.
+
+### The account in the path is discarded, and the Region is not in the key
+
+`AwsAccountId` is `Required: Yes` on every QuickSight operation, is extracted from the path, and is
+then discarded by every handler — the state key is built from the caller's own account instead. So a
+call naming account B reads and writes account A's data sources, and a data source created in one
+Region is visible in every other, because the key omits the Region. The rest of the emulator keys a
+regional resource by account **and** Region; QuickSight is the exception.
+[#1167](https://github.com/scttfrdmn/substrate/issues/1167).
+
+### Any ingestion ID is reported COMPLETED
+
+`DescribeIngestion` loads the **data set** key, ignores the ingestion ID entirely, and fabricates the
+response: `IngestionStatus: COMPLETED` with `RowsIngested: 1000` and `RowsDropped: 0`, plus an ARN
+built from the ID it was given. So any ingestion ID whatsoever answers HTTP 200 as long as the data
+set exists, a data set that was never ingested reports a thousand rows, and `INITIALIZED`,
+`QUEUED`, `RUNNING`, `FAILED` and `CANCELLED` are unobservable — the poll loop the operation exists
+for finishes on its first call. [#1168](https://github.com/scttfrdmn/substrate/issues/1168).
+
+### Status is bound to the status line, not the body
+
+Every QuickSight Response Syntax opens with `HTTP/1.1 {Status}` rather than a literal code, because
+`Status` is bound to the status line: an SDK populates the field from the HTTP status it already
+received. Both describes emit `Status` as a JSON body member as well, which is invisible through an
+SDK and visible as an unpublished extra member to anything reading the raw body.
+[#1179](https://github.com/scttfrdmn/substrate/issues/1179). The two creates emit no `Status`.
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse, or `DataSourceId`/`DataSetId` absent | `InvalidParameterValue` | 400 |
+| a data source, data set or data set's ingestion that does not exist | `ResourceNotFoundException` | 404 |
+
+`ResourceNotFoundException`/404 is what the pages publish. `InvalidParameterValue` is not: QuickSight
+publishes `InvalidParameterValueException`, and one code with the message *"DataSourceId is
+required"* also serves an unparseable body, which is a different failure
+([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+
+`AccessDeniedException`/**401**, `ConflictException`/409, `LimitExceededException`/409,
+`ResourceExistsException`/409 and `ThrottlingException`/429 are published and have no site, so
+creating the same data source twice succeeds. QuickSight publishes no `ValidationException` anywhere.
+
+### CloudFormation resource types
+
+None. AWS publishes `AWS::QuickSight::DataSource`, `AWS::QuickSight::DataSet` and the analysis,
+dashboard and template types; Substrate deploys none of them.
+
+### Cost
+
+`CreateDataSource` and `CreateDataSet` are each attributed $0.000025 per call. Real QuickSight bills
+per user per month, and SPICE capacity by the gigabyte; neither has a per-call analogue, so these are
+flat proxies for authoring activity.
+
+---
+
+## RAM
+
+**Endpoint:** `ram.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON over lowercase `POST` paths — `POST /createresourceshare` rather than an
+`X-Amz-Target` header. API version 2018-01-04.
+
+**Routing:** the path is lowercased before matching, so a mixed-case path still routes; a path that
+matches no operation falls through to the bare HTTP method, which matches nothing and is refused as
+an unknown route. `DeleteResourceShare` is routed on `DELETE`, which is what the page publishes, and
+on `POST` as well.
+
+Eight operations over one resource: a resource share, and the principals and resources associated
+with it. Nothing is actually shared — an association is a record, not access — so a principal that
+RAM reports as `ASSOCIATED` gains no permission on the resource anywhere else in the emulator.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateResourceShare | Answers HTTP 200 with `{"resourceShare"}`; `name` is the one `Required: Yes` member and is checked. [Two members AWS does not publish are included, and `clientToken` is never echoed](#the-resource-share-record-diverges-from-the-published-shape) |
+| GetResourceShares | Filters by `name` and `resourceShareArns`; [`resourceOwner` is `Required: Yes` and ignored](#resourceowner-is-required-and-ignored). `maxResults`, `nextToken`, `resourceShareStatus`, `tagFilters` and `permissionArn` are ignored and no `nextToken` is emitted |
+| UpdateResourceShare | Replaces `name` and `allowExternalPrincipals` and refreshes `lastUpdatedTime`; `clientToken` is not read |
+| DeleteResourceShare | [A hard delete](#a-delete-removes-the-record-rather-than-marking-it-deleted), answering `{"returnValue": true}` |
+| AssociateResourceShare | Records each principal and resource ARN and answers `resourceShareAssociations` of five members, each `ASSOCIATED`. `clientToken` and `sources` are not read |
+| DisassociateResourceShare | [Also reports `ASSOCIATED`](#a-disassociation-still-reports-associated) |
+| ListPrincipals | `principals` of `id`, `resourceShareArn` and `status`, all `ASSOCIATED`, where `Principal` publishes five members. The published `resourceOwner` is ignored here too |
+| ListResources | `resources` of `arn`, `resourceShareArn` and `status`, all `AVAILABLE`, where `Resource` publishes eight members |
+
+The invitation surface is unrouted — `GetResourceShareInvitations`,
+`AcceptResourceShareInvitation`, `RejectResourceShareInvitation` — as is the permission surface
+(`ListPermissions`, `GetPermission`, `AssociateResourceSharePermission`,
+`ListResourceSharePermissions`), `GetResourceShareAssociations`, `ListResourceTypes`,
+`GetResourcePolicies`, `EnableSharingWithAwsOrganization` and the three tag operations. A share's
+`tags` are stored but RAM is not scanned by the Resource Groups Tagging API, so they cannot be
+searched for or read back except inside a share.
+
+### The resource share record diverges from the published shape
+
+`API_ResourceShare` publishes exactly eleven members. Substrate's record carries eight of them —
+`allowExternalPrincipals`, `creationTime`, `lastUpdatedTime`, `name`, `owningAccountId`,
+`resourceShareArn`, `status`, `tags` — and omits `featureSet`, `resourceShareConfiguration` and
+`statusMessage`. It adds `principals` and `resourceArns`, which are on no RAM page: they are the
+create request's own inputs kept on the share for convenience, and a consumer that reads them is
+writing code that reads nothing against AWS. The record also carries `accountID` and `region`,
+Substrate's own bookkeeping ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+`CreateResourceShare` publishes `clientToken` alongside `resourceShare` and Substrate emits only the
+latter. `clientToken` is not read either, so the published idempotency contract — a retry with the
+same token returning the same share, and the same token with different parameters failing with
+`IdempotentParameterMismatch` — does not hold: the same request twice creates two shares with
+different ARNs. [#1170](https://github.com/scttfrdmn/substrate/issues/1170).
+
+### resourceOwner is required and ignored
+
+`resourceOwner` is `Required: Yes` on `GetResourceShares`, `ListPrincipals` and `ListResources`, with
+the values `SELF` and `OTHER-ACCOUNTS`. It is decoded and discarded, so every call behaves as `SELF`
+and a request for shares owned by other accounts answers the caller's own.
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+
+### A disassociation still reports ASSOCIATED
+
+`DisassociateResourceShare` builds its response through the same helper as the association, which
+hard-codes `status: "ASSOCIATED"`. The published `ResourceShareAssociationStatus` enum is
+`ASSOCIATING | ASSOCIATED | FAILED | DISASSOCIATING | DISASSOCIATED`, so the one state that says the
+call did what it was asked is never reported. The association records themselves are not removed
+either, so `ListPrincipals` still lists a disassociated principal.
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+
+### A delete removes the record rather than marking it deleted
+
+RAM publishes a `DELETED` share status, and `DeleteResourceShare` here deletes the state entry and
+removes it from the share index, so the share does not appear in `GetResourceShares` in any status
+and a subsequent read answers not-found rather than a deleted share.
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `ValidationError` | 400 |
+| `name` or `resourceShareArn` absent | `MissingRequiredParameter` | 400 |
+| a resource share that does not exist | `UnknownResourceException` | 400 |
+
+`ValidationError`/400 is the spelling RAM's consolidated common-errors list publishes, and
+`UnknownResourceException`/400 matches its own page. `MissingRequiredParameter` is invented: no
+`MissingParameter`-anything appears anywhere in RAM's documentation, and the published code for the
+condition is `ValidationError` ([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+
+`IdempotentParameterMismatch`, `InvalidClientTokenException`, `MalformedArnException`,
+`OperationNotPermittedException`, `ResourceShareLimitExceededException` and
+`ServerInternalException`/500 are published and have no site: no ARN is validated for shape, no
+token is tracked, and no share quota is enforced.
+
+### CloudFormation resource types
+
+None. AWS publishes `AWS::RAM::ResourceShare` and Substrate does not deploy it, so a share exists
+only if `CreateResourceShare` creates it.
+
+### Cost
+
+Nothing is attributed. AWS RAM is free of charge; what a share costs is whatever the shared resources
+cost in the accounts that use them, which Substrate does not model.
+
+---
+
 ---
 
 ## Fault injection

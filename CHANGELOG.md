@@ -146,6 +146,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   affected `CloudFormation resource types` row rather than implied. The disclaimer at the head of the
   per-service sections still stands; #1093 stays open for the REST-path group and the ten services
   found while verifying its scope.
+- **`docs/services.md` has sections for the five REST-path JSON services it documented only as matrix
+  rows** (#1093, second of three). AWS Backup, Bedrock Runtime, HealthOmics, QuickSight and RAM —
+  **34 routed operations** — were reached by an HTTP method and a URL path rather than an
+  `X-Amz-Target` header, which is exactly why they were the hardest group to learn from the plugin:
+  there is no target string to grep for, so the operation set lives only in a path parser. Each now
+  carries the standard section: endpoint and protocol, a `Routing` note where the dispatch is not
+  obvious, a row per routed operation, a `###` subsection per divergence, the refusal table,
+  CloudFormation resource types, and the cost note. Backup's table adds a **published-path column**,
+  because one of its operations cannot be reached over the path its own page publishes. Two routing
+  notes are traps in their own right: `bedrock` is aliased to `bedrock-runtime`, so one plugin serves
+  a data plane and four control-plane batch-inference operations, and RAM lowercases the path before
+  matching and falls back to the bare HTTP method — which matches nothing — for a path it does not
+  recognize. Eighteen divergences were found while writing the rows and **filed rather than fixed**,
+  since this change is documentation only. Three of them mean an operation does not work as published
+  at all: `GetBackupPlan` is unreachable, because `API_GetBackupPlan` publishes a trailing slash after
+  the plan ID and the router puts that slash into the ID, so a plan `ListBackupPlans` reports answers
+  not-found (#1176); and `CreateBackupPlan` and `CreateBackupSelection` are routed on `POST` where
+  their pages publish `PUT`, with nothing on the published verb, so an SDK call is refused as an
+  unknown route (#1172). The rest, by service. Backup: three loaders answer 404 and an absent required
+  member answers `InvalidRequestException` where every Backup page publishes 400 and
+  `MissingParameterValueException` (#1173); `UpdateBackupPlan` invents an `UpdatedAt` no page
+  publishes while dropping the published `CreationDate`, and `DeleteBackupPlan` answers `{}` where
+  four members are published, `VersionId` — the only handle on what was deleted — among them (#1177);
+  and a plan with selections is deleted despite the page's opening sentence, after which
+  `GetBackupSelection` answers 200 for a selection whose parent is gone (#1178), while
+  `DeleteBackupVault`'s mirror precondition is **vacuous rather than unenforced**, since no operation
+  can make `NumberOfRecoveryPoints` anything but zero. Bedrock: `StopModelInvocationJob` writes
+  `Stopped` directly, so the published `Stopping` is unobservable, and stops a job in any state,
+  including `Completed` (#1174). HealthOmics: `CancelRun` answers 204 where the page publishes 202 and
+  writes `CANCELED` where the published enum spells it `CANCELLED` (#1165, the sibling of Athena's
+  #1154), and `StartRun` answers one of eight published members while checking none of the three
+  marked `Required: Yes` (#1166). QuickSight: the `Required: Yes` `AwsAccountId` is parsed out of the
+  path and discarded by every handler, and both state keys omit the Region, so one account reads
+  another's data sources and a data source is visible in every Region (#1167); `DescribeIngestion`
+  loads the *data set* key, ignores the ingestion ID, and reports any ID whatsoever as `COMPLETED` with
+  1000 rows (#1168); and both describes emit `Status` as a body member where every QuickSight Response
+  Syntax binds it to the status line (#1179). RAM: the share record carries `principals` and
+  `resourceArns`, which `API_ResourceShare`'s eleven members do not include, and `clientToken` is
+  neither echoed nor read, so the published idempotency contract does not hold (#1170); the
+  `Required: Yes` `resourceOwner` is ignored at three operations, a disassociation reports
+  `ASSOCIATED` because it shares the association's response builder, and a delete removes the record
+  rather than reporting the published `DELETED` status (#1171). Shared by two: QuickSight's
+  `InvalidParameterValue` and RAM's `MissingRequiredParameter` are both missing the spelling their own
+  documentation publishes (#1169). Shared by more: the string-index helpers every one of these plugins
+  uses to maintain a listing discard their write error, so a create can report success while the
+  resource is absent from its own list (#1175). Two came out of checking the CloudFormation row
+  rather than the API: a backup plan's ARN spells its resource segment `backup-plan` where both the
+  API reference and the CloudFormation reference publish the worked example
+  `arn:aws:backup:us-east-1:123456789012:plan:…` — in the handler and in the deployer alike, while the
+  vault's `backup-vault` is correct, so the asymmetry is AWS's and only half of it is honoured (#1181)
+  — and `AWS::Backup::BackupPlan` answers the logical ID for `Ref` where AWS publishes `BackupPlanId`,
+  supports none of the three published `Fn::GetAtt` attributes, and carries a doc comment asserting
+  the `Ref` behaviour it does not have (#1182). One more came out of reading
+  `API_runtime_InvokeModel` beside the handler: `invokeModel` takes its request as `_ *AWSRequest`, so
+  the two published guardrail headers are unread — an invocation that attaches a guardrail is never
+  filtered, the published `amazon-bedrock-guardrailAction` member never appears, and the page's three
+  request-error conditions are unchecked — while the decision those headers would reach already exists
+  in `ApplyGuardrail` next door (#1183). Recorded as deliberate rather than filed: Bedrock's
+  guardrail blocklist has no control-plane endpoint, so `GUARDRAIL_INTERVENED` is reachable only by
+  writing state directly, and its batch-job status seed accepts any string — both stated on the rows
+  that depend on them, because a test author needs to know before writing the test. The disclaimer at
+  the head of the per-service sections still stands; #1093 stays open for the ten services found while
+  verifying its scope.
 
 ### Fixed
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not
