@@ -424,6 +424,8 @@ func (s *Server) buildRouter() *chi.Mux {
 	// EC2 snapshot progression control-plane endpoints (#715).
 	r.Post("/v1/ec2/snapshot-status", s.handleEC2SeedSnapshotStatus)
 	r.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
+	r.Post("/v1/ec2/instance-state", s.handleEC2SeedInstanceState)
+	r.Delete("/v1/ec2/instance-state", s.handleEC2ClearInstanceState)
 
 	// EC2 spot-placement-score control-plane endpoints (#892).
 	r.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
