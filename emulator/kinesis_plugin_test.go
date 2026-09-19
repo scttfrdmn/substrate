@@ -72,12 +72,17 @@ func TestKinesisPlugin_CreateAndDescribeStream(t *testing.T) {
 		t.Fatalf("DescribeStream: want 200, got %d", resp.StatusCode)
 	}
 
+	// This decoded OpenShardCount out of the StreamDescription and asserted it equalled 2 until
+	// #1076, which is how the union shape survived: OpenShardCount is a member of
+	// StreamDescriptionSummary and API_StreamDescription publishes it nowhere, so the test that
+	// existed to check DescribeStream was pinning a member AWS never answers there. HasMoreShards
+	// takes its place — it is one of the two members this shape has and the summary does not.
 	var result struct {
 		StreamDescription struct {
-			StreamName   string `json:"StreamName"`
-			StreamStatus string `json:"StreamStatus"`
-			ShardCount   int    `json:"OpenShardCount"`
-			Shards       []struct {
+			StreamName    string `json:"StreamName"`
+			StreamStatus  string `json:"StreamStatus"`
+			HasMoreShards bool   `json:"HasMoreShards"`
+			Shards        []struct {
 				ShardID string `json:"ShardId"`
 			} `json:"Shards"`
 		} `json:"StreamDescription"`
@@ -91,8 +96,8 @@ func TestKinesisPlugin_CreateAndDescribeStream(t *testing.T) {
 	if result.StreamDescription.StreamStatus != "ACTIVE" {
 		t.Errorf("want StreamStatus=ACTIVE, got %q", result.StreamDescription.StreamStatus)
 	}
-	if result.StreamDescription.ShardCount != 2 {
-		t.Errorf("want OpenShardCount=2, got %d", result.StreamDescription.ShardCount)
+	if result.StreamDescription.HasMoreShards {
+		t.Errorf("want HasMoreShards=false, got true")
 	}
 	if len(result.StreamDescription.Shards) != 2 {
 		t.Errorf("want 2 shards, got %d", len(result.StreamDescription.Shards))

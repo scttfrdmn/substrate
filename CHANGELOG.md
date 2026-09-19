@@ -498,6 +498,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `"Distribution not found: " + distID`, and an empty ID is reachable, so the answer ended in a colon
   with nothing after it. It is now the description `API_GetDistributionConfig` publishes for the code,
   *"The specified distribution does not exist."*, which names no distribution and so has no empty tail.
+- **Kinesis reports `EnhancedMonitoring` as the array of `EnhancedMetrics` objects both describe shapes
+  publish** (#1076). `API_StreamDescription` and `API_StreamDescriptionSummary` both type the member
+  *"Array of `EnhancedMetrics` objects"*, each object carrying one `ShardLevelMetrics` array, and
+  substrate rendered its stored `[]string` straight through — so a response read `["IncomingBytes"]`
+  where AWS answers `[{"ShardLevelMetrics": ["IncomingBytes"]}]`. An SDK decoding into the generated
+  type got an unmarshal error, so this was a hard failure for a real client rather than a cosmetic
+  difference, the same class as #1017's ECR tags. A stream with nothing enhanced answers `[]`, not
+  `[{"ShardLevelMetrics": []}]`: `API_EnhancedMetrics` publishes *"Array Members: Minimum number of 1
+  item"* on `ShardLevelMetrics`, so an object holding an empty list is a shape the model does not
+  permit, while the outer array publishes no minimum. State is unchanged — the names still store as a
+  `[]string` and go out through #999's set/render pair, so a record holding the literal `ALL` now reads
+  back through a describe as the seven metrics it means.
+- **`DescribeStream` and `DescribeStreamSummary` answer their own members instead of the union of
+  both** (#1076). One builder served the two operations, so `DescribeStream` reported an
+  `OpenShardCount` that `API_StreamDescription` publishes nowhere and `DescribeStreamSummary` reported
+  `Shards` and `HasMoreShards` that `API_StreamDescriptionSummary` publishes nowhere. The six
+  `Required: Yes` members the two pages share are unchanged.
+  `TestKinesisPlugin_CreateAndDescribeStream` read `OpenShardCount` out of a `StreamDescription` and
+  asserted it, so the test that existed to check the operation was pinning the union — it is rewritten
+  around `HasMoreShards`, which is a member of that shape and not of the other.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -614,6 +634,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   not interchangeable: an invalidation ID under a distribution that does not exist answered
   `NoSuchInvalidation`, telling a caller the batch was missing from a distribution substrate never had.
   The handler also folded a state-read error into that same 404; it is now wrapped and returned.
+- **`UpdateShardCount` checks the two members it decodes, and four of the bounds its page publishes**
+  (#1076). It read neither: an absent `ScalingType`, a misspelled one, a zero target and a tenfold
+  scale-up were all accepted and written to the stream. `ScalingType` is `Required: Yes` with
+  `UNIFORM_SCALING` as its only value; `TargetShardCount` is `Required: Yes` with a published minimum
+  of 1, a 10 000 ceiling, and a pair of inclusive bounds at double and half the stream's current count.
+  All six refusals answer `InvalidArgumentException`/400, and an absent `TargetShardCount` is reported
+  as absent rather than as a zero that failed the minimum. A stream that does not exist is still
+  refused first, which is forced rather than chosen — the double and half bounds are stated against
+  *"your current shard count"*, so they cannot be evaluated before the record is loaded.
+  **The code is deliberately not `ValidationException`**, which the issue asked for and the page does
+  publish: its gloss there is capacity-mode-specific, *"Specifies that you tried to invoke this API for
+  a data stream with the on-demand capacity mode"*, so it is not a general validation code despite the
+  name — the reading `emulator/kinesis_errors.go` has carried since #950, and substrate has no site for
+  it at all until capacity mode exists (#1118). `LimitExceededException` is the other published
+  candidate and is declined: the page attributes it to one rule only, the 10 TPS call rate. Three
+  further published restrictions are recorded as unmodelled rather than silently skipped — the
+  ten-scalings-per-rolling-24-hours limit needs a request history, the account shard limit needs a
+  quota, and the *">10 000 shards may only scale down below 10 000"* rule is unreachable while the
+  ceiling is enforced. A fourth restriction the issue listed, *"the target cannot equal the current
+  count"*, is published nowhere on the page and is not enforced. `UPDATING` remains unobservable and is
+  tracked as #1119 so that it and EC2's instance states share one seeded-progression mechanism.
 
 ## [v0.119.0] - 2026-09-18
 

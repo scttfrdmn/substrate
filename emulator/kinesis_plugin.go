@@ -212,9 +212,8 @@ func (p *KinesisPlugin) describeStream(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
-	desc := buildStreamDescription(stream)
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamDescription": desc,
+		"StreamDescription": buildStreamDescription(stream),
 	})
 }
 
@@ -235,9 +234,8 @@ func (p *KinesisPlugin) describeStreamSummary(ctx *RequestContext, req *AWSReque
 		return nil, err
 	}
 
-	desc := buildStreamDescription(stream)
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamDescriptionSummary": desc,
+		"StreamDescriptionSummary": buildStreamDescriptionSummary(stream),
 	})
 }
 
@@ -268,7 +266,7 @@ func (p *KinesisPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWSR
 func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		kinesisStreamRef
-		TargetShardCount int    `json:"TargetShardCount"`
+		TargetShardCount *int   `json:"TargetShardCount"`
 		ScalingType      string `json:"ScalingType"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -284,9 +282,19 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 
+	// The shape is checked after the stream is resolved, because the double and half bounds are
+	// stated against "your current shard count" and so cannot be evaluated without the record.
+	// ResourceNotFoundException therefore takes precedence over InvalidArgumentException here,
+	// which is the order the two arrive in on every other Kinesis operation (#1076).
 	current := stream.ShardCount
-	stream.ShardCount = body.TargetShardCount
-	stream.Shards = generateKinesisShards(body.TargetShardCount)
+	if vErr := kinesisValidateShardCountUpdate(body.ScalingType, body.TargetShardCount, current); vErr != nil {
+		return nil, vErr
+	}
+
+	stream.ShardCount = *body.TargetShardCount
+	stream.Shards = generateKinesisShards(*body.TargetShardCount)
+	// StreamStatus is set straight to ACTIVE, where the page says a reshard reports UPDATING until
+	// it completes. Making that observable means a seeded observation count, which is #1119.
 	stream.StreamStatus = "ACTIVE"
 
 	if err := p.saveStream(stream); err != nil {
@@ -301,7 +309,7 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 		"StreamName":        target.Name,
 		"StreamARN":         kinesisStreamARN(target),
 		"CurrentShardCount": current,
-		"TargetShardCount":  body.TargetShardCount,
+		"TargetShardCount":  *body.TargetShardCount,
 	})
 }
 
@@ -1030,22 +1038,6 @@ func (p *KinesisPlugin) appendRecord(target kinesisStreamTarget, shardID string,
 		return fmt.Errorf("kinesis appendRecord state.Put: %w", err)
 	}
 	return nil
-}
-
-// buildStreamDescription builds the common stream description map used by
-// DescribeStream and DescribeStreamSummary.
-func buildStreamDescription(stream KinesisStream) map[string]interface{} {
-	return map[string]interface{}{
-		"StreamName":              stream.StreamName,
-		"StreamARN":               stream.StreamArn,
-		"StreamStatus":            stream.StreamStatus,
-		"Shards":                  stream.Shards,
-		"HasMoreShards":           false,
-		"RetentionPeriodHours":    stream.RetentionPeriodHours,
-		"StreamCreationTimestamp": stream.CreatedAt.Unix(),
-		"EnhancedMonitoring":      stream.EnhancedMonitoring,
-		"OpenShardCount":          stream.ShardCount,
-	}
 }
 
 // generateKinesisShards creates n evenly-partitioned KinesisShard descriptors.
