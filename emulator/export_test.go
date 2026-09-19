@@ -1638,3 +1638,24 @@ func SeedSNSTopicAttributeForTest(
 	}
 	return nil
 }
+
+// ParseLambdaOperationForTest wraps parseLambdaOperation for external tests.
+//
+// Exported because the parser decides more than routing: it is Lambda's entry in
+// [operationNameResolvers], so the name it returns is what authorization, metering and fault
+// injection see. Over the wire a request under an undocumented API version and one naming an
+// operation substrate does not route are the same 404, and only the resolved name distinguishes
+// them (#1142).
+func ParseLambdaOperationForTest(method, path string) (op, name, subResource string) {
+	return parseLambdaOperation(method, path)
+}
+
+// LambdaAuthzResourceARNForTest wraps lambdaAuthzResourceARN for external tests.
+//
+// Exported because the resource a request is authorized against is not observable from the
+// response: a server with no registered principal authorizes everything, and one with a policy
+// reports only the allow/deny. Asserting the ARN directly is what pins that a tags request is
+// evaluated against the ARN it names rather than against "*" (#1142).
+func LambdaAuthzResourceARNForTest(path, region, accountID string) string {
+	return lambdaAuthzResourceARN(path, region, accountID)
+}

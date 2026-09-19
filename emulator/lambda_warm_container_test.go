@@ -232,6 +232,10 @@ func TestLambdaWarmContainer_AnOperationThatChangesNoContainerKeepsIt(t *testing
 	resp := lambdaRequest(t, w.srv, http.MethodPost,
 		"/2017-03-31/tags/"+lambdaWarmARN("untouched-fn"),
 		map[string]any{"Tags": map[string]string{"env": "test"}})
+	// The status is asserted because it was not: this was the one site in the tree already posting
+	// to the published tags date, and it passed against the 404 of #1142 — "a tag write evicts
+	// nothing" is not proven by a tag write that never happened.
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	require.NoError(t, resp.Body.Close())
 
 	resp = lambdaRequest(t, w.srv, http.MethodGet, "/2015-03-31/functions/untouched-fn", nil)

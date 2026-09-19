@@ -5525,19 +5525,19 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | DeleteFunction | |
 | ListFunctions | |
 | Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
-| InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference |
+| InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
 | AddPermission | Adds a statement to the function's resource policy; the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up) |
 | RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
 | GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
-| PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup |
+| PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
 | CreateEventSourceMapping | |
 | GetEventSourceMapping | By UUID |
 | UpdateEventSourceMapping | `BatchSize` and `Enabled` only; both optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops the SQS poller |
 | DeleteEventSourceMapping | |
 | ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2) |
-| TagResource | |
-| UntagResource | |
-| ListTags | |
+| TagResource | `204` with no body. Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
+| UntagResource | Takes `tagKeys` as repeated query parameters; `204` with no body |
+| ListTags | Reports `Tags` as a map, empty for an untagged function |
 
 The row that used to sit here read `InvokeFunction`, which **is not a Lambda API
 operation** — the operation is `Invoke`, and `InvokeFunction` is the IAM action name. So
@@ -5545,6 +5545,44 @@ the one `Invoke`-shaped row in the table named something no caller can call, whi
 eight operations the plugin actually routes had no row at all (#1015). Rows are now
 listed in the router's own order, which is the order a reader checking one against the
 other needs.
+
+### Each operation is published under its own API version date
+
+A query-protocol service carries one `Version` parameter for the whole API. A REST service
+puts the version in the path, and Lambda dates each operation's URI at the version that
+operation was introduced — it has never renumbered. Four dates appear among the operations
+substrate routes, each read from that operation's own published Request Syntax:
+
+| API version | Operations |
+|---|---|
+| `2014-11-13` | `InvokeAsync` |
+| `2015-03-31` | the function CRUD, `Invoke`, the resource policy, the event source mappings |
+| `2017-03-31` | `TagResource`, `UntagResource`, `ListTags` |
+| `2019-09-25` | `PutFunctionEventInvokeConfig` |
+
+Until #1142 substrate routed one of the four. The parser reached its arms by trimming the
+literal prefix `/2015-03-31`, so a path under any other date kept its version segment,
+matched nothing, and answered `UnknownOperationException`/404 — which is what
+`lambda.TagResource` got from an SDK against a function substrate had just created, even
+though the handler behind it merges tags and saves the function. Three operations were
+unreachable in a plugin that implements them, and `invoke-async` and `event-invoke-config`
+were reachable only at a date AWS does not serve.
+
+**A request under an undocumented date is still refused.** The version is compared against
+the one the operation publishes rather than stripped, so `/2015-03-31/tags/{Resource}` — a
+path no AWS SDK emits and AWS itself does not serve — answers the same 404 it always did.
+Accepting it would make substrate the only implementation that does, which hides the defect
+rather than reporting it: a consumer hand-building the URI would pass here and fail at
+deployment.
+
+The same resolution decides more than routing, because the parser is also what names the
+operation for authorization, metering and fault injection. `lambda:TagResource` resolved to
+`Unknown`, so an IAM policy naming the action could neither allow nor deny it and a seeded
+fault on it could not fire. The resource half moved with it: a tags request names its
+resource as a whole ARN in the path, and that ARN is what the request is authorized against
+— reassembling one from the caller's own account and Region, which a function-path request
+must do because it carries only a name, would silently retarget a cross-account ARN at the
+caller's own function of that name.
 
 ### What CodeSize and CodeSha256 report
 

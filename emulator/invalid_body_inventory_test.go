@@ -775,7 +775,7 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 
 	for _, tc := range []invalidBodyCase{
 		{op: "AddPermission", path: "/2015-03-31/functions/guarded-fn/policy"},
-		{op: "TagResource", path: "/2015-03-31/tags/" + arn},
+		{op: "TagResource", path: "/2017-03-31/tags/" + arn},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
 			status, code, message := rawUnsignedCall(t, ts, host, "", tc.path, []byte(invalidBodyPayload))
@@ -809,7 +809,7 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 
 	for _, tc := range []invalidBodyCase{
 		{op: "AddPermission", path: "/2015-03-31/functions/absent-fn/policy"},
-		{op: "TagResource", path: "/2015-03-31/tags/" + absentARN},
+		{op: "TagResource", path: "/2017-03-31/tags/" + absentARN},
 	} {
 		t.Run(tc.op+"/absentFunction", func(t *testing.T) {
 			status, code, message := rawUnsignedCall(t, ts, host, "", tc.path, []byte(invalidBodyPayload))
@@ -833,7 +833,7 @@ func TestLambdaInvalidBodyBelowAFunctionLookup(t *testing.T) {
 			path: "/2015-03-31/functions/absent-fn/policy",
 			body: `{"StatementId":"s1","Action":"lambda:InvokeFunction","Principal":"s3.amazonaws.com"}`,
 		},
-		{op: "TagResource", path: "/2015-03-31/tags/" + absentARN, body: `{"Tags":{"env":"prod"}}`},
+		{op: "TagResource", path: "/2017-03-31/tags/" + absentARN, body: `{"Tags":{"env":"prod"}}`},
 	} {
 		t.Run(tc.op+"/absentFunctionStillNotFound", func(t *testing.T) {
 			status, code, _ := rawUnsignedCall(t, ts, host, "", tc.path, []byte(tc.body))
@@ -926,7 +926,7 @@ var invalidBodyMethodCases = []invalidBodyMethodCase{
 	},
 	{
 		name: "PutFunctionEventInvokeConfig", host: "lambda.us-east-1.amazonaws.com",
-		path: "/2015-03-31/functions/absent-fn/event-invoke-config", method: http.MethodPut,
+		path: "/2019-09-25/functions/absent-fn/event-invoke-config", method: http.MethodPut,
 		code: "InvalidParameterValueException", status: http.StatusBadRequest,
 	},
 	{
