@@ -165,6 +165,17 @@ func cfnFailedResources(resources []DeployedResource) []string {
 // not a duplicate create, and clearing one of those would hide a real failure — the
 // opposite and worse error. Missing an entry only leaves the pre-existing behavior of
 // reporting the refusal, so the conservative side is the safe one.
+//
+// The two Step Functions entries changed meaning in #1072 and are kept deliberately.
+// Both create operations now model the idempotency AWS publishes, so a re-Deploy of an
+// unchanged state machine or activity answers the existing ARN and reaches no refusal
+// for this map to clear. ActivityAlreadyExists is unreachable outright — the only
+// condition its page publishes for it is a changed EncryptionConfiguration, which this
+// plugin does not model — and StateMachineAlreadyExists now fires only for a genuinely
+// different definition or type, the case the paragraph above argues an entry should be
+// absent for. Neither is removed: the entries cost nothing while the code is unreachable,
+// and dropping the live one would surface a refusal on the update path, which is
+// #1077's subject rather than this map's.
 var cfnCreateExistsCodes = map[string]bool{
 	"ActivityAlreadyExists":                            true,
 	"BucketAlreadyExists":                              true,

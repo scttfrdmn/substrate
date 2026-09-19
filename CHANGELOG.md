@@ -249,6 +249,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ErrorDetails` survives as a read-only fallback, split on the first `": "`, so a record written by an
   earlier substrate or replayed from an older event log still reports its failure. That fallback is
   documented as best-effort for exactly the colon-in-the-code case the new fields exist to fix.
+- **`CreateStateMachine` and `CreateActivity` refuse with the codes and statuses their own pages
+  publish** (#1072). Both handlers carried the same three divergences, so the defect was in the plugin
+  rather than in one operation. An absent `name` answered `InvalidParameterException`, which is on
+  neither page: `API_CreateStateMachine` publishes fifteen errors and `API_CreateActivity` seven, and it
+  is among neither — both publish `InvalidName`/400, *"The provided name is not valid."*, which is now
+  answered. A name already taken answered **409** where both pages publish **400**; that is the
+  #910/#912 class one step further along, since those sweeps moved four codes off 404 and missed this
+  pair for being 409s rather than 404s. And the name constraints both pages publish identically —
+  1–80 characters, no white space, none of `<>{}[]`, `?*` or the fourteen special characters, no control
+  characters — were checked nowhere, so only the empty string was refused. `InvalidName` is answered
+  rather than `ValidationException` because `ValidationException` is published on
+  `API_CreateStateMachine` and **not** on `API_CreateActivity`, so using it would make one plugin report
+  two codes for one failure and report a code `CreateActivity`'s page does not publish, which is #1072's
+  own defect relocated. Two clauses are recorded rather than enforced, and the service reference says
+  why: the surrogate range cannot reach the validator, because Go's JSON decoder substitutes U+FFFD for
+  an unpaired escape, and the page's CloudWatch-Logs sentence is a *"should"* about logging rather than a
+  constraint on the name.
+- **`roleArn` and `type` are checked, because `CreateStateMachine` publishes a requirement and an enum
+  for them** (#1072). `roleArn` is `Required: Yes` and nothing looked at it, so a state machine could be
+  stored with no role at all and `DescribeStateMachine` would report it; an absent, over-long or
+  non-ARN value now answers `InvalidArn`/400, the code the page publishes. The check stops at the `arn:`
+  prefix and the published 1–256 bound deliberately: the member carries **no Pattern**, so splitting the
+  ARN apart and demanding an IAM role would invent a validation AWS does not document — the line
+  `cfnValidateRoleARN` already draws for CloudFormation's own bare length-bounded `RoleARN`. `type` is
+  published as `Valid Values: STANDARD | EXPRESS` and any string was stored, which left
+  `DescribeStateMachine` able to report a type AWS does not publish and left the execution path's
+  branching undecided, since `StartSyncExecution`'s refusal tests for `STANDARD` rather than for
+  `EXPRESS`; an unpublished value now answers `StateMachineTypeNotSupported`/400 through the constructor
+  #996 already added, and an absent one still becomes the published default `STANDARD` rather than a
+  refusal.
+- **Both creates are idempotent, and where the page contradicts itself the idempotency Note governs**
+  (#1072). Each page publishes its operation as idempotent — *"Subsequent requests won't create a
+  duplicate resource if it was already created"* — and substrate refused every repeat, so a template
+  redeployed or a test rerun hit a refusal AWS does not send. A repeat now answers the stored record.
+  `CreateStateMachine`'s check is keyed on the eight inputs its Note names, of which substrate models
+  three — `name`, `definition` and `type`; the other five are request members no handler decodes, so
+  they cannot differ between two requests substrate has seen. **The page states two incompatible rules
+  about `roleArn` and substrate follows the more specific one**: `StateMachineAlreadyExists` is glossed
+  *"A state machine with the same name but a different definition **or role ARN** already exists"*, while
+  the Note excludes `roleArn` from the check and says twice that `roleArn` and `tags` *"will not be
+  updated, even if they are different"*. The Note enumerates the check's inputs and names the exclusion
+  explicitly, so a repeat differing only in `roleArn` is idempotent and the stored role does not move.
+  `CreateActivity`'s Note keys on `name` alone, which makes `ActivityAlreadyExists` **unreachable**: the
+  only condition that page gives it is a changed `EncryptionConfiguration`, a member substrate does not
+  decode. Both entries in `cfnCreateExistsCodes` therefore changed meaning and neither is removed —
+  `cfn_rollback.go` records that dropping the live one would surface a refusal on the update path, which
+  is #1077's subject.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
@@ -309,6 +356,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   class of tool substrate is. Refusing either spelling would therefore reject a document AWS accepts, so
   the rule is *exactly one of the two*, and carrying both is refused because nothing publishes a
   precedence between them.
+- **`emulator/stepfunctions_create.go`, and eleven tests over the two creates** (#1072). One file holds
+  what both handlers check before they store anything and what a repeat answers, because the name
+  constraint list is published identically on both pages down to its wording — one validator serving two
+  operations is what keeps the two from drifting apart again. The tests are the load-bearing part:
+  **nothing pinned any of the corrected behaviour**, since every existing caller — the CFN builders and
+  every helper in the suite — already supplies a conforming name and a real `roleArn`, so the full suite
+  passed both before and after with no test edited. A twelve-case table walks each published constraint,
+  including a control character and U+FFFE constructed as runes; `sfnCreateRefused` asserts the code, the
+  400 *and* that the body no longer carries `InvalidParameterException`; and the idempotency tests assert
+  the two responses are equal JSON, that a repeat differing only in `roleArn` leaves
+  `DescribeStateMachine` reporting the **first** role, and that a repeated `CreateActivity` leaves
+  `ListTagsForResource` reporting the first call's tags.
 - **Five tests over the structural rules, including one that pins the determinism** (#1073). A
   twenty-eight-case refusal table runs at **both** writers, each case asserting the code, the status,
   AWS's message, the fault named in the decoded `Message`, and that nothing was stored or that the stored
