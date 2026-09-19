@@ -13488,7 +13488,7 @@ EventBridge custom events: $1.00 per million events.
 |-----------|-------|-------|
 | CreateSchedule | `POST /schedules/{Name}` | Answers **200**, not 201 — see below |
 | GetSchedule | `GET /schedules/{Name}` | |
-| UpdateSchedule | `PUT /schedules/{Name}` | Merges the optional members where AWS publishes full replacement — filed separately |
+| UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
 | ListSchedules | `GET /schedules` | `GroupName` and `NamePrefix` filters |
 
@@ -13533,6 +13533,35 @@ than silently taken:
 - The templated-target objects (`EcsParameters`, `EventBridgeParameters`, `KinesisParameters`,
   `SageMakerPipelineParameters`, `SqsParameters`, `DeadLetterConfig`) are likewise unmodelled, so they
   are neither decoded nor reported.
+
+### `UpdateSchedule` replaces the schedule, it does not merge into it
+
+`API_UpdateSchedule` opens with the property verbatim:
+
+> Updates the specified schedule. When you call `UpdateSchedule`, EventBridge Scheduler uses all the
+> information that you have provided and replaces your schedule. You will lose any information that you
+> haven't provided, such as a description.
+
+Substrate assigned each optional member only when the request supplied a non-empty one, so an omitted
+`Description`, `ScheduleExpressionTimezone`, `State`, `Target.Input` or `Target.RetryPolicy` survived the
+update. A caller following AWS's own advice — send the whole configuration, or accept losing what you
+omit — saw a stale value instead of a reset. Since
+[#1089](https://github.com/scttfrdmn/substrate/issues/1089) the create and the update resolve a body
+through one function, so the two doors cannot disagree about what an omitted member means.
+
+`State`'s default is the one part of this with no API Reference citation. The `State` entry is
+byte-identical on all four pages that carry it (`API_UpdateSchedule`, `API_CreateSchedule`,
+`API_GetSchedule`, `API_ScheduleSummary`) and none publishes a `Default:` line; the CLI and
+CloudFormation references are equally silent, and `API_GetSchedule` has no Examples section. `ENABLED` is
+documented in the **User Guide** instead — *"By default, the EventBridge Scheduler enables your
+schedule"* (`scheduler/latest/UserGuide/getting-started.html`) — and that is the citation substrate
+applies at both doors.
+
+`ClientToken` came off the `GetSchedule` response with the same change. It is not among that page's
+fifteen published response elements — it is a request-only idempotency token, published on the create and
+the update and on no read. It was removed *with* the full-replace fix rather than on its own because an
+omitted member now reverts: leaving it would have made an unpublished field start changing under callers
+who never named it. The record keeps it as recorded intent.
 
 ### `CreateSchedule` answers 200, not 201
 
@@ -14921,15 +14950,76 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 |-----------|-------|
 | CreateUserPool | Pool ID format: `{region}_{12-char alphanum}` |
 | DescribeUserPool | |
+| UpdateUserPool | Replaces the published configuration and answers an empty body — see below |
 | DeleteUserPool | |
 | ListUserPools | |
 | CreateUserPoolClient | |
 | DescribeUserPoolClient | |
+| UpdateUserPoolClient | Replaces the published configuration — see below |
 | DeleteUserPoolClient | |
 | AdminCreateUser | |
 | AdminGetUser | |
 | AdminDeleteUser | |
 | InitiateAuth | Returns stub JWT tokens |
+
+The table above is a subset; 31 operations are routed. Completing it is
+[#1093](https://github.com/scttfrdmn/substrate/issues/1093)'s scope.
+
+### `UpdateUserPool` and `UpdateUserPoolClient` replace, they do not merge
+
+`API_UpdateUserPool` and `API_UpdateUserPoolClient` carry the same Important box, word for word:
+
+> If you don't provide a value for an attribute, Amazon Cognito sets it to its default value.
+
+and the same recommendation above it — build the request from the current configuration, which both pages
+point at `DescribeUserPool` / `DescribeUserPoolClient` to obtain. Substrate assigned each member only when
+the request supplied a non-empty one, so a caller following that advice and omitting a member it did not
+want to change saw the stored value survive where AWS resets it. Since
+[#1089](https://github.com/scttfrdmn/substrate/issues/1089) both handlers assign every member their page
+publishes, and the create shares the same resolver so the two doors cannot drift apart again.
+
+Full replacement governs only the members an operation **publishes**. `Schema` is absent from
+`API_UpdateUserPool`'s Request Syntax, so `SchemaAttributes` is *preserved* across an update rather than
+cleared — an operation cannot reset a member it does not accept. `ProviderName`, `Status`, `Arn` and
+`CreationDate` are preserved for the same reason.
+
+Two defaults are applied on the reset:
+
+| Member | Default | Citation |
+|--------|---------|----------|
+| `ExplicitAuthFlows` | `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH`, `ALLOW_CUSTOM_AUTH` | Published on `API_UpdateUserPoolClient` and `API_CreateUserPoolClient`: *"If you don't specify a value for `ExplicitAuthFlows`, your app client supports `ALLOW_REFRESH_TOKEN_AUTH`, `ALLOW_USER_SRP_AUTH`, and `ALLOW_CUSTOM_AUTH`."* An explicit `[]` is a value the caller specified and keeps the empty set. |
+| `MfaConfiguration` | `OFF` | **Unpublished.** Neither page carries a `Default:` line; both publish `Valid Values: OFF \| ON \| OPTIONAL`. `OFF` is substrate's reading, and it predates this change — the create has always applied it. It is applied at the update so an omitted member cannot leave the pool reporting the empty string, which is not a value the page publishes (#1013). |
+
+`UpdateUserPool` answers **200 with a byte-empty body**. Its Response Syntax is `HTTP/1.1 200` followed by
+nothing, where `UpdateUserPoolClient`'s publishes a `UserPoolClient` object — so the two updates differ,
+and substrate answers each as its own page publishes rather than making them symmetrical. Empty rather
+than `{}` follows `AppSync`'s in-tree precedent: `{}` is a member-less object where the page promises no
+object at all.
+
+### Other `Update*` handlers are not flipped by analogy
+
+41 `update*` handlers live in `emulator/`, and 29 of them guard an assignment on a non-empty request
+member. Exactly three pages publish that an update is a full replacement — `API_UpdateSchedule`,
+`API_UpdateUserPool` and `API_UpdateUserPoolClient` — and only those three lost their guards. The other
+26 keep them, because [#671](https://github.com/scttfrdmn/substrate/issues/671)'s binding scope decision
+is that substrate models only what an operation's own page states: a published sentence is not extended to
+a sibling by analogy, however tempting the symmetry.
+
+Step Functions is the sharpest case, because its page argues the other way rather than merely staying
+silent. `API_UpdateStateMachine` publishes both `definition` and `roleArn` as `Required: No` and then
+publishes `MissingRequiredParameter` — *"This error occurs if both `definition` and `roleArn` are not
+specified."* A request naming only `roleArn` is therefore explicitly legal, which full replacement would
+turn into a request that blanks the definition and leaves a state machine the service could not execute.
+So the merge there is what the page describes, and substrate keeps it.
+
+### Tagging is published and unrouted
+
+AWS publishes `ListTagsForResource`, `TagResource` and `UntagResource` for `cognito-idp`. Substrate routes
+none of the three ([#1135](https://github.com/scttfrdmn/substrate/issues/1135)), so a user pool's tag set
+is readable only through `DescribeUserPool`, where `UserPoolType` publishes it. `UpdateUserPool` replaces
+the tag set outright like every other published member. Note that `DescribeUserPool` currently reports the
+set as `Tags` rather than the published `UserPoolTags`
+([#1136](https://github.com/scttfrdmn/substrate/issues/1136)).
 
 ### CloudFormation resource types
 

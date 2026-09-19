@@ -135,10 +135,6 @@ func (p *CognitoIDPPlugin) createUserPool(ctx *RequestContext, req *AWSRequest) 
 	poolID := ctx.Region + "_" + generateCognitoID()
 	arn := fmt.Sprintf("arn:aws:cognito-idp:%s:%s:userpool/%s", ctx.Region, ctx.AccountID, poolID)
 	providerName := fmt.Sprintf("cognito-idp.%s.amazonaws.com/%s", ctx.Region, poolID)
-	mfa := body.MfaConfiguration
-	if mfa == "" {
-		mfa = "OFF"
-	}
 
 	now := p.tc.Now()
 	pool := CognitoUserPool{
@@ -150,7 +146,7 @@ func (p *CognitoIDPPlugin) createUserPool(ctx *RequestContext, req *AWSRequest) 
 		Policies:         body.Policies,
 		LambdaConfig:     body.LambdaConfig,
 		SchemaAttributes: body.Schema,
-		MfaConfiguration: mfa,
+		MfaConfiguration: cognitoMfaConfiguration(body.MfaConfiguration),
 		Tags:             body.UserPoolTags,
 		CreationDate:     now,
 		LastModifiedDate: now,
@@ -193,12 +189,29 @@ func (p *CognitoIDPPlugin) describeUserPool(ctx *RequestContext, req *AWSRequest
 	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: *pool})
 }
 
+// updateUserPool replaces a pool's published configuration with the request's, per the Important box
+// quoted in cognito_idp_update_replace.go: a member the caller omits reverts to its default rather
+// than surviving.
+//
+// `PoolName` and `UserPoolTags` are decoded here for the first time since #1089; both are published on
+// this operation (`PoolName` as `Required: No`, where `CreateUserPool` marks it `Required: Yes`), so
+// before this a pool could neither be renamed nor retagged and the call answered 200 either way.
+// Neither has a published default, so an omitted one clears.
+//
+// The answer is an empty body, which is `API_UpdateUserPool`'s entire Response Elements section: "If
+// the action is successful, the service sends back an HTTP 200 response with an empty HTTP body." The
+// page's Sample Response corroborates it — headers and no JSON. Substrate answered `{"UserPool": …}`,
+// a member the page does not publish, which is #1013's class and which also meant the only way to
+// observe a replacement was the door that does publish the object: DescribeUserPool. The body stays
+// empty rather than becoming `{}`, following [appsyncDeleted] — the page promises no object at all.
 func (p *CognitoIDPPlugin) updateUserPool(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		UserPoolID       string      `json:"UserPoolId"`
-		Policies         interface{} `json:"Policies"`
-		LambdaConfig     interface{} `json:"LambdaConfig"`
-		MfaConfiguration string      `json:"MfaConfiguration"`
+		UserPoolID       string            `json:"UserPoolId"`
+		PoolName         string            `json:"PoolName"`
+		Policies         interface{}       `json:"Policies"`
+		LambdaConfig     interface{}       `json:"LambdaConfig"`
+		MfaConfiguration string            `json:"MfaConfiguration"`
+		UserPoolTags     map[string]string `json:"UserPoolTags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
@@ -207,15 +220,11 @@ func (p *CognitoIDPPlugin) updateUserPool(ctx *RequestContext, req *AWSRequest) 
 	if err != nil {
 		return nil, err
 	}
-	if body.Policies != nil {
-		pool.Policies = body.Policies
-	}
-	if body.LambdaConfig != nil {
-		pool.LambdaConfig = body.LambdaConfig
-	}
-	if body.MfaConfiguration != "" {
-		pool.MfaConfiguration = body.MfaConfiguration
-	}
+	pool.Name = body.PoolName
+	pool.Policies = body.Policies
+	pool.LambdaConfig = body.LambdaConfig
+	pool.MfaConfiguration = cognitoMfaConfiguration(body.MfaConfiguration)
+	pool.Tags = body.UserPoolTags
 	pool.LastModifiedDate = p.tc.Now()
 
 	data, err := json.Marshal(pool)
@@ -227,10 +236,10 @@ func (p *CognitoIDPPlugin) updateUserPool(ctx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, stateKey, data); err != nil {
 		return nil, fmt.Errorf("cognito-idp updateUserPool state.Put: %w", err)
 	}
-	type response struct {
-		UserPool CognitoUserPool `json:"UserPool"`
-	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: *pool})
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+	}, nil
 }
 
 func (p *CognitoIDPPlugin) deleteUserPool(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -365,7 +374,7 @@ func (p *CognitoIDPPlugin) createUserPoolClient(ctx *RequestContext, req *AWSReq
 		ClientName:        body.ClientName,
 		UserPoolID:        body.UserPoolID,
 		ClientSecret:      secret,
-		ExplicitAuthFlows: body.ExplicitAuthFlows,
+		ExplicitAuthFlows: cognitoExplicitAuthFlows(body.ExplicitAuthFlows),
 		CreationDate:      now,
 		AccountID:         ctx.AccountID,
 		Region:            ctx.Region,
@@ -407,6 +416,15 @@ func (p *CognitoIDPPlugin) describeUserPoolClient(ctx *RequestContext, req *AWSR
 	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: *client})
 }
 
+// updateUserPoolClient replaces an app client's published configuration with the request's, on the
+// same Important box as [CognitoIDPPlugin.updateUserPool] — `API_UpdateUserPoolClient` carries it
+// verbatim, so this is its own page's sentence and not an analogy with the pool (#1089, #671).
+//
+// Unlike the pool update, the response is right as it stands: this page's Response Syntax publishes a
+// `UserPoolClient` object, where `API_UpdateUserPool`'s publishes nothing.
+//
+// `ClientName` has no published default and clears when omitted; `ExplicitAuthFlows` has one, and
+// [cognitoExplicitAuthFlows] carries the citation.
 func (p *CognitoIDPPlugin) updateUserPoolClient(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		UserPoolID        string   `json:"UserPoolId"`
@@ -421,12 +439,8 @@ func (p *CognitoIDPPlugin) updateUserPoolClient(ctx *RequestContext, req *AWSReq
 	if err != nil {
 		return nil, err
 	}
-	if body.ClientName != "" {
-		client.ClientName = body.ClientName
-	}
-	if len(body.ExplicitAuthFlows) > 0 {
-		client.ExplicitAuthFlows = body.ExplicitAuthFlows
-	}
+	client.ClientName = body.ClientName
+	client.ExplicitAuthFlows = cognitoExplicitAuthFlows(body.ExplicitAuthFlows)
 
 	data, err := json.Marshal(client)
 	if err != nil {
