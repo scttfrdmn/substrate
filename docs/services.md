@@ -18324,7 +18324,8 @@ for a plan's existence rather than for anything AWS would bill.
 
 **Endpoint:** `bedrock-runtime.{region}.amazonaws.com`
 
-**Protocol:** REST-JSON, path-routed. API version 2023-04-20.
+**Protocol:** REST-JSON, path-routed. Two API versions, because two services are served here: the
+`bedrock-runtime` data plane is 2023-09-30 and the `bedrock` control plane is 2023-04-20.
 
 **Routing:** `bedrock` is aliased to `bedrock-runtime`, because boto3's `bedrock-runtime` client
 signs with `bedrock` as the SigV4 signing name in the credential scope when `AWS_ENDPOINT_URL` is
@@ -18341,7 +18342,7 @@ running.
 
 | Operation | Notes |
 |-----------|-------|
-| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. The request body is passed through unparsed, so no model-specific input shape is validated |
+| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
 | ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
 | CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked |
 | GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports a [seeded status](#seeding-a-batch-job-status) if one is set |
@@ -18352,6 +18353,26 @@ running.
 Converse-shaped call is served. Nor is the rest of the `bedrock` control plane —
 `ListFoundationModels`, `GetFoundationModel`, `CreateGuardrail`, `GetGuardrail`,
 `CreateModelCustomizationJob` and the provisioned-throughput operations among them.
+
+### InvokeModel reads nothing but the model ID
+
+The handler takes its request as `_ *AWSRequest`, so every part of the call except the path's model ID
+is discarded. Three consequences are worth knowing before writing a test.
+
+`X-Amzn-Bedrock-GuardrailIdentifier` and `X-Amzn-Bedrock-GuardrailVersion` are published request
+headers and are unread, so an invocation that attaches a guardrail is never filtered. The published
+`"amazon-bedrock-guardrailAction": "INTERVENED | NONE"` member therefore never appears in a canned
+body — the only way to observe an intervention is to call `ApplyGuardrail` directly, which is a
+different operation most consumers do not make. The decision itself already exists next door
+([see above](#how-a-guardrail-decides)); what is missing is the header read that would reach it.
+
+The page publishes three conditions under which the *request* is an error, and none is checked: a body
+naming `amazon-bedrock-guardrailConfig` with no guardrail identifier, a guardrail enabled with a
+`contentType` other than `application/json`, and a guardrail identifier with no `guardrailVersion`.
+
+And because the body is never parsed, a malformed or entirely absent one is accepted — the canned
+Claude Messages body comes back regardless.
+[#1183](https://github.com/scttfrdmn/substrate/issues/1183).
 
 ### How a guardrail decides
 
@@ -18402,14 +18423,22 @@ refuses with `ConflictException`. It answers `{}`, which is the published empty 
 
 | Condition | Code | Status |
 |-----------|------|--------|
-| a body that will not parse | `ValidationException` | 400 |
+| a body that will not parse, on `ApplyGuardrail` or `CreateModelInvocationJob` | `ValidationException` | 400 |
 | a batch job that does not exist | `ResourceNotFoundException` | 404 |
 
-Both match what the pages publish. `AccessDeniedException`, `ThrottlingException`,
-`ServiceQuotaExceededException`, `ModelTimeoutException`, `ModelNotReadyException` and
-`ModelStreamErrorException` are published and have no site: no quota, model readiness or timeout is
-modelled. `ConflictException`/400 is published on the create and the stop and is answered by
-neither — a duplicate `jobName` is accepted, and so is stopping a finished job.
+Both match what the pages publish. Those two are the only operations that parse a body at all:
+`InvokeModel` [reads nothing but the model ID](#invokemodel-reads-nothing-but-the-model-id), so it has
+no body-parse refusal to answer.
+
+The rest of what the pages publish has no site, because none of the conditions is modelled.
+`InvokeModel` alone publishes ten errors — `AccessDeniedException`/403, `InternalServerException`/500,
+`ModelErrorException`/424, `ModelNotReadyException`/429, `ModelTimeoutException`/408,
+`ResourceNotFoundException`/404, `ServiceQuotaExceededException`/400,
+`ServiceUnavailableException`/503, `ThrottlingException`/429 and `ValidationException`/400 — of which
+Substrate answers none: there is no quota, no model readiness, no timeout and no unknown model, so
+every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop
+and is answered by neither — a duplicate `jobName` is accepted, and so is stopping a finished job.
+`ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
 
 ### CloudFormation resource types
 
