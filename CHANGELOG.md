@@ -441,6 +441,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **caller** supplied is now refused, while a name read out of substrate's own index is still skipped,
   because a missing record there is an internal inconsistency rather than a caller's mistake.
   `TestECRPlugin_DeleteRepository` asserted the empty-list reading and was rewritten.
+- **ECR's three paginated listings honour `maxResults` and `nextToken`, in the three different shapes
+  their three pages publish** (#1090, third of three). `DescribeRepositories`, `DescribeImages` and
+  `ListImages` each publish `maxResults` (Valid Range 1–1000, default 100) and an opaque `nextToken`,
+  and substrate decoded neither on any of the three, so every request answered the whole listing in
+  one page — which a caller following the published contract cannot detect, because one full page is
+  a well-formed answer. The three pages were read one at a time (#671) and **they do not agree**:
+  `DescribeRepositories` publishes the exclusion on **both** members against `repositoryNames`,
+  `DescribeImages` publishes it on both against `imageIds`, and `ListImages` publishes **none at all**
+  — so the exclusion is declared per operation rather than shared, since one guard would either
+  refuse a `ListImages` request AWS accepts or accept a `DescribeImages` request AWS refuses. A
+  `maxResults` outside the published range is **refused** rather than clamped, and the cursor is
+  `offset_pagination_token.go`'s base64 offset, so a token substrate never issued is refused (#915)
+  while an offset past the end of a shrunken listing clamps to a final empty page.
+  `InvalidParameterException`/400 carries all three refusals, being the only parameter-fault code any
+  of the three pages publishes.
+- **`ListImages` answers one entry per image ID rather than per image, and all three ECR listings
+  sort before they page** (#1090). An offset cursor is only meaningful over settled membership in a
+  stable order and neither held: `ListImages` de-duplicated by digest and kept whichever tag Go's
+  randomised map iteration yielded first, so an image with two tags was reported under an arbitrary
+  one of them and two identical calls could answer differently — a determinism defect in its own
+  right. AWS's own published sample for the operation answers two entries carrying the same digest
+  and different tags, and the page says a `TAGGED` filter lists "all of the tags in your repository".
+  `DescribeRepositories` walked its names index in creation order and both image operations ranged
+  over the tag map; repositories now sort by name, image details by digest, image IDs by digest then
+  tag.
+- **`DescribeImages` refuses an image it cannot answer for** (#1090). `API_DescribeImages` publishes
+  `ImageNotFoundException`/400 and it had no site: an `imageIds` entry naming an unknown tag was
+  dropped from the request and one naming an unknown digest was dropped from the answer, so a caller
+  naming one real and one imaginary image was answered 200 with a short list — the same shape as the
+  `DescribeRepositories` defect above. As there, only an image the **caller** named is refused; a
+  digest derived from substrate's own tag index with no record behind it is skipped as an internal
+  inconsistency.
 
 ### Added
 - **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
