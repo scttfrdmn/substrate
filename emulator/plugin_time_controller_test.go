@@ -212,6 +212,10 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 			want: rfc3339,
 		},
 		{
+			// Epoch seconds to three decimals, like ECS below and for the same reason:
+			// ECR speaks application/x-amz-json-1.1, whose timestamps are numbers. It
+			// answered a quoted RFC3339 string until #1090, because the persisted record's
+			// time.Time reached the wire directly — so this case now also pins the unit.
 			name: "ecr CreateRepository reports repository.createdAt",
 			observe: func(t *testing.T, ts *emulator.TestServer) string {
 				t.Helper()
@@ -219,7 +223,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 					"AmazonEC2ContainerRegistry_V1_1_0.CreateRepository", `{"repositoryName":"clock"}`)
 				return pluginClockJSONField(t, got, "repository", "createdAt")
 			},
-			want: rfc3339,
+			want: strconv.FormatFloat(float64(pluginClockFrozen.UnixNano())/1e9, 'f', 3, 64),
 		},
 		{
 			// ECS renders epoch seconds to three decimals, so this case is also the one
@@ -353,13 +357,17 @@ func TestPluginTimeController_TheControlEndpointReachesAPreviouslyUnwiredPlugin(
 		"application/json", string(body))
 	require.Equal(t, http.StatusOK, status, "%s", got)
 
-	want := pluginClockQuoted(moved.Format(time.RFC3339))
-
 	api := pluginClockREST(t, ts, "apigateway.us-east-1.amazonaws.com", "apigateway",
 		"/restapis", "application/json", `{"name":"moved"}`, http.StatusCreated)
-	assert.Equal(t, want, pluginClockJSONField(t, api, "", "createdDate"))
+	assert.Equal(t, pluginClockQuoted(moved.Format(time.RFC3339)),
+		pluginClockJSONField(t, api, "", "createdDate"))
 
+	// ECR renders the same instant as epoch seconds rather than as a quoted string, since
+	// #1090 gave the repository shape a projection that marshals its timestamp the way the
+	// JSON protocol publishes it. The two members are the same moment in two encodings,
+	// which is why this assertion cannot share the one above.
 	repo := pluginClockTarget(t, ts, "api.ecr.us-east-1.amazonaws.com", "ecr",
 		"AmazonEC2ContainerRegistry_V1_1_0.CreateRepository", `{"repositoryName":"moved"}`)
-	assert.Equal(t, want, pluginClockJSONField(t, repo, "repository", "createdAt"))
+	assert.Equal(t, strconv.FormatFloat(float64(moved.UnixNano())/1e9, 'f', 3, 64),
+		pluginClockJSONField(t, repo, "repository", "createdAt"))
 }
