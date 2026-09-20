@@ -1636,3 +1636,196 @@ func TestPaginationToken_SchedulerListSchedulesRefusesATokenItDidNotIssue(t *tes
 		assert.Equal(t, "ValidationException", code, body)
 	})
 }
+
+// --- Batch's three resource describes ---
+
+const tokenRefusalBatchHost = "batch.us-east-1.amazonaws.com"
+
+// tokenRefusalBatchCall sends one Batch REST/JSON request and returns the status, the raw body and
+// the bare error code a refusal carries.
+//
+// Batch renders a refusal as {"Code":…,"Message":…,"message":…} rather than under __type, so
+// [tokenRefusalJSONCall] cannot read it; it also routes on the request path rather than on
+// X-Amz-Target.
+func tokenRefusalBatchCall(t *testing.T, srv *emulator.Server, path, body string) (int, string, string) {
+	t.Helper()
+	r := httptest.NewRequest(http.MethodPost, path, bytes.NewReader([]byte(body)))
+	r.Host = tokenRefusalBatchHost
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20240101/"+
+		"us-east-1/batch/aws4_request, SignedHeaders=host, Signature=fake")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	resp := w.Result()
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read %s body", path)
+
+	var errShape struct {
+		Code string `json:"Code"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &errShape); unmarshalErr != nil {
+		errShape.Code = ""
+	}
+	return resp.StatusCode, string(raw), errShape.Code
+}
+
+// tokenRefusalBatchDescribe is one of the three describes, addressed by the resource member it
+// returns.
+type tokenRefusalBatchDescribe struct {
+	// operation is the wire name the refusal message must carry.
+	operation string
+	// path is the describe's published request path.
+	path string
+	// createPath and createBody build one record; %s is the resource's name.
+	createPath string
+	createBody string
+	// member is the response member the records arrive under.
+	member string
+	// names are the three records the fixture creates, in the order the index sorts them.
+	names []string
+}
+
+// tokenRefusalBatchDescribes is the three operations sharing one paginator, which is why this is the
+// only site in the class where one conversion covers three operations — and why the decode had to move
+// out of the shared helper rather than staying in it.
+var tokenRefusalBatchDescribes = []tokenRefusalBatchDescribe{
+	{
+		operation:  "DescribeComputeEnvironments",
+		path:       "/v1/describecomputeenvironments",
+		createPath: "/v1/createcomputeenvironment",
+		createBody: `{"computeEnvironmentName":"%s","type":"MANAGED"}`,
+		member:     "computeEnvironments",
+		names:      []string{"trb-ce-a", "trb-ce-b", "trb-ce-c"},
+	},
+	{
+		operation:  "DescribeJobQueues",
+		path:       "/v1/describejobqueues",
+		createPath: "/v1/createjobqueue",
+		createBody: `{"jobQueueName":"%s","priority":1,` +
+			`"computeEnvironmentOrder":[{"order":1,"computeEnvironment":"trb-ce-a"}]}`,
+		member: "jobQueues",
+		names:  []string{"trb-q-a", "trb-q-b", "trb-q-c"},
+	},
+	{
+		operation:  "DescribeJobDefinitions",
+		path:       "/v1/describejobdefinitions",
+		createPath: "/v1/registerjobdefinition",
+		createBody: `{"jobDefinitionName":"%s","type":"container"}`,
+		member:     "jobDefinitions",
+		names:      []string{"trb-jd-a", "trb-jd-b", "trb-jd-c"},
+	},
+}
+
+// tokenRefusalBatchFixture creates one describe's three records through the real create operation
+// (#765) and returns the server.
+func tokenRefusalBatchFixture(t *testing.T, d tokenRefusalBatchDescribe) *emulator.Server {
+	t.Helper()
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.BatchPlugin{})
+	for _, name := range d.names {
+		status, out, code := tokenRefusalBatchCall(t, srv, d.createPath, fmt.Sprintf(d.createBody, name))
+		require.Empty(t, code, out)
+		require.Equal(t, http.StatusOK, status, out)
+	}
+	return srv
+}
+
+// TestPaginationToken_BatchDescribesRefuseATokenTheyDidNotIssue is #1086's last site, and the only one
+// where three operations share one paginator.
+//
+// The code is ClientException/400, which each page publishes in its own Errors section and which is —
+// with ServerException/500 — the whole of Batch's published error vocabulary, since Batch publishes no
+// common-errors page. The footing for the condition is each page's own description of the parameter:
+// *"The nextToken value returned from a previous paginated Describe… request where maxResults was used
+// and the results exceeded the value of that parameter."* See batch_pagination.go.
+//
+// All three are asserted rather than one plus an argument about the shared helper, because the fix had
+// to *leave* the shared helper — DescribeJobDefinitions reads state before calling it, so a decode
+// there would have been below a state read on exactly one of the three.
+func TestPaginationToken_BatchDescribesRefuseATokenTheyDidNotIssue(t *testing.T) {
+	for _, d := range tokenRefusalBatchDescribes {
+		t.Run(d.operation, func(t *testing.T) {
+			srv := tokenRefusalBatchFixture(t, d)
+
+			status, page1, code := tokenRefusalBatchCall(t, srv, d.path, `{"maxResults":1}`)
+			require.Empty(t, code, page1)
+			require.Equal(t, http.StatusOK, status, page1)
+			require.Contains(t, page1, d.names[0])
+			issued := tokenRefusalJSONToken(t, page1, "nextToken")
+
+			status, page2, code := tokenRefusalBatchCall(t, srv, d.path,
+				fmt.Sprintf(`{"maxResults":1,"nextToken":%q}`, issued))
+			require.Empty(t, code, page2)
+			require.Equal(t, http.StatusOK, status, page2)
+			assert.Contains(t, page2, d.names[1],
+				"an issued token must resume rather than re-serve page one")
+
+			for _, tc := range tokenRefusalBadTokens {
+				t.Run(tc.name, func(t *testing.T) {
+					status, body, code := tokenRefusalBatchCall(t, srv, d.path,
+						fmt.Sprintf(`{"maxResults":1,"nextToken":%q}`, tc.token))
+					assert.Equal(t, http.StatusBadRequest, status, body)
+					assert.Equal(t, "ClientException", code, body)
+					assert.Contains(t, body, d.operation, "the message must name the operation")
+					assert.NotContains(t, body, d.names[0],
+						"a refused token must not be answered with page one")
+				})
+			}
+
+			t.Run("a past-the-end token clamps rather than being refused", func(t *testing.T) {
+				status, body, code := tokenRefusalBatchCall(t, srv, d.path,
+					fmt.Sprintf(`{"nextToken":%q}`,
+						base64.StdEncoding.EncodeToString([]byte("99"))))
+				assert.Equal(t, http.StatusOK, status, body)
+				assert.Empty(t, code, body)
+				assert.NotContains(t, body, d.names[0], "a past-the-end offset must not reset to page one")
+			})
+
+			t.Run("refused before any state is read", func(t *testing.T) {
+				// The seal proves the ordering on all three, which is the half the shared helper could
+				// not deliver: describeBatchResources only loads an index when no filter is supplied,
+				// and DescribeJobDefinitions loads one of its own before it ever calls the helper.
+				sealed := &tokenRefusalSealedState{
+					inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true,
+				}
+				sealedSrv := tokenRefusalServer(t, sealed, &emulator.BatchPlugin{})
+				status, body, code := tokenRefusalBatchCall(t, sealedSrv, d.path,
+					`{"nextToken":"!!not-base64!!"}`)
+				assert.Equal(t, http.StatusBadRequest, status, body)
+				assert.Equal(t, "ClientException", code, body)
+			})
+		})
+	}
+}
+
+// TestPaginationToken_BatchTokensAreNotPortableBetweenTheThreeDescribes records the boundary the
+// refusal does not cross: the token carries an offset and nothing else, so one operation's token is
+// well-formed at another and indexes into a listing the caller never asked for.
+//
+// Asserted rather than left in a comment because the refusal's name invites the stronger reading, and
+// because the message naming the operation would otherwise look like it enforced something.
+func TestPaginationToken_BatchTokensAreNotPortableBetweenTheThreeDescribes(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.BatchPlugin{})
+	for _, d := range tokenRefusalBatchDescribes {
+		for _, name := range d.names {
+			status, out, code := tokenRefusalBatchCall(t, srv, d.createPath, fmt.Sprintf(d.createBody, name))
+			require.Empty(t, code, out)
+			require.Equal(t, http.StatusOK, status, out)
+		}
+	}
+
+	queues := tokenRefusalBatchDescribes[1]
+	status, body, code := tokenRefusalBatchCall(t, srv, queues.path, `{"maxResults":1}`)
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+	issued := tokenRefusalJSONToken(t, body, "nextToken")
+
+	envs := tokenRefusalBatchDescribes[0]
+	status, body, code = tokenRefusalBatchCall(t, srv, envs.path,
+		fmt.Sprintf(`{"maxResults":1,"nextToken":%q}`, issued))
+	assert.Equal(t, http.StatusOK, status, body)
+	assert.Empty(t, code, body)
+	assert.Contains(t, body, envs.names[1],
+		"a sibling's token decodes cleanly and indexes into this operation's own listing")
+}

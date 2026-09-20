@@ -1415,19 +1415,23 @@ first, so a refusal could depend on how much state happened to exist and a store
 reported as a 500 for a request that was already refusable. Asserted the way #915's sites assert it:
 by sealing the state store against reads and requiring the refusal to arrive anyway.
 
-**The remaining ten sites, and what their pages do not say.** Thirteen operation references were
-read for the other five services, and **not one publishes a code that AWS attributes to an invalid,
+**The other ten sites, and what their pages do not say.** Thirteen operation references were read for
+the remaining five services, and **not one publishes a code that AWS attributes to an invalid,
 unusable or expired pagination token** — in an Errors section or in the token member's prose. So each
-of these refuses under a code that is substrate's reading of a generic code published on the
+of those ten refuses under a code that is substrate's reading of a generic code published on the
 operation's own page, the way S3 `ListObjectsV2` and `GetResources` above already do, and none by
 borrowing a sibling operation's code, which
-[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. SNS's two sites, Athena's two and
-CloudWatch Logs' four and EventBridge Scheduler's one have landed and have their own sections below;
-the **one** remaining site, carrying three operations, is unchanged so far:
+[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. All ten have landed — SNS's two
+sites, Athena's two, CloudWatch Logs' four, EventBridge Scheduler's one and Batch's one, which alone
+carries three operations — and each has its own section below. **The class is closed: no listing in
+the tree now answers page one to a token it could not have issued.**
 
-| Sites | Reading available on the page | What the page says |
-|---|---|---|
-| Batch `DescribeComputeEnvironments`, `DescribeJobQueues`, `DescribeJobDefinitions` (one shared paginator) | `ClientException` / 400 | *"These errors are usually caused by a client action. … Another cause is specifying an identifier that's not valid."* And the same page's token prose says *"Treat this token as an opaque identifier."* That is the closest of the thirteen pages to covering the condition under a generic code — but the page never joins the two sentences, so it is still substrate's reading and not an attribution. |
+What the ten have in common, and what the five sections record separately, is that the *condition* is
+substrate's reading in every case while the *code* is never borrowed. Four of the five services
+publish the where-a-token-comes-from sentence in the token parameter's own description — Athena,
+CloudWatch Logs, EventBridge Scheduler and Batch — and that sentence, not an Errors entry, is the
+footing each refusal stands on. SNS is the one that publishes no such sentence, so its section carries
+the weaker argument, which is why it says so.
 
 ### SNS's three listings refuse a token under the code their own pages publish
 
@@ -1609,10 +1613,63 @@ the stronger reading. And a past-the-end offset still clamps to a final empty pa
 refused, because a token substrate issued over a listing that has since shrunk is still a token it
 issued. Left as they were: the `State` filter is applied **after** the page is cut, so a state-filtered
 request can be answered a page shorter than `MaxResults` while still carrying a `NextToken` where AWS
-publishes `State` as a filter on the listing; and a `MaxResults` above the published maximum of 100 is
+publishes `State` as a filter on the listing
+([#1229](https://github.com/scttfrdmn/substrate/issues/1229)); and a `MaxResults` above the published maximum of 100 is
 clamped rather than refused, with a value of zero or below silently ignored in favour of substrate's
 own default of 20. Both are separate classes from the token, and changing either changes which
 schedules a page contains rather than which tokens are accepted.
+
+### Batch's three describes shared one paginator, so the decode had to leave it
+
+`DescribeComputeEnvironments`, `DescribeJobQueues` and `DescribeJobDefinitions` are the last of those
+ten sites, and the only one where three operations paginate through **one shared helper** — which is
+why one conversion covers three operations, and why the fix had to move the decode *out* of the helper
+rather than correcting it in place.
+
+All three answer **`ClientException` / 400**, glossed *"These errors are usually caused by a client
+action. … Another cause is specifying an identifier that's not valid."* and published in all three
+operations' own Errors sections. Each Batch page publishes exactly two errors — `ClientException`/400
+and `ServerException`/500 — and Batch publishes no common-errors page, so those two are the whole
+published vocabulary and there is nothing a refusal here could borrow from a sibling:
+
+```
+nextToken is not a token returned by a previous DescribeComputeEnvironments request
+```
+
+**The footing is each page's own description of the parameter, and it names the operation.** All three
+say *"The `nextToken` value returned from a previous paginated `Describe…` request where `maxResults`
+was used and the results exceeded the value of that parameter."*, each naming its own operation as the
+source. The same paragraph adds *"Treat this token as an opaque identifier that's only used to retrieve
+the next items in a list and not for other programmatic purposes."*, which is addressed to the caller
+rather than to the service and so is not itself a refusal rule — it is the page's own statement that
+the token's contents are not a caller-constructible value. What remains substrate's reading is only
+that a token is one of the identifiers the `ClientException` gloss covers: the page never joins the two
+sentences. No page publishes a Length or Pattern constraint on `nextToken`, so unlike KMS's 1–1024
+there is no ceiling for the refusal to subsume and the issuability round trip is the entire rule.
+
+**Why the decode left the shared helper.** `DescribeJobDefinitions` loads the job-definition index
+*before* it reaches the helper, to expand a `jobDefinitionName` into its revisions, so a decode inside
+the helper would have sat below a state read on exactly one of the three and only for one shape of
+request. Moving it to each handler makes the refusal unconditional, which is #887's criterion, and the
+state-store seal asserts it for all three rather than for two-and-an-argument. The body decode keeps
+its precedence: a request whose JSON does not parse cannot have a token read out of it, and since both
+refusals carry the same published code, the message is the only thing that distinguishes them.
+
+**Tokens are not portable between the three, and that is asserted rather than implied.** The token
+carries an offset and nothing else, so a `DescribeJobQueues` token is well-formed at
+`DescribeComputeEnvironments` and indexes into a listing the caller never asked for. The message names
+the operation for that reason, and a test pins the non-portability so the naming is not mistaken for
+enforcement. A past-the-end offset still clamps to a final empty page, because a token substrate issued
+over a listing that has since shrunk is still a token it issued.
+
+**Three things this does not fix.** `maxResults` outside the published range of **1–100** is clamped
+rather than refused — all three pages publish *"If this parameter isn't used, then `Describe…` returns
+up to 100 results"*, so 100 is the published default for an absent value and applying it to a zero or
+negative one as well is substrate's reading. `ListJobs` publishes `maxResults` and `nextToken` and
+substrate implements neither, so it answers every job in the account and never a cursor — the
+published-a-cursor-and-implemented-none-of-it class, below, rather than this one. And
+`DescribeJobDefinitions` applies its `status` filter after the page is cut, which is recorded in the
+tree as substrate's reading of the page's ordering and is unchanged here.
 
 ### Six describes published a cursor and implemented none of it
 
@@ -17669,11 +17726,11 @@ Firehose data ingestion: $0.029 per GB.
 | Operation | Notes |
 |-----------|-------|
 | CreateComputeEnvironment | `computeEnvironmentName` and `type` required; an omitted `state` is `ENABLED` |
-| DescribeComputeEnvironments | `computeEnvironments` filter takes [names or full ARNs](#a-describe-filter-takes-a-name-or-an-arn); reports `ecsClusterArn` |
+| DescribeComputeEnvironments | `computeEnvironments` filter takes [names or full ARNs](#a-describe-filter-takes-a-name-or-an-arn); reports `ecsClusterArn`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | CreateJobQueue | `jobQueueName` required; an omitted `state` is `ENABLED` |
-| DescribeJobQueues | `jobQueues` filter takes names or full ARNs |
+| DescribeJobQueues | `jobQueues` filter takes names or full ARNs; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | RegisterJobDefinition | `jobDefinitionName` and `type` required; each registration is [the next revision](#a-job-definition-is-versioned) |
-| DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status` |
+| DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | SubmitJob | Returns `jobId`; the job is immediately `SUCCEEDED` |
 | DescribeJobs | |
 | TerminateJob | Reports the job `FAILED` with the supplied `reason` |
