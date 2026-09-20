@@ -3,14 +3,12 @@ package emulator
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"io"
 	"net/http"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -493,34 +491,23 @@ func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 }
 
 func (p *SNSPlugin) listTopics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Before the topic index is read, so the refusal does not depend on what the store holds — see
+	// sns_pagination.go for the code's provenance and the ordering argument (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["NextToken"])
+	if !tokenOK {
+		return nil, snsInvalidPaginationToken("ListTopics")
+	}
+
 	goCtx := context.Background()
 	names, err := p.loadTopicNames(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {
 		return nil, err
 	}
+	// The sort is what makes the offset mean anything: [pageByOffsetToken] indexes into the slice, so
+	// the order has to be the same on every call of the walk.
 	sort.Strings(names)
 
-	// Pagination.
-	nextTokenParam := req.Params["NextToken"]
-	offset := 0
-	pageSize := 100
-	if nextTokenParam != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(nextTokenParam); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextToken string
-	if len(page) > pageSize {
-		page = page[:pageSize]
-		nextOffset := offset + pageSize
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
-	}
+	page, nextToken := pageByOffsetToken(names, offset, snsListPageSize)
 
 	type topicEntry struct {
 		TopicArn string `xml:"TopicArn"`
@@ -694,52 +681,61 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 }
 
 func (p *SNSPlugin) listSubscriptions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Before the subscription index is read (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["NextToken"])
+	if !tokenOK {
+		return nil, snsInvalidPaginationToken("ListSubscriptions")
+	}
+
 	goCtx := context.Background()
 	allIDs, err := p.loadSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region))
 	if err != nil {
 		return nil, err
 	}
-	return p.buildSubscriptionListResponse(ctx, req, allIDs, "ListSubscriptions", "ListSubscriptionsResult")
+	return p.buildSubscriptionListResponse(ctx, allIDs, offset, "ListSubscriptions", "ListSubscriptionsResult")
 }
 
 func (p *SNSPlugin) listSubscriptionsByTopic(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// An empty list and an absent topic were the same answer here, and API_ListSubscriptionsByTopic
 	// publishes NotFound/404 to distinguish them (#926).
+	//
+	// The topic is resolved before the token is decoded, so that 404 keeps its precedence: the topic is
+	// the resource the request addresses, and AWS publishes nothing about which of the two refusals
+	// wins. This is the one of the three listings whose token is not checked first, and the reasoning
+	// is written out in sns_pagination.go (#1086).
 	goCtx := context.Background()
 	_, target, err := p.requireTopic(goCtx, req.Params["TopicArn"])
 	if err != nil {
 		return nil, err
 	}
 
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params["NextToken"])
+	if !tokenOK {
+		return nil, snsInvalidPaginationToken("ListSubscriptionsByTopic")
+	}
+
 	topicIDs, err := p.loadSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, target.Name))
 	if err != nil {
 		return nil, err
 	}
-	return p.buildSubscriptionListResponse(ctx, req, topicIDs, "ListSubscriptionsByTopic", "ListSubscriptionsByTopicResult")
+	return p.buildSubscriptionListResponse(ctx, topicIDs, offset, "ListSubscriptionsByTopic", "ListSubscriptionsByTopicResult")
 }
 
-func (p *SNSPlugin) buildSubscriptionListResponse(ctx *RequestContext, req *AWSRequest, subARNs []string, rootElem, resultElem string) (*AWSResponse, error) {
-	// Pagination.
-	nextTokenParam := req.Params["NextToken"]
-	offset := 0
-	pageSize := 100
-	if nextTokenParam != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(nextTokenParam); decErr == nil {
-			if n, parseErr := strconv.Atoi(string(decoded)); parseErr == nil && n >= 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(subARNs) {
-		offset = len(subARNs)
-	}
-	page := subARNs[offset:]
-	var nextToken string
-	if len(page) > pageSize {
-		page = page[:pageSize]
-		nextOffset := offset + pageSize
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(nextOffset)))
-	}
+// buildSubscriptionListResponse renders one page of subARNs from offset.
+//
+// It takes an already-validated offset rather than the request, because the two callers decode their
+// token at different points: ListSubscriptions before it reads anything, ListSubscriptionsByTopic after
+// it resolves the topic so that #926's NotFound keeps precedence. A decode inside this function could
+// only be at one of those two points and would be wrong for the other caller (#1086).
+//
+// subARNs is in the order the subscription index was appended in, which is stable across calls and is
+// what [pageByOffsetToken]'s offset relies on. A subscription whose record no longer loads is skipped,
+// so a page can be shorter than [snsListPageSize] while a token is still emitted; the offset counts
+// index entries rather than rendered members, so the walk stays coherent.
+func (p *SNSPlugin) buildSubscriptionListResponse(
+	ctx *RequestContext, subARNs []string, offset int, rootElem, resultElem string,
+) (*AWSResponse, error) {
+	page, nextToken := pageByOffsetToken(subARNs, offset, snsListPageSize)
 
 	type subEntry struct {
 		SubscriptionArn string `xml:"SubscriptionArn"`

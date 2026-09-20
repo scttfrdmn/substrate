@@ -1418,18 +1418,55 @@ by sealing the state store against reads and requiring the refusal to arrive any
 **The remaining ten sites, and what their pages do not say.** Thirteen operation references were
 read for the other five services, and **not one publishes a code that AWS attributes to an invalid,
 unusable or expired pagination token** — in an Errors section or in the token member's prose. So each
-of these will refuse under a code that is substrate's reading of a generic code published on the
+of these refuses under a code that is substrate's reading of a generic code published on the
 operation's own page, the way S3 `ListObjectsV2` and `GetResources` above already do, and none by
 borrowing a sibling operation's code, which
-[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids:
+[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. SNS was the first of the five to
+land and has its own section below; the other seven sites are unchanged so far:
 
 | Sites | Reading available on the page | What the page says |
 |---|---|---|
-| SNS `ListTopics`, `ListSubscriptions`, `ListSubscriptionsByTopic` | `InvalidParameter` / 400 | *"Indicates that a request parameter does not comply with the associated constraints."* The token member's prose is one sentence — *"Token returned by the previous `ListTopics` request."* — and names no code and no constraint. |
 | Athena `ListQueryExecutions`, `ListWorkGroups` | `InvalidRequestException` / 400 | *"Indicates that something is wrong with the input to the request. For example, a required parameter may be missing or out of range."* The only constraint published on the token is Length 1–1024. |
 | CloudWatch Logs `DescribeLogGroups`, `DescribeLogStreams`, `GetLogEvents`, `FilterLogEvents` | `InvalidParameterException` / 400 | *"A parameter is specified incorrectly."* `FilterLogEvents` names this code in prose three times for other parameter violations and never for a token. **These four pages do publish that the token expires** — *"The token expires after 24 hours"*, on the response member — and publish no code for using an expired one, which is the same shape as EventBridge's finding with the conclusion missing. |
 | EventBridge Scheduler `ListSchedules` | `ValidationException` / 400 | *"The input fails to satisfy the constraints specified by an AWS service."* The only constraint published on the token is Length 1–2048, so on this page's own text an in-length but unissuable token is not covered by the gloss. |
 | Batch `DescribeComputeEnvironments`, `DescribeJobQueues`, `DescribeJobDefinitions` (one shared paginator) | `ClientException` / 400 | *"These errors are usually caused by a client action. … Another cause is specifying an identifier that's not valid."* And the same page's token prose says *"Treat this token as an opaque identifier."* That is the closest of the thirteen pages to covering the condition under a generic code — but the page never joins the two sentences, so it is still substrate's reading and not an attribution. |
+
+### SNS's three listings refuse a token under the code their own pages publish
+
+`ListTopics`, `ListSubscriptions` and `ListSubscriptionsByTopic` are the first three of those ten
+sites to convert. All three answer **`InvalidParameter` / 400**, which every one of the three pages
+publishes in its **own** Errors section, glossed *"Indicates that a request parameter does not comply
+with the associated constraints."* The code is therefore the operation's own vocabulary, not a
+sibling's. What is substrate's reading is the **condition**: each page describes `NextToken` in a
+single sentence — *"Token returned by the previous `ListTopics` request."* — with no constraint, no
+length, and no error attributed to it, and SNS's common-errors page says nothing about a token
+either. So "a token no previous call returned" is substrate's reading of that gloss, and the message
+says which parameter and which operation rather than restating it, because a caller handed *"does not
+comply with the associated constraints"* cannot tell which of its parameters AWS means:
+
+```
+NextToken is not a token returned by a previous ListTopics request
+```
+
+Two things this does **not** claim. It is not an expiry refusal: SNS publishes no lifetime for a
+`NextToken` and substrate's tokens do not expire, so what is refused is the other way a token fails to
+be honourable — one this service could not have minted. And it does not make a token portable between
+the three: all three encode an offset the same way, so `ListTopics`' token decodes cleanly under
+`ListSubscriptions` and would index into the wrong listing. That is now refused, which is why the
+message names the operation.
+
+**The page size is a constant 100, not a default.** All three pages say *"Each call returns a limited
+list of topics, up to 100"* and none publishes a request parameter that can change it, so the listing
+in the tests is 101 records — the smallest one that makes the operation issue a token at all.
+
+**Two of the three validate the token before they read any state; the third does so deliberately
+later.** `ListSubscriptionsByTopic` resolves the topic first, so the `NotFound`/404 that
+[#926](https://github.com/scttfrdmn/substrate/issues/926) added for an absent topic keeps its
+precedence over a token refusal — the topic is the resource the request addresses, which is the same
+reading S3 `ListObjectsV2` records for its bucket, and AWS publishes nothing about which of the two
+wins. The token is still decoded before the subscription index is read, and that boundary is asserted
+by sealing **that one state key** rather than every read: sealing every read would fail the topic
+lookup instead and prove nothing about the token.
 
 ### Six describes published a cursor and implemented none of it
 

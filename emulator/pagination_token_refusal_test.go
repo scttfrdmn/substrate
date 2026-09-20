@@ -25,7 +25,8 @@ package emulator_test
 // of the four did — CloudWatch loaded its alarm index and Systems Manager loaded its parameter paths
 // before looking at the token. For S3 only the object listing is sealed, because the bucket-existence
 // 404 keeps its precedence: the bucket is the resource the request addresses, and AWS publishes
-// nothing about which of the two refusals wins.
+// nothing about which of the two refusals wins. SNS ListSubscriptionsByTopic is the same exception for
+// the same reason, and because both of its reads are Gets it seals one state key rather than a method.
 //
 // Provenance of the three codes is per operation and is recorded with each helper:
 // [cwInvalidNextToken] and [ssmInvalidNextToken] are published, S3's is substrate's reading.
@@ -35,6 +36,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -83,15 +85,22 @@ var errTokenRefusalSealed = errors.New("state store sealed by the test")
 // to be created first, through real wire calls. Get and List are sealed independently: S3's
 // bucket-existence check is a Get that keeps its precedence over the token refusal, while the object
 // listing it guards is a List that must not be reached.
+//
+// sealGetKey seals a single Get, for the case where both reads are Gets and only the second one is
+// below the decode. SNS ListSubscriptionsByTopic is that case: it resolves the topic first so #926's
+// NotFound keeps precedence, so sealGets would fail the topic lookup and assert nothing about the
+// token. The key is obtained from the plugin's own builder ([emulator.SNSSubscriptionIndexKeyForTest])
+// rather than spelled here, so the seal cannot drift from the key actually written.
 type tokenRefusalSealedState struct {
-	inner     emulator.StateManager
-	sealGets  bool
-	sealLists bool
+	inner      emulator.StateManager
+	sealGets   bool
+	sealLists  bool
+	sealGetKey string
 }
 
 // Get reads through to the wrapped manager unless gets are sealed.
 func (s *tokenRefusalSealedState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
-	if s.sealGets {
+	if s.sealGets || (s.sealGetKey != "" && key == s.sealGetKey) {
 		return nil, errTokenRefusalSealed
 	}
 	return s.inner.Get(ctx, namespace, key)
@@ -450,10 +459,10 @@ func TestPaginationToken_S3ListObjectsV2RefusesATokenItDidNotIssue(t *testing.T)
 // --- #1086: the four services whose pages publish a code of their own ---
 //
 // #915 fixed three operations; the same decode idiom was found at fifteen more, and only four
-// services publish anything a refusal can be answered with. Those four are here. The other eleven
-// sites are recorded as deliberate divergences in docs/services.md rather than fixed, because giving
-// them a code would mean borrowing one from a sibling operation — the analogy #671's binding scope
-// decision forbids.
+// services publish anything a refusal can be answered with. Those four are here. The remaining ten
+// sites convert under a code that is substrate's reading of a generic code published on the
+// operation's *own* page — never one borrowed from a sibling operation, which is the analogy #671's
+// binding scope decision forbids — and SNS's three are the first of them, below.
 //
 // Each test is the shape the three above established: the issued token round-trips first, so a
 // handler that refused everything could not pass; then every unissuable form is refused with the
@@ -725,5 +734,279 @@ func TestPaginationToken_EventBridgeListRulesRefusesATokenItDidNotIssue(t *testi
 		status, body, code := call(sealedSrv, "ListRules", `{"NextToken":"!!not-base64!!"}`)
 		assert.Equal(t, http.StatusBadRequest, status, body)
 		assert.Equal(t, "InvalidToken", code, body)
+	})
+}
+
+// --- SNS ListTopics, ListSubscriptions and ListSubscriptionsByTopic ---
+
+// tokenRefusalSNSHost is the endpoint all three SNS listings are called through.
+const tokenRefusalSNSHost = "sns.us-east-1.amazonaws.com"
+
+// tokenRefusalSNSRegion is the Region that host resolves to, needed to rebuild the state key the
+// ListSubscriptionsByTopic ordering assertion seals.
+const tokenRefusalSNSRegion = "us-east-1"
+
+// tokenRefusalSNSCall posts one SNS Query-protocol action and returns the status, the raw body and the
+// bare error code a refusal carries.
+//
+// The parameters go through url.Values so that a token which is not valid base64 is encoded for the
+// wire and arrives at the handler exactly as written, rather than being rejected by the form parser.
+func tokenRefusalSNSCall(t *testing.T, srv *emulator.Server, params map[string]string) (int, string, string) {
+	t.Helper()
+	form := url.Values{}
+	for k, v := range params {
+		form.Set(k, v)
+	}
+	r := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(form.Encode()))
+	r.Host = tokenRefusalSNSHost
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	resp := w.Result()
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read %s body", params["Action"])
+
+	var errDoc struct {
+		XMLName xml.Name `xml:"ErrorResponse"`
+		Code    string   `xml:"Error>Code"`
+	}
+	if unmarshalErr := xml.Unmarshal(raw, &errDoc); unmarshalErr == nil && errDoc.Code != "" {
+		return resp.StatusCode, string(raw), errDoc.Code
+	}
+	return resp.StatusCode, string(raw), ""
+}
+
+// tokenRefusalSNSCreateTopic creates one topic and returns its ARN.
+func tokenRefusalSNSCreateTopic(t *testing.T, srv *emulator.Server, name string) string {
+	t.Helper()
+	status, body, code := tokenRefusalSNSCall(t, srv, map[string]string{"Action": "CreateTopic", "Name": name})
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+	return tokenRefusalBetween(t, body, "TopicArn")
+}
+
+// tokenRefusalSNSAccountOf reads the account segment out of an SNS topic ARN.
+//
+// The account comes from an ARN the server minted rather than from a constant, because the ordering
+// assertion has to seal the key the running plugin writes and a guessed account would seal a key
+// nothing reads — which would make that assertion pass for the wrong reason.
+func tokenRefusalSNSAccountOf(t *testing.T, topicARN string) string {
+	t.Helper()
+	parts := strings.Split(topicARN, ":")
+	require.Len(t, parts, 6, "not a topic ARN: %s", topicARN)
+	return parts[4]
+}
+
+// TestPaginationToken_SNSListTopicsRefusesATokenItDidNotIssue is #1086 at the first of SNS's three
+// offset paginators.
+//
+// API_ListTopics publishes InvalidParameter/400 in its own Errors section and says nothing at all about
+// the token beyond "Token returned by the previous ListTopics request", so the code is the page's and
+// the condition is substrate's reading of it — see snsInvalidPaginationToken. The listing is 101 topics
+// because the page size is a constant 100 that no request parameter can lower: none of the three
+// operations publishes one.
+func TestPaginationToken_SNSListTopicsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.SNSPlugin{})
+	for i := range 101 {
+		tokenRefusalSNSCreateTopic(t, srv, fmt.Sprintf("topic-%03d", i))
+	}
+
+	list := func(srv *emulator.Server, token string) (int, string, string) {
+		t.Helper()
+		params := map[string]string{"Action": "ListTopics"}
+		if token != "" {
+			params["NextToken"] = token
+		}
+		return tokenRefusalSNSCall(t, srv, params)
+	}
+
+	// The token the operation issues resumes the walk. Asserted first, so a refusal that swallowed every
+	// token could not pass the rest of this test.
+	status, page1, code := list(srv, "")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	assert.Contains(t, page1, ":topic-000")
+	assert.NotContains(t, page1, ":topic-100", "the 101st topic belongs to page two")
+	issued := tokenRefusalBetween(t, page1, "NextToken")
+	require.NotEmpty(t, issued)
+
+	status, page2, code := list(srv, issued)
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, ":topic-100", "an issued token must resume after the first page")
+	assert.NotContains(t, page2, ":topic-000", "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := list(srv, tc.token)
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameter", code, body)
+			assert.Contains(t, body, "NextToken is not a token returned by a previous ListTopics request", body)
+			assert.NotContains(t, body, ":topic-000", "a refused token must not be answered with page one")
+		})
+	}
+
+	// The refusal precedes the read of the topic index: sealed against reads, the handler still refuses
+	// rather than reporting the store's failure as a 500.
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.SNSPlugin{})
+		status, body, code := list(sealedSrv, "!!not-base64!!")
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameter", code, body)
+	})
+}
+
+// tokenRefusalSNSSubscribeMany creates one topic with n subscriptions and returns the topic ARN and the
+// ARN of the last subscription, which is the one page two must carry.
+//
+// The subscriptions are created through Subscribe rather than seeded, per #765: an index written
+// directly would not prove the offset indexes into what a caller can observe.
+func tokenRefusalSNSSubscribeMany(t *testing.T, srv *emulator.Server, topicName string, n int) (string, string) {
+	t.Helper()
+	topicARN := tokenRefusalSNSCreateTopic(t, srv, topicName)
+	last := ""
+	for i := range n {
+		status, body, code := tokenRefusalSNSCall(t, srv, map[string]string{
+			"Action":   "Subscribe",
+			"TopicArn": topicARN,
+			"Protocol": "email",
+			"Endpoint": fmt.Sprintf("sub-%03d@example.com", i),
+		})
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+		last = tokenRefusalBetween(t, body, "SubscriptionArn")
+	}
+	return topicARN, last
+}
+
+// TestPaginationToken_SNSListSubscriptionsRefusesATokenItDidNotIssue is #1086 at the shared subscription
+// paginator, reached through the account-wide listing.
+//
+// The order here is the subscription index's append order rather than a sort, which is what
+// pageByOffsetToken's offset relies on; the round-trip half asserts it by requiring the 101st
+// subscription — and only it — on page two.
+func TestPaginationToken_SNSListSubscriptionsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.SNSPlugin{})
+	_, lastSubARN := tokenRefusalSNSSubscribeMany(t, srv, "walked", 101)
+
+	list := func(srv *emulator.Server, token string) (int, string, string) {
+		t.Helper()
+		params := map[string]string{"Action": "ListSubscriptions"}
+		if token != "" {
+			params["NextToken"] = token
+		}
+		return tokenRefusalSNSCall(t, srv, params)
+	}
+
+	status, page1, code := list(srv, "")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	assert.Contains(t, page1, "sub-000@example.com")
+	assert.NotContains(t, page1, lastSubARN, "the 101st subscription belongs to page two")
+	issued := tokenRefusalBetween(t, page1, "NextToken")
+	require.NotEmpty(t, issued)
+
+	status, page2, code := list(srv, issued)
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, lastSubARN, "an issued token must resume after the first page")
+	assert.NotContains(t, page2, "sub-000@example.com", "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := list(srv, tc.token)
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameter", code, body)
+			assert.Contains(t, body,
+				"NextToken is not a token returned by a previous ListSubscriptions request", body)
+			assert.NotContains(t, body, "sub-000@example.com", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.SNSPlugin{})
+		status, body, code := list(sealedSrv, "!!not-base64!!")
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameter", code, body)
+	})
+}
+
+// TestPaginationToken_SNSListSubscriptionsByTopicRefusesATokenItDidNotIssue is #1086 at the one of the
+// three whose token is not checked first, and the assertion that the exception is the intended one.
+//
+// #926 gave this operation NotFound/404 for a topic that does not exist, and the topic is the resource
+// the request addresses, so that refusal keeps its precedence — the same reading S3's ListObjectsV2
+// records for its bucket. The token is still decoded before the subscription index is read, which is the
+// property the sealed-key subtest below pins: sealing every Get would fail the topic lookup instead and
+// assert nothing about the token.
+func TestPaginationToken_SNSListSubscriptionsByTopicRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.SNSPlugin{})
+	topicARN, lastSubARN := tokenRefusalSNSSubscribeMany(t, srv, "by-topic", 101)
+
+	list := func(srv *emulator.Server, arn, token string) (int, string, string) {
+		t.Helper()
+		params := map[string]string{"Action": "ListSubscriptionsByTopic", "TopicArn": arn}
+		if token != "" {
+			params["NextToken"] = token
+		}
+		return tokenRefusalSNSCall(t, srv, params)
+	}
+
+	status, page1, code := list(srv, topicARN, "")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	assert.Contains(t, page1, "sub-000@example.com")
+	assert.NotContains(t, page1, lastSubARN, "the 101st subscription belongs to page two")
+	issued := tokenRefusalBetween(t, page1, "NextToken")
+	require.NotEmpty(t, issued)
+
+	status, page2, code := list(srv, topicARN, issued)
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, lastSubARN, "an issued token must resume after the first page")
+	assert.NotContains(t, page2, "sub-000@example.com", "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := list(srv, topicARN, tc.token)
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameter", code, body)
+			assert.Contains(t, body,
+				"NextToken is not a token returned by a previous ListSubscriptionsByTopic request", body)
+			assert.NotContains(t, body, "sub-000@example.com", "a refused token must not be answered with page one")
+		})
+	}
+
+	// A topic that does not exist is still NotFound, whatever the token says: the two refusals are
+	// ordered, and this is the half that fixes which.
+	t.Run("an absent topic outranks a bad token", func(t *testing.T) {
+		absent := strings.Replace(topicARN, ":by-topic", ":never-created", 1)
+		require.NotEqual(t, topicARN, absent)
+		status, body, code := list(srv, absent, "!!not-base64!!")
+		assert.Equal(t, http.StatusNotFound, status, body)
+		assert.Equal(t, "NotFound", code, body)
+	})
+
+	// The decode sits above the subscription-index read. Sealing that one key leaves the topic lookup
+	// working, so a handler that decoded after it would report the seal as a 500 instead of refusing.
+	t.Run("refused before the subscription index is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager()}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.SNSPlugin{})
+		arn := tokenRefusalSNSCreateTopic(t, sealedSrv, "sealed-index")
+		sealed.sealGetKey = emulator.SNSSubscriptionIndexKeyForTest(
+			tokenRefusalSNSAccountOf(t, arn), tokenRefusalSNSRegion, "sealed-index")
+
+		// The control: with a token this operation could have issued, the sealed read is reached and
+		// reported. Without it the refusal below could pass because the key is never read at all.
+		status, body, _ := list(sealedSrv, arn, base64.StdEncoding.EncodeToString([]byte("0")))
+		require.NotEqual(t, http.StatusBadRequest, status, body)
+
+		status, body, code := list(sealedSrv, arn, "!!not-base64!!")
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameter", code, body)
 	})
 }
