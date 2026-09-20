@@ -43,6 +43,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Batch `ListJobs` read no member of its request at all** (#1236). The handler took its request as
+  `_ *AWSRequest`, so not one of the seven published members was read: it answered every job in the
+  account and Region, in insertion order, with no cursor. The pagination gap it was filed under was
+  the smallest of four divergences. The sharpest is the **default**: *"If you don't specify a status,
+  only `RUNNING` jobs are returned"*, and substrate returned every status — a `SUCCEEDED` job in a
+  list a consumer reads as "still running" inverts the meaning of the call, on the path both of the
+  page's own examples take, with no parameter to blame. `jobQueue` now scopes the listing by name or
+  full ARN; naming more than one of `jobQueue`/`arrayJobId`/`multiNodeJobId` is refused per the
+  page's opening sentence, while naming none stays the account-wide listing because that sentence
+  forbids naming two rather than naming none; `arrayJobId` and `multiNodeJobId` answer an **empty**
+  list, because `SubmitJob` records neither `arrayProperties` nor `nodeProperties` and reporting a
+  parent's children as though they existed is the worse of the two wrong answers. All five published
+  `filters` names match by their own published rules — `JOB_NAME` case-insensitively with the
+  trailing-asterisk prefix form, `JOB_DEFINITION` case-sensitively across every revision of a bare
+  name, the two created-at bounds in milliseconds with a non-numeric value refused rather than
+  matching nothing, and `SHARE_IDENTIFIER` matching nothing because no recorded job carries one —
+  more than one filter is refused, a filter switches `jobStatus` off except for `SHARE_IDENTIFIER`,
+  and the filter path sorts `createdAt`-descending as published. `maxResults`/`nextToken` make this
+  the fourth caller of `batchDecodeNextToken`, so a token no previous `ListJobs` returned is refused
+  rather than answered with page one (#1086), and the caps clamp. The summary carries seven of
+  `JobSummary`'s eighteen members rather than three, adding `jobArn`, `jobDefinition`, `createdAt`
+  and `statusReason`; the other eleven describe the workload inside the job, have no record behind
+  them, and are declined in a doc comment rather than half-filled. ListJobs also gained its
+  published route, `POST /v1/listjobs` — its members live in a body the legacy `GET /v1/jobs` route
+  cannot carry. Because `SubmitJob` records a job `SUCCEEDED` at submission, substrate's default
+  listing is now **always empty**; that is #1248, filed rather than papered over by keeping the
+  every-status listing, and asserted as such.
 - **Every ELBv2 response carried a document namespace one character from the published one**
   (#1147). `elbXMLNS` spelled the 2015-12-01 namespace `https://` where every sample response on
   every ELBv2 page spells it `http://` — all four examples on `API_CreateLoadBalancer`, among

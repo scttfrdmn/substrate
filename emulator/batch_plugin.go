@@ -83,6 +83,10 @@ func parseBatchOperation(method, path string) (op, jobID string) {
 		return "SubmitJob", ""
 	case rest == "v1/describejobs" && method == "POST":
 		return "DescribeJobs", ""
+	// ListJobs' published path. Its request members live in a body, which the legacy
+	// GET route below cannot carry, so an SDK call reaches this one (#1236).
+	case rest == "v1/listjobs" && method == "POST":
+		return "ListJobs", ""
 	case rest == "v1/terminatejob" && method == "POST":
 		// SDK sends jobId in the request body; extracted by terminateJob handler.
 		return "TerminateJob", ""
@@ -671,31 +675,6 @@ func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID s
 		return nil, fmt.Errorf("terminateJob: put: %w", err)
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{})
-}
-
-func (p *BatchPlugin) listJobs(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	idsKey := "job_ids:" + ctx.AccountID + "/" + ctx.Region
-	ids, _ := loadStringIndex(goCtx, p.state, batchNamespace, idsKey)
-
-	type jobSummary struct {
-		JobID   string `json:"jobId"`
-		JobName string `json:"jobName"`
-		Status  string `json:"status"`
-	}
-	summaries := make([]jobSummary, 0, len(ids))
-	for _, id := range ids {
-		key := "job:" + ctx.AccountID + "/" + ctx.Region + "/" + id
-		data, err := p.state.Get(goCtx, batchNamespace, key)
-		if err != nil || data == nil {
-			continue
-		}
-		var job BatchJob
-		if json.Unmarshal(data, &job) == nil {
-			summaries = append(summaries, jobSummary{JobID: job.JobID, JobName: job.JobName, Status: job.Status})
-		}
-	}
-	return batchJSONResponse(http.StatusOK, map[string]interface{}{"jobSummaryList": summaries})
 }
 
 func (p *BatchPlugin) createComputeEnvironment(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
