@@ -197,7 +197,13 @@ func (d *StackDeployer) deployCloudTrailTrail(
 // (#580).
 
 // deployTransferServer creates an AWS Transfer Family server stub.
-// The Ref value is the server ID.
+//
+// The Ref value is the server **ARN**, not the server ID (#1234 corrected this comment, which had
+// said the ID and was the opposite of both the page and the tree). AWS::Transfer::Server's Return
+// values section publishes "Ref returns the server ARN, such as
+// arn:aws:transfer:us-east-1:123456789012:server/s-01234567890abcdef", and offers the ID only as the
+// ServerId Fn::GetAtt attribute. cfn_intrinsics.go resolves it that way already; only the comment
+// here had drifted, presumably from the v0.32.0 stub that shipped before the Ref was settled.
 func (d *StackDeployer) deployTransferServer(
 	ctx context.Context,
 	logicalID string,

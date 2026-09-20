@@ -25,10 +25,15 @@ import "net/http"
 // The stem is what was wrong, not the suffix: FSx's Java class is BadRequestException but
 // the wire code carries no suffix, so #950's no-suffix instinct was right.
 //
-// Recorded and not fixed here: API_DeleteFileSystem publishes FileSystemNotFound at **400**,
-// where substrate answers 404. That is a status divergence rather than a code one and it is
-// shared with Glue's twelve EntityNotFoundException sites and WAFv2's three
-// WAFNonexistentItemException sites, so it belongs to one sweep rather than to this change.
+// FSx is no longer part of the not-found status sweep this file once said it belonged to, and the
+// note has been corrected rather than deleted (#1234), because the grouping still has members.
+// All three FileSystemNotFound sites answer 400, which is what API_DeleteFileSystem publishes:
+// fsx_plugin.go:230 and :244 in describeFileSystems, :300 in deleteFileSystem. What remains of the
+// grouping is Glue's twelve EntityNotFoundException sites (glue_plugin.go:171 through :898) and
+// WAFv2's three WAFNonexistentItemException sites (wafv2_plugin.go:454, :695, :722), all of which
+// still answer 404 — so the class stays findable from here without FSx being a phantom site in it.
+// Whether 404 is a divergence at either service is that sweep's question to settle against their
+// own pages, not one this file can answer for them.
 
 // fsxBadRequest reports that a request is malformed or cannot be used as given.
 //

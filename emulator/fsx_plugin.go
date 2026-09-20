@@ -72,7 +72,12 @@ func fsxDNSName(id, region string) string {
 
 // FSxPlugin emulates the Amazon FSx service.
 // It supports CreateFileSystem, DescribeFileSystems, and DeleteFileSystem
-// using the FSx JSON API (X-Amz-Target: AmazonFSx.<Op>).
+// using the FSx JSON API (X-Amz-Target: AWSSimbaAPIService_v20180301.<Op>).
+//
+// The prefix is that, not AmazonFSx — it names an internal service codename rather than the public
+// one, which is why it is worth stating here and why stating it wrongly was worth fixing (#1234).
+// The authority is routing.go's FSx entry, sourced from botocore's fsx service-2.json, and parser.go
+// splits an incoming target on it.
 type FSxPlugin struct {
 	state  StateManager
 	logger Logger
