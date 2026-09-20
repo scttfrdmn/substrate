@@ -43,6 +43,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Glue and WAFv2 answered 404 for fifteen refusals their pages publish at 400** (#1098). Glue's
+  twelve `EntityNotFoundException` sites — `GetDatabase`, `UpdateDatabase`, `GetTable`, `UpdateTable`,
+  `GetConnection`, `UpdateConnection`, `GetCrawler`, `UpdateCrawler`, `GetJob`, `UpdateJob`,
+  `StartJobRun` and `GetJobRun` — and WAFv2's three `WAFNonexistentItemException` sites
+  (`GetWebACLForResource`, and the Web ACL and IP set lookups behind `GetWebACL`/`GetIPSet` and the
+  updates) all answered HTTP 404. Neither service publishes a 404 anywhere: `API_GetTable` lists
+  `EntityNotFoundException` at **400**, glossed *"A specified entity does not exist"*, and
+  `API_GetIPSet` lists `WAFNonexistentItemException` at **400**, glossed *"AWS WAF couldn't perform
+  the operation because your resource doesn't exist…"*. A consumer branching on the status rather than
+  on the code therefore saw a shape AWS never sends, and one branching on the code saw its status
+  disagree with the page it read. This follows #910, which made the same argument for the statuses it
+  moved; #1063 had already corrected these codes and left their statuses behind. Each service now
+  builds its refusal through one constructor, so a new site cannot pick a different status, and the
+  messages stay substrate's own — `"<Entity> <name> not found."`, and the Web ACL or IP set named —
+  because the published glosses name no resource. The remaining 404 is not either service's:
+  `UnknownOperationException`, for an operation the plugin does not route, is published at 404 by the
+  JSON protocol's own Common Errors page and did not move. Both halves are now asserted over the wire
+  rather than off the returned `*AWSError`, which is how fifteen statuses drifted together.
 - **A CloudWatch Logs group that does not exist read as an empty log group** (#1224).
   `DescribeLogStreams`, `GetLogEvents` and `FilterLogEvents` each answered HTTP 200 with an empty
   listing for a log group with no record, so "this group is empty" and "this group was never created"

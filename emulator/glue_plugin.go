@@ -168,7 +168,7 @@ func (p *GluePlugin) getDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("glue getDatabase get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Database " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Database", input.Name)
 	}
 	var db GlueDatabase
 	if err := json.Unmarshal(raw, &db); err != nil {
@@ -221,7 +221,7 @@ func (p *GluePlugin) updateDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("glue updateDatabase get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Database " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Database", input.Name)
 	}
 	var db GlueDatabase
 	if err := json.Unmarshal(raw, &db); err != nil {
@@ -315,7 +315,7 @@ func (p *GluePlugin) getTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, fmt.Errorf("glue getTable get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Table " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Table", input.Name)
 	}
 	var tbl GlueTable
 	if err := json.Unmarshal(raw, &tbl); err != nil {
@@ -383,7 +383,7 @@ func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("glue updateTable get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Table " + input.TableInput.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Table", input.TableInput.Name)
 	}
 	var tbl GlueTable
 	if err := json.Unmarshal(raw, &tbl); err != nil {
@@ -475,7 +475,7 @@ func (p *GluePlugin) getConnection(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("glue getConnection get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Connection " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Connection", input.Name)
 	}
 	var conn GlueConnection
 	if err := json.Unmarshal(raw, &conn); err != nil {
@@ -527,7 +527,7 @@ func (p *GluePlugin) updateConnection(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("glue updateConnection get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Connection " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Connection", input.Name)
 	}
 	var conn GlueConnection
 	if err := json.Unmarshal(raw, &conn); err != nil {
@@ -616,7 +616,7 @@ func (p *GluePlugin) getCrawler(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, fmt.Errorf("glue getCrawler get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Crawler " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Crawler", input.Name)
 	}
 	var crawler GlueCrawler
 	if err := json.Unmarshal(raw, &crawler); err != nil {
@@ -675,7 +675,7 @@ func (p *GluePlugin) updateCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("glue updateCrawler get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Crawler " + input.Name + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Crawler", input.Name)
 	}
 	var crawler GlueCrawler
 	if err := json.Unmarshal(raw, &crawler); err != nil {
@@ -758,7 +758,7 @@ func (p *GluePlugin) getJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("glue getJob get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Job " + input.JobName + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Job", input.JobName)
 	}
 	var job GlueJob
 	if err := json.Unmarshal(raw, &job); err != nil {
@@ -809,7 +809,7 @@ func (p *GluePlugin) updateJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, fmt.Errorf("glue updateJob get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Job " + input.JobName + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Job", input.JobName)
 	}
 	var job GlueJob
 	if err := json.Unmarshal(raw, &job); err != nil {
@@ -857,7 +857,7 @@ func (p *GluePlugin) startJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("glue startJobRun get job: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Job " + input.JobName + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Job", input.JobName)
 	}
 
 	now := p.tc.Now()
@@ -895,7 +895,7 @@ func (p *GluePlugin) getJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, fmt.Errorf("glue getJobRun get: %w", err)
 	}
 	if raw == nil {
-		return nil, &AWSError{Code: "EntityNotFoundException", Message: "Job run " + input.RunID + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, glueEntityNotFound("Job run", input.RunID)
 	}
 	var run GlueJobRun
 	if err := json.Unmarshal(raw, &run); err != nil {
