@@ -16,6 +16,34 @@ import (
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
+// requireDeployedCleanly fails the test if any resource in a deploy result carries an error.
+//
+// [emulator.StackDeployer.Deploy] returns no error for a resource that *failed*: the per-resource
+// outcome is in `DeployedResource.Error`, and a test that checks only the returned error and a non-nil
+// result therefore passes over a template in which every resource was refused. #1123 found five such
+// tests, one of which — `TestCFN_AppSyncFullStack` — created none of the three resources its name
+// claims. This helper exists so a new CFN test gets the per-resource check by remembering one call
+// rather than by remembering the whole reasoning.
+//
+// Each resource is named in the failure message with its type and its error, because "resource 2
+// failed" is not enough to act on, and every failing resource is reported rather than only the first.
+//
+// A test whose subject *is* a refusal should assert the expected error on the resource it expects to
+// fail instead of calling this — see `TestCFN_AppSyncDataSourceMissingApiId`.
+func requireDeployedCleanly(t *testing.T, result *emulator.DeployResult, wantResources int) {
+	t.Helper()
+	require.NotNil(t, result, "Deploy returned no result")
+	require.Len(t, result.Resources, wantResources)
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "%s (%s) failed to deploy", r.LogicalID, r.Type)
+		assert.NotEmpty(t, r.PhysicalID, "%s (%s) deployed with no physical ID", r.LogicalID, r.Type)
+	}
+	// The stack's own status is checked as well, because a failed resource and the rollback it
+	// triggers are two observations of one event and a caller may reach either first.
+	assert.NotContains(t, result.Status, "FAILED", "stack status")
+	assert.NotContains(t, result.Status, "ROLLBACK", "stack status")
+}
+
 // newTestDeployer creates a StackDeployer with a full plugin set for CFN tests.
 func newTestDeployer(t *testing.T) *emulator.StackDeployer {
 	t.Helper()
@@ -2262,6 +2290,14 @@ func newTestDeployerOverState(t *testing.T, state *emulator.MemoryStateManager, 
 	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs, opts...)
 }
 
+// TestCFN_ChangeSet_CreateDescribeExecute covers the change-set lifecycle: create, describe,
+// execute, and the describe-after-execute that no longer finds it.
+//
+// #1123: the added resource used to be an AWS::SNS::Topic, which newTestDeployer registers no plugin
+// for, so executing the change set refused it with "service not emulated: sns", rolled the update
+// back by re-deploying the first template, and refused MyRole with EntityAlreadyExists on the way.
+// `assert.NotNil(t, result)` held throughout — the stack reached UPDATE_ROLLBACK_FAILED and the test
+// passed. The queue is the same shape of change (one Add) against a service the deployer can reach.
 func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 	d := newTestDeployer(t)
 
@@ -2284,16 +2320,16 @@ func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 	_, err := d.Deploy(context.Background(), tmpl1, "cs-stack", nil)
 	require.NoError(t, err)
 
-	// Create change set: add SNS topic, remove IAM role, keep S3 bucket.
+	// Create change set: add SQS queue, remove IAM role, keep S3 bucket.
 	tmpl2 := `{
 		"Resources": {
 			"MyBucket": {
 				"Type": "AWS::S3::Bucket",
 				"Properties": {"BucketName": "cs-test-bucket"}
 			},
-			"MyTopic": {
-				"Type": "AWS::SNS::Topic",
-				"Properties": {"TopicName": "cs-test-topic"}
+			"MyQueue": {
+				"Type": "AWS::SQS::Queue",
+				"Properties": {"QueueName": "cs-test-queue"}
 			}
 		}
 	}`
@@ -2302,13 +2338,13 @@ func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 	assert.Equal(t, "CREATE_COMPLETE", cs.Status)
 	assert.Equal(t, "cs-stack", cs.StackName)
 
-	// Verify changes: 1 Add (MyTopic), 1 Remove (MyRole), 0 Modify (MyBucket unchanged).
+	// Verify changes: 1 Add (MyQueue), 1 Remove (MyRole), 0 Modify (MyBucket unchanged).
 	adds, removes, modifies := 0, 0, 0
 	for _, c := range cs.Changes {
 		switch c.Action {
 		case "Add":
 			adds++
-			assert.Equal(t, "MyTopic", c.LogicalID)
+			assert.Equal(t, "MyQueue", c.LogicalID)
 		case "Remove":
 			removes++
 			assert.Equal(t, "MyRole", c.LogicalID)
@@ -2326,10 +2362,19 @@ func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 	assert.Equal(t, cs.ChangeSetName, described.ChangeSetName)
 	assert.Len(t, described.Changes, len(cs.Changes))
 
-	// Execute change set.
+	// Execute change set. Both of the template's resources have to come back clean: an update that
+	// refused one of them rolls back, which is a different observation than the one this test names.
 	result, err := d.ExecuteChangeSet(context.Background(), "cs-stack", "my-changes")
 	require.NoError(t, err)
-	assert.NotNil(t, result)
+	requireDeployedCleanly(t, result, 2)
+
+	byLogical := map[string]emulator.DeployedResource{}
+	for _, r := range result.Resources {
+		byLogical[r.LogicalID] = r
+	}
+	assert.Contains(t, byLogical, "MyQueue", "the Add the change set described")
+	assert.Contains(t, byLogical, "MyBucket", "the resource the change set left alone")
+	assert.NotContains(t, byLogical, "MyRole", "the Remove the change set described")
 
 	// Describe after execute → not found.
 	_, err = d.DescribeChangeSet(context.Background(), "cs-stack", "my-changes")

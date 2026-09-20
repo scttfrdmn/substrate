@@ -15030,8 +15030,10 @@ this page is not surprised by a member:
 All four `Ref`s are the resource's ARN, which is what each type's Return values section publishes, so a
 child resource must name its API by `Fn::GetAtt ["Api", "ApiId"]` and **not** by `Ref` — the `Ref` form
 builds `/v1/apis/arn:aws:appsync:…/datasources` and reaches no operation. Substrate answers both
-correctly; three of its own CloudFormation tests use the `Ref` form and pass anyway because they assert
-no per-resource error, which is #1123.
+correctly, and its own CloudFormation tests now use the `Fn::GetAtt` form and assert every deployed
+resource's error, physical ID and ARN (#1123 — they previously used `Ref`, deployed three resources
+that all failed, and passed, because `Deploy` reports a refusal on the resource rather than as a
+returned error).
 
 ### Cost
 

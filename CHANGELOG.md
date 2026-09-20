@@ -66,6 +66,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CloudFormation tests that deployed nothing and passed** (#1123). `StackDeployer.Deploy` reports a
+  resource it could not create on that resource's own `DeployedResource.Error` and returns no Go error,
+  so `require.NoError(t, err)` followed by `result != nil` is satisfied by a template in which every
+  resource was refused. `TestCFN_AppSyncFullStack` was exactly that: it named its API by
+  `{"Ref": "MyAPI"}`, which resolves to the API's *ARN* — what `AWS::AppSync::GraphQLApi`'s Return
+  values section publishes — so all three child resources addressed
+  `/v1/apis/arn:aws:appsync:…/datasources` and were refused `UnknownOperationException`, the stack
+  reached `ROLLBACK_COMPLETE`, and the test was green. Both AppSync CloudFormation tests now use
+  `{"Fn::GetAtt": ["MyAPI", "ApiId"]}`, the form AWS's own page documents, and assert each resource's
+  error, physical ID and ARN. A sweep ran all 305 tests that call `Deploy` individually against an
+  instrumented failed-resource path — individually, because the package's 1464 `t.Parallel()` calls
+  make attribution from one whole-suite run wrong: 34 deploy a failing resource, of which five tests
+  were asserting something they could not observe. `TestCFN_ChangeSet_CreateDescribeExecute` added an
+  `AWS::SNS::Topic` its deployer registers no plugin for, so executing the change set refused it,
+  rolled back, and refused the IAM role with `EntityAlreadyExists` on the way, ending in
+  `UPDATE_ROLLBACK_FAILED`; it now adds a queue and asserts the update clean.
+  `TestCFN_MultiKeyMapIsNotAnIntrinsic` deployed one bucket name 20 times, so 19 iterations rolled
+  back — and a rolled-back stack has no outputs, which satisfies `assert.NotEqual` twice over, so the
+  repetition that exists to catch a map-iteration race asserted nothing from the second iteration on.
+  The three AppSync refusal tests asserted only `result != nil`, which a clean deploy also satisfies,
+  and now assert the refusal they are named for. A shared `requireDeployedCleanly` helper sits beside
+  `newTestDeployer` so a new CloudFormation test gets the per-resource assertion by default.
+  `TestCFN_Route53RecordSetGroup` was failing for a production reason, filed separately as #1256, and
+  its refusal is pinned rather than ignored so that fixing #1256 turns the test red instead of leaving
+  it green in either state. No production behaviour changes here.
 - **AppSync answered its GraphQL API's ARN under a member no SDK reads** (#1121). `API_GraphqlApi`
   publishes the ARN as **`arn`**; substrate's persisted record spells it `apiArn`, and the record was
   handed straight to the caller by `CreateGraphqlApi`, `GetGraphqlApi`, `UpdateGraphqlApi` and
