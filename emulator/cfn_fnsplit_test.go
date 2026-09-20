@@ -443,28 +443,43 @@ func TestCFNListParameterType(t *testing.T) {
 // same template could resolve two ways across runs — the one outcome an emulator
 // built on deterministic replay must never produce. The same rule covers user
 // data that happens to hold a member named "Ref".
+//
+// #1123: every iteration but the first used to reuse one bucket name, so 19 of the 20 stacks were
+// refused with BucketAlreadyExists and rolled back. A rolled-back stack has no outputs, and an empty
+// `Outputs["Both"]` satisfies both NotEqual assertions — the repetition that exists to catch a map
+// iteration race was, from the second iteration on, asserting nothing. The bucket name now carries
+// the iteration, and the deploy is asserted clean before the output is read.
 func TestCFN_MultiKeyMapIsNotAnIntrinsic(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Parameters": {"P": {"Type": "String", "Default": "resolved"}},
 		"Resources": {
-			"MyBucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "multikey-bucket"}}
+			"MyBucket": {"Type": "AWS::S3::Bucket", "Properties": {"BucketName": "multikey-bucket-%d"}}
 		},
 		"Outputs": {
 			"Both": {"Value": {"Ref": "P", "Fn::Sub": "also-${P}"}}
 		}
 	}`
 
+	// The unresolved map, re-encoded. Asserted exactly rather than only as "not either intrinsic":
+	// encoding/json orders a map's keys, so the string is the same on every run, which is the property
+	// the repetition below exists to check.
+	const want = `{"Fn::Sub":"also-${P}","Ref":"P"}`
+
 	// Deployed repeatedly, because the defect is a race with map iteration
 	// order: a single run could pass by luck.
 	for i := 0; i < 20; i++ {
-		result, err := d.Deploy(context.Background(), tmpl, fmt.Sprintf("multikey-%d", i), nil)
+		result, err := d.Deploy(context.Background(), fmt.Sprintf(tmpl, i), fmt.Sprintf("multikey-%d", i), nil)
 		require.NoError(t, err)
+		requireDeployedCleanly(t, result, 1)
+		require.Contains(t, result.Outputs, "Both",
+			"the output has to be present for the assertions below to say anything")
 		assert.NotEqual(t, "resolved", result.Outputs["Both"],
 			"a two-key map is not a Ref")
 		assert.NotEqual(t, "also-resolved", result.Outputs["Both"],
 			"a two-key map is not an Fn::Sub either")
+		assert.Equal(t, want, result.Outputs["Both"], "iteration %d", i)
 	}
 }
 

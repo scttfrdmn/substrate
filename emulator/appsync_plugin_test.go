@@ -10,6 +10,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/scttfrdmn/substrate/emulator"
 )
 
@@ -425,6 +428,9 @@ func TestAppSync_CreateAPI_MissingName(t *testing.T) {
 }
 
 // TestCFN_AppSyncGraphQLApi deploys an AppSync API via CloudFormation.
+//
+// #1123: this asserted only that Deploy returned no error and a non-nil result, which a template whose
+// every resource was refused also satisfies. It now asserts the resource itself.
 func TestCFN_AppSyncGraphQLApi(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -440,16 +446,28 @@ func TestCFN_AppSyncGraphQLApi(t *testing.T) {
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
+	require.NoError(t, err)
+	requireDeployedCleanly(t, result, 1)
+
+	api := result.Resources[0]
+	assert.Equal(t, "AWS::AppSync::GraphQLApi", api.Type)
+	assert.Equal(t, "arn:aws:appsync:us-east-1:123456789012:apis/"+api.PhysicalID, api.ARN,
+		"Ref on this type is the ARN, which is read out of the graphqlApi response's arn member")
 }
 
 // TestCFN_AppSyncFullStack deploys an AppSync API with DataSource, Resolver,
 // and pipeline Function via CloudFormation.
+//
+// #1123: the three child resources named their API by `{"Ref": "MyAPI"}`, and `Ref` on an
+// `AWS::AppSync::GraphQLApi` is the API's **ARN** — AWS's own documented return value, and what
+// substrate answers deliberately (`cfn_intrinsics.go`, #837). So each child was addressed to
+// `POST /v1/apis/arn:aws:appsync:…:apis/<id>/datasources`, which resolves to no operation, and all
+// three came back with `UnknownOperationException` in their `DeployedResource.Error`. The test asserted
+// only `err` and `result != nil`, neither of which a failed resource disturbs, so a test named for a
+// full stack created none of it.
+//
+// The templates now use `{"Fn::GetAtt": ["MyAPI", "ApiId"]}`, which is the form the resource type's own
+// page documents and the only way to reach the ID.
 func TestCFN_AppSyncFullStack(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -465,7 +483,7 @@ func TestCFN_AppSyncFullStack(t *testing.T) {
 			"MyDS": {
 				"Type": "AWS::AppSync::DataSource",
 				"Properties": {
-					"ApiId": {"Ref": "MyAPI"},
+					"ApiId": {"Fn::GetAtt": ["MyAPI", "ApiId"]},
 					"Name": "NoneDS",
 					"Type": "NONE"
 				},
@@ -474,7 +492,7 @@ func TestCFN_AppSyncFullStack(t *testing.T) {
 			"MyResolver": {
 				"Type": "AWS::AppSync::Resolver",
 				"Properties": {
-					"ApiId": {"Ref": "MyAPI"},
+					"ApiId": {"Fn::GetAtt": ["MyAPI", "ApiId"]},
 					"TypeName": "Query",
 					"FieldName": "hello",
 					"DataSourceName": "NoneDS",
@@ -485,7 +503,7 @@ func TestCFN_AppSyncFullStack(t *testing.T) {
 			"MyFunction": {
 				"Type": "AWS::AppSync::FunctionConfiguration",
 				"Properties": {
-					"ApiId": {"Ref": "MyAPI"},
+					"ApiId": {"Fn::GetAtt": ["MyAPI", "ApiId"]},
 					"Name": "my-pipeline-fn",
 					"DataSourceName": "NoneDS"
 				},
@@ -494,12 +512,26 @@ func TestCFN_AppSyncFullStack(t *testing.T) {
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
+	require.NoError(t, err)
+	requireDeployedCleanly(t, result, 4)
+
+	byLogical := map[string]emulator.DeployedResource{}
+	for _, r := range result.Resources {
+		byLogical[r.LogicalID] = r
 	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
+	apiID := byLogical["MyAPI"].PhysicalID
+	require.NotEmpty(t, apiID)
+
+	// Each child's ARN is built from the API ID the GetAtt resolved to, so an ARN that names the
+	// right API is proof the child reached the operation under the right path.
+	base := "arn:aws:appsync:us-east-1:123456789012:apis/" + apiID
+	assert.Equal(t, "NoneDS", byLogical["MyDS"].PhysicalID)
+	assert.Equal(t, base+"/datasources/NoneDS", byLogical["MyDS"].ARN)
+	assert.Equal(t, "Query.hello", byLogical["MyResolver"].PhysicalID,
+		"a resolver's physical ID is TypeName.FieldName")
+	assert.Equal(t, base+"/types/Query/resolvers/hello", byLogical["MyResolver"].ARN)
+	assert.Equal(t, base+"/functions/"+byLogical["MyFunction"].PhysicalID,
+		byLogical["MyFunction"].ARN)
 }
 
 // TestAppSync_GetNonexistentDataSource returns 404 for unknown data source.
@@ -554,7 +586,12 @@ func TestAppSync_StartSchemaCreation_BadInput(t *testing.T) {
 	}
 }
 
-// TestCFN_AppSyncDataSourceMissingApiId verifies error path when ApiId is missing.
+// TestCFN_AppSyncDataSourceMissingApiId is the refusal a data source with no ApiId gets.
+//
+// #1123: the assertion used to be `result != nil`, which a refusal and a clean deploy satisfy
+// equally — the three tests below asserted nothing about the refusal they are named for. `ApiId` is
+// Required: Yes on AWS::AppSync::DataSource, and a refused resource reports it on its own
+// DeployedResource.Error rather than as an error returned from Deploy.
 func TestCFN_AppSyncDataSourceMissingApiId(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -570,16 +607,21 @@ func TestCFN_AppSyncDataSourceMissingApiId(t *testing.T) {
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	// Should have deployed with an error (no ApiId).
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Resources, 1)
+
+	ds := result.Resources[0]
+	assert.Equal(t, "AWS::AppSync::DataSource", ds.Type)
+	assert.Equal(t, "ApiId is required", ds.Error)
+	assert.Empty(t, ds.ARN, "a resource that was never created has no ARN")
 }
 
-// TestCFN_AppSyncResolverMissingFields verifies error path when required fields are absent.
+// TestCFN_AppSyncResolverMissingFields is the refusal a resolver missing any of its three
+// identifying properties gets. See #1123 on [TestCFN_AppSyncDataSourceMissingApiId].
+//
+// All three of ApiId, TypeName and FieldName are Required: Yes on AWS::AppSync::Resolver, and the
+// refusal names all three because the template below supplies two of them.
 func TestCFN_AppSyncResolverMissingFields(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -595,15 +637,18 @@ func TestCFN_AppSyncResolverMissingFields(t *testing.T) {
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Resources, 1)
+
+	resolver := result.Resources[0]
+	assert.Equal(t, "AWS::AppSync::Resolver", resolver.Type)
+	assert.Equal(t, "ApiId, TypeName, and FieldName are required", resolver.Error)
+	assert.Empty(t, resolver.ARN, "a resource that was never created has no ARN")
 }
 
-// TestCFN_AppSyncFunctionMissingApiId verifies error path when ApiId is missing.
+// TestCFN_AppSyncFunctionMissingApiId is the refusal a pipeline function with no ApiId gets.
+// See #1123 on [TestCFN_AppSyncDataSourceMissingApiId].
 func TestCFN_AppSyncFunctionMissingApiId(t *testing.T) {
 	d := newTestDeployer(t)
 	tmpl := `{
@@ -619,12 +664,15 @@ func TestCFN_AppSyncFunctionMissingApiId(t *testing.T) {
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
-	if err != nil {
-		t.Fatalf("Deploy: %v", err)
-	}
-	if result == nil {
-		t.Fatal("expected non-nil result")
-	}
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Resources, 1)
+
+	fn := result.Resources[0]
+	assert.Equal(t, "AWS::AppSync::FunctionConfiguration", fn.Type)
+	assert.Equal(t, "ApiId is required", fn.Error)
+	assert.Empty(t, fn.PhysicalID, "a function that was never created has no id")
+	assert.Empty(t, fn.ARN, "a resource that was never created has no ARN")
 }
 
 // TestAppSync_ApiKeyCRUD covers CreateApiKey and ListApiKeys.
