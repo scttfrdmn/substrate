@@ -289,6 +289,65 @@ func TestScheduler_ListSchedulesReadsThePublishedQueryKeys(t *testing.T) {
 	})
 }
 
+// TestScheduler_ListSchedulesMaxResultsReadings pins the two page-size readings that are substrate's
+// own rather than the page's, now that MaxResults is read at all (#1226).
+//
+// API_ListSchedules publishes a Valid Range of 1–100 and **no default**. Substrate answers 20 when the
+// parameter is absent or unusable, and clamps a larger request to 100 rather than refusing it — both
+// recorded in docs/services.md as divergences. They are asserted here because an unasserted reading is
+// how the lowerCamel keys survived: nothing observed what the operation actually did.
+//
+// A clamp is only observable above the maximum, so this needs more than 100 schedules; that is why it
+// is a separate test from the query-key one rather than another subtest of it.
+func TestScheduler_ListSchedulesMaxResultsReadings(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	target := `{"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"}`
+	ftw := `{"Mode": "OFF"}`
+	const total = 101
+	for i := range total {
+		body := fmt.Sprintf(`{"ScheduleExpression": "rate(1 hour)", "Target": %s, "FlexibleTimeWindow": %s}`, target, ftw)
+		resp := schedulerRequest(t, ts, http.MethodPost, fmt.Sprintf("/schedules/cap-%03d", i), body)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create %d", i)
+	}
+
+	page := func(t *testing.T, query string) (int, string) {
+		t.Helper()
+		resp := schedulerRequest(t, ts, http.MethodGet, "/schedules"+query, "")
+		require.Equal(t, http.StatusOK, resp.StatusCode, query)
+		var out struct {
+			Schedules []struct {
+				Name string `json:"Name"`
+			} `json:"Schedules"`
+			NextToken string `json:"NextToken"`
+		}
+		require.NoError(t, json.Unmarshal(readSchedulerBody(t, resp), &out), query)
+		return len(out.Schedules), out.NextToken
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  int
+		why   string
+	}{
+		{"absent", "", 20, "the unpublished default of 20"},
+		{"above the published maximum", "?MaxResults=500", 100, "clamped to the published maximum, not refused"},
+		{"at the published maximum", "?MaxResults=100", 100, "the maximum is honored as given"},
+		{"zero", "?MaxResults=0", 20, "outside the range 1-100 and silently ignored, not refused"},
+		{"negative", "?MaxResults=-5", 20, "silently ignored, not refused"},
+		{"not a number", "?MaxResults=many", 20, "unparseable and silently ignored, not refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, token := page(t, tc.query)
+			assert.Equal(t, tc.want, got, tc.why)
+			assert.NotEmpty(t, token, "%d of %d schedules leaves a cursor", tc.want, total)
+		})
+	}
+}
+
 func TestScheduler_ListPagination(t *testing.T) {
 	srv := newSchedulerTestServer(t)
 	ts := httptest.NewServer(srv)
