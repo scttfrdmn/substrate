@@ -152,14 +152,6 @@ const (
 	elbClassicMaxPort = 65535
 )
 
-// elbClassicDefaultPageSize and elbClassicMaxPageSize are `DescribeLoadBalancers`' published
-// `PageSize` bounds — "The maximum number of results to return with this call (a number from 1 to
-// 400). The default is 400." — so the default and the maximum are one number.
-const (
-	elbClassicDefaultPageSize = 400
-	elbClassicMaxPageSize     = 400
-)
-
 // ELBClassicListener is one listener on a Classic Load Balancer, as `CreateLoadBalancer` accepts it
 // and `DescribeLoadBalancers` reports it.
 //
@@ -281,8 +273,8 @@ func elbClassicRequest(req *AWSRequest) bool {
 	return req.Params["Version"] == elbClassicAPIVersion
 }
 
-// elbClassicValidationError returns the refusal for a classic request member that is absent or
-// outside its published constraints.
+// elbValidationError returns the refusal for a request member that is absent or outside its
+// published constraints, in either generation.
 //
 // `ValidationError`/400 rather than an operation-specific code, and it is published rather than
 // borrowed: Elastic Load Balancing's Common Errors page — which the 2012-06-01 reference links as
@@ -290,7 +282,12 @@ func elbClassicRequest(req *AWSRequest) bool {
 // ("The input fails to satisfy the constraints specified by an AWS service."). It is also the code
 // ELBv2's own handlers in this plugin already answer for a missing member, so one generation does
 // not answer a different code from the other for the same class of mistake.
-func elbClassicValidationError(format string, args ...any) *AWSError {
+//
+// It was `elbClassicValidationError` until #1150 gave the two generations one `PageSize` rule, which
+// needed the refusal an ELBv2 operation answers to be the same function the classic one answers: a
+// name saying "classic" would have said the wrong thing about `DescribeAccountLimits`' refusal. It
+// stays in this file because the classic handlers are the bulk of its callers.
+func elbValidationError(format string, args ...any) *AWSError {
 	return &AWSError{
 		Code:       "ValidationError",
 		Message:    fmt.Sprintf(format, args...),
@@ -305,15 +302,15 @@ func elbClassicValidationError(format string, args ...any) *AWSError {
 // ([ELBPlugin.createClassicLoadBalancer] answers `DuplicateLoadBalancerName`).
 func elbClassicCheckName(name string) *AWSError {
 	if name == "" {
-		return elbClassicValidationError("LoadBalancerName is required")
+		return elbValidationError("LoadBalancerName is required")
 	}
 	if n := len(name); n > elbClassicMaxNameLength {
-		return elbClassicValidationError(
+		return elbValidationError(
 			"LoadBalancerName must have a maximum of %d characters; the supplied name has %d",
 			elbClassicMaxNameLength, n)
 	}
 	if !elbClassicNamePattern.MatchString(name) {
-		return elbClassicValidationError(
+		return elbValidationError(
 			"LoadBalancerName '%s' must contain only alphanumeric characters or hyphens, "+
 				"and cannot begin or end with a hyphen", name)
 	}
@@ -347,7 +344,7 @@ func elbClassicParseListeners(params map[string]string) ([]ELBClassicListener, *
 		out = append(out, listener)
 	}
 	if len(out) == 0 {
-		return nil, elbClassicValidationError("Listeners.member.1 is required")
+		return nil, elbValidationError("Listeners.member.1 is required")
 	}
 	return out, nil
 }
@@ -363,7 +360,7 @@ func elbClassicListenerFrom(
 ) (ELBClassicListener, *AWSError) {
 	prefix := fmt.Sprintf("Listeners.member.%d.", index)
 	if protocol == "" {
-		return ELBClassicListener{}, elbClassicValidationError("%sProtocol is required", prefix)
+		return ELBClassicListener{}, elbValidationError("%sProtocol is required", prefix)
 	}
 	if !elbClassicProtocols[protocol] {
 		return ELBClassicListener{}, &AWSError{
@@ -407,14 +404,14 @@ func elbClassicListenerFrom(
 // direction: no value inside 1–65535 is refused here that AWS's model publishes as valid.
 func elbClassicPort(member, raw string) (int, *AWSError) {
 	if raw == "" {
-		return 0, elbClassicValidationError("%s is required", member)
+		return 0, elbValidationError("%s is required", member)
 	}
 	port, err := strconv.Atoi(raw)
 	if err != nil {
-		return 0, elbClassicValidationError("%s '%s' is not a number", member, raw)
+		return 0, elbValidationError("%s '%s' is not a number", member, raw)
 	}
 	if port < elbClassicMinPort || port > elbClassicMaxPort {
-		return 0, elbClassicValidationError("%s must be between %d and %d; the supplied value is %d",
+		return 0, elbValidationError("%s must be between %d and %d; the supplied value is %d",
 			member, elbClassicMinPort, elbClassicMaxPort, port)
 	}
 	return port, nil
@@ -555,7 +552,7 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 // result member is `LoadBalancerDescriptions`, not ELBv2's `LoadBalancers`, and each member is a
 // `LoadBalancerDescription` rather than a `LoadBalancer`.
 func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	pageSize, awsErr := elbClassicPageSize(req.Params["PageSize"])
+	pageSize, awsErr := elbPageSize(req.Params["PageSize"])
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -567,7 +564,7 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 		// reading**: an unissued marker silently restarting the listing at page one is a wrong
 		// answer a consumer's paging loop cannot see, which is the defect #915 records for the three
 		// operations this decoder was hoisted out of.
-		return nil, elbClassicValidationError("Marker '%s' is not a marker this service issued",
+		return nil, elbValidationError("Marker '%s' is not a marker this service issued",
 			req.Params["Marker"])
 	}
 
@@ -614,26 +611,6 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 		describeResult{LoadBalancerDescriptions: items, NextMarker: next})
 }
 
-// elbClassicPageSize resolves the `PageSize` member against its published range.
-//
-// Absent is the published default of 400. A value outside 1–400 is refused rather than clamped:
-// the range is published on the parameter ("a number from 1 to 400"), and honoring a larger one
-// would let a test pass against substrate that AWS refuses.
-func elbClassicPageSize(raw string) (int, *AWSError) {
-	if raw == "" {
-		return elbClassicDefaultPageSize, nil
-	}
-	size, err := strconv.Atoi(raw)
-	if err != nil {
-		return 0, elbClassicValidationError("PageSize '%s' is not a number", raw)
-	}
-	if size < 1 || size > elbClassicMaxPageSize {
-		return 0, elbClassicValidationError("PageSize must be a number from 1 to %d; the supplied value is %d",
-			elbClassicMaxPageSize, size)
-	}
-	return size, nil
-}
-
 // loadClassicLoadBalancers reads every classic record in the caller's account and Region, in the
 // lexicographic key order [StateManager.List] guarantees (#865) — which is name order, and is what
 // makes the offset cursor above mean the same thing on every call.
@@ -670,7 +647,7 @@ func (p *ELBPlugin) loadClassicLoadBalancers(reqCtx *RequestContext) ([]ELBClass
 func (p *ELBPlugin) deleteClassicLoadBalancer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["LoadBalancerName"]
 	if name == "" {
-		return nil, elbClassicValidationError("LoadBalancerName is required")
+		return nil, elbValidationError("LoadBalancerName is required")
 	}
 	goCtx := context.Background()
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
