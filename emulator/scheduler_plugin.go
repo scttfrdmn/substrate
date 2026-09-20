@@ -538,13 +538,6 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		names = filtered
 	}
 
-	// The index is ASCII-sorted by schedule name, which is stable across calls — what
-	// [pageByOffsetToken]'s offset relies on. The prefix filter above preserves that order, so the
-	// offset counts the schedules this request can see rather than every schedule in the group. A
-	// past-the-end offset clamps to a final empty page rather than being refused, because a token
-	// substrate issued over a listing that has since shrunk is still a token it issued.
-	page, nextToken := pageByOffsetToken(names, offset, maxResults)
-
 	type targetSummary struct {
 		Arn string `json:"Arn"`
 	}
@@ -559,10 +552,19 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		Target               targetSummary `json:"Target"`
 	}
 
-	schedules := make([]schedSummary, 0, len(page))
-	for _, n := range page {
+	// Every published filter is applied before the cut, which is why the records are loaded for the
+	// whole group rather than for one page: State lives in the record and not in the name index, so a
+	// state-filtered listing cannot be assembled from names alone — see scheduler_list_filters.go
+	// (#1229).
+	matching := make([]schedSummary, 0, len(names))
+	for _, n := range names {
 		data, getErr := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, n))
 		if getErr != nil || data == nil {
+			// A name the index holds with no record behind it, and a record that will not decode, are
+			// both store inconsistencies rather than filters. They still shorten the *listing*, but no
+			// longer a page: the cut is below, so a page is short only when the listing has run out.
+			// See scheduler_list_filters.go for why skipping rather than refusing is the reading
+			// (#1229).
 			continue
 		}
 		var rec SchedulerRecord
@@ -574,7 +576,7 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		}
 		ct, _ := time.Parse(time.RFC3339, rec.CreationDate)
 		mt, _ := time.Parse(time.RFC3339, rec.LastModificationDate)
-		schedules = append(schedules, schedSummary{
+		matching = append(matching, schedSummary{
 			Arn:                  rec.ARN,
 			Name:                 rec.Name,
 			GroupName:            rec.GroupName,
@@ -584,6 +586,13 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 			Target:               targetSummary{Arn: rec.Target.ARN},
 		})
 	}
+
+	// The index is ASCII-sorted by schedule name, which is stable across calls — what
+	// [pageByOffsetToken]'s offset relies on. Both filters above preserve that order, so the offset
+	// counts the schedules this request can see rather than every schedule in the group. A
+	// past-the-end offset clamps to a final empty page rather than being refused, because a token
+	// substrate issued over a listing that has since shrunk is still a token it issued.
+	schedules, nextToken := pageByOffsetToken(matching, offset, maxResults)
 
 	type response struct {
 		Schedules []schedSummary `json:"Schedules"`

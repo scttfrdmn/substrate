@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **EventBridge Scheduler's `State` filter was applied after the page was cut** (#1229).
+  `ListSchedules` read its three filters in three places relative to the cut: `ScheduleGroup` chose
+  which name index to load and `NamePrefix` filtered that index, both ahead of it, but `State` ran
+  inside the render loop — on the records the page had already selected. So a state-filtered request
+  was answered `MaxResults` schedules minus however many of *that page* failed the filter, while the
+  `NextToken` alongside had been computed from the unfiltered listing. `?State=ENABLED&MaxResults=20`
+  over a group of 40 half of which are `DISABLED` answered fewer than 20 enabled schedules with a
+  cursor set, where AWS answers 20; and when every schedule on a page failed the filter it answered
+  `{"Schedules":[],"NextToken":"…"}` with matches still to come, which a caller that stops at an
+  empty list — several SDK paginator idioms do — reads as "nothing matches". `API_ListSchedules`
+  publishes `State` in the same URI-parameter list as the other two and in the same words (*"If
+  specified, only lists the schedules whose current state matches the given filter."*), and the
+  cursor is the ordinary *"Indicates whether there are additional results to retrieve"*; nothing on
+  the page says a page may be short. All three filters now run before the cut, so a page carries
+  `min(MaxResults, remaining matches)`. The cost is a `state.Get` per schedule in the group per call,
+  because `State` lives in the record and not in the name index — deliberate, over copying `State`
+  into the index and leaving `UpdateSchedule` two places to write it, which is the class #756 is
+  about. A name with no record behind it, or a record that will not decode, is still skipped: those
+  are store inconsistencies rather than published filters, and they can no longer shorten a page
+  either.
 - **Batch `ListJobs` read no member of its request at all** (#1236). The handler took its request as
   `_ *AWSRequest`, so not one of the seven published members was read: it answered every job in the
   account and Region, in insertion order, with no cursor. The pagination gap it was filed under was
