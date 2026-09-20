@@ -10386,7 +10386,17 @@ place the code appears in a table at all.
 
 A seeded state is a property of the reservation the create writes, so it survives into every
 later `DescribeCapacityReservations` — unlike a seeded error, which prevents the create from
-writing anything at all. Seeds live in the state manager, so they replay like any other state.
+writing anything at all.
+
+The seed itself does **not** survive a replay, and here that is sharper than for a progression
+seed. A replay resets the state manager, and a control-plane write is not an AWS request and so
+never enters the event stream — the mechanism is spelled out under
+[Seeding a snapshot progression](#seeding-a-snapshot-progression) — so the seed is gone before
+the recorded `CreateCapacityReservation` is re-executed, and the replayed create writes the
+nominal `active` state. A progression seed diverges an *observation*; this one diverges the
+**record**, because the state is resolved once at create time and persisted. See
+[#1140](https://github.com/scttfrdmn/substrate/issues/1140), which is where the fix will be
+decided.
 
 ### CloudFormation resource types
 
