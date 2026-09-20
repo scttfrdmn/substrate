@@ -353,14 +353,12 @@ func TestEC2_InstanceState_ATerminatedInstanceCannotBeStartedOrStopped(t *testin
 // TestEC2_InstanceState_TheSameSeedProducesTheSameSequenceTwice is #514's reproducibility
 // criterion: same inputs, seed included, same observations.
 //
-// It runs the sequence twice over two independent servers rather than replaying one stream, and
-// that is a finding rather than a shortcut. **A seed is a control-plane input, not an event**:
-// [Server] records only AWS requests, so `POST /v1/ec2/instance-state` never enters the stream,
-// and [ReplayEngine.Replay] resets the whole [StateManager] before re-executing — which clears
-// the seed along with the resource state. A replay of a seeded stream therefore answers the
-// *unseeded* sequence, which is what the test below this one relies on. That gap is general to
-// every seed in substrate, not specific to this one, and it is filed as #1140 rather than worked
-// around here.
+// It runs the sequence twice over two independent servers rather than replaying one stream,
+// because those are two different claims and this is the one #514 asked for: a fresh process,
+// given the same seed, reports the same states. A replay is the other claim — the same *recorded*
+// stream reports what it reported — and #1140 made that hold too, by recording the seed as an
+// event of its own. The test below this one deliberately withholds the handler that re-applies
+// it, for a reason stated there.
 //
 // What this does assert is the property the seed exists for: a poll loop written against
 // substrate sees the same states in the same order on every run, so a failure is a real signal
@@ -388,12 +386,20 @@ func TestEC2_InstanceState_TheSameSeedProducesTheSameSequenceTwice(t *testing.T)
 // rule that makes the whole design safe: **a seed governs what an observation reports and never
 // rewrites the record.**
 //
-// A replay is the sharpest available test of that rule, because [ReplayEngine.Replay] resets the
-// state manager — seed included — and then re-executes the recorded AWS requests alone. The
-// recording below observes `pending` twice under a seed while its record holds `running`; had
-// either observation been written back, the record would have held `pending` and the replay, which
-// has no seed, would have re-derived `running` — a difference. Both hold `running`, so neither
-// observation touched the record.
+// An *unseeded* replay is the sharpest available test of that rule, because
+// [ReplayEngine.Replay] resets the state manager and then re-derives the record from the recorded
+// AWS requests alone. The recording below observes `pending` twice under a seed while its record
+// holds `running`; had either observation been written back, the record would have held `pending`
+// and a replay with no seed in it would have re-derived `running` — a difference. Both hold
+// `running`, so neither observation touched the record.
+//
+// **Why the engine is given no [emulator.WithControlPlaneHandler].** Since #1140 a replay handed
+// one re-applies the recorded seed, and then a replayed observation reports `pending` exactly as
+// the recording did — which is the right default and is asserted in
+// replay_control_plane_seed_test.go, but it is no longer a test of *where the pending came from*.
+// Withholding the handler is what keeps the seed out of the replayed run, and the skip it is
+// reported as is the counter that says so. The two tests are the two halves: that one asserts a
+// seed is reproduced, this one asserts the record was never seeded in the first place.
 //
 // **Why no recorded call names the instance.** A replayed `RunInstances` mints a *new* random
 // instance ID, so a recorded `StopInstances` naming the recording's ID answers
@@ -422,7 +428,8 @@ func TestEC2_InstanceState_AReplayReproducesTheRecordsOwnStates(t *testing.T) {
 	results, err := engine.Replay(t.Context(), "default")
 	require.NoError(t, err)
 	require.Positive(t, results.TotalEvents, "nothing was recorded")
-	require.Zero(t, results.SkippedEvents, "every recorded event must be re-executed")
+	require.Equal(t, 1, results.SkippedEvents,
+		"exactly one event is not re-executed: the seed, which this replay withholds on purpose")
 	require.Zero(t, results.FailedEvents)
 
 	assert.Equal(t, "running", ec2ReplaySoleRecordedState(t, ts),

@@ -2116,6 +2116,57 @@ not see a parse guard. A decoded tag set compares equal whatever order it arrive
 
 ---
 
+## How a seed survives a replay
+
+**A seed is recorded as an event and re-applied where it was written, so a stream recorded under
+a seed replays under the same seed.** This is stated once here rather than at each of the seeding
+sections below, because it is one mechanism serving all of them.
+
+Every seedable outcome in substrate is written through a control-plane endpoint — `POST`/`DELETE
+/v1/{service}/…` — rather than through an AWS request, and until
+[#1140](https://github.com/scttfrdmn/substrate/issues/1140) only AWS requests were recorded. A
+replay resets the whole state manager before re-executing, and a seed lives in the state manager,
+so a stream recorded under a seed replayed as the **unseeded** sequence: four `pending` snapshot
+observations followed by `completed` came back as five `completed`s. Nothing failed, because every
+recorded request was re-executed and every one succeeded — the divergence was in the answers, not
+in the count.
+
+A successful control-plane write is now recorded as an event of its own, carrying the method, the
+request target *including its query string*, the body and the status. Replaying it re-issues that
+request against the emulator's own control plane. Three consequences worth knowing:
+
+- **Position is preserved.** A seed written between two observations is re-applied between the
+  same two, so a recording whose first poll answered `completed` and whose second answered
+  `pending` — because the seed landed in between — replays in that order. Preserving the seed
+  across the reset instead, the obvious smaller fix, could not do this.
+- **A consumed count restarts.** The reset still wipes the observation counters and the spend-down
+  budgets, and the recorded write re-arms the seed as it was originally armed. That matters most
+  for the seeds whose budget is spent *in place* — SQS's queue-miss count and S3's three
+  conditional-conflict counters decrement the stored record — where by the end of a recording the
+  stored value is zero and there is nothing left to preserve.
+- **A `DELETE` replays as the same `DELETE`.** Most clear endpoints name their target in the query
+  (`?snapshotId=`, `?bucket=&key=`, `?roleName=`), which is why the event records the full request
+  target and not the path alone.
+
+**A replay driven programmatically must be given the handler.** `substrate replay` wires it
+itself; a test constructing an `emulator.ReplayEngine` directly passes
+`emulator.WithControlPlaneHandler(ts.ControlPlaneHandler())`. Without it a recorded seed is
+reported in `SkippedEvents` and the replay answers the unseeded sequence — the behaviour every
+replay had before #1140, now visible in the counters rather than silent. Withholding it is
+occasionally what a test wants: an unseeded replay is the sharpest check that a seed governs only
+what an *observation* reports and was never written back into the resource record.
+
+A few control-plane endpoints are deliberately **not** recorded. `/v1/state/reset`,
+`/v1/control/time` and `/v1/control/scale` are the replay's own business — it resets the state
+manager and freezes the clock at each recorded timestamp itself, so re-applying a recorded reset or
+time set would fight it. `/v1/fault/rules` writes to the fault controller, which the replay rewinds
+to the configuration it was armed with, so re-arming would double every rule. The rest write
+nothing a replayed AWS observation can read: `/v1/s3/presign` mints a URL, `/v1/pricing/refresh`
+reloads a price table, and the pricing discount and credit endpoints write to the cost tracker
+rather than to the state manager the reset clears.
+
+---
+
 ## CloudFormation
 
 **Endpoint:** `cloudformation.{region}.amazonaws.com`
@@ -10220,14 +10271,12 @@ A seed governs what an *observation* reports and never rewrites the snapshot rec
 whole namespace — makes every snapshot read `completed` again, and a snapshot with no seed
 against it is untouched.
 
-A seed does **not** survive a replay, and that is general to every seed in substrate rather than
-particular to this one. Seeds live in the state manager, and a replay resets the state manager
-before re-executing the recorded requests — so a stream recorded under a seed replays as the
-*unseeded* sequence: four `pending` observations followed by `completed` come back as five
-`completed`s. No event fails, since the requests themselves all succeed, so nothing surfaces.
-The cause is that a control-plane write is not an AWS request and therefore never enters the event
-stream at all. See [#1140](https://github.com/scttfrdmn/substrate/issues/1140), which is where the
-fix will be decided.
+A seed survives a replay: the `POST` above is recorded as an event and re-applied where it was
+written, so a stream whose four `pending` observations preceded a `completed` replays as exactly
+that rather than as five `completed`s. The countdown restarts from zero, because the reset still
+wipes the `observed:` counters and the recorded `POST` re-arms the seed. See
+[How a seed survives a replay](#how-a-seed-survives-a-replay) for the mechanism and for the one
+thing a programmatic replay has to pass.
 
 There is no Python helper for this endpoint: `pytest_substrate`'s seeding helpers are hardcoded
 to the Athena, Redshift Data and Timestream result endpoints, so drive this one with raw HTTP,
@@ -10504,15 +10553,12 @@ A seeded state is a property of the reservation the create writes, so it survive
 later `DescribeCapacityReservations` — unlike a seeded error, which prevents the create from
 writing anything at all.
 
-The seed itself does **not** survive a replay, and here that is sharper than for a progression
-seed. A replay resets the state manager, and a control-plane write is not an AWS request and so
-never enters the event stream — the mechanism is spelled out under
-[Seeding a snapshot progression](#seeding-a-snapshot-progression) — so the seed is gone before
-the recorded `CreateCapacityReservation` is re-executed, and the replayed create writes the
-nominal `active` state. A progression seed diverges an *observation*; this one diverges the
-**record**, because the state is resolved once at create time and persisted. See
-[#1140](https://github.com/scttfrdmn/substrate/issues/1140), which is where the fix will be
-decided.
+The seed survives a replay, and getting that right matters more here than for a progression seed.
+A progression seed diverges an *observation*, which the next call re-derives; this one is resolved
+once at create time and **persisted**, so a replay that lost the seed would write a reservation
+whose stored state was `active` and answer every later `DescribeCapacityReservations` from it. The
+seed is recorded as an event and re-applied before the recorded `CreateCapacityReservation` is
+re-executed — see [How a seed survives a replay](#how-a-seed-survives-a-replay).
 
 ### CloudFormation resource types
 

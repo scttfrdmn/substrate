@@ -115,9 +115,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unrouted, because #1065 gated the `apikeys` tail so a `POST` under `apikeys/{id}` answers
   `UnknownOperationException`/404 rather than minting a second credential, and the bound's "from
   update" half arrives with the operation.
+- **`WithControlPlaneHandler` and `TestServer.ControlPlaneHandler`, for re-applying a recorded seed**
+  (#1140). A seed is written over HTTP rather than as an AWS request, so replaying one means
+  re-issuing that request; the engine needs a handler to issue it against, and a test harness needs a
+  way to hand it the server it already started. `substrate replay` wires its own, against a store with
+  recording disabled. An engine given no handler counts each control-plane event in `SkippedEvents`
+  and answers the unseeded sequence, which is occasionally what a test wants: an unseeded replay is
+  the sharpest check that a seed governed only what an observation *reported* and was never written
+  back into the resource record.
 
 ### Fixed
 
+- **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
+  substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
+  a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a
+  seed lives in the state manager, so a recording of four `pending` snapshot observations followed by
+  `completed` replayed as five `completed`s, with **nothing reported**: every recorded request was
+  re-executed and every one succeeded. The divergence was in the answers, not in the count, which is
+  the silent-wrong-answer class applied to the determinism claim itself — CLAUDE.md promises "same
+  inputs (including seeds) → same outputs", and the parenthesis was the part that did not hold. A
+  successful control-plane write is now recorded as an event of its own kind, carrying the request
+  target *including its query string*, the body, the headers and the status, and a replay re-issues it
+  in position. Recording the write rather than exempting the seed namespaces from the reset — #1140's
+  smaller option — is what makes two further cases come out right: a budget spent **in place**
+  (SQS's queue-miss count, S3's three conditional-conflict counters decrement the stored record) is
+  re-armed at its seeded value instead of arriving spent, and a seed written *between* two recorded
+  observations is re-applied between the same two, which no preserved state can express. The recorded
+  set is defined structurally, as the registrations inside one `chi` group, so a seed endpoint added
+  there is recorded with no second edit; the endpoints a replay must not re-issue stay outside it
+  (`/v1/state/reset`, `/v1/control/time`, `/v1/control/scale`, `/v1/fault/rules`), as do the ones
+  writing nothing a replayed observation reads. Only a 2xx is recorded, since a refused seed changed
+  nothing, and a replayed write is marked so the middleware that recorded it declines it — without
+  that, each replay would append a copy of every seed in the stream.
 - **A replayed timestamp is the recorded one, not a value near it** (#1217). `replayEvent` called
   `SetTime(event.Timestamp)` before dispatching, and `SetTime` sets a *baseline* the clock then
   advances from at its scale — so a handler reading `TimeController.Now()` during a replay saw the

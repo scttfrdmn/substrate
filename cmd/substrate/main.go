@@ -275,8 +275,22 @@ func newReplayEngineWiring(
 		return nil, fmt.Errorf("initialize consistency controller: %w", err)
 	}
 
+	// The control plane a recorded seed is re-applied through (#1140). A seed is written
+	// over HTTP rather than as an AWS request, so replaying one means re-issuing that
+	// request; this server is never started, which is the documented in-process use of
+	// substrate.Server as an http.Handler.
+	//
+	// It is given pluginStore — the disabled one — rather than the loaded store, for the
+	// reason spelled out above it: a replay must append nothing to the stream it is
+	// replaying. The engine also marks the requests it synthesizes so the recording
+	// middleware declines them, so a control-plane write would be dropped either way;
+	// both are here because a store handed to a replay is the thing that corrupts a
+	// recording, and one guard is not worth relying on.
+	controlPlane := substrate.NewServer(*cfg, registry, pluginStore, state, tc, logger)
+
 	return &replayWiring{
 		engine: substrate.NewReplayEngine(store, state, tc, registry, replayCfg, logger,
+			substrate.WithControlPlaneHandler(controlPlane),
 			substrate.WithReplayPipeline(substrate.ReplayPipeline{
 				Auth:        authCtrl,
 				Quota:       substrate.NewQuotaController(cfg.Quotas.ToQuotaConfig(), tc),
