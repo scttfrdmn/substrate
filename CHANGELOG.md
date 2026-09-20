@@ -1345,6 +1345,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three with the audited figures, which is why this correction is confined to the two places the
   estimate outlived it.
 
+### Added
+
+- **Substrate's own bookkeeping fields are now inventoried and ratcheted, and the inventory is 330
+  fields rather than the 343 estimated** (#756). Five fields exist for the emulator's own use —
+  `AccountID`, `Region`, `CreatedAt`, `UpdatedAt`, `EverTagged` — and AWS publishes none of them on any
+  shape, so a handler that marshals a persisted record straight into an `AWSResponse.Body` ships
+  members the service does not have. `make wire-bookkeeping-check` (`scripts/check-wire-bookkeeping.sh`,
+  in the shape of `check-discarded-unmarshal.sh`) now enumerates every such field carrying a
+  wire-visible json tag and diffs it against `scripts/wire-bookkeeping-baseline.txt`, failing both on a
+  field missing from the baseline and on a baseline line the tree no longer has. It runs in CI as `Wire
+  Bookkeeping Drift`, because a baseline nothing executes is a TODO list rather than a ratchet — which
+  is precisely how this inventory went untaken for as long as it did.
+
+  **The measured surface is 330 fields across 146 struct types in 67 files**, correcting the planned
+  estimate of 343 across roughly 40 files. Two exclusions narrow it, both deliberate and both recorded
+  in the script:
+  `organizations_account_test.go`'s `orgCreateStatus.AccountID` reads `CreateAccountStatus.AccountId`,
+  which AWS *does* publish, and both ELB generations publish `CreatedTime` as a real member, so a field
+  of that name is the service's data rather than substrate's. (`CloudFrontDistribution.CreatedTime` is a
+  divergence — CloudFront publishes `LastModifiedTime` — but that is a wrong member, not a bookkeeping
+  leak.) Two things the inventory makes visible that a tag-name scan could not: one `AccountID` renders
+  as `json:"a"` and one `Region` as `json:"r"`, and `AccountID` renders **ten** different ways in all,
+  so the Go identifier is the only stable key. And `json:"-"` — the one tag that would keep a bookkeeping
+  field out of a response without removing it — is used on **none** of the 330.
+
+  **The reachability half was answered by observation, not by analysis, and is recorded on the issue.**
+  The rule one wants is "no bookkeeping field reaches an `AWSResponse.Body`", which no grep can state
+  and which would need dataflow through 500-plus bare `json.Marshal(x)` calls and 60-odd per-plugin
+  response helpers; substrate depends on neither `golang.org/x/tools` nor any vendored analysis, so a
+  precise answer would mean adding a dependency to serve one check. Instead every plugin's
+  `HandleRequest` was temporarily instrumented with a deferred hook that walked the body it was about to
+  return, and the suite was run: **213 wire-visible observations across 31 services and 97 operations,
+  of which 194 — across 25 services and 86 operations — are members AWS publishes nowhere**. That is a
+  floor and not a ceiling, because it sees only what the suite exercises, and the instrumentation was
+  deliberately not committed, so the script asserts the declaration surface, which is the upper bound
+  and exactly decidable. ECR calibrates the pass: after #1090, its only remaining
+  bookkeeping-named wire member is `createdAt`, which `API_Repository` publishes, and the pass reports
+  that and nothing else.
+
+  Ten pages were read to separate a leak from a published member, because a wrong "published" call
+  would hide a real one. Genuinely published, so not leaks: ECR `createdAt`, ECS `Service.createdAt`,
+  Batch `JobDetail.createdAt`, ACM `CertificateDetail.CreatedAt`, Firehose
+  `DeliveryStreamDescription.CreateTimestamp`, RedshiftData `DescribeStatement.CreatedAt`/`UpdatedAt`,
+  Organizations `CreateAccountStatus.AccountId`, SSO `AccountAssignment.AccountId`, EC2
+  `SpotPlacementScore.region`, and Health `Event.region`. The same reads settled the co-located members
+  the other way: Firehose publishes no `AccountId` or `Region`, ACM no `AccountID` or `Region`, and
+  AppSync's `GraphqlApi` and SES v2's `GetEmailIdentity` publish none of the trio each emits. **EFS is
+  the sharpest case found**: substrate spells `CreatedAt` where `FileSystemDescription` publishes
+  `CreationTime`, so the leak is a near-miss of a real member rather than an obvious extra. Two
+  DynamoDB observations (`/Items/[]/CreatedAt`, `/Items/[]/Meta/M/Region`) are false positives —
+  caller-supplied item attributes, which the pass cannot distinguish from substrate's fields in a
+  schemaless service.
+
+  Fixing the services the inventory names is v0.121.0 work; this change takes the inventory and stops it
+  growing. `make wire-bookkeeping-write` regenerates the baseline after a deliberate change. Also
+  added `tag-releases-check` to the `Makefile`'s `.PHONY` list, where it had been missing.
+
 ## [v0.119.0] - 2026-09-18
 
 ### Added

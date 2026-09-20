@@ -137,6 +137,21 @@ jobs:
       - name: Check the authorization reference table is in sync with its snapshots
         run: make authz-reference-check
 
+  # Pure bash and awk, so no toolchain: the check is lexical by construction (see
+  # scripts/check-wire-bookkeeping.sh for why it cannot be a reachability check).
+  # It runs here rather than only in `make` because a baseline that nothing
+  # executes is not a ratchet — it is a TODO list, and #756's whole complaint is
+  # that the inventory had never been taken. A new bookkeeping field with a
+  # wire-visible json tag must fail a PR, not wait for someone to run a target.
+  wire-bookkeeping:
+    name: Wire Bookkeeping Drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check no bookkeeping field has gained wire-visible ground
+        run: make wire-bookkeeping-check
+
   python:
     name: Python (pytest-substrate)
     runs-on: ubuntu-latest
