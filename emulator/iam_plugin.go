@@ -281,7 +281,7 @@ func (p *IAMPlugin) createUser(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	user := &IAMUser{
 		UserName:   params.UserName,
-		UserID:     generateIAMID("AIDA"),
+		UserID:     generateIAMID(ctx.IDs, "AIDA"),
 		ARN:        iamUserARN(ctx.AccountID, params.Path, params.UserName),
 		Path:       params.Path,
 		CreateDate: p.now().UTC(),
@@ -513,7 +513,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	role := &IAMRole{
 		RoleName:                 params.RoleName,
-		RoleID:                   generateIAMID("AROA"),
+		RoleID:                   generateIAMID(ctx.IDs, "AROA"),
 		ARN:                      iamRoleARN(ctx.AccountID, params.Path, params.RoleName),
 		Path:                     params.Path,
 		Description:              params.Description,
@@ -793,7 +793,7 @@ func (p *IAMPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	}
 	group := &IAMGroup{
 		GroupName:  params.GroupName,
-		GroupID:    generateIAMID("AGPA"),
+		GroupID:    generateIAMID(ctx.IDs, "AGPA"),
 		ARN:        iamGroupARN(ctx.AccountID, params.Path, params.GroupName),
 		Path:       params.Path,
 		CreateDate: p.now().UTC(),
@@ -1331,7 +1331,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	now := p.now().UTC()
 	policy := &IAMPolicy{
 		PolicyName:       params.PolicyName,
-		PolicyID:         generateIAMID("ANPA"),
+		PolicyID:         generateIAMID(ctx.IDs, "ANPA"),
 		ARN:              arn,
 		Path:             params.Path,
 		Description:      params.Description,
@@ -1565,8 +1565,8 @@ func (p *IAMPlugin) createAccessKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	accessKey := &IAMAccessKey{
-		AccessKeyID:     generateIAMID("AKIA"),
-		SecretAccessKey: generateIAMID("SECRET") + generateIAMID("KEY"),
+		AccessKeyID:     generateIAMID(ctx.IDs, "AKIA"),
+		SecretAccessKey: generateIAMID(ctx.IDs, "SECRET") + generateIAMID(ctx.IDs, "KEY"),
 		Status:          "Active",
 		UserName:        userName,
 		CreateDate:      p.now().UTC(),
@@ -3047,7 +3047,7 @@ func (p *IAMPlugin) createInstanceProfile(ctx *RequestContext, req *AWSRequest) 
 
 	profile := &IAMInstanceProfile{
 		InstanceProfileName: params.InstanceProfileName,
-		InstanceProfileID:   generateIAMID("AIPA"),
+		InstanceProfileID:   generateIAMID(ctx.IDs, "AIPA"),
 		ARN:                 iamInstanceProfileARN(ctx.AccountID, params.Path, params.InstanceProfileName),
 		Path:                params.Path,
 		Roles:               []IAMRole{},

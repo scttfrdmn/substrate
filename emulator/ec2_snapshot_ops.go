@@ -229,7 +229,7 @@ func (p *EC2Plugin) createSnapshots(reqCtx *RequestContext, req *AWSRequest) (*A
 			return nil, tagErr
 		}
 		snapshots = append(snapshots, EC2Snapshot{
-			SnapshotID:  generateEBSSnapshotID(),
+			SnapshotID:  generateEBSSnapshotID(reqCtx.IDs),
 			VolumeID:    av.volume.VolumeID,
 			VolumeSize:  int64(av.volume.Size),
 			State:       "completed",
@@ -421,8 +421,8 @@ func (p *EC2Plugin) copySnapshot(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	snap := EC2Snapshot{
-		SnapshotID:  generateEBSSnapshotID(),
-		VolumeID:    generateVolumeID(),
+		SnapshotID:  generateEBSSnapshotID(reqCtx.IDs),
+		VolumeID:    generateVolumeID(reqCtx.IDs),
 		VolumeSize:  source.VolumeSize,
 		State:       "completed",
 		StartTime:   p.tc.Now().UTC().Format(time.RFC3339),

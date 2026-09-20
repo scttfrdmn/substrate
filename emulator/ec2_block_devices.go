@@ -572,7 +572,12 @@ func ec2CreatesEBSVolume(bdm EC2BlockDeviceMapping) bool {
 // the launch materializes — including the root volume synthesized when no mapping
 // declares one. AWS's rule is per resource type, not per mapping: the request has no
 // way to tag one mapping's volume differently from another's (#670).
+//
+// m mints the volume ids, so a replayed launch reproduces them (#856). It is threaded
+// through rather than drawn here because the mint belongs to the request, and this
+// function is two calls below the handler that holds it.
 func ec2LaunchVolumesFor(
+	m *IDMint,
 	inst *EC2Instance,
 	mappings []EC2BlockDeviceMapping,
 	tags []EC2Tag,
@@ -588,11 +593,11 @@ func ec2LaunchVolumesFor(
 		if ec2IsRootDevice(bdm.DeviceName) {
 			rootDeclared = true
 		}
-		volumes = append(volumes, ec2VolumeFromMapping(inst, bdm, tags, now))
+		volumes = append(volumes, ec2VolumeFromMapping(m, inst, bdm, tags, now))
 	}
 
 	if !rootDeclared {
-		volumes = append(volumes, ec2VolumeFromMapping(inst, EC2BlockDeviceMapping{
+		volumes = append(volumes, ec2VolumeFromMapping(m, inst, EC2BlockDeviceMapping{
 			DeviceName: ec2RootDeviceSDA1,
 		}, tags, now))
 	}
@@ -606,6 +611,7 @@ func ec2LaunchVolumesFor(
 // deriving it any other way would let a launch into a non-default zone produce an
 // attachment real EC2 cannot have.
 func ec2VolumeFromMapping(
+	m *IDMint,
 	inst *EC2Instance,
 	bdm EC2BlockDeviceMapping,
 	tags []EC2Tag,
@@ -643,7 +649,7 @@ func ec2VolumeFromMapping(
 	}
 
 	return EC2Volume{
-		VolumeID:         generateVolumeID(),
+		VolumeID:         generateVolumeID(m),
 		Size:             size,
 		Tags:             volTags,
 		VolumeType:       volType,
@@ -670,12 +676,13 @@ func ec2VolumeFromMapping(
 // indexing each one the way CreateVolume does so DescribeVolumes and DeleteVolume
 // find them by the same paths.
 func (p *EC2Plugin) ec2CreateLaunchVolumes(
+	m *IDMint,
 	inst *EC2Instance,
 	mappings []EC2BlockDeviceMapping,
 	tags []EC2Tag,
 	now string,
 ) error {
-	for _, vol := range ec2LaunchVolumesFor(inst, mappings, tags, now) {
+	for _, vol := range ec2LaunchVolumesFor(m, inst, mappings, tags, now) {
 		data, err := json.Marshal(vol)
 		if err != nil {
 			return fmt.Errorf("ec2 runInstances volume marshal: %w", err)

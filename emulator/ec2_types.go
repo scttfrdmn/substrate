@@ -431,64 +431,72 @@ type EC2RouteTable struct {
 
 // generateEC2InstanceID generates a random EC2 instance ID in the format
 // "i-" followed by 17 hex characters.
-func generateEC2InstanceID() string {
-	return "i-" + randomHex(8)
+func generateEC2InstanceID(m *IDMint) string {
+	return "i-" + m.Hex(8)
 }
 
 // generateENIID generates a random elastic network interface ID in the format
 // "eni-" followed by 8 hex characters.
-func generateENIID() string {
-	return "eni-" + randomHex(8)
+func generateENIID(m *IDMint) string {
+	return "eni-" + m.Hex(8)
 }
 
 // generateVPCID generates a random VPC ID in the format "vpc-" followed by
 // 8 hex characters.
-func generateVPCID() string {
-	return "vpc-" + randomHex(8)
+func generateVPCID(m *IDMint) string {
+	return "vpc-" + m.Hex(8)
 }
 
 // generateSubnetID generates a random subnet ID in the format "subnet-"
 // followed by 8 hex characters.
-func generateSubnetID() string {
-	return "subnet-" + randomHex(8)
+func generateSubnetID(m *IDMint) string {
+	return "subnet-" + m.Hex(8)
 }
 
 // generateSGID generates a random security group ID in the format "sg-"
 // followed by 8 hex characters.
-func generateSGID() string {
-	return "sg-" + randomHex(8)
+func generateSGID(m *IDMint) string {
+	return "sg-" + m.Hex(8)
 }
 
 // generateIGWID generates a random internet gateway ID in the format "igw-"
 // followed by 8 hex characters.
-func generateIGWID() string {
-	return "igw-" + randomHex(8)
+func generateIGWID(m *IDMint) string {
+	return "igw-" + m.Hex(8)
 }
 
 // generateRTBID generates a random route table ID in the format "rtb-"
 // followed by 8 hex characters.
-func generateRTBID() string {
-	return "rtb-" + randomHex(8)
+func generateRTBID(m *IDMint) string {
+	return "rtb-" + m.Hex(8)
 }
 
 // generateKeyPairID generates a random EC2 key pair ID in the format "key-"
 // followed by 17 hex characters.
-func generateKeyPairID() string {
-	return "key-" + randomHex(17)
+func generateKeyPairID(m *IDMint) string {
+	return "key-" + m.Hex(17)
 }
 
 // generateReservationID generates a random reservation ID in the format
 // "r-" followed by 8 hex characters.
-func generateReservationID() string {
-	return "r-" + randomHex(8)
+func generateReservationID(m *IDMint) string {
+	return "r-" + m.Hex(8)
 }
 
 // generateAssociationID generates a random route table association ID.
-func generateAssociationID() string {
-	return "rtbassoc-" + randomHex(8)
+func generateAssociationID(m *IDMint) string {
+	return "rtbassoc-" + m.Hex(8)
 }
 
 // randomHex generates n random bytes returned as a lowercase hex string.
+//
+// It is the shared draw site for every service whose ids have not moved to [IDMint] yet,
+// which is what lets that migration proceed one service family at a time instead of as a
+// flag day: a caller moves by taking a mint and calling [IDMint.Hex] with the same width.
+// EC2's own ids no longer come through here.
+//
+// TODO(#856): 32 draw sites remain on crypto/rand, tiered by service family on the issue;
+// delete this function when the last caller moves.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {
@@ -693,14 +701,14 @@ type EC2CreateVolumePermission struct {
 
 // generateImageID generates a random AMI ID in the format "ami-" followed
 // by 17 hex characters.
-func generateImageID() string {
-	return "ami-" + randomHex(8)
+func generateImageID(m *IDMint) string {
+	return "ami-" + m.Hex(8)
 }
 
 // generateEBSSnapshotID generates a random EBS snapshot ID in the format "snap-"
 // followed by 17 hex characters.
-func generateEBSSnapshotID() string {
-	return "snap-" + randomHex(8)
+func generateEBSSnapshotID(m *IDMint) string {
+	return "snap-" + m.Hex(8)
 }
 
 // ec2SnapshotStateKey returns the state key for an EBS snapshot.
@@ -745,8 +753,8 @@ type EC2PlacementGroup struct {
 
 // generatePlacementGroupID generates a random placement group ID in the format
 // "pg-" followed by 17 hex characters.
-func generatePlacementGroupID() string {
-	return "pg-" + randomHex(8)
+func generatePlacementGroupID(m *IDMint) string {
+	return "pg-" + m.Hex(8)
 }
 
 // ec2PlacementGroupStateKey returns the state key for a placement group (keyed
@@ -854,18 +862,18 @@ type EC2NATGateway struct {
 }
 
 // generateAllocationID generates a random Elastic IP allocation ID.
-func generateAllocationID() string {
-	return "eipalloc-" + randomHex(8)
+func generateAllocationID(m *IDMint) string {
+	return "eipalloc-" + m.Hex(8)
 }
 
 // generateEIPAssociationID generates a random Elastic IP association ID.
-func generateEIPAssociationID() string {
-	return "eipassoc-" + randomHex(8)
+func generateEIPAssociationID(m *IDMint) string {
+	return "eipassoc-" + m.Hex(8)
 }
 
 // generateNATGatewayID generates a random NAT gateway ID.
-func generateNATGatewayID() string {
-	return "nat-" + randomHex(8)
+func generateNATGatewayID(m *IDMint) string {
+	return "nat-" + m.Hex(8)
 }
 
 // EC2LaunchTemplateData holds the launch parameters stored in an EC2 launch template.
@@ -1132,8 +1140,8 @@ func (t EC2LaunchTemplate) TemplateVersions() []EC2LaunchTemplateVersion {
 }
 
 // generateLaunchTemplateID generates a random launch template ID.
-func generateLaunchTemplateID() string {
-	return "lt-" + randomHex(8)
+func generateLaunchTemplateID(m *IDMint) string {
+	return "lt-" + m.Hex(8)
 }
 
 // EC2VolumeAttachment represents the attachment of an EBS volume to an instance.
@@ -1214,8 +1222,8 @@ type EC2Volume struct {
 }
 
 // generateVolumeID generates a random EBS volume ID.
-func generateVolumeID() string {
-	return "vol-" + randomHex(8)
+func generateVolumeID(m *IDMint) string {
+	return "vol-" + m.Hex(8)
 }
 
 // SecurityGroupAllowed checks if (protocol, port, sourceCIDR) is permitted by

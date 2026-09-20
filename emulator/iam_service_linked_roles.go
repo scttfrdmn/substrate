@@ -1,9 +1,6 @@
 package emulator
 
 import (
-	cryptorand "crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"strings"
 )
 
@@ -244,18 +241,10 @@ func iamSLRRoleFromDeletionTaskID(taskID string) (serviceName, roleName string, 
 //
 // The shape is a UUID because AWS's own example is one
 // (`ec720f7a-c0ba-4838-be33-f72e1873dd52`) and an SDK or a consumer's regex may read
-// it as such. It is random for the same reason [generateIAMID] is: an identifier AWS
-// generates is not derivable from the request, and deriving one would make two
-// deletions of the same role collide on a single ID.
-func iamSLRTaskUUID() string {
-	raw := make([]byte, 16)
-	if _, err := cryptorand.Read(raw); err != nil {
-		panic(fmt.Sprintf("iamSLRTaskUUID: crypto/rand read: %v", err))
-	}
-	// Version 4, variant 1, so the value is a well-formed random UUID rather than 16
-	// hex-encoded bytes that merely look like one.
-	raw[6] = (raw[6] & 0x0f) | 0x40
-	raw[8] = (raw[8] & 0x3f) | 0x80
-	h := hex.EncodeToString(raw)
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+// it as such. It is not derived from the *request* for the same reason [generateIAMID] is
+// not: two deletions of one role carry identical requests and would collide on a single ID.
+// It is derived from the request's **id** (#856), which is distinct per call and is restored
+// on replay, so the two properties hold together.
+func iamSLRTaskUUID(m *IDMint) string {
+	return m.UUID()
 }

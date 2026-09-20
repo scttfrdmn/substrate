@@ -105,7 +105,7 @@ func (p *EC2Plugin) createSnapshot(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	snap := EC2Snapshot{
-		SnapshotID:  generateEBSSnapshotID(),
+		SnapshotID:  generateEBSSnapshotID(reqCtx.IDs),
 		VolumeID:    vol.VolumeID,
 		VolumeSize:  int64(vol.Size),
 		State:       "completed",

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"bytes"
-	cryptorand "crypto/rand"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -361,18 +360,14 @@ const iamIDChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 // generateIAMID generates a 21-character IAM entity ID with the given prefix.
 // AWS prefixes: AIDA (user), AROA (role), AGPA (group), ANPA (policy), AKIA (access key).
-func generateIAMID(prefix string) string {
+//
+// Derived from the request's own id rather than drawn from crypto/rand (#856), which matters
+// more here than anywhere else in the tier: an access key that a replay mints differently is
+// absent from replayed state, so resolvePrincipal returns nil and every authorization door
+// [AuthController.CheckAccess] guards opens (#833).
+func generateIAMID(m *IDMint, prefix string) string {
 	const totalLen = 21
-	remaining := totalLen - len(prefix)
-	raw := make([]byte, remaining)
-	if _, err := cryptorand.Read(raw); err != nil {
-		panic(fmt.Sprintf("generateIAMID: crypto/rand read: %v", err))
-	}
-	out := make([]byte, remaining)
-	for i, b := range raw {
-		out[i] = iamIDChars[int(b)%len(iamIDChars)]
-	}
-	return prefix + string(out)
+	return prefix + m.Chars(totalLen-len(prefix), iamIDChars)
 }
 
 // IAMInstanceProfile represents an AWS IAM instance profile — a container

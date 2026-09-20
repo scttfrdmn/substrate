@@ -116,6 +116,11 @@ type RequestContext struct {
 	// Principal is the authenticated caller, or nil for unauthenticated requests.
 	Principal *Principal
 
+	// IDs mints the identifiers this request publishes, derived from RequestID so that
+	// replaying the request mints the same ones (#856). Nil is usable: an [IDMint] method
+	// on a nil receiver draws from crypto/rand, which is what every mint site did before.
+	IDs *IDMint
+
 	// Metadata holds arbitrary key-value pairs for cross-cutting concerns
 	// such as stream IDs and replay context.
 	Metadata map[string]interface{}

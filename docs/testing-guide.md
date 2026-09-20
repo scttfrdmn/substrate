@@ -327,6 +327,24 @@ timestamp, and a run exported as a regression fixture no longer carries a one-in
 failure. The clock is restored afterwards, so replaying on a live emulator does not stop
 its clock — unless it was already frozen, in which case it is left that way.
 
+**A replayed create reproduces the identifiers it minted.** An identifier substrate mints
+is derived from the request's own id, so the replayed `CreateVpc` answers with the
+recording's `vpc-…` and the recorded `CreateSubnet` that names it succeeds. This is what
+makes `Differences` empty — and `StateValid` true, with `WithRecordedStateHashes` and
+`ReplayConfig{ValidateState: true}` — an assertion a stream containing creates can make at
+all; before #856 every such stream diverged on its first create, which is why the #1140
+tests above are built on caller-chosen bucket and key names instead.
+
+Two caveats. **Only EC2, IAM and STS identifiers are derived so far**; the remaining
+services are migrating one family at a time, and until a service moves, a replay of a
+stream creating one of its resources still diverges. And a recording made against an
+**unfrozen** clock can still diverge on a `state_hash_after` even when every identifier
+matches, because a handler reading the live clock stamps its record a few hundred
+nanoseconds after the event's own timestamp — invisible in a response rendering seconds,
+visible in a hash taken over a stored `time.Time`. Freeze the clock in any test that
+asserts on state hashes, which is what "no test depends on wall-clock time" asks for
+anyway.
+
 ### What a replay re-executes
 
 A live request passes through nine pipeline steps before its response is written, and a
