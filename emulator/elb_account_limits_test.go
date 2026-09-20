@@ -151,8 +151,7 @@ func TestELB_DescribeAccountLimits_RawWireShape(t *testing.T) {
 	ts := newELBTestServer(t)
 	raw, _, _ := elbDescribeAccountLimits(t, ts, nil)
 
-	assert.Contains(t, raw, `<DescribeAccountLimitsResponse xmlns="`+
-		`https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/">`)
+	assert.Contains(t, raw, `<DescribeAccountLimitsResponse xmlns="`+elbV2Namespace+`">`)
 	assert.Contains(t, raw, "<DescribeAccountLimitsResult>")
 	assert.Contains(t, raw, "</DescribeAccountLimitsResult>")
 
