@@ -150,7 +150,7 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 	// cannot legally apply leaves no load balancer behind. CreateLoadBalancer is the one
 	// create of the four that publishes DuplicateTagKeys, which is why it is the one
 	// passing true here.
-	tags, tagErr := elbTagsForCreate(req, true)
+	tags, tagErr := elbTagsForCreate(req, true, elbKindLoadBalancer)
 	if tagErr != nil {
 		return nil, tagErr
 	}
@@ -307,7 +307,7 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 	suffix := generateELBSuffix()
 	arn := elbTargetGroupARN(reqCtx.Region, reqCtx.AccountID, name, suffix)
 
-	tags, tagErr := elbTagsForCreate(req, false)
+	tags, tagErr := elbTagsForCreate(req, false, elbKindTargetGroup)
 	if tagErr != nil {
 		return nil, tagErr
 	}
@@ -602,7 +602,7 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		})
 	}
 
-	tags, tagErr := elbTagsForCreate(req, false)
+	tags, tagErr := elbTagsForCreate(req, false, elbKindListener)
 	if tagErr != nil {
 		return nil, tagErr
 	}
@@ -805,7 +805,7 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		})
 	}
 
-	tags, tagErr := elbTagsForCreate(req, false)
+	tags, tagErr := elbTagsForCreate(req, false, elbKindRule)
 	if tagErr != nil {
 		return nil, tagErr
 	}

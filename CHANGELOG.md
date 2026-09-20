@@ -27,6 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checked seven sibling constants against each service's own page and found that `https://` is not
   wrong by itself: IAM, SNS, STS and Route 53 publish it. RDS and ElastiCache publish `http://` and
   substrate spells both `https://`, filed as #1238 rather than fixed here.
+- **A Classic Load Balancer was allowed ELBv2's fifty tags where AWS publishes ten** (#1148). The
+  cap lived in one constant, `elbMaxTagsPerResource = 50`, and #844's Tier 1a made that reachable:
+  a classic load balancer became a record in the `elb` namespace, `elbKeyIsTaggable` admits its key
+  prefix, and the Resource Groups Tagging API's quota check counted it against 50 — where the
+  `2012-06-01` `AddTags` page's first sentence publishes *"Each load balancer can have a maximum of
+  10 tags"*. So `TagResources` accepted an 11th tag on a classic load balancer, and a 50th, and a
+  consumer testing its own tag budget against substrate would have found five times the room AWS
+  gives it. The two caps now travel as an `elbTagQuota` value pairing the number with the
+  `TooManyTags` wording its own page publishes, resolved **from the record's own kind** — the
+  classic state-key prefix against the four ELBv2 ones — rather than from which API door the request
+  arrived through, so the tagging API, ELBv2's tag doors and the classic tag trio #844 Tier 1b will
+  route cannot disagree about one load balancer. The `aws:` exclusion applies to both, because the
+  restrictions list that states it is written for the service rather than for one generation and the
+  classic page publishes no prefix rule of its own. Worth recording is which page each number comes
+  from, because the asymmetry runs the opposite way from expectation: ELBv2's `API_AddTags`
+  (`2015-12-01`) publishes **no maximum at all** — not in its description, not as an `Array Members`
+  constraint on `Tags`, not in its Errors section beyond naming `TooManyTags` — so substrate's 50 is
+  read off the ELB user guide's restrictions list, while the classic 10 is API-reference text. Both
+  boundaries are now pinned by tests against one state store, so neither constant can stand in for
+  the other again.
 - **The capacity-reservation section still claimed a seed replays like any other state** (#1140).
   v0.120.0 corrected that sentence where the snapshot-progression section stated it and added the
   general rule there, but the same false sentence sat 280 lines later under the capacity-reservation

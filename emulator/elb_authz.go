@@ -190,7 +190,11 @@ func elbAuthzCreateTagsPass(reqCtx *RequestContext, req *AWSRequest) string {
 // CreateListener or CreateRule. Passing false is what keeps substrate from inventing a
 // code three of the four do not publish; the duplicate then resolves last-wins through
 // [elbMergeTags], which is the only other thing it can do.
-func elbTagsForCreate(req *AWSRequest, refuseDuplicateKeys bool) ([]ELBTag, *AWSError) {
+//
+// kind is a parameter for a different reason: the two generations publish different per-resource
+// tag caps, and a create is the one place the record's kind is known before the record exists, so
+// there is nothing to key [elbTagQuotaForStateKey] off yet. See [elbTagQuota] (#1148).
+func elbTagsForCreate(req *AWSRequest, refuseDuplicateKeys bool, kind string) ([]ELBTag, *AWSError) {
 	tags := extractELBTags(req.Params, "Tags.member")
 	if len(tags) == 0 {
 		return nil, nil
@@ -200,7 +204,7 @@ func elbTagsForCreate(req *AWSRequest, refuseDuplicateKeys bool) ([]ELBTag, *AWS
 			return nil, awsErr
 		}
 	}
-	if awsErr := elbCheckCreateTags(tags); awsErr != nil {
+	if awsErr := elbCheckCreateTags(tags, elbTagQuotaForKind(kind)); awsErr != nil {
 		return nil, awsErr
 	}
 	return elbMergeTags(nil, tags), nil

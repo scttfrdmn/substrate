@@ -10542,8 +10542,10 @@ Details a consumer can observe:
   cursor that resets.
 
 **What is deliberately not routed**, so that three operations are not read as the whole API: the
-classic tag trio (`AddTags`, `RemoveTags`, `DescribeTags` at `2012-06-01`, whose published tag cap
-is **10** against ELBv2's 50 and whose `RemoveTags` takes `Tags.member.N` of `TagKeyOnly`),
+classic tag trio (`AddTags`, `RemoveTags`, `DescribeTags` at `2012-06-01`, whose `RemoveTags` takes
+`Tags.member.N` of `TagKeyOnly`; their published cap of **10** against ELBv2's 50 is enforced
+already, by the create and by the tagging API, so routing the trio adds doors rather than a rule —
+see [#1148](https://github.com/scttfrdmn/substrate/issues/1148)),
 `RegisterInstancesWithLoadBalancer`, `CreateLoadBalancerListeners`, the health-check and policy
 operations, and the `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper. Any of them answers
 `InvalidAction`/400, which is the Query family's unknown-action answer. `TooManyLoadBalancers` and
@@ -10640,8 +10642,15 @@ exist — a `Tags` on a `CreateLoadBalancer` produced an untagged load balancer 
 error.
 
 Limits and shapes come from the `Tag` type's API reference: a key is 1–128 characters, a
-value 0–256, both matching `^([\p{L}\p{Z}\p{N}_.:/=+\-@]*)$`, and a resource holds at most
-50 tags. **AWS contradicts itself on the lengths and substrate follows the model:** the ELB
+value 0–256, both matching `^([\p{L}\p{Z}\p{N}_.:/=+\-@]*)$`, and an ELBv2 resource holds at
+most 50 tags. **A Classic Load Balancer holds at most 10**, and that number is the one place
+the classic API reference is the *more* specific of the two: the `2012-06-01` `API_AddTags`
+opens with *"Each load balancer can have a maximum of 10 tags"*, where the `2015-12-01` page
+publishes no maximum anywhere and substrate's 50 is read off the user guide's restrictions
+list. The cap is resolved from the record's own kind, so the classic 10 applies to a classic
+load balancer's own create and to the Resource Groups Tagging API alike
+([#1148](https://github.com/scttfrdmn/substrate/issues/1148)). **AWS contradicts itself on
+the lengths and substrate follows the model:** the ELB
 user guide's restrictions list says "Maximum key length—127 Unicode characters" and
 "Maximum value length—255", where the API model says 128 and 256. A caller who trusts the
 user guide's smaller numbers is inside substrate's limits either way. A violated constraint
@@ -11650,7 +11659,12 @@ substrate's internal business and not something an API response should publish.
 
 `API_TagResources` states the rule itself — *"Each resource can have up to 50
 tags"* — and four of the twenty-three namespace arms enforce a per-resource quota on
-their **own** tagging operations: EC2, ELBv2, IAM and Kinesis, all four at 50. Until
+their **own** tagging operations: EC2, ELB, IAM and Kinesis. Three are at 50, and ELB
+is at 50 for an ELBv2 resource and **10** for a Classic Load Balancer — the cap is
+resolved from the record's own state key, so a classic load balancer reached through
+this generation-agnostic API gets 10 because of what it is rather than because of which
+door the request came through
+([#1148](https://github.com/scttfrdmn/substrate/issues/1148)). Until
 [#1000](https://github.com/scttfrdmn/substrate/issues/1000) the shared merge consulted
 none of them, so `TagResources` was the one way in substrate to put a resource over its
 own service's quota — after which that service's own tagging operation refused every
@@ -11662,16 +11676,30 @@ covered sixteen arms; both were wrong when written and are corrected with that i
 **Each service's own checker is called rather than a shared count, because the four
 disagree in ways a shared count would have to flatten:**
 
-| Service | Code | Status | Reserved `aws:` keys |
-|---------|------|--------|----------------------|
-| EC2 | `TagLimitExceeded` | 400 | Excluded from the count |
-| ELBv2 | `TooManyTags` | 400 | Excluded from the count |
-| IAM | `LimitExceeded` | **409** | Counted |
-| Kinesis | `LimitExceededException` | 400 | Counted |
+| Service | Cap | Code | Status | Reserved `aws:` keys |
+|---------|-----|------|--------|----------------------|
+| EC2 | 50 | `TagLimitExceeded` | 400 | Excluded from the count |
+| ELBv2 | 50 | `TooManyTags` | 400 | Excluded from the count |
+| ELB Classic | **10** | `TooManyTags` | 400 | Excluded from the count |
+| IAM | 50 | `LimitExceeded` | **409** | Counted |
+| Kinesis | 50 | `LimitExceededException` | 400 | Counted |
+
+The two ELB rows answer the same code at the same status and differ only in the number
+and in the message, and the numbers come from different places. ELBv2's `API_AddTags`
+(`2015-12-01`) publishes **no maximum at all** — not in its description, not as an
+`Array Members` constraint, not in its Errors section beyond naming `TooManyTags` — so
+the 50 is read off the user guide's restrictions list (*"Maximum number of tags per
+resource—50"*). The classic 10 is API-reference text, in the first sentence of the
+`2012-06-01` `API_AddTags`: *"Each load balancer can have a maximum of 10 tags."* The
+`TooManyTags` **message** differs between the two pages and each generation answers its
+own, so a consumer reading the message sees which generation refused it.
 
 The reserved-key column is what each service publishes, not a choice: EC2's and ELB's
 restrictions state that *"[t]ags with the aws: prefix do not count against your tags
-per resource limit"* and no IAM or Kinesis page says anything of the kind. It is
+per resource limit"* and no IAM or Kinesis page says anything of the kind. That
+restrictions list is written for Elastic Load Balancing rather than for one generation,
+and the classic API page publishes no reserved-prefix rule of its own, so the exclusion
+is applied to both ELB caps rather than to ELBv2's alone. It is
 unobservable through this API either way — a reserved key is refused upstream, so only
 the CloudFormation deployer's stamp can write one — and it is recorded rather than
 unified because unifying it would mean overruling one of the four pages.
