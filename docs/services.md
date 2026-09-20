@@ -10452,7 +10452,8 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | DescribeAccountLimits | Reports 23 limits, seedable; `Marker`/`PageSize` paginated |
 
 Every operation whose output shape carries no members answers
-`<OperationResponse><OperationResult/></OperationResponse>`. The empty result element is not
+`<OperationResponse><OperationResult/><ResponseMetadata>…</ResponseMetadata></OperationResponse>`.
+The empty result element is not
 decoration: ELBv2 speaks the Query protocol, where each output shape declares a
 `resultWrapper`, and botocore looks that wrapper up by name — so a bare
 `<OperationResponse/>` makes the AWS CLI and boto3 raise `KeyError` rather than report
@@ -10460,6 +10461,50 @@ success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRul
 `RegisterTargets` and `DeregisterTargets` answered that way and were unusable from a real
 client while substrate's own tests passed, because those tests read the XML directly instead
 of through an SDK's parser.
+
+### The response envelope, and which plugins still lack it
+
+Every ELB response — both generations, result-bearing and memberless alike — closes with the Query
+protocol's `ResponseMetadata`:
+
+```xml
+<CreateLoadBalancerResponse xmlns="http://elasticloadbalancing.amazonaws.com/doc/2012-06-01/">
+  <CreateLoadBalancerResult>
+    <DNSName>my-vpc-loadbalancer-1234567890.us-east-1.elb.amazonaws.com</DNSName>
+  </CreateLoadBalancerResult>
+  <ResponseMetadata>
+    <RequestId>1549581b-12b7-11e3-895e-1334aEXAMPLE</RequestId>
+  </ResponseMetadata>
+</CreateLoadBalancerResponse>
+```
+
+It is built in one place (`elb_response_envelope.go`) rather than in the ~30 handlers, and that is the
+substantive part of the rule. Substrate emitted the element nowhere in this plugin for exactly the
+reason a per-handler convention fails: each handler declared its own inline response struct, so the
+member was something every handler could omit, and every handler did. The handlers now pass a
+*result* and the envelope decides the root element, the namespace, the result wrapper and the
+metadata; the two generations differ in the namespace and in nothing else.
+
+The `RequestId` is the request's own — the value `Event.RequestID` records and `replayRequestID`
+reproduces — never a freshly minted one. That is what keeps a replayed ELB response byte-identical to
+its recording; an id minted per call would make every ELB body in a recorded stream diverge on
+replay, which the replay engine's body comparison reports as a difference.
+
+Which other Query-protocol plugins answer the envelope today:
+
+| Plugin | Envelope | Notes |
+|---|---|---|
+| CloudFormation, CloudWatch, IAM, SNS, SQS, STS | yes | — |
+| ELB (both generations) | yes | all 27 routed actions |
+| EC2 | **no** | publishes a root-level lowercase `<requestId>`, not `ResponseMetadata` — a different document |
+| Redshift | **no** | and the result wrapper is the document root, so no SDK decodes it |
+| RDS, ElastiCache | **no** | built exactly as ELB's were: one inline response struct per handler |
+
+An XML **error** response carries no request ID for any plugin that shares
+`error_protocol.go`'s `ErrorResponse` document, ELB included. No ELB page publishes a sample error
+response, so what belongs inside one is not readable off an ELB page; EC2's page does publish one, and
+it is a different shape again (`<Response><Errors><Error>…</Errors><RequestID>`). That is one
+cross-plugin change rather than an ELB change.
 
 ### The Classic (2012-06-01) API, and the version that routes it
 

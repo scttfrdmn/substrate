@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -97,20 +98,31 @@ func elbAddTags(t *testing.T, ts *emulator.TestServer, arn string, tags map[stri
 	require.Equal(t, http.StatusOK, resp.StatusCode, "AddTags %s", arn)
 }
 
-// elbRawDescribe returns the response body of an ELBv2 Describe call verbatim.
+// elbDescribeBodySansMetadata returns the response body of an ELBv2 Describe call with the
+// `ResponseMetadata` element removed.
 //
 // The bytes rather than a decoded struct, for the reason
 // [TestELBTagging_TheMergeLeavesTheRestOfTheRecordIntact] needs: a struct can only assert the members
 // it declares, and the defect being guarded against is a member disappearing. A decode would have to
 // enumerate every member of every shape to see the same thing the bytes show for free.
-func elbRawDescribe(t *testing.T, baseURL string, params map[string]string) string {
+//
+// The one element that is dropped is the one that is *supposed* to differ between two calls. #1149
+// gave every ELB response the published `ResponseMetadata`, whose `RequestId` is the request's own, so
+// two Describes of an unchanged record no longer have equal bodies — and a comparison that kept it
+// would fail on the fact that two requests are two requests rather than on any record member.
+func elbDescribeBodySansMetadata(t *testing.T, baseURL string, params map[string]string) string {
 	t.Helper()
 	resp := elbRequest(t, baseURL, params)
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode, params["Action"])
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	return string(body)
+
+	start := strings.Index(string(body), "<ResponseMetadata>")
+	require.GreaterOrEqual(t, start, 0, "%s answers the published ResponseMetadata", params["Action"])
+	end := strings.Index(string(body), "</ResponseMetadata>")
+	require.Greater(t, end, start, "%s ResponseMetadata is closed", params["Action"])
+	return string(body[:start]) + string(body[end+len("</ResponseMetadata>"):])
 }
 
 // TestELBTagging_TagResourcesIsReadableThroughDescribeTags is the first half of #765's rule for
@@ -255,7 +267,7 @@ func TestELBTagging_TheMergeLeavesTheRestOfTheRecordIntact(t *testing.T) {
 	}
 	before := make(map[string]string, len(describes))
 	for name, params := range describes {
-		before[name] = elbRawDescribe(t, ts.URL, params)
+		before[name] = elbDescribeBodySansMetadata(t, ts.URL, params)
 	}
 
 	for _, arn := range []string{lb, tg, listener, rule} {
@@ -263,7 +275,7 @@ func TestELBTagging_TheMergeLeavesTheRestOfTheRecordIntact(t *testing.T) {
 	}
 
 	for name, params := range describes {
-		assert.Equal(t, before[name], elbRawDescribe(t, ts.URL, params), name)
+		assert.Equal(t, before[name], elbDescribeBodySansMetadata(t, ts.URL, params), name)
 	}
 }
 

@@ -47,6 +47,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read off the ELB user guide's restrictions list, while the classic 10 is API-reference text. Both
   boundaries are now pinned by tests against one state store, so neither constant can stand in for
   the other again.
+- **No ELB response carried the request ID every published sample shows** (#1149). Both
+  generations' pages close every sample response with the Query protocol's
+  `<ResponseMetadata><RequestId>…</RequestId></ResponseMetadata>`, and substrate emitted it on none
+  of its 27 routed ELB operations, so a consumer's logging or correlation wrapper reading
+  `ResponseMetadata.RequestId` off a *successful* ELB call read the empty string, silently,
+  everywhere. The absence was uniform for a structural reason worth stating, because it is the part
+  the fix is about: each handler built its own inline response struct declaring its own root element,
+  namespace and result wrapper, which made the metadata a convention every handler was free to omit
+  — and all ~30 of them did. Adding the member to 30 structs would have left that intact. So the
+  document is now built in one place (`elb_response_envelope.go`) and the handlers pass a *result*:
+  the envelope derives the root element and the result wrapper from the operation name, takes the
+  generation from the namespace, and renders the metadata itself. `elbXMLResponse` kept only the two
+  jobs that are genuinely its own, the XML declaration and the content type. The rendered id is
+  `reqCtx.RequestID` — the value `Event.RequestID` records and `replayRequestID` reproduces — rather
+  than a freshly minted one, which is the difference between a replayed ELB body that is
+  byte-identical to its recording and one that diverges on every event in the stream; the regression
+  test asserts exactly that through the replay engine's own body comparison. The sweep also walks all
+  27 routed actions rather than a representative three, since a per-handler convention is precisely
+  what passes a three-shape test and then fails on the next handler. One existing test had to change
+  and the change is the point: `TestELBTagging_TheMergeLeavesTheRestOfTheRecordIntact` compared two
+  Describe bodies byte-for-byte, and two calls now legitimately differ in the one element that is
+  supposed to, so it drops `ResponseMetadata` before comparing. The error envelope is deliberately
+  not part of this: no ELB page publishes a sample error response, and the missing id is in the
+  `ErrorResponse` document `error_protocol.go` builds for *every* Query plugin, filed as #1241. The
+  sweep #1149 asked for found RDS and ElastiCache in the same state ELB was, built the same way,
+  filed as #1242; EC2 (#1189) and Redshift (#1208) were already filed, and EC2's published element is
+  a root-level lowercase `requestId` rather than this envelope — a different document, not a
+  duplicate.
 - **The capacity-reservation section still claimed a seed replays like any other state** (#1140).
   v0.120.0 corrected that sentence where the snapshot-progression section stated it and added the
   general rule there, but the same false sentence sat 280 lines later under the capacity-reservation

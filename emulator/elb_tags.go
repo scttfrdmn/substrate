@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -856,7 +855,7 @@ func (p *ELBPlugin) addTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRespon
 		}
 	}
 
-	return elbEmptyOKResponse("AddTags")
+	return elbEmptyOKResponse(reqCtx, "AddTags")
 }
 
 // removeTags removes the named tag keys from the given resources.
@@ -899,7 +898,7 @@ func (p *ELBPlugin) removeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 	}
 
-	return elbEmptyOKResponse("RemoveTags")
+	return elbEmptyOKResponse(reqCtx, "RemoveTags")
 }
 
 // describeTags reports the tags on up to [elbDescribeTagsMaxResources] resources.
@@ -932,19 +931,14 @@ func (p *ELBPlugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	type tagsResult struct {
 		TagDescriptions []elbTagDescriptionItem `xml:"TagDescriptions>member"`
 	}
-	type response struct {
-		XMLName xml.Name   `xml:"DescribeTagsResponse"`
-		XMLNS   string     `xml:"xmlns,attr"`
-		Result  tagsResult `xml:"DescribeTagsResult"`
-	}
-	resp := response{XMLNS: elbXMLNS}
+	var result tagsResult
 	for _, res := range resolved {
-		resp.Result.TagDescriptions = append(resp.Result.TagDescriptions, elbTagDescriptionItem{
+		result.TagDescriptions = append(result.TagDescriptions, elbTagDescriptionItem{
 			ResourceArn: res.arn,
 			Tags:        elbTagItems(res.tags),
 		})
 	}
-	return elbXMLResponse(http.StatusOK, resp)
+	return elbOKResponse(reqCtx, "DescribeTags", elbXMLNS, result)
 }
 
 // elbTagItem is the XML representation of one ELB tag.
