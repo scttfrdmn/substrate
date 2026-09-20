@@ -64,6 +64,10 @@ package emulator
 // A past-the-end offset still clamps to a final empty page rather than being refused, because a token
 // substrate issued over a listing that has since shrunk is still a token it issued.
 //
+// `ListJobs` is the fourth Batch paginator and the fourth caller of [batchDecodeNextToken], which it
+// became in #1236 — where the rest of that operation's request members are argued. Until then it was
+// recorded below as "not fixed here", which is what the bullet was for.
+//
 // # Not fixed here, so that the conversion is not read as having fixed it
 //
 //   - **`maxResults` outside the published range of 1–100 is clamped, not refused.** All three pages
@@ -71,9 +75,6 @@ package emulator
 //     Describe… returns up to 100 results"*, so 100 is the published default for an absent value;
 //     applying it to a zero or negative one as well is substrate's reading, and refusing an
 //     out-of-range page size is its own class.
-//   - **`ListJobs` publishes `maxResults` and `nextToken` and substrate implements neither**, so it
-//     answers every job in the account and never a cursor. That is the "published a cursor and
-//     implemented none of it" class, not this one.
 //   - **`DescribeJobDefinitions` applies its `status` filter after the page is cut**, which
 //     [batchFilterByStatus]'s doc comment already records as substrate's reading of the page's
 //     ordering. Unchanged.

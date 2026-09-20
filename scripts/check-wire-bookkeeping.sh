@@ -75,6 +75,21 @@ BASELINE="scripts/wire-bookkeeping-baseline.txt"
 # divergence — CloudFront publishes LastModifiedTime — but that is a wrong member,
 # not a bookkeeping leak, and belongs to its own issue.)
 #
+# The same reasoning applies one level finer, per site rather than per name: a
+# field is excluded when the operation's own reference publishes a member of that
+# name on the shape the struct renders. The BEGIN block below holds those, keyed by
+# file, type and Go field so the exclusion cannot spread to another struct by
+# accident. It currently holds one:
+#
+#   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
+#     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
+#     the wire struct this check recommends building (#1090's pattern), carrying
+#     only published members. Tagging it `json:"-"` would drop a published member;
+#     recording it in the baseline would file a published member as a defect owed a
+#     deletion. (emulator/batch_plugin.go's BatchJob.CreatedAt is a separate line,
+#     still in the baseline and unchanged here: that struct is the persisted record
+#     and its AccountID and Region leak alongside, which is what #756 is about.)
+#
 # Test files are skipped. A bookkeeping-named field in a _test.go file is a decode
 # target — a test reading a member off a response — not wire surface, and one
 # exists: organizations_account_test.go's orgCreateStatus.AccountID reads
@@ -98,10 +113,16 @@ BASELINE="scripts/wire-bookkeeping-baseline.txt"
 # fields belong to the type that contains them.
 extract() {
   awk '
+    BEGIN {
+      # Published members whose Go identifier collides with the five names; see the
+      # header. Keyed file, type, field — tab-separated, as the output is.
+      published["emulator/batch_list_jobs.go\tbatchJobSummary\tCreatedAt"] = 1
+    }
     FILENAME ~ /_test\.go$/ { next }
     $1 == "type" && $3 == "struct" { t = $2; next }
     $0 == "}" { t = ""; next }
     t != "" && $1 ~ /^(AccountID|Region|CreatedAt|UpdatedAt|EverTagged)$/ {
+      if ((FILENAME "\t" t "\t" $1) in published) { next }
       if (match($0, /`json:"[^"]*"/)) {
         tag = substr($0, RSTART + 7, RLENGTH - 8)
         if (tag != "-") { print FILENAME "\t" t "\t" $1 "\t" tag }

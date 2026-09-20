@@ -152,6 +152,10 @@ func TestBatchPlugin_SubmitDescribeTerminateJob(t *testing.T) {
 }
 
 // TestBatchPlugin_ListJobs verifies that all submitted jobs appear in the list.
+//
+// The status is named because the published default is `RUNNING` only (#1236) and `SubmitJob`
+// records a job `SUCCEEDED`, so the listing this test is about is the one that names the status the
+// jobs are actually in. The default listing's emptiness is asserted in batch_list_jobs_test.go.
 func TestBatchPlugin_ListJobs(t *testing.T) {
 	ts := newBatchTestServer(t)
 
@@ -164,7 +168,7 @@ func TestBatchPlugin_ListJobs(t *testing.T) {
 		batchBody(t, resp)
 	}
 
-	resp := batchRequest(t, ts, http.MethodGet, "/v1/jobs", nil)
+	resp := batchRequest(t, ts, http.MethodPost, "/v1/listjobs", map[string]string{"jobStatus": "SUCCEEDED"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("listJobs: expected 200, got %d", resp.StatusCode)
 	}

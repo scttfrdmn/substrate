@@ -1674,14 +1674,18 @@ the operation for that reason, and a test pins the non-portability so the naming
 enforcement. A past-the-end offset still clamps to a final empty page, because a token substrate issued
 over a listing that has since shrunk is still a token it issued.
 
-**Three things this does not fix.** `maxResults` outside the published range of **1–100** is clamped
+**Two things this does not fix.** `maxResults` outside the published range of **1–100** is clamped
 rather than refused — all three pages publish *"If this parameter isn't used, then `Describe…` returns
 up to 100 results"*, so 100 is the published default for an absent value and applying it to a zero or
-negative one as well is substrate's reading. `ListJobs` publishes `maxResults` and `nextToken` and
-substrate implements neither, so it answers every job in the account and never a cursor — the
-published-a-cursor-and-implemented-none-of-it class, below, rather than this one. And
-`DescribeJobDefinitions` applies its `status` filter after the page is cut, which is recorded in the
-tree as substrate's reading of the page's ordering and is unchanged here.
+negative one as well is substrate's reading. And `DescribeJobDefinitions` applies its `status` filter
+after the page is cut, which is recorded in the tree as substrate's reading of the page's ordering and
+is unchanged here.
+
+`ListJobs` was recorded here as a third, because it published `maxResults` and `nextToken` and
+implemented neither. It is the fourth caller of the same decode as of
+[#1236](https://github.com/scttfrdmn/substrate/issues/1236) — see
+[ListJobs reads its request](#listjobs-reads-its-request), which is also where the rest of that
+operation's members are argued.
 
 ### Six describes published a cursor and implemented none of it
 
@@ -17864,6 +17868,7 @@ Firehose data ingestion: $0.029 per GB.
 | DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | SubmitJob | Returns `jobId`; the job is immediately `SUCCEEDED` |
 | DescribeJobs | |
+| ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
 | TerminateJob | Reports the job `FAILED` with the supplied `reason` |
 
 Every operation reports a bad request as **`ClientException`** at HTTP 400. The API
@@ -17902,6 +17907,73 @@ A newly registered definition is `ACTIVE`, and the `status` filter selects on th
 Nothing yet reports a definition `INACTIVE` — `DeregisterJobDefinition` is not
 implemented (tracked as issue #555) — but the status is recorded on the resource rather
 than synthesised at read time, so a deregistration can set it.
+
+### ListJobs reads its request
+
+[#1236](https://github.com/scttfrdmn/substrate/issues/1236). The handler took its request as
+`_ *AWSRequest`, so none of the seven published members was read: it answered every job in the
+account and Region, in insertion order, with no cursor. The pagination gap it was filed under was
+the smallest of the four things that were wrong.
+
+**The published default is `RUNNING` only.** *"If you don't specify a status, only `RUNNING` jobs
+are returned."* A `SUCCEEDED` job in a list a consumer reads as "still running" inverts the meaning
+of the call, and it was the **default** path — both of the page's own examples take it, and there is
+no parameter to blame it on. `jobStatus` selects any of the seven published values and a value
+outside them is refused; that a value outside a published `Valid Values` list is one of the
+*"identifier[s] that's not valid"* the `ClientException` gloss covers is substrate's reading, on the
+same footing as the token refusal above.
+
+Because `SubmitJob` records a job `SUCCEEDED` at submission, **substrate's default listing is always
+empty** — no job is ever `RUNNING`. Implementing the default faithfully is what makes that visible;
+it is tracked as [#1248](https://github.com/scttfrdmn/substrate/issues/1248) rather than papered
+over by keeping the every-status listing, because a listing AWS would not have answered is not a
+substitute for a job that reaches `RUNNING`.
+
+**One selector, or none.** *"You must specify only one of the following items: A job queue ID … A
+multi-node parallel job ID … An array job ID"* — all three are `Required: No` individually, so the
+rule lives in that prose. More than one is refused. **None** of the three stays the account-wide
+listing, because the sentence forbids naming two rather than naming none and the page publishes no
+error for an empty request; requiring exactly one would be substrate's reading. `jobQueue` matches a
+name or a full ARN, so it reaches a job whichever form `SubmitJob` recorded.
+
+`arrayJobId` and `multiNodeJobId` answer an **empty** list: `SubmitJob` records no
+`arrayProperties` and no `nodeProperties`, so substrate mints no children and no nodes and there is
+nothing for either listing to contain. Ignoring the member answered the account-wide listing
+instead, reporting a parent's children as though they existed — the worse of the two wrong answers,
+because it is not empty.
+
+**All five filters, by their own rules.** `JOB_NAME` is a case-insensitive match with a
+trailing-asterisk prefix form; `JOB_DEFINITION` is case-sensitive, matches every revision of a bare
+name, supports the same asterisk on a name but not on an ARN; `BEFORE_CREATED_AT` and
+`AFTER_CREATED_AT` take milliseconds since the epoch, and a value that is not a number is refused
+rather than matching nothing. `SHARE_IDENTIFIER` is implemented and matches nothing, because no
+recorded job carries a share identifier — a real empty answer rather than an ignored filter. More
+than one filter is refused (*"Only one filter can be used at a time"*), a filter switches `jobStatus`
+selection off except for `SHARE_IDENTIFIER`, and the filter path sorts by `createdAt` with the most
+recent first, as the page publishes. The unfiltered path keeps insertion order, because the page
+states no order for it.
+
+Two published properties of the filter path are **not** modeled: `JOB_NAME`'s *"the results are
+grouped by the job name and version"*, because a group is a property of the listing's shape rather
+than of any job and the page does not say what the grouping does to the order it publishes in the
+same paragraph; and *"The filter doesn't apply to child jobs in an array or multi-node parallel (MNP)
+jobs"*, which is vacuous while both of those listings are empty.
+
+**The summary carries seven of the eighteen published `JobSummary` members** — `jobArn` (derived as
+`SubmitJob` derives the one it returns), `jobId`, `jobName`, `jobDefinition`, `createdAt`, `status`
+and `statusReason`. It used to carry three. The other eleven describe the workload running inside
+the job rather than an API observation of it and have no record behind them, so they are declined
+rather than half-filled: a caller cannot tell a zero `container.exitCode` from a job that exited 0.
+The page's own two sample responses emit only `jobId` and `jobName`, so a reader of the examples
+alone would conclude nothing was missing; the Response Elements section is the authority.
+
+`maxResults` clamps to the applicable published cap — 100 with `filters`, 1000 otherwise — and an
+absent, zero or negative value takes the cap too, which is the reading the three describes already
+record. `nextToken` is the same offset cursor, refused when no previous `ListJobs` returned it.
+
+ListJobs also gained its published route, `POST /v1/listjobs`. Its members live in a body, which the
+legacy `GET /v1/jobs` route cannot carry, so that is the path an SDK call arrives on; the legacy
+route still answers, with every member absent.
 
 ### Resources are scoped to the caller
 
