@@ -423,6 +423,42 @@ func (ts *TestServer) SetScale(scale float64) {
 	ts.tc.SetScale(scale)
 }
 
+// FreezeTime stops the simulated clock where it stands, so every value a handler
+// renders from it is the same instant however long the test takes.
+//
+// This is what a test asserting an exact timestamp needs, and the reason it is named
+// rather than expressed as a scale of zero: `CLAUDE.md` rules out a test depending on
+// wall-clock time, and a clock advancing at any nonzero scale makes a rendered second
+// depend on how fast the machine ran (#1217). [TestServer.AdvanceTime] and
+// [TestServer.SetTime] still move a frozen clock, which is how a frozen test drives a
+// time-dependent path — deliberately, by a known interval.
+func (ts *TestServer) FreezeTime() {
+	ts.tc.Freeze()
+}
+
+// FreezeTimeAt stops the simulated clock at exactly t, so every value rendered from
+// the clock is t until [TestServer.UnfreezeTime].
+//
+// This exists because the obvious spelling — SetTime then FreezeTime — stops the clock
+// a few tens of nanoseconds *after* t, since FreezeTime stops it where it currently
+// reads. That is invisible until something renders it, and then it is a second
+// boundary crossed for no reason a reader of the test could see, which is the class of
+// defect #1217 was.
+func (ts *TestServer) FreezeTimeAt(t time.Time) {
+	ts.tc.Freeze()
+	ts.tc.SetTime(t)
+}
+
+// UnfreezeTime resumes the simulated clock from the instant it was frozen at.
+func (ts *TestServer) UnfreezeTime() {
+	ts.tc.Unfreeze()
+}
+
+// TimeFrozen reports whether the simulated clock is stopped.
+func (ts *TestServer) TimeFrozen() bool {
+	return ts.tc.Frozen()
+}
+
 // seedSSMRegion is the default AWS region used for seeded SSM parameters.
 const seedSSMRegion = "us-east-1"
 

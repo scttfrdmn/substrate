@@ -73,6 +73,10 @@ func (ts *TestServer) ResetState(tb testing.TB)         // wipes all server stat
 func (ts *TestServer) AdvanceTime(d time.Duration)      // move the simulated clock forward
 func (ts *TestServer) SetTime(t time.Time)              // set the simulated clock
 func (ts *TestServer) SetScale(scale float64)           // set the time-acceleration factor
+func (ts *TestServer) FreezeTimeAt(t time.Time)         // stop the simulated clock at exactly t
+func (ts *TestServer) FreezeTime()                      // stop it where it stands
+func (ts *TestServer) UnfreezeTime()                    // resume from where it was stopped
+func (ts *TestServer) TimeFrozen() bool
 func (ts *TestServer) SeedSSMParameter(name, value string)
 func (ts *TestServer) SeedSSMParameters(params map[string]string)
 
@@ -86,6 +90,17 @@ func (ts *TestServer) Registry() *PluginRegistry
 `StartTestServer` returns when the `/health` endpoint responds — the server is
 ready for requests immediately. The event store is enabled, so cost summaries
 and recording/replay work against `ts.Store()` out of the box.
+
+`SetTime` sets where the clock *starts from*, not what it reads: the clock then
+advances with wall time at its scale, so a value rendered from it — a
+`CreationDate`, a `CreatedTime` — depends on how fast the machine ran. At the
+second resolution most AWS timestamps are rendered at, that is usually invisible
+and occasionally a one-second difference. Use **`FreezeTimeAt`** when a test
+asserts an exact timestamp; a frozen clock reads the same instant however long the
+test takes, and `AdvanceTime` still moves it by a known interval. Prefer
+`FreezeTimeAt(t)` over `SetTime(t)` followed by `FreezeTime()` — the latter stops
+the clock a few tens of nanoseconds after `t`, which is enough to cross a second
+boundary if `t` sits near one.
 
 ### Benchmarks
 
@@ -296,6 +311,18 @@ So two assertions are safe and one is not:
 
 A stream recorded before the event carried a request id replays with the event id in
 that field, since the original value was never written down and nothing can recover it.
+
+**A replayed timestamp is the recorded one, exactly.** The simulated clock is *frozen*
+at the recorded event's own timestamp for the duration of that event's replay, so every
+read of it while the handler runs returns that timestamp however long the replay
+dispatch takes. Before #1217 the clock was set to the recorded timestamp and then left
+advancing, which made a replayed date reproducible only to within that latency: at
+second resolution it matched the recording except when the recorded and replayed reads
+straddled a second boundary, and then the replay reported a one-second difference. So
+`Differences` being empty is now an assertion a test can rely on for a body carrying a
+timestamp, and a run exported as a regression fixture no longer carries a one-in-N
+failure. The clock is restored afterwards, so replaying on a live emulator does not stop
+its clock — unless it was already frozen, in which case it is left that way.
 
 ### What a replay re-executes
 

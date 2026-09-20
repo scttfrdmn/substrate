@@ -414,8 +414,28 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		return false, nil
 	}
 
+	// The clock is frozen *and then* set, in that order, and restored when the event
+	// is done. SetTime alone sets a baseline that advances with wall time, so a
+	// handler rendering from Now() saw event.Timestamp plus however long the replay
+	// dispatch took — reproducing the recorded value only when the two reads landed
+	// in the same second, and reporting a one-second difference when they straddled a
+	// boundary. That made a replayed timestamp nearly reproducible rather than
+	// reproducible, and made any test asserting one a wall-clock-dependent test
+	// (#1217). Frozen, every read during this event returns event.Timestamp exactly.
+	//
+	// Restoring rather than leaving it frozen matters because the controller is the
+	// server's: a replay that ran on a live emulator would otherwise stop the clock
+	// for every request after it. A clock that was already frozen when the replay
+	// reached this event is left frozen, so a caller that stopped the clock on purpose
+	// — which is the one way to make a live run's timestamps exact too — does not have
+	// it started again by a replay.
 	if r.timeController != nil {
+		wasFrozen := r.timeController.Frozen()
+		r.timeController.Freeze()
 		r.timeController.SetTime(event.Timestamp)
+		if !wasFrozen {
+			defer r.timeController.Unfreeze()
+		}
 	}
 
 	reqCtx := &RequestContext{

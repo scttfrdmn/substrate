@@ -3845,9 +3845,11 @@ stored — a caller the trust policy refuses records no use.
 
 **A projection over the recorded `AssumeRole` events was considered and rejected.** The direct
 write replays identically for the reason a projection would: the replay engine re-executes each
-recorded request with the simulated clock set to that event's timestamp and the request's region
-taken from the event, so the re-executed `AssumeRole` derives the same date and the same region
-and writes the same value. What a projection adds is a dependency no plugin has — the IAM plugin
+recorded request with the simulated clock **frozen at** that event's timestamp and the request's
+region taken from the event, so the re-executed `AssumeRole` derives the same date and the same
+region and writes the same value. ("Frozen at" rather than "set to" since
+[#1217](https://github.com/scttfrdmn/substrate/issues/1217): setting it left the clock advancing
+with wall time, so a rendered date was the recorded one only to within the replay's own latency.) What a projection adds is a dependency no plugin has — the IAM plugin
 would have to hold the event store and scan it on every `GetRole`, making the answer to a read
 depend on the event log rather than on state.
 
