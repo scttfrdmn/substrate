@@ -41,6 +41,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in every configuration. `ExportCSV`'s header is unchanged; widening an export format is not this
   field's question.
 
+### Changed
+
+- **An AppSync api key now expires 7 days out, not 365** (#1122). `API_CreateApiKey` states the
+  default in words — "The default value for this parameter is 7 days from creation time" — and
+  substrate set a year. This is a behaviour change, not only a fix: a consumer that asserted the
+  old expiry, or computed a date from it, will see the published one instead. `expires` is also
+  read now, where before it was decoded nowhere: a caller asking for a 30-day key was given a
+  year-long one and told it succeeded, which is the silent-wrong-answer class rather than a
+  refusal. A value the caller does send is honoured and rounded down to the hour, the
+  representation `API_ApiKey` publishes for its timestamps; the rounding is applied *after* the
+  bound is checked, because rounding first would refuse an `expires` exactly one day out that the
+  published sentence admits, and AWS publishes no order for the two. An `expires` under 1 day or
+  over 365 days from the create time is now refused with
+  **`ApiKeyValidityOutOfBoundsException`/400** carrying the page's own sentence; that code
+  previously had no site to fire from, because a refusal cannot be reached against a value that is
+  never read. Keys also answer **`deletes`**, which `API_ApiKey` publishes and substrate omitted,
+  derived as 60 days past `expires` from "Expired API keys are kept for 60 days after the
+  expiration time" — derived in the projection rather than persisted, so a key recorded before this
+  release still reports the published value instead of a zero. `UpdateApiKey` is out of scope: it is
+  unrouted, because #1065 gated the `apikeys` tail so a `POST` under `apikeys/{id}` answers
+  `UnknownOperationException`/404 rather than minting a second credential, and the bound's "from
+  update" half arrives with the operation.
+
 ### Fixed
 
 - **AppSync answered its GraphQL API's ARN under a member no SDK reads** (#1121). `API_GraphqlApi`

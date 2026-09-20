@@ -523,19 +523,28 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 	}
 	var input struct {
 		Description string `json:"description"`
+		Expires     int64  `json:"expires"`
 	}
-	// Ignore decode error — description is optional and body may be empty.
+	// Both members are Required: No, so an empty body is a valid CreateApiKey — but a body that does
+	// not decode is not, hence the refusal rather than a zero-valued input (#1122 reads `expires` out
+	// of it, where before only `description` was read).
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, appsyncInvalidBody()
 		}
 	}
 
+	created := p.tc.Now().Unix()
+	expires, expiresErr := appsyncAPIKeyExpiry(created, input.Expires)
+	if expiresErr != nil {
+		return nil, expiresErr
+	}
+
 	keyID := generateAppSyncAPIKeyID()
 	key := AppSyncAPIKey{
 		ID:          keyID,
 		Description: input.Description,
-		Expires:     p.tc.Now().Unix() + 365*24*3600,
+		Expires:     expires,
 	}
 	data, _ := json.Marshal(key)
 	goCtx := context.Background()
@@ -544,7 +553,7 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 		return nil, fmt.Errorf("put appsync api key: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIKeyIDsKey(acct, region, apiID), keyID)
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKey": key})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKey": appsyncAPIKeyToWire(key)})
 }
 
 func (p *AppSyncPlugin) listAPIKeys(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -565,7 +574,7 @@ func (p *AppSyncPlugin) listAPIKeys(reqCtx *RequestContext, req *AWSRequest, api
 			keys = append(keys, key)
 		}
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKeys": keys})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKeys": appsyncAPIKeysToWire(keys)})
 }
 
 // --- Schema operations ---
