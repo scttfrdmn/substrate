@@ -1322,6 +1322,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   describes the fallback it can make, and `LambdaExecCfg` documents where the gate really is. #1079's
   last acceptance criterion — that the stub path stays the default — was therefore already satisfied
   by `config.go`'s `false` default, and only the comment suggested otherwise.
+- **#917 was credited with twenty-five EC2 describes in the v0.118.0 release notes and twenty in this
+  file; its audited share is seven** (#1092). Three figures had been shipped for one piece of work and
+  none of them was the counted one. The v0.118.0 Release body's bullet read *"Twenty-five EC2 describes
+  … EC2 had two copies of a paginator and twenty operations with none, five more published a cursor and
+  read neither half of it"* — where twenty-five is the headline, twenty matches no audited number, and
+  the five is part two's own share read as if it were the remainder. The `## [v0.118.0]` part-one
+  headline here carried the same twenty. What the three commits actually did, confirmed against each
+  operation's page: sixteen routed EC2 describes published `MaxResults` and `NextToken` and implemented
+  neither, #917 converted **seven** of them and folded EC2's two pre-existing copies of the paginator
+  into one shared helper, #1024 converted the remaining **nine**, and the two operations outside EC2
+  were Lambda `ListEventSourceMappings` and API Gateway `GetBasePathMappings`. The part-one headline now
+  names the sixteen rather than a count of its own, and the Release body — which is editable where the
+  tag it points at is not — was corrected in place to seven plus the two outside EC2, and now names
+  #1024 for the nine. It had dropped #1024 entirely, which is how one release's two issues came to be
+  credited to one of them.
+
+  The self-contradiction was fifty-four lines wide, not sixty in the other direction as the issue
+  recorded: the audited sentence from #1024 sits at `CHANGELOG.md:3907` and the wrong headline sat at
+  `:3961`, both inside `## [v0.118.0]`. Nothing was added to `emulator/ec2_pagination.go:17-26` or
+  `docs/services.md:9570`/`:9587` — #1024 had already replaced the "roughly twenty" estimate at all
+  three with the audited figures, which is why this correction is confined to the two places the
+  estimate outlived it.
 
 ## [v0.119.0] - 2026-09-18
 
@@ -3958,11 +3980,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Two stragglers outside EC2 remain — Lambda's `ListEventSourceMappings` and API Gateway's
   `GetBasePathMappings` — and #917 stays open for them.
 
-- **EC2's describes had two copies of a paginator and twenty operations with none** (#917, part one of
-  three). `DescribeVolumes` and `DescribeSnapshots` publish `MaxResults` and `NextToken` and read
-  neither: every request answered the whole listing and emitted no token, so a consumer's paging loop
-  terminated on the first response here and first executed for real against a listing long enough to
-  page. Both now paginate, and the two operations that already did — `DescribeTags` and
+- **EC2's describes had two copies of a paginator, and sixteen published both cursor parameters and
+  read neither** (#917, part one of three). `DescribeVolumes` and `DescribeSnapshots` — two of the
+  sixteen — publish `MaxResults` and `NextToken` and read neither: every request answered the whole
+  listing and emitted no token, so a consumer's paging loop terminated on the first response here and
+  first executed for real against a listing long enough to page. Both now paginate, and the two operations that already did — `DescribeTags` and
   `DescribeLaunchTemplateVersions` — were converted onto the same helpers in the same change, so the
   count of implementations went from two to **one** rather than from two to three. Their wire behaviour
   is unchanged, as is the answer to any request that sends neither parameter: an absent `MaxResults`
