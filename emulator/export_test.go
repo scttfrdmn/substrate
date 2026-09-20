@@ -1598,6 +1598,17 @@ func CFNPropagateConfigStackTagsForTest(
 	return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 }
 
+// AthenaStateNamespaceForTest is the state namespace the Athena plugin keeps its records in.
+//
+// Exported so #1086's ordering assertion can count the reads the Athena listings make and no others.
+// Athena's index loader reports a store failure as an empty index, so the sealed-store assertion the
+// other sites use cannot tell the two orderings apart there; counting can, but only if the server's own
+// authorization reads — which happen in the iam namespace before any plugin is dispatched to — are
+// excluded. The namespace comes from the plugin's own constant rather than being spelled in the test.
+func AthenaStateNamespaceForTest() string {
+	return athenaNamespace
+}
+
 // SNSSubscriptionIndexKeyForTest is the state key a topic's subscription index is written at.
 //
 // Exported so #1086's ordering assertion can seal that one read. ListSubscriptionsByTopic resolves the
