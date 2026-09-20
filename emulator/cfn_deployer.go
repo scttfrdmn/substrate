@@ -4284,10 +4284,15 @@ func (d *StackDeployer) deploySNSTopic(
 		"Action": "CreateTopic",
 		"Name":   topicName,
 	}
-	// Forward DisplayName when declared so it round-trips and is drift-checkable.
+	// Forward DisplayName when declared so it round-trips and is drift-checkable, through the
+	// Attributes map API_CreateTopic publishes — `Attributes.entry.1.key` / `.value`. It used to be
+	// sent as a bare `DisplayName` parameter, which is not a parameter that page publishes and which
+	// the SNS plugin stopped honoring with #1126; the property itself is unchanged, only the wire
+	// form it travels in, which is now the one a real CreateTopic call would carry.
 	if _, declared := props["DisplayName"]; declared {
 		if dn := resolveValue(props["DisplayName"], cctx); dn != "" {
-			params["DisplayName"] = dn
+			params["Attributes.entry.1.key"] = "DisplayName"
+			params["Attributes.entry.1.value"] = dn
 		}
 	}
 	req := &AWSRequest{
