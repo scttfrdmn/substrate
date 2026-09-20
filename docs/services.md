@@ -14855,7 +14855,7 @@ table is a Substrate spelling.
 | ListFunctions | `GET /v1/apis/{apiId}/functions` | one page, no cursor |
 | GetFunction | `GET /v1/apis/{apiId}/functions/{functionId}` | |
 | DeleteFunction | `DELETE /v1/apis/{apiId}/functions/{functionId}` | **200** with an empty body |
-| CreateApiKey | `POST /v1/apis/{apiId}/apikeys` | `expires` is not read — [#1122](https://github.com/scttfrdmn/substrate/issues/1122) |
+| CreateApiKey | `POST /v1/apis/{apiId}/apikeys` | `expires` is read and bounded — see *An api key's expiry* |
 | ListApiKeys | `GET /v1/apis/{apiId}/apikeys` | one page, no cursor |
 | StartSchemaCreation | `POST /v1/apis/{apiId}/schemacreation` | stores the definition, answers `PROCESSING` |
 | GetIntrospectionSchema | `GET /v1/apis/{apiId}/schema` | a fixed placeholder schema |
@@ -14975,14 +14975,42 @@ projection rather than present and empty.
 Because `AWS::AppSync::GraphQLApi`'s `Ref` and `Fn::GetAtt Arn` are read out of the plugin's own
 response rather than rebuilt in the deployer, the CloudFormation reader moved with the rename.
 
+### An api key's expiry
+
+`API_CreateApiKey` publishes `expires` as an optional request member and states the default in words:
+"From the creation time, the time after which the API key expires. The date is represented as seconds
+since the epoch, rounded down to the nearest hour. The default value for this parameter is 7 days from
+creation time."
+
+| Request | Answer |
+|---------|--------|
+| No `expires` | 7 days from the simulated clock, rounded down to the hour |
+| `expires` between 1 and 365 days out | that instant, rounded down to the hour |
+| `expires` under 1 day or over 365 days out | `ApiKeyValidityOutOfBoundsException`/**400** |
+
+The bound is the one the exception's own message states: "The API key expiration must be set to a
+value between 1 and 365 days from creation (for `CreateApiKey`) or from update (for `UpdateApiKey`)."
+It is checked against the value the caller sent, with the hour rounding applied afterwards — rounding
+first would refuse an `expires` exactly one day out, which the sentence admits, because the rounding
+is how the timestamp is represented rather than part of the constraint. AWS publishes no order for the
+two.
+
+`deletes` is answered on every key, derived as 60 days past `expires` and rounded the same way, from
+`API_ApiKey`'s "Expired API keys are kept for 60 days after the expiration time." It is derived in the
+projection rather than persisted, so a key recorded before this behaviour existed still reports the
+published value instead of a zero.
+
+Until [#1122](https://github.com/scttfrdmn/substrate/issues/1122), every key expired 365 days out and a
+caller's `expires` was decoded nowhere — so a request for a 30-day key was answered with a year-long
+one and told it succeeded, and the published refusal had no site to fire from. The `from update` half
+of the bound arrives with `UpdateApiKey`, which is unrouted: a `POST` under `apikeys/{id}` answers
+`UnknownOperationException`/**404** rather than minting a second credential.
+
 ### Known divergences in the wire shape
 
 These are recorded rather than fixed, each with the issue that owns it, so that a consumer reading
 this page is not surprised by a member:
 
-- **An api key expires 365 days out and a caller's `expires` is ignored**, where the page publishes a
-  7-day default and a 1-to-365-day bound enforced by `ApiKeyValidityOutOfBoundsException`/400.
-  [#1122](https://github.com/scttfrdmn/substrate/issues/1122).
 - **Tagging is not modelled.** `CreateGraphqlApi` stores a `tags` map and reports it back, but
   `TagResource`, `UntagResource` and `ListTagsForResource` are unrouted and an AppSync ARN is not a
   Resource Groups Tagging resource here — see *Resource Groups Tagging* for the services that are.
