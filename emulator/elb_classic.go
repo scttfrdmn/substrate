@@ -76,9 +76,9 @@ const elbClassicAPIVersion = "2012-06-01"
 // elbClassicXMLNS is the XML namespace classic responses carry.
 //
 // It is the 2012-06-01 document namespace and it is spelled `http://`, which is what AWS publishes
-// in every sample response on every classic page. (Substrate's ELBv2 [elbXMLNS] spells the
-// 2015-12-01 one `https://` where AWS also publishes `http://`; that is a separate defect in a
-// constant this one must not copy.)
+// in every sample response on every classic page. The sibling [elbXMLNS] carries the 2015-12-01
+// one and is spelled the same way; it was `https://` until #1147, and the two differ only in the
+// version segment.
 const elbClassicXMLNS = "http://elasticloadbalancing.amazonaws.com/doc/2012-06-01/"
 
 // elbKindClassicLB is the internal kind constant for a Classic Load Balancer.

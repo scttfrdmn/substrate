@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every ELBv2 response carried a document namespace one character from the published one**
+  (#1147). `elbXMLNS` spelled the 2015-12-01 namespace `https://` where every sample response on
+  every ELBv2 page spells it `http://` — all four examples on `API_CreateLoadBalancer`, among
+  others. One constant, so the divergence was uniform across all ~30 routed ELBv2 operations
+  including the error envelope, and no test caught it because botocore resolves output shapes by
+  element name and ignores the namespace entirely. It is visible only to a consumer that compares
+  the attribute as a string: an XSD validation step, an XPath expression with a bound prefix, a
+  hand-written parser, a golden-file comparison against a response recorded from real AWS — and
+  there it lands on every response and reads as a bug in the consumer. The classic half added by
+  #844 already spelled its own namespace correctly and its doc comment named this defect as one it
+  must not copy; that parenthetical is now a statement that the two agree. The regression test
+  pins the attribute on the wire for three shapes, because they reach it by three routes — a
+  result-bearing response builds it in the handler, an empty-result response builds it in
+  `elbEmptyOKResponse`, and a classic response builds it from the second constant — so a
+  one-character edit to either constant leaves two of the three passing. The sweep #1147 asked for
+  checked seven sibling constants against each service's own page and found that `https://` is not
+  wrong by itself: IAM, SNS, STS and Route 53 publish it. RDS and ElastiCache publish `http://` and
+  substrate spells both `https://`, filed as #1238 rather than fixed here.
 - **The capacity-reservation section still claimed a seed replays like any other state** (#1140).
   v0.120.0 corrected that sentence where the snapshot-progression section stated it and added the
   general rule there, but the same false sentence sat 280 lines later under the capacity-reservation

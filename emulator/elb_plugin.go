@@ -960,8 +960,19 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 
 // --- Helpers ---
 
-// elbXMLNS is the XML namespace for ELBv2 API responses.
-const elbXMLNS = "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/"
+// elbXMLNS is the XML namespace ELBv2 (2015-12-01) responses carry.
+//
+// It is spelled `http://`, which is what AWS publishes in the `xmlns` attribute of every sample
+// response on every ELBv2 page — e.g. all four examples on `API_CreateLoadBalancer`. Substrate
+// spelled it `https://` until #1147, so every one of the ~30 routed ELBv2 operations answered a
+// namespace one character from the published one. Nothing dereferences a namespace URI, but an
+// XSD step, a prefix-bound XPath or a golden-file comparison against a recorded AWS response
+// compares it as a string and sees a mismatch on every response.
+//
+// Sibling constants that spell a document namespace `https://` are not all wrong: IAM, SNS, STS
+// and Route 53 publish `https://` in their own samples. RDS and ElastiCache publish `http://` and
+// substrate spells both `https://` — see #1238.
+const elbXMLNS = "http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/"
 
 // elbLBItem is the XML representation of an ELBv2 load balancer.
 type elbLBItem struct {
