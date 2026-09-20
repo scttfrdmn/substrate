@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch version-check discarded-unmarshal-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -63,6 +63,12 @@ docs-versions: ## Fail if docs/README pin a stale version in prose
 
 discarded-unmarshal-check: ## Fail if a plugin decodes a request body and discards the error
 	./scripts/check-discarded-unmarshal.sh
+
+wire-bookkeeping-check: ## Fail if substrate's own bookkeeping fields gain new wire-visible ground
+	./scripts/check-wire-bookkeeping.sh
+
+wire-bookkeeping-write: ## Rewrite the bookkeeping baseline from the tree (run by hand after a deliberate change)
+	./scripts/check-wire-bookkeeping.sh --write
 
 version-check: ## Fail if the build's -ldflags do not reach the version the server reports
 	./scripts/check-version-stamping.sh
