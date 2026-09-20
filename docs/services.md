@@ -1565,27 +1565,34 @@ Substrate applies 50 and 10,000, which is the published figure in each case — 
 default was substrate's own choice. It models no response-size ceiling, so `GetLogEvents` applies the
 count alone.
 
-**Three things this does not fix, named so the conversion is not read as having fixed them.** All four
+**Two things this does not fix, named so the conversion is not read as having fixed them.** All four
 response members publish *"The token expires after 24 hours."* and no page publishes a code for
 presenting an expired one, so a token substrate issues stays valid for the life of the store —
 refusing an expired one would need the token to carry its issue time and the simulated clock to judge
-it. `GetLogEvents` publishes a **pair** of directional tokens, says *"The returned tokens are never
+it. And `GetLogEvents` publishes a **pair** of directional tokens, says *"The returned tokens are never
 null"*, and documents termination as the returned token being equal to the one passed in; substrate
 emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
-caller following that rule cannot terminate and has to use the empty-token rule instead. And
-`ResourceNotFoundException` — *"The specified resource does not exist."*, published on three of the
-four pages at HTTP **400**, not 404 — has no site at these four doors, because none of them resolves
-the log group; a listing over a group that does not exist is empty rather than refused. That is a
-missing refusal rather than a token defect, and it is also why there is no `NotFound` precedence here
-to preserve, unlike SNS `ListSubscriptionsByTopic`.
+caller following that rule cannot terminate and has to use the empty-token rule instead.
 
-**All four validate the token before they read any state**, asserted by sealing the store the way
+A third was recorded here and has since been fixed: `ResourceNotFoundException` had no site at three of
+these four doors, so a listing over a log group that does not exist was empty rather than refused. See
+[a log group that does not exist is not an empty log group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group)
+for the refusal and for how it orders against the token.
+
+**All four validate the token before they read any listing**, asserted by sealing the store the way
 #915's sites are; unlike Athena, Logs' index loader propagates a store failure, so the seal can tell
-the two orderings apart. Three of the four require a member first — `logGroupName`, and
+the two orderings apart. `DescribeLogGroups` has nothing ahead of its decode and seals every read; the
+other three seal the *listing's* key alone — the stream-name index at two of them, the events key at
+`GetLogEvents` — each with a control call proving the sealed key is reached, because sealing every read
+would fail the group lookup that now precedes the token and assert nothing about it. Three of the four
+require a member first — `logGroupName`, and
 `logStreamName` as well at `GetLogEvents` — and that refusal keeps its precedence, because an absent
 required member is the more basic failure and neither ordering is published. Both carry the same
 published code, so the message is the only thing that says which one answered, which is why the
-precedence is asserted rather than left to the reader.
+precedence is asserted rather than left to the reader. Those same three now also resolve the log group
+(and the log stream, at `GetLogEvents`) ahead of the token, for the reason SNS `ListSubscriptionsByTopic`
+resolves its topic first; the token is still decoded before the *listing* is read, which is what #887's
+criterion asks.
 
 ### EventBridge Scheduler's one listing refuses a token the parameter is not documented to accept
 
@@ -1672,6 +1679,51 @@ either, and the page publishes no code for substrate's own index and records dis
 would be inventing one. What changed is that skipping one can no longer shorten a *page* — it shortens
 the listing being cut from, exactly as a filter does, and a page is short only when the listing has run
 out.
+
+### A log group that does not exist is not an empty log group
+
+`DescribeLogStreams`, `GetLogEvents` and `FilterLogEvents` each answered **HTTP 200 with an empty
+listing** for a log group with no record, so "this group is empty" and "this group was never created"
+were the same response — and a consumer waiting for a Lambda's first log line could not tell a
+still-warming stream from a name it had spelled wrong. All three now answer
+**`ResourceNotFoundException` / 400**:
+
+```
+The specified log group does not exist: /aws/lambda/my-function
+```
+
+**The code and the status are published on each page, and the status is not a typo.** Each of
+`API_DescribeLogStreams`, `API_GetLogEvents` and `API_FilterLogEvents` lists
+`ResourceNotFoundException`, glossed *"The specified resource does not exist."*, at **HTTP Status Code
+400**, not the 404 the code's name suggests. `API_DescribeLogGroups` is the exception and is left
+alone: its Errors section publishes `InvalidParameterException` / 400 and `ServiceUnavailableException`
+/ 500 and no not-found at all, so a `logGroupNamePrefix` matching nothing is a legitimately empty
+listing there, and refusing it would be inventing a code the page does not carry.
+
+**So the fix also moved four refusals that already existed.** `DeleteLogGroup`, `CreateLogStream`,
+`DeleteLogStream` and `PutLogEvents` answered the same `ResourceNotFoundException` at **404**, and each
+of their pages publishes 400. One code cannot keep two statuses in one service without a consumer
+matching on status seeing a difference AWS does not have, so all seven sites now go through two
+helpers and cannot drift. `GetLogEvents` also resolves the **stream**, since its `logStreamName` is
+Required: Yes and a stream is what it reads; the group is checked first, because a caller told the
+stream is missing would create it and be refused again.
+
+**The one status left as it was** is `CreateLogStream`'s and `CreateLogGroup`'s
+`ResourceAlreadyExistsException`, which substrate answers at **409** where both pages publish 400. That
+is the same class of defect, but it is a different code with its own consumers, so it is filed as
+[#1251](https://github.com/scttfrdmn/substrate/issues/1251) rather than swept in here under a
+not-found heading.
+
+**Against the token refusal above, the resource wins.** No page publishes the order, so the reading is
+the one SNS `ListSubscriptionsByTopic` already records: a token is a continuation of a listing over the
+resource the request addresses, and there is no listing to continue when the resource does not exist.
+The token is still decoded before the *listing* is read, which is all #887's criterion asks — a refusal
+must not depend on how much state happens to exist, and existence of the addressed resource is not
+"how much". The absent-required-member refusal keeps the front of the sequence, since a request naming
+no group names no resource to resolve. All three orderings are asserted, in both directions, because
+every refusal involved answers 400 and the code is the only thing that says which one won.
+`logStreamNames` on `FilterLogEvents` is a filter and not the addressed resource, so a name in it with
+no stream behind it is still not refused.
 
 ### Batch's three describes shared one paginator, so the decode had to leave it
 
@@ -14232,17 +14284,20 @@ is the signal, which is why `DeleteRetentionPolicy` exists.
 3653); anything else — including a plausible 45 or 100 — is an
 `InvalidParameterException`. Note that this service returns
 `ResourceNotFoundException` at **HTTP 400**, not 404, as its reference documents:
-the error code travels in the body's `__type`, not the status line. Substrate's
-older group- and stream-level not-found responses on the other operations still
-use 404 and are not changed here.
+the error code travels in the body's `__type`, not the status line. Every
+group- and stream-level not-found in the plugin answers that 400, and the three
+reads that answered an empty `200` for an absent log group now refuse it too —
+see [a log group that does not exist is not an empty log
+group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group), which also
+records the one status deliberately left as it was
+([#1251](https://github.com/scttfrdmn/substrate/issues/1251)).
 
 All four paginating operations refuse a `nextToken` substrate could not have issued with
 `InvalidParameterException` / 400, rather than answering a well-formed page one — see
 [CloudWatch Logs carried one block four times](#cloudwatch-logs-carried-one-block-four-times-and-the-page-says-where-a-token-comes-from)
-for the provenance, the three divergences the change deliberately leaves in place (the published
-24-hour token expiry, `GetLogEvents`' missing `nextBackwardToken`, and the absent
-`ResourceNotFoundException` for a log group that does not exist), and the argument that the token is
-validated before any state is read.
+for the provenance, the two divergences the change deliberately leaves in place (the published
+24-hour token expiry and `GetLogEvents`' missing `nextBackwardToken`), and the argument that the token
+is validated before any listing is read.
 
 ### CloudFormation resource types
 

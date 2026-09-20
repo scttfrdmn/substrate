@@ -27,6 +27,9 @@ package emulator_test
 // 404 keeps its precedence: the bucket is the resource the request addresses, and AWS publishes
 // nothing about which of the two refusals wins. SNS ListSubscriptionsByTopic is the same exception for
 // the same reason, and because both of its reads are Gets it seals one state key rather than a method.
+// CloudWatch Logs' three group-addressed reads joined that shape in #1224 and seal a key too — the
+// stream-name index at DescribeLogStreams and FilterLogEvents, the events key at GetLogEvents — each
+// with a control call proving the sealed key is reached at all.
 // Athena is asserted by counting reads instead of sealing, because its index loader turns a store
 // failure into an empty index and so a sealed read is indistinguishable from an empty listing — see
 // [tokenRefusalCountingState], which is the honest instrument for that shape rather than a seal that
@@ -1289,6 +1292,34 @@ func tokenRefusalCWLogsPutEvents(t *testing.T, srv *emulator.Server, group, stre
 	}
 }
 
+// tokenRefusalCWLogsRegion is the region the host above resolves to, named so the sealed-key helpers
+// below cannot spell a different one than the calls they seal.
+const tokenRefusalCWLogsRegion = "us-east-1"
+
+// tokenRefusalCWLogsAccountOf reads the account segment out of a log group's ARN.
+//
+// The account comes from an ARN the server minted rather than from a constant, for the reason
+// [tokenRefusalSNSAccountOf] gives: the ordering assertions below have to seal the key the running
+// plugin writes, and a guessed account would seal a key nothing reads — which would make the assertion
+// pass for the wrong reason.
+func tokenRefusalCWLogsAccountOf(t *testing.T, srv *emulator.Server, group string) string {
+	t.Helper()
+	status, body, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogGroups",
+		fmt.Sprintf(`{"logGroupNamePrefix":%q}`, group))
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+	var out struct {
+		LogGroups []struct {
+			ARN string `json:"arn"`
+		} `json:"logGroups"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &out))
+	require.Len(t, out.LogGroups, 1, body)
+	parts := strings.Split(out.LogGroups[0].ARN, ":")
+	require.Greater(t, len(parts), 5, "not a log group ARN: %s", out.LogGroups[0].ARN)
+	return parts[4]
+}
+
 // TestPaginationToken_CWLogsDescribeLogGroupsRefusesATokenItDidNotIssue is #1086 at the first of
 // CloudWatch Logs' four sites, the only one of them whose page publishes no ResourceNotFoundException
 // and so the only one with nothing ahead of the decode at all.
@@ -1382,11 +1413,36 @@ func TestPaginationToken_CWLogsDescribeLogStreamsRefusesATokenItDidNotIssue(t *t
 		assert.Contains(t, body, "logGroupName is required", body)
 	})
 
-	t.Run("refused before any state is read", func(t *testing.T) {
-		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+	t.Run("an absent log group outranks a bad token", func(t *testing.T) {
+		// #1224's half of the ordering: the group is the resource the request addresses, so its
+		// not-found keeps precedence, the same reading SNS ListSubscriptionsByTopic records for its
+		// topic. Both refusals are 400, so the code is the only thing that says which one answered.
+		status, body, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogStreams",
+			`{"logGroupName":"trg-streams-never-created","nextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "ResourceNotFoundException", code, body)
+	})
+
+	// The decode sits above the stream-index read. Sealing that one key leaves the group lookup
+	// working, so a handler that decoded after it would report the seal as a 500 instead of refusing —
+	// which sealing every Get can no longer show, since #1224 put the group lookup ahead of the token.
+	t.Run("refused before the stream index is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager()}
 		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		tokenRefusalCWLogsGroup(t, sealedSrv, "trg-sealed-streams")
+		sealed.sealGetKey = emulator.CWLogStreamNamesKeyForTest(
+			tokenRefusalCWLogsAccountOf(t, sealedSrv, "trg-sealed-streams"),
+			tokenRefusalCWLogsRegion, "trg-sealed-streams")
+
+		// The control: with a token this operation could have issued, the sealed read is reached and
+		// reported. Without it the refusal below could pass because the key is never read at all.
+		status, body, _ := tokenRefusalCWLogsCall(t, sealedSrv, "DescribeLogStreams",
+			fmt.Sprintf(`{"logGroupName":"trg-sealed-streams","nextToken":%q}`,
+				base64.StdEncoding.EncodeToString([]byte("0"))))
+		require.NotEqual(t, http.StatusBadRequest, status, body)
+
 		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "DescribeLogStreams",
-			fmt.Sprintf(`{"logGroupName":%q,"nextToken":"!!not-base64!!"}`, group))
+			`{"logGroupName":"trg-sealed-streams","nextToken":"!!not-base64!!"}`)
 		assert.Equal(t, http.StatusBadRequest, status, body)
 		assert.Equal(t, "InvalidParameterException", code, body)
 	})
@@ -1433,11 +1489,42 @@ func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing
 		})
 	}
 
-	t.Run("refused before any state is read", func(t *testing.T) {
-		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+	t.Run("an absent resource outranks a bad token", func(t *testing.T) {
+		// This is the site that addresses two resources, so both are asserted, and the group first:
+		// a caller told the stream is missing would create it and be refused again (#1224).
+		status, body, code := tokenRefusalCWLogsCall(t, srv, "GetLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":"trg-never-created","nextToken":"!!not-base64!!"}`, group))
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "ResourceNotFoundException", code, body)
+		assert.Contains(t, body, "log stream", body)
+
+		status, body, code = tokenRefusalCWLogsCall(t, srv, "GetLogEvents",
+			fmt.Sprintf(`{"logGroupName":"trg-never-created","logStreamName":%q,"nextToken":"!!not-base64!!"}`, stream))
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "ResourceNotFoundException", code, body)
+		assert.Contains(t, body, "log group", body)
+	})
+
+	// The decode sits above the events read, which at this site is a key rather than an index. Sealing
+	// that one key leaves both resource lookups working, so a handler that decoded after them would
+	// report the seal as a 500 instead of refusing.
+	t.Run("refused before the events key is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager()}
 		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		tokenRefusalCWLogsGroup(t, sealedSrv, "trg-sealed-events")
+		tokenRefusalCWLogsStream(t, sealedSrv, "trg-sealed-events", "trg-sealed-stream")
+		sealed.sealGetKey = emulator.CWLogEventsKeyForTest(
+			tokenRefusalCWLogsAccountOf(t, sealedSrv, "trg-sealed-events"),
+			tokenRefusalCWLogsRegion, "trg-sealed-events", "trg-sealed-stream")
+
+		// The control, as above: the sealed key has to be reachable for the refusal to mean anything.
+		status, body, _ := tokenRefusalCWLogsCall(t, sealedSrv, "GetLogEvents",
+			fmt.Sprintf(`{"logGroupName":"trg-sealed-events","logStreamName":"trg-sealed-stream","nextToken":%q}`,
+				base64.StdEncoding.EncodeToString([]byte("0"))))
+		require.NotEqual(t, http.StatusBadRequest, status, body)
+
 		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "GetLogEvents",
-			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"nextToken":"!!not-base64!!"}`, group, stream))
+			`{"logGroupName":"trg-sealed-events","logStreamName":"trg-sealed-stream","nextToken":"!!not-base64!!"}`)
 		assert.Equal(t, http.StatusBadRequest, status, body)
 		assert.Equal(t, "InvalidParameterException", code, body)
 	})
@@ -1447,8 +1534,8 @@ func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing
 // fourth site, the one that concatenates every stream in the group before paging.
 //
 // The token is not passed logStreamNames, so the walk goes through the stream index — which is both
-// the path a caller takes by default and the one the sealed-store assertion can see, since the
-// per-stream reads below it swallow their errors.
+// the path a caller takes by default and the one the sealed-key assertion can see, since the per-stream
+// reads below it swallow their errors.
 func TestPaginationToken_CWLogsFilterLogEventsRefusesATokenItDidNotIssue(t *testing.T) {
 	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
 	const group = "trg-filter-group"
@@ -1499,11 +1586,38 @@ func TestPaginationToken_CWLogsFilterLogEventsRefusesATokenItDidNotIssue(t *test
 		assert.Empty(t, code, body)
 	})
 
-	t.Run("refused before any state is read", func(t *testing.T) {
-		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+	t.Run("an absent log group outranks a bad token", func(t *testing.T) {
+		// Only the group: logStreamNames is a filter on the search rather than the resource the request
+		// addresses, so a name in it with no stream behind it is still not refused (#1224).
+		status, body, code := tokenRefusalCWLogsCall(t, srv, "FilterLogEvents",
+			`{"logGroupName":"trg-filter-never-created","nextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "ResourceNotFoundException", code, body)
+
+		status, body, code = tokenRefusalCWLogsCall(t, srv, "FilterLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamNames":["trg-no-such-stream"]}`, group))
+		assert.Equal(t, http.StatusOK, status, body)
+		assert.Empty(t, code, body)
+	})
+
+	// The decode sits above the stream-index read, as at DescribeLogStreams. Sealing that one key leaves
+	// the group lookup working, so a handler that decoded after it would report the seal as a 500.
+	t.Run("refused before the stream index is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager()}
 		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		tokenRefusalCWLogsGroup(t, sealedSrv, "trg-sealed-filter")
+		sealed.sealGetKey = emulator.CWLogStreamNamesKeyForTest(
+			tokenRefusalCWLogsAccountOf(t, sealedSrv, "trg-sealed-filter"),
+			tokenRefusalCWLogsRegion, "trg-sealed-filter")
+
+		// The control, as above.
+		status, body, _ := tokenRefusalCWLogsCall(t, sealedSrv, "FilterLogEvents",
+			fmt.Sprintf(`{"logGroupName":"trg-sealed-filter","nextToken":%q}`,
+				base64.StdEncoding.EncodeToString([]byte("0"))))
+		require.NotEqual(t, http.StatusBadRequest, status, body)
+
 		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "FilterLogEvents",
-			fmt.Sprintf(`{"logGroupName":%q,"nextToken":"!!not-base64!!"}`, group))
+			`{"logGroupName":"trg-sealed-filter","nextToken":"!!not-base64!!"}`)
 		assert.Equal(t, http.StatusBadRequest, status, body)
 		assert.Equal(t, "InvalidParameterException", code, body)
 	})

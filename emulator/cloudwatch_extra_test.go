@@ -52,7 +52,9 @@ func TestCWLogs_DeleteStreamNotFound(t *testing.T) {
 	srv := newCWLogsTestServer(t)
 	cwLogsRequest(t, srv, "CreateLogGroup", map[string]string{"logGroupName": "/g"})
 	resp := cwLogsRequest(t, srv, "DeleteLogStream", map[string]string{"logGroupName": "/g", "logStreamName": "missing"})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	// 400: API_DeleteLogStream publishes ResourceNotFoundException at HTTP Status Code 400 (#1224).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", cwLogsErrorType(t, resp))
 }
 
 func TestCWLogs_DescribeStreamPrefix(t *testing.T) {
@@ -79,7 +81,9 @@ func TestCWLogs_PutEventsOnMissingStream(t *testing.T) {
 		"logStreamName": "nonexistent",
 		"logEvents":     []map[string]any{{"timestamp": 1, "message": "x"}},
 	})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	// 400: API_PutLogEvents publishes ResourceNotFoundException at HTTP Status Code 400 (#1224).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", cwLogsErrorType(t, resp))
 }
 
 func TestCWLogs_GetEventsTimeFilter(t *testing.T) {

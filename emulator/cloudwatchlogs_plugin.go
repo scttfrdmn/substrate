@@ -133,7 +133,9 @@ func (p *CloudWatchLogsPlugin) deleteLogGroup(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("logs deleteLogGroup state.Get: %w", err)
 	}
 	if existing == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Log group not found: " + body.LogGroupName, HTTPStatus: http.StatusNotFound}
+		// 400, not 404: API_DeleteLogGroup publishes ResourceNotFoundException at 400 like every other
+		// page in this service, and the plugin answered two different statuses for one code until #1224.
+		return nil, cwLogsGroupNotFound(body.LogGroupName)
 	}
 
 	// Delete log group.
@@ -389,7 +391,7 @@ func (p *CloudWatchLogsPlugin) createLogStream(ctx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("logs createLogStream group.Get: %w", err)
 	}
 	if groupData == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Log group not found: " + body.LogGroupName, HTTPStatus: http.StatusNotFound}
+		return nil, cwLogsGroupNotFound(body.LogGroupName)
 	}
 
 	streamKey := cwLogStreamKey(ctx.AccountID, ctx.Region, body.LogGroupName, body.LogStreamName)
@@ -441,7 +443,7 @@ func (p *CloudWatchLogsPlugin) deleteLogStream(ctx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("logs deleteLogStream state.Get: %w", err)
 	}
 	if existing == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Log stream not found: " + body.LogStreamName, HTTPStatus: http.StatusNotFound}
+		return nil, cwLogsStreamNotFound(body.LogStreamName)
 	}
 
 	if err := p.state.Delete(goCtx, cloudwatchLogsNamespace, streamKey); err != nil {
@@ -471,14 +473,22 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Below the required-member refusal and above the stream index, for the reason
-	// cloudwatchlogs_pagination.go states (#1086).
+	goCtx := context.Background()
+
+	// Above the token decode, because the group is the resource the request addresses and a token is a
+	// continuation of a listing over it — see cloudwatchlogs_not_found.go for the precedence argument
+	// and the precedent it follows (#1224).
+	if err := p.requireLogGroup(goCtx, ctx.AccountID, ctx.Region, body.LogGroupName, "describeLogStreams"); err != nil {
+		return nil, err
+	}
+
+	// Below the required-member refusal and the group resolution, and above the stream index, for the
+	// reason cloudwatchlogs_pagination.go states (#1086).
 	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
 	if !tokenOK {
 		return nil, cwLogsInvalidPaginationToken("DescribeLogStreams")
 	}
 
-	goCtx := context.Background()
 	idxKey := cwLogStreamNamesKey(ctx.AccountID, ctx.Region, body.LogGroupName)
 	allNames, err := loadStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey)
 	if err != nil {
@@ -553,7 +563,7 @@ func (p *CloudWatchLogsPlugin) putLogEvents(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("logs putLogEvents stream.Get: %w", err)
 	}
 	if streamData == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Log stream not found: " + body.LogStreamName, HTTPStatus: http.StatusNotFound}
+		return nil, cwLogsStreamNotFound(body.LogStreamName)
 	}
 
 	now := p.tc.Now().UnixMilli()
@@ -616,15 +626,27 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName and logStreamName are required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Below the required-member refusal and above the event read, for the reason
-	// cloudwatchlogs_pagination.go states (#1086). Only the forward token is substrate's to issue, so
-	// only the forward offset is what a token can decode to.
+	goCtx := context.Background()
+
+	// Both resources this request addresses are resolved above the token decode, the group before the
+	// stream so that a missing group is reported as a missing group — see cloudwatchlogs_not_found.go
+	// (#1224). logStreamName is Required: Yes on this page, so the stream is as much the addressed
+	// resource as the group is.
+	if err := p.requireLogGroup(goCtx, ctx.AccountID, ctx.Region, body.LogGroupName, "getLogEvents"); err != nil {
+		return nil, err
+	}
+	if err := p.requireLogStream(goCtx, ctx.AccountID, ctx.Region, body.LogGroupName, body.LogStreamName, "getLogEvents"); err != nil {
+		return nil, err
+	}
+
+	// Below the required-member refusal and the two resolutions, and above the event read, for the
+	// reason cloudwatchlogs_pagination.go states (#1086). Only the forward token is substrate's to
+	// issue, so only the forward offset is what a token can decode to.
 	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
 	if !tokenOK {
 		return nil, cwLogsInvalidPaginationToken("GetLogEvents")
 	}
 
-	goCtx := context.Background()
 	eventsKey := cwLogEventsKey(ctx.AccountID, ctx.Region, body.LogGroupName, body.LogStreamName)
 	eventsData, err := p.state.Get(goCtx, cloudwatchLogsNamespace, eventsKey)
 	if err != nil {
@@ -691,14 +713,21 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Below the required-member refusal and above every read, for the reason
-	// cloudwatchlogs_pagination.go states (#1086).
+	goCtx := context.Background()
+
+	// Above the token decode, for the reason cloudwatchlogs_not_found.go states (#1224). Only the group
+	// is resolved: logStreamNames is a filter on the search rather than the resource the request
+	// addresses, and the page publishes nothing that makes naming an absent stream in it a refusal.
+	if err := p.requireLogGroup(goCtx, ctx.AccountID, ctx.Region, body.LogGroupName, "filterLogEvents"); err != nil {
+		return nil, err
+	}
+
+	// Below the required-member refusal and the group resolution, and above every listing read, for the
+	// reason cloudwatchlogs_pagination.go states (#1086).
 	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
 	if !tokenOK {
 		return nil, cwLogsInvalidPaginationToken("FilterLogEvents")
 	}
-
-	goCtx := context.Background()
 
 	// Determine which streams to search.
 	streamNames := body.LogStreamNames

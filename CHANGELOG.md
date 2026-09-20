@@ -43,6 +43,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A CloudWatch Logs group that does not exist read as an empty log group** (#1224).
+  `DescribeLogStreams`, `GetLogEvents` and `FilterLogEvents` each answered HTTP 200 with an empty
+  listing for a log group with no record, so "this group is empty" and "this group was never created"
+  were the same response — and a consumer waiting for a Lambda's first log line could not tell a
+  still-warming stream from a name it had misspelled. Each of `API_DescribeLogStreams`,
+  `API_GetLogEvents` and `API_FilterLogEvents` publishes `ResourceNotFoundException`, glossed *"The
+  specified resource does not exist."*, at **HTTP 400** — not the 404 the code's name suggests — and
+  all three now answer it. `DescribeLogGroups` is deliberately excluded: its Errors section publishes
+  no not-found at all, so a `logGroupNamePrefix` matching nothing is a legitimately empty listing
+  there. Because the code's published status is 400, the four sites that already refused an absent
+  resource — `DeleteLogGroup`, `CreateLogStream`, `DeleteLogStream` and `PutLogEvents` — moved from
+  404 to 400 with them: one code cannot keep two statuses in one service without a consumer matching
+  on status seeing a difference AWS does not have. All seven now go through two shared helpers.
+  `GetLogEvents` also resolves the stream, since its `logStreamName` is Required: Yes, and reports the
+  group first when both are absent. Against #1086's refusal of an unissuable token the resource wins,
+  which is the reading SNS `ListSubscriptionsByTopic` already records — a token continues a listing
+  over the resource the request addresses, and there is no listing to continue when the resource does
+  not exist — while the token is still decoded before the *listing* is read, and an absent required
+  member still refuses first. `CreateLogGroup`/`CreateLogStream`'s `ResourceAlreadyExistsException`
+  stays at 409 where its pages publish 400: same class, different code and consumers, so it is #1251.
 - **EventBridge Scheduler's `State` filter was applied after the page was cut** (#1229).
   `ListSchedules` read its three filters in three places relative to the cut: `ScheduleGroup` chose
   which name index to load and `NamePrefix` filtered that index, both ahead of it, but `State` ran

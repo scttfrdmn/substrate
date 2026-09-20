@@ -268,7 +268,10 @@ func TestCWLogs_DeleteNonExistent(t *testing.T) {
 	srv := newCWLogsTestServer(t)
 
 	resp := cwLogsRequest(t, srv, "DeleteLogGroup", map[string]string{"logGroupName": "/does/not/exist"})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	// 400, not 404: API_DeleteLogGroup publishes ResourceNotFoundException with HTTP Status Code 400,
+	// as every CloudWatch Logs page that publishes the code does (#1224).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", cwLogsErrorType(t, resp))
 }
 
 func TestCWLogs_CreateStreamMissingGroup(t *testing.T) {
@@ -278,5 +281,8 @@ func TestCWLogs_CreateStreamMissingGroup(t *testing.T) {
 		"logGroupName":  "/missing/group",
 		"logStreamName": "stream",
 	})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	// 400, not 404 — see TestCWLogs_DeleteNonExistent; API_CreateLogStream publishes the same status
+	// for the same code (#1224).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	assert.Equal(t, "ResourceNotFoundException", cwLogsErrorType(t, resp))
 }
