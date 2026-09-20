@@ -12,20 +12,6 @@ import (
 // control-plane (seed) data.
 const elbAccountLimitsCtrlNamespace = "elb-limits-ctrl"
 
-// elbAccountLimitsMaxPageSize is the largest PageSize DescribeAccountLimits documents.
-//
-// AWS: "PageSize … Type: Integer. Valid Range: Minimum value of 1. Maximum value of 400."
-// The same range is published on both generations' pages.
-const elbAccountLimitsMaxPageSize = 400
-
-// elbAccountLimitsDefaultPageSize is the page size used when the request asks for none, or
-// asks for one substrate cannot use.
-//
-// It is the documented maximum, so an unparameterized call returns every limit in one page
-// and reports no NextMarker — which is what a caller reading its quotas expects, and what
-// the AWS CLI reference's own example output for the operation shows.
-const elbAccountLimitsDefaultPageSize = elbAccountLimitsMaxPageSize
-
 // elbAccountLimit is one reported Elastic Load Balancing account limit.
 //
 // Max is a string rather than an int because that is the member's published type: the
@@ -145,31 +131,6 @@ func (p *ELBPlugin) resolveAccountLimitMax(name string) (string, error) {
 	return "", nil
 }
 
-// elbAccountLimitsPageSize resolves the page size a DescribeAccountLimits request asked
-// for, falling back to [elbAccountLimitsDefaultPageSize] for a value substrate cannot use:
-// absent, non-numeric, or outside the documented 1–400.
-//
-// Falling back rather than refusing is a decision, because substrate's paginators do not
-// agree with each other. The Query-protocol family this operation belongs to — RDS's and
-// ElastiCache's `MaxRecords`, CloudWatch's — takes any positive integer and quietly
-// substitutes its default for anything else, enforcing no maximum. EC2's `DescribeTags`
-// goes the other way and refuses a `MaxResults` outside 5–1000 with
-// `InvalidParameterValue`. ELBv2 had no paginated operation at all before this one, so
-// there was no ELB precedent to match and one of the two had to be chosen (#885).
-//
-// The deciding argument is that DescribeAccountLimits publishes **no operation-specific
-// error**: its Errors section is Common Errors only, on both generations' pages. Refusing
-// would mean inventing a code the page does not publish, which is the thing EC2's
-// DescribeTags did *not* have to do. And because the default is the documented maximum, a
-// PageSize above 400 is answered indistinguishably from a clamp to 400.
-func elbAccountLimitsPageSize(raw string) int {
-	n, err := strconv.Atoi(raw)
-	if err != nil || n < 1 || n > elbAccountLimitsMaxPageSize {
-		return elbAccountLimitsDefaultPageSize
-	}
-	return n
-}
-
 // elbLimitItem is the XML representation of an ELBv2 Limit. Members are declared in the
 // order API_Limit's Contents section lists them.
 type elbLimitItem struct {
@@ -195,7 +156,20 @@ type elbLimitItem struct {
 // This handler answers v2 shapes, so it follows v2's null; the difference is recorded here
 // for the day classic dispatch arrives (#844), because it is a published difference and not
 // a paraphrase.
+//
+// `PageSize` had its own resolver here — `elbAccountLimitsPageSize`, which substituted the
+// default for an out-of-range or non-numeric value and answered 200 — and #1150 replaced it
+// with the plugin's one rule, [elbPageSize]. That function's file carries the whole of the
+// reasoning: that the fallback was a decision rather than an oversight, that #1064 removed
+// the step it turned on, and the Query-family survey it sat in.
 func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Before any state is read, as `DescribeLoadBalancers` validates its own cursor: a refused
+	// request must not be distinguishable from one that was refused earlier.
+	pageSize, awsErr := elbPageSize(req.Params["PageSize"])
+	if awsErr != nil {
+		return nil, awsErr
+	}
+
 	limits := make([]elbLimitItem, 0, len(elbDefaultAccountLimits))
 	for _, limit := range elbDefaultAccountLimits {
 		reported := limit.Max
@@ -223,7 +197,7 @@ func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSReques
 	page := limits[offset:]
 
 	var nextMarker string
-	if pageSize := elbAccountLimitsPageSize(req.Params["PageSize"]); len(page) > pageSize {
+	if len(page) > pageSize {
 		page = page[:pageSize]
 		nextMarker = strconv.Itoa(offset + pageSize)
 	}

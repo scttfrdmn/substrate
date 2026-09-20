@@ -277,7 +277,7 @@ func TestELBClassic_DeleteIsIdempotentAndNamesItsLoadBalancer(t *testing.T) {
 
 	// The one refusal the operation has, and it is not from its own Errors section — that section is
 	// empty. An absent `LoadBalancerName` names nothing at all, so the idempotent success has nothing
-	// to be idempotent about, and the code is the Common Errors one [elbClassicValidationError]
+	// to be idempotent about, and the code is the Common Errors one [elbValidationError]
 	// documents.
 	missing := elbRequest(t, ts.URL, map[string]string{
 		"Action": "DeleteLoadBalancer", "Version": elbClassicVersion,
@@ -551,15 +551,17 @@ func TestELBClassic_ARepeatedNameIsRefused(t *testing.T) {
 	assert.Equal(t, dnsName, out.Result.Descriptions[0].DNSName)
 }
 
-// TestELBClassic_DescribeRefusesABadCursor covers the two cursor members' own refusals.
+// TestELBClassic_DescribeRefusesABadCursor covers the `Marker` half of the cursor's own refusals.
+//
+// The `PageSize` half was here too, as three rows, until #1150 made the refusal the plugin's one rule
+// rather than this operation's: `elb_page_size_test.go` asserts it for both generations at once, which
+// is the property that was missing, and keeping a copy here would leave two tables to edit when the
+// rule changes.
 func TestELBClassic_DescribeRefusesABadCursor(t *testing.T) {
 	tests := []struct {
 		name  string
 		extra map[string]string
 	}{
-		{name: "a page size above the published maximum", extra: map[string]string{"PageSize": "401"}},
-		{name: "a page size below the published minimum", extra: map[string]string{"PageSize": "0"}},
-		{name: "a page size that is not a number", extra: map[string]string{"PageSize": "all"}},
 		{name: "a marker the service never issued", extra: map[string]string{"Marker": "page-two"}},
 	}
 	for _, tt := range tests {

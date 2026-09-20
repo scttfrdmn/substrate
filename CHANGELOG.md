@@ -75,6 +75,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filed as #1242; EC2 (#1189) and Redshift (#1208) were already filed, and EC2's published element is
   a root-level lowercase `requestId` rather than this envelope — a different document, not a
   duplicate.
+- **One ELB plugin answered one published `PageSize` range two ways** (#1150). Both generations
+  publish the same constraint — "Valid Range: Minimum value of 1. Maximum value of 400", and classic's
+  "a number from 1 to 400. The default is 400" — and substrate answered it twice over: ELBv2
+  `DescribeAccountLimits` substituted its default and returned 200 for a value outside the range,
+  while classic `DescribeLoadBalancers`, in the same plugin under the same signing name, refused the
+  same value with `ValidationError`/400. The fallback was argued for in writing rather than
+  overlooked, and the argument is what changed: its deciding step was that `DescribeAccountLimits`
+  publishes no operation-specific error, so refusing looked like inventing a code, and #1064
+  established that the consolidated Query Common Errors page each operation's Errors section links as
+  *its own* publishes `ValidationError` at 400 — a code on the page an operation links is that
+  operation's own vocabulary, not a borrowing from a sibling. The other half of the old argument, that
+  a `PageSize` above 400 is indistinguishable from a clamp because the default *is* the maximum, was
+  true and defended nothing at the low end: `PageSize=0` and `PageSize=-1` were answered with 400
+  items, the largest page a caller can get in response to asking for the smallest. So the rule is now
+  refusal, written once in `elb_page_size.go` and called by both operations; `elbClassicValidationError`
+  became `elbValidationError`, because a refusal an ELBv2 operation answers cannot be built by a
+  function whose name says classic. The Query family it sits in agrees with it now — RDS's and
+  ElastiCache's `MaxRecords` and CloudWatch's substituted a default until #913 made them refuse, and
+  EC2's `DescribeTags` already refused — with the code differing because the page does, which leaves
+  the rule shared and the vocabulary each service's. The test that pinned the fallback moves rather
+  than being deleted, and moves *up* a level: it asserted this operation's answer, and the new one
+  asserts that **both** operations answer the same code and status for each of the four unusable
+  values, since two tables agreeing today is what drifted apart in the first place. The sweep #1150
+  asked for found a third answer rather than a second: of the plugin's six paginated operations, the
+  four remaining ELBv2 describes read neither `Marker` nor `PageSize` at all, which is #1244 — closing
+  it means implementing the cursor, not validating a member, and they take this rule when they do. The
+  `Marker` half of the same cursor is still answered two ways and is #1245, kept separate so this
+  change's diff is one member.
 - **The capacity-reservation section still claimed a seed replays like any other state** (#1140).
   v0.120.0 corrected that sentence where the snapshot-progression section stated it and added the
   general rule there, but the same false sentence sat 280 lines later under the capacity-reservation

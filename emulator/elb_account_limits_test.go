@@ -233,16 +233,17 @@ func TestELB_DescribeAccountLimits_MarkerRoundTrip(t *testing.T) {
 	}
 }
 
-// TestELB_DescribeAccountLimits_PageSize covers the documented 1–400 range and what happens
-// outside it.
+// TestELB_DescribeAccountLimits_PageSize covers the documented 1–400 range from the inside:
+// every value the operation accepts, and the page each one answers.
 //
-// A value substrate cannot use falls back to the default, which is the documented maximum —
-// the behavior RDS's and ElastiCache's MaxRecords and CloudWatch's already have. It is a
-// choice, not the only convention in the tree: EC2's DescribeTags refuses a MaxResults
-// outside 5–1000 with InvalidParameterValue. The deciding argument is that
-// DescribeAccountLimits publishes **no operation-specific error** — its Errors section is
-// Common Errors only on both generations' pages — so refusing would mean inventing a code
-// AWS does not publish for it (#885).
+// The outside of the range moved to `elb_page_size_test.go` when #1150 gave the plugin one
+// rule. Until then a value substrate could not use fell back to the default — the behavior
+// the Query family had before #913 — and the argument for it turned on
+// DescribeAccountLimits publishing no operation-specific error, which #1064 answered: the
+// Common Errors page its Errors section links as its own publishes `ValidationError`. So the
+// four out-of-range cases are now refusals, and they are asserted there against **both**
+// generations at once, because "the same code and status from both" is the property that was
+// missing rather than "this operation refuses".
 func TestELB_DescribeAccountLimits_PageSize(t *testing.T) {
 	all := len(elbExpectedAccountLimitNames)
 	tests := []struct {
@@ -252,14 +253,10 @@ func TestELB_DescribeAccountLimits_PageSize(t *testing.T) {
 		wantNextMarker string
 	}{
 		{"absent returns the whole set", "", all, ""},
-		{"one", "1", 1, "1"},
+		{"the documented minimum", "1", 1, "1"},
 		{"the documented minimum plus one", "2", 2, "2"},
 		{"exactly the set size", "23", all, ""},
 		{"the documented maximum", "400", all, ""},
-		{"zero falls back to the default", "0", all, ""},
-		{"negative falls back to the default", "-5", all, ""},
-		{"above the documented maximum falls back to the default", "401", all, ""},
-		{"non-numeric falls back to the default", "not-a-number", all, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

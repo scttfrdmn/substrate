@@ -1196,7 +1196,8 @@ every other caller exposed.
   do state what the `Marker` means — "the response includes only records beyond the marker" — and
   a record cannot be *beyond* another without an order to be beyond it in. AWS also publishes a
   `Marker` and `PageSize` on the four ELBv2 describes, though substrate implements neither
-  parameter there yet, so ELBv2's order rests on the replay promise alone for now. A cursor over
+  parameter there yet ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)), so ELBv2's
+  order rests on the replay promise alone for now. A cursor over
   an unstable order is the worst form of this defect, because it loses and duplicates resources
   rather than merely reordering them.
 - **AWS documents no order at all, and lexicographic is substrate's reading.** `ListBuckets` says
@@ -1312,6 +1313,17 @@ parameter is invalid." — and is **substrate's reading** for RDS, whose pages p
 NotFound faults (`API_DescribeDBInstances` lists `DBInstanceNotFound` / 404 and nothing else). One
 code serves both families, as it does for the `Marker`, so the two parameters of one cursor cannot
 be refused under different codes. Both parameters are validated before any state is read.
+
+**Elastic Load Balancing joined this rule later, and from the other side.** Its two paginated
+operations published one range — `PageSize` 1–400, on both generations' pages — and answered it two
+ways: the classic `DescribeLoadBalancers` refused an out-of-range value while ELBv2
+`DescribeAccountLimits` substituted its default and answered 200. The fallback rested on the
+operation publishing no error of its own, which
+[#1064](https://github.com/scttfrdmn/substrate/issues/1064) answered, so
+[#1150](https://github.com/scttfrdmn/substrate/issues/1150) gave the plugin one rule and it is this
+one: absent is the published default, anything else must be within the range, and a value outside it
+is refused. The code is `ValidationError`/400 rather than `InvalidParameterValue`, because that is
+what ELB's own Common Errors page publishes — the rule is shared, the vocabulary is each service's.
 
 **A finding recorded rather than quietly fixed.** Eleven request sites across eight tests paged at
 `MaxRecords=2` — a page size both real services refuse — and passed only because substrate was
@@ -10584,7 +10596,11 @@ Details a consumer can observe:
   `ValidationError`. The operation publishes no token code of its own, so the code comes from the
   Common Errors page that covers it; the refusal itself is substrate's reading, for the reason
   [#915](https://github.com/scttfrdmn/substrate/issues/915) records — a paging loop cannot see a
-  cursor that resets.
+  cursor that resets. ELBv2 `DescribeAccountLimits` still restarts the walk for the same cursor,
+  which is [#1245](https://github.com/scttfrdmn/substrate/issues/1245).
+- **`PageSize` is refused outside its published 1–400**, through the rule both generations now
+  share — see [Account limits](#account-limits) for why refusing replaced the fallback the other
+  operation had ([#1150](https://github.com/scttfrdmn/substrate/issues/1150)).
 
 **What is deliberately not routed**, so that three operations are not read as the whole API: the
 classic tag trio (`AddTags`, `RemoveTags`, `DescribeTags` at `2012-06-01`, whose `RemoveTags` takes
@@ -10656,21 +10672,53 @@ Two behaviors are substrate's decisions rather than AWS's published text:
 | | |
 |---|---|
 | `NextMarker` | **Absent** when the walk is exhausted, not empty. v2 documents "Otherwise, this is null"; classic documents "If there are no additional results, the string is empty" — a present-but-empty element. Following v2 is following the shape this handler answers. The classic `DescribeLoadBalancers` #844 routed follows v2 here too, which is a divergence from its own page and is recorded as one |
-| `PageSize` | A value outside the documented 1–400, or a non-numeric one, **falls back to the default** rather than being refused. The default is the documented maximum, so an unparameterized call returns the whole set in one page and a `PageSize` above 400 is indistinguishable from a clamp. The classic `DescribeLoadBalancers` **refuses** the same out-of-range value, and the two operations disagree deliberately: this one's fallback is the decision the citation below argues for, and reversing it would change an answer a consumer already reads |
+| `PageSize` | An **absent** member is the published default of 400, which is also the published maximum, so an unparameterized call returns the whole set in one page. Anything else must be an integer within 1–400 inclusive, and a value outside it or a non-numeric one is **refused** with `ValidationError`/400 naming the range — the same answer the classic `DescribeLoadBalancers` gives, through the same function ([#1150](https://github.com/scttfrdmn/substrate/issues/1150)) |
 
-The `PageSize` choice needs the citation because substrate's own paginators do not agree.
-The Query-protocol family this operation joins — RDS's and ElastiCache's `MaxRecords`,
-CloudWatch's — takes any positive integer and quietly substitutes its default for anything
-else, enforcing no maximum; EC2's `DescribeTags` goes the other way and refuses a
-`MaxResults` outside 5–1000 with `InvalidParameterValue`. ELBv2 had no paginated operation
-at all before this one, so there was no ELB precedent to match. The decider is that
-`DescribeAccountLimits` publishes no operation-specific error on either generation's page:
-refusing would mean inventing a code AWS does not publish for it, which is a thing EC2's
-`DescribeTags` did not have to do.
+**The two operations disagreed until #1150, and the disagreement was recorded here as
+deliberate.** It was: this operation substituted its default for an unusable `PageSize` and
+answered 200, and the argument for it turned on `DescribeAccountLimits` publishing no
+operation-specific error — its Errors section is Common Errors only — so that refusing looked
+like inventing a code. [#1064](https://github.com/scttfrdmn/substrate/issues/1064) removed
+that step: the consolidated Query Common Errors page each operation's Errors section links as
+*its own* publishes `ValidationError` at 400, and a code on the page an operation links is
+that operation's own vocabulary rather than a borrowing from a sibling. The second half of the
+old argument — that because the default equals the maximum, a `PageSize` above 400 is
+indistinguishable from a clamp — was true and was no defense of the low end: a `PageSize` of 0
+or -1 was answered with 400 items, the largest page a caller can get in response to asking for
+the smallest. And a harness that asks for a page size it believes is legal, reads a 200, and
+concludes it is legal then fails against AWS, which is the failure an emulator exists to
+prevent.
+
+The family this operation joins now agrees with it. RDS's and ElastiCache's `MaxRecords` and
+CloudWatch's took any positive integer and substituted a default for anything else until
+[#913](https://github.com/scttfrdmn/substrate/issues/913) made them refuse; EC2's
+`DescribeTags` already refused a `MaxResults` outside 5–1000. The code differs because the
+page does — `InvalidParameterValue` is what RDS and ElastiCache publish, `ValidationError` is
+what ELB's Common Errors page publishes — but the rule no longer does.
+
+**The sweep behind that decision, and its count.** The plugin has six paginated operations:
+ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`
+and `DescribeAccountLimits`, plus classic `DescribeLoadBalancers`, each publishing `PageSize`
+1–400 and `Marker`. Two read the member and now answer through one rule. The other **four read
+neither `Marker` nor `PageSize` at all**, which was a third answer rather than a second, and is
+[#1244](https://github.com/scttfrdmn/substrate/issues/1244) — closing it means implementing the
+cursor, not validating a member, and when they gain it they take the same rule. ELBv2
+`DescribeTags` publishes no pagination member and is correctly unpaginated.
 
 `Marker` is a decimal offset into a fixed, name-ordered set, so a paged walk returns each
 limit exactly once. An unparseable `Marker` restarts the walk and an offset past the end
 answers an empty last page — neither being an error the operation publishes a code for.
+
+**The `Marker` half of this cursor is still answered two ways**, and that is now a recorded
+defect rather than a recorded decision: the classic `DescribeLoadBalancers` refuses a marker it
+never issued, for the reason
+[#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a
+cursor that resets — while the restart above stands on the same "no published code" step #1064
+answered for `PageSize`. It is
+[#1245](https://github.com/scttfrdmn/substrate/issues/1245), kept out of #1150 so that one
+change's diff is one member of the cursor. An offset past the end stays an empty last page
+either way: that is a walk that has ended, not a malformed cursor, and both operations already
+agree on it.
 
 Authorization needed nothing: `elasticloadbalancing:DescribeAccountLimits` was **already** in
 substrate's generated authorization reference with an empty resource list, which is exactly
