@@ -1012,6 +1012,30 @@ func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, s
 	}
 }
 
+// recordedStatusCode is the HTTP status a completed request was answered with, for
+// [Event.StatusCode] to record.
+//
+// It lives beside [Server.writeError] because it has to agree with it: an error is
+// written with the status its [AWSError] carries, and anything that is not an AWSError
+// is written as an InternalFailure at 500. A recorded status that disagreed with the
+// written one would be worse than none, because a consumer counting refusals would
+// count the wrong ones and have no way to notice.
+//
+// The error is read before the response because that is the order the server answers
+// in: when a plugin returns both, the error is what reaches the caller.
+func recordedStatusCode(resp *AWSResponse, err error) int {
+	if err != nil {
+		if awsErr, ok := err.(*AWSError); ok {
+			return awsErr.HTTPStatus
+		}
+		return http.StatusInternalServerError
+	}
+	if resp != nil {
+		return resp.StatusCode
+	}
+	return 0
+}
+
 // checkPresignedExpiry reports whether the request is a presigned URL whose
 // expiry has elapsed.  A presigned request is identified by the presence of
 // X-Amz-Algorithm in the query string (SigV4 pre-signed URL format).
