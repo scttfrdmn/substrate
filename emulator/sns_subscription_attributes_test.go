@@ -333,6 +333,11 @@ func TestSNSSubscriptionAttributesRefuseAnAbsentSubscription(t *testing.T) {
 // subscription, and before #1125 the handlers built a state key from it and reported NotFound — telling
 // a caller the subscription did not exist rather than that the ARN was not one. The two codes are
 // distinguishable now, which is what makes the row above meaningful.
+//
+// The last three rows are seven-part ARNs missing one part each, which is why they are written out rather
+// than derived from topicARN: an ARN of the right arity whose Region, account or topic is empty reaches
+// the refusal only by being constructed that way, and a caller that builds an ARN by formatting can
+// produce exactly this by interpolating an unset variable.
 func TestSNSSubscriptionAttributesRefuseAMalformedARN(t *testing.T) {
 	t.Parallel()
 	ts := snsTagServer(t)
@@ -347,6 +352,9 @@ func TestSNSSubscriptionAttributesRefuseAMalformedARN(t *testing.T) {
 		{"not an ARN", "sub-attrs-malformed"},
 		{"another service", "arn:aws:sqs:us-east-1:123456789012:queue:tail"},
 		{"no subscription id", topicARN + ":"},
+		{"no region", "arn:aws:sns::123456789012:sub-attrs-malformed:1a2b3c4d"},
+		{"no account", "arn:aws:sns:us-east-1::sub-attrs-malformed:1a2b3c4d"},
+		{"no topic", "arn:aws:sns:us-east-1:123456789012::1a2b3c4d"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
