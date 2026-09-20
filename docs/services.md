@@ -18257,10 +18257,10 @@ is `2017-05-18` and appears in no wire field.
 | GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text); `MaxResults` and `NextToken` are not read |
 | StopQueryExecution | Accepted for any stored execution, including one already `SUCCEEDED` |
 | ListQueryExecutions | `MaxResults` defaults to 50 and is not clamped |
-| CreateWorkGroup | `Name` required |
-| GetWorkGroup | [Synthesises a `primary` workgroup](#the-primary-workgroup-exists-only-for-getworkgroup) if none was created |
-| DeleteWorkGroup | |
-| ListWorkGroups | `MaxResults` defaults to 50 and is not clamped |
+| CreateWorkGroup | `Name` and `Description` are read; `Configuration` and `Tags` are discarded |
+| GetWorkGroup | Reports `Name`, `State` and `Description`, and nothing else; [synthesises the `primary` workgroup](#the-primary-workgroup-and-what-is-synthesised-about-it) when no record was written for it |
+| DeleteWorkGroup | Refuses `primary` with `InvalidRequestException`/400 and *"The primary workgroup cannot be deleted"*, which `API_DeleteWorkGroup` itself states; `RecursiveDeleteOption` is not read |
+| ListWorkGroups | `MaxResults` defaults to 50 and is not clamped; [the `primary` workgroup is prepended](#the-primary-workgroup-and-what-is-synthesised-about-it) and pages like any other entry |
 
 ### A query has already succeeded when StartQueryExecution returns
 
@@ -18301,13 +18301,48 @@ string equality, so a difference in whitespace or case misses the seed and repor
 than refusing. Seeds live in the `athena-ctrl` namespace keyed `result:{sql}` and are **not** scoped by
 account or Region: one seed serves every caller of the emulator.
 
-### The primary workgroup exists only for GetWorkGroup
+### The primary workgroup, and what is synthesised about it
 
-Every AWS account has a `primary` workgroup that cannot be deleted. Substrate creates no such record;
-instead `GetWorkGroup` synthesises one when the requested name is `primary` and nothing is stored, so
-`ListWorkGroups` reports it only after something has explicitly created it and `DeleteWorkGroup`
-accepts `primary` without complaint. A consumer that lists workgroups to find the default finds
-nothing.
+Every AWS account has a `primary` workgroup. `API_DeleteWorkGroup`'s own description states *"The
+primary workgroup cannot be deleted"*, and the user guide's *Manage workgroups* page repeats the
+sentence verbatim, so both the existence and the refusal are published by the API reference rather than
+inferred from the guide.
+
+Substrate still writes no record for it — there is nothing to write it in response to — and instead
+synthesises one on read. One producer and one reader, which is the whole of
+[#1222](https://github.com/scttfrdmn/substrate/issues/1222): until it was fixed, `GetWorkGroup`
+synthesised the record while `ListWorkGroups` read only the workgroup-names index that `CreateWorkGroup`
+alone appends to, so `GetWorkGroup("primary")` answered 200, `ListWorkGroups` answered `[]`, and
+`ListQueryExecutions` reported every unqualified query under a workgroup the listing said did not
+exist — three answers that cannot all be true of one account. `DeleteWorkGroup` compounded it by
+answering `WorkGroup primary not found`: the right code for the wrong reason.
+
+What is read and what is substrate's own:
+
+| Member | Where it comes from |
+|--------|---------------------|
+| `Name` | `primary`, published by `API_DeleteWorkGroup` and by the user guide |
+| `State` | `ENABLED` — the workgroup is usable (an unqualified `StartQueryExecution` is attributed to it and runs), and `API_WorkGroupSummary` publishes only `ENABLED` and `DISABLED`, so a usable workgroup has exactly one available value |
+| `Description` | `Primary workgroup` — **substrate's own placeholder.** AWS publishes no description for it, and a real primary workgroup has none. Assert on `Name` and `State`; treat this string as arbitrary |
+
+The synthesised entry is **prepended** to the listing, not appended, and the position is part of the
+contract rather than cosmetic. `ListWorkGroups` pages by an offset into this order
+([#1086](https://github.com/scttfrdmn/substrate/issues/1086)); the primary workgroup exists before any
+workgroup a caller creates, so creation order puts it first, and prepending is the only position that
+leaves every other entry's offset unchanged — appending would move it on each `CreateWorkGroup` and
+leave a token issued mid-walk pointing at a different element.
+
+A caller may create its own workgroup named `primary`. Then the stored record wins both readers, the
+listing reports it once (the duplicate guard is against the names index, which is what the walk orders),
+and `DeleteWorkGroup` still refuses it — the refusal is on the name, not on the absence of a record,
+because AWS's statement is flat.
+
+`Description` is omitted from both readers' answers when it is empty, rather than sent as `""`: both
+`API_WorkGroup` and `API_WorkGroupSummary` give it *Required: No* with a minimum length of 0, and a
+workgroup created without a description has none rather than an empty one. Before #1222 `GetWorkGroup`
+sent the empty string while `ListWorkGroups` omitted the member, so the two readers differed over a
+workgroup neither was wrong about. `EngineVersion` and `IdentityCenterApplicationArn` are published
+`WorkGroupSummary` members that substrate does not carry, so neither reader reports them.
 
 ### What a refusal reports
 
@@ -18319,6 +18354,7 @@ Athena has one refusal code, and it covers every condition:
 | a required member absent or empty | `InvalidRequestException` | 400 |
 | a query execution or workgroup that does not exist | `InvalidRequestException` | 400 |
 | a workgroup name already in use | `InvalidRequestException` | 400 |
+| `DeleteWorkGroup` naming the `primary` workgroup | `InvalidRequestException` | 400 |
 
 The code is published — `GetQueryResults` declares `InternalServerException`/500,
 `InvalidRequestException`/400 and `TooManyRequestsException`/400, and Athena's consolidated

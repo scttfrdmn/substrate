@@ -1175,6 +1175,11 @@ func TestPaginationToken_AthenaListQueryExecutionsRefusesATokenItDidNotIssue(t *
 // It also pins the portability the per-operation message exists to make detectable: both listings encode
 // an offset identically, so each one's token is issuable under the other and only the operation name in
 // the message distinguishes them.
+//
+// The walk starts at the `primary` workgroup because #1222 prepended it: it exists before any workgroup
+// a caller creates, so it holds offset 0 and the two created here follow it. The page-by-page assertions
+// below are about the offset advancing and not re-serving, which is unchanged by there being one more
+// entry to advance over.
 func TestPaginationToken_AthenaListWorkGroupsRefusesATokenItDidNotIssue(t *testing.T) {
 	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.AthenaPlugin{})
 	for _, name := range []string{"wg-one", "wg-two"} {
@@ -1196,15 +1201,15 @@ func TestPaginationToken_AthenaListWorkGroupsRefusesATokenItDidNotIssue(t *testi
 	status, page1, code := list(srv, "")
 	require.Empty(t, code, page1)
 	require.Equal(t, http.StatusOK, status, page1)
-	assert.Contains(t, page1, "wg-one")
-	assert.NotContains(t, page1, "wg-two", "the second workgroup belongs to page two")
+	assert.Contains(t, page1, "primary", "the workgroup that exists before either created one")
+	assert.NotContains(t, page1, "wg-one", "the first created workgroup belongs to page two")
 	issued := tokenRefusalJSONToken(t, page1, "NextToken")
 
 	status, page2, code := list(srv, issued)
 	require.Empty(t, code, page2)
 	require.Equal(t, http.StatusOK, status, page2)
-	assert.Contains(t, page2, "wg-two", "an issued token must resume after the first page")
-	assert.NotContains(t, page2, "wg-one", "an issued token must not re-serve page one")
+	assert.Contains(t, page2, "wg-one", "an issued token must resume after the first page")
+	assert.NotContains(t, page2, "primary", "an issued token must not re-serve page one")
 
 	for _, tc := range tokenRefusalBadTokens {
 		t.Run(tc.name, func(t *testing.T) {
