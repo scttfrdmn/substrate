@@ -1247,3 +1247,264 @@ func TestPaginationToken_AthenaListWorkGroupsRefusesATokenItDidNotIssue(t *testi
 		assert.Greater(t, counted.reads, before, "an accepted token must reach the index")
 	})
 }
+
+// --- CloudWatch Logs DescribeLogGroups, DescribeLogStreams, GetLogEvents and FilterLogEvents ---
+
+const tokenRefusalCWLogsHost = "logs.us-east-1.amazonaws.com"
+
+// tokenRefusalCWLogsCall posts one CloudWatch Logs operation.
+func tokenRefusalCWLogsCall(t *testing.T, srv *emulator.Server, op, body string) (int, string, string) {
+	t.Helper()
+	return tokenRefusalJSONCall(t, srv, tokenRefusalCWLogsHost, "Logs_20140328."+op, body)
+}
+
+// tokenRefusalCWLogsGroup creates one log group through CreateLogGroup.
+func tokenRefusalCWLogsGroup(t *testing.T, srv *emulator.Server, name string) {
+	t.Helper()
+	status, body, code := tokenRefusalCWLogsCall(t, srv, "CreateLogGroup",
+		fmt.Sprintf(`{"logGroupName":%q}`, name))
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+}
+
+// tokenRefusalCWLogsStream creates one log stream through CreateLogStream.
+func tokenRefusalCWLogsStream(t *testing.T, srv *emulator.Server, group, stream string) {
+	t.Helper()
+	status, body, code := tokenRefusalCWLogsCall(t, srv, "CreateLogStream",
+		fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q}`, group, stream))
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+}
+
+// tokenRefusalCWLogsPutEvents writes n events to one stream, each with a distinct message and
+// timestamp so that a page boundary is visible in the body rather than only in the token.
+func tokenRefusalCWLogsPutEvents(t *testing.T, srv *emulator.Server, group, stream string, n int) {
+	t.Helper()
+	for i := range n {
+		status, body, code := tokenRefusalCWLogsCall(t, srv, "PutLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"logEvents":[{"timestamp":%d,"message":%q}]}`,
+				group, stream, 1700000000000+int64(i)*1000, fmt.Sprintf("token-refusal-event-%d", i)))
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+}
+
+// TestPaginationToken_CWLogsDescribeLogGroupsRefusesATokenItDidNotIssue is #1086 at the first of
+// CloudWatch Logs' four sites, the only one of them whose page publishes no ResourceNotFoundException
+// and so the only one with nothing ahead of the decode at all.
+//
+// The groups are created through CreateLogGroup rather than seeded, per #765: a listing built by
+// writing state directly would not prove the offset indexes into what a caller can observe.
+func TestPaginationToken_CWLogsDescribeLogGroupsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
+	for _, name := range []string{"trg-groups-a", "trg-groups-b", "trg-groups-c"} {
+		tokenRefusalCWLogsGroup(t, srv, name)
+	}
+
+	status, page1, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogGroups", `{"limit":1}`)
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	require.Contains(t, page1, "trg-groups-a")
+	issued := tokenRefusalJSONToken(t, page1, "nextToken")
+
+	status, page2, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogGroups",
+		fmt.Sprintf(`{"limit":1,"nextToken":%q}`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "trg-groups-b", "an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogGroups",
+				fmt.Sprintf(`{"limit":1,"nextToken":%q}`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameterException", code, body)
+			assert.Contains(t, body, "DescribeLogGroups", "the message must name the operation")
+			assert.NotContains(t, body, "trg-groups-a", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "DescribeLogGroups",
+			`{"nextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameterException", code, body)
+	})
+}
+
+// TestPaginationToken_CWLogsDescribeLogStreamsRefusesATokenItDidNotIssue is the same refusal at the
+// second site, asserted separately because the four decoded their tokens with four copies of one
+// block — which is how one fix could have left three of them answering page one.
+//
+// It is also the first of the three sites that require a member, so the refusal sits below that one:
+// a request with neither logGroupName nor a valid token is still told about logGroupName.
+func TestPaginationToken_CWLogsDescribeLogStreamsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
+	const group = "trg-streams-group"
+	tokenRefusalCWLogsGroup(t, srv, group)
+	for _, name := range []string{"trg-stream-a", "trg-stream-b", "trg-stream-c"} {
+		tokenRefusalCWLogsStream(t, srv, group, name)
+	}
+
+	status, page1, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogStreams",
+		fmt.Sprintf(`{"logGroupName":%q,"limit":1}`, group))
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	require.Contains(t, page1, "trg-stream-a")
+	issued := tokenRefusalJSONToken(t, page1, "nextToken")
+
+	status, page2, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogStreams",
+		fmt.Sprintf(`{"logGroupName":%q,"limit":1,"nextToken":%q}`, group, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "trg-stream-b", "an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogStreams",
+				fmt.Sprintf(`{"logGroupName":%q,"limit":1,"nextToken":%q}`, group, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameterException", code, body)
+			assert.Contains(t, body, "DescribeLogStreams", "the message must name the operation")
+			assert.NotContains(t, body, "trg-stream-a", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("the required member keeps precedence over the token", func(t *testing.T) {
+		// Both refusals carry InvalidParameterException, so the message is the only thing that says
+		// which one answered — which is why this is asserted rather than left to the reader.
+		status, body, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogStreams",
+			`{"nextToken":"!!not-base64!!"}`)
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameterException", code, body)
+		assert.Contains(t, body, "logGroupName is required", body)
+	})
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "DescribeLogStreams",
+			fmt.Sprintf(`{"logGroupName":%q,"nextToken":"!!not-base64!!"}`, group))
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameterException", code, body)
+	})
+}
+
+// TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue is the same refusal at the third
+// site, which is the one whose published cursor is a *pair* of directional tokens.
+//
+// Substrate issues only nextForwardToken, so that is the only token it can have issued and the only
+// one a walk can resume from; the divergence is recorded in cloudwatchlogs_pagination.go rather than
+// asserted here, because this test is about the refusal and not about the pair.
+func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
+	const group, stream = "trg-events-group", "trg-events-stream"
+	tokenRefusalCWLogsGroup(t, srv, group)
+	tokenRefusalCWLogsStream(t, srv, group, stream)
+	tokenRefusalCWLogsPutEvents(t, srv, group, stream, 3)
+
+	get := func(extra string) (int, string, string) {
+		return tokenRefusalCWLogsCall(t, srv, "GetLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"limit":1%s}`, group, stream, extra))
+	}
+
+	status, page1, code := get("")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	require.Contains(t, page1, "token-refusal-event-0")
+	issued := tokenRefusalJSONToken(t, page1, "nextForwardToken")
+
+	status, page2, code := get(fmt.Sprintf(`,"nextToken":%q`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "token-refusal-event-1",
+		"an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := get(fmt.Sprintf(`,"nextToken":%q`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameterException", code, body)
+			assert.Contains(t, body, "GetLogEvents", "the message must name the operation")
+			assert.NotContains(t, body, "token-refusal-event-0",
+				"a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "GetLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"nextToken":"!!not-base64!!"}`, group, stream))
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameterException", code, body)
+	})
+}
+
+// TestPaginationToken_CWLogsFilterLogEventsRefusesATokenItDidNotIssue is the same refusal at the
+// fourth site, the one that concatenates every stream in the group before paging.
+//
+// The token is not passed logStreamNames, so the walk goes through the stream index — which is both
+// the path a caller takes by default and the one the sealed-store assertion can see, since the
+// per-stream reads below it swallow their errors.
+func TestPaginationToken_CWLogsFilterLogEventsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
+	const group = "trg-filter-group"
+	tokenRefusalCWLogsGroup(t, srv, group)
+	tokenRefusalCWLogsStream(t, srv, group, "trg-filter-stream")
+	tokenRefusalCWLogsPutEvents(t, srv, group, "trg-filter-stream", 3)
+
+	filter := func(extra string) (int, string, string) {
+		return tokenRefusalCWLogsCall(t, srv, "FilterLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"limit":1%s}`, group, extra))
+	}
+
+	status, page1, code := filter("")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	require.Contains(t, page1, "token-refusal-event-0")
+	issued := tokenRefusalJSONToken(t, page1, "nextToken")
+
+	status, page2, code := filter(fmt.Sprintf(`,"nextToken":%q`, issued))
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "token-refusal-event-1",
+		"an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := filter(fmt.Sprintf(`,"nextToken":%q`, tc.token))
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidParameterException", code, body)
+			assert.Contains(t, body, "FilterLogEvents", "the message must name the operation")
+			assert.NotContains(t, body, "token-refusal-event-0",
+				"a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("a token from another Logs listing is issuable and is not refused", func(t *testing.T) {
+		// All four encode an offset the same way, so DescribeLogGroups' token decodes cleanly here. The
+		// refusal is about issuability, not about provenance, and this pins that it does not over-claim:
+		// what the message says is that no *previous call* returned the token, which a test cannot
+		// disprove and the implementation does not try to.
+		tokenRefusalCWLogsGroup(t, srv, "trg-filter-second-group")
+		status, groups, code := tokenRefusalCWLogsCall(t, srv, "DescribeLogGroups", `{"limit":1}`)
+		require.Empty(t, code, groups)
+		require.Equal(t, http.StatusOK, status, groups)
+
+		status, body, code := filter(fmt.Sprintf(`,"nextToken":%q`, tokenRefusalJSONToken(t, groups, "nextToken")))
+		assert.Equal(t, http.StatusOK, status, body)
+		assert.Empty(t, code, body)
+	})
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.CloudWatchLogsPlugin{})
+		status, body, code := tokenRefusalCWLogsCall(t, sealedSrv, "FilterLogEvents",
+			fmt.Sprintf(`{"logGroupName":%q,"nextToken":"!!not-base64!!"}`, group))
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidParameterException", code, body)
+	})
+}

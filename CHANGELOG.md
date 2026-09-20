@@ -1447,9 +1447,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whichever side of the read the decode sat on. The test counts reads in Athena's namespace — excluding
   the server's own authorization reads, which precede every request — and requires a refused request to
   have made none, with a control that must reach the index so a zero count cannot pass vacuously.
+- **CloudWatch Logs answered a well-formed page one for a `nextToken` it never issued, at four sites**
+  (#1086). `DescribeLogGroups`, `DescribeLogStreams`, `GetLogEvents` and `FilterLogEvents` each carried
+  its own copy of the pre-#915 idiom — the largest concentration in this class, and the reason the
+  conversion is worth more here than the count of operations suggests: a fix applied to one of them
+  would have left the other three answering page one. All four now share `decodeOffsetPaginationToken`
+  and `pageByOffsetToken`, and all four answer `InvalidParameterException`/400, glossed "A parameter is
+  specified incorrectly." and published in **all four** operations' own Errors sections. **The footing
+  is the parenthesis in the token's own description**: every page says "The token for the next set of
+  items to return. (You received this token from a previous call.)", which states where a token comes
+  from, so a token no previous call returned is not what the parameter is documented to accept.
+  Substrate's reading is only that this input problem is the one the published gloss covers. Unlike
+  Athena's and KMS's 1–1024, the published Length is **minimum 1 with no maximum and no Pattern**, so
+  there is no ceiling for the refusal to subsume and the issuability round trip is the whole rule. Also
+  unlike Athena, both page-size defaults are **published** — 50 for the two describes, 10,000 for the
+  two event readers — and substrate's match, so the named constants record a verified figure rather
+  than a choice. All four decode before reading any state, pinned by sealing the store, which works
+  here because Logs' index loader propagates a store failure; at the three operations that require a
+  member the required-member refusal keeps precedence, and because both carry the same published code
+  the message is the only thing that distinguishes them, so the precedence is asserted rather than left
+  to the reader.
 
 ### Changed
 
+- **Three CloudWatch Logs divergences the token fix deliberately leaves in place are now recorded**
+  (#1086). All four response members publish "The token expires after 24 hours." and no page publishes
+  a code for presenting an expired token, so a token substrate issues stays valid for the life of the
+  store. `GetLogEvents` publishes a **pair** of directional tokens, states "The returned tokens are
+  never null", and documents termination as the returned token equalling the one passed in; substrate
+  emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
+  caller following that rule cannot terminate and must use the empty-token rule. And
+  `ResourceNotFoundException` — published on three of the four pages at HTTP **400**, not 404 — has no
+  site at these four doors, because none of them resolves the log group, so a listing over a group that
+  does not exist is empty rather than refused.
 - **Neither Athena listing enforces its published `MaxResults` range, and that is now recorded rather
   than silent** (#1086). A value above the published maximum of 50 is honoured and one at or below zero
   is rewritten to 50; the rewrite is named `athenaListDefaultPageSize` and documented as substrate's
