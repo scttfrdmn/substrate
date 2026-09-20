@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -196,7 +195,7 @@ type elbLimitItem struct {
 // This handler answers v2 shapes, so it follows v2's null; the difference is recorded here
 // for the day classic dispatch arrives (#844), because it is a published difference and not
 // a paraphrase.
-func (p *ELBPlugin) describeAccountLimits(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	limits := make([]elbLimitItem, 0, len(elbDefaultAccountLimits))
 	for _, limit := range elbDefaultAccountLimits {
 		reported := limit.Max
@@ -233,15 +232,8 @@ func (p *ELBPlugin) describeAccountLimits(_ *RequestContext, req *AWSRequest) (*
 		Limits     []elbLimitItem `xml:"Limits>member"`
 		NextMarker string         `xml:"NextMarker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name     `xml:"DescribeAccountLimitsResponse"`
-		XMLNS   string       `xml:"xmlns,attr"`
-		Result  limitsResult `xml:"DescribeAccountLimitsResult"`
-	}
-	return elbXMLResponse(http.StatusOK, response{
-		XMLNS:  elbXMLNS,
-		Result: limitsResult{Limits: page, NextMarker: nextMarker},
-	})
+	return elbOKResponse(reqCtx, "DescribeAccountLimits", elbXMLNS,
+		limitsResult{Limits: page, NextMarker: nextMarker})
 }
 
 // handleELBSeedAccountLimit handles POST /v1/elb/account-limits. It seeds the Max that

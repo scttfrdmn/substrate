@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"regexp"
@@ -546,15 +545,8 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 	type createResult struct {
 		DNSName string `xml:"DNSName"`
 	}
-	type response struct {
-		XMLName xml.Name     `xml:"CreateLoadBalancerResponse"`
-		XMLNS   string       `xml:"xmlns,attr"`
-		Result  createResult `xml:"CreateLoadBalancerResult"`
-	}
-	return elbXMLResponse(http.StatusOK, response{
-		XMLNS:  elbClassicXMLNS,
-		Result: createResult{DNSName: lb.DNSName},
-	})
+	return elbOKResponse(reqCtx, "CreateLoadBalancer", elbClassicXMLNS,
+		createResult{DNSName: lb.DNSName})
 }
 
 // describeClassicLoadBalancers answers the 2012-06-01 `DescribeLoadBalancers`.
@@ -618,15 +610,8 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 		LoadBalancerDescriptions []elbClassicLBItem `xml:"LoadBalancerDescriptions>member"`
 		NextMarker               string             `xml:"NextMarker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name       `xml:"DescribeLoadBalancersResponse"`
-		XMLNS   string         `xml:"xmlns,attr"`
-		Result  describeResult `xml:"DescribeLoadBalancersResult"`
-	}
-	return elbXMLResponse(http.StatusOK, response{
-		XMLNS:  elbClassicXMLNS,
-		Result: describeResult{LoadBalancerDescriptions: items, NextMarker: next},
-	})
+	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbClassicXMLNS,
+		describeResult{LoadBalancerDescriptions: items, NextMarker: next})
 }
 
 // elbClassicPageSize resolves the `PageSize` member against its published range.
@@ -700,28 +685,7 @@ func (p *ELBPlugin) deleteClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 		}
 		p.removeFromList(scope, elbClassicLBNamesList, name)
 	}
-	return elbClassicEmptyOKResponse("DeleteLoadBalancer")
-}
-
-// elbClassicEmptyOKResponse answers a classic operation whose output shape carries no members.
-//
-// The empty result element is there for the reason [elbEmptyOKResponse] documents at length — the
-// Query protocol's resultWrapper is looked up by name, and a bare `<…Response/>` makes botocore
-// raise `KeyError` — and this is a separate function only because the namespace differs.
-func elbClassicEmptyOKResponse(operation string) (*AWSResponse, error) {
-	type result struct {
-		XMLName xml.Name
-	}
-	type response struct {
-		XMLName xml.Name
-		XMLNS   string `xml:"xmlns,attr"`
-		Result  result
-	}
-	return elbXMLResponse(http.StatusOK, response{
-		XMLName: xml.Name{Local: operation + "Response"},
-		XMLNS:   elbClassicXMLNS,
-		Result:  result{XMLName: xml.Name{Local: operation + "Result"}},
-	})
+	return elbClassicEmptyOKResponse(reqCtx, "DeleteLoadBalancer")
 }
 
 // elbClassicListenerItem is the XML representation of a classic `Listener`.
