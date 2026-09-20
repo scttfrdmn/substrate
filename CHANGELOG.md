@@ -279,6 +279,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is only the omission #1202 tracks.
 
 ### Fixed
+- **Batch's three resource describes answered a well-formed page one to a `nextToken` they could not
+  have issued, and did it through one shared helper** (#1086). `DescribeComputeEnvironments`,
+  `DescribeJobQueues` and `DescribeJobDefinitions` all paginate through `batchPage`, which carried the
+  pre-#915 idiom — `base64.StdEncoding.DecodeString` then `strconv.Atoi`, both errors discarded — so an
+  unusable token left the offset at zero and every one of the three restarted the listing, the one wrong
+  answer a paginating caller cannot detect. All three now answer **`ClientException` / 400**, published
+  in each operation's own Errors section and glossed *"These errors are usually caused by a client
+  action. … Another cause is specifying an identifier that's not valid."*; each Batch page publishes
+  exactly two errors and Batch publishes no common-errors page, so that is the whole published
+  vocabulary and nothing is borrowed from a sibling. The footing for the condition is each page's own
+  description of the parameter — *"The `nextToken` value returned from a previous paginated `Describe…`
+  request where `maxResults` was used …"*, naming the operation itself as the source — with the *"Treat
+  this token as an opaque identifier"* sentence recorded as addressed to the caller rather than to the
+  service. **The decode had to move out of the shared helper**: `DescribeJobDefinitions` loads the
+  job-definition index before it reaches the helper, so a decode there would have sat below a state read
+  on one of the three, and the refusal is now unconditional for all three (#887), asserted by sealing
+  the state store. Token non-portability between the three is asserted rather than implied, since the
+  token carries an offset and nothing else, and a past-the-end offset still clamps to a final empty
+  page. **This closes #1086**: with Batch converted, no listing in the tree answers page one to a token
+  it could not have issued.
 - **EventBridge Scheduler `ListSchedules` answered a well-formed page one to a `NextToken` it could
   not have issued** (#1086). The handler carried the pre-#915 idiom — `base64.StdEncoding.DecodeString`
   then `strconv.Atoi`, both errors discarded — so an unusable token left the offset at zero and the

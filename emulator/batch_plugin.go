@@ -4,11 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -356,34 +354,23 @@ func batchNameFromIdentifier(identifier string) string {
 	return identifier
 }
 
-// batchPage applies the maxResults/nextToken pagination every Batch describe
-// documents to an already-filtered list of names, returning the page and the token
-// to report.
+// batchPage applies the maxResults page size every Batch describe documents to an
+// already-filtered list of names, returning the page and the token to report.
 //
 // "If this parameter isn't used, then Describe… returns up to 100 results", so an
 // absent or out-of-range maxResults is 100 rather than unbounded.
-func batchPage(names []string, maxResults int, nextToken string) ([]string, string) {
+//
+// The offset arrives already decoded: the token is resolved by [batchDecodeNextToken]
+// in each handler so that an unissuable one is refused above every state read, which
+// this helper sits below — see batch_pagination.go for the argument (#1086). A
+// past-the-end offset clamps to a final empty page inside [pageByOffsetToken] rather
+// than being refused, because a token substrate issued over a listing that has since
+// shrunk is still a token it issued.
+func batchPage(names []string, maxResults, offset int) ([]string, string) {
 	if maxResults < 1 || maxResults > 100 {
 		maxResults = 100
 	}
-	offset := 0
-	if nextToken != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(nextToken); err == nil {
-			if n, err := strconv.Atoi(string(decoded)); err == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var out string
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		out = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset + maxResults)))
-	}
-	return page, out
+	return pageByOffsetToken(names, offset, maxResults)
 }
 
 // batchDescribeRequest is the request body shape shared by the three resource
@@ -410,7 +397,7 @@ type batchDescribeRequest struct {
 // refused: the operations describe "one or more of your compute environments" and
 // document no not-found error, so an absent name yields an absent result.
 func (p *BatchPlugin) describeBatchResources(
-	ctx *RequestContext, resource string, filter []string, maxResults int, nextToken string,
+	ctx *RequestContext, resource string, filter []string, maxResults, offset int,
 ) ([]json.RawMessage, string, error) {
 	goCtx := context.Background()
 
@@ -429,7 +416,7 @@ func (p *BatchPlugin) describeBatchResources(
 		names = indexed
 	}
 
-	page, out := batchPage(names, maxResults, nextToken)
+	page, out := batchPage(names, maxResults, offset)
 	records := make([]json.RawMessage, 0, len(page))
 	for _, name := range page {
 		data, err := p.state.Get(goCtx, batchNamespace, batchRecordKey(ctx, resource, name))
@@ -462,8 +449,15 @@ func (p *BatchPlugin) describeComputeEnvironments(ctx *RequestContext, req *AWSR
 			return nil, batchClientError("invalid request body")
 		}
 	}
+	// Above every state read, so the refusal does not depend on what the store holds — see
+	// batch_pagination.go for the code's provenance and the ordering argument (#1086).
+	offset, tokenErr := batchDecodeNextToken("DescribeComputeEnvironments", body.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+
 	records, nextToken, err := p.describeBatchResources(
-		ctx, "compute-environment", body.ComputeEnvironments, body.MaxResults, body.NextToken)
+		ctx, "compute-environment", body.ComputeEnvironments, body.MaxResults, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -477,8 +471,13 @@ func (p *BatchPlugin) describeJobQueues(ctx *RequestContext, req *AWSRequest) (*
 			return nil, batchClientError("invalid request body")
 		}
 	}
+	offset, tokenErr := batchDecodeNextToken("DescribeJobQueues", body.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+
 	records, nextToken, err := p.describeBatchResources(
-		ctx, "job-queue", body.JobQueues, body.MaxResults, body.NextToken)
+		ctx, "job-queue", body.JobQueues, body.MaxResults, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -499,6 +498,14 @@ func (p *BatchPlugin) describeJobDefinitions(ctx *RequestContext, req *AWSReques
 		if err := json.Unmarshal(req.Body, &body); err != nil {
 			return nil, batchClientError("invalid request body")
 		}
+	}
+
+	// Before the index load below, not only before the shared helper: this is the one describe that
+	// reads state of its own, so a decode left inside the helper would sit under a state read here
+	// (#1086, #887).
+	offset, tokenErr := batchDecodeNextToken("DescribeJobDefinitions", body.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
 	}
 
 	goCtx := context.Background()
@@ -522,7 +529,7 @@ func (p *BatchPlugin) describeJobDefinitions(ctx *RequestContext, req *AWSReques
 	}
 
 	records, nextToken, err := p.describeBatchResources(
-		ctx, "job-definition", filter, body.MaxResults, body.NextToken)
+		ctx, "job-definition", filter, body.MaxResults, offset)
 	if err != nil {
 		return nil, err
 	}
