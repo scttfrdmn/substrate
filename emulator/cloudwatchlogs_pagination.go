@@ -65,12 +65,12 @@ import "net/http"
 //     to the one passed in. Substrate emits nextForwardToken only when a further page exists and
 //     never emits nextBackwardToken at all, so a caller following that documented rule cannot
 //     terminate and has to use the empty-token rule instead. Left as it was.
-//   - **ResourceNotFoundException is published on three of the four pages** (every one but
-//     DescribeLogGroups), glossed *"The specified resource does not exist."* and — worth noting
-//     because it reads like a typo and is not — at HTTP **400**, not 404. Substrate answers an empty
-//     listing for a log group that does not exist, so it has no site for that code at these four
-//     doors, although it does answer it at 404 elsewhere in the plugin. That is a missing refusal,
-//     not a token defect.
+// **ResourceNotFoundException** was one of these: published on three of the four pages (every one but
+// DescribeLogGroups) and answered by none of them, while the sites elsewhere in the plugin that did
+// answer it used 404 where every page publishes 400. It was fixed in #1224 — see
+// cloudwatchlogs_not_found.go, which is where the argument for the refusal and for its precedence
+// against the token refusal above now lives. Until then it was recorded here as "not fixed here",
+// which is what this heading is for.
 //
 // [#671]: https://github.com/scttfrdmn/substrate/issues/671
 

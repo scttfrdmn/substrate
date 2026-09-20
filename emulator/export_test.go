@@ -1621,6 +1621,25 @@ func SNSSubscriptionIndexKeyForTest(accountID, region, topicName string) string 
 	return snsSubTopicIDsStateKey(accountID, region, topicName)
 }
 
+// CWLogStreamNamesKeyForTest is the state key a log group's stream-name index is written at.
+//
+// Exported for the same reason as [SNSSubscriptionIndexKeyForTest], and for the same shape of
+// ordering: since #1224, DescribeLogStreams and FilterLogEvents resolve the log group before they look
+// at the token, so a test that sealed every Get would fail the group lookup and prove nothing about
+// the token. Sealing this key alone leaves the group readable and the listing unreachable, which is
+// the boundary the decode has to sit above.
+func CWLogStreamNamesKeyForTest(accountID, region, logGroupName string) string {
+	return cwLogStreamNamesKey(accountID, region, logGroupName)
+}
+
+// CWLogEventsKeyForTest is the state key one log stream's events are written at.
+//
+// GetLogEvents' listing is this key rather than an index, so it is the read its own ordering assertion
+// seals — see [CWLogStreamNamesKeyForTest] for why sealing every Get would assert nothing there.
+func CWLogEventsKeyForTest(accountID, region, logGroupName, logStreamName string) string {
+	return cwLogEventsKey(accountID, region, logGroupName, logStreamName)
+}
+
 // SeedSNSTopicAttributeForTest writes name=value into a topic record's stored attribute map, bypassing
 // SetTopicAttributes.
 //
