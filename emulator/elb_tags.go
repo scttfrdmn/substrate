@@ -29,13 +29,100 @@ const (
 	elbKindRule         = "listener-rule"
 )
 
-// elbMaxTagsPerResource is the number of user tags ELB allows on one resource.
+// elbMaxTagsPerResource is the number of user tags **ELBv2** allows on one resource, and
+// elbClassicMaxTagsPerResource is the Classic Load Balancing API's own, lower number.
 //
-// From the ELB tagging documentation's restrictions: "Maximum number of tags per
-// resource—50". Tags carrying [elbReservedTagPrefix] are excluded from the count, per
-// the same list — "Tags with this prefix do not count against your tags per resource
-// limit" — which is byte-for-byte the rule [ec2CheckTagLimit] already implements.
-const elbMaxTagsPerResource = 50
+// The two generations publish their caps in different places, and that asymmetry is the reason
+// these are two constants rather than one:
+//
+//   - The ELBv2 50 is **not on the API reference**. `API_AddTags` (2015-12-01) states no maximum
+//     anywhere — not in its description, not as an `Array Members` constraint on `Tags` (which
+//     carries only "Minimum number of 1 item"), not in its Errors section beyond naming
+//     `TooManyTags`. The number comes from the ELB tagging documentation's restrictions:
+//     "Maximum number of tags per resource—50". So it is a user-guide reading, and a reader
+//     looking for it on the operation page will not find it.
+//   - The classic 10 **is** on the API reference, in the first sentence of `API_AddTags`
+//     (2012-06-01): "Adds the specified tags to the specified load balancer. Each load balancer
+//     can have a maximum of 10 tags."
+//
+// Tags carrying [elbReservedTagPrefix] are excluded from both counts, per the same restrictions
+// list — "Tags with this prefix do not count against your tags per resource limit" — which is
+// byte-for-byte the rule [ec2CheckTagLimit] already implements. The classic page publishes no
+// reserved-prefix rule of its own, and the restrictions list is written for the service rather
+// than for one generation, so the exclusion is applied to both rather than to ELBv2 alone.
+//
+// Substrate held only the 50 until #1148, and #844's Tier 1a made that reachable: a classic load
+// balancer became a record, and the Resource Groups Tagging API tags one. So `TagResources` on a
+// classic ARN accepted an 11th tag, and a 50th, where AWS refuses the 11th.
+const (
+	elbMaxTagsPerResource        = 50
+	elbClassicMaxTagsPerResource = 10
+)
+
+// elbTagQuota is one generation's per-resource tag cap together with the `TooManyTags` wording its
+// own page publishes.
+//
+// The two travel as one value so they cannot drift: a cap without its refusal is how substrate came
+// to enforce ELBv2's number behind classic's code path in the first place. Resolved from the
+// record's own kind — never from the caller — so the Resource Groups Tagging API, ELBv2's tag doors
+// and the classic tag trio #844 Tier 1b will route cannot disagree about one load balancer.
+type elbTagQuota struct {
+	max     int
+	message string
+}
+
+// tooManyTags builds the refusal for a resource already at the quota.
+//
+// `TooManyTags` at HTTP 400 is published on both generations' `AddTags` pages and, for ELBv2, on all
+// four creates; classic `CreateLoadBalancer` lists it too. The message differs between the pages and
+// each generation answers its own wording, which is the convention every other refusal in this file
+// follows.
+func (q elbTagQuota) tooManyTags() *AWSError {
+	return &AWSError{Code: "TooManyTags", Message: q.message, HTTPStatus: http.StatusBadRequest}
+}
+
+// elbV2TagQuota is the quota the four ELBv2 taggable kinds share.
+func elbV2TagQuota() elbTagQuota {
+	return elbTagQuota{
+		max:     elbMaxTagsPerResource,
+		message: "You've reached the limit on the number of tags for this resource.",
+	}
+}
+
+// elbClassicTagQuota is the Classic Load Balancing API's own.
+//
+// The message is the `TooManyTags` text on the 2012-06-01 `AddTags` page — "The quota for the number
+// of tags that can be assigned to a load balancer has been reached." — which words the same refusal
+// differently from ELBv2's, so a consumer reading the message sees which generation refused it.
+func elbClassicTagQuota() elbTagQuota {
+	return elbTagQuota{
+		max:     elbClassicMaxTagsPerResource,
+		message: "The quota for the number of tags that can be assigned to a load balancer has been reached.",
+	}
+}
+
+// elbTagQuotaForKind returns the quota that applies to a resource kind.
+func elbTagQuotaForKind(kind string) elbTagQuota {
+	if kind == elbKindClassicLB {
+		return elbClassicTagQuota()
+	}
+	return elbV2TagQuota()
+}
+
+// elbTagQuotaForStateKey returns the quota that applies to the record a state key in the elb
+// namespace names.
+//
+// Only the classic prefix is tested, because the four ELBv2 prefixes share one cap and a key
+// matching none of the five has already been turned away by [elbKeyIsTaggable] at every caller.
+// Keying on the stored record rather than on the request is what makes the cap the *resource's*
+// and not the API door's — a classic load balancer reached through the generation-agnostic tagging
+// API gets 10 because of what it is.
+func elbTagQuotaForStateKey(key string) elbTagQuota {
+	if strings.HasPrefix(key, elbClassicLBKeyPrefix) {
+		return elbClassicTagQuota()
+	}
+	return elbV2TagQuota()
+}
 
 // elbReservedTagPrefix is the tag-key prefix ELB reserves for AWS's own use.
 //
@@ -116,20 +203,6 @@ func elbDuplicateTagKeysError() *AWSError {
 	return &AWSError{
 		Code:       "DuplicateTagKeys",
 		Message:    "A tag key was specified more than once.",
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// elbTooManyTagsError returns the error raised when a resource would exceed
-// [elbMaxTagsPerResource].
-//
-// Code and message are the API reference's own — "TooManyTags — You've reached the limit
-// on the number of tags for this resource. HTTP Status Code: 400" — and it is listed on
-// AddTags and on all four creates, so every path that can apply a tag can raise it.
-func elbTooManyTagsError() *AWSError {
-	return &AWSError{
-		Code:       "TooManyTags",
-		Message:    "You've reached the limit on the number of tags for this resource.",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
@@ -634,13 +707,18 @@ func elbCheckDuplicateTagKeys(tags []ELBTag) *AWSError {
 }
 
 // elbCheckTagLimit returns an error if merging incoming into existing would leave a
-// resource with more than [elbMaxTagsPerResource] user tags, or nil.
+// resource with more than its quota's worth of user tags, or nil.
 //
 // The count is over the post-merge key set with reserved keys excluded, which is the
 // same expression [ec2CheckTagLimit] uses and gets the same two documented rules right:
 // re-tagging an existing key on a resource already at the limit succeeds, and a reserved
 // key neither counts nor consumes room.
-func elbCheckTagLimit(existing, incoming []ELBTag) *AWSError {
+//
+// The quota is a parameter rather than a constant because the two ELB generations publish
+// different numbers; it is resolved from the record, via [elbTagQuotaForKind] at a create or
+// [elbTagQuotaForStateKey] at a tag call, never from which API door the request came through
+// (#1148).
+func elbCheckTagLimit(existing, incoming []ELBTag, quota elbTagQuota) *AWSError {
 	keys := make(map[string]struct{}, len(existing)+len(incoming))
 	for _, t := range existing {
 		if !strings.HasPrefix(t.Key, elbReservedTagPrefix) {
@@ -652,8 +730,8 @@ func elbCheckTagLimit(existing, incoming []ELBTag) *AWSError {
 			keys[t.Key] = struct{}{}
 		}
 	}
-	if len(keys) > elbMaxTagsPerResource {
-		return elbTooManyTagsError()
+	if len(keys) > quota.max {
+		return quota.tooManyTags()
 	}
 	return nil
 }
@@ -666,11 +744,11 @@ func elbCheckTagLimit(existing, incoming []ELBTag) *AWSError {
 // refusing a duplicate on all four would invent a code three of them do not publish. A
 // duplicate therefore resolves last-wins through [elbMergeTags], which is the only other
 // thing it can do.
-func elbCheckCreateTags(tags []ELBTag) *AWSError {
+func elbCheckCreateTags(tags []ELBTag, quota elbTagQuota) *AWSError {
 	if awsErr := elbCheckTagRules(tags); awsErr != nil {
 		return awsErr
 	}
-	return elbCheckTagLimit(nil, tags)
+	return elbCheckTagLimit(nil, tags, quota)
 }
 
 // elbMergeTags returns existing with incoming applied, overwriting a key already
@@ -768,7 +846,7 @@ func (p *ELBPlugin) addTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRespon
 	// Every resource is checked against the limit before any is written, for the same
 	// reason resolution is: the request either applies to all of them or to none.
 	for _, res := range resolved {
-		if limitErr := elbCheckTagLimit(res.tags, tags); limitErr != nil {
+		if limitErr := elbCheckTagLimit(res.tags, tags, elbTagQuotaForStateKey(res.stateKey)); limitErr != nil {
 			return nil, limitErr
 		}
 	}

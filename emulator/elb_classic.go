@@ -61,8 +61,11 @@ import (
 // `ConfigureHealthCheck` — is still an unrouted action and answers as one. The three tagging
 // actions are shared *names* with different shapes (classic addresses load balancers by
 // `LoadBalancerNames.member.N`, ELBv2 by `ResourceArns.member.N`), and they are deliberately not
-// discriminated yet: their classic forms also carry a different tag cap and a different removal
-// member, which is one decision rather than three and belongs with the rest of Tier 1b.
+// discriminated yet: their classic forms also carry a different removal member, which is one
+// decision rather than three and belongs with the rest of Tier 1b. Their different tag cap is no
+// longer part of that decision — #1148 resolved it from the record's own kind, so the classic 10 is
+// enforced by the create above and by the Resource Groups Tagging API already, and routing the trio
+// adds doors to a rule rather than the rule itself. See [elbTagQuota].
 //
 // A classic load balancer created here is therefore taggable through its create and through the
 // Resource Groups Tagging API, and not through classic `AddTags`. See
@@ -488,7 +491,10 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 	// document: a create carrying a tag it cannot legally apply must leave no load balancer
 	// behind. The classic operation publishes `DuplicateTagKeys` exactly as the ELBv2 one does,
 	// which is why it also passes true, and it accepts the same indexed `Tags.member.N` shape.
-	tags, tagErr := elbTagsForCreate(req, true)
+	//
+	// It passes its own kind, so the tag cap counted here is the 10 the classic `AddTags` page
+	// publishes rather than ELBv2's 50 (#1148).
+	tags, tagErr := elbTagsForCreate(req, true, elbKindClassicLB)
 	if tagErr != nil {
 		return nil, tagErr
 	}

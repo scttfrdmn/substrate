@@ -9,7 +9,8 @@ import (
 // Per-resource tag quotas on the Resource Groups Tagging API path — #1000.
 //
 // Four services enforce a published per-resource tag quota on their own tagging operations — EC2
-// ([ec2CheckTagLimit], 50), ELBv2 ([elbCheckTagLimit], 50), IAM ([iamCheckTagLimit], 50) and Kinesis
+// ([ec2CheckTagLimit], 50), ELB ([elbCheckTagLimit], 50 for ELBv2 and 10 for classic — see
+// [elbTagQuota]), IAM ([iamCheckTagLimit], 50) and Kinesis
 // ([kinesisCheckTagQuota], 50) — and all four are reachable through [TaggingPlugin.resolveARN], whose
 // merge consulted none of them. So `TagResources` was the one way to put a resource over its own
 // service's quota, after which that service's own tagging operation refused every further add: a
@@ -131,7 +132,7 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 		if !elbKeyIsTaggable(key) {
 			return nil
 		}
-		return taggingQuotaRefusal(taggingELBQuotaRefusal(raw, addTags, removeKeys))
+		return taggingQuotaRefusal(taggingELBQuotaRefusal(key, raw, addTags, removeKeys))
 	case iamNamespace:
 		return taggingQuotaRefusal(taggingIAMQuotaRefusal(key, raw, addTags, removeKeys))
 	case kinesisNamespace:
@@ -170,12 +171,17 @@ func taggingEC2QuotaRefusal(raw []byte, addTags map[string]string, removeKeys []
 		taggingTagsAsEC2(addTags))
 }
 
-// taggingELBQuotaRefusal applies [elbCheckTagLimit] to a stored ELBv2 record.
+// taggingELBQuotaRefusal applies [elbCheckTagLimit] to a stored ELB record of either generation.
 //
-// All four taggable ELBv2 records spell the member `Tags` and hold the same `Key`/`Value` pair, which
-// is the same fact the elasticloadbalancing arm of [mergeResourceTags] relies on to merge them all
-// through one call.
-func taggingELBQuotaRefusal(raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
+// All five taggable ELB records — the four ELBv2 ones and the classic load balancer #844 Tier 1a
+// added — spell the member `Tags` and hold the same `Key`/`Value` pair, which is the same fact the
+// elasticloadbalancing arm of [mergeResourceTags] relies on to merge them all through one call.
+//
+// The key is threaded in for the quota rather than for the decode: the two generations publish
+// different per-resource caps, so [elbTagQuotaForStateKey] reads the cap off the record's own key
+// prefix. Until #1148 this counted every ELB record against ELBv2's 50, which let `TagResources` put
+// a classic load balancer at five times the 10 its own `AddTags` page publishes.
+func taggingELBQuotaRefusal(key string, raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
 	var record struct {
 		Tags []ELBTag `json:"Tags"`
 	}
@@ -184,7 +190,8 @@ func taggingELBQuotaRefusal(raw []byte, addTags map[string]string, removeKeys []
 	}
 	return elbCheckTagLimit(
 		taggingDropRemovedTags(record.Tags, removeKeys, func(t ELBTag) string { return t.Key }),
-		taggingTagsAsELB(addTags))
+		taggingTagsAsELB(addTags),
+		elbTagQuotaForStateKey(key))
 }
 
 // taggingIAMQuotaRefusal applies [iamCheckTagLimitAWSError] to a stored IAM user or role.

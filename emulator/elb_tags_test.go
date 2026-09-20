@@ -16,6 +16,21 @@ import (
 // Code. It fails the test if the response was not an error.
 func elbErrorCode(t *testing.T, resp *http.Response) string {
 	t.Helper()
+	code, _ := elbErrorBody(t, resp)
+	return code
+}
+
+// elbErrorMessage returns the Message of the same body, for the assertions about wording rather than
+// dispatch — the two ELB generations word `TooManyTags` differently and each answers its own.
+func elbErrorMessage(t *testing.T, resp *http.Response) string {
+	t.Helper()
+	_, message := elbErrorBody(t, resp)
+	return message
+}
+
+// elbErrorBody decodes an ELB error response into its Code and Message.
+func elbErrorBody(t *testing.T, resp *http.Response) (code, message string) {
+	t.Helper()
 	var body struct {
 		XMLName xml.Name `xml:"ErrorResponse"`
 		Error   struct {
@@ -29,7 +44,7 @@ func elbErrorCode(t *testing.T, resp *http.Response) string {
 	if body.Error.Code == "" {
 		t.Fatalf("expected an error body, got status %d with no Code", resp.StatusCode)
 	}
-	return body.Error.Code
+	return body.Error.Code, body.Error.Message
 }
 
 // elbCreateLB creates a load balancer and returns its ARN.
