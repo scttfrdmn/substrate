@@ -391,7 +391,9 @@ func (p *SchedulerPlugin) getSchedule(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, awsErr
 	}
 
-	groupName := req.Params["groupName"]
+	// lowerCamel here, and PascalCase at listSchedules, because the two pages publish different query
+	// strings — see scheduler_query_keys.go (#1226).
+	groupName := req.Params[schedGroupNameKey]
 	if groupName == "" {
 		groupName = "default"
 	}
@@ -475,7 +477,9 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 		return nil, awsErr
 	}
 
-	groupName := req.Params["groupName"]
+	// lowerCamel, like getSchedule and unlike listSchedules, because this page publishes it that way
+	// (#1226).
+	groupName := req.Params[schedGroupNameKey]
 	if groupName == "" {
 		groupName = "default"
 	}
@@ -491,20 +495,22 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 }
 
 func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	groupName := req.Params["groupName"]
+	// PascalCase, and ScheduleGroup rather than groupName, because this page publishes its query
+	// string that way where the single-schedule pages do not — see scheduler_query_keys.go (#1226).
+	groupName := req.Params[schedListGroupKey]
 	if groupName == "" {
 		groupName = "default"
 	}
-	namePrefix := req.Params["namePrefix"]
-	stateFilter := req.Params["state"]
-	nextTokenParam := req.Params["nextToken"]
+	namePrefix := req.Params[schedListNamePrefixKey]
+	stateFilter := req.Params[schedListStateKey]
+	nextTokenParam := req.Params[schedListNextTokenKey]
 
-	maxResults := 20
-	if mr := req.Params["maxResults"]; mr != "" {
+	maxResults := schedListDefaultMaxResults
+	if mr := req.Params[schedListMaxResultsKey]; mr != "" {
 		if n, err := strconv.Atoi(mr); err == nil && n > 0 {
 			maxResults = n
-			if maxResults > 100 {
-				maxResults = 100
+			if maxResults > schedListMaxMaxResults {
+				maxResults = schedListMaxMaxResults
 			}
 		}
 	}

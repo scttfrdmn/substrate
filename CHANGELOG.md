@@ -279,6 +279,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is only the omission #1202 tracks.
 
 ### Fixed
+- **EventBridge Scheduler `ListSchedules` read all five of its query parameters under names the page
+  does not publish, so every filter and the whole cursor were inert** (#1226). `API_ListSchedules`
+  publishes `GET /schedules?MaxResults=…&NamePrefix=…&NextToken=…&ScheduleGroup=…&State=…` —
+  PascalCase throughout, with the group bound to **`ScheduleGroup`** even though the parameter list
+  calls it `GroupName`, so `GroupName` never appears on the wire. Substrate read `groupName`,
+  `namePrefix`, `state`, `nextToken` and `maxResults`, and `AWSRequest.Params` is populated verbatim
+  from the query string, so **no SDK could set any of the five**: every call answered the `default`
+  group's first twenty schedules, attached a `NextToken` the next call then ignored, and applied no
+  filter. A paginating loop either spun or reread the same page, and nothing in any response said so
+  — the same undetectable failure #1086 is about, arriving by a different route. **The split is the
+  API Reference's own, not substrate's**, which is why the fix is one operation wide:
+  `API_GetSchedule` publishes `?groupName=` and `API_DeleteSchedule` publishes
+  `?clientToken=&groupName=`, so those two handlers were already right and are deliberately left
+  alone, with both spellings now named in one file so neither can later be "corrected" into the
+  other. The lowerCamel names are **not** kept as aliases: AWS ignores a query parameter its model
+  does not carry, so honouring one would be the same defect facing the other way — a call that
+  filters against substrate and silently does not against AWS. This is also why the defect survived,
+  and the evidence is in the diff: every test in the tree built its query string in substrate's
+  dialect rather than AWS's, so the pagination and filter tests passed while the operation was
+  unusable from an SDK. Two readings of substrate's own are recorded rather than changed: `MaxResults`
+  has **no published default**, so the page size of 20 is substrate's choice, and a value above the
+  published maximum of 100 is clamped rather than refused.
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not
   only `2015-03-31`** (#1142). A REST service puts the version in the path, and Lambda dates each
   operation's URI at the version that operation was introduced — `2014-11-13` for `InvokeAsync`,
