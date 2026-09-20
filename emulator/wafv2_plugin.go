@@ -451,7 +451,7 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("wafv2 getWebACLForResource get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "WAFNonexistentItemException", Message: "No WebACL is associated with resource " + input.ResourceArn, HTTPStatus: http.StatusNotFound}
+		return nil, wafv2NonexistentItem("No WebACL is associated with resource " + input.ResourceArn)
 	}
 
 	var webACLArn string
@@ -692,7 +692,7 @@ func (p *WAFv2Plugin) loadWebACLByID(acct, region, scope, id string) (*WAFv2WebA
 		return nil, fmt.Errorf("wafv2 loadWebACLByID get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "WAFNonexistentItemException", Message: "Web ACL with ID " + id + " does not exist.", HTTPStatus: http.StatusNotFound}
+		return nil, wafv2NonexistentItem("Web ACL with ID " + id + " does not exist.")
 	}
 	var acl WAFv2WebACL
 	if err := json.Unmarshal(data, &acl); err != nil {
@@ -719,7 +719,7 @@ func (p *WAFv2Plugin) loadIPSetByID(acct, region, scope, id string) (*WAFv2IPSet
 		return nil, fmt.Errorf("wafv2 loadIPSetByID get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "WAFNonexistentItemException", Message: "IP set with ID " + id + " does not exist.", HTTPStatus: http.StatusNotFound}
+		return nil, wafv2NonexistentItem("IP set with ID " + id + " does not exist.")
 	}
 	var ipset WAFv2IPSet
 	if err := json.Unmarshal(data, &ipset); err != nil {

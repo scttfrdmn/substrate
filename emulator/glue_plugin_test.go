@@ -144,9 +144,10 @@ func TestGluePlugin_DatabaseCRUD(t *testing.T) {
 	_ = glueBody(t, resp5)
 
 	// Confirm gone.
+	// 400, not 404: Glue publishes EntityNotFoundException at 400 on every page that lists it (#1098).
 	resp6 := glueRequest(t, ts, "GetDatabase", map[string]interface{}{"Name": "mydb"})
-	if resp6.StatusCode != http.StatusNotFound {
-		t.Fatalf("expected 404 after delete, got %d", resp6.StatusCode)
+	if resp6.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 after delete, got %d", resp6.StatusCode)
 	}
 	_ = glueBody(t, resp6)
 }

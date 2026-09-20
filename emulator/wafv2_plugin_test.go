@@ -642,6 +642,11 @@ func TestWAFv2Plugin_DisassociateWebACL(t *testing.T) {
 // TestWAFv2Plugin_UnsupportedOperation pins the default arm. WAFv2 is JSON-RPC, so
 // the refusal is AWS's documented UnknownOperationException at 404, not the Query
 // protocol's InvalidAction at 400 (#716).
+//
+// This 404 deliberately did not move with #1098's fifteen: the code belongs to the JSON protocol's
+// Common Errors page, which publishes it at 404, not to WAFv2's own vocabulary — so the argument that
+// moved WAFNonexistentItemException to 400 does not reach it. #1098's acceptance criteria assumed
+// otherwise.
 func TestWAFv2Plugin_UnsupportedOperation(t *testing.T) {
 	p, ctx := setupWAFv2Plugin(t)
 	_, err := p.HandleRequest(ctx, wafv2Request(t, "TagResource", map[string]any{}))

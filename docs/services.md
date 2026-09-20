@@ -16676,6 +16676,25 @@ EFS standard storage: $0.30 per GB-month.
 | GetJobRun | Transitions to SUCCEEDED after describe |
 | GetJobRuns | |
 
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a database, table, connection, crawler, job or job run that does not exist | `EntityNotFoundException` | 400 |
+
+All twelve of those sites answered 404 until
+[#1098](https://github.com/scttfrdmn/substrate/issues/1098). Glue publishes
+`EntityNotFoundException` at 400 on every page that lists it — `GetTable`'s Errors section gives the
+gloss, *"A specified entity does not exist"* — and publishes no 404 anywhere, so a consumer branching on
+the status rather than on the code saw a shape AWS never sends. The correction follows
+[#910](https://github.com/scttfrdmn/substrate/issues/910), which made the same argument for the
+statuses it moved; [#1063](https://github.com/scttfrdmn/substrate/issues/1063) had already corrected
+these codes and left their statuses behind.
+
+The messages are substrate's own — `"<Entity> <name> not found."`, naming which entity and which name —
+because the published gloss names neither, and a caller reading a message rather than a code needs to
+know which lookup failed.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
@@ -18732,11 +18751,20 @@ token is minted on every successful write.
 |-----------|------|--------|
 | a body that will not parse | `WAFInvalidParameterException` | 400 |
 | an invalid `Scope` | `WAFInvalidParameterException` | 400 |
-| a Web ACL or IP set that does not exist | `WAFNonexistentItemException` | **404** |
+| a Web ACL or IP set that does not exist | `WAFNonexistentItemException` | 400 |
 | a `LockToken` that does not match | `WAFOptimisticLockException` | 400 |
 
-The three 404s are a divergence: every WAFv2 page publishes `WAFNonexistentItemException` at 400.
-[#1098](https://github.com/scttfrdmn/substrate/issues/1098) covers them together with Glue's twelve.
+Those three answered 404 until
+[#1098](https://github.com/scttfrdmn/substrate/issues/1098). Every WAFv2 page that lists
+`WAFNonexistentItemException` publishes it at 400 — `GetIPSet`'s Errors section gives the gloss, *"AWS
+WAF couldn't perform the operation because your resource doesn't exist. If you've just created a
+resource that you're using in this operation, you might just need to wait a few minutes."* — and no
+WAFv2 page publishes a 404 at all, so a consumer branching on the status rather than on the code saw a
+shape AWS never sends. The messages are substrate's own, naming which Web ACL or IP set was not found,
+because the published gloss names neither.
+
+The one 404 that remains is not WAFv2's: an operation the plugin does not route answers
+`UnknownOperationException`, which the JSON protocol's own Common Errors page publishes at 404.
 
 `WAFDuplicateItemException`, `WAFLimitsExceededException`, `WAFInvalidResourceException`,
 `WAFUnavailableEntityException` and `WAFInternalErrorException` are published and have no site:
