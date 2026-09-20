@@ -59,12 +59,16 @@ import "net/http"
 //     expires after 24 hours."* and no page publishes a code for presenting an expired one, so a
 //     token substrate issues stays valid for the life of the store. Refusing an expired token would
 //     need the token to carry its issue time and the simulated clock to judge it — a different
-//     change, and one that needs a code decision this one does not.
-//   - **GetLogEvents' two tokens.** AWS publishes nextBackwardToken and nextForwardToken, says *"The
-//     returned tokens are never null"*, and documents termination as the returned token being equal
-//     to the one passed in. Substrate emits nextForwardToken only when a further page exists and
-//     never emits nextBackwardToken at all, so a caller following that documented rule cannot
-//     terminate and has to use the empty-token rule instead. Left as it was.
+//     change, and one that needs a code decision this one does not. #1223 revisited it for GetLogEvents
+//     and declined it again for the same reason, recording the decision in docs/services.md.
+//
+// **GetLogEvents' two tokens** were one of these: AWS publishes nextBackwardToken and nextForwardToken,
+// says *"The returned tokens are never null"*, and documents termination as the returned token being
+// equal to the one passed in, while substrate emitted the forward one only when a further page existed
+// and the backward one never — so a caller following that rule could not terminate. It was fixed in
+// #1223; see cloudwatchlogs_event_tokens.go, which is where the argument for the pair, for the
+// direction prefix, and for reading startFromHead now lives. Note that GetLogEvents no longer decodes
+// the bare offset token the other three still use, and that its tokens no longer decode under them.
 // **ResourceNotFoundException** was one of these: published on three of the four pages (every one but
 // DescribeLogGroups) and answered by none of them, while the sites elsewhere in the plugin that did
 // answer it used 404 where every page publishes 400. It was fixed in #1224 — see

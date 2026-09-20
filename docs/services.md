@@ -1565,19 +1565,23 @@ Substrate applies 50 and 10,000, which is the published figure in each case — 
 default was substrate's own choice. It models no response-size ceiling, so `GetLogEvents` applies the
 count alone.
 
-**Two things this does not fix, named so the conversion is not read as having fixed them.** All four
+**One thing this does not fix, named so the conversion is not read as having fixed it.** All four
 response members publish *"The token expires after 24 hours."* and no page publishes a code for
 presenting an expired one, so a token substrate issues stays valid for the life of the store —
 refusing an expired one would need the token to carry its issue time and the simulated clock to judge
-it. And `GetLogEvents` publishes a **pair** of directional tokens, says *"The returned tokens are never
-null"*, and documents termination as the returned token being equal to the one passed in; substrate
-emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
-caller following that rule cannot terminate and has to use the empty-token rule instead.
+it, and would have to attribute the refusal to `InvalidParameterException`/400, the only 400-class code
+these pages publish for a bad parameter. That attribution is a reading rather than a read, so the expiry
+is **declined** rather than deferred: substrate's pagination tokens do not expire, and a test that needs
+an expired-token path cannot get one here.
 
-A third was recorded here and has since been fixed: `ResourceNotFoundException` had no site at three of
-these four doors, so a listing over a log group that does not exist was empty rather than refused. See
-[a log group that does not exist is not an empty log group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group)
-for the refusal and for how it orders against the token.
+Two more were recorded here and have since been fixed. `ResourceNotFoundException` had no site at three
+of these four doors, so a listing over a log group that does not exist was empty rather than refused —
+see [a log group that does not exist is not an empty log group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group)
+for the refusal and for how it orders against the token. And `GetLogEvents`' pair of directional tokens
+is now reported in full — see
+[GetLogEvents pages by a pair of tokens](#getlogevents-pages-by-a-pair-of-tokens), which is also where
+the one way the four now differ is set out: `GetLogEvents` prefixes its tokens with a direction, so its
+tokens no longer decode under the other three and theirs no longer decode under it.
 
 **All four validate the token before they read any listing**, asserted by sealing the store the way
 #915's sites are; unlike Athena, Logs' index loader propagates a store failure, so the seal can tell
@@ -14360,7 +14364,7 @@ KMS API requests: $0.03 per 10,000 requests.
 | DeleteLogStream | |
 | DescribeLogStreams | Refuses a `nextToken` it did not issue |
 | PutLogEvents | Accepts up to 10,000 events per call |
-| GetLogEvents | Issues `nextForwardToken` only, and refuses a `nextToken` it did not issue |
+| GetLogEvents | Issues both `nextForwardToken` and `nextBackwardToken`; reads `startFromHead`; refuses a `nextToken` it did not issue |
 | FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.
@@ -14400,9 +14404,61 @@ records the one status deliberately left as it was
 All four paginating operations refuse a `nextToken` substrate could not have issued with
 `InvalidParameterException` / 400, rather than answering a well-formed page one — see
 [CloudWatch Logs carried one block four times](#cloudwatch-logs-carried-one-block-four-times-and-the-page-says-where-a-token-comes-from)
-for the provenance, the two divergences the change deliberately leaves in place (the published
-24-hour token expiry and `GetLogEvents`' missing `nextBackwardToken`), and the argument that the token
+for the provenance, the one divergence the change deliberately leaves in place (the published
+24-hour token expiry, which is declined rather than deferred), and the argument that the token
 is validated before any listing is read.
+
+### GetLogEvents pages by a pair of tokens
+
+`GetLogEvents` is the one Logs paginator whose response carries **two** tokens, and whose termination
+rule is stated in terms of both. The reference's overview says *"As long as the `nextBackwardToken` or
+`nextForwardToken` returned is NOT equal to the `nextToken` that you passed into the API call, there
+might be more log events available"*, and each member's own description adds *"If you have reached the
+end of the stream, it returns the same token you passed in."* Both are published with Length Constraints
+minimum 1, and the overview states flatly that *"The returned tokens are never null."*
+
+Substrate emitted `nextForwardToken` only when a further page existed, and `nextBackwardToken` never. A
+caller written from the page therefore could not terminate: it sent an empty token, was returned an empty
+one, and either stopped on its first page believing the comparison had been met or spun. Both tokens are
+now present on every answer, including for an empty stream, and each names a position such that
+presenting it back yields the same token — so the published rule works as written in both directions
+([#1223](https://github.com/scttfrdmn/substrate/issues/1223)).
+
+**The forward token names the position after the page; the backward token the position before it.** That
+is what makes equality fall out arithmetically at each end rather than needing a special case: walking
+forward past the tail clamps to the same offset and returns the same token, and walking backward past the
+head clamps to zero and does the same. It is also why `GetLogEvents` does **not** share
+`pageByOffsetToken` with the other three — that helper omits its token on a final page, which is correct
+where a token's *absence* means done, and wrong here where *equality* means done. A full final page
+therefore still carries a forward token, and presenting it costs one round trip to an empty page. AWS
+describes exactly that: *"Partially full or empty pages don't necessarily mean that pagination is
+finished."*
+
+**The direction is on the wire, using the prefixes the reference's own examples publish.** The page's
+example responses show `"nextBackwardToken": "b/31132629274945519779805322857203735586714454643391594505"`
+and `"nextForwardToken": "f/31132629323784151764587387538205132201699397759403884544"`, so substrate
+prefixes `b/` and `f/` ahead of its offset encoding. The prefix is load-bearing rather than cosmetic:
+without it a backward token is a bare offset indistinguishable from a forward one, and would be read as a
+forward position — the same class of undetectably wrong page the token refusal above exists to prevent.
+One consequence is a **wire-shape change**: `GetLogEvents` no longer accepts the bare offset token the
+other three issue, and its own tokens no longer decode under them. A token presented without a valid
+direction prefix is refused with the same `InvalidParameterException` / 400.
+
+**`startFromHead` is read, and decides only the first page.** The reference gives it a default of `false`
+— *"If the value is true, the earliest log events are returned first. If the value is false, the latest
+log events are returned first"* — so a tokenless call now answers the **tail** of the stream, where
+substrate previously always started at the head. Once a token is present the token's own direction
+decides. The page also says *"If you are using a previous `nextForwardToken` value as the `nextToken` in
+this operation, you must specify `true` for `startFromHead`"*; substrate does **not** enforce that,
+because no Logs page publishes a code for violating it and the token already carries its direction —
+inventing a refusal AWS does not document refusing is the thing
+[#671](https://github.com/scttfrdmn/substrate/issues/671)'s scope decision rules out.
+
+**The 24-hour expiry is declined here too.** Both members publish *"The token expires after 24 hours."*
+and neither publishes a code for presenting an expired one; the argument is the same as for the other
+three and is set out above. A token past the end of a stream that has since been trimmed is **clamped**
+to a final empty page rather than refused, so a walk whose events were deleted mid-loop terminates
+instead of erroring.
 
 ### CloudFormation resource types
 

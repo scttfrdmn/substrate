@@ -616,6 +616,7 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		EndTime       int64  `json:"endTime"`
 		NextToken     string `json:"nextToken"`
 		Limit         int    `json:"limit"`
+		StartFromHead bool   `json:"startFromHead"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -640,9 +641,10 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 	}
 
 	// Below the required-member refusal and the two resolutions, and above the event read, for the
-	// reason cloudwatchlogs_pagination.go states (#1086). Only the forward token is substrate's to
-	// issue, so only the forward offset is what a token can decode to.
-	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	// reason cloudwatchlogs_pagination.go states (#1086). The token carries its own direction, which is
+	// what cloudwatchlogs_event_tokens.go is for (#1223) — so unlike the other three paginators here,
+	// what a token decodes to is a cursor rather than a bare offset.
+	cursor, tokenPresent, tokenOK := cwLogsDecodeEventToken(body.NextToken)
 	if !tokenOK {
 		return nil, cwLogsInvalidPaginationToken("GetLogEvents")
 	}
@@ -676,21 +678,28 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 	if limit <= 0 {
 		limit = cwLogsEventsDefaultLimit
 	}
-	page, nextToken := pageByOffsetToken(filtered, offset, limit)
+	start, end := cwLogsEventPageBounds(cursor, tokenPresent, body.StartFromHead, len(filtered), limit)
+	page := filtered[start:end]
 
 	events := make([]cwOutputLogEventOut, 0, len(page))
 	for _, ev := range page {
 		events = append(events, cwOutputLogEventWire(ev))
 	}
 
+	// Neither token is omitempty, because neither has an empty form: both publish Length Constraints of
+	// minimum 1 and the overview says *"The returned tokens are never null"*. The forward token names the
+	// position after this page and the backward token the position before it, which is what makes the
+	// published termination rule — the returned token equalling the one passed in — hold at either end
+	// without being special-cased (#1223).
 	type response struct {
 		Events            []cwOutputLogEventOut `json:"events"`
-		NextForwardToken  string                `json:"nextForwardToken,omitempty"`
-		NextBackwardToken string                `json:"nextBackwardToken,omitempty"`
+		NextForwardToken  string                `json:"nextForwardToken"`
+		NextBackwardToken string                `json:"nextBackwardToken"`
 	}
 	return cwLogsJSONResponse(http.StatusOK, response{
-		Events:           events,
-		NextForwardToken: nextToken,
+		Events:            events,
+		NextForwardToken:  cwLogsEncodeEventToken(cwLogsEventCursor{Offset: end}),
+		NextBackwardToken: cwLogsEncodeEventToken(cwLogsEventCursor{Offset: start, Backward: true}),
 	})
 }
 
