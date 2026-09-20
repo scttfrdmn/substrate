@@ -14026,7 +14026,7 @@ EventBridge custom events: $1.00 per million events.
 | GetSchedule | `GET /schedules/{Name}` | |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
-| ListSchedules | `GET /schedules` | `GroupName` and `NamePrefix` filters |
+| ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation) |
 
 ### What a create or update is refused for
 
@@ -14112,6 +14112,43 @@ tags are snake_case (`role_arn`, `retry_policy`, `maximum_window_in_minutes`). A
 survived the request — `GetSchedule` reported them empty however they were sent. The handlers now decode
 into request types carrying the published names and fold those into the stored shape, which is also what
 makes `RoleArn`'s `Required: Yes` checkable at all: a member the decode drops cannot be found missing.
+
+### The query string is read in the published spelling, which differs per operation
+
+The body's spelling was only half of it. `ListSchedules` read all five of its query parameters in the
+lowerCamel form — `groupName`, `namePrefix`, `state`, `nextToken`, `maxResults` — and **no SDK sends
+those names**, so every call arrived with none of the five set. The observable result was the worst
+available: the operation answered the `default` group's first twenty schedules to every request,
+attached a `NextToken` the next request then ignored, and applied no filter. A paginating loop either
+spun or reread the same page, and nothing in any response said so. Every test in the tree spoke
+substrate's dialect rather than AWS's, which is why it survived
+([#1226](https://github.com/scttfrdmn/substrate/issues/1226)).
+
+**The split is the API Reference's own, not substrate's**, which is why the fix is confined to one
+operation. `API_ListSchedules` publishes
+
+```
+GET /schedules?MaxResults={MaxResults}&NamePrefix={NamePrefix}&NextToken={NextToken}&ScheduleGroup={GroupName}&State={State}
+```
+
+— PascalCase throughout, and the group is bound to **`ScheduleGroup`** even though the parameter list
+calls it `GroupName`, so `GroupName` never appears on the wire. `API_GetSchedule` publishes
+`GET /schedules/{Name}?groupName={GroupName}` and `API_DeleteSchedule` publishes
+`DELETE /schedules/{Name}?clientToken={ClientToken}&groupName={GroupName}` — lowerCamel, and a
+different key for the same concept. Those two handlers were already right and were deliberately left
+alone; `emulator/scheduler_query_keys.go` names both spellings in one place so neither can later be
+"corrected" into the other.
+
+The lowerCamel names are **not** accepted as aliases for `ListSchedules`. AWS ignores a query
+parameter its model does not carry, so honouring one would be the same defect facing the other way: a
+call that filters against substrate and silently does not against AWS. `?maxResults=1` now reads the
+default page, which is what AWS answers.
+
+Two readings of substrate's own remain, and are recorded rather than fixed here. `MaxResults` has
+**no published default** — the page publishes only a Valid Range of 1–100 — so the page size of 20 an
+absent `MaxResults` gets is substrate's choice. And a `MaxResults` above the published maximum is
+**clamped to 100 rather than refused**, as is a value of zero or below, which is silently ignored;
+refusing an out-of-range page size is a class of its own and is not this operation's alone.
 
 ### An empty `Name` reaches the operation the caller named
 

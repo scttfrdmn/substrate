@@ -204,19 +204,148 @@ func TestScheduler_ListSchedules(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &listResp))
 	assert.Len(t, listResp.Schedules, 3)
 
-	// List with namePrefix=alpha — expect 2.
-	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?namePrefix=alpha", "")
+	// List with NamePrefix=alpha — expect 2. PascalCase is what API_ListSchedules publishes (#1226).
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?NamePrefix=alpha", "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readSchedulerBody(t, resp)
 	require.NoError(t, json.Unmarshal(body, &listResp))
 	assert.Len(t, listResp.Schedules, 2)
 
-	// List with state=DISABLED — expect 0 (all are ENABLED by default).
-	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?state=DISABLED", "")
+	// List with State=DISABLED — expect 0 (all are ENABLED by default).
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?State=DISABLED", "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readSchedulerBody(t, resp)
 	require.NoError(t, json.Unmarshal(body, &listResp))
 	assert.Len(t, listResp.Schedules, 0)
+}
+
+// TestScheduler_ListSchedulesReadsThePublishedQueryKeys pins the spellings API_ListSchedules
+// publishes, and pins that the lowerCamel spellings substrate used to read are now inert (#1226).
+//
+// The two halves are asserted together because the defect was invisible from either alone: the old
+// tests passed on the lowerCamel form, and a real SDK can only send the PascalCase form, so nothing
+// compared the two. The inert half matters as much as the working half — AWS ignores a query
+// parameter its model does not carry, so accepting one would leave a call that filters against
+// substrate and silently does not against AWS.
+func TestScheduler_ListSchedulesReadsThePublishedQueryKeys(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	target := `{"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"}`
+	ftw := `{"Mode": "OFF"}`
+	for _, name := range []string{"keys-a1", "keys-a2", "keys-b1"} {
+		body := fmt.Sprintf(`{"ScheduleExpression": "rate(1 hour)", "Target": %s, "FlexibleTimeWindow": %s}`, target, ftw)
+		resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/"+name, body)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create %s", name)
+	}
+
+	count := func(t *testing.T, query string) (int, string) {
+		t.Helper()
+		resp := schedulerRequest(t, ts, http.MethodGet, "/schedules"+query, "")
+		require.Equal(t, http.StatusOK, resp.StatusCode, query)
+		var out struct {
+			Schedules []struct {
+				Name string `json:"Name"`
+			} `json:"Schedules"`
+			NextToken string `json:"NextToken"`
+		}
+		require.NoError(t, json.Unmarshal(readSchedulerBody(t, resp), &out), query)
+		return len(out.Schedules), out.NextToken
+	}
+
+	t.Run("the published spellings are read", func(t *testing.T) {
+		got, _ := count(t, "?NamePrefix=keys-a")
+		assert.Equal(t, 2, got, "NamePrefix")
+
+		got, _ = count(t, "?State=DISABLED")
+		assert.Equal(t, 0, got, "State")
+
+		got, token := count(t, "?MaxResults=1")
+		assert.Equal(t, 1, got, "MaxResults")
+		require.NotEmpty(t, token, "MaxResults=1 must leave a cursor")
+
+		got, _ = count(t, "?MaxResults=1&NextToken="+token)
+		assert.Equal(t, 1, got, "NextToken advances the page")
+
+		// ScheduleGroup, not GroupName: the page names the parameter GroupName and binds it to the
+		// ScheduleGroup key, so only the key is observable. A group holding nothing lists nothing,
+		// where the unread parameter would have listed the default group's three.
+		got, _ = count(t, "?ScheduleGroup=other")
+		assert.Equal(t, 0, got, "ScheduleGroup")
+	})
+
+	t.Run("the lowerCamel spellings are ignored", func(t *testing.T) {
+		for _, query := range []string{
+			"?namePrefix=keys-a",
+			"?state=DISABLED",
+			"?maxResults=1",
+			"?scheduleGroup=other",
+			"?groupName=other",
+		} {
+			got, _ := count(t, query)
+			assert.Equal(t, 3, got, "%s must be ignored, as AWS ignores an unmodelled parameter", query)
+		}
+	})
+}
+
+// TestScheduler_ListSchedulesMaxResultsReadings pins the two page-size readings that are substrate's
+// own rather than the page's, now that MaxResults is read at all (#1226).
+//
+// API_ListSchedules publishes a Valid Range of 1–100 and **no default**. Substrate answers 20 when the
+// parameter is absent or unusable, and clamps a larger request to 100 rather than refusing it — both
+// recorded in docs/services.md as divergences. They are asserted here because an unasserted reading is
+// how the lowerCamel keys survived: nothing observed what the operation actually did.
+//
+// A clamp is only observable above the maximum, so this needs more than 100 schedules; that is why it
+// is a separate test from the query-key one rather than another subtest of it.
+func TestScheduler_ListSchedulesMaxResultsReadings(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	target := `{"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"}`
+	ftw := `{"Mode": "OFF"}`
+	const total = 101
+	for i := range total {
+		body := fmt.Sprintf(`{"ScheduleExpression": "rate(1 hour)", "Target": %s, "FlexibleTimeWindow": %s}`, target, ftw)
+		resp := schedulerRequest(t, ts, http.MethodPost, fmt.Sprintf("/schedules/cap-%03d", i), body)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "create %d", i)
+	}
+
+	page := func(t *testing.T, query string) (int, string) {
+		t.Helper()
+		resp := schedulerRequest(t, ts, http.MethodGet, "/schedules"+query, "")
+		require.Equal(t, http.StatusOK, resp.StatusCode, query)
+		var out struct {
+			Schedules []struct {
+				Name string `json:"Name"`
+			} `json:"Schedules"`
+			NextToken string `json:"NextToken"`
+		}
+		require.NoError(t, json.Unmarshal(readSchedulerBody(t, resp), &out), query)
+		return len(out.Schedules), out.NextToken
+	}
+
+	for _, tc := range []struct {
+		name  string
+		query string
+		want  int
+		why   string
+	}{
+		{"absent", "", 20, "the unpublished default of 20"},
+		{"above the published maximum", "?MaxResults=500", 100, "clamped to the published maximum, not refused"},
+		{"at the published maximum", "?MaxResults=100", 100, "the maximum is honored as given"},
+		{"zero", "?MaxResults=0", 20, "outside the range 1-100 and silently ignored, not refused"},
+		{"negative", "?MaxResults=-5", 20, "silently ignored, not refused"},
+		{"not a number", "?MaxResults=many", 20, "unparseable and silently ignored, not refused"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, token := page(t, tc.query)
+			assert.Equal(t, tc.want, got, tc.why)
+			assert.NotEmpty(t, token, "%d of %d schedules leaves a cursor", tc.want, total)
+		})
+	}
 }
 
 func TestScheduler_ListPagination(t *testing.T) {
@@ -235,8 +364,8 @@ func TestScheduler_ListPagination(t *testing.T) {
 		require.Equal(t, http.StatusOK, resp.StatusCode, "create %s", name)
 	}
 
-	// First page: maxResults=2.
-	resp := schedulerRequest(t, ts, http.MethodGet, "/schedules?maxResults=2", "")
+	// First page: MaxResults=2.
+	resp := schedulerRequest(t, ts, http.MethodGet, "/schedules?MaxResults=2", "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readSchedulerBody(t, resp)
 	var page1 struct {
@@ -249,8 +378,8 @@ func TestScheduler_ListPagination(t *testing.T) {
 	assert.Len(t, page1.Schedules, 2)
 	assert.NotEmpty(t, page1.NextToken)
 
-	// Second page using nextToken.
-	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?maxResults=2&nextToken="+page1.NextToken, "")
+	// Second page using NextToken.
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?MaxResults=2&NextToken="+page1.NextToken, "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readSchedulerBody(t, resp)
 	var page2 struct {
@@ -264,7 +393,7 @@ func TestScheduler_ListPagination(t *testing.T) {
 	assert.NotEmpty(t, page2.NextToken)
 
 	// Third page — should have the remaining 1 item and no NextToken.
-	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?maxResults=2&nextToken="+page2.NextToken, "")
+	resp = schedulerRequest(t, ts, http.MethodGet, "/schedules?MaxResults=2&NextToken="+page2.NextToken, "")
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readSchedulerBody(t, resp)
 	var page3 struct {
