@@ -202,10 +202,13 @@ func TestCWLogs_ExistingGroupsStillRead(t *testing.T) {
 	assert.Contains(t, string(cwLogsReadBody(t, resp)), "ERROR: disk full")
 
 	// An empty stream under a real group: a 200 with no events, which is the answer the refusal above
-	// used to hide.
+	// used to hide. Both tokens are present and name the head, because the published rule is that they
+	// are never null and that the end of the stream returns the token you passed in — which for a stream
+	// with nothing in it is the position a first call already sits at (#1223).
 	resp = cwLogsRequest(t, srv, "CreateLogStream", map[string]any{"logGroupName": "/exists", "logStreamName": "quiet"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	resp = cwLogsRequest(t, srv, "GetLogEvents", map[string]any{"logGroupName": "/exists", "logStreamName": "quiet"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.JSONEq(t, `{"events":[]}`, string(cwLogsReadBody(t, resp)))
+	assert.JSONEq(t, `{"events":[],"nextForwardToken":"f/MA==","nextBackwardToken":"b/MA=="}`,
+		string(cwLogsReadBody(t, resp)))
 }

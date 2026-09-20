@@ -1456,9 +1456,11 @@ func TestPaginationToken_CWLogsDescribeLogStreamsRefusesATokenItDidNotIssue(t *t
 // TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue is the same refusal at the third
 // site, which is the one whose published cursor is a *pair* of directional tokens.
 //
-// Substrate issues only nextForwardToken, so that is the only token it can have issued and the only
-// one a walk can resume from; the divergence is recorded in cloudwatchlogs_pagination.go rather than
-// asserted here, because this test is about the refusal and not about the pair.
+// The pair itself is asserted in cloudwatchlogs_event_tokens_test.go (#1223); this test is about the
+// refusal, so it walks forward with an explicit startFromHead and only needs a token substrate issued
+// to be accepted and a token it did not to be refused. The bad-token table is shared with the other
+// three sites, which is the point: those tokens carry no direction prefix, so they are exactly the
+// foreign tokens this operation stopped sharing a wire shape with.
 func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing.T) {
 	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.CloudWatchLogsPlugin{})
 	const group, stream = "trg-events-group", "trg-events-stream"
@@ -1468,7 +1470,8 @@ func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing
 
 	get := func(extra string) (int, string, string) {
 		return tokenRefusalCWLogsCall(t, srv, "GetLogEvents",
-			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"limit":1%s}`, group, stream, extra))
+			fmt.Sprintf(`{"logGroupName":%q,"logStreamName":%q,"limit":1,"startFromHead":true%s}`,
+				group, stream, extra))
 	}
 
 	status, page1, code := get("")
@@ -1522,9 +1525,11 @@ func TestPaginationToken_CWLogsGetLogEventsRefusesATokenItDidNotIssue(t *testing
 			tokenRefusalCWLogsAccountOf(t, sealedSrv, "trg-sealed-events"),
 			tokenRefusalCWLogsRegion, "trg-sealed-events", "trg-sealed-stream")
 
-		// The control, as above: the sealed key has to be reachable for the refusal to mean anything.
+		// The control, as above: the sealed key has to be reachable for the refusal to mean anything. The
+		// token carries the forward prefix this operation's tokens carry (#1223), so the bare offset the
+		// other three sites use would be refused here for the wrong reason.
 		status, body, _ := tokenRefusalCWLogsCall(t, sealedSrv, "GetLogEvents",
-			fmt.Sprintf(`{"logGroupName":"trg-sealed-events","logStreamName":"trg-sealed-stream","nextToken":%q}`,
+			fmt.Sprintf(`{"logGroupName":"trg-sealed-events","logStreamName":"trg-sealed-stream","nextToken":"f/%s"}`,
 				base64.StdEncoding.EncodeToString([]byte("0"))))
 		require.NotEqual(t, http.StatusBadRequest, status, body)
 

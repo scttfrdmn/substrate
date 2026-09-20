@@ -109,6 +109,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`GetLogEvents` reports both of its published tokens, so the documented termination rule works**
+  (#1223). `API_GetLogEvents` states termination in terms of a pair: *"As long as the
+  `nextBackwardToken` or `nextForwardToken` returned is NOT equal to the `nextToken` that you passed
+  into the API call, there might be more log events available"*, each member adds *"If you have reached
+  the end of the stream, it returns the same token you passed in"*, and the overview says flatly that
+  *"The returned tokens are never null."* Substrate emitted `nextForwardToken` only when a further page
+  existed and `nextBackwardToken` never — so a caller written from that rule could not terminate: it
+  sent an empty token, was handed an empty one back, and either stopped on its first page believing the
+  comparison had been met or spun forever. Both tokens are now present on every answer, including for an
+  empty stream, and the arithmetic is arranged so the published rule needs no special case: the forward
+  token names the position *after* the page and the backward token the position *before* it, so walking
+  past the tail clamps to the same offset and walking past the head clamps to zero, each returning the
+  token it was given. This is also why `GetLogEvents` no longer shares `pageByOffsetToken` with the
+  other three Logs paginators — that helper omits its token on a final page, which is right where a
+  token's *absence* means done and wrong where *equality* does. A full final page therefore carries a
+  forward token and costs one round trip to an empty page, which is what AWS describes: *"Partially full
+  or empty pages don't necessarily mean that pagination is finished."* **Three observable changes.**
+  Every `GetLogEvents` response now carries both members where one or neither appeared before. The token
+  *wire shape* gained a direction prefix — `f/` and `b/`, the prefixes the reference's own example
+  responses publish — because a backward token that is a bare offset is indistinguishable from a forward
+  one and would be read as a forward position, the same undetectably wrong page #1086's refusal exists
+  to prevent; `GetLogEvents` consequently refuses the bare offset token the other three issue, and its
+  own tokens no longer decode under them, both with the `InvalidParameterException`/400 those four
+  already share. And **`startFromHead` is now read**, with the published default of `false`, so a
+  tokenless call answers the *tail* of a stream where substrate previously always started at the head;
+  once a token is present its own direction decides. The page's *"you must specify `true` for
+  `startFromHead`"* coupling is deliberately not enforced, because no Logs page publishes a code for
+  violating it and the token already carries its direction (#671). The published 24-hour token expiry
+  remains unmodelled and is now **declined** rather than deferred, recorded in `docs/services.md`: the
+  refusal would have to be attributed to `InvalidParameterException`/400, which is a reading of a gloss
+  rather than something a page states. A token past the end of a trimmed stream is still clamped to a
+  final empty page rather than refused, so a walk whose events were deleted mid-loop terminates.
 - **Athena's primary workgroup is one workgroup, and every reader now says so** (#1222). Every AWS
   account has a `primary` workgroup, and `API_DeleteWorkGroup`'s own description states "The primary
   workgroup cannot be deleted" — so both the existence and the refusal are published by the API
