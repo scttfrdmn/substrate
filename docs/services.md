@@ -1283,20 +1283,20 @@ carries no `Marker` and costs the caller no round trip to an empty page.
 page-*size* change into a page-*contents* change would have made the two indistinguishable in
 one diff — and it is now corrected in its own right, below.
 
-### A page size outside the documented range is refused, not honoured or rewritten
+### A page size outside the documented range is refused, not honored or rewritten
 
 [#913](https://github.com/scttfrdmn/substrate/issues/913). Both families publish the same three
-facts on `MaxRecords`, and substrate honoured none of them:
+facts on `MaxRecords`, and substrate honored none of them:
 
 | Fact | Published as | Substrate before |
 |---|---|---|
 | Default | `Default: 100` | 100, but also applied to an unusable value |
-| Minimum | `Minimum 20` (RDS) / `minimum 20` (ElastiCache) | any positive integer honoured |
-| Maximum | `maximum 100` | any positive integer honoured |
+| Minimum | `Minimum 20` (RDS) / `minimum 20` (ElastiCache) | any positive integer honored |
+| Maximum | `maximum 100` | any positive integer honored |
 
 The two halves fail in different directions, and both matter:
 
-- **An honoured out-of-range value diverges towards the caller's disadvantage.**
+- **An honored out-of-range value diverges towards the caller's disadvantage.**
   `MaxRecords=5` produced a five-record page here and is refused by real RDS, so a consumer
   written against substrate broke on AWS. That is the direction an emulator must not permit.
 - **A rewritten value cannot be noticed.** `MaxRecords=0`, `-1` and `abc` became 100. A caller
@@ -2024,7 +2024,7 @@ answers every resource with its `resourceMethods` populated regardless. `GetApiK
 `customerId`, `includeValues`, and the parameter documented as `nameQuery` but spelled **`name`** on the
 query string — worth recording, since a later reader will grep for the documented name and find
 nothing. `GetUsagePlans` publishes `keyId`. Every one of the five *narrows* what is reported, so
-honouring one would over-report before and under-report after — the opposite direction from the cursor
+honoring one would over-report before and under-report after — the opposite direction from the cursor
 defect these conversions fix, and not the rest of it. Narrowing a response a caller may already be
 reading is a compatibility break that wants its own issue and its own citation.
 
@@ -4302,7 +4302,7 @@ and tags* page:
   changed meaning by accident.
 - **Key names are case-insensitive**, so `${aws:userName}` and `${AWS:USERNAME}` resolve the
   same key a producer wrote as `aws:username`.
-- **Defaults are honoured**: `${aws:PrincipalTag/team, 'company-wide'}` resolves to
+- **Defaults are honored**: `${aws:PrincipalTag/team, 'company-wide'}` resolves to
   `company-wide` when the tag has no value, so a variable with a default is never unresolved.
 - **`${*}`, `${?}` and `${$}` stay literal.** They are AWS's escapes for those characters, so
   substrate tracks per byte whether a `*` was written by the policy author or arrived from a
@@ -4833,7 +4833,7 @@ STS operations are free.
 ### Listing buckets
 
 `ListBuckets` honours all four of its query parameters
-([#884](https://github.com/scttfrdmn/substrate/issues/884)). It previously honoured none of
+([#884](https://github.com/scttfrdmn/substrate/issues/884)). It previously honored none of
 them, which mattered most for the paging pair: a dropped `max-buckets` is invisible, because a
 short page and a complete listing are the same shape, and a dropped `continuation-token` returns
 page one forever.
@@ -6738,9 +6738,9 @@ generated — so a new `case` in the switch has to be given a row by hand.
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honoured-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honoured-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honored-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids); answers `pending` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | RebootInstances | `InstanceId.N` is `Required: Yes` and **nothing reads it**: the operation answers `<return>true</return>` without resolving an ID or touching state. An unchanged `instanceState` is the nominal answer — AWS documents the reboot as asynchronous (*"it only queues a request to reboot"*) and as ignoring a terminated instance — so what diverges is only the refusal: an absent or unknown `InstanceId.N` is answered identically, where every other instance operation [is decided against every ID it names](#an-operation-naming-resources-by-id-is-decided-against-every-one-of-them) |
@@ -6795,7 +6795,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeSnapshotAttribute | `createVolumePermission` and `productCodes`, one at a time; the name is validated **before** the snapshot is resolved, and both answer as a present-but-empty element rather than an omitted one — see [The rest of the snapshot family](#the-rest-of-the-snapshot-family) |
 | ModifySnapshotAttribute | Both wire forms of a permission change — structured `CreateVolumePermission.Add.N`/`.Remove.N` and flat `OperationType` with `UserId.N`/`UserGroup.N`. `Group` accepts only `all`; sharing an encrypted snapshot publicly, adding *and* removing the same account ID, `productCodes`, and more than 500 modifications in one call are each refused, while adding a group while removing an account is allowed because that is AWS's own Example 2. The recorded permission grants nothing — substrate is single-account — so it is [readable intent](#the-rest-of-the-snapshot-family) |
 | ResetSnapshotAttribute | `createVolumePermission` only; `productCodes` is refused. Clears the list rather than restoring a remembered default, since an empty list is what a snapshot is created with — see [The rest of the snapshot family](#the-rest-of-the-snapshot-family) |
-| CreateImage | `InstanceId` and `Name` are both required. `TagSpecification.N` is honoured **per `ResourceType`**, `image` and `snapshot` scoped separately — see [Tag scoping on `CreateImage`](#tag-scoping-on-createimage). A backing snapshot is always materialised, at the instance's own root volume size — see [A snapshot has a real size](#a-snapshot-has-a-real-size) — and the AMI inherits [only what the operating system decides](#an-ami-reports-its-architecture-platform-and-root-device) from its parent: architecture, platform, virtualization type and root device name, but not `ownerAlias`, `publicSsmParameterName` or public launch permissions. `imageState` is `available` at once, and the response carries `imageId` alone |
+| CreateImage | `InstanceId` and `Name` are both required. `TagSpecification.N` is honored **per `ResourceType`**, `image` and `snapshot` scoped separately — see [Tag scoping on `CreateImage`](#tag-scoping-on-createimage). A backing snapshot is always materialised, at the instance's own root volume size — see [A snapshot has a real size](#a-snapshot-has-a-real-size) — and the AMI inherits [only what the operating system decides](#an-ami-reports-its-architecture-platform-and-root-device) from its parent: architecture, platform, virtualization type and root device name, but not `ownerAlias`, `publicSsmParameterName` or public launch permissions. `imageState` is `available` at once, and the response carries `imageId` alone |
 | RegisterImage | `Name` is required; `TagSpecification.N` must be scoped to `image` and any other type is refused before anything is written. [The whole block device mapping is recorded](#registerimage-records-the-whole-block-device-mapping), and each mapping naming a snapshot is resolved, so a dangling reference cannot be stored — but only that rule of the launch path's set, since the rest is not published for this operation. `Architecture` defaults to **`i386`** and `VirtualizationType` to **`paravirtual`**, which are AWS's published defaults rather than the `x86_64`/`hvm` a modern caller expects; `rootDeviceType` is derived from whether `ImageLocation` is present. Response is `imageId` alone |
 | DescribeImages | [Explicit resource IDs](#explicit-resource-ids) — `ImageId.N` [asserts existence](#which-selectors-assert-existence) as of [#731](https://github.com/scttfrdmn/substrate/issues/731), where before it was not read at all; eighteen of forty-three filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — see [`DescribeImages` filters](#describeimages-filters). Reports [`architecture`, `platform`, the root device and the block device mapping](#an-ami-reports-its-architecture-platform-and-root-device). `Owner.N` and `ExecutableBy.N` are **not read**, deliberately: substrate stores only images the account owns, so reading them would report a narrowing that did not happen. A [bundled AMI](#which-amis-resolve) resolves by explicit ID but is not listed by an unqualified describe. Paginates on `MaxResults`/`NextToken`, with no published range, and `ImageId.N` with `MaxResults` is `InvalidParameterCombination` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeregisterImage | `ImageId` is required; the record is deleted, so the AMI stops resolving for `RunInstances` and stops being reported by `DescribeImages` — and a [snapshot it protected](#deleting-a-snapshot-refuses-what-aws-refuses) becomes deletable. Silently idempotent: an `ImageId` naming nothing answers `return=true`, and the ID is not checked for shape, so it is the one AMI operation that does not resolve what it names |
@@ -6823,7 +6823,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, [need an AMI that resolves](#runinstances-requires-a-resolvable-ami), and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter**. Paginates on `MaxResults`/`NextToken`, with no published range — and an `instant` fleet therefore never lands on a paginated page, see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honoured-one-availability-zone-at-a-time) |
+| DeleteFleets | `TerminateInstances=true` (and any `instant` fleet) terminates the fleet's instances, [subject to termination protection](#termination-protection-is-honored-one-availability-zone-at-a-time) |
 | CreateCapacityReservation | Reserves capacity **immediately**, in `active` state, and returns the whole `capacityReservation` structure. `InstanceCount`, `InstancePlatform` and `InstanceType` are the only required parameters — `AvailabilityZone` is not one — and `InstanceCount` is range-checked 1–1000. Honours `TagSpecification.N`. `EndDateType` is inferred from `EndDate` rather than defaulted; a **future-dated** reservation is refused rather than answered falsely, and the outcome is [seedable](#seeding-a-capacity-reservation-outcome) — see [A Capacity Reservation is never consumed](#a-capacity-reservation-is-never-consumed) |
 | DescribeCapacityReservations | `CapacityReservationId.N` is **singular** and narrows rather than asserting, while a malformed ID is refused; **all twelve** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — the page documents **no tag filter**, so use `DescribeTags`. `MaxResults` 1–1000 and `NextToken` through the [shared paginator](#one-offset-paginator-shared). A reservation past its `EndDate` reports `expired`, derived from the simulated clock |
 | CancelCapacityReservation | Sets the state to `cancelled` and releases the capacity, so `availableInstanceCount` becomes zero while `totalInstanceCount` keeps reporting what was reserved. A well-formed ID naming nothing answers `InvalidCapacityReservationId.NotFound`; a second cancel answers `IncorrectState`, which is [substrate's reading](#a-capacity-reservation-is-never-consumed) |
@@ -6977,7 +6977,7 @@ full.
 
 Since [#697](https://github.com/scttfrdmn/substrate/issues/697), one matcher backs every EC2
 describe filter, so these rules hold for all of them — previously only
-`DescribeInstanceTypeOfferings` and `DescribeTags` honoured wildcards, the two operations whose
+`DescribeInstanceTypeOfferings` and `DescribeTags` honored wildcards, the two operations whose
 reference pages state them outright, and the other nine compared exactly.
 
 | Value | Matches |
@@ -7285,7 +7285,7 @@ chance. It used to be applied first, and the template fallback then treated
 `t3.micro` as a proxy for "the request named no instance type" — so a request
 explicitly asking for `t3.micro` alongside a template naming something else got
 the template's type, exactly inverting the documented precedence. An explicit
-`t3.micro` is now honoured, and the default applies only when neither side names
+`t3.micro` is now honored, and the default applies only when neither side names
 a type.
 
 A template's `TagSpecifications` and `IamInstanceProfile` used to be accepted and
@@ -8587,7 +8587,7 @@ just harder to notice, since it looks like extra rigor.
 an instance's user data is expressible: `UserData.Value=` on a stopped instance empties
 it, and the attribute then reads back as the empty element above.
 
-#### Termination protection is honoured, one Availability Zone at a time
+#### Termination protection is honored, one Availability Zone at a time
 
 `TerminateInstances` refuses a protected instance with `OperationNotPermitted`, HTTP
 `400`, and the instance stays `running`. The **code** is documented — EC2's client-error
@@ -9590,7 +9590,7 @@ moment the caller is being told the snapshot is pending. It also means the CLI's
 filters run, so a snapshot the filter excludes has still advanced its countdown.
 
 **`Owner.N` and `RestorableBy.N`** were read by neither the ID selection nor the filters,
-and are now honoured. Both sit outside `Filter.N` and both accept `self`, an account ID, or
+and are now honored. Both sit outside `Filter.N` and both accept `self`, an account ID, or
 one of AWS's aliases. Substrate is single-account, so `self` and the requesting account's ID
 match everything, and **anything else — including `amazon` — matches nothing**: answering
 "snapshots owned by `amazon`" with the account's own snapshots would claim they were public.
@@ -9622,7 +9622,7 @@ knew a real size.
 | `progress` | Rendered, since AWS documents it as a member of the `Snapshot` that `CreateSnapshot` returns. `100%` for an unseeded snapshot; the ramp's current position under a seed |
 | `statusMessage` | Not rendered, because AWS scopes it: "this parameter is only returned by `DescribeSnapshots`" — where an SDK reads the same element as `StateMessage`, the third of these name splits after `status`/`State` and `state`/`State` |
 | `Description`, `TagSpecification.N` | Read; the tags go through the same walk and the same [tag rules](#reserved-tag-keys) as every other tag-on-create, checked before anything is written |
-| `Location`, `OutpostArn` | Not read. Both are documented as supported only for a Local Zone or an Outpost, neither of which substrate models, so honouring them would place the snapshot somewhere substrate cannot describe it from |
+| `Location`, `OutpostArn` | Not read. Both are documented as supported only for a Local Zone or an Outpost, neither of which substrate models, so honoring them would place the snapshot somewhere substrate cannot describe it from |
 
 `status` being `completed` immediately is the deliberate divergence. Substrate advances no
 snapshot asynchronously, so a caller's waiter succeeds on its first poll rather than
@@ -9693,7 +9693,7 @@ the endpoint is the one region substrate serves.
 |---|---|
 | `SourceRegion`, `SourceSnapshotId` | Both required; absent is `MissingParameter`. A malformed source is `InvalidSnapshotID.Malformed`, one naming nothing `InvalidSnapshot.NotFound` |
 | A `SourceRegion` that is not the request's region | `SnapshotCopyUnsupported.InterRegion`, whose published description — "inter-region snapshot copy is not supported for this AWS Region" — is precisely substrate's situation. The code is AWS's; the message is substrate's |
-| `Encrypted` | Accepted only as `true`. A copy of an encrypted snapshot is encrypted whatever the request says; `Encrypted=false` is refused rather than silently honoured or silently dropped |
+| `Encrypted` | Accepted only as `true`. A copy of an encrypted snapshot is encrypted whatever the request says; `Encrypted=false` is refused rather than silently honored or silently dropped |
 | `KmsKeyId` | Validated, not stored: "if `KmsKeyId` is specified, the encrypted state must be true", so naming a key for a copy that will not be encrypted is refused. Substrate models no KMS key on a snapshot, so the rule is observable only as that refusal |
 | `Description` | The request's, empty when absent. AWS documents nothing for an omitted one, so substrate invents no "Copied from …" string a consumer might assert on |
 | `TagSpecification.N` | The only source of the copy's tags. `CopySnapshot` has no `CopyTagsFromSource` — that is `CreateSnapshots`' parameter — so the source's tags are deliberately not carried over |
@@ -11114,7 +11114,7 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 
 | Operation | Notes |
 |-----------|-------|
-| GetResources | All eight published request members honoured; base64 pagination token, refused unless substrate issued it; reports tagged and previously tagged resources only |
+| GetResources | All eight published request members honored; base64 pagination token, refused unless substrate issued it; reports tagged and previously tagged resources only |
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
@@ -11315,13 +11315,13 @@ side comes from the caller, and it was in neither pass.
 ### `GetResources` honours all eight of its request parameters
 
 `API_GetResources` publishes eight request members, all `Required: No`. Substrate decoded
-four of them, and until #1004 and #1010 two of those four were not honoured as published
+four of them, and until #1004 and #1010 two of those four were not honored as published
 either:
 
 | Member | Before | Now |
 |---|---|---|
-| `TagFilters` | honoured | honoured |
-| `ResourceTypeFilters` | honoured | honoured |
+| `TagFilters` | honored | honored |
+| `ResourceTypeFilters` | honored | honored |
 | `ResourcesPerPage` | **clamped** — any value ≤ 0 became 100, and 5000 was served | refused outside 1–100 |
 | `PaginationToken` | **both decode errors discarded** — an unissued token meant page one | refused unless substrate issued it |
 | `ResourceARNList` | **dropped** — and its three exclusions unenforced | selects the named ARNs |
@@ -11340,7 +11340,7 @@ and the bound it violated.
 which an Integer member does not carry. Substrate's single `if in.ResourcesPerPage <= 0 {
 in.ResourcesPerPage = 100 }` arm was doing two jobs — supplying the default and swallowing
 an out-of-range value — and only the first was correct. The worse direction was upward:
-`5000` was honoured, so one call could return every resource in the account on a page size
+`5000` was honored, so one call could return every resource in the account on a page size
 AWS refuses, and a consumer's paging loop was never exercised. The member is now a pointer,
 because `Required: No` with a published minimum above zero means an omitted integer and an
 explicit `0` are different requests: absent is the default of 100, and `0` is out of range.
@@ -11940,7 +11940,7 @@ Resource Groups Tagging API operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateTopic | Decodes `Tags`, in either published spelling |
+| CreateTopic | Decodes `Tags`, in either published spelling, and `Attributes` — only the 24 published keys, anything else is `InvalidParameter`/400 |
 | GetTopicAttributes | Four attributes derived, the rest passed through as stored |
 | SetTopicAttributes | Only the 25 published names are settable; anything else is `InvalidParameter`/400 |
 | DeleteTopic | |
@@ -12223,6 +12223,39 @@ substrate's answer.
 whether or not the topic exists. The page publishes both `InvalidParameter`/400 and
 `NotFound`/404 and orders them nowhere, so that is substrate's choice.
 
+### CreateTopic's Attributes map, and the one name it does not accept
+
+`API_CreateTopic` publishes an `Attributes` map on the wire as
+`Attributes.entry.N.key` / `Attributes.entry.N.value`, which is what an SDK sends for
+`create_topic(Name=…, Attributes={…})`. Substrate decoded none of it until #1126: it
+seeded the record from a bare `DisplayName` query parameter instead, so the ordinary SDK
+call lost every attribute and `GetTopicAttributes` reported none of them, while a
+parameter the page does not publish at all was the only one honored.
+
+The map is now decoded at every index, 1-based and dense — the first absent *key* ends
+it, and an empty value is stored, matching what `SetTopicAttributes` does with an empty
+`AttributeValue`. The bare `DisplayName` parameter is **no longer read**: the page
+publishes exactly four request parameters — `Attributes`, `DataProtectionPolicy`,
+`Name` and `Tags.member.N` — and honoring a fifth let a consumer write a call that
+round-tripped here and created a topic with no display name on AWS.
+
+**`CreateTopic` publishes 24 keys where `SetTopicAttributes` publishes 25.** The lists
+are otherwise identical, name for name and group for group; the single difference is the
+server-side-encryption group, where `SetTopicAttributes` lists `KmsMasterKeyId` *and*
+`SignatureVersion` and `CreateTopic` lists `KmsMasterKeyId` alone. So
+`SignatureVersion` on a create is `InvalidParameter`/400 and on a set is accepted, and a
+topic that needs one gets it from the operation whose page publishes it. That asymmetry
+is AWS's, and substrate keeps two allowlists rather than one so that it cannot be
+collapsed by accident.
+
+The refusal is the same code and the same shape as the set side's, and it is decoded
+**before the topic index is read** — so a refused create leaves no topic behind, and the
+answer does not depend on whether a topic of that name already exists.
+
+`AWS::SNS::Topic`'s `DisplayName` property travels through this map, as the wire form a
+real `CreateTopic` carries. The type's other attribute-valued properties are not
+forwarded; see the CloudFormation section for what it does send.
+
 ### An empty result element is not the same as no result element
 
 Eight SNS operations answer with a body carrying no members, and the query protocol
@@ -12266,8 +12299,19 @@ service in the tree omits an element its own page publishes.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::SNS::Topic | TopicArn | |
+| AWS::SNS::Topic | TopicArn | `TopicName` and `DisplayName` are sent; other attribute-valued properties are not |
 | AWS::SNS::Subscription | SubscriptionArn | |
+
+`DisplayName` travels as `CreateTopic`'s published `Attributes.entry.1.key` /
+`.value` — see *CreateTopic's Attributes map* above. It is the only one of the type's
+attribute-valued properties the deployer forwards. `AWS::SNS::Topic` publishes fourteen
+properties, and the deploy reads two: `TopicName` and `DisplayName`. So `ArchivePolicy`,
+`ContentBasedDeduplication`, `FifoThroughputScope`, `KmsMasterKeyId`,
+`MaximumMessageSize`, `SignatureVersion` and `TracingConfig` are accepted in a template
+and reach no `CreateTopic` parameter — `GetTopicAttributes` reports none of them for a
+topic CloudFormation created — and neither `Tags`, the inline `Subscription` array,
+`DataProtectionPolicy` nor `DeliveryStatusLogging` is sent. `FifoTopic` is likewise not
+read, so a `.fifo` topic declared in a template is a standard topic here.
 
 ### Cost
 
@@ -13322,7 +13366,7 @@ substrate decoded only the response half
 enough to still send the deprecated name asked for `RSA_4096` and got a symmetric key —
 the quietest failure available, a `200` with a complete `KeyMetadata` whose own
 `CustomerMasterKeySpec` read `SYMMETRIC_DEFAULT`, contradicting the value it was sent.
-It is now decoded and honoured, and every rule of the section above applies to the spec
+It is now decoded and honored, and every rule of the section above applies to the spec
 it names, since those rules are keyed on the resolved spec rather than on which member
 carried it.
 
@@ -13646,7 +13690,7 @@ accept a value AWS refuses and report a period the caller never asked for.
 `Encrypt`, `Decrypt`, `GenerateDataKey`, `GenerateDataKeyWithoutPlaintext` and
 `ReEncrypt` share one row in the developer guide's *Key states of AWS KMS keys*
 table, and each of their reference pages carries the same *"the KMS key that you use
-for this operation must be in a compatible key state"* sentence. Substrate honoured
+for this operation must be in a compatible key state"* sentence. Substrate honored
 that unevenly. Three of the five checked whether the key was enabled and answered
 `DisabledException`; **two checked nothing at all**, so a disabled key generated a
 data key or re-encrypted a ciphertext and answered `200`.
@@ -14471,7 +14515,7 @@ alone; `emulator/scheduler_query_keys.go` names both spellings in one place so n
 "corrected" into the other.
 
 The lowerCamel names are **not** accepted as aliases for `ListSchedules`. AWS ignores a query
-parameter its model does not carry, so honouring one would be the same defect facing the other way: a
+parameter its model does not carry, so honoring one would be the same defect facing the other way: a
 call that filters against substrate and silently does not against AWS. `?maxResults=1` now reads the
 default page, which is what AWS answers.
 
@@ -15153,7 +15197,7 @@ last-segment extraction used to run here: a qualified ARN such as
 `arn:aws:lambda:{region}:{account}:function:score:PROD` invoked a function named
 after the *alias*, and `arn:aws:states:::lambda:invoke` — the optimized
 integration, which also contains `:lambda:` and so passed the old dispatch test —
-invoked one named `invoke`. A qualifier is now dropped rather than honoured,
+invoked one named `invoke`. A qualifier is now dropped rather than honored,
 because the executor invokes through Lambda's unqualified path; invoking a
 specific version or alias from a Task state is not modelled. An optimized
 integration is not dispatched to Lambda at all and returns the empty-object stub.
@@ -16522,7 +16566,7 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | Operation | Notes |
 |-----------|-------|
 | CreateDBInstance | |
-| DescribeDBInstances | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
+| DescribeDBInstances | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
 | DeleteDBInstance | |
 | ModifyDBInstance | |
 | StartDBInstance | |
@@ -16533,7 +16577,7 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | DeleteDBSnapshot | |
 | RestoreDBInstanceFromDBSnapshot | |
 | CreateDBCluster | |
-| DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
+| DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
 | DeleteDBCluster | |
 | CreateDBSubnetGroup | |
 | DescribeDBSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSubnetGroupName` for a group that does not exist answers `DBSubnetGroupNotFoundFault` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
@@ -16638,7 +16682,7 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 | Operation | Notes |
 |-----------|-------|
 | CreateCacheCluster | |
-| DescribeCacheClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue`, which this service's page publishes — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honoured-or-rewritten) |
+| DescribeCacheClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue`, which this service's page publishes — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
 | ModifyCacheCluster | |
 | DeleteCacheCluster | |
 | CreateReplicationGroup | |
@@ -18289,7 +18333,7 @@ and a message naming the operation, rather than reading it as page one
 and what the refusal takes as its own reading are set out under
 [Athena's two listings refuse a token](#athena-s-two-listings-refuse-a-token-and-the-page-says-where-a-token-comes-from)
 above. Neither operation enforces the published `MaxResults` range, which is a separate defect: a value
-above the maximum of 50 is honoured and one at or below zero is silently rewritten to 50.
+above the maximum of 50 is honored and one at or below zero is silently rewritten to 50.
 
 ### CloudFormation resource types
 

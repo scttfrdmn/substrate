@@ -259,6 +259,14 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "InvalidParameter", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
 	}
 
+	// Decoded before the topic index is read, so the refusal does not depend on what the store holds
+	// — the same ordering listTopics takes for its token check, and what makes "no topic is created by
+	// a refused call" true of the idempotent path as well as the creating one.
+	attrs, attrErr := snsCreateTopicAttributes(req.Params)
+	if attrErr != nil {
+		return nil, attrErr
+	}
+
 	goCtx := context.Background()
 	existing, err := p.loadTopic(goCtx, ctx.AccountID, ctx.Region, name)
 	if err != nil {
@@ -289,10 +297,13 @@ func (p *SNSPlugin) createTopic(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		AccountID: ctx.AccountID,
 		Region:    ctx.Region,
 	}
-	// CreateTopic accepts initial attributes in real AWS; persist DisplayName so
-	// it round-trips and is drift-checkable.
-	if dn := req.Params["DisplayName"]; dn != "" {
-		topic.Attributes = map[string]string{"DisplayName": dn}
+	// API_CreateTopic publishes an Attributes map and substrate decoded none of it, seeding the record
+	// from a bare `DisplayName` parameter the page does not publish at all (#1126) — so
+	// `create_topic(Name=…, Attributes={…})`, the call an SDK makes, lost every attribute, while a
+	// parameter AWS would ignore was the only one honored. The bare parameter is gone: accepting it
+	// let a test pass against substrate that creates a topic with no display name against AWS.
+	if len(attrs) > 0 {
+		topic.Attributes = attrs
 	}
 	// CreateTopic publishes a Tags parameter and substrate decoded none of it, so a topic created
 	// with tags in one call reported none through ListTagsForResource or GetResources (#925). Ordered

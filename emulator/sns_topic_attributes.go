@@ -2,6 +2,8 @@ package emulator
 
 import (
 	"context"
+	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 )
@@ -81,6 +83,78 @@ var snsSettableTopicAttributeNames = []string{ //nolint:gochecknoglobals // read
 // is not normalised anywhere else in this plugin either.
 func snsTopicAttributeIsSettable(name string) bool {
 	return slices.Contains(snsSettableTopicAttributeNames, name)
+}
+
+// snsCreateTopicOnlySettableName is the one name API_SetTopicAttributes publishes that
+// API_CreateTopic does not.
+//
+// The asymmetry is AWS's, verified against both pages: `SignatureVersion` — which selects the
+// signature version SNS uses for the messages it publishes — appears in SetTopicAttributes'
+// server-side-encryption group alongside `KmsMasterKeyId`, and CreateTopic's same group lists
+// `KmsMasterKeyId` alone. Everything else matches name for name and group for group.
+//
+// So CreateTopic publishes 24 map keys where SetTopicAttributes publishes 25. The difference is stated
+// here, once, rather than by transcribing the list twice: two lists differing by one entry invite a
+// later reader to "fix" the difference by pointing both checks at one of them, which is exactly the
+// wrong move. A topic can still be given a SignatureVersion — through the operation whose page
+// publishes it.
+const snsCreateTopicOnlySettableName = "SignatureVersion"
+
+// snsCreatableTopicAttributeNames are the twenty-four Attributes map keys API_CreateTopic publishes.
+//
+// Derived from [snsSettableTopicAttributeNames] for the reason [snsCreateTopicOnlySettableName] gives.
+// A test transcribes API_CreateTopic's list independently and asserts both the count and the one
+// absence, so a name dropped from or misspelled in the settable list fails there rather than agreeing
+// with itself here.
+var snsCreatableTopicAttributeNames = slices.DeleteFunc( //nolint:gochecknoglobals // read-only reference data, derived once so a test can assert it
+	slices.Clone(snsSettableTopicAttributeNames),
+	func(name string) bool { return name == snsCreateTopicOnlySettableName },
+)
+
+// snsTopicAttributeIsCreatable reports whether API_CreateTopic publishes name as an Attributes map key.
+func snsTopicAttributeIsCreatable(name string) bool {
+	return slices.Contains(snsCreatableTopicAttributeNames, name)
+}
+
+// snsCreateTopicAttributes decodes CreateTopic's Attributes map out of a query-protocol request, or
+// refuses a key the page does not publish.
+//
+// The wire form is the one API_CreateTopic's parameter heading gives verbatim —
+// `Attributes.entry.N.key` and `Attributes.entry.N.value` — which is what an SDK sends for
+// `create_topic(Name=…, Attributes={…})`, and is the same `entry.N` shape
+// [parseSNSMessageAttributes] already decodes for Publish. Only that spelling is accepted: unlike the
+// tag list (see snsTagParamForms), the page and its examples do not disagree here, so there is no
+// second reading a caller could reasonably have followed.
+//
+// The index is 1-based and dense and the first absent key ends the map, the convention every indexed
+// query-protocol decoder in the tree uses. An empty *value* is kept, because setTopicAttributes stores
+// an empty AttributeValue and the two operations should not disagree about what clearing an attribute
+// means.
+//
+// A nil map is returned when no entry is present, so an attribute-free CreateTopic leaves the record's
+// Attributes nil exactly as it did before #1126 rather than storing an empty map that
+// GetTopicAttributes would then have to distinguish from an absent one.
+func snsCreateTopicAttributes(params map[string]string) (map[string]string, *AWSError) {
+	var attrs map[string]string
+	for i := 1; ; i++ {
+		prefix := fmt.Sprintf("Attributes.entry.%d.", i)
+		key := params[prefix+"key"]
+		if key == "" {
+			break
+		}
+		if !snsTopicAttributeIsCreatable(key) {
+			return nil, &AWSError{
+				Code:       "InvalidParameter",
+				Message:    "Attributes key " + key + " is not an attribute CreateTopic accepts",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		if attrs == nil {
+			attrs = make(map[string]string, 1)
+		}
+		attrs[key] = params[prefix+"value"]
+	}
+	return attrs, nil
 }
 
 // derivedTopicAttributes returns the four GetTopicAttributes members substrate computes from state.

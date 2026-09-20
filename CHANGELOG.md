@@ -43,6 +43,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SNS `CreateTopic` reads the `Attributes` map it publishes, and no longer reads a bare
+  `DisplayName`** (#1126). `API_CreateTopic` publishes exactly four request parameters —
+  `Attributes`, `DataProtectionPolicy`, `Name` and `Tags.member.N` — and substrate decoded the
+  attribute map from none of them: `create_topic(Name=…, Attributes={…})` was answered 200 with
+  every attribute discarded, so `GetTopicAttributes` reported none of them back. The published
+  `Attributes.entry.N.key` / `.value` form is now decoded, and all twenty-four keys the page
+  publishes are stored. That is twenty-four against `SetTopicAttributes`' twenty-five: the pages
+  differ by exactly one name, `SignatureVersion`, which Set lists beside `KmsMasterKeyId` and
+  Create does not list at all — so it is refused on a create and still reachable through the
+  operation that publishes it. A key neither group publishes is `InvalidParameter`/400, decoded
+  before the topic index is read so a refused create leaves no record and no index entry behind.
+  **This is observable:** the bare `DisplayName` query parameter substrate used to honor is
+  published nowhere on that page, and is now ignored. A consumer that set a display name by
+  passing it alongside `Name` — rather than inside `Attributes`, where AWS reads it — saw it
+  round-trip here and would have got a topic with no display name from AWS; it now reads as absent
+  in both. The CloudFormation deployer was sending that bare parameter for
+  `AWS::SNS::Topic.DisplayName` and now sends the published entry form, so a template is
+  unaffected.
 - **An AppSync api key now expires 7 days out, not 365** (#1122). `API_CreateApiKey` states the
   default in words — "The default value for this parameter is 7 days from creation time" — and
   substrate set a year. This is a behaviour change, not only a fix: a consumer that asserted the
