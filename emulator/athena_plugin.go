@@ -3,11 +3,9 @@ package emulator
 import (
 	"context"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -314,6 +312,13 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 		}
 	}
 
+	// Before the query index is read, so the refusal does not depend on what the store holds — see
+	// athena_pagination.go for the code's provenance and the ordering argument (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, athenaInvalidPaginationToken("ListQueryExecutions")
+	}
+
 	goCtx := context.Background()
 	idsKey := "query_ids:" + ctx.AccountID + "/" + ctx.Region
 	ids := athenaLoadStringIndex(goCtx, p.state, idsKey)
@@ -340,25 +345,13 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 
 	maxResults := body.MaxResults
 	if maxResults <= 0 {
-		maxResults = 50
+		maxResults = athenaListDefaultPageSize
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(body.NextToken); err == nil {
-			if n, err := strconv.Atoi(string(decoded)); err == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(ids) {
-		offset = len(ids)
-	}
-	page := ids[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset + maxResults)))
-	}
+
+	// The index is appended to in submission order, which is stable across calls and is what
+	// [pageByOffsetToken]'s offset relies on. The workgroup filter above preserves that order, so the
+	// offset counts the records this request can see rather than every query in the account.
+	page, nextToken := pageByOffsetToken(ids, offset, maxResults)
 	if page == nil {
 		page = []string{}
 	}
@@ -483,31 +476,26 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
+	// Before the workgroup-names index is read, for the reason listQueryExecutions states (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, athenaInvalidPaginationToken("ListWorkGroups")
+	}
+
 	goCtx := context.Background()
 	namesKey := "workgroup_names:" + ctx.AccountID + "/" + ctx.Region
 	names := athenaLoadStringIndex(goCtx, p.state, namesKey)
 
 	maxResults := body.MaxResults
 	if maxResults <= 0 {
-		maxResults = 50
+		maxResults = athenaListDefaultPageSize
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, err := base64.StdEncoding.DecodeString(body.NextToken); err == nil {
-			if n, err := strconv.Atoi(string(decoded)); err == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(offset + maxResults)))
-	}
+
+	// The index is appended to in creation order, which is stable across calls and is what
+	// [pageByOffsetToken]'s offset relies on. A workgroup whose record no longer loads is skipped below,
+	// so a page can be shorter than maxResults while a token is still emitted; the offset counts index
+	// entries rather than rendered members, so the walk stays coherent.
+	page, nextToken := pageByOffsetToken(names, offset, maxResults)
 
 	wgs := make([]map[string]interface{}, 0, len(page))
 	for _, name := range page {

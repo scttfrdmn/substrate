@@ -27,6 +27,10 @@ package emulator_test
 // 404 keeps its precedence: the bucket is the resource the request addresses, and AWS publishes
 // nothing about which of the two refusals wins. SNS ListSubscriptionsByTopic is the same exception for
 // the same reason, and because both of its reads are Gets it seals one state key rather than a method.
+// Athena is asserted by counting reads instead of sealing, because its index loader turns a store
+// failure into an empty index and so a sealed read is indistinguishable from an empty listing — see
+// [tokenRefusalCountingState], which is the honest instrument for that shape rather than a seal that
+// would pass either way.
 //
 // Provenance of the three codes is per operation and is recorded with each helper:
 // [cwInvalidNextToken] and [ssmInvalidNextToken] are published, S3's is substrate's reading.
@@ -120,6 +124,56 @@ func (s *tokenRefusalSealedState) Delete(ctx context.Context, namespace, key str
 func (s *tokenRefusalSealedState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
 	if s.sealLists {
 		return nil, errTokenRefusalSealed
+	}
+	return s.inner.List(ctx, namespace, prefix)
+}
+
+// tokenRefusalCountingState wraps a state manager and counts the reads made in one namespace, for the
+// case where sealing cannot distinguish the two orderings.
+//
+// Athena is that case: its index loader (athenaLoadStringIndex) reports a store failure as an empty
+// index, so a sealed read answers 200 with an empty page — indistinguishable from an empty listing,
+// which means the seal would pass whichever side of the read the decode sat on. Counting asks the
+// question directly: a request that was refused must have read nothing. The paired control, a token the
+// operation could have issued, must read something, or a zero count would prove only that the test
+// never reached a handler.
+//
+// The count is scoped to a namespace because it is not the only read a request makes: the server
+// authorizes every request first, which reads the principal and its policies out of the iam namespace
+// before any plugin is dispatched to. Those reads are not the handler's and counting them would make the
+// question unanswerable. The namespace comes from the plugin's own constant
+// ([emulator.AthenaStateNamespaceForTest]) rather than being spelled here.
+//
+// No mutex: every assertion here drives one request at a time through httptest, so the count is read
+// after the call that wrote it.
+type tokenRefusalCountingState struct {
+	inner     emulator.StateManager
+	namespace string
+	reads     int
+}
+
+// Get counts the read when it is in the counted namespace and passes it through.
+func (s *tokenRefusalCountingState) Get(ctx context.Context, namespace, key string) ([]byte, error) {
+	if namespace == s.namespace {
+		s.reads++
+	}
+	return s.inner.Get(ctx, namespace, key)
+}
+
+// Put writes through to the wrapped manager.
+func (s *tokenRefusalCountingState) Put(ctx context.Context, namespace, key string, value []byte) error {
+	return s.inner.Put(ctx, namespace, key, value)
+}
+
+// Delete removes through to the wrapped manager.
+func (s *tokenRefusalCountingState) Delete(ctx context.Context, namespace, key string) error {
+	return s.inner.Delete(ctx, namespace, key)
+}
+
+// List counts the read when it is in the counted namespace and passes it through.
+func (s *tokenRefusalCountingState) List(ctx context.Context, namespace, prefix string) ([]string, error) {
+	if namespace == s.namespace {
+		s.reads++
 	}
 	return s.inner.List(ctx, namespace, prefix)
 }
@@ -1008,5 +1062,188 @@ func TestPaginationToken_SNSListSubscriptionsByTopicRefusesATokenItDidNotIssue(t
 		status, body, code := list(sealedSrv, arn, "!!not-base64!!")
 		assert.Equal(t, http.StatusBadRequest, status, body)
 		assert.Equal(t, "InvalidParameter", code, body)
+	})
+}
+
+// --- Athena ListQueryExecutions and ListWorkGroups ---
+
+// tokenRefusalAthenaHost is the endpoint both Athena listings are called through.
+const tokenRefusalAthenaHost = "athena.us-east-1.amazonaws.com"
+
+// tokenRefusalAthenaCall posts one Athena operation.
+func tokenRefusalAthenaCall(t *testing.T, srv *emulator.Server, op, body string) (int, string, string) {
+	t.Helper()
+	return tokenRefusalJSONCall(t, srv, tokenRefusalAthenaHost, "AmazonAthena."+op, body)
+}
+
+// tokenRefusalAthenaStartQuery starts one query execution and returns its ID.
+//
+// The queries are started through StartQueryExecution rather than seeded, per #765: an index written
+// directly would not prove the offset indexes into what a caller can observe.
+func tokenRefusalAthenaStartQuery(t *testing.T, srv *emulator.Server, sql string) string {
+	t.Helper()
+	status, body, code := tokenRefusalAthenaCall(t, srv, "StartQueryExecution",
+		fmt.Sprintf(`{"QueryString":%q}`, sql))
+	require.Empty(t, code, body)
+	require.Equal(t, http.StatusOK, status, body)
+	var out struct {
+		QueryExecutionID string `json:"QueryExecutionId"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(body), &out))
+	require.NotEmpty(t, out.QueryExecutionID)
+	return out.QueryExecutionID
+}
+
+// TestPaginationToken_AthenaListQueryExecutionsRefusesATokenItDidNotIssue is #1086 at the first of
+// Athena's two offset paginators.
+//
+// Both pages publish InvalidRequestException/400 in their own Errors sections and describe NextToken as
+// "A token generated by the Athena service", which is the closest any site in this class comes to
+// publishing the refusal — see athenaInvalidPaginationToken. Two records and MaxResults=1 are enough to
+// truncate a page, because unlike SNS both operations publish a MaxResults a caller can lower.
+func TestPaginationToken_AthenaListQueryExecutionsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.AthenaPlugin{})
+	first := tokenRefusalAthenaStartQuery(t, srv, "SELECT 1")
+	second := tokenRefusalAthenaStartQuery(t, srv, "SELECT 2")
+
+	list := func(srv *emulator.Server, token string) (int, string, string) {
+		t.Helper()
+		if token == "" {
+			return tokenRefusalAthenaCall(t, srv, "ListQueryExecutions", `{"MaxResults":1}`)
+		}
+		return tokenRefusalAthenaCall(t, srv, "ListQueryExecutions",
+			fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, token))
+	}
+
+	// The token the operation issues resumes the walk. Asserted first, so a refusal that swallowed every
+	// token could not pass the rest of this test.
+	status, page1, code := list(srv, "")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	assert.Contains(t, page1, first)
+	assert.NotContains(t, page1, second, "the second query belongs to page two")
+	issued := tokenRefusalJSONToken(t, page1, "NextToken")
+
+	status, page2, code := list(srv, issued)
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, second, "an issued token must resume after the first page")
+	assert.NotContains(t, page2, first, "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := list(srv, tc.token)
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidRequestException", code, body)
+			assert.Contains(t, body,
+				"NextToken is not a token returned by a previous ListQueryExecutions request", body)
+			assert.NotContains(t, body, first, "a refused token must not be answered with page one")
+		})
+	}
+
+	// #887's ordering criterion, counted rather than sealed: see [tokenRefusalCountingState] for why a
+	// sealed store cannot tell Athena's two orderings apart.
+	t.Run("refused before any state is read", func(t *testing.T) {
+		counted := &tokenRefusalCountingState{
+			inner:     emulator.NewMemoryStateManager(),
+			namespace: emulator.AthenaStateNamespaceForTest(),
+		}
+		countedSrv := tokenRefusalServer(t, counted, &emulator.AthenaPlugin{})
+
+		before := counted.reads
+		status, body, code := list(countedSrv, "!!not-base64!!")
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidRequestException", code, body)
+		assert.Equal(t, before, counted.reads, "a refused token must be refused before any read")
+
+		// The control: a token this operation could have issued reaches the index and reads it. Without it
+		// the assertion above could pass because no request ever reaches the handler.
+		before = counted.reads
+		status, body, _ = list(countedSrv, base64.StdEncoding.EncodeToString([]byte("0")))
+		require.Equal(t, http.StatusOK, status, body)
+		assert.Greater(t, counted.reads, before, "an accepted token must reach the index")
+	})
+}
+
+// TestPaginationToken_AthenaListWorkGroupsRefusesATokenItDidNotIssue is the same refusal at the second
+// site, asserted separately because the two decoded their tokens with two copies of one block — which is
+// how they came to be fixed twice and can come to diverge again.
+//
+// It also pins the portability the per-operation message exists to make detectable: both listings encode
+// an offset identically, so each one's token is issuable under the other and only the operation name in
+// the message distinguishes them.
+func TestPaginationToken_AthenaListWorkGroupsRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.AthenaPlugin{})
+	for _, name := range []string{"wg-one", "wg-two"} {
+		status, body, code := tokenRefusalAthenaCall(t, srv, "CreateWorkGroup",
+			fmt.Sprintf(`{"Name":%q}`, name))
+		require.Empty(t, code, body)
+		require.Equal(t, http.StatusOK, status, body)
+	}
+
+	list := func(srv *emulator.Server, token string) (int, string, string) {
+		t.Helper()
+		if token == "" {
+			return tokenRefusalAthenaCall(t, srv, "ListWorkGroups", `{"MaxResults":1}`)
+		}
+		return tokenRefusalAthenaCall(t, srv, "ListWorkGroups",
+			fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, token))
+	}
+
+	status, page1, code := list(srv, "")
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	assert.Contains(t, page1, "wg-one")
+	assert.NotContains(t, page1, "wg-two", "the second workgroup belongs to page two")
+	issued := tokenRefusalJSONToken(t, page1, "NextToken")
+
+	status, page2, code := list(srv, issued)
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "wg-two", "an issued token must resume after the first page")
+	assert.NotContains(t, page2, "wg-one", "an issued token must not re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := list(srv, tc.token)
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "InvalidRequestException", code, body)
+			assert.Contains(t, body,
+				"NextToken is not a token returned by a previous ListWorkGroups request", body)
+			assert.NotContains(t, body, "wg-one", "a refused token must not be answered with page one")
+		})
+	}
+
+	// The other listing's token is issuable here, so it is accepted — the message is what tells a caller
+	// which listing a token belongs to, and this records that the refusal does not claim otherwise.
+	t.Run("a token from the other listing is issuable and is not refused", func(t *testing.T) {
+		tokenRefusalAthenaStartQuery(t, srv, "SELECT 1")
+		tokenRefusalAthenaStartQuery(t, srv, "SELECT 2")
+		status, queries, code := tokenRefusalAthenaCall(t, srv, "ListQueryExecutions", `{"MaxResults":1}`)
+		require.Empty(t, code, queries)
+		require.Equal(t, http.StatusOK, status, queries)
+
+		status, body, code := list(srv, tokenRefusalJSONToken(t, queries, "NextToken"))
+		assert.Equal(t, http.StatusOK, status, body)
+		assert.Empty(t, code, body)
+	})
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		counted := &tokenRefusalCountingState{
+			inner:     emulator.NewMemoryStateManager(),
+			namespace: emulator.AthenaStateNamespaceForTest(),
+		}
+		countedSrv := tokenRefusalServer(t, counted, &emulator.AthenaPlugin{})
+
+		before := counted.reads
+		status, body, code := list(countedSrv, "!!not-base64!!")
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "InvalidRequestException", code, body)
+		assert.Equal(t, before, counted.reads, "a refused token must be refused before any read")
+
+		before = counted.reads
+		status, body, _ = list(countedSrv, base64.StdEncoding.EncodeToString([]byte("0")))
+		require.Equal(t, http.StatusOK, status, body)
+		assert.Greater(t, counted.reads, before, "an accepted token must reach the index")
 	})
 }
