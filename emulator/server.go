@@ -362,99 +362,132 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/control/time", s.handleSetTime)
 	r.Post("/v1/control/scale", s.handleSetScale)
 
-	r.Post("/v1/redshift-data/results", s.handleRedshiftDataSeedResult)
-	r.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
-	r.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
+	// Seed endpoints, grouped so that every write through one is recorded as an event
+	// and replayed in position (#1140). Membership is not a taste question: an endpoint
+	// belongs here when its write lands in the [StateManager], because that is what
+	// [ReplayEngine.resetState] wipes at the start of a replay and therefore what a
+	// replay has to re-apply. An endpoint whose write lands on a long-lived controller
+	// instead — fault rules, pricing discounts and credits — survives the reset already
+	// and must stay outside, or a replay would apply it twice. See
+	// [Server.recordControlPlaneWrites] for the full rule and for why the alternative,
+	// exempting the seed namespaces from the reset, does not work.
+	r.Group(func(cp chi.Router) {
+		cp.Use(s.recordControlPlaneWrites)
 
-	r.Post("/v1/athena/results", s.handleAthenaSeedResult)
-	r.Delete("/v1/athena/results", s.handleAthenaClearResults)
+		cp.Post("/v1/redshift-data/results", s.handleRedshiftDataSeedResult)
+		cp.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
+		cp.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
 
-	r.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
-	r.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
+		cp.Post("/v1/athena/results", s.handleAthenaSeedResult)
+		cp.Delete("/v1/athena/results", s.handleAthenaClearResults)
 
-	r.Post("/v1/sagemaker/training-job-status", s.handleSageMakerSeedTrainingJobStatus)
-	r.Delete("/v1/sagemaker/training-job-status", s.handleSageMakerClearTrainingJobStatus)
+		cp.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
+		cp.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
 
-	r.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
-	r.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
+		cp.Post("/v1/sagemaker/training-job-status", s.handleSageMakerSeedTrainingJobStatus)
+		cp.Delete("/v1/sagemaker/training-job-status", s.handleSageMakerClearTrainingJobStatus)
 
-	// IAM control-plane endpoints (#747).
-	r.Post("/v1/iam/slr-deletion-status", s.handleIAMSeedSLRDeletionStatus)
-	r.Delete("/v1/iam/slr-deletion-status", s.handleIAMClearSLRDeletionStatus)
+		cp.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
+		cp.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
 
-	// Organizations control-plane endpoints (#578).
-	r.Post("/v1/organizations/feature-set", s.handleOrganizationsSeedFeatureSet)
-	r.Delete("/v1/organizations/feature-set", s.handleOrganizationsClearFeatureSet)
-	r.Post("/v1/organizations/create-account-failure", s.handleOrganizationsSeedCreateAccountFailure)
-	r.Delete("/v1/organizations/create-account-failure", s.handleOrganizationsClearCreateAccountFailure)
+		// IAM control-plane endpoints (#747).
+		cp.Post("/v1/iam/slr-deletion-status", s.handleIAMSeedSLRDeletionStatus)
+		cp.Delete("/v1/iam/slr-deletion-status", s.handleIAMClearSLRDeletionStatus)
 
-	// Account Management control-plane endpoints (#629).
-	r.Post("/v1/account/region-opt-status", s.handleAccountSeedRegionOptStatus)
-	r.Delete("/v1/account/region-opt-status", s.handleAccountClearRegionOptStatus)
+		// Organizations control-plane endpoints (#578).
+		cp.Post("/v1/organizations/feature-set", s.handleOrganizationsSeedFeatureSet)
+		cp.Delete("/v1/organizations/feature-set", s.handleOrganizationsClearFeatureSet)
+		cp.Post("/v1/organizations/create-account-failure", s.handleOrganizationsSeedCreateAccountFailure)
+		cp.Delete("/v1/organizations/create-account-failure", s.handleOrganizationsClearCreateAccountFailure)
 
-	// AWS Config control-plane endpoints (#580).
-	r.Post("/v1/config/recorder-status", s.handleConfigSeedRecorderStatus)
-	r.Delete("/v1/config/recorder-status", s.handleConfigClearRecorderStatus)
-	r.Post("/v1/config/delivery-status", s.handleConfigSeedDeliveryStatus)
-	r.Delete("/v1/config/delivery-status", s.handleConfigClearDeliveryStatus)
-	r.Post("/v1/config/delivery-policy", s.handleConfigSeedDeliveryPolicy)
-	r.Delete("/v1/config/delivery-policy", s.handleConfigClearDeliveryPolicy)
-	r.Post("/v1/config/rule-compliance/{name}", s.handleConfigSeedRuleCompliance)
-	r.Delete("/v1/config/rule-compliance/{name}", s.handleConfigClearRuleCompliance)
-	r.Delete("/v1/config/rule-compliance", s.handleConfigClearRuleCompliance)
-	r.Post("/v1/config/pack-status/{name}", s.handleConfigSeedPackStatus)
-	r.Delete("/v1/config/pack-status/{name}", s.handleConfigClearPackStatus)
-	r.Delete("/v1/config/pack-status", s.handleConfigClearPackStatus)
-	r.Post("/v1/config/pack-compliance/{name}", s.handleConfigSeedPackCompliance)
-	r.Delete("/v1/config/pack-compliance/{name}", s.handleConfigClearPackCompliance)
-	r.Delete("/v1/config/pack-compliance", s.handleConfigClearPackCompliance)
+		// Account Management control-plane endpoints (#629).
+		cp.Post("/v1/account/region-opt-status", s.handleAccountSeedRegionOptStatus)
+		cp.Delete("/v1/account/region-opt-status", s.handleAccountClearRegionOptStatus)
 
-	// Lambda control-plane endpoints (#393).
-	r.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
-	r.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
+		// AWS Config control-plane endpoints (#580).
+		cp.Post("/v1/config/recorder-status", s.handleConfigSeedRecorderStatus)
+		cp.Delete("/v1/config/recorder-status", s.handleConfigClearRecorderStatus)
+		cp.Post("/v1/config/delivery-status", s.handleConfigSeedDeliveryStatus)
+		cp.Delete("/v1/config/delivery-status", s.handleConfigClearDeliveryStatus)
+		cp.Post("/v1/config/delivery-policy", s.handleConfigSeedDeliveryPolicy)
+		cp.Delete("/v1/config/delivery-policy", s.handleConfigClearDeliveryPolicy)
+		cp.Post("/v1/config/rule-compliance/{name}", s.handleConfigSeedRuleCompliance)
+		cp.Delete("/v1/config/rule-compliance/{name}", s.handleConfigClearRuleCompliance)
+		cp.Delete("/v1/config/rule-compliance", s.handleConfigClearRuleCompliance)
+		cp.Post("/v1/config/pack-status/{name}", s.handleConfigSeedPackStatus)
+		cp.Delete("/v1/config/pack-status/{name}", s.handleConfigClearPackStatus)
+		cp.Delete("/v1/config/pack-status", s.handleConfigClearPackStatus)
+		cp.Post("/v1/config/pack-compliance/{name}", s.handleConfigSeedPackCompliance)
+		cp.Delete("/v1/config/pack-compliance/{name}", s.handleConfigClearPackCompliance)
+		cp.Delete("/v1/config/pack-compliance", s.handleConfigClearPackCompliance)
 
-	// SQS control-plane endpoints (#413).
-	r.Post("/v1/sqs/consistency", s.handleSQSSeedConsistency)
-	r.Delete("/v1/sqs/consistency", s.handleSQSClearConsistency)
+		// Lambda control-plane endpoints (#393).
+		cp.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
+		cp.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
 
-	// EC2 Fleet partial-fulfillment control-plane endpoints (#387).
-	r.Post("/v1/ec2/fleet-shortfall", s.handleEC2SeedFleetShortfall)
-	r.Delete("/v1/ec2/fleet-shortfall", s.handleEC2ClearFleetShortfall)
+		// SQS control-plane endpoints (#413).
+		cp.Post("/v1/sqs/consistency", s.handleSQSSeedConsistency)
+		cp.Delete("/v1/sqs/consistency", s.handleSQSClearConsistency)
 
-	// EC2 snapshot progression control-plane endpoints (#715).
-	r.Post("/v1/ec2/snapshot-status", s.handleEC2SeedSnapshotStatus)
-	r.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
-	r.Post("/v1/ec2/instance-state", s.handleEC2SeedInstanceState)
-	r.Delete("/v1/ec2/instance-state", s.handleEC2ClearInstanceState)
+		// EC2 Fleet partial-fulfillment control-plane endpoints (#387).
+		cp.Post("/v1/ec2/fleet-shortfall", s.handleEC2SeedFleetShortfall)
+		cp.Delete("/v1/ec2/fleet-shortfall", s.handleEC2ClearFleetShortfall)
 
-	// EC2 spot-placement-score control-plane endpoints (#892).
-	r.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
-	r.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)
+		// EC2 snapshot progression control-plane endpoints (#715).
+		cp.Post("/v1/ec2/snapshot-status", s.handleEC2SeedSnapshotStatus)
+		cp.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
+		cp.Post("/v1/ec2/instance-state", s.handleEC2SeedInstanceState)
+		cp.Delete("/v1/ec2/instance-state", s.handleEC2ClearInstanceState)
 
-	// EC2 Capacity Reservation outcome control-plane endpoints (#891).
-	r.Post("/v1/ec2/capacity-reservation-outcomes", s.handleEC2SeedCapacityReservationOutcome)
-	r.Delete("/v1/ec2/capacity-reservation-outcomes", s.handleEC2ClearCapacityReservationOutcome)
+		// EC2 spot-placement-score control-plane endpoints (#892).
+		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
+		cp.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)
 
-	// ELB account-limit control-plane endpoints (#885).
-	r.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
-	r.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)
+		// EC2 Capacity Reservation outcome control-plane endpoints (#891).
+		cp.Post("/v1/ec2/capacity-reservation-outcomes", s.handleEC2SeedCapacityReservationOutcome)
+		cp.Delete("/v1/ec2/capacity-reservation-outcomes", s.handleEC2ClearCapacityReservationOutcome)
 
-	// spore.host spawn task-completion control-plane endpoints (#360).
-	r.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
-	r.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)
+		// ELB account-limit control-plane endpoints (#885).
+		cp.Post("/v1/elb/account-limits", s.handleELBSeedAccountLimit)
+		cp.Delete("/v1/elb/account-limits", s.handleELBClearAccountLimit)
 
-	// Bedrock Runtime control-plane endpoints.
-	r.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
-	r.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
-	r.Post("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeSeedJobStatus)
-	r.Delete("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeClearJobStatus)
+		// spore.host spawn task-completion control-plane endpoints (#360).
+		cp.Post("/v1/spawn/task-completion", s.handleSpawnSeedTaskCompletion)
+		cp.Delete("/v1/spawn/task-completion", s.handleSpawnClearTaskCompletion)
 
-	// Fault injection control-plane endpoints.
+		// Bedrock Runtime control-plane endpoints.
+		cp.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
+		cp.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
+		cp.Post("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeSeedJobStatus)
+		cp.Delete("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeClearJobStatus)
+
+		// Pricing seed endpoints, as distinct from the discount and credit endpoints
+		// below: these two write to the state manager, so they belong here.
+		cp.Post("/v1/pricing/query-failures", s.handlePricingSeedQueryFailure)
+		cp.Delete("/v1/pricing/query-failures", s.handlePricingClearQueryFailures)
+		cp.Post("/v1/pricing/offers", s.handlePricingSeedOffer)
+		cp.Delete("/v1/pricing/offers", s.handlePricingClearOffers)
+
+		// Health control-plane endpoints.
+		cp.Post("/v1/health/events", s.handleHealthSeedEvents)
+		cp.Delete("/v1/health/events", s.handleHealthClearEvents)
+
+		// S3 conditional-request conflict seeds. POST /v1/s3/presign is not here: it mints
+		// a URL and writes nothing, so a replay has nothing to re-apply.
+		cp.Post("/v1/s3/conditional-conflict", s.handleS3SeedConditionalConflict)
+		cp.Delete("/v1/s3/conditional-conflict", s.handleS3ClearConditionalConflict)
+	})
+
+	// Fault injection control-plane endpoints. Outside the recorded group: a rule lives
+	// on the [FaultController], which resetState rewinds rather than clears, so a replay
+	// that re-armed the recorded rules would hold each of them twice.
 	r.Post("/v1/fault/rules", s.handleFaultSetRules)
 	r.Delete("/v1/fault/rules", s.handleFaultClearRules)
 	r.Get("/v1/fault/rules", s.handleFaultGetRules)
 
-	// Pricing control-plane endpoints.
+	// Pricing control-plane endpoints. Outside the recorded group for the same reason:
+	// a discount and a credit are held by the cost tracker, not the state manager. The
+	// two pricing endpoints that do write state are registered in the group above.
 	r.Post("/v1/pricing/refresh", s.handlePricingRefresh)
 	r.Get("/v1/pricing", s.handlePricingGet)
 	r.Get("/v1/pricing/lookup", s.handlePricingLookup)
@@ -464,19 +497,9 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Post("/v1/pricing/credits", s.handlePricingAddCredit)
 	r.Get("/v1/pricing/credits", s.handlePricingListCredits)
 	r.Delete("/v1/pricing/credits/{id}", s.handlePricingRemoveCredit)
-	r.Post("/v1/pricing/query-failures", s.handlePricingSeedQueryFailure)
-	r.Delete("/v1/pricing/query-failures", s.handlePricingClearQueryFailures)
-	r.Post("/v1/pricing/offers", s.handlePricingSeedOffer)
-	r.Delete("/v1/pricing/offers", s.handlePricingClearOffers)
 
-	// Health control-plane endpoints.
-	r.Post("/v1/health/events", s.handleHealthSeedEvents)
-	r.Delete("/v1/health/events", s.handleHealthClearEvents)
-
-	// S3 control-plane endpoints.
+	// S3 presigning. Not a seed: it mints a URL from the request and writes nothing.
 	r.Post("/v1/s3/presign", s.handleS3Presign)
-	r.Post("/v1/s3/conditional-conflict", s.handleS3SeedConditionalConflict)
-	r.Delete("/v1/s3/conditional-conflict", s.handleS3ClearConditionalConflict)
 
 	r.Get("/ui", s.handleDebugUI)
 	r.Get("/v1/debug/events", s.handleDebugEvents)

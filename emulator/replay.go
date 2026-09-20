@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand/v2" // nosemgrep
+	"net/http"
 	"sync"
 	"time"
 )
@@ -26,6 +27,11 @@ type ReplayEngine struct {
 	// reaches step 5 directly — which is how a recorded 403 replayed as a 200
 	// (#833).
 	pipeline ReplayPipeline
+
+	// controlPlane is the handler a recorded control-plane write is re-issued
+	// against. Nil unless [WithControlPlaneHandler] was given, in which case a
+	// recorded seed is skipped and the replay answers the unseeded sequence (#1140).
+	controlPlane http.Handler
 
 	// currentReplay is the in-progress replay session, if any.
 	currentReplay *ActiveReplay
@@ -206,6 +212,23 @@ type ReplayEngineOption func(*ReplayEngine)
 // meaningful to a caller replaying a stream recorded without them.
 func WithReplayPipeline(pipeline ReplayPipeline) ReplayEngineOption {
 	return func(r *ReplayEngine) { r.pipeline = pipeline }
+}
+
+// WithControlPlaneHandler gives the engine the handler a recorded control-plane
+// write is re-issued against, which is how a replay reproduces the seeds the
+// recording ran under (#1140).
+//
+// Pass the [Server] whose stream is being replayed, or a server built over the same
+// registry, state manager and clock; [Server.ServeHTTP] needs no [Server.Start].
+// Without it a control-plane event is **skipped**, which is reported in
+// [ReplayResults.SkippedEvents] and leaves the replay answering the unseeded
+// sequence — the behavior every replay had before #1140, now visible in the counters
+// instead of silent.
+//
+// A replay writes no events, so the engine marks the request it synthesizes and
+// [Server.recordControlPlaneWrites] declines to record it again.
+func WithControlPlaneHandler(handler http.Handler) ReplayEngineOption {
+	return func(r *ReplayEngine) { r.controlPlane = handler }
 }
 
 // NewReplayEngine creates a ReplayEngine wired to the given dependencies.
@@ -436,6 +459,14 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		if !wasFrozen {
 			defer r.timeController.Unfreeze()
 		}
+	}
+
+	// A control-plane write is not an AWS request: it passes no pre-plugin gate, reaches
+	// no plugin, and is re-applied by re-issuing the HTTP request that made it. It is
+	// dispatched after the freeze above so a seed that stores a timestamp stores the
+	// recorded one.
+	if isControlPlaneEvent(event) {
+		return r.replayControlPlaneEvent(ctx, event, replay)
 	}
 
 	reqCtx := &RequestContext{

@@ -59,6 +59,10 @@ func pipelineReplayEngine(ts *emulator.TestServer, pipeline emulator.ReplayPipel
 		emulator.ReplayConfig{},
 		emulator.NewDefaultLogger(slog.LevelError, false),
 		emulator.WithReplayPipeline(pipeline),
+		// Given unconditionally: a seed in the recording is re-applied in position
+		// (#1140), and a stream with no seed in it is unaffected — so every replay test
+		// gets the wiring a consumer replaying a live server's stream would have.
+		emulator.WithControlPlaneHandler(ts.ControlPlaneHandler()),
 	)
 }
 

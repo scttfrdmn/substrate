@@ -55,11 +55,15 @@ import (
 // so a duration seed would make every "still pending" assertion depend on how long the rest of
 // the test took. A count of observations is exactly reproducible.
 //
-// Reproducible across runs, that is, and not across a replay: a seed is written through the
-// control plane and so never enters the event stream, while [ReplayEngine.Replay] resets the whole
-// [StateManager] first — so a replay of a seeded stream answers the *unseeded* sequence. That is
-// true of every seed in substrate and is filed as #1140; what a replay does still prove here is
-// that no seeded observation was ever written back to the instance record.
+// Reproducible across a replay too, and that took a second mechanism. A seed is written through
+// the control plane rather than as an AWS request, and [ReplayEngine.Replay] resets the whole
+// [StateManager] first, so a replay of a seeded stream used to answer the *unseeded* sequence.
+// [Server.recordControlPlaneWrites] records the write as an event of its own and the replay
+// re-issues it in position, which restores the countdown from zero rather than carrying over the
+// position the recording reached (#1140). A replay handed no control-plane handler still answers
+// the unseeded sequence, and that is worth having: it is the sharpest available test of the rule
+// that a seed governs what an observation reports and never rewrites the instance record — see
+// TestEC2_InstanceState_AReplayReproducesTheRecordsOwnStates.
 
 // ec2InstStateNamespace is the state namespace for EC2 instance-state control-plane (seed) data.
 //

@@ -44,6 +44,11 @@ type AWSRequest struct {
 
 	// Path is the effective URL path of the HTTP request. For S3 virtual-hosted
 	// requests the bucket is prepended so the plugin always sees /bucket[/key].
+	//
+	// On a recorded control-plane write — an AWSRequest no plugin ever sees, built by
+	// [Server.recordControlPlaneWrites] — it is the full request target including the
+	// query string, because replaying such a write means re-issuing that exact request
+	// and most of the clear endpoints carry their key in the query (#1140).
 	Path string
 
 	// Protocol is the wire serialization the caller used, classified by

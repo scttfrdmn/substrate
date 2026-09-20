@@ -65,6 +65,16 @@ func (ts *TestServer) AuthController() *AuthController { return ts.srv.opts.Auth
 // its armed state at the start of a replay (#833).
 func (ts *TestServer) FaultController() *FaultController { return ts.srv.opts.Fault }
 
+// ControlPlaneHandler returns the server as an [http.Handler], for
+// [WithControlPlaneHandler] to re-issue a recorded control-plane write against.
+//
+// A replay of this server's stream needs it for the same reason it needs the auth and
+// fault controllers above: a seed is written through a control-plane endpoint rather
+// than an AWS request, so re-applying one means re-issuing that request, and a replay
+// given no handler skips every seed in the stream and answers the unseeded sequence
+// (#1140).
+func (ts *TestServer) ControlPlaneHandler() http.Handler { return ts.srv }
+
 // TestServerOption configures a server started by [StartTestServer].
 type TestServerOption func(*testServerConfig)
 

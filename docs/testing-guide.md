@@ -212,6 +212,9 @@ func setupTestHarness(t *testing.T) (*substrate.TestServer, *substrate.ReplayEng
             StopOnError: true,
         },
         substrate.NewDefaultLogger(slog.LevelError, false),
+        // Lets a recorded seed be re-applied during the replay; see "A seeded
+        // outcome replays under the same seed" below.
+        substrate.WithControlPlaneHandler(ts.ControlPlaneHandler()),
     )
 
     return ts, engine
@@ -390,6 +393,52 @@ sections `substrate server` reads, and an authorization controller over the same
 manager the replay rebuilds IAM into. A replay
 therefore reproduces a recorded refusal only when it is configured as the recording
 was; a configuration difference surfaces as a divergence rather than being hidden.
+
+### A seeded outcome replays under the same seed
+
+A seed is recorded as an event of its own and re-applied where it was written, so a
+stream recorded under a seed replays under the same seed (#1140). Three things follow,
+and each was wrong before:
+
+- **Position is preserved.** A seed written between two requests is re-applied between
+  those same two requests, so a write the recording accepted before the seed was armed
+  is accepted on replay too.
+- **A consumed count restarts.** A budget the recording spent down to zero — an
+  observation countdown, a conflict allowance — is re-armed at its seeded value, because
+  the replay's reset wipes the counter and the recorded write re-arms it. The replay
+  reproduces the recording's sequence rather than continuing from where it stopped.
+- **A `DELETE` replays as the same `DELETE`.** The recorded event carries the query
+  string, so clearing one seed does not replay as clearing every seed.
+
+Before this, the seed lived only in the state manager, and a replay opens by resetting
+the state manager. So a recording in which a conditional PUT was refused twice and then
+accepted replayed as three acceptances, with nothing reported: every event was
+re-executed and every one succeeded.
+
+**A replay driven programmatically must be given the handler.** Re-applying a seed means
+re-issuing the HTTP request that wrote it, and the engine needs something to issue it
+against:
+
+```go
+engine := substrate.NewReplayEngine(store, state, tc, registry, cfg, logger,
+    substrate.WithControlPlaneHandler(ts.ControlPlaneHandler()))
+```
+
+An engine given none counts each control-plane event in `SkippedEvents` and replays the
+unseeded behaviour — the pre-#1140 outcome, now visible in the counters instead of
+silent. Withholding it is occasionally what a test wants: a suite proving that a seed
+only ever changed what an observation *reported*, and never the record underneath, can
+replay without the handler and assert the records report their own settled states. That
+is a deliberate choice to state in the test, not a default to fall into. `substrate
+replay` wires the handler itself.
+
+Not every control-plane write is recorded — only the ones that seed state an AWS
+observation later reads. A replay resets the state manager, freezes the clock and rewinds
+the fault controller itself, so `/v1/state/reset`, `/v1/control/time`, `/v1/control/scale`
+and `/v1/fault/rules` are excluded; the remaining endpoints write nothing a replayed
+observation can read. See
+[How a seed survives a replay](services.md#how-a-seed-survives-a-replay) for the rule as
+the service reference states it.
 
 ### What a replay compares
 
