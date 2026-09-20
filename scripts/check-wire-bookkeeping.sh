@@ -80,6 +80,14 @@ BASELINE="scripts/wire-bookkeeping-baseline.txt"
 # exists: organizations_account_test.go's orgCreateStatus.AccountID reads
 # CreateAccountStatus.AccountId, which AWS does publish.
 #
+# One further reason the 330 is an upper bound rather than a leak count: a request
+# decode struct is matched too, and cannot leak. Exactly one entry is of that kind
+# — accountRegionRequest.AccountID (account_plugin.go:568), which decodes the
+# AccountId that Account's own operations publish as an input. There is no lexical
+# way to tell a request struct from a response struct, and excluding by a name
+# suffix would be a heuristic that silently drops real surface, so it stays in and
+# is named here instead.
+#
 # The awk is written for the POSIX subset because CI's awk is mawk, not gawk:
 # matching the struct header on field position rather than on an escaped brace
 # avoids the one construct the two disagree about (`\{` is a literal brace to mawk
