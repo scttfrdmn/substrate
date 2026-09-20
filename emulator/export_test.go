@@ -1598,6 +1598,18 @@ func CFNPropagateConfigStackTagsForTest(
 	return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 }
 
+// SNSSubscriptionIndexKeyForTest is the state key a topic's subscription index is written at.
+//
+// Exported so #1086's ordering assertion can seal that one read. ListSubscriptionsByTopic resolves the
+// topic before it looks at the token, so #926's NotFound keeps precedence — which means a test that
+// sealed every Get would fail the topic lookup and prove nothing about the token. Sealing this key
+// alone leaves the topic readable and the index unreachable, which is exactly the boundary the decode
+// has to sit above. The key comes from the builder that writes it rather than being spelled again in
+// the test, which is the single-producer rule the key layout's own comment in sns_plugin.go states.
+func SNSSubscriptionIndexKeyForTest(accountID, region, topicName string) string {
+	return snsSubTopicIDsStateKey(accountID, region, topicName)
+}
+
 // SeedSNSTopicAttributeForTest writes name=value into a topic record's stored attribute map, bypassing
 // SetTopicAttributes.
 //

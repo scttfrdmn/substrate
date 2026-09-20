@@ -1402,6 +1402,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   growing. `make wire-bookkeeping-write` regenerates the baseline after a deliberate change. Also
   added `tag-releases-check` to the `Makefile`'s `.PHONY` list, where it had been missing.
 
+### Fixed
+- **SNS's three listings answered a well-formed page one for a `NextToken` they never issued** (#1086).
+  `ListTopics`, `ListSubscriptions` and `ListSubscriptionsByTopic` all carried the pre-#915 idiom that
+  decodes a base64 offset and discards both errors, so a token from another operation, a truncated copy
+  or an offset left over from an older recording selected the start of the listing — the one wrong answer
+  a paginating caller cannot detect. All three now go through `decodeOffsetPaginationToken` and
+  `pageByOffsetToken`, which was already the cut each had written out by hand. **The code is published
+  and the condition is substrate's reading:** all three pages carry `InvalidParameter`/400 in their
+  *own* Errors sections, glossed "Indicates that a request parameter does not comply with the associated
+  constraints", so the code is the operation's own vocabulary and not a sibling's — but none of the
+  three publishes anything about the token beyond "Token returned by the previous `ListTopics` request",
+  and SNS's common-errors page says nothing about one either. The message therefore names the parameter
+  and the operation rather than restating the gloss, since a caller handed "does not comply with the
+  associated constraints" cannot tell which of its parameters AWS means. This is not an expiry refusal:
+  SNS publishes no lifetime for a `NextToken`. It does stop a token being portable between the three,
+  which it silently was, because all three encode an offset identically.
+- **`ListSubscriptionsByTopic` keeps #926's `NotFound` ahead of the token refusal, and the boundary is
+  asserted rather than assumed** (#1086). The other two decode before they read anything, which is
+  #887's ordering criterion; this one resolves the topic first, because the topic is the resource the
+  request addresses and AWS publishes nothing about which of the two refusals wins — the same reading S3
+  `ListObjectsV2` records for its bucket. The token is still decoded before the subscription index is
+  read, pinned by sealing *that one state key* against reads: sealing every read would fail the topic
+  lookup instead and assert nothing about the token. The page size is left a constant 100, which is what
+  all three pages state and what none of them publishes a parameter to change.
+
 ## [v0.119.0] - 2026-09-18
 
 ### Added
