@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -213,6 +214,65 @@ func TestRequestLog_ARefusedWriteIsDistinguishableFromAnAcceptedOne(t *testing.T
 	assert.Equal(t, http.StatusOK, puts.Events[1].StatusCode)
 	assert.NotEqual(t, puts.Events[0].StatusCode, puts.Events[1].StatusCode,
 		"a refused write and an accepted one are two entries, not one shape twice")
+}
+
+// plainErrorPlugin answers every request with an error that is not an [emulator.AWSError],
+// which is the third thing a handler can return and the one the server has to invent a
+// status for.
+type plainErrorPlugin struct{ name string }
+
+// Name identifies the plugin to the registry.
+func (p *plainErrorPlugin) Name() string { return p.name }
+
+// Initialize satisfies the plugin interface; there is no state to set up.
+func (p *plainErrorPlugin) Initialize(_ context.Context, _ emulator.PluginConfig) error { return nil }
+
+// HandleRequest refuses with a bare error, carrying neither a code nor a status.
+func (p *plainErrorPlugin) HandleRequest(_ *emulator.RequestContext, _ *emulator.AWSRequest) (*emulator.AWSResponse, error) {
+	return nil, errors.New("the handler broke")
+}
+
+// Shutdown satisfies the plugin interface; there is nothing to release.
+func (p *plainErrorPlugin) Shutdown(_ context.Context) error { return nil }
+
+// TestRequestLog_ARefusalWithNoAWSCodeIsStillCounted is the third refusal shape, and the
+// one where the recorded status is the *only* thing a counting caller has.
+//
+// A handler that returns a bare error gives the log no AWS code to record — `error_code` is
+// set only from an [emulator.AWSError] — so an entry for a request that failed looks exactly
+// like an entry for one that succeeded unless the status says otherwise. The server answers
+// that request `InternalFailure`/500, and the assertion here is that the log says 500 too:
+// [recordedStatusCode] invents the same status `writeError` does, which is what makes the
+// recorded number safe to count refusals with. A status that disagreed would be worse than
+// none, because the disagreement is invisible from the log.
+func TestRequestLog_ARefusalWithNoAWSCodeIsStillCounted(t *testing.T) {
+	t.Parallel()
+
+	cfg := emulator.DefaultConfig()
+	cfg.EventStore.Enabled = true
+	cfg.EventStore.IncludeBodies = false
+
+	state := emulator.NewMemoryStateManager()
+	tc := emulator.NewTimeController(time.Now())
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig(), emulator.WithTimeController(tc))
+
+	// Only the failing plugin is registered, so S3 is routed to it rather than to the
+	// real one: the point is the handler's return value, not which service it belongs to.
+	registry := emulator.NewPluginRegistry()
+	registry.Register(&plainErrorPlugin{name: "s3"})
+	srv := emulator.NewServer(*cfg, registry, store, state, tc, logger)
+
+	rec := s3Request(t, srv, "PUT", "/plain-error-bucket/key", []byte("a"), nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "InternalFailure", "the caller is answered an InternalFailure")
+
+	log := readRequestLog(t, srv, "?service=s3")
+	require.Equal(t, 1, log.Total)
+	assert.Equal(t, rec.Code, log.Events[0].StatusCode,
+		"the log records the status the server answered with, invented the same way")
+	assert.Empty(t, log.Events[0].ErrorCode, "a bare error carries no AWS code to record")
+	assert.NotEmpty(t, log.Events[0].Error)
 }
 
 // TestRequestLog_ARefusalReportedAsAnErrorCarriesItsCode covers the other way a plugin
