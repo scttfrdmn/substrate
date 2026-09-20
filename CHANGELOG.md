@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **The capacity-reservation section still claimed a seed replays like any other state** (#1140).
+  v0.120.0 corrected that sentence where the snapshot-progression section stated it and added the
+  general rule there, but the same false sentence sat 280 lines later under the capacity-reservation
+  seed, so the reference contradicted itself and contradicted its own general statement. The
+  correction is not a copy of the first one, because the consequence here is worse: a progression
+  seed governs what an *observation* reports, so a replay diverges an observation and the record
+  survives — but a capacity-reservation state is resolved once in `createCapacityReservation` and
+  persisted onto the reservation, so a replay, having lost the seed with the state-manager reset,
+  re-executes the create and writes the nominal `active`. The **record** diverges, not a reading of
+  it, which is the one case where the divergence outlives the request that caused it. #1140 stays
+  open: its remaining criteria are the decision between the three candidate fixes and the rule that
+  observation counters must reset rather than be preserved.
+
 ## [v0.120.0] - 2026-09-19
 
 ### Added
