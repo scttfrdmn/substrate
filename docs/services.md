@@ -1421,13 +1421,12 @@ unusable or expired pagination token** — in an Errors section or in the token 
 of these refuses under a code that is substrate's reading of a generic code published on the
 operation's own page, the way S3 `ListObjectsV2` and `GetResources` above already do, and none by
 borrowing a sibling operation's code, which
-[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. SNS's two sites and Athena's two
-have landed and have their own sections below; the **six** remaining sites, carrying eight
-operations, are unchanged so far:
+[#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. SNS's two sites, Athena's two and
+CloudWatch Logs' four have landed and have their own sections below; the **two** remaining sites,
+carrying four operations, are unchanged so far:
 
 | Sites | Reading available on the page | What the page says |
 |---|---|---|
-| CloudWatch Logs `DescribeLogGroups`, `DescribeLogStreams`, `GetLogEvents`, `FilterLogEvents` | `InvalidParameterException` / 400 | *"A parameter is specified incorrectly."* `FilterLogEvents` names this code in prose three times for other parameter violations and never for a token. **These four pages do publish that the token expires** — *"The token expires after 24 hours"*, on the response member — and publish no code for using an expired one, which is the same shape as EventBridge's finding with the conclusion missing. |
 | EventBridge Scheduler `ListSchedules` | `ValidationException` / 400 | *"The input fails to satisfy the constraints specified by an AWS service."* The only constraint published on the token is Length 1–2048, so on this page's own text an in-length but unissuable token is not covered by the gloss. |
 | Batch `DescribeComputeEnvironments`, `DescribeJobQueues`, `DescribeJobDefinitions` (one shared paginator) | `ClientException` / 400 | *"These errors are usually caused by a client action. … Another cause is specifying an identifier that's not valid."* And the same page's token prose says *"Treat this token as an opaque identifier."* That is the closest of the thirteen pages to covering the condition under a generic code — but the page never joins the two sentences, so it is still substrate's reading and not an attribution. |
 
@@ -1514,6 +1513,64 @@ index, so a sealed read answers `200` with an empty page, which is indistinguish
 listing. The test counts the reads made in Athena's namespace instead and requires a refused request to
 have made none, with a paired control — a token the operation could have issued — that must read the
 index, so a count of zero cannot pass by never reaching the handler.
+
+### CloudWatch Logs carried one block four times, and the page says where a token comes from
+
+`DescribeLogGroups`, `DescribeLogStreams`, `GetLogEvents` and `FilterLogEvents` are the next four of
+those ten sites to convert, and they are the largest concentration in the class: **four copies of one
+decode block in one file**, which is why the conversion is worth more here than the count of
+operations suggests — a fix applied to one of them would have left the other three answering page one.
+All four answer **`InvalidParameterException` / 400**, glossed *"A parameter is specified
+incorrectly."* and published in **all four** operations' own Errors sections, so it is each
+operation's own vocabulary rather than a sibling's; it is also already this plugin's code at every
+other door it has.
+
+**The footing is the parenthesis in the token's own description.** All four pages describe the request
+parameter identically — *"The token for the next set of items to return. (You received this token from
+a previous call.)"*, with `FilterLogEvents` saying "events" where the others say "items". That aside
+states where a token comes from, so a token no previous call returned is not what the parameter is
+documented to accept. What is still substrate's reading is only that this input problem is the one the
+`InvalidParameterException` gloss covers: no page publishes a code AWS attributes to a pagination
+token.
+
+```
+nextToken is not a token returned by a previous DescribeLogGroups request
+```
+
+**Nothing in the published constraints bounds the token.** `nextToken` is Length **minimum 1 with no
+maximum** and no Pattern, so unlike Athena's and KMS's 1–1024 there is no ceiling for the refusal to
+subsume, and the issuability round trip is the entire rule. The minimum of 1 is again why an empty
+`nextToken` is an *absent* token, the start of the listing, rather than an invalid one.
+
+**Here the page sizes are published, and substrate's match.** The two describes publish *"If you don't
+specify a value, the default is up to 50 items"* with a Valid Range of 1–50; `FilterLogEvents`
+publishes *"The default is 10,000 events."* and `GetLogEvents` *"the default is as many log events as
+can fit in a response size of 1 MB (up to 10,000 log events)"*, both with a Valid Range of 1–10000.
+Substrate applies 50 and 10,000, which is the published figure in each case — unlike Athena, where the
+default was substrate's own choice. It models no response-size ceiling, so `GetLogEvents` applies the
+count alone.
+
+**Three things this does not fix, named so the conversion is not read as having fixed them.** All four
+response members publish *"The token expires after 24 hours."* and no page publishes a code for
+presenting an expired one, so a token substrate issues stays valid for the life of the store —
+refusing an expired one would need the token to carry its issue time and the simulated clock to judge
+it. `GetLogEvents` publishes a **pair** of directional tokens, says *"The returned tokens are never
+null"*, and documents termination as the returned token being equal to the one passed in; substrate
+emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
+caller following that rule cannot terminate and has to use the empty-token rule instead. And
+`ResourceNotFoundException` — *"The specified resource does not exist."*, published on three of the
+four pages at HTTP **400**, not 404 — has no site at these four doors, because none of them resolves
+the log group; a listing over a group that does not exist is empty rather than refused. That is a
+missing refusal rather than a token defect, and it is also why there is no `NotFound` precedence here
+to preserve, unlike SNS `ListSubscriptionsByTopic`.
+
+**All four validate the token before they read any state**, asserted by sealing the store the way
+#915's sites are; unlike Athena, Logs' index loader propagates a store failure, so the seal can tell
+the two orderings apart. Three of the four require a member first — `logGroupName`, and
+`logStreamName` as well at `GetLogEvents` — and that refusal keeps its precedence, because an absent
+required member is the more basic failure and neither ordering is published. Both carry the same
+published code, so the message is the only thing that says which one answered, which is why the
+precedence is asserted rather than left to the reader.
 
 ### Six describes published a cursor and implemented none of it
 
@@ -13863,15 +13920,15 @@ KMS API requests: $0.03 per 10,000 requests.
 |-----------|-------|
 | CreateLogGroup | |
 | DeleteLogGroup | Also removes the group's streams and their events |
-| DescribeLogGroups | Reports both ARN forms — see below |
+| DescribeLogGroups | Reports both ARN forms — see below; refuses a `nextToken` it did not issue |
 | PutRetentionPolicy | `retentionInDays` must be one of the API's 22 enumerated values |
 | DeleteRetentionPolicy | The documented way to make a group's events never expire |
 | CreateLogStream | |
 | DeleteLogStream | |
-| DescribeLogStreams | |
+| DescribeLogStreams | Refuses a `nextToken` it did not issue |
 | PutLogEvents | Accepts up to 10,000 events per call |
-| GetLogEvents | Supports nextForwardToken pagination |
-| FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams` |
+| GetLogEvents | Issues `nextForwardToken` only, and refuses a `nextToken` it did not issue |
+| FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.
 
@@ -13902,6 +13959,14 @@ is the signal, which is why `DeleteRetentionPolicy` exists.
 the error code travels in the body's `__type`, not the status line. Substrate's
 older group- and stream-level not-found responses on the other operations still
 use 404 and are not changed here.
+
+All four paginating operations refuse a `nextToken` substrate could not have issued with
+`InvalidParameterException` / 400, rather than answering a well-formed page one — see
+[CloudWatch Logs carried one block four times](#cloudwatch-logs-carried-one-block-four-times-and-the-page-says-where-a-token-comes-from)
+for the provenance, the three divergences the change deliberately leaves in place (the published
+24-hour token expiry, `GetLogEvents`' missing `nextBackwardToken`, and the absent
+`ResourceNotFoundException` for a log group that does not exist), and the argument that the token is
+validated before any state is read.
 
 ### CloudFormation resource types
 

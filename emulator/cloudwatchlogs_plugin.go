@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -175,6 +174,13 @@ func (p *CloudWatchLogsPlugin) describeLogGroups(ctx *RequestContext, req *AWSRe
 		}
 	}
 
+	// Before the log-group index is read, so the refusal does not depend on what the store holds — see
+	// cloudwatchlogs_pagination.go for the code's provenance and the ordering argument (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, cwLogsInvalidPaginationToken("DescribeLogGroups")
+	}
+
 	goCtx := context.Background()
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)
 	allNames, err := loadStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey)
@@ -194,33 +200,18 @@ func (p *CloudWatchLogsPlugin) describeLogGroups(ctx *RequestContext, req *AWSRe
 		names = filtered
 	}
 
-	// Pagination.
+	// Pagination. The index is ASCII-sorted by log group name, which is the order the page publishes
+	// for the results and is stable across calls — which is what [pageByOffsetToken]'s offset relies
+	// on. The prefix filter above preserves that order, so the offset counts the groups this request
+	// can see rather than every group in the account.
 	limit := body.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = cwLogsDescribeDefaultLimit
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(body.NextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
+	page, nextToken := pageByOffsetToken(names, offset, limit)
 
-	end := offset + limit
-	var nextToken string
-	if end < len(names) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(names)
-	}
-
-	groups := make([]cwLogGroupOut, 0, end-offset)
-	for _, name := range names[offset:end] {
+	groups := make([]cwLogGroupOut, 0, len(page))
+	for _, name := range page {
 		data, getErr := p.state.Get(goCtx, cloudwatchLogsNamespace, cwLogGroupKey(ctx.AccountID, ctx.Region, name))
 		if getErr != nil || data == nil {
 			continue
@@ -480,6 +471,13 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
+	// Below the required-member refusal and above the stream index, for the reason
+	// cloudwatchlogs_pagination.go states (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, cwLogsInvalidPaginationToken("DescribeLogStreams")
+	}
+
 	goCtx := context.Background()
 	idxKey := cwLogStreamNamesKey(ctx.AccountID, ctx.Region, body.LogGroupName)
 	allNames, err := loadStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey)
@@ -498,32 +496,18 @@ func (p *CloudWatchLogsPlugin) describeLogStreams(ctx *RequestContext, req *AWSR
 		names = filtered
 	}
 
+	// The index is name-sorted and the prefix filter preserves that order, so the offset counts the
+	// streams this request can see. A stream whose record no longer loads is skipped below, so a page
+	// can be shorter than limit while a token is still emitted; the offset counts index entries rather
+	// than rendered members, so the walk stays coherent.
 	limit := body.Limit
 	if limit <= 0 {
-		limit = 50
+		limit = cwLogsDescribeDefaultLimit
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(body.NextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
+	page, nextToken := pageByOffsetToken(names, offset, limit)
 
-	end := offset + limit
-	var nextToken string
-	if end < len(names) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(names)
-	}
-
-	streams := make([]cwLogStreamOut, 0, end-offset)
-	for _, name := range names[offset:end] {
+	streams := make([]cwLogStreamOut, 0, len(page))
+	for _, name := range page {
 		data, getErr := p.state.Get(goCtx, cloudwatchLogsNamespace, cwLogStreamKey(ctx.AccountID, ctx.Region, body.LogGroupName, name))
 		if getErr != nil || data == nil {
 			continue
@@ -632,6 +616,14 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName and logStreamName are required", HTTPStatus: http.StatusBadRequest}
 	}
 
+	// Below the required-member refusal and above the event read, for the reason
+	// cloudwatchlogs_pagination.go states (#1086). Only the forward token is substrate's to issue, so
+	// only the forward offset is what a token can decode to.
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, cwLogsInvalidPaginationToken("GetLogEvents")
+	}
+
 	goCtx := context.Background()
 	eventsKey := cwLogEventsKey(ctx.AccountID, ctx.Region, body.LogGroupName, body.LogStreamName)
 	eventsData, err := p.state.Get(goCtx, cloudwatchLogsNamespace, eventsKey)
@@ -656,31 +648,14 @@ func (p *CloudWatchLogsPlugin) getLogEvents(ctx *RequestContext, req *AWSRequest
 		filtered = append(filtered, ev)
 	}
 
+	// The events are stored in ingestion order and the time-range filter above preserves it, so the
+	// offset counts the events this request can see rather than every event in the stream.
 	limit := body.Limit
 	if limit <= 0 {
-		limit = 10000
+		limit = cwLogsEventsDefaultLimit
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(body.NextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(filtered) {
-		offset = len(filtered)
-	}
+	page, nextToken := pageByOffsetToken(filtered, offset, limit)
 
-	end := offset + limit
-	var nextToken string
-	if end < len(filtered) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(filtered)
-	}
-
-	page := filtered[offset:end]
 	events := make([]cwOutputLogEventOut, 0, len(page))
 	for _, ev := range page {
 		events = append(events, cwOutputLogEventWire(ev))
@@ -714,6 +689,13 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 	}
 	if body.LogGroupName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
+	}
+
+	// Below the required-member refusal and above every read, for the reason
+	// cloudwatchlogs_pagination.go states (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
+	if !tokenOK {
+		return nil, cwLogsInvalidPaginationToken("FilterLogEvents")
 	}
 
 	goCtx := context.Background()
@@ -773,28 +755,16 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 		return allEvents[i].Timestamp < allEvents[j].Timestamp
 	})
 
+	// The sort above is what makes the offset stable across calls: the streams are walked in index
+	// order and their events concatenated, so without it the page boundary would depend on that walk
+	// rather than on the order the caller sees.
 	limit := body.Limit
 	if limit <= 0 {
-		limit = 10000
+		limit = cwLogsEventsDefaultLimit
 	}
-	offset := 0
-	if body.NextToken != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(body.NextToken); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(allEvents) {
-		offset = len(allEvents)
-	}
-
-	end := offset + limit
-	var nextToken string
-	if end < len(allEvents) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(allEvents)
+	page, nextToken := pageByOffsetToken(allEvents, offset, limit)
+	if page == nil {
+		page = []filteredEvent{}
 	}
 
 	type response struct {
@@ -816,7 +786,7 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 		}{LogStreamName: n, SearchedCompletely: true}
 	}
 	return cwLogsJSONResponse(http.StatusOK, response{
-		Events:             allEvents[offset:end],
+		Events:             page,
 		SearchedLogStreams: searched,
 		NextToken:          nextToken,
 	})
