@@ -61,6 +61,19 @@ type SNSSubscription struct {
 	// FilterPolicy holds an optional message filtering policy. When set,
 	// only messages whose attributes match the policy are delivered.
 	FilterPolicy map[string]interface{} `json:"FilterPolicy,omitempty"`
+
+	// Attributes holds the subscription attributes SetSubscriptionAttributes stored, keyed by the
+	// AttributeName the caller sent. Only the six names API_SetSubscriptionAttributes publishes can
+	// appear; see snsSettableSubscriptionAttributeNames.
+	//
+	// Separate from FilterPolicy above, and deliberately so. A `FilterPolicy` set through the API
+	// lands here as the JSON string the caller sent and is reported back by GetSubscriptionAttributes;
+	// it is not parsed into FilterPolicy, so it does not change which messages Publish delivers.
+	// Filtering is the subscription's runtime behavior rather than an API observation, which is the
+	// boundary CLAUDE.md draws and what #1125 deliberately stopped short of — storing recorded intent
+	// is in scope, acting on it is not. FilterPolicy is reachable only by a test writing the record
+	// directly, and the divergence is recorded in docs/services.md.
+	Attributes map[string]string `json:"Attributes,omitempty"`
 }
 
 // snsTopicARN constructs an SNS topic ARN from region, account, and name.

@@ -794,14 +794,22 @@ func (p *SNSPlugin) buildSubscriptionListResponse(
 	}, nil
 }
 
+// getSubscriptionAttributes reports a subscription's stored attributes together with the members
+// substrate derives from its record.
+//
+// Until #1125 it answered a fixed four entries built from the record — SubscriptionArn, TopicArn,
+// Protocol, Endpoint — so nothing a caller set could ever be read back, whatever it was. The pairing
+// with setSubscriptionAttributes was the defect: one operation discarded every attribute and the other
+// could not have reported one. Both halves are in [SNSPlugin.subscriptionAttributes] now, which is what
+// makes a set followed by a get a round trip rather than two independent answers.
+//
+// The entries are sorted by key before marshaling, matching getTopicAttributes: Go's map iteration
+// order is randomized, and an unordered response body would make a recorded run replay differently from
+// itself.
 func (p *SNSPlugin) getSubscriptionAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	subARN := req.Params["SubscriptionArn"]
-	sub, err := p.loadSub(context.Background(), ctx.AccountID, ctx.Region, subARN)
+	sub, err := p.requireSubscription(ctx, req.Params["SubscriptionArn"])
 	if err != nil {
 		return nil, err
-	}
-	if sub == nil {
-		return nil, &AWSError{Code: "NotFound", Message: "Subscription not found", HTTPStatus: http.StatusNotFound}
 	}
 
 	type attrEntry struct {
@@ -817,12 +825,12 @@ func (p *SNSPlugin) getSubscriptionAttributes(ctx *RequestContext, req *AWSReque
 		GetSubscriptionAttributesResult result           `xml:"GetSubscriptionAttributesResult"`
 		ResponseMetadata                responseMetadata `xml:"ResponseMetadata"`
 	}
-	attrs := []attrEntry{
-		{Key: "SubscriptionArn", Value: sub.ARN},
-		{Key: "TopicArn", Value: sub.TopicARN},
-		{Key: "Protocol", Value: sub.Protocol},
-		{Key: "Endpoint", Value: sub.Endpoint},
+	merged := p.subscriptionAttributes(sub)
+	attrs := make([]attrEntry, 0, len(merged))
+	for k, v := range merged {
+		attrs = append(attrs, attrEntry{Key: k, Value: v})
 	}
+	sort.Slice(attrs, func(i, j int) bool { return attrs[i].Key < attrs[j].Key })
 	return snsXMLResponse(http.StatusOK, response{
 		Xmlns:                           snsXMLNS,
 		GetSubscriptionAttributesResult: result{Attributes: attrs},
@@ -830,9 +838,52 @@ func (p *SNSPlugin) getSubscriptionAttributes(ctx *RequestContext, req *AWSReque
 	})
 }
 
+// setSubscriptionAttributes stores one of the six attributes API_SetSubscriptionAttributes publishes,
+// refusing a name it does not publish and an ARN that names no subscription.
+//
+// It was a literal stub until #1125: it read SubscriptionArn into `_`, read neither AttributeName nor
+// AttributeValue, touched no state and answered 200. So a subscription that did not exist was a
+// success, a malformed ARN was a success, an attribute name AWS publishes nowhere was a success, and
+// the value was unreadable because getSubscriptionAttributes answered a fixed four entries. A consumer
+// testing "set a FilterPolicy, then confirm the subscription reports it" got a green 200 and a response
+// with the member absent — a silent wrong answer rather than a refusal.
+//
+// The order is AttributeName, then the ARN, then the record: the name check is a fact about the request
+// and is decided before any state is read, which is the ordering setTopicAttributes takes and what
+// makes the refusal independent of what the store holds. AttributeValue is not required — the page marks
+// it "Required: No" where AttributeName is "Required: Yes" — so an absent value stores the empty string,
+// the same meaning setTopicAttributes gives it.
+//
+// Storing a FilterPolicy is not evaluating one; see the comment on [SNSSubscription.Attributes].
 func (p *SNSPlugin) setSubscriptionAttributes(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Stub: accept any attribute set and succeed.
-	_ = req.Params["SubscriptionArn"]
+	attrName := req.Params["AttributeName"]
+	if attrName == "" {
+		return nil, &AWSError{
+			Code:       "InvalidParameter",
+			Message:    "AttributeName is required",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if !snsSubscriptionAttributeIsSettable(attrName) {
+		return nil, &AWSError{
+			Code:       "InvalidParameter",
+			Message:    "AttributeName " + attrName + " is not a settable subscription attribute",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	sub, err := p.requireSubscription(ctx, req.Params["SubscriptionArn"])
+	if err != nil {
+		return nil, err
+	}
+	if sub.Attributes == nil {
+		sub.Attributes = make(map[string]string, 1)
+	}
+	sub.Attributes[attrName] = req.Params["AttributeValue"]
+	if err := p.saveSub(context.Background(), sub); err != nil {
+		return nil, fmt.Errorf("sns setSubscriptionAttributes saveSub: %w", err)
+	}
+
 	return snsUnitResponse("SetSubscriptionAttributes", ctx.RequestID)
 }
 

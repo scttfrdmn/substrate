@@ -43,6 +43,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SNS subscription attributes round-trip, and a stub stops answering 200 to everything** (#1125).
+  `SetSubscriptionAttributes` was a literal stub: it read `SubscriptionArn` into `_`, read neither
+  `AttributeName` nor `AttributeValue`, touched no state and answered 200. So a subscription that did
+  not exist was a success, a malformed ARN was a success, and an attribute name AWS publishes nowhere
+  was a success — and the value was unreadable either way, because `GetSubscriptionAttributes`
+  answered a fixed four entries built from the record. A consumer testing "set a `FilterPolicy`, then
+  confirm the subscription reports it" got a green 200 from the set and a response from the get with
+  the member simply absent. Both halves now go through one merge: the six `AttributeName` values
+  `API_SetSubscriptionAttributes` publishes are stored and reported back, anything else is
+  `InvalidParameter`/400, and seven members are derived from the record and merged over the stored map
+  so a stored value cannot shadow one. Six, not seven: `ReplayPolicy` and `ReplayStatus` are on
+  `API_Subscribe` under a "FIFO topics" heading and on neither attribute page, so both are refused —
+  the `ReplayLimitExceeded`/403 this page does publish is an error shared with `Subscribe` and says
+  nothing about which names it accepts. `EffectiveDeliveryPolicy` stays absent: substrate models
+  neither the account system defaults nor the merge the page defines it as, so reporting the
+  subscription's own `DeliveryPolicy` under the name would claim a computation that did not happen.
+  **This is observable in three ways**, all of which a test written against the stub may depend on: a
+  `SetSubscriptionAttributes` for a subscription that does not exist now answers `NotFound`/404 rather
+  than 200; an `AttributeName` the page does not publish now answers `InvalidParameter`/400 rather
+  than 200; and an ARN that is not a subscription's — a topic ARN, say — now answers
+  `InvalidParameter`/400 on both operations, where the missing record used to read as `NotFound`/404.
+  `GetSubscriptionAttributes` also reports more members than the four it did. A stored `FilterPolicy`
+  is recorded intent and does **not** filter delivery: that is the subscription's runtime behaviour,
+  not an API observation, so `Publish` still delivers a non-matching message. The divergence, and the
+  `Unsubscribe` ARN refusal left for #1259, are recorded in `docs/services.md`.
 - **SNS `CreateTopic` reads the `Attributes` map it publishes, and no longer reads a bare
   `DisplayName`** (#1126). `API_CreateTopic` publishes exactly four request parameters —
   `Attributes`, `DataProtectionPolicy`, `Name` and `Tags.member.N` — and substrate decoded the
