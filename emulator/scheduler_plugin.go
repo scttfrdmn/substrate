@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -503,7 +502,13 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	}
 	namePrefix := req.Params[schedListNamePrefixKey]
 	stateFilter := req.Params[schedListStateKey]
-	nextTokenParam := req.Params[schedListNextTokenKey]
+
+	// Above the index load, so the refusal does not depend on what the store holds — see
+	// scheduler_pagination.go for the code's provenance and the ordering argument (#1086).
+	offset, tokenOK := decodeOffsetPaginationToken(req.Params[schedListNextTokenKey])
+	if !tokenOK {
+		return nil, schedInvalidPaginationToken()
+	}
 
 	maxResults := schedListDefaultMaxResults
 	if mr := req.Params[schedListMaxResultsKey]; mr != "" {
@@ -533,26 +538,12 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		names = filtered
 	}
 
-	// Parse offset from nextToken.
-	offset := 0
-	if nextTokenParam != "" {
-		if decoded, decErr := base64.StdEncoding.DecodeString(nextTokenParam); decErr == nil {
-			if n, atoiErr := strconv.Atoi(string(decoded)); atoiErr == nil && n > 0 {
-				offset = n
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-
-	end := offset + maxResults
-	var nextToken string
-	if end < len(names) {
-		nextToken = base64.StdEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-	} else {
-		end = len(names)
-	}
+	// The index is ASCII-sorted by schedule name, which is stable across calls — what
+	// [pageByOffsetToken]'s offset relies on. The prefix filter above preserves that order, so the
+	// offset counts the schedules this request can see rather than every schedule in the group. A
+	// past-the-end offset clamps to a final empty page rather than being refused, because a token
+	// substrate issued over a listing that has since shrunk is still a token it issued.
+	page, nextToken := pageByOffsetToken(names, offset, maxResults)
 
 	type targetSummary struct {
 		Arn string `json:"Arn"`
@@ -568,8 +559,8 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 		Target               targetSummary `json:"Target"`
 	}
 
-	schedules := make([]schedSummary, 0, end-offset)
-	for _, n := range names[offset:end] {
+	schedules := make([]schedSummary, 0, len(page))
+	for _, n := range page {
 		data, getErr := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, n))
 		if getErr != nil || data == nil {
 			continue

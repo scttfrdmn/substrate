@@ -279,6 +279,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is only the omission #1202 tracks.
 
 ### Fixed
+- **EventBridge Scheduler `ListSchedules` answered a well-formed page one to a `NextToken` it could
+  not have issued** (#1086). The handler carried the pre-#915 idiom — `base64.StdEncoding.DecodeString`
+  then `strconv.Atoi`, both errors discarded — so an unusable token left the offset at zero and the
+  listing restarted, which is the one wrong answer a paginating caller cannot detect: a loop running
+  until the token comes back empty is handed the first page again, so it spins or reprocesses the same
+  schedules, and nothing in the response says so. It now answers **`ValidationException` / 400**,
+  published in the operation's own Errors section and glossed *"The input fails to satisfy the
+  constraints specified by an AWS service."* The footing for the condition is the request parameter's
+  own sentence — *"The token returned by a previous call to retrieve the next set of results."* — so a
+  token no previous call returned is not what the parameter is documented to accept; what remains
+  substrate's reading is only that this input problem is the one that gloss covers, since the page
+  publishes no code AWS attributes to a token. The message uses the service's `1 validation error
+  detected: …` shape with the member spelled `nextToken`, because `ValidationException` is Scheduler's
+  only refusal for a bad input and a caller told the input failed a constraint cannot otherwise tell
+  which input AWS means. The token is decoded **above** the index load (#887), asserted by sealing the
+  state store; the published Length of 1–2048 is subsumed by the issuability round trip; and a
+  past-the-end offset still clamps to a final empty page, because a token substrate issued over a
+  listing that has since shrunk is still a token it issued. This is the ninth of #1086's ten sites and
+  the only one whose token travels in a query string — Batch's shared paginator behind three describes
+  remains, so #1086 stays open.
 - **EventBridge Scheduler `ListSchedules` read all five of its query parameters under names the page
   does not publish, so every filter and the whole cursor were inert** (#1226). `API_ListSchedules`
   publishes `GET /schedules?MaxResults=…&NamePrefix=…&NextToken=…&ScheduleGroup=…&State=…` —

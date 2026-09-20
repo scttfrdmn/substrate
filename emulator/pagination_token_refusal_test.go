@@ -1508,3 +1508,131 @@ func TestPaginationToken_CWLogsFilterLogEventsRefusesATokenItDidNotIssue(t *test
 		assert.Equal(t, "InvalidParameterException", code, body)
 	})
 }
+
+// --- EventBridge Scheduler ListSchedules ---
+
+const tokenRefusalSchedulerHost = "scheduler.us-east-1.amazonaws.com"
+
+// tokenRefusalSchedulerCall sends one Scheduler REST/JSON request and returns the status, the raw body
+// and the bare error code a refusal carries.
+//
+// It is separate from [tokenRefusalJSONCall] for two reasons that are both the protocol's: Scheduler
+// routes on the method and path rather than on X-Amz-Target, and it renders a refusal as
+// {"message":…,"Code":…} rather than under __type, so the code has to be read from a different member.
+func tokenRefusalSchedulerCall(t *testing.T, srv *emulator.Server, method, path, body string) (int, string, string) {
+	t.Helper()
+	r := httptest.NewRequest(method, path, bytes.NewReader([]byte(body)))
+	r.Host = tokenRefusalSchedulerHost
+	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("Authorization", "AWS4-HMAC-SHA256 Credential=AKIATEST1234567890/20240101/"+
+		"us-east-1/scheduler/aws4_request, SignedHeaders=host, Signature=fake")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+
+	resp := w.Result()
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err, "read %s %s body", method, path)
+
+	var errShape struct {
+		Code string `json:"Code"`
+	}
+	if unmarshalErr := json.Unmarshal(raw, &errShape); unmarshalErr != nil {
+		errShape.Code = ""
+	}
+	return resp.StatusCode, string(raw), errShape.Code
+}
+
+// tokenRefusalSchedulerList calls ListSchedules with the given query parameters.
+//
+// The token goes through [url.Values.Encode] rather than being concatenated, because that is what an
+// SDK does and because a token containing a byte the query string reserves — "+" for one, which decodes
+// to a space — would otherwise reach the handler as something the caller never sent, and the test would
+// be asserting about the wrong string.
+func tokenRefusalSchedulerList(t *testing.T, srv *emulator.Server, params url.Values) (int, string, string) {
+	t.Helper()
+	path := "/schedules"
+	if len(params) > 0 {
+		path += "?" + params.Encode()
+	}
+	return tokenRefusalSchedulerCall(t, srv, http.MethodGet, path, "")
+}
+
+// tokenRefusalSchedulerCreate creates one schedule through CreateSchedule, with every member the page
+// marks Required: Yes, so the fixture is built the way a caller builds it (#765).
+func tokenRefusalSchedulerCreate(t *testing.T, srv *emulator.Server, name string) {
+	t.Helper()
+	const body = `{"ScheduleExpression":"rate(1 hour)",` +
+		`"Target":{"Arn":"arn:aws:sqs:us-east-1:123456789012:q","RoleArn":"arn:aws:iam::123456789012:role/r"},` +
+		`"FlexibleTimeWindow":{"Mode":"OFF"}}`
+	status, out, code := tokenRefusalSchedulerCall(t, srv, http.MethodPost, "/schedules/"+name, body)
+	require.Empty(t, code, out)
+	require.Equal(t, http.StatusOK, status, out)
+}
+
+// TestPaginationToken_SchedulerListSchedulesRefusesATokenItDidNotIssue is #1086 at EventBridge
+// Scheduler's single site.
+//
+// The code is ValidationException/400, which this operation's own Errors section publishes and which is
+// the only refusal the service publishes for an input that fails a constraint — so the message carries
+// which input failed, in the shape every other Scheduler refusal uses. The footing for the condition is
+// the request parameter's own sentence, *"The token returned by a previous call to retrieve the next set
+// of results."*, not an Errors entry: see scheduler_pagination.go.
+//
+// Unlike the JSON-protocol sites, the token travels in a query string, so the round-trip half is doing
+// double duty — it also proves the encoding survives URL encoding, which a body-carried token never has
+// to.
+func TestPaginationToken_SchedulerListSchedulesRefusesATokenItDidNotIssue(t *testing.T) {
+	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.SchedulerPlugin{})
+	for _, name := range []string{"trs-sched-a", "trs-sched-b", "trs-sched-c"} {
+		tokenRefusalSchedulerCreate(t, srv, name)
+	}
+
+	status, page1, code := tokenRefusalSchedulerList(t, srv, url.Values{"MaxResults": {"1"}})
+	require.Empty(t, code, page1)
+	require.Equal(t, http.StatusOK, status, page1)
+	require.Contains(t, page1, "trs-sched-a")
+	issued := tokenRefusalJSONToken(t, page1, "NextToken")
+
+	status, page2, code := tokenRefusalSchedulerList(t, srv,
+		url.Values{"MaxResults": {"1"}, "NextToken": {issued}})
+	require.Empty(t, code, page2)
+	require.Equal(t, http.StatusOK, status, page2)
+	assert.Contains(t, page2, "trs-sched-b", "an issued token must resume rather than re-serve page one")
+
+	for _, tc := range tokenRefusalBadTokens {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body, code := tokenRefusalSchedulerList(t, srv,
+				url.Values{"MaxResults": {"1"}, "NextToken": {tc.token}})
+			assert.Equal(t, http.StatusBadRequest, status, body)
+			assert.Equal(t, "ValidationException", code, body)
+			assert.Contains(t, body, "'nextToken'", "the message must name the member that failed")
+			assert.Contains(t, body, "ListSchedules", "the message must name the operation")
+			assert.NotContains(t, body, "trs-sched-a", "a refused token must not be answered with page one")
+		})
+	}
+
+	t.Run("a past-the-end token clamps rather than being refused", func(t *testing.T) {
+		// The two are different conditions and only one of them is a caller's mistake: a token substrate
+		// issued over a listing that has since shrunk is still a token it issued, so it is answered with a
+		// final empty page. Asserted here because [decodeOffsetPaginationToken] accepts it and only
+		// [pageByOffsetToken] decides what it means.
+		status, body, code := tokenRefusalSchedulerList(t, srv,
+			url.Values{"NextToken": {base64.StdEncoding.EncodeToString([]byte("99"))}})
+		assert.Equal(t, http.StatusOK, status, body)
+		assert.Empty(t, code, body)
+		assert.NotContains(t, body, "trs-sched-a", "a past-the-end offset must not reset to page one")
+	})
+
+	t.Run("refused before any state is read", func(t *testing.T) {
+		// The seal works here because listSchedules' index loader propagates the store error rather than
+		// reporting it as an empty index, so a handler that read first would answer 500 rather than an
+		// empty 200. Athena needed [tokenRefusalCountingState] for the opposite reason.
+		sealed := &tokenRefusalSealedState{inner: emulator.NewMemoryStateManager(), sealGets: true, sealLists: true}
+		sealedSrv := tokenRefusalServer(t, sealed, &emulator.SchedulerPlugin{})
+		status, body, code := tokenRefusalSchedulerList(t, sealedSrv,
+			url.Values{"NextToken": {"!!not-base64!!"}})
+		assert.Equal(t, http.StatusBadRequest, status, body)
+		assert.Equal(t, "ValidationException", code, body)
+	})
+}

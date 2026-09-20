@@ -1422,12 +1422,11 @@ of these refuses under a code that is substrate's reading of a generic code publ
 operation's own page, the way S3 `ListObjectsV2` and `GetResources` above already do, and none by
 borrowing a sibling operation's code, which
 [#671](https://github.com/scttfrdmn/substrate/issues/671) forbids. SNS's two sites, Athena's two and
-CloudWatch Logs' four have landed and have their own sections below; the **two** remaining sites,
-carrying four operations, are unchanged so far:
+CloudWatch Logs' four and EventBridge Scheduler's one have landed and have their own sections below;
+the **one** remaining site, carrying three operations, is unchanged so far:
 
 | Sites | Reading available on the page | What the page says |
 |---|---|---|
-| EventBridge Scheduler `ListSchedules` | `ValidationException` / 400 | *"The input fails to satisfy the constraints specified by an AWS service."* The only constraint published on the token is Length 1–2048, so on this page's own text an in-length but unissuable token is not covered by the gloss. |
 | Batch `DescribeComputeEnvironments`, `DescribeJobQueues`, `DescribeJobDefinitions` (one shared paginator) | `ClientException` / 400 | *"These errors are usually caused by a client action. … Another cause is specifying an identifier that's not valid."* And the same page's token prose says *"Treat this token as an opaque identifier."* That is the closest of the thirteen pages to covering the condition under a generic code — but the page never joins the two sentences, so it is still substrate's reading and not an attribution. |
 
 ### SNS's three listings refuse a token under the code their own pages publish
@@ -1571,6 +1570,49 @@ the two orderings apart. Three of the four require a member first — `logGroupN
 required member is the more basic failure and neither ordering is published. Both carry the same
 published code, so the message is the only thing that says which one answered, which is why the
 precedence is asserted rather than left to the reader.
+
+### EventBridge Scheduler's one listing refuses a token the parameter is not documented to accept
+
+`ListSchedules` is the ninth of those ten sites, and the only one whose token travels in a **query
+string** rather than a request body. It answers **`ValidationException` / 400**, which the operation's
+own Errors section publishes, glossed *"The input fails to satisfy the constraints specified by an AWS
+service."* It is also the only refusal this service publishes for an input that fails a constraint, so
+the message carries which input failed, in the shape every other Scheduler refusal renders:
+
+```
+1 validation error detected: Value at 'nextToken' failed to satisfy constraint: Member must be a token
+returned by a previous ListSchedules request
+```
+
+**The footing is the request parameter's own sentence, not the Errors section.** `API_ListSchedules`
+describes `NextToken` as *"The token returned by a previous call to retrieve the next set of
+results."* — the page states where a token comes from, so a token no previous call returned is not the
+thing the parameter is documented to accept. What remains substrate's reading is only that this input
+problem is the one the `ValidationException` gloss covers: the page publishes no code AWS attributes
+to a pagination token. The published Length constraint of **1–2048** is subsumed by the issuability
+round trip, since a base64 encoding of a decimal offset is far shorter than 2048 bytes and a
+length refusal would be unreachable behind it; the minimum of 1 is again why an empty `NextToken` is an
+*absent* token, the start of the listing, rather than an invalid one.
+
+**The token is decoded before the name index is read.** There is no required member on this operation
+and no schedule to resolve, so unlike the three Scheduler operations that check `Name` first, nothing
+competes with the refusal for precedence. Asserted by sealing the state store the way #915's sites
+are; Scheduler's index loader propagates a store failure, so the seal can tell the two orderings
+apart.
+
+**Two things this does not claim, and two it does not fix.** It refuses a token this service could not
+have minted; it does **not** make a token portable between two listings of different shape, because
+the token carries an offset and nothing else, so a token issued for one `ScheduleGroup`, `NamePrefix`
+or `State` decodes cleanly against another and indexes into a listing the caller never asked for —
+a property every offset paginator in the tree has, recorded here because the refusal's name invites
+the stronger reading. And a past-the-end offset still clamps to a final empty page rather than being
+refused, because a token substrate issued over a listing that has since shrunk is still a token it
+issued. Left as they were: the `State` filter is applied **after** the page is cut, so a state-filtered
+request can be answered a page shorter than `MaxResults` while still carrying a `NextToken` where AWS
+publishes `State` as a filter on the listing; and a `MaxResults` above the published maximum of 100 is
+clamped rather than refused, with a value of zero or below silently ignored in favour of substrate's
+own default of 20. Both are separate classes from the token, and changing either changes which
+schedules a page contains rather than which tokens are accepted.
 
 ### Six describes published a cursor and implemented none of it
 
@@ -14026,7 +14068,7 @@ EventBridge custom events: $1.00 per million events.
 | GetSchedule | `GET /schedules/{Name}` | |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
-| ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation) |
+| ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one |
 
 ### What a create or update is refused for
 
