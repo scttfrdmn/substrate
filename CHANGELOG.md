@@ -209,6 +209,74 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that depend on them, because a test author needs to know before writing the test. The disclaimer at
   the head of the per-service sections still stands; #1093 stays open for the ten services found while
   verifying its scope.
+- **`docs/services.md` has sections for the last nine services, and the disclaimer at the head of the
+  per-service sections is gone** (#1093, third of three, closing it). CodeDeploy, EMR Serverless, FSx,
+  MSK, Redshift, Timestream and Transfer Family — **sixty routed operations** — plus two surfaces that
+  are not ordinary plugins: OpenSearch, whose data plane is an OpenSearch REST engine rather than an
+  AWS service model, and `execute-api`, the API Gateway data plane that resolves a stage path to a
+  Lambda integration. Every plugin in the coverage matrix now has a section, so the paragraph claiming
+  the sections "cover a subset of the plugins in the matrix above" is replaced by one saying what a
+  section carries and that a divergence is named and linked rather than smoothed over. **Eighty-five
+  divergences were found while writing the rows and filed rather than fixed**, since this change is
+  documentation only. They are grouped into twenty-one issues (#1195–#1215) rather than one per
+  finding, because thirteen of the classes recur across services and the per-service issue would have
+  had to be written seven times: a page-size or cursor parameter that is decoded nowhere, in seven of
+  the nine (#1195); a resource that reaches a terminal state at birth, in eight, so that no poll loop
+  can observe a transition and five deletes erase the record rather than reporting the published
+  terminal status (#1196); a member marked `Required: Yes` that is defaulted rather than checked, in
+  seven (#1197); a refusal answering a code or status the page does not publish, plus three stored
+  values outside their published enum — Transfer's `Domain` defaulting to `SFTP` where the page
+  publishes `S3 | EFS`, EMR Serverless writing `CANCELED` where the enum spells `CANCELLED`, and FSx
+  writing a `DELETED` that appears nowhere in the lifecycle (#1198); nine records shipping a fraction
+  of their published members while six add members AWS publishes nowhere (#1199, under #756); nine
+  state keys carrying no account or Region segment (#1200); three outputs decided by Go map iteration
+  order or by the lexicographic order of a random ID, so one input answers differently twice in one
+  build (#1201); two cost keys that can never match a request, a missing `msk/CreateClusterV2`, and an
+  `execute-api` surface that is uncharged and whose internal Lambda invoke bypasses the cost
+  controller entirely (#1202); five CloudFormation resource types deployed as stubs their own
+  service's API cannot see (#1203); three minted identifiers violating their published pattern and an
+  MSK ARN that resolves on the cluster name while discarding the UUID, so a stale ARN answers about
+  the cluster that replaced it (#1204); a routing decision made by substring search, so
+  `/applications/ab/jobrunsbad` routes as `ListJobRuns` and `GET /anything/at/all/nodes` answers 400
+  rather than 404 (#1205); five operations answering `{}` where the page publishes a body, `CancelQuery`
+  among them — its handler takes `_ *RequestContext, _ *AWSRequest` and returns none of the
+  `CancellationMessage` the operation exists to report (#1206); and four `Timestamp` members declared
+  `string` and written RFC3339 where the `awsJson1_1` wire form is epoch seconds, which is not a wrong
+  field but an unmarshal failure that loses the whole response (#1207). **#1200 corrects a finding
+  recorded while planning this release** — that the state-key-omits-Region class was closed apart from
+  SQS (#1088) — which was reached from the global-service argument and did not cover these two
+  plugins. The eight service-specific issues, sharpest first. **Redshift cannot be consumed at all**:
+  `redshiftXMLResponse` marshals the result as the document root with the request-ID parameter named
+  `_ string`, so there is no `{Operation}Response` envelope, no namespace and no `ResponseMetadata`,
+  lists flatten to bare `>member`, an `XMLName` tag on the `Cluster` type double-wraps a single
+  cluster, two codes carry an unpublished `Fault` suffix, and the 131 unrouted operations answer
+  `InvalidAction`, which Redshift's consolidated Common Errors page — unlike SQS's legacy one (#1064)
+  — does not publish (#1208). `execute-api` **relays a seeded Lambda failure as HTTP 200**: only
+  `invokeResp.Body` is passed on, discarding the `X-Amz-Function-Error` that `lambda_plugin.go` sets
+  and `lambda_control.go` can seed, while `parseProxyResponse` promotes a `statusCode` of `0` to 200 —
+  so the two cases a consumer most needs to test both report success where AWS answers 502 — and its
+  resource paths match by exact equality, so `{proxy+}` is unreachable, the stage is never validated,
+  and refusals are internal English prose rather than the published gateway responses (#1214); both
+  proxy event payloads omit most of their published members, the v1 event carries a `version` member
+  the 1.0 format does not publish, and a configured `PayloadFormatVersion` is stored and never read
+  (#1215). OpenSearch's **control plane is not routed at all** — `POST /2021-01-01/opensearch/domain`
+  is split as an index named `2021-01-01` and refused `route_not_found` at 404 in the engine's own
+  envelope, with no AWS `Code` — so no domain can be created through the API (#1212), and ten
+  data-plane responses diverge, two of them inconsistently with correct code in the same file: a
+  scroll page reports its own length as `hits.total` where the initial search reports the real total,
+  and every search hit reports `_index: "unknown"` where the scroll path emits the real name (#1213).
+  Timestream reconstructs a query result in which every column is `VARCHAR`, every value is
+  `fmt.Sprintf("%v", v)` and the columns are sorted alphabetically, and `DescribeEndpoints` answers
+  neither published endpoint while neither is enforced, so a consumer's endpoint-discovery code passes
+  whether it is right or wrong (#1209). FSx wraps its `DeleteFileSystem` body in a `FileSystem` member
+  where the published response is flat and names the member `LifecycleStatus`, and reads
+  `ClientRequestToken` on neither create nor delete (#1210). And **MSK's entire v2 surface is verified
+  against no AWS reference page** — the nesting, the member names and the `/v2/clusters` URI are all
+  unattributed — while MSK publishes no error code strings at all, so every code substrate answers
+  there is its own reading and the one machine-readable member AWS does publish,
+  `invalidParameter`, is never populated (#1211). Recorded as deliberate rather than filed:
+  `execute-api` gets no `### Cost` subsection, because writing "free" would state a policy where there
+  is only the omission #1202 tracks.
 
 ### Fixed
 - **Every routed Lambda operation is reachable under the API version date its own page publishes, not

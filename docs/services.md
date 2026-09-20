@@ -82,11 +82,13 @@ CloudFormation, and cost detail follows below the matrix.
 
 ---
 
-The per-service sections below carry hand-written operation lists,
-CloudFormation resource types, and cost notes for the most heavily used plugins.
-They are maintained by hand and cover a subset of the plugins in the matrix
-above; the remaining plugins are registered and functional but not yet detailed
-here.
+Every plugin in the matrix above now has a section below. Each is written and
+maintained by hand, and carries the operations substrate routes, the divergences
+from the published API with the issue that tracks each one, what a refusal
+reports, the CloudFormation resource types the service deploys, and its cost
+notes. A section describes what substrate does today rather than what AWS does:
+where the two differ, the difference is named and linked rather than smoothed
+over.
 
 ---
 
@@ -18727,6 +18729,1943 @@ only if `CreateResourceShare` creates it.
 
 Nothing is attributed. AWS RAM is free of charge; what a share costs is whatever the shared resources
 cost in the accounts that use them, which Substrate does not model.
+
+---
+
+## CodeDeploy
+
+**Endpoint:** `codedeploy.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: CodeDeploy_20141006.{Op}`), API version 2014-10-06
+
+Nine of the forty-eight published operations, over three resources: an application, its deployment
+groups, and a deployment. Every record is keyed by account and Region, so two accounts, or one account
+in two Regions, never see each other's applications. Nothing is ever deployed — the revision, the
+lifecycle hooks, the traffic-shifting configuration and the alarms are not read at all, and a
+deployment is [`Succeeded` before `CreateDeployment` returns](#a-deployment-is-succeeded-before-createdeployment-returns).
+Before writing any test against this service, know that
+[`GetApplication` and `GetDeployment` cannot be deserialized by an AWS SDK](#codedeploy-timestamps-are-rfc3339-strings-where-the-pages-publish-numbers).
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateApplication | `applicationName` is the one checked member; `computePlatform` defaults to `Server` and is [otherwise unvalidated](#no-codedeploy-name-role-or-compute-platform-is-checked). `tags` are not read. Answers the published `applicationId` |
+| GetApplication | Four of the six published `ApplicationInfo` members, [plus two of Substrate's own](#the-three-codedeploy-record-shapes-are-truncated); `createTime` is [the wrong JSON type](#codedeploy-timestamps-are-rfc3339-strings-where-the-pages-publish-numbers) |
+| DeleteApplication | Answers `{}` where the page publishes an empty body, and [refuses an absent application under an unpublished code](#three-codedeploy-refusals-answer-codes-their-own-page-does-not-publish) |
+| ListApplications | Names only. [`nextToken` is neither read nor emitted](#listapplications-never-paginates) |
+| CreateDeploymentGroup | Verifies the application exists; `serviceRoleArn` is `Required: Yes` and [stored without a check](#no-codedeploy-name-role-or-compute-platform-is-checked). The other nineteen published members — `ec2TagFilters`, `deploymentStyle`, `blueGreenDeploymentConfiguration`, `alarmConfiguration`, `triggerConfigurations` and the rest — are not read |
+| GetDeploymentGroup | Four of the twenty-three published `deploymentGroupInfo` members, [plus two of Substrate's own](#the-three-codedeploy-record-shapes-are-truncated) |
+| DeleteDeploymentGroup | Answers the published `hooksNotCleanedUp` as an empty array, which is what AWS's own sample response shows, and [refuses an absent group under an unpublished code](#three-codedeploy-refusals-answer-codes-their-own-page-does-not-publish) |
+| CreateDeployment | Verifies the application, and the deployment group when one is named. `revision` is `Required: No` and unread, so a deployment with no artifact at all succeeds. Answers the published `deploymentId` in the published `d-XXXXXXXXX` shape |
+| GetDeployment | Six of the thirty-one published `deploymentInfo` members. [An absent `deploymentId` is reported as an absent deployment](#an-absent-deploymentid-is-reported-as-an-absent-deployment) |
+
+The thirty-nine unrouted operations include everything that would let a consumer observe a deployment
+in progress or intervene in one: `ListDeployments`, `StopDeployment`, `ContinueDeployment`,
+`GetDeploymentTarget`, `ListDeploymentTargets`, `GetDeploymentInstance`,
+`PutLifecycleEventHookExecutionStatus` and `SkipWaitTimeForInstanceTermination`. Also unrouted are
+`UpdateApplication` and `UpdateDeploymentGroup` — nothing created here can be modified — the five
+`BatchGet*` reads, `ListDeploymentGroups`, the revision surface
+(`RegisterApplicationRevision`, `GetApplicationRevision`, `ListApplicationRevisions`), the whole
+deployment-configuration surface (`CreateDeploymentConfig`, `GetDeploymentConfig`,
+`ListDeploymentConfigs`, `DeleteDeploymentConfig`), the on-premises-instance surface, the GitHub-token
+operations and the three tag operations. Each answers `UnknownOperationException` / 404.
+
+### CodeDeploy timestamps are RFC3339 strings where the pages publish numbers
+
+`CodeDeployApp.CreateTime` and `CodeDeployDeployment.CreateTime` and `CompleteTime` are Go
+`time.Time` values marshalled by `encoding/json`, which emits RFC3339: `"createTime":
+"2024-01-01T00:00:00Z"`. `API_GetApplication` publishes `"createTime": number`, `API_GetDeployment`
+publishes `"completeTime": number` and `"createTime": number`, and `API_DeploymentInfo` types both as
+`Timestamp`; AWS's own sample responses show `"createTime": 1446229001.211` and `"completeTime":
+1446232681.319`. An `awsJson1_1` timestamp deserializer expects a JSON number, so this is not a wrong
+value but a refusal to decode: `GetApplication` and `GetDeployment` fail in the SDK before a consumer's
+assertion runs. The three records are marshalled whole, which is also how `accountID` and `region`
+reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+[#1207](https://github.com/scttfrdmn/substrate/issues/1207).
+
+### A deployment is Succeeded before CreateDeployment returns
+
+`CreateDeployment` stores the deployment with `status: "Succeeded"` and `completeTime` equal to
+`createTime`. `DeploymentInfo` publishes `Valid Values: Created | Queued | InProgress | Baking |
+Succeeded | Failed | Stopped | Ready`, and seven of those eight cannot be produced by any input or
+seed. Running the deployment is workload-internal and out of scope, but the observable progression is
+not: a consumer's wait loop over `GetDeployment` passes on its first poll, `errorInformation` and
+`rollbackInfo` are never populated, and the `autoRollbackConfiguration` a template supplies has no
+failure to react to. `startTime` and `deploymentOverview` are not emitted either, so the idiomatic
+assertion — `deploymentOverview.Succeeded` — reads nil on a deployment that reports success.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### Three CodeDeploy refusals answer codes their own page does not publish
+
+`DeleteApplication` loads the application first and propagates `ApplicationDoesNotExistException`.
+That page publishes three errors — `ApplicationNameRequiredException`,
+`InvalidApplicationNameException` and `InvalidRoleException`, all 400 — and an empty 200 body, which
+is the shape of an idempotent delete; the not-found code belongs to `GetApplication`,
+`CreateDeploymentGroup`, `GetDeploymentGroup` and `CreateDeployment`.
+`DeleteDeploymentGroup` does the same with `DeploymentGroupDoesNotExistException`, which its page also
+does not publish. A teardown that runs twice succeeds against AWS and raises here, both times.
+
+The third is `InvalidInputException`, answered for a missing name by `CreateApplication` and by the two
+loaders every get and delete goes through. CodeDeploy publishes that code on exactly two pages,
+`CreateDeploymentGroup` and `CreateDeployment`, and it is absent from the service's consolidated
+common-errors list; the five other operations publish `ApplicationNameRequiredException` — *"The
+minimum number of required application names was not specified."* — and
+`DeploymentGroupNameRequiredException` — *"The deployment group name was not specified."* — at 400
+instead. Both of those, and the format codes beside them, have no site.
+[#1198](https://github.com/scttfrdmn/substrate/issues/1198).
+
+### An absent deploymentId is reported as an absent deployment
+
+`GetDeployment` does not check `deploymentId` for emptiness: the empty string is concatenated into the
+state key, the lookup misses, and the caller is told `DeploymentDoesNotExistException`. The page
+publishes `DeploymentIdRequiredException` — *"At least one deployment ID must be specified."* — and
+`InvalidDeploymentIdException` at 400 for precisely this, and neither has a site, so a validation bug
+in a consumer's own code arrives dressed as a missing resource.
+[#1198](https://github.com/scttfrdmn/substrate/issues/1198).
+
+### The three CodeDeploy record shapes are truncated
+
+`deploymentInfo` carries six of the thirty-one members `DeploymentInfo` publishes:
+`deploymentId`, `applicationName`, `deploymentGroupName`, `status`, `createTime` and `completeTime`.
+`startTime`, `creator`, `deploymentOverview`, `revision`, `previousRevision`, `deploymentConfigName`,
+`errorInformation`, `rollbackInfo`, `externalId` and the rest are absent. `deploymentGroupInfo`
+carries four of twenty-three — `deploymentGroupId`, `deploymentGroupName`, `applicationName` and
+`serviceRoleArn` — so `computePlatform`, `deploymentConfigName`, `targetRevision`, `ec2TagFilters`,
+`autoScalingGroups` and `lastSuccessfulDeployment` are never reported, and a group created with tag
+filters reads back with none. `application` carries four of the six published `ApplicationInfo`
+members, omitting `gitHubAccountName` and `linkedToGitHub`; the latter appears in AWS's sample
+response for every application, including ones with no GitHub connection.
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+
+### No CodeDeploy name, role or compute platform is checked
+
+`serviceRoleArn` is `Required: Yes` on `CreateDeploymentGroup` and is decoded and stored without
+validation, so `RoleRequiredException` — *"The role ID was not specified."* — and `InvalidRoleException`
+have no site and a group can exist with no role at all. `computePlatform` is defaulted to `Server`
+when absent and stored verbatim when present, so `InvalidComputePlatformException` — *"The
+computePlatform is invalid. The computePlatform should be `Lambda`, `Server`, or `ECS`."* — cannot fire,
+even though the member's published `Valid Values` are `Server | Lambda | ECS | Kubernetes`. The
+published `Length Constraints: Minimum length of 1. Maximum length of 100` and `Pattern:
+[A-Za-z0-9+=,.@_-]*` on `applicationName` and `deploymentGroupName` are unenforced, retiring
+`InvalidApplicationNameException` and `InvalidDeploymentGroupNameException`. A template that AWS
+would reject on any of these deploys clean here.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### ListApplications never paginates
+
+The handler discards its request entirely and answers the name index. `nextToken` is published in both
+the request and the response — *"If a large amount of information is returned, an identifier is also
+returned. It can be used in a subsequent list applications call to return the next set of
+applications"* — and neither half exists here, so a paginator loop terminates after one page however
+many applications were created. `InvalidNextTokenException`/400 is the operation's only published
+error and has no site.
+[#1195](https://github.com/scttfrdmn/substrate/issues/1195).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `ValidationError` | 400 |
+| `applicationName` or `deploymentGroupName` absent | `InvalidInputException` | 400 |
+| an application that does not exist | `ApplicationDoesNotExistException` | 400 |
+| an application name already in use | `ApplicationAlreadyExistsException` | 400 |
+| a deployment group that does not exist | `DeploymentGroupDoesNotExistException` | 400 |
+| a deployment group name already in use | `DeploymentGroupAlreadyExistsException` | 400 |
+| a deployment that does not exist, or no `deploymentId` at all | `DeploymentDoesNotExistException` | 400 |
+| an unrecognised `X-Amz-Target` suffix | `UnknownOperationException` | 404 |
+
+`ValidationError`/400 is the spelling CodeDeploy's consolidated common-errors list publishes, and it
+is the only code that covers all eight body-decode sites because the service publishes narrow
+per-field exceptions almost everywhere and adds a generic code only on its two create surfaces; the
+reasoning is recorded on `codedeployInvalidBody`. The four `*AlreadyExists*` and `*DoesNotExist*`
+codes are at their published status of 400, and two of them are answered on operations that do not
+publish them.
+
+Beyond the codes named above, CodeDeploy publishes and Substrate never answers:
+`ApplicationNameRequiredException`, `DeploymentGroupNameRequiredException`,
+`DeploymentIdRequiredException`, `InvalidApplicationNameException`,
+`InvalidDeploymentGroupNameException`, `InvalidDeploymentIdException`, `InvalidNextTokenException`,
+`RoleRequiredException`, `InvalidRoleException`, `InvalidComputePlatformException`,
+`InvalidTagsToAddException`, `RevisionRequiredException`, `RevisionDoesNotExistException`,
+`InvalidRevisionException`, `DeploymentConfigDoesNotExistException`,
+`InvalidDeploymentConfigNameException`, `InvalidAlarmConfigException`,
+`InvalidAutoRollbackConfigException`, `InvalidDeploymentStyleException`,
+`InvalidLoadBalancerInfoException`, `InvalidTriggerConfigException`, `InvalidTargetInstancesException`
+and `ThrottlingException`, all at 400, plus the five limit codes
+(`ApplicationLimitExceededException`, `DeploymentGroupLimitExceededException`,
+`DeploymentLimitExceededException`, `AlarmsLimitExceededException`,
+`TriggerTargetsLimitExceededException`) at 400. No quota is enforced and no member is validated for
+shape, so none of them has a site.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::CodeDeploy::DeploymentGroup | DeploymentGroupName | A stub: properties are recorded in the CloudFormation stub store, which the CodeDeploy plugin does not read, so `GetDeploymentGroup` on a group a template just created answers `DeploymentGroupDoesNotExistException` ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)) |
+
+AWS publishes three types in the namespace. `AWS::CodeDeploy::Application` and
+`AWS::CodeDeploy::DeploymentConfig` are not deployed, so an application exists only if
+`CreateApplication` creates it, and a template whose deployment group names a custom deployment
+configuration deploys without the configuration existing anywhere.
+
+### Cost
+
+`CreateDeployment` is attributed $0.000001 per call. The table's own comment records the rationale as
+"free for EC2/on-premises, approximated per deployment"; AWS's published price structure for CodeDeploy
+could not be read off its pricing page during this pass, so treat the figure as a placeholder rather
+than a derivation. Substrate does not model on-premises instances at all — none of the four
+`*OnPremisesInstance*` operations is routed — so the entry fires identically for every deployment
+whatever platform it names.
+
+---
+
+
+## EMR Serverless
+
+**Endpoint:** `emr-serverless.{region}.amazonaws.com`
+**Protocol:** REST/JSON, API version 2021-07-13. The SigV4 signing name is `emr-serverless`, which
+`parser.go` maps to the `emrserverless` namespace
+**Routing:** method and path, resolved by `parseEMRServerlessOperation`. The path is matched with a
+`strings.Index` for `/jobruns` rather than by segment, so
+[two path shapes AWS would not match are routed](#the-jobruns-route-is-matched-as-a-substring)
+
+Seven of the twenty-three published operations, over two resources: an application and its job runs.
+Every record is keyed by account and Region. No Spark or Hive work is executed — that is the boundary
+in `doc.go` — and the `jobDriver` that says what would have run is not even recorded, so a job run
+reports [`SUCCESS` from the instant it is submitted](#a-job-run-is-success-the-moment-it-is-started).
+Before writing a test, know that `StartJobRun` [does not check that the application
+exists](#startjobrun-does-not-check-that-the-application-exists) and that `ListJobRuns`
+[reports every job run id as blank](#listjobruns-names-the-job-run-id-jobrunid).
+
+### Supported operations
+
+| Operation | Published path | Notes |
+|-----------|----------------|-------|
+| CreateApplication | `POST /applications` | Routed on the published verb. `clientToken`, `releaseLabel` and `type` are all `Required: Yes` and [none is checked](#the-emr-serverless-required-inputs-are-neither-read-nor-refused); the application is `CREATED` and [stays there](#an-emr-serverless-application-never-leaves-created). Answers `applicationId` and `arn` where [three members are published](#the-emr-serverless-required-inputs-are-neither-read-nor-refused) |
+| GetApplication | `GET /applications/{applicationId}` | Five of the seven published `Required: Yes` `Application` members, [plus two of Substrate's own](#the-emr-serverless-records-drop-most-of-their-required-members) |
+| DeleteApplication | `DELETE /applications/{applicationId}` | Answers `{}` where the page publishes an empty body, and [cannot fail](#deleteapplication-cannot-fail) |
+| StartJobRun | `POST /applications/{applicationId}/jobruns` | Only `name` is read: `clientToken` and `executionRoleArn` are `Required: Yes` and unread, as are `jobDriver`, `configurationOverrides`, `retryPolicy`, `mode` and `executionTimeoutMinutes`. [The application is not verified](#startjobrun-does-not-check-that-the-application-exists) and the run is [`SUCCESS` immediately](#a-job-run-is-success-the-moment-it-is-started). The `jobRunId` it mints [violates its published pattern](#an-emr-serverless-job-run-id-is-a-dashed-uuid) |
+| GetJobRun | `GET /applications/{applicationId}/jobruns/{jobRunId}` | Four of the eleven published `Required: Yes` `JobRun` members; `attempt` is not read |
+| CancelJobRun | `DELETE /applications/{applicationId}/jobruns/{jobRunId}` | Answers the two published members. Writes [a state the published enum does not carry](#a-cancelled-job-run-reports-canceled-which-is-not-a-published-state); `shutdownGracePeriodInSeconds` is not read |
+| ListJobRuns | `GET /applications/{applicationId}/jobruns` | Three members per run, one of them [under the wrong name](#listjobruns-names-the-job-run-id-jobrunid). [Every filter and both pagination members are discarded](#every-listjobruns-filter-is-accepted-and-discarded) |
+
+The sixteen unrouted operations include the whole application lifecycle beyond create and delete —
+`StartApplication`, `StopApplication`, `UpdateApplication` and `ListApplications`, so an application
+cannot be started, stopped, modified or enumerated — the entire interactive-session surface
+(`StartSession`, `GetSession`, `GetSessionEndpoint`, `ListSessions`, `TerminateSession`), the two
+dashboard reads (`GetDashboardForJobRun`, `GetResourceDashboard`), `ListJobRunAttempts`, and the three
+tag operations. Each answers `UnknownOperationException` / 404. An application's `tags` are not stored
+at all, so they cannot be read back by any route.
+
+### A job run is SUCCESS the moment it is started
+
+`StartJobRun` stores the run with `state: "SUCCESS"`. `JobRun` publishes `state` as `Required: Yes`
+with `Valid Values: SUBMITTED | PENDING | SCHEDULED | RUNNING | SUCCESS | FAILED | CANCELLING |
+CANCELLED | QUEUED`, and eight of those nine cannot be produced by any input — `CANCELLED` not even by
+`CancelJobRun`. Executing the Spark or Hive work is out of scope, but the progression a consumer polls
+for is not: a wait loop over `GetJobRun` passes on its first observation, the `retryPolicy` the request
+carried has no failure to retry, `stateDetails` is never emitted, and neither is
+`billedResourceUtilization` or `totalResourceUtilization`, so nothing about what the job consumed can
+be asserted. `queuedDurationMilliseconds`, `startedAt` and `endedAt` are absent for the same reason.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### A cancelled job run reports CANCELED, which is not a published state
+
+`CancelJobRun` sets the stored state to `CANCELED`. Both places EMR Serverless publishes the enum —
+`JobRun`'s `state` member and `ListJobRuns`'s `states` filter — spell it `CANCELLED`, with two Ls, and
+publish `CANCELLING` beside it as the transitional state. A typed-enum SDK resolves `CANCELED` to an
+unknown value, so a consumer switching on the cancelled state, or filtering `ListJobRuns` by it, never
+matches — on the one operation whose only observable effect is producing that state. `CANCELLING` is
+never reported either, so the cancellation is instantaneous as well as misspelled.
+[#1198](https://github.com/scttfrdmn/substrate/issues/1198).
+
+### ListJobRuns names the job run id jobRunId
+
+The list builds a three-member summary of `applicationId`, `jobRunId` and `state`. `ListJobRuns`
+publishes its `jobRuns` elements with the id member named `id` — `jobRunId` is a member of `JobRun`,
+which `GetJobRun` returns, not of the summary — so an SDK deserializing the list finds no `id` and
+leaves it empty on every element. The failure is silent and the shape is plausible: the count is
+right, the states are right, and every id is blank, which reads as a list of anonymous runs rather
+than as a bug. Thirteen further published summary members are absent, among them `arn`, `createdAt`,
+`updatedAt`, `createdBy`, `executionRole`, `releaseLabel`, `type`, `mode`, `name` and `stateDetails`.
+[#1204](https://github.com/scttfrdmn/substrate/issues/1204).
+
+### StartJobRun does not check that the application exists
+
+The handler reads `name` from the body and writes the job run under a key built from the path's
+application id, without loading the application first. `StartJobRun` publishes
+`ResourceNotFoundException` — *"The specified resource was not found."* — at 404, and it has no site,
+so a typo'd or already-deleted application id yields a job run that `GetJobRun` then reports as
+`SUCCESS`. A consumer's error path for a missing application is unreachable, and so is the check that
+would have caught the wrong id in the first place. `ListJobRuns` does not verify the application
+either, but that operation publishes no not-found error, so an empty list for an unknown application
+is within its published vocabulary.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### DeleteApplication cannot fail
+
+The handler deletes the state key without reading it first, removes the id from the index and answers
+`{}`. `ResourceNotFoundException`/404 is published on that page and has no site, so deleting an
+application that was never created succeeds. The page also states the precondition — *"An application
+has to be in a stopped or created state in order to be deleted."* — which cannot be violated here
+because an application never leaves `CREATED`; and there is no published code on that page for a
+precondition failure to land on, since it publishes only `InternalServerException`/500,
+`ResourceNotFoundException`/404 and `ValidationException`/400, with no `ConflictException`. The `{}`
+body is a third small divergence: the page publishes *"an HTTP 200 response with an empty HTTP body"*.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### An EMR Serverless job run id is a dashed UUID
+
+`generateEMRServerlessRunID` formats sixteen random bytes as `%x-%x-%x-%x-%x`. `JobRun`'s `jobRunId`
+publishes `Pattern: [0-9a-z]+` with a maximum length of 64, the URI parameters on `GetJobRun` and
+`CancelJobRun` publish the same, and `StartJobRun`'s `arn` publishes
+`Pattern: arn:(aws[a-zA-Z0-9-]*):emr-serverless:.+:(\d{12}):\/applications\/[0-9a-zA-Z]+\/jobruns\/[0-9a-zA-Z]+`.
+A dashed id satisfies none of the three, so code that validates an id or parses one out of an ARN
+rejects every job run Substrate mints. The application id, formatted `00%08x`, does satisfy its
+published `[0-9a-z]+`, and the application ARN satisfies its pattern and its 60-character minimum.
+[#1204](https://github.com/scttfrdmn/substrate/issues/1204).
+
+### Every ListJobRuns filter is accepted and discarded
+
+The handler discards its request, so `maxResults` — published `Valid Range: Minimum value of 1.
+Maximum value of 50` — `nextToken`, `states`, `mode`, `createdAtAfter` and `createdAtBefore` are all
+unread, and the response carries `jobRuns` with no `nextToken`, which the page calls *"the token for
+the next set of job run results. This is required for pagination"*. A `states=["FAILED"]` filter
+therefore returns every job run the application has, all of them `SUCCESS`, which reads as a passing
+assertion rather than as an ignored filter. `GetJobRun`'s `attempt` and `CancelJobRun`'s
+`shutdownGracePeriodInSeconds` are discarded the same way, both handlers taking `_ *AWSRequest`.
+[#1195](https://github.com/scttfrdmn/substrate/issues/1195).
+
+### The EMR Serverless records drop most of their required members
+
+`Application` publishes seven members as `Required: Yes`; the stored record supplies five and omits
+`createdAt` and `updatedAt`, both `Type: Timestamp`. `JobRun` publishes eleven as `Required: Yes`; the
+stored record supplies four — `applicationId`, `arn`, `jobRunId` and `state` — and omits `createdAt`,
+`updatedAt`, `createdBy`, `executionRole`, `jobDriver`, `releaseLabel` and `stateDetails`. `jobDriver`
+is the member that says what was submitted, so a consumer cannot confirm from any response that the
+right entry point, jar or SQL was even sent. Both records also carry `accountID` and `region`, which
+are Substrate's own and appear on neither published shape
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+
+### The EMR Serverless required inputs are neither read nor refused
+
+`CreateApplication` publishes `clientToken`, `releaseLabel` and `type` as `Required: Yes`. Substrate
+decodes two of them, never reads `clientToken`, and checks none, so a request missing all three
+succeeds and `ValidationException`/400 has no missing-member site. `clientToken` is documented as *"The
+client idempotency token of the application to create. Its value must be unique for each request"*, and
+because it is not tracked the published idempotency contract does not hold: the same request twice
+creates two applications with different ids, and `ConflictException`/409 has no site. `StartJobRun`
+repeats the shape with `clientToken` and `executionRoleArn`, both `Required: Yes` and both unread, so
+a job run can exist with no execution role. The create response also omits the published `name`,
+answering `applicationId` and `arn` where the Response Syntax publishes all three.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### An EMR Serverless application never leaves CREATED
+
+`CreateApplication` stores `state: "CREATED"` and nothing routed changes it. `Application` publishes
+`Valid Values: CREATING | CREATED | STARTING | STARTED | STOPPING | STOPPED | TERMINATED`, and six of
+the seven are unreachable because `StartApplication`, `StopApplication` and `UpdateApplication` are
+not routed. `autoStartConfiguration` and `autoStopConfiguration` are stored nowhere, so neither the
+start-on-submission path nor the idle-timeout path can be observed, and `StartJobRun` succeeds against
+a `CREATED` application regardless.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### The jobruns route is matched as a substring
+
+`parseEMRServerlessOperation` locates the job run surface with `strings.Index(after, "/jobruns")`
+rather than by splitting the path into segments. `GET /applications/ab/jobrunsbad` therefore routes to
+`GetJobRun` with application id `ab` and job run id `bad`, and a trailing slash on
+`GET /applications/ab/` makes the application id `ab/`, which matches no state key. AWS matches
+neither path to an operation. Both cases end in a refusal rather than a wrong success — the first as
+`ResourceNotFoundException`/404 for a job run that does not exist, the second as the same for an
+application — so the practical cost is a misleading code rather than corrupt state, and the published
+landing for a path that matches nothing is the common list's `UnknownOperationException`/404, which
+`unknownRouteError` already answers for genuinely unmatched paths.
+[#1205](https://github.com/scttfrdmn/substrate/issues/1205).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a `CreateApplication` body that will not parse, or no body at all | `ValidationException` | 400 |
+| a `StartJobRun` body that will not parse | `ValidationException` | 400 |
+| an application that does not exist, on `GetApplication` | `ResourceNotFoundException` | 404 |
+| a job run that does not exist, on `GetJobRun` or `CancelJobRun` | `ResourceNotFoundException` | 404 |
+| a method and path that match no operation | `UnknownOperationException` | 404 |
+
+Both codes are published at those statuses on every page that carries them: `ValidationException` at
+400 and `ResourceNotFoundException` at 404, which is the REST-JSON shape and not the 400 the
+JSON-RPC services in this document use. `CreateApplication` is the only handler with no
+`len(req.Body) > 0` guard, so a bodyless create is refused rather than defaulted — which is right,
+given three of its members are `Required: Yes`. The two body-decode refusals answer the same code,
+status and message; one reaches it through the shared `emrInvalidBody` constructor and the other
+through a literal, which is a house-consistency gap rather than a wire divergence.
+
+`ConflictException`/409, published on `CreateApplication` and `StartJobRun`, has no site: no client
+token is tracked and no state precondition is enforced. `ResourceNotFoundException`/404 has no site on
+`DeleteApplication` or `StartJobRun`, both of which publish it. `ValidationException`/400 has no
+missing-member or constraint site anywhere: no `Required: Yes` member is checked, and no published
+`Pattern`, `Length Constraints` or `Valid Range` — including `maxResults`' 1-to-50 range and the
+`states` filter's enum — is enforced. `InternalServerException`/500 is published on all seven routed
+operations and has no site, which is correct: an internal failure is not something a request can ask
+for.
+
+### Cost
+
+`StartJobRun` is attributed $0.0001 per call and `CreateApplication` $0.00001. Both keys can match:
+the cost table is keyed on the lowercased service name and the resolved operation, and the
+`emrserverless` operation resolver derives the operation from the method and path. The figures stand
+in for nothing AWS actually meters — EMR Serverless bills worker vCPU-hours, memory-GB-hours and
+storage, and Substrate runs no workers, which is also why `billedResourceUtilization` and
+`totalResourceUtilization` are never emitted on a job run. Creating an application is free at AWS;
+the $0.00001 exists so that an application appears in a cost summary at all.
+
+---
+
+
+## FSx
+
+**Endpoint:** `fsx.{region}.amazonaws.com`
+
+**Protocol:** JSON 1.1 with an `X-Amz-Target` header. The target namespace is
+`AWSSimbaAPIService_v20180301`, the internal name the FSx model carries rather than anything the
+public reference prints, and Substrate's parser maps that namespace onto the `fsx` service. API
+version 2018-03-01.
+
+**Routing:** on the target's operation name alone; a target Substrate does not route, and an absent
+target, are both refused as an unrecognised action.
+
+Three operations over one resource: a file system. Nothing is mounted and no storage exists — a file
+system is a record with a DNS name — and the Lustre mount name a `SCRATCH_2` file system reports is
+the literal `fsx`, which is what real FSx uses for that deployment type. A file system's VPC is
+derived by looking its first subnet up in EC2 state, so a file system created against a subnet
+Substrate has never seen reports an empty `VpcId`.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateFileSystem | Answers `{"FileSystem"}` as published. [Neither `Required: Yes` member is checked and no member is validated](#createfilesystem-validates-none-of-its-members); [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` is not read](#clientrequesttoken-is-not-read-so-creating-a-file-system-twice-creates-two) |
+| DescribeFileSystems | Describes the IDs given, or every non-deleted file system when `FileSystemIds` is absent, which is what the page publishes. [`MaxResults` and `NextToken` are ignored and no token is emitted](#describefilesystems-answers-every-file-system-in-one-page) |
+| DeleteFileSystem | A soft delete. [The response body is the wrong shape](#deletefilesystem-answers-a-file-system-object-where-the-published-response-is-flat) and [the lifecycle it records is not a published value](#a-deleted-file-system-carries-a-lifecycle-the-api-does-not-publish) |
+
+Everything else on the FSx API is unrouted: `CreateFileSystemFromBackup` and `UpdateFileSystem`, the
+backup surface (`CreateBackup`, `CopyBackup`, `DeleteBackup`, `DescribeBackups`), the volume and
+storage-virtual-machine surfaces used by ONTAP and OpenZFS, the snapshot surface, the data-repository
+association and task surfaces used by Lustre, the alias operations, and the three tag operations. A
+call to any of them is refused as an unrecognised action, so an FSx file system here cannot be backed
+up, restored, resized, or read through a data repository — and because `ListTagsForResource` is
+unrouted, a file system's tags can only be read back inside the file system record itself.
+
+### DeleteFileSystem answers a file system object where the published response is flat
+
+`API_DeleteFileSystem` publishes a response of five top-level members — `FileSystemId`, `Lifecycle`,
+`LustreResponse`, `OpenZFSResponse` and `WindowsResponse` — and no `FileSystem` member. Substrate
+answers the whole file-system record under a `FileSystem` key, the shape `CreateFileSystem` uses. An
+SDK's `DeleteFileSystemOutput` unmarshals that as an empty struct: the ID is nil and the lifecycle is
+the empty string, so a caller cannot read back which file system it deleted or what state the delete
+left it in. [#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+
+### A deleted file system carries a Lifecycle the API does not publish
+
+The delete marks the record `DELETED`. The published `Lifecycle` values are `AVAILABLE | CREATING |
+FAILED | DELETING | MISCONFIGURED | UPDATING | MISCONFIGURED_UNAVAILABLE`, and the page states that
+"If the `DeleteFileSystem` operation is successful, this status is `DELETING`." `DELETED` is on no
+FSx page, so a consumer switching on the published enum falls through every arm. The value is also
+load-bearing inside the plugin, which treats it as not-found on `DescribeFileSystems` and filters it
+out of the list, so the published `DELETING` window is never observable: a file system is available
+and then absent. Reporting `DELETING` is the published behaviour and would keep the SDK's delete
+waiter working, because the page also publishes that describing a deleted file system answers
+`FileSystemNotFound`.
+[#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+
+### A new file system is AVAILABLE and was never CREATING
+
+`API_CreateFileSystem` publishes that it "Creates a new, empty Amazon FSx file system with an assigned
+ID, and an initial lifecycle state of `CREATING`", and notes that "The `CreateFileSystem` call returns
+while the file system's lifecycle state is still `CREATING`. You can check the file-system creation
+status by calling the `DescribeFileSystems` operation." Substrate records `AVAILABLE` at creation, so
+the SDK's file-system-available waiter succeeds on its first poll and the polling code a consumer
+wrote for a real create is never exercised. A seedable observation count, the pattern the snapshot and
+job-status surfaces already use, would let a test assert the `CREATING` path without depending on
+wall-clock time.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### CreateFileSystem validates none of its members
+
+`FileSystemType` is `Required: Yes` with `Valid Values: WINDOWS | LUSTRE | ONTAP | OPENZFS`, and
+`SubnetIds` is `Required: Yes`. Substrate defaults the first to `LUSTRE` and accepts an absent second,
+so a template or SDK call missing a required member deploys clean here and is refused by AWS.
+`StorageType` publishes `Valid Values: SSD | HDD | INTELLIGENT_TIERING`, and only `FileSystemType` is
+upper-cased before storage, so a lowercase `ssd` is stored and echoed verbatim — an off-enum value in
+a response, which is worse than a refusal because it looks like a real observation. `StorageCapacity`
+is accepted unchecked and reported as `0` when absent, where the page publishes per-deployment-type
+values such as "1200 GiB, 2400 GiB, and increments of 2400 GiB" for `SCRATCH_2`. Each of these lands
+on `BadRequest`/400, "A generic error indicating a failure with a client request.", which is the first
+entry in the operation's own Errors section and already has a constructor in the plugin.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### ClientRequestToken is not read so creating a file system twice creates two
+
+The page publishes the whole idempotency contract: "If a file system with the specified client request
+token exists and the parameters match, `CreateFileSystem` returns the description of the existing file
+system. If a file system with the specified client request token exists and the parameters don't
+match, this call returns `IncompatibleParameterError`." Substrate does not decode the token, so the
+same request sent twice creates two file systems with different IDs and `IncompatibleParameterError`,
+published at 400, has no site in the plugin. A consumer testing its own retry-on-timeout path — the
+case the token exists for — observes a duplicate resource instead of the published replay.
+[#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+
+### DescribeFileSystems answers every file system in one page
+
+`MaxResults` and `NextToken` are both published request members, `NextToken` is a published response
+member, and the page describes the loop in full: "`DescribeFileSystems` is called first without a
+`NextToken` value. Then the operation continues to be called with the `NextToken` parameter set to the
+value of the last `NextToken` value until a response has no `NextToken`." Substrate decodes only
+`FileSystemIds` and emits only `FileSystems`, so a paginator stops after one page and a consumer's
+paging code is never exercised. The page also warns that an implementation "might return fewer than
+`MaxResults` file system descriptions while still including a `NextToken` value", which is exactly the
+case a test wants to reach and cannot.
+[#1195](https://github.com/scttfrdmn/substrate/issues/1195).
+
+### The file system record carries twelve of the published members
+
+`API_FileSystem` is a large shape and Substrate reports `FileSystemId`, `FileSystemType`,
+`StorageCapacity`, `StorageType`, `VpcId`, `SubnetIds`, `DNSName`, `ResourceARN`, `Lifecycle`,
+`CreationTime`, `Tags` and `OwnerId`, plus a `LustreConfiguration` of `MountName` and `DeploymentType`
+for Lustre file systems so that an SDK consumer can dereference the mount name without a nil check.
+Published and never populated: `AdministrativeActions`, `FailureDetails`, `FileSystemTypeVersion`,
+`KmsKeyId`, `NetworkInterfaceIds`, `NetworkType`, and the ONTAP, OpenZFS and Windows configuration
+blocks. Every name Substrate does emit is a published one, and `CreationTime` is a JSON number as the
+model declares. The absences bite hardest through CloudFormation, where two of the four published
+`Fn::GetAtt` attributes have no stored value.
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `BadRequest` | 400 |
+| `FileSystemId` absent on `DeleteFileSystem` | `BadRequest` | 400 |
+| a file system ID that does not exist | `FileSystemNotFound` | 400 |
+| a file system already deleted, on `DescribeFileSystems` | `FileSystemNotFound` | 400 |
+| a target Substrate does not route | `UnknownOperationException` | 404 |
+
+All four FSx codes are published spellings at published statuses. `BadRequest`/400 and
+`FileSystemNotFound`/400 are both in `API_DeleteFileSystem`'s own Errors section, and
+`FileSystemNotFound`/400 is in `API_DescribeFileSystems`' as well — the 400 is worth stating plainly,
+because a not-found at 400 rather than 404 is unusual enough to look like a bug and is not one here.
+Refusing an absent `FileSystemId` is correct on the delete, where it is `Required: Yes`, and the
+absence of the same check on `DescribeFileSystems` is also correct, where `FileSystemIds` is
+`Required: No` and an absent list means describe them all.
+
+Published and with no site: `ActiveDirectoryError`/400, `IncompatibleParameterError`/400,
+`InvalidExportPath`/400, `InvalidImportPath`/400, `InvalidNetworkSettings`/400,
+`InvalidPerUnitStorageThroughput`/400, `MissingFileSystemConfiguration`/400 and
+`ServiceLimitExceeded`/400 on `CreateFileSystem`; `IncompatibleParameterError`/400 and
+`ServiceLimitExceeded`/400 on `DeleteFileSystem`; and `InternalServerError`/500 on all three. No
+client token is tracked, no network setting is validated, no configuration block is required and no
+file-system quota is enforced, so none of these conditions can arise.
+
+### CloudFormation resource types
+
+`AWS::FSx::FileSystem` deploys through `CreateFileSystem` and deletes through `DeleteFileSystem`. Five
+template properties reach the plugin — `FileSystemType` (defaulting to `LUSTRE`), `StorageCapacity`
+(defaulting to `1200`), `StorageType` (defaulting to `SSD`), `SubnetIds` and `Tags` — with `!Ref` and
+`!Sub` resolved in the subnet list and in both halves of every tag. Everything else the resource
+publishes is dropped, including `FileSystemTypeVersion`, `KmsKeyId`, `SecurityGroupIds`, `NetworkType`,
+`BackupId` and all four per-type configuration blocks. Dropping `LustreConfiguration` is the
+consequential one: a template asking for `PERSISTENT_2` gets `SCRATCH_2` and a mount name of `fsx`,
+which is the one Lustre observable a mount script actually reads.
+
+`Ref` returns the file system ID, as published. Of the four published `Fn::GetAtt` attributes,
+`DNSName` resolves from stored metadata and `ResourceARN` resolves because its name ends in `ARN`;
+`LustreMountName` and `RootVolumeId` have no stored value, so a template that reads either gets
+nothing.
+[#1203](https://github.com/scttfrdmn/substrate/issues/1203).
+
+### Cost
+
+`CreateFileSystem` is attributed $0.00013, a file-system hour prorated across a single API call.
+`DescribeFileSystems` and `DeleteFileSystem` have no entry and no per-service fallback, so they are
+free — which is right for the describe and wrong in spirit for a file system that keeps existing after
+the create call returns, since FSx bills for provisioned storage by the hour rather than per request.
+No pricing provider maps onto `fsx`, so the figure is the static one and does not move with a loaded
+price list.
+
+---
+
+
+## MSK
+
+**Endpoint:** `kafka.{region}.amazonaws.com`
+
+**Protocol:** REST-JSON over versioned paths — `POST /v1/clusters` rather than an `X-Amz-Target`
+header — with error codes carried in the `x-amzn-errortype` header. API version 2018-11-14. The
+signing name and service key are `kafka`, not `msk`.
+
+**Routing:** on the HTTP method and path together, resolved by a single ordered switch. Since #1009 an
+empty path parameter routes to the single-cluster operation rather than folding onto the list
+operation, so `GET /v1/clusters/` reaches `DescribeCluster` with an empty ARN and is refused for the
+reason it is wrong. Two arms match on a path *suffix* before any version prefix is tested, which is a
+divergence in its own right.
+
+Nine operations over one resource: a provisioned cluster, addressed by ARN, in both the v1 and the v2
+shapes. No Kafka runs — a cluster is a record, brokers are synthesised from the requested count on
+each `ListNodes` call rather than stored — so a bootstrap-broker string here resolves to nothing and a
+producer cannot connect. Serverless clusters are not modelled: every cluster reports
+`clusterType: "PROVISIONED"`.
+
+### Supported operations
+
+| Operation | Route, and what it answers |
+|-----------|----------------------------|
+| CreateCluster | `POST /v1/clusters` → `{clusterArn, clusterName, state}` as published. [Only `clusterName` is checked of four required members](#createcluster-requires-only-the-cluster-name); [the cluster is `ACTIVE` at once](#a-cluster-is-active-from-the-moment-it-is-created) |
+| ListClusters | `GET /v1/clusters` → `{clusterInfoList}`. [`maxResults`, `nextToken` and `clusterNameFilter` are all ignored](#every-msk-list-operation-answers-one-page-and-reads-no-filter) |
+| DescribeCluster | `GET /v1/clusters/{clusterArn}` → `{clusterInfo}`. [The ARN resolves by cluster name alone](#a-cluster-arn-resolves-by-name-and-its-uuid-is-ignored); [eight of twenty-one members are reported](#the-reported-clusterinfo-carries-eight-of-twenty-one-published-members) |
+| DeleteCluster | `DELETE /v1/clusters/{clusterArn}` → `{clusterArn, state}`. [The record is removed while the state says `DELETING`](#deletecluster-removes-the-cluster-while-reporting-it-deleting) |
+| GetBootstrapBrokers | `GET /v1/clusters/{clusterArn}/bootstrap-brokers` → [one of the fourteen published broker strings](#getbootstrapbrokers-reports-one-of-fourteen-published-broker-strings). [The path is matched by suffix](#a-path-ending-in-nodes-or-bootstrap-brokers-routes-before-its-api-version-is-read) |
+| ListNodes | `GET /v1/clusters/{clusterArn}/nodes` → `{nodeInfoList}`, synthesised from the cluster's broker count. [Matched by suffix](#a-path-ending-in-nodes-or-bootstrap-brokers-routes-before-its-api-version-is-read) and [unpaginated](#every-msk-list-operation-answers-one-page-and-reads-no-filter) |
+| CreateClusterV2 | `POST /api/v2/clusters`, preferring a `Provisioned` sub-object and delegating to `CreateCluster`. [The path is unverifiable and `clusterType` is not reported](#the-v2-cluster-surface-has-no-page-in-the-msk-api-reference) |
+| DescribeClusterV2 | `GET /api/v2/clusters/{clusterArn}` → `{clusterInfo}` in the v2 shape, with the broker detail under `provisioned` |
+| ListClustersV2 | `GET /api/v2/clusters` → `{clusterInfoList}` in the v2 shape, one page, no token |
+
+There is no v2 delete arm, so `DELETE /api/v2/clusters/{clusterArn}` is refused as an unrecognised
+route. The rest of the `kafka` API is unrouted: the whole update surface (`UpdateBrokerCount`,
+`UpdateBrokerStorage`, `UpdateBrokerType`, `UpdateClusterConfiguration`, `UpdateClusterKafkaVersion`,
+`UpdateMonitoring`, `UpdateSecurity`, `UpdateConnectivity`, `UpdateStorage`, `RebootBroker`), the
+configuration surface, the cluster-operation history, the SCRAM-secret operations, the cluster-policy
+operations, VPC connections, the Kafka-version listings, replicators and the three tag operations. A
+cluster here can therefore be created, read, listed and deleted and nothing else: it cannot be scaled,
+reconfigured, upgraded, or tagged after creation, and because `ListClusterOperations` is unrouted
+there is no history to read either.
+
+### A path ending in nodes or bootstrap-brokers routes before its API version is read
+
+The published URIs are exactly `/v1/clusters/{clusterArn}/bootstrap-brokers` and
+`/v1/clusters/{clusterArn}/nodes`. Substrate matches both on an unanchored path suffix, and places
+those two arms ahead of every prefix arm, so the `/v1/clusters/` prefix is never actually required —
+the `TrimPrefix` that is supposed to strip it is a no-op when it is absent. Three things follow. A
+`GET /api/v2/clusters/{arn}/nodes` answers HTTP 200, because the mangled ARN still splits with `kafka`
+in its third field and the cluster lookup succeeds, so Substrate serves a path AWS does not publish
+and a consumer can come to depend on it. Any GET whose path merely ends in one of those two words —
+`GET /anything/at/all/nodes` — is refused as a bad cluster ARN rather than as an unrecognised route,
+which sends a caller looking at its ARN instead of at its URL. And `GET /bootstrap-brokers` with no
+cluster at all reaches the empty-ARN guard. Anchoring both arms to their published prefix, below the
+version arms, leaves every published call routed as it is today.
+[#1205](https://github.com/scttfrdmn/substrate/issues/1205).
+
+### A cluster is ACTIVE from the moment it is created
+
+The published `ClusterState` is `ACTIVE`, `CREATING`, `UPDATING`, `DELETING`, `FAILED`, `MAINTENANCE`,
+`REBOOTING_BROKER` and `HEALING`, and a real cluster takes tens of minutes to leave `CREATING`.
+Substrate writes `ACTIVE` in `CreateCluster` and never writes anything else, so `CREATING` is
+unreachable and a consumer's wait-for-active loop returns on its first poll. That is the one MSK
+observable a test most wants to drive, because a cluster create is the slowest step in a streaming
+stack's deployment: a seeded observation count would let the `CREATING` path be asserted without
+waiting on anything.
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+
+### CreateCluster requires only the cluster name
+
+`CreateClusterRequest` marks four members required: `brokerNodeGroupInfo`, `clusterName`,
+`kafkaVersion` and `numberOfBrokerNodes`. Substrate checks `clusterName`, defaults `kafkaVersion` to
+`3.5.1` and `numberOfBrokerNodes` to `2`, and accepts an absent `brokerNodeGroupInfo` — whose own
+`clientSubnets` and `instanceType` are required in turn. A call or template missing any of the three
+succeeds here and is refused by AWS, which is the failure mode this emulator exists to catch. The
+defaults are not harmless either: a cluster created without a broker count reports two brokers, and
+`ListNodes` then reports two nodes, so the count a consumer asked for is not what it reads back.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### A cluster ARN resolves by name and its UUID is ignored
+
+The published ARN form is
+`arn:aws:kafka:us-east-1:0123456789019:cluster/SalesCluster/abcd1234-abcd-cafe-abab-9876543210ab-4`,
+and the trailing UUID is what distinguishes one cluster named `SalesCluster` from the next. Substrate
+parses the region, the account and the name out of the ARN and looks the cluster up by name, never
+reading the UUID, so an ARN whose UUID belongs to a cluster that no longer exists resolves to whatever
+cluster now holds that name. A test that deletes a cluster, recreates it under the same name and
+reuses the old ARN gets HTTP 200 where AWS answers not-found, which hides exactly the class of stale-
+reference bug a deploy-destroy-redeploy test is written to find.
+[#1204](https://github.com/scttfrdmn/substrate/issues/1204).
+
+### Every MSK list operation answers one page and reads no filter
+
+`GET /v1/clusters` publishes three query parameters — `nextToken`, `clusterNameFilter` ("Specify a
+prefix of the name of the clusters that you want to list") and `maxResults` ("The maximum number of
+results to return in the response (default maximum 100 results per API call)") — and
+`/v1/clusters/{clusterArn}/nodes` publishes `nextToken` and `maxResults`. `ListClustersResponse` and
+`ListNodesResponse` both publish a `nextToken` member. Substrate reads none of them in `ListClusters`,
+`ListClustersV2` or `ListNodes`, and deliberately omits `nextToken` rather than sending it empty, since
+an empty token invites a caller to page on it. The consequence is that a `clusterNameFilter` silently
+returns every cluster in the account and region, which is a wrong answer rather than a missing feature:
+a test asserting that a filter narrowed the list passes for the wrong reason.
+[#1195](https://github.com/scttfrdmn/substrate/issues/1195).
+
+### DeleteCluster removes the cluster while reporting it DELETING
+
+The response body is right — `DeleteClusterResponse` publishes exactly `clusterArn` and `state`, and
+`clusterName` is deliberately not reported because it is not a member — and `DELETING` is a published
+state. What diverges is what the state describes: the record and its index entry are removed before the
+response is written, so the very next `DescribeCluster` answers not-found rather than a cluster in
+`DELETING`, and the published deletion window is unobservable. The `currentVersion` query parameter
+`DELETE /v1/clusters/{clusterArn}` publishes is also never read, so a delete that names a stale version
+cannot be exercised.
+[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+
+### The v2 cluster surface has no page in the MSK API reference
+
+`CreateClusterV2`, `DescribeClusterV2` and `ListClustersV2` are routed under `/api/v2/clusters`, and
+that is the one routing fact in this section that could not be verified: the MSK API reference's
+resource index lists no v2 resource page, and the two plausible page URLs return no API content, so
+the HTTP paths themselves are **unverified against any AWS reference page**. The v2 request and
+response shapes were verified only from the AWS CLI reference, which publishes four `CreateClusterV2`
+output members — `ClusterArn`, `ClusterName`, `State` and `ClusterType` — against the three Substrate
+emits, because the v2 create delegates to the v1 create and answers the v1 body. A consumer switching
+on `clusterType` to tell a provisioned cluster from a serverless one reads an absent member, even
+though every cluster here is provisioned and the describe and list responses do report the value.
+[#1211](https://github.com/scttfrdmn/substrate/issues/1211).
+
+### The reported ClusterInfo carries eight of twenty-one published members
+
+`ClusterInfo` publishes twenty-one members and Substrate reports eight: `clusterArn`, `clusterName`,
+`state`, `brokerNodeGroupInfo`, `currentBrokerSoftwareInfo`, `numberOfBrokerNodes`, `tags` and
+`creationTime`. Absent are `activeOperationArn`, `clientAuthentication`, `currentVersion`,
+`customerActionStatus`, `encryptionInfo`, `enhancedMonitoring`, `loggingInfo`, `openMonitoring`,
+`rebalancing`, `stateInfo`, `storageMode`, `zookeeperConnectString` and `zookeeperConnectStringTls`.
+`currentVersion` is the one with teeth, because CloudFormation publishes it as an attribute and no
+value is stored for it, and `stateInfo` is the one a failure test would want, since it is where a real
+cluster explains an unusable state. `ListNodes` is thinner still: the published `NodeInfo` members
+`addedToClusterTime`, `controllerNodeInfo` and `zookeeperNodeInfo` are absent, as are
+`brokerNodeInfo`'s `endpoints`, `attachedENIId` and `clientVpcIpAddress`, so a node reports its ARN,
+type, instance type, broker ID, subnet and Kafka version and nothing a client could connect to. Every
+name Substrate does emit is a published one, including `nodeARN`, the single MSK response member that
+is not the plain lowerCamel of its name.
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+
+### GetBootstrapBrokers reports one of fourteen published broker strings
+
+`GetBootstrapBrokersResponse` publishes fourteen members — `bootstrapBrokerString`,
+`bootstrapBrokerStringTls`, `bootstrapBrokerStringSaslIam`, `bootstrapBrokerStringSaslScram`, and
+their public, IPv6 and VPC-connectivity variants. Substrate reports `bootstrapBrokerString` alone, so
+a consumer that asks for the TLS or SASL/IAM string — the normal case, since the published default for
+client-broker encryption is `TLS` — reads an absent member. The value it does report is
+`broker1.{cluster}.{region}.kafka.amazonaws.com:9092,broker2.…`, where the page's own example is
+`b-1.exampleClusterName.abcde.c2.kafka.us-east-1.amazonaws.com:9094`: the broker prefix, the cluster
+suffix and the port all differ, so a test that parses a broker hostname parses a form AWS never sends.
+[#1204](https://github.com/scttfrdmn/substrate/issues/1204).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| a body that will not parse | `BadRequest` | 400 |
+| `clusterName` absent on a create | `BadRequest` | 400 |
+| an empty cluster ARN in the path | `BadRequest` | 400 |
+| an ARN whose third field is not `kafka` | `BadRequest` | 400 |
+| a cluster ARN that resolves to no cluster | `NotFoundException` | 404 |
+| a cluster name that already exists | `ConflictException` | 409 |
+| a method and path Substrate does not route | `UnknownOperationException` | 404 |
+
+MSK is the one service in Substrate's inventory whose refusal codes cannot be verified against
+anything, and that is a fact about the API rather than about the plugin. Every MSK resource page
+documents its failures as a table of status codes against the model `Error`, whose schema is
+`{"message", "invalidParameter"}` — there is no code member — and MSK publishes no common-errors page
+and no `Errors` section on any operation. So `BadRequest`, `NotFoundException` and `ConflictException`
+are spellings Substrate chose, not spellings AWS published, and no amount of reading the reference can
+make one of them correct.
+
+The statuses, by contrast, are all published rows: 400 is "The request isn't valid because the input is
+incorrect. Correct your input and then submit it again.", 404 is "The resource could not be found due
+to incorrect input. Correct the input, then retry the request.", and 409 appears only on
+`POST /v1/clusters` as "This cluster name already exists. Retry your request using another name." — so
+the duplicate-name conflict is the one refusal here whose status is published for exactly the condition
+that raises it. The published `invalidParameter` member, which is where a real MSK refusal names the
+member at fault, is never set on any of the eleven refusal sites. The remaining published statuses —
+401, 403, 429, 500 and 503 — have no site: no credential is validated inside the plugin, no request is
+throttled, and nothing fails internally.
+
+### CloudFormation resource types
+
+`AWS::MSK::Cluster` deploys through `POST /v1/clusters` and deletes by path. Four template properties
+reach the plugin: `ClusterName` (defaulting to the logical ID), `KafkaVersion` (defaulting to `3.5.1`),
+and `BrokerNodeGroupInfo`'s `InstanceType` (defaulting to `kafka.m5.large`) and `ClientSubnets`.
+`NumberOfBrokerNodes` is hard-coded to `2` and the template's value is not read, even though the
+resource publishes it as "*Required*: Yes" — so a stack asking for six brokers gets two, `ListNodes`
+then reports two nodes, and a template's broker count is unassertable. `ClientAuthentication`,
+`ConfigurationInfo`, `EncryptionInfo`, `EnhancedMonitoring`, `LoggingInfo`, `OpenMonitoring`,
+`Rebalancing`, `StorageMode`, `Tags` and `ZookeeperAccess` are all dropped.
+
+`Ref` returns the cluster ARN, which is what the resource publishes. Of the two published `Fn::GetAtt`
+attributes, `Arn` resolves; `CurrentVersion` has no stored value, because `currentVersion` is not a
+member of the cluster record, so a template that reads it to drive an update gets nothing.
+[#1203](https://github.com/scttfrdmn/substrate/issues/1203).
+
+### Cost
+
+`CreateCluster` is attributed $0.0002 and `GetBootstrapBrokers` $0.000001, a broker hour and a request
+respectively, prorated across a single API call. `CreateClusterV2` has no entry and there is no
+per-service fallback, so a cluster created through the v2 path is free while the same cluster created
+through the v1 path is charged — the cost of a resource should not depend on which API version created
+it. A loaded price list can supply MSK figures, since `AmazonMSK` maps onto this service.
+[#1202](https://github.com/scttfrdmn/substrate/issues/1202).
+
+---
+
+
+## Redshift
+
+**Endpoint:** `redshift.{region}.amazonaws.com`
+**Protocol:** Query (API version 2012-12-01), XML responses
+**Routing:** `Action` form parameter
+
+Substrate models the Redshift cluster control plane: creating, describing,
+modifying and deleting a cluster, and recording a parameter group, a subnet group
+and a manual snapshot. Ten of the API's 141 operations are routed. Nothing about
+the data plane is here — for `ExecuteStatement` and the rest of the statement API
+see [Redshift Data API](#redshift-data-api), which is a separate plugin on a
+separate endpoint. The single most important thing to know before writing a test
+is that substrate's XML is not the XML the reference publishes: there is no
+`<XxxResponse>` envelope, no namespace, no `ResponseMetadata`, and every list and
+single-cluster element is wrapped in `member`. An SDK cannot parse it, so these
+operations are reachable today only by a caller that reads the body itself.
+
+### Supported operations
+
+| Operation | `Action` |
+|---|---|
+| CreateCluster | `CreateCluster` |
+| DescribeClusters | `DescribeClusters` |
+| ModifyCluster | `ModifyCluster` |
+| DeleteCluster | `DeleteCluster` |
+| CreateClusterParameterGroup | `CreateClusterParameterGroup` |
+| DescribeClusterParameterGroups | `DescribeClusterParameterGroups` |
+| CreateClusterSubnetGroup | `CreateClusterSubnetGroup` |
+| DescribeClusterSubnetGroups | `DescribeClusterSubnetGroups` |
+| CreateClusterSnapshot | `CreateClusterSnapshot` |
+| DescribeClusterSnapshots | `DescribeClusterSnapshots` |
+
+The other 131 operations are not routed. The whole of snapshot restore and copy,
+resize and `DescribeNodeConfigurationOptions`, pause and resume, `RebootCluster`,
+`GetClusterCredentials`, the event, HSM, usage-limit, reserved-node and
+scheduled-action families, every tagging operation, and the parameter-level
+operations `DescribeClusterParameters` and `ModifyClusterParameterGroup` reach the
+dispatch switch's default arm and refuse with `InvalidAction` at 400. Redshift's
+own Common Errors page does not publish a code for an unrecognised action — it is
+one of the five regenerated eighteen-entry Query lists, from which `InvalidAction`
+is absent — so that answer is the Query family's code as cited from SQS's page,
+not a Redshift-published one.
+
+### No Redshift response carries its XxxResponse envelope
+
+`redshiftXMLResponse` marshals the result struct as the document root, so a
+`CreateCluster` response begins `<CreateClusterResult>` where the reference's
+sample begins `<CreateClusterResponse
+xmlns="http://redshift.amazonaws.com/doc/2012-12-01/">`
+(`emulator/redshift_plugin.go:545`). The helper's third parameter is the request
+ID and it is declared `_ string`, discarded before the body is built, so no
+`<ResponseMetadata><RequestId>` element is emitted on any of the ten operations.
+A Query-protocol SDK locates a result by the `…Response`/`…Result` pair and finds
+neither, and the request ID a consumer is told to capture for support escalation
+does not exist. Fixing this is a prerequisite for the rest of the section being
+observable at all
+([#1208](https://github.com/scttfrdmn/substrate/issues/1208)).
+
+### A cluster is wrapped in a spurious member element
+
+`redshiftClusterXML` declares `XMLName xml.Name` tagged `member`
+(`emulator/redshift_plugin.go:76`), and the single-cluster results tag their field
+`Cluster>member` (`:99`, `:105`, `:111`), so `CreateCluster`, `ModifyCluster` and
+`DeleteCluster` emit `<Cluster><member>…</member></Cluster>` where the reference
+publishes the members directly inside `<Cluster>`. The four list results are wrong
+in the other direction: they flatten to `<member>`
+(`Clusters>member` at `:94`, `ParameterGroups>member` at `:282`,
+`ClusterSubnetGroups>member` at `:363`, `Snapshots>member` at `:446`) where the
+reference names each element for its member type — `<Clusters><Cluster>`,
+`<ParameterGroups><ClusterParameterGroup>`,
+`<ClusterSubnetGroups><ClusterSubnetGroup>` and `<Snapshots><Snapshot>`. The
+element name is per-list rather than a convention: `Cluster` genuinely does
+publish two `member`-named lists, `ClusterNodes.member.N` and
+`PendingActions.member.N`, which is why a global default cannot be right. Because
+the struct's own `XMLName` forces `member`, renaming the field tags alone would
+not fix the single-cluster case
+([#1208](https://github.com/scttfrdmn/substrate/issues/1208)).
+
+### Two refusal codes carry a Fault suffix the reference does not publish
+
+Substrate answers `ClusterAlreadyExistsFault` at 400
+(`emulator/redshift_plugin.go:143`) and `ClusterNotFoundFault` at 404 (`:216`,
+`:536`). The reference publishes the wire codes without the suffix:
+`CreateCluster` documents "ClusterAlreadyExists — The account already has a
+cluster with the given identifier. HTTP Status Code: 400", and `DescribeClusters`,
+`ModifyCluster`, `DeleteCluster` and `CreateClusterSnapshot` all document
+"ClusterNotFound — The `ClusterIdentifier` parameter does not refer to an existing
+cluster. HTTP Status Code: 404". Both statuses are right; the spellings are the
+Smithy shape names rather than what the service puts on the wire, so a consumer
+branching on `ClusterNotFound` never takes the branch
+([#1198](https://github.com/scttfrdmn/substrate/issues/1198)).
+
+### A cluster and its snapshots are available the moment they are asked for
+
+`createCluster` stores `ClusterStatus: "available"`
+(`emulator/redshift_plugin.go:163`) and `createClusterSnapshot` stores
+`Status: "available"` (`:470`). The reference's `CreateCluster` sample publishes
+`<ClusterStatus>creating</ClusterStatus>` and its `CreateClusterSnapshot` sample
+publishes `<Status>creating</Status>`. `Cluster` publishes twenty valid status
+values, from `creating` and `modifying` through `resizing`, `paused`,
+`storage-full` and `incompatible-parameters`, and substrate emits exactly one of
+them. A consumer's wait-until-available loop therefore exits on its first poll,
+which is the one thing such a loop exists to make testable, and there is no seed
+that would make it poll. A seedable status progression, following the pattern the
+Bedrock and SageMaker job-status seeds establish, is what would make it assertable
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+### Deleting a cluster erases it instead of reporting deleting
+
+`deleteCluster` calls `state.Delete` and `removeFromStringIndex` and then returns
+the record it loaded before the delete, with its `available` status intact
+(`emulator/redshift_plugin.go:252`). The reference's `DeleteCluster` sample
+publishes `<ClusterStatus>deleting</ClusterStatus>` on a cluster that remains
+describable while the deletion proceeds. In substrate the following
+`DescribeClusters` refuses with `ClusterNotFoundFault` at 404 instead, so a
+consumer that polls for the transition cannot observe it.
+`SkipFinalClusterSnapshot` and `FinalClusterSnapshotIdentifier` are read by
+nothing, so no final snapshot appears in `DescribeClusterSnapshots` either
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+### The cluster record carries eleven of sixty-three members
+
+`redshiftClusterXML` has fields for `ClusterIdentifier`, `ClusterStatus`,
+`NodeType`, `MasterUsername`, `DBName`, `NumberOfNodes`, `ClusterCreateTime`,
+`VpcId`, `AvailabilityZone`, `ClusterNamespaceArn` and `Endpoint`
+(`emulator/redshift_plugin.go:76`). The reference's `Cluster` type publishes
+sixty-three. Absent are the members a test most often asserts on:
+`ClusterAvailabilityStatus`, `ClusterVersion`, `ClusterSubnetGroupName`,
+`ClusterParameterGroups`, `ClusterNodes`, `Encrypted`, `KmsKeyId`,
+`PubliclyAccessible`, `IamRoles`, `Tags`, `PendingModifiedValues`,
+`PreferredMaintenanceWindow`, `AutomatedSnapshotRetentionPeriod` and
+`TotalStorageCapacityInMegaBytes`. One of the eleven present members carries the
+wrong value rather than no value: `ClusterNamespaceArn` is filled from the
+cluster's own ARN (`:126`, built at `:160` as
+`arn:aws:redshift:{region}:{account}:cluster:{id}`), where the reference
+documents it as "The namespace Amazon Resource Name (ARN) of the cluster" — a
+`:namespace:` ARN. `Cluster` publishes no member at all that carries a
+`:cluster:` ARN, so there is nowhere correct for that value to go and no
+published error code for handing a namespace field a cluster ARN
+([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
+
+### Marker and MaxRecords are read by nothing
+
+None of the four Describe operations paginates. Three of them do not even take the
+request: `describeClusterParameterGroups`, `describeClusterSubnetGroups` and
+`describeClusterSnapshots` are declared with `_ *AWSRequest`
+(`emulator/redshift_plugin.go:325`, `:406`, `:495`). Each page publishes
+`MaxRecords` — "The maximum number of response records to return in each call…
+Default: `100`, Constraints: minimum 20, maximum 100" — and a `Marker` on both
+request and response; substrate returns the whole index and emits no `Marker`, so
+a consumer's paginator terminates after one page and a paging bug in its own code
+cannot surface. The same three signatures discard every filter the pages publish:
+`ClusterIdentifier`, `SnapshotIdentifier`, `SnapshotType`, `StartTime`, `EndTime`,
+`OwnerAccount`, `TagKeys` and `TagValues` on snapshots, and `ParameterGroupName`,
+`TagKeys` and `TagValues` on parameter groups. Only `DescribeClusters` filters at
+all, and only on `ClusterIdentifier` (`:192`)
+([#1195](https://github.com/scttfrdmn/substrate/issues/1195)).
+
+### A resize takes effect before the call returns
+
+`modifyCluster` writes `NodeType` and `NumberOfNodes` onto the stored record and
+returns it (`emulator/redshift_plugin.go:222`), so the new shape is visible on the
+response to the modify call itself. The reference states that a resize sets the
+cluster status to `resizing` and publishes a `PendingModifiedValues` member for
+the values not yet applied; substrate sets neither. The other modifiable
+parameters the page publishes — among them `ClusterType`, `MasterUserPassword`,
+`ClusterVersion`, `AllowVersionUpgrade`, `PreferredMaintenanceWindow`,
+`AutomatedSnapshotRetentionPeriod`, `Encrypted` and `PubliclyAccessible` — are
+discarded without a refusal, so a call that modifies only those appears to
+succeed and changes nothing
+([#1197](https://github.com/scttfrdmn/substrate/issues/1197)).
+
+### Parameter groups and subnet groups are recorded without their required inputs
+
+`createCluster` checks `ClusterIdentifier` and nothing else
+(`emulator/redshift_plugin.go:135`), though the page publishes `NodeType`
+"Required: Yes" and `MasterUsername` "Required: Yes"; substrate defaults the
+first to `dc2.large` (`:146`) and reads the second unchecked (`:151`).
+`createClusterParameterGroup` checks only `ParameterGroupName` (`:295`) where the
+page publishes `Description` and `ParameterGroupFamily` both "Required: Yes".
+`createClusterSubnetGroup` checks only `ClusterSubnetGroupName` (`:376`) where the
+page publishes `Description` and `SubnetIds.SubnetIdentifier.N` both "Required:
+Yes", discards the subnet list entirely, and reads `req.Params["VpcId"]` (`:375`)
+— `VpcId` is a member of the `ClusterSubnetGroup` response type and is not a
+parameter of the request, so for a correct caller the recorded group's `VpcId` is
+always empty. Neither group checks for a duplicate name, though the pages publish
+`ClusterParameterGroupAlreadyExists` and `ClusterSubnetGroupAlreadyExists` at 400.
+`MissingParameter` at 400 is on Redshift's Common Errors page — "A required
+parameter for the specified action is not supplied" — so every one of these has a
+published code to land on and simply does not use it
+([#1197](https://github.com/scttfrdmn/substrate/issues/1197)).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|---|---|---|
+| `ClusterIdentifier` absent on `CreateCluster` | `MissingParameter` | 400 |
+| `ClusterIdentifier` absent on `ModifyCluster` or `DeleteCluster` | `MissingParameter` | 400 |
+| `ClusterIdentifier` or `SnapshotIdentifier` absent on `CreateClusterSnapshot` | `MissingParameter` | 400 |
+| `ParameterGroupName` absent on `CreateClusterParameterGroup` | `MissingParameter` | 400 |
+| `ClusterSubnetGroupName` absent on `CreateClusterSubnetGroup` | `MissingParameter` | 400 |
+| Cluster identifier already recorded | `ClusterAlreadyExistsFault` | 400 |
+| Named cluster not recorded | `ClusterNotFoundFault` | 404 |
+| Any of the other 131 operations | `InvalidAction` | 400 |
+
+`MissingParameter` at 400 is Redshift's own Common Errors entry and is used
+correctly everywhere it appears above. The two `…Fault` codes are the shape names
+rather than the published wire codes `ClusterAlreadyExists` and `ClusterNotFound`,
+whose statuses substrate does match. Several published codes have no site in
+substrate at all: `ClusterParameterGroupAlreadyExists` (400),
+`ClusterSubnetGroupAlreadyExists` (400), `ClusterSnapshotAlreadyExists` (400),
+`ClusterSnapshotNotFound` (404), `ClusterParameterGroupNotFound` (404),
+`ClusterSubnetGroupNotFound` (400), `InvalidClusterState` (400),
+`NumberOfNodesQuotaExceeded` (400), `ClusterQuotaExceeded` (400),
+`InsufficientClusterCapacity` (400), `UnsupportedOperation` (400) and
+`InvalidSubnet` (400). Because substrate never records a non-`available` status,
+`InvalidClusterState` in particular is unreachable by construction rather than
+merely unimplemented.
+
+### CloudFormation resource types
+
+Substrate has no Redshift provisioner. `AWS::Redshift::Cluster` appears only in
+`cfnSnapshotCapableTypes` (`emulator/cfn_deployer.go:182`), which records that the
+reference lists the type as supporting the `Snapshot` deletion policy; nothing
+dispatches it. A template declaring one falls to `dispatchResource`'s default arm
+(`:2957`), which logs "unknown CloudFormation resource type; using generic stub"
+and deploys a generic stub, so the stack reaches `CREATE_COMPLETE` and no cluster
+exists for `DescribeClusters` to find. No `AWS::Timestream::*` or other Redshift
+type is dispatched.
+
+### Cost
+
+| Operation | Cost per call (USD) |
+|---|---|
+| `CreateCluster` | 0.0002 |
+| `CreateClusterSnapshot` | 0.00002 |
+
+Both keys are `redshift/{Operation}` and both name routed operations, so both
+attribute on every matching call. The other eight routed operations are free.
+
+---
+
+
+## Timestream
+
+**Endpoint:** `ingest.timestream.{region}.amazonaws.com` (write) and
+`query.timestream.{region}.amazonaws.com` (query)
+**Protocol:** JSON 1.0
+**Routing:** `X-Amz-Target: Timestream_20181101.{Operation}`
+
+Substrate models Timestream's database and table control plane, accepts records
+without interpreting them, and answers `Query` from a **seeded result set**.
+Twelve of the API's thirty-three operations are routed, spanning two API versions
+that AWS publishes as separate references — `timestream-write-2018-11-01` and
+`timestream-query-2018-11-01` — behind one plugin and one dispatch switch. The
+single most important thing to know before writing a test is that a seeded query
+result is keyed by query string alone, with no account or Region in the key, so
+one seed serves every caller of the emulator and a wildcard seed left behind by
+an earlier test will answer a later one.
+
+### Supported operations
+
+| Operation | `X-Amz-Target` |
+|---|---|
+| CreateDatabase | `Timestream_20181101.CreateDatabase` |
+| DescribeDatabase | `Timestream_20181101.DescribeDatabase` |
+| DeleteDatabase | `Timestream_20181101.DeleteDatabase` |
+| ListDatabases | `Timestream_20181101.ListDatabases` |
+| CreateTable | `Timestream_20181101.CreateTable` |
+| DescribeTable | `Timestream_20181101.DescribeTable` |
+| DeleteTable | `Timestream_20181101.DeleteTable` |
+| ListTables | `Timestream_20181101.ListTables` |
+| WriteRecords | `Timestream_20181101.WriteRecords` |
+| DescribeEndpoints | `Timestream_20181101.DescribeEndpoints` |
+| Query | `Timestream_20181101.Query` |
+| CancelQuery | `Timestream_20181101.CancelQuery` |
+
+The other twenty-one operations are not routed and refuse with
+`UnknownOperationException` at 404, which is what both Timestream Common Errors
+pages publish for an unrecognised action — a live citation rather than a
+substituted code. That covers `UpdateDatabase`, `UpdateTable`, the three tagging
+operations, the whole batch-load family (`CreateBatchLoadTask`,
+`DescribeBatchLoadTask`, `ResumeBatchLoadTask`, `ListBatchLoadTasks`), the account
+settings pair, the six scheduled-query operations, and `PrepareQuery`. Substrate
+also does not enforce which endpoint an operation arrives on: the parser maps both
+the `ingest.` and `query.` host prefixes to the one plugin
+(`emulator/parser.go:455`), so `WriteRecords` answers on the query host and
+`Query` on the ingest host, where AWS publishes each on one endpoint only.
+
+### One seeded query result serves every account, Region and endpoint
+
+`Query` returns, in order of preference, a result seeded for the exact query
+string, a result seeded under the `"*"` wildcard, rows reconstructed from records
+written to the table a `SELECT … FROM …` names, or an empty result set
+(`emulator/timestream_plugin.go:370`). Seeds are installed and cleared through the
+control plane:
+
+```
+POST   /v1/timestream-query/results   {"queryString": "…", "result": {…}}
+DELETE /v1/timestream-query/results   (all seeds; ?queryString=… for one)
+```
+
+Seeds live in the `timestream-ctrl` namespace keyed `result:{queryString}`
+(`emulator/timestream_types.go:103`) and are **not** scoped by account or Region,
+unlike every other Timestream key in that file — `db:{acct}/{region}/{name}`,
+`table:{acct}/{region}/{db}/{name}` and the records key are all scoped. One seed
+therefore serves every caller of the emulator. The seed is also barely validated:
+the handler refuses only a body that fails to decode and a body whose `result` is
+null (`emulator/timestream_ctrl.go:18`), so a result whose row arity disagrees with
+its `ColumnInfo` is stored and returned verbatim. An omitted `queryString`
+silently becomes the `"*"` wildcard (`:26`) rather than being refused, which is
+how a seed intended for one query comes to answer all of them. The lookup discards
+the store's own error — `if err != nil || raw == nil { continue }`
+(`emulator/timestream_plugin.go:381`) — so a state-layer failure is
+indistinguishable from an absent seed
+([#1200](https://github.com/scttfrdmn/substrate/issues/1200)).
+
+### Every Timestream timestamp is a string where the model publishes a number
+
+`TimestreamDatabase` and `TimestreamTable` declare `CreationTime` and
+`LastUpdatedTime` as `string` (`emulator/timestream_types.go:20`, `:22`, `:36`,
+`:38`), and both create paths fill them with
+`p.tc.Now().UTC().Format(time.RFC3339)` (`emulator/timestream_plugin.go:106`,
+`:202`). The reference publishes all four as `Type: Timestamp`, rendering them in
+every JSON sample as `"CreationTime": number`. An SDK deserialising the member
+into a timestamp field fails on a string, so the call errors inside the client
+rather than returning a record, which makes the divergence fatal to an
+SDK-driven test rather than merely cosmetic
+([#1207](https://github.com/scttfrdmn/substrate/issues/1207)).
+
+### A conflict answers 409 and a missing resource 404
+
+`CreateDatabase` and `CreateTable` refuse a duplicate with `ConflictException` at
+409 (`emulator/timestream_plugin.go:103`, `:192`), and `loadDatabase` and
+`loadTable` refuse an absent one with `ResourceNotFoundException` at 404 (`:470`,
+`:490`). The reference publishes both at 400: "ConflictException … HTTP Status
+Code: 400" and "ResourceNotFoundException — The operation tried to access a
+nonexistent resource. HTTP Status Code: 400". Across both Common Errors pages and
+every routed operation's page, `InternalServerException` at 500 is the only
+published Timestream error that is not a 400, so a consumer whose retry policy
+keys on status — retry 409, do not retry 400 — behaves differently against
+substrate than against the service
+([#1198](https://github.com/scttfrdmn/substrate/issues/1198)).
+
+### Three operations answer an empty JSON object
+
+`DeleteDatabase`, `DeleteTable` and `CancelQuery` each return
+`map[string]any{}`, serialised as `{}` (`emulator/timestream_plugin.go:152`,
+`:252`, `:363`). The two delete pages state "If the action is successful, the
+service sends back an HTTP 200 response with an empty HTTP body", so substrate
+sends two bytes where the service sends none. `CancelQuery` is a different
+mistake: the page publishes a response body of `{"CancellationMessage": "string"}`,
+and substrate omits the member, so a consumer reads an empty string with no
+indication it was never sent. `CancelQuery` is also declared
+`(_ *RequestContext, _ *AWSRequest)` (`:362`), which means it reads nothing at
+all — the page publishes `QueryId` as "Required: Yes" with a one-to-sixty-four
+character length constraint, and cancelling an ID that was never issued succeeds
+([#1206](https://github.com/scttfrdmn/substrate/issues/1206)).
+
+### Pagination is accepted and discarded on four operations
+
+`ListDatabases` and `ListTables` read neither `MaxResults` nor `NextToken` and
+emit no `NextToken` (`emulator/timestream_plugin.go:155`, `:255`), though
+`ListTables` publishes "MaxResults — The total number of items to return in the
+output… Valid Range: Minimum value of 1. Maximum value of 20" and a `NextToken` on
+both request and response. `Query` is worse than silent: it emits
+`"NextToken": ""` (`:357`), an empty token rather than an absent member, which an
+SDK paginator can read as a further page. `Query` also never checks
+`QueryString`, published "Required: Yes", so an omitted query string falls
+through the seed lookup to an empty result set instead of the
+`ValidationException` at 400 the page publishes; and `MaxRows` is discarded. The
+same is true of any query `parseTimestreamSelect` cannot handle (`:396`), which
+recognises a bare `SELECT … FROM …` and nothing else — a join, an aggregate or a
+time-series function returns zero rows rather than a refusal, so a consumer
+testing that a malformed query is rejected sees a success
+([#1195](https://github.com/scttfrdmn/substrate/issues/1195)).
+
+### A table is ACTIVE at birth and TableCount never moves
+
+`createTable` stores `TableStatus: "ACTIVE"`
+(`emulator/timestream_plugin.go:207`) where the page publishes the valid values
+`ACTIVE | DELETING | RESTORING`, so the transition a consumer polls for is never
+observable and there is no seed that would produce one. `createDatabase` stores
+`TableCount: 0` (`:110`) and nothing increments it, so after creating three
+tables `DescribeDatabase` still reports zero against a member the reference
+defines as "The total number of tables found within a Timestream database".
+`DeleteDatabase` compounds this by not requiring the database to be empty
+(`:136`): the page states "All tables in the database must be deleted first, or a
+ValidationException error will be thrown", and substrate deletes the database
+record while leaving every table in the store, still reachable by
+`DescribeTable`, under a database that no longer exists. `ValidationException` at
+400 is published on that page, so the refusal has a site
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+### WriteRecords accepts any batch and rejects nothing
+
+`Records` is stored at whatever length it arrives (`emulator/timestream_plugin.go:283`)
+against a published constraint of "Minimum number of 1 item. Maximum number of
+100 items", and the response reports `RecordsIngested` with `Total` and
+`MemoryStore` both set to the record count and `MagneticStore` fixed at zero.
+`CommonAttributes` is discarded: the page defines it as "A record that contains
+the common measure, dimension, time, and version attributes shared across all the
+records in the request… will be merged with the measure and dimension attributes
+in the records object", so a request that factors its dimensions out loses them,
+and a subsequent unseeded `Query` over those records returns rows missing every
+common dimension. Nothing in substrate emits `RejectedRecordsException` at 400 or
+its `RejectedRecords` list of per-record `Reason` and `ExistingVersion`, so the
+duplicate-record, out-of-retention and schema-mismatch surface a consumer's
+partial-failure handler exists for is unreachable, by construction and without a
+seed
+([#1197](https://github.com/scttfrdmn/substrate/issues/1197)).
+
+### Every query column is VARCHAR
+
+`recordsToQueryResult` types every column `ScalarType: "VARCHAR"`
+(`emulator/timestream_plugin.go:444`) and renders every value with
+`fmt.Sprintf("%v", v)` (`:454`), with the columns sorted alphabetically rather
+than in the order the query asked for them. The reference's `Type` shape publishes
+`BIGINT | BOOLEAN | DOUBLE | DATE | INTEGER | INTERVAL_DAY_TO_SECOND |
+INTERVAL_YEAR_TO_MONTH | TIME | TIMESTAMP | UNKNOWN | VARCHAR`, and its `Datum`
+shape publishes `ArrayValue`, `NullValue`, `RowValue` and `TimeSeriesValue`
+alongside `ScalarValue`; substrate's `TimestreamDatum` carries only `ScalarValue`
+and its `TimestreamColumnInfoType` only `ScalarType`
+(`emulator/timestream_types.go:68`, `:82`), so no nested or null datum can be
+represented. A consumer that inspects `ColumnInfo` to decide how to parse each
+value finds every column claiming to be text. A seeded result is unaffected —
+substrate returns the seed's own columns verbatim — so this shapes only the
+records-derived path
+([#1209](https://github.com/scttfrdmn/substrate/issues/1209)).
+
+### DescribeEndpoints answers a host neither published endpoint uses
+
+`describeEndpoints` returns a single endpoint whose address is
+`"timestream." + reqCtx.Region + ".amazonaws.com"` with a
+`CachePeriodInMinutes` of 1 (`emulator/timestream_plugin.go:322`). Timestream
+requires endpoint discovery and publishes its endpoints under the `ingest.` and
+`query.` prefixes; the bare `timestream.{region}.amazonaws.com` is not an address
+AWS publishes for either API. Substrate's parser accepts it anyway, because a
+host it does not special-case falls back to its first label
+(`emulator/parser.go:482`), so the discovery loop closes inside the emulator and
+the divergence only surfaces against the real service. The published
+`CachePeriodInMinutes` member is required but its value is not documented, so
+substrate's 1 is unverified rather than wrong
+([#1209](https://github.com/scttfrdmn/substrate/issues/1209)).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|---|---|---|
+| A request body that is not valid JSON | `ValidationException` | 400 |
+| `DatabaseName` absent on any database or table operation | `ValidationException` | 400 |
+| `TableName` absent on `CreateTable`, `DescribeTable`, `DeleteTable` or `WriteRecords` | `ValidationException` | 400 |
+| Database name already recorded | `ConflictException` | 409 |
+| Table name already recorded in the database | `ConflictException` | 409 |
+| Named database not recorded | `ResourceNotFoundException` | 404 |
+| Named table not recorded | `ResourceNotFoundException` | 404 |
+| Any of the other twenty-one operations | `UnknownOperationException` | 404 |
+
+`ValidationException` at 400 is published on every routed operation's page and is
+the right code for both a malformed body and a missing required member, so
+substrate reuses it for both and a consumer cannot distinguish them.
+`UnknownOperationException` at 404 is published on both Common Errors pages at
+exactly that status. `ConflictException` and `ResourceNotFoundException` are
+published at 400, not at the 409 and 404 substrate returns. Published codes with
+no site in substrate at all are `RejectedRecordsException` (400),
+`AccessDeniedException` (400), `ThrottlingException` (400),
+`ServiceQuotaExceededException` (400), `InvalidEndpointException` (400),
+`QueryExecutionException` (400) and `InternalServerException` (500) — so
+throttling, quota and endpoint-staleness retries, which are the paths a
+Timestream client's retry policy is written for, cannot be exercised here and
+have no seed.
+
+### Cost
+
+| Operation | Cost per call (USD) |
+|---|---|
+| `WriteRecords` | 0.0000005 |
+| `Query` | 0.000001 |
+
+Both keys are `timestream/{Operation}` and both name routed operations, so both
+attribute on every matching call. The cost is per call and does not scale with the
+record count or the bytes scanned, which is how the service prices both.
+
+---
+
+
+## Transfer Family
+
+**Endpoint:** `transfer.{region}.amazonaws.com`
+**Protocol:** JSON (`X-Amz-Target: TransferService.{Operation}`, API version 2018-11-05)
+
+Substrate routes ten of the seventy-three operations the Transfer Family API
+reference lists: create, describe, update and delete for servers and for users,
+plus the two collections that list them. Server and user records are keyed by
+account and Region, so two accounts or two Regions in one run do not see each
+other's servers. Nothing behind the API is modelled — no SFTP, FTPS, FTP or AS2
+endpoint listens, no file moves, and no identity provider is called — because a
+file transfer is not observable through a Transfer Family API call. What a
+consumer can assert is the control-plane record: that a server exists with the
+endpoint type and tags it was given, that it has the users created on it, and
+that deleting it takes its users with it.
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateServer | Reads `Domain`, `EndpointType`, `IdentityProviderType` and `Tags`; every other published member is dropped |
+| DescribeServer | Eight of the members `DescribedServer` publishes, plus three it does not |
+| UpdateServer | Reads `EndpointType` and `Tags` only |
+| DeleteServer | Cascade-deletes the server's users and their index |
+| ListServers | One page; body not decoded, so `MaxResults` and `NextToken` are unread |
+| CreateUser | Requires `ServerId` and `UserName`; `Role` is not checked |
+| DescribeUser | Five of the members `DescribedUser` publishes, plus three it does not |
+| UpdateUser | Reads `HomeDirectory` and `Role` only |
+| DeleteUser | Answers an empty JSON object |
+| ListUsers | One page; requires `ServerId` |
+
+The other sixty-three operations are unrouted and are refused
+`UnknownOperationException` at 404 with the message `The action {name} is not
+recognized.`, which is the code and status the service's own Common Errors page
+publishes for an unrecognised action. Among them are the two that would make a
+server's state observable (`StartServer`, `StopServer`); the whole access,
+agreement, connector, profile, certificate and workflow surface
+(`CreateAccess`, `CreateAgreement`, `CreateConnector`, `CreateProfile`,
+`ImportCertificate`, `CreateWorkflow` and their describe/list/update/delete
+counterparts); `StartFileTransfer` and `StartDirectoryListing`, which are the
+operations a caller would use to move data and which substrate does not model by
+design; the SSH-key operations (`ImportSshPublicKey`, `DeleteSshPublicKey`);
+`TestIdentityProvider`; tagging (`TagResource`, `UntagResource`,
+`ListTagsForResource`); and the security-policy and web-app families. A consumer
+that needs one of these needs real AWS or a seeded stand-in, not a substrate
+run.
+
+### Domain defaults to SFTP, which is not a Domain value
+
+`CreateServer` substitutes `SFTP` when the request omits `Domain`, and `SFTP` is
+not a value the member can carry. `API_CreateServer` publishes `Domain` as
+`Valid Values: S3 | EFS` and states `The default value is S3.`; `SFTP` belongs to
+`Protocols`, which is a different member and is not read at all. The effect is not
+confined to the one response: the value is stored, so every later
+`DescribeServer` and `ListServers` reports a storage domain of `SFTP`, and a
+consumer that branches on `S3` versus `EFS` to decide where to stage fixtures
+takes neither branch
+([#1198](https://github.com/scttfrdmn/substrate/issues/1198)).
+`EndpointType` defaulting to `PUBLIC` in the same block is correct — `PUBLIC` is
+the first of the three published values — so the two defaults must not be read as
+one decision.
+
+### A missing server or user is reported 404 where Transfer publishes 400
+
+Both loaders answer `ResourceNotFoundException` with HTTP 404. Every operation
+page that publishes that code — `DescribeServer`, `DescribeUser`, `UpdateServer`,
+`DeleteServer`, `DeleteUser`, `CreateUser` — publishes it as `HTTP Status Code:
+400`. Transfer is a JSON-target service, so a code-aware SDK reads the code out of
+the body and a consumer catching `ResourceNotFoundException` is unaffected; a
+consumer that classifies by status is not, and the common shape of that mistake is
+a retry wrapper that treats 404 as "not yet consistent, try again" and 400 as
+"malformed, fail now". Against substrate it retries an absent server forever
+([#1198](https://github.com/scttfrdmn/substrate/issues/1198)).
+
+### A duplicate user name is refused a code CreateUser does not publish
+
+Creating a user that already exists on the server is refused `ConflictException`
+at 409. `API_CreateUser` publishes five codes — `InternalServiceError` (500),
+`InvalidRequestException` (400), `ResourceExistsException` (400),
+`ResourceNotFoundException` (400) and `ServiceUnavailableException` (500) — and
+`ConflictException` is not among them; it is published on `UpdateServer`, where
+the reason is a concurrent update rather than a name collision.
+`ResourceExistsException` at 400 is the code with a site on this operation, so a
+consumer whose idempotent-create helper catches it never catches anything
+([#1198](https://github.com/scttfrdmn/substrate/issues/1198)).
+
+### A server is ONLINE from birth and no other state is reachable
+
+`CreateServer` records `State: "ONLINE"` and nothing ever writes the field again.
+`API_DescribedServer` publishes `Valid Values: OFFLINE | ONLINE | STARTING |
+STOPPING | START_FAILED | STOP_FAILED`, and the two operations that would move a
+server between them, `StartServer` and `StopServer`, are not routed. Five of the
+six published values are therefore unobservable, and no transition can be
+asserted: a wait-until-`ONLINE` loop exits on its first poll, and a
+wait-until-`OFFLINE` loop cannot exit at all. A state progression is the kind of
+thing substrate models well — an observation countdown or a simulated-clock
+deadline, seeded per server — so the gap is the absence of a seed, not a scope
+boundary
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+What real AWS reports on the first `DescribeServer` after a `CreateServer` is not
+published on either operation's page and is recorded here as unverified.
+
+### Both Transfer collections send an empty NextToken and ignore MaxResults
+
+`ListServers` and `ListUsers` return every record in one page and set
+`"NextToken": ""`. `ListServers` does not decode its body at all, so a supplied
+`MaxResults` or `NextToken` is not merely ignored but unread. The reference
+publishes `NextToken` with `Length Constraints: Minimum length of 1. Maximum
+length of 6144`, which makes the empty string an illegal value rather than a
+terminator, and `MaxResults` with `Valid Range: Minimum value of 1. Maximum value
+of 1000`. The consequence depends on the idiom: a paginator that stops when the
+token is falsy terminates correctly by accident, while one written as `while
+"NextToken" in response` loops forever, because the member is always present. It
+also follows that `InvalidNextTokenException`, published at 400 on both
+operations, can never be reached
+([#1195](https://github.com/scttfrdmn/substrate/issues/1195)).
+
+### CreateUser accepts a request with no Role
+
+The required-member check tests `ServerId` and `UserName`. `API_CreateUser`
+publishes three members as `Required: Yes` — `Role`, `ServerId` and `UserName` —
+so a request that names a user and a server but no access role is accepted, stored
+and reported successful. This is precisely the shape of defect a run against
+substrate exists to catch before a template reaches AWS: the omission is
+invisible locally and fatal on the first real deploy
+([#1197](https://github.com/scttfrdmn/substrate/issues/1197)).
+
+### DescribeServer counts zero users and omits most published members
+
+`UserCount` is declared on the stored server record and is never assigned, so
+`DescribeServer` reports `UserCount: 0` however many users exist — including
+immediately after a `CreateUser` that succeeded. `API_DescribedServer` documents
+the member as the number of users assigned to the server. The same response sends
+eight published members (`ServerId`, `Arn`, `Domain`, `EndpointType`,
+`IdentityProviderType`, `State`, `Tags`, `UserCount`) and omits the rest,
+including `Protocols`, `EndpointDetails`, `LoggingRole`, `HostKeyFingerprint`,
+`IdentityProviderDetails`, `SecurityPolicyName` and `IpAddressType`; and it adds
+`CreatedAt`, `AccountID` and `Region`, none of which `DescribedServer` publishes.
+`DescribeUser` has the matching shape: five published members plus `ServerId`,
+`AccountID` and `Region` inside the user object, with
+`HomeDirectoryMappings`, `HomeDirectoryType`, `Policy`, `PosixProfile` and
+`SshPublicKeys` absent. The two list shapes are thinner still — `ListedServer`
+publishes eight members and substrate sends four, `ListedUser` publishes six and
+substrate sends four — so a consumer that lists to filter on `EndpointType` or
+`SshPublicKeyCount` reads a missing member as a zero value
+([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
+
+### UpdateServer reads two members and publishes neither of them as one it accepts
+
+The update handler decodes `ServerId`, `EndpointType` and `Tags`, applies the
+latter two and reports success. `API_UpdateServer` publishes no `Tags` member at
+all — tagging a server is `TagResource`, which substrate does not route — and does
+publish `Certificate`, `EndpointDetails`, `HostKeyId`,
+`IdentityProviderDetails`, `IpAddressType`, `LoggingRole`,
+`PostAuthenticationLoginBanner`, `PreAuthenticationLoginBanner`,
+`ProtocolDetails`, `Protocols`, `S3StorageOptions`, `SecurityPolicyName`,
+`StructuredLogDestinations` and `WorkflowDetails`, every one of which is dropped
+silently. A consumer that adds FTPS by setting `Protocols` and `Certificate` gets
+a 200 carrying the server ID and reads back an unchanged server
+([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
+
+### Server IDs are unseeded, so no two runs produce the same one
+
+`generateTransferServerID` reads from `crypto/rand`. The shape is right — `s-`
+followed by 17 hexadecimal characters, 19 in total, which is what
+`API_DescribedServer` publishes as `Pattern: s-([0-9a-f]{17})` and `Length
+Constraints: Fixed length of 19` — but the value is tied neither to the simulated
+clock nor to a seed, so the same test run twice produces different IDs, a
+recorded run cannot be re-derived from its inputs, and an exported fixture that
+pins a server ID is stale as soon as it is written. That is a direct cost to the
+property the rest of the emulator is built around
+([#1204](https://github.com/scttfrdmn/substrate/issues/1204)).
+
+### A stack-deployed server is invisible to DescribeServer
+
+`AWS::Transfer::Server` is deployed as a stub: the properties are written to the
+CloudFormation stub namespace and never into the Transfer plugin's own state, so
+the ten routed operations cannot see the resource the stack created. Calling
+`DescribeServer` on the value a template exported answers
+`ResourceNotFoundException`. The physical ID compounds it — it is `s-` followed by
+the lower-cased logical ID, so a resource named `MySftpServer` gets
+`s-mysftpserver`, which satisfies neither the published fixed length of 19 nor the
+published `s-([0-9a-f]{17})` pattern, and cannot be a value any Transfer
+operation would accept. `Ref` is correct: AWS publishes `Ref returns the server
+ARN, such as arn:aws:transfer:us-east-1:123456789012:server/s-01234567890abcdef`,
+and that is what substrate returns
+([#1203](https://github.com/scttfrdmn/substrate/issues/1203)).
+
+### The two delete operations answer an empty JSON object
+
+`DeleteServer` and `DeleteUser` answer `{}` at 200, where both pages state `If
+the action is successful, the service sends back an HTTP 200 response with an
+empty HTTP body.` This is listed for completeness and ranked last deliberately:
+`API_DeleteServer`'s own example response block shows `{ }`, so the reference does
+not agree with itself, and no SDK distinguishes an empty body from an empty object
+for an operation with no response members
+([#1206](https://github.com/scttfrdmn/substrate/issues/1206)).
+
+### What a refusal reports
+
+| Condition | Code | Status |
+|-----------|------|--------|
+| Request body that is not JSON | InvalidRequestException | 400 |
+| `ServerId` absent or empty | InvalidRequestException | 400 |
+| `ServerId` or `UserName` absent on a user operation | InvalidRequestException | 400 |
+| Server ID that does not exist | ResourceNotFoundException | 404 |
+| User that does not exist on the named server | ResourceNotFoundException | 404 |
+| User name already present on the server | ConflictException | 409 |
+| Operation outside the routed ten | UnknownOperationException | 404 |
+
+Two of those seven do not match the reference: `ResourceNotFoundException` is
+published at 400 on every operation that carries it, and the duplicate-user case
+has no site for `ConflictException` on `CreateUser` at all, where
+`ResourceExistsException` at 400 is the published code. The refusal for an
+undecodable body is `InvalidRequestException` at 400 rather than the Common Errors
+code `MalformedHttpRequestException`, also 400, because that code's published
+gloss is about content-encoding decompression rather than JSON syntax; the
+reasoning is recorded at the call site.
+
+Published codes with no site in substrate: `AccessDeniedException`, which
+`CreateServer`, `UpdateServer` and `DeleteServer` publish at 400 and the Common
+Errors page publishes at 403; `ResourceExistsException` (400);
+`InvalidNextTokenException` (400), unreachable because neither collection reads a
+token; `ThrottlingException` (400 per operation, 400 on Common Errors);
+`InternalServiceError` (500); and `ServiceUnavailableException` (500). The rest of
+the Common Errors vocabulary is likewise unemitted: `ExpiredTokenException` (403),
+`IncompleteSignature` (403), `InternalFailure` (500),
+`MalformedHttpRequestException` (400), `NotAuthorized` (401), `OptInRequired`
+(403), `RequestAbortedException` (400), `RequestEntityTooLargeException` (413),
+`RequestTimeoutException` (408), `ServiceUnavailable` (503),
+`UnrecognizedClientException` (403) and `ValidationError` (400).
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::Transfer::Server | server ARN | Physical ID is `s-` + lower-cased logical ID, which the published `s-([0-9a-f]{17})` pattern rejects. Deployed as a stub, so `DescribeServer` cannot see it. `Fn::GetAtt Arn` resolves; `ServerId`, `State` and `As2ServiceManagedEgressIpAddresses` answer an empty string |
+
+`AWS::Transfer::User` is not deployed, so a template that creates a server and its
+users gets the server stub and a refusal for each user.
+
+### Cost
+
+Creating a server is charged $0.30, an approximation of the published
+$0.30 per protocol per hour collapsed into a single per-creation charge. The key
+is matched on the operation name, which a JSON-target request carries in its
+`X-Amz-Target` header, so the entry is live. No other Transfer operation is
+charged, and no per-hour or per-gigabyte component is modelled.
+
+---
+
+
+## OpenSearch
+
+**Endpoint:** `search-{domain}-{suffix}.{region}.es.amazonaws.com`, `{id}.{region}.aoss.amazonaws.com`
+**Protocol:** OpenSearch REST (paths and JSON bodies, not an AWS service model)
+**Routing:** any host containing `.es.` or `.aoss.`, and the SigV4 signing names `es` and `aoss`, are mapped to this plugin. The domain or collection name in the host is data, not a routing key, and substrate does not read it.
+
+**Substrate routes the OpenSearch data plane only.** Indexing, searching, bulk
+writes, scrolling and the handful of index operations below are emulated; the
+`es`/`opensearch` **control plane is not routed at all**. There is no
+`CreateDomain`, `DescribeDomain`, `UpdateDomainConfig`, `ListDomainNames` or
+`DeleteDomain`, and no `aoss` collection operation. A control-plane call is not
+refused as an unknown action either: it arrives on a host this plugin owns, its
+path is split as `{index}/{rest…}`, and `POST /2021-01-01/opensearch/domain` is
+therefore read as an index named `2021-01-01` and refused `route_not_found` at
+404 in the OpenSearch engine's error envelope — a body with no AWS `Code` in it,
+which an `opensearch` SDK client cannot turn into a modelled error. A consumer
+must treat the domain as pre-existing and address the data plane directly
+([#1212](https://github.com/scttfrdmn/substrate/issues/1212)).
+
+There is one cluster per run and it is shared. Substrate holds no notion of which
+domain a request was addressed to, and its state keys carry no account or Region
+segment, so every caller in a run reads and writes the same indices.
+
+### Supported operations
+
+| Method and path | Notes |
+|-----------------|-------|
+| `PUT /{index}` | Stores a supplied `mappings` and `settings`; refuses an existing index |
+| `GET /{index}` | Always reports one shard and no replicas; never returns stored settings |
+| `HEAD /{index}` | Answers the same JSON body as `GET`, where the reference publishes a status and no body |
+| `DELETE /{index}` | Deletes the index and every document in it |
+| `PUT\|POST /{index}/_mapping` | Acknowledged and discarded |
+| `POST /{index}/_refresh` | Reports a one-shard `_shards` object |
+| `PUT\|POST /{index}/_doc/{id}` | Always 201 with `_version: 1`, `_seq_no: 0`, no `_primary_term` |
+| `POST /{index}/_doc` | ID drawn from `crypto/rand` |
+| `GET /{index}/_doc/{id}` | Reports `_version: 1` always; a miss is the error envelope, not `found: false` |
+| `DELETE /{index}/_doc/{id}` | Always `result: "deleted"` at 200, even for a document that never existed |
+| `POST\|PUT /{index}/_bulk` | `index`, `create` and `delete` only; `errors` always `false` |
+| `{any method} /{index}/_search` | `query`, `from`, `size`, `aggs` and `scroll` are read; `sort` and `_source` are parsed and ignored |
+| `GET\|POST /_search/scroll` | Body or `scroll_id` parameter; reports the page length as the total |
+| `DELETE /_search/scroll` | Reports `succeeded` and `num_freed` |
+| `GET /_cluster/health` | A fixed single-node green response |
+
+Anything else is refused `route_not_found` at 404. That set includes
+`PUT\|POST /{index}/_create/{id}`, which the reference publishes alongside
+`_doc`; the index-less forms `GET\|POST /_search` and `POST /_bulk`, which are
+misread as indices named `_search` and `_bulk` and answer
+`index_not_found_exception` and `route_not_found` respectively; the published
+path form `GET\|POST /_search/scroll/{scroll_id}`; `DELETE /_search/scroll/_all`;
+`_update`, `_update_by_query`, `_delete_by_query`, `_reindex`, `_count`,
+`_msearch`, `_alias`, `_aliases`, `_settings`, `_cat/*`, `_nodes/*`, `_snapshot/*`
+and the point-in-time API. Substrate is not an OpenSearch engine and does not aim
+to be one: what it models is the set of observations a consumer's index-then-query
+code makes.
+
+### OpenSearch state keys carry no account or Region, so one cluster is shared
+
+Index metadata is stored at `index:{name}`, a document at `doc:{index}/{id}`, a
+document-ID list at `doc_ids:{index}` and a scroll context at `scroll:{id}`. Every
+other plugin in substrate prefixes its keys with the account and Region from the
+request context, which is what makes a multi-account or multi-Region run
+meaningful. Here two accounts in one run write into the same index, a document
+indexed while acting as one principal is searchable as another, and a test that
+separates fixtures by Region does not separate them. The domain name is not part
+of the key either — nor of the routing — so two domains in one template are also
+one cluster
+([#1200](https://github.com/scttfrdmn/substrate/issues/1200)).
+
+### Every search hit reports _index as unknown
+
+The paging helper that builds a search response emits the literal string
+`unknown` for `_index` on every hit. The search reference publishes `_index` on
+each hit as the name of the index the document came from, and the scroll
+continuation path in this same plugin emits the real name, so the two disagree
+with each other as well as with the reference. A consumer that reads `_index` off
+a hit to address a follow-up write — the normal pattern for a multi-index search,
+a delete-by-hit, or a reindex loop — builds a request against an index literally
+called `unknown`
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### A query with two top-level clauses is decided by Go map order
+
+The matcher iterates the query object as a Go map and returns as soon as it sees
+`match_all` (matching) or `match_none` (not matching). Go randomises map
+iteration order, so a body such as `{"query": {"match_all": {}, "term": {"status":
+"open"}}}` matches every document or applies the term filter depending on which
+key the runtime happens to visit first, and the same test run twice gives
+different answers. That is the one defect class this repository cannot tolerate:
+reproducibility by construction is the premise, and here the same input produces
+different output within a single build. No published page supplies a code to
+refuse such a body — the Query DSL documents compound queries as the way to
+combine clauses and says nothing about a multi-clause object, so there is no
+published error for substrate to answer — which means the fix is to make the
+decision order-independent, not to start refusing
+([#1201](https://github.com/scttfrdmn/substrate/issues/1201)).
+
+### Result order is a random ID sorted lexicographically
+
+An auto-generated document ID is twelve bytes from `crypto/rand`, and the
+`doc_ids` index that drives document loading is re-sorted lexicographically on
+every append. Search therefore returns documents in the order of random strings:
+different on every run, and unrelated to any property of the documents. Nothing
+else supplies an order, because `_score` is hard-coded to `1.0` on every hit and
+`max_score` to `1.0` on every response, and the `sort` member is decoded into the
+request struct and then never read — as is `_source`, so field filtering does
+nothing. A test that asserts the first hit, or that pins a response body, is
+asserting a coin flip
+([#1201](https://github.com/scttfrdmn/substrate/issues/1201)).
+
+### The two OpenSearch cost entries can never match a request
+
+The cost table registers `opensearch/IndexDocument` and `opensearch/Bulk`. The
+lookup key is the lower-cased service name joined to `req.Operation`, and for a
+REST-routed plugin `req.Operation` holds the HTTP method — this plugin's own
+dispatcher says so on its first line. The resolver table that rewrites a verb into
+a semantic operation name has no `opensearch` entry, so the keys a request
+actually offers are `opensearch/PUT`, `opensearch/POST` and `opensearch/GET`.
+Neither table entry is reachable, and an indexing workload reports a cost of zero.
+Fixing it means adding an `opensearch` resolver, not editing the cost table: the
+operation name is also what the audit log, the fault injector and the IAM
+condition-key evaluation see
+([#1202](https://github.com/scttfrdmn/substrate/issues/1202)).
+
+### Indexing a document is always 201 and never reports _primary_term
+
+A write to `_doc` answers HTTP 201 with `_version: 1` and `_seq_no: 0`, whether it
+created the document or overwrote one, and omits `_primary_term`. The reference
+publishes `200` for an updated document and `201` for a created one, a `_version`
+that increments with each write, and both `_seq_no` and `_primary_term` in the
+response body. The consequence is that the whole optimistic-concurrency contract
+is unreachable: a consumer cannot read a `_seq_no`/`_primary_term` pair worth
+sending back, cannot provoke the published `409` version conflict, and cannot
+distinguish a create from an update by status. The `result` member is computed
+correctly (`created` or `updated`), so the body and the status contradict each
+other
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### A bulk update is dropped and a bulk response never reports an error
+
+The bulk handler switches on three action names. The reference publishes four —
+`create`, `index`, `update`, `delete` — and an `update` line is consumed as an
+action header whose body line is then read as the next action header, so the
+update and whatever followed it disappear without a diagnostic. The response makes
+that invisible: `errors` is hard-coded to `false`, every item reports `status:
+200` even when it created a document, and no item carries `_version`, `_shards`,
+`_seq_no`, `_primary_term` or the published `error` object. The reference
+documents item statuses of `200 (updated)`, `201 (created)`, `404 (not found)` and
+`409 (version conflict)`, and `errors` as reporting whether any action failed. A
+consumer whose ingest checks `if response["errors"]` never enters the branch it
+wrote that check for
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### Deleting a document that is not there reports deleted
+
+The delete handler issues the state delete unconditionally and answers
+`result: "deleted"` with `_version: 2` at 200. The reference states that the
+operation `Returns deleted if the document was successfully deleted or not_found
+if the document did not exist`. A delete-then-confirm test therefore cannot tell a
+real delete from a no-op, and neither can a cleanup routine that counts how many
+of its targets were actually present. The `_version: 2` is fixed rather than
+derived, so it is wrong for any document written more than once
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### A scroll continuation reports its page length as the total
+
+The continuation response sets `hits.total.value` to the number of hits in the
+page it is returning. The scroll reference is explicit that `hits.total` `shows
+the total count from the original search query, not the current batch`. The
+initial search is correct — it reports the size of the full filtered set — so the
+first response and every later one disagree about what the number means. A loop
+that scrolls while its accumulated count is below `total` exits after one page
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### An index read reports settings it was never given
+
+`GET /{index}` always answers `number_of_shards: "1"` and
+`number_of_replicas: "0"`, even though `PUT /{index}` does store a supplied
+`settings` object. A `_mapping` update is worse: it is acknowledged and thrown
+away, so a consumer that puts a mapping and reads it back sees only whatever the
+create call carried. `HEAD /{index}` is routed to the same handler as `GET` and so
+answers a JSON body, where the index-exists reference states the operation
+`returns only one of two possible response codes: 200 … and 404` and publishes no
+body at all
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+
+### What a refusal reports
+
+Refusals on this endpoint are the engine's own JSON envelope —
+`{"error": {"type": …, "reason": …}, "status": N}` — and not an AWS `Code`/`Message`
+pair, because the data plane is the domain's REST API rather than an AWS
+control-plane operation. The `status` member repeats the HTTP status.
+
+| Condition | `error.type` | Status |
+|-----------|--------------|--------|
+| Path with no index segment | index_not_specified | 400 |
+| `PUT /{index}` where the index exists | resource_already_exists_exception | 400 |
+| `GET`, `HEAD` or `DELETE` on an index that does not exist | index_not_found_exception | 404 |
+| `GET /{index}/_doc/{id}` where the document is absent | not_found | 404 |
+| Search, scroll or clear-scroll body that is not valid JSON | json_parse_exception | 400 |
+| Scroll with neither a body `scroll_id` nor a `scroll_id` parameter | illegal_argument_exception | 400 |
+| Scroll ID with no stored context | search_context_missing_exception | 404 |
+| Stored scroll context that will not decode | internal_error | 500 |
+| Any path the dispatcher does not recognise, including every control-plane path | route_not_found | 404 |
+
+None of these type strings comes from an AWS API model, because there is no AWS
+API model for the data plane; they follow the engine's own lower-cased exception
+names. Two are substrate's own coinages with no counterpart in the engine —
+`index_not_specified` and `route_not_found` — and are named as such so that a
+reader does not mistake them for published values. The envelope also omits
+`root_cause`: a published OpenSearch error nests
+`{"error": {"root_cause": [{"type": …, "reason": …}], "type": …, "reason": …}, "status": N}`,
+so a consumer reading `error.root_cause[0].reason` finds no such key
+([#1213](https://github.com/scttfrdmn/substrate/issues/1213)).
+Published outcomes with no site here include the `409` version conflict on a
+document write and on a bulk item, and the `404`-with-`found: false` body the
+get-document reference publishes; the reference publishes no error body for an
+expired scroll ID or for a query object carrying several top-level clauses, so
+substrate's answers in those two cases have nothing to be measured against.
+
+### CloudFormation resource types
+
+| Type | Ref | Notes |
+|------|-----|-------|
+| AWS::OpenSearchService::Domain | domain name | Deployed as a stub; the data plane does not see it and serves one shared cluster regardless. `Fn::GetAtt Arn` and `DomainArn` resolve to the domain ARN; `DomainEndpoint`, `DomainEndpointV2` and `Id` answer an empty string |
+
+`AWS::Elasticsearch::Domain`, the legacy type AWS still documents a migration path
+from, is not deployed. Because `DomainEndpoint` resolves to an empty string, a
+template that passes the endpoint into a Lambda environment variable or a stack
+output hands on an empty value
+([#1203](https://github.com/scttfrdmn/substrate/issues/1203)).
+
+### Cost
+
+No OpenSearch request is charged. Two entries exist in the cost table,
+`opensearch/IndexDocument` and `opensearch/Bulk`, and neither can match: the
+lookup key is built from `req.Operation`, which on this endpoint is the HTTP
+method, so the only keys ever offered are `opensearch/PUT`, `opensearch/POST` and
+`opensearch/GET`. Treat an OpenSearch workload as free until the operation-name
+resolver covers this service.
+
+---
+
+
+## execute-api (API Gateway data plane)
+
+**Endpoint:** `{apiId}.execute-api.{region}.amazonaws.com/{stage}/{resourcePath}`
+**Protocol:** whatever the deployed API accepts — there is no service model
+**Routing:** any host containing `.execute-api.`; the first host label is the API ID, and is data rather than part of the service name
+
+This is not a modelled AWS API. It is the runtime endpoint a browser or an HTTP
+client calls, and substrate's job on it is to do what a deployed stage does: find
+the `AWS_PROXY` integration for the requested method and path, build the proxy
+event AWS would build, invoke the Lambda function through the registry, and turn
+the function's proxy response back into an HTTP response. Nothing is stored and
+no state is owned — the API, its routes and its integrations are read out of the
+API Gateway and API Gateway v2 plugins' state, and the function is whatever the
+Lambda plugin holds. An SDK-generated client never calls this endpoint, which is
+why it has no operation list.
+
+**The name a caller needs is `execute-api`.** The plugin registry keys every
+plugin on its `Name()`, and this one returns `execute-api`; that is the value a
+request's resolved service name must equal, and the value to use in a fault
+injection rule, a cost key or an audit filter. The string `apigateway-proxy` that
+appears beside the plugin in the registration table is a label used only to
+interpolate into an initialization error message. It is not an alias, it never
+reaches routing, and addressing it gets `ServiceNotAvailable` at 501.
+
+### What a request does
+
+| Step | Result |
+|------|--------|
+| Host header read for the API ID | Missing host is refused 400; a host without `.execute-api.` is refused 400 |
+| First path segment taken as the stage | Never validated against a stage or a deployment |
+| Remainder taken as the resource path | Compared to route keys and resource paths by exact string equality |
+| v2 route lookup, then v1 resource lookup | The first `AWS_PROXY` integration found wins; v2 falls back to `$default` |
+| Proxy event built | 2.0 format for an HTTP API, 1.0 format for a REST API, chosen by which plugin held the API |
+| Lambda invoked | Through the registry, as `POST /2015-03-31/functions/{name}/invocations` |
+| Response parsed | `statusCode`, `headers`, `body` and `isBase64Encoded` are read; anything else is relayed at 200 |
+
+Nothing else in the data-plane surface is modelled. There are no authorizers,
+no usage plans or API keys, no WAF, no request or response mapping templates, no
+non-proxy integration types, no binary media-type handling beyond a single
+base64 decode, no CORS preflight handling, no throttling and no gateway response
+customisation. A request whose API cannot be found, or whose method and path
+match no `AWS_PROXY` integration, is refused 502.
+
+### The stage in the path is never checked
+
+The stage is split off the path and used only to populate the event. No stage
+record is read, no deployment is read, and no check ties the two together, so
+`/prod/users`, `/dev/users` and `/typo/users` are one request. A template that
+creates a resource, a method and an integration but never a `AWS::ApiGateway::Deployment`
+or `AWS::ApiGateway::Stage` — a real and common CDK mistake — is indistinguishable
+from a correct one when driven through this endpoint, which removes exactly the
+signal a pre-AWS validation run is supposed to produce. What AWS returns for a
+stage that does not exist is not stated in the gateway-response table and is
+recorded here as unverified; the table does publish
+`MISSING_AUTHENTICATION_TOKEN` at 403 for `the cases when the client attempts to
+invoke an unsupported API method or resource`, which is the landing for an unknown
+resource path
+([#1214](https://github.com/scttfrdmn/substrate/issues/1214)).
+
+### A path parameter never matches, so a proxy resource is unreachable
+
+Resolution compares the request's resource path to the stored path with `!=` for
+a REST API and `==` for an HTTP API route key. Neither compare understands a path
+template, so a REST API whose only resource is `/{proxy+}` matches nothing, and
+one with `/users/{id}` cannot serve `/users/42`. Since `/{proxy+}` forwarding to a
+single handler is the shape most CDK and SAM applications emit, the common case is
+that a correctly deployed API answers 502 for every request. `pathParameters` is
+hard-coded to `nil` in the v1 event and absent from the v2 event for the same
+reason: with no template there is nothing to extract. An HTTP API is partially
+rescued by its `$default` route, which substrate does fall back to, so a
+`$default`-only HTTP API works and a parameterised one does not
+([#1214](https://github.com/scttfrdmn/substrate/issues/1214)).
+
+### A failed Lambda is reported to the caller as a success
+
+Only the invoke response's **body** is examined. The invoke status and headers are
+discarded, including `X-Amz-Function-Error`, which substrate's own Lambda plugin
+sets when a function errors and which a control-plane seed can force. The body is
+then decoded leniently: a body that is not JSON is passed through verbatim at HTTP
+200, and a body that is JSON but not a proxy response yields a zero `statusCode`
+that is promoted to 200 with an empty body. The REST API developer guide states
+the opposite — `If the function output is of a different format, API Gateway
+returns a 502 Bad Gateway error response.` — so an unhandled exception payload,
+which is neither a proxy shape nor an error to this code, reaches the caller as a
+200 carrying `{"errorMessage": …}` or as a 200 carrying nothing at all. The path a
+test seeds a Lambda failure in order to exercise is therefore the path that cannot
+be observed
+([#1214](https://github.com/scttfrdmn/substrate/issues/1214)).
+
+### The v2 rawQueryString is assembled from Go map order
+
+The 2.0 event's `rawQueryString` is built by concatenating `key=value` while
+iterating the parsed query parameters, which are held in a Go map. With two or
+more parameters the resulting string differs between runs of the same test, so an
+event payload cannot be pinned and a handler that parses `rawQueryString` itself
+sees a different input each time. Values are also inserted without percent
+encoding, so a value containing `&` or `=` silently changes the shape of the
+string. Deterministic replay is the property the rest of the emulator is built to
+guarantee, and this breaks it inside the payload a consumer's code reads
+([#1201](https://github.com/scttfrdmn/substrate/issues/1201)).
+
+### PayloadFormatVersion is recorded by the control plane and ignored by the proxy
+
+The v2 integration record carries `PayloadFormatVersion`, and the proxy never
+reads it: the event format is decided by which plugin's state held the API, 2.0
+for an HTTP API and 1.0 for a REST API. The HTTP API reference states `The
+supported values are 1.0 and 2.0` and documents two different event shapes, so an
+HTTP API deliberately configured for `1.0` — which is what a consumer does when
+migrating a REST API handler unchanged — receives a 2.0 event, and its handler
+reads `event["httpMethod"]` and `event["path"]` as absent
+([#1215](https://github.com/scttfrdmn/substrate/issues/1215)).
+
+### Both proxy events are thinner than the published ones
+
+The 1.0 event carries a `version` member, which the REST API proxy input
+reference does not publish at all — payload-format versioning belongs to HTTP
+APIs — so a handler that dispatches on `event.get("version")` sends a REST API
+request down its HTTP API branch. It omits `multiValueHeaders` and
+`multiValueQueryStringParameters`, sends `stageVariables` as an empty object where
+the published example shows `null`, and reduces `requestContext` to `stage`,
+`requestId`, `httpMethod`, `resourcePath` and `apiId` — five of the fifteen
+members published, with `identity` and `authorizer` among the absent, so
+`requestContext.identity.sourceIp` and `requestContext.authorizer.claims` cannot
+be read. The 2.0 event omits `cookies`, `queryStringParameters`, `pathParameters`
+and `stageVariables`, and its `requestContext` omits `time`, `timeEpoch`,
+`domainName`, `domainPrefix`, `accountId` and the `http` members `protocol`,
+`sourceIp` and `userAgent`. The omission that bites first is
+`queryStringParameters`: substrate does parse the query string into
+`rawQueryString`, so the information is present and simply not offered in the
+member a 2.0 handler reads
+([#1215](https://github.com/scttfrdmn/substrate/issues/1215)).
+Whether a named stage contributes a segment to the 1.0 `path` and the 2.0
+`rawPath`, as substrate assumes, is unverified: both published examples use the
+`$default` stage, where the question does not arise, and the REST example shows
+`path` equal to `resource`.
+
+### What a refusal reports
+
+A refusal is a JSON object with a single `message` member carrying substrate's own
+diagnostic text, which is not the shape or the status API Gateway publishes for any
+of these conditions.
+
+| Condition | Body | Status |
+|-----------|------|--------|
+| Plugin initialized without a registry | `{"message": "proxy plugin not wired to registry"}` | 500 |
+| No `Host` header | `{"message": "missing Host header"}` | 400 |
+| Host without an `.execute-api.` label | `{"message": "unexpected host: …"}` | 400 |
+| API ID not found in either plugin's state | `{"message": "no Lambda integration found: API … not found"}` | 502 |
+| No `AWS_PROXY` integration for the method and path | `{"message": "no Lambda integration found: no AWS_PROXY integration for …"}` | 502 |
+| Proxy event will not marshal | `{"message": "build proxy event: …"}` | 500 |
+| Lambda invocation refused, or nil | `{"message": "lambda invoke: …"}` or `{"message": "nil lambda response"}` | 502 |
+| Lambda answered a body that is not a proxy response | the body verbatim, or an empty body | 200 |
+
+API Gateway publishes a gateway response type and a default status for each of
+these situations, and none of them is a 502 carrying prose.
+`MISSING_AUTHENTICATION_TOKEN` is 403 and its gloss covers `the cases when the
+client attempts to invoke an unsupported API method or resource`, which is the
+published landing for an unrecognised path — substrate answers 502.
+`RESOURCE_NOT_FOUND` is 404, `INTEGRATION_FAILURE` and `INTEGRATION_TIMEOUT` are
+504, `API_CONFIGURATION_ERROR` is 500, `BAD_REQUEST_BODY` and
+`BAD_REQUEST_PARAMETERS` are 400, `UNAUTHORIZED` is 401, `ACCESS_DENIED`,
+`EXPIRED_TOKEN`, `INVALID_API_KEY`, `INVALID_SIGNATURE` and `WAF_FILTERED` are
+403, `REQUEST_TOO_LARGE` is 413, `UNSUPPORTED_MEDIA_TYPE` is 415, and
+`THROTTLED` and `QUOTA_EXCEEDED` are 429; `DEFAULT_4XX` and `DEFAULT_5XX`
+publish no default status of their own. Every one of those is currently without a
+site in substrate. Which type covers a resource that exists but carries no
+`AWS_PROXY` integration is not stated in the table and is recorded here as
+unverified. The published answer for a malformed function output is not a gateway
+response type at all but a plain `502 Bad Gateway`, which is the one status
+substrate does emit — for the wrong conditions, and never for that one
+([#1214](https://github.com/scttfrdmn/substrate/issues/1214)).
 
 ---
 
