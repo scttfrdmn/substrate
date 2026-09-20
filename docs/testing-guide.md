@@ -529,6 +529,50 @@ namespaces match service names: `"s3"`, `"dynamodb"`, `"lambda"`, `"iam"`, etc.
 
 <!-- TODO(#178): document SetBreakpoint API once exposed -->
 
+## Counting Requests From Another Process
+
+A Go test that starts the emulator itself can count requests through the event
+store: `ts.Store().GetEvents(ctx, substrate.EventFilter{Service: "s3", Operation:
+"PutObject"})` returns every matching event.
+
+A consumer that runs `substrate server` as a **separate** process cannot reach that
+store. Read the same log over HTTP instead:
+
+```bash
+# How many PutObjects has this server seen?
+curl -s 'http://localhost:4566/v1/debug/events?service=s3&operation=PutObject'
+# {"events":[…],"count":2,"total":2,"truncated":false}
+```
+
+`operation=` (or `op=`) filters to one operation, and `service=`, `stream=` and
+`after=` narrow further. Each entry carries at least `seq`, `service`,
+`operation`, `status_code`, `error_code` and `timestamp`.
+
+**Assert on `total`, not on `count`.** `count` is the length of `events`, which
+`limit=` (default 500) trims to the *most recent* matches — so on a run that
+recorded more than the limit, a count read from `count` is silently short and a
+request early in the run is not in the page at all. `total` is the number matching
+the filter before the limit, and `truncated` says whether the two differ.
+
+```bash
+# Nothing wrote, and that is a claim about the whole run rather than the last page.
+test "$(curl -s 'http://localhost:4566/v1/debug/events?op=PutObject' | jq .total)" -eq 0
+```
+
+This is stronger than diffing a bucket listing before and after, which cannot see a
+PUT that rewrote an object with identical bytes, and cannot tell "nothing was
+attempted" from "something was attempted and refused". `status_code` tells those
+apart — it is recorded whether or not `event_store.include_bodies` is set, and so is
+`error_code`, which carries the refusal's own AWS code.
+
+Two members are **not** in an entry: `method` and `path`. They live on the recorded
+request, which `event_store.include_bodies` governs, so they would be empty in the
+default configuration; `service` plus `operation` identifies an operation in every
+configuration.
+
+From the CLI, `substrate inspect <service>` prints the most recent 100 events for one
+service and says `showing 100 of N` when the run was longer.
+
 ## Cost Assertions
 
 Substrate tracks real AWS pricing per operation. Use `EventStore.GetCostSummary`

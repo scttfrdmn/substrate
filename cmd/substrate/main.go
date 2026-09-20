@@ -956,10 +956,19 @@ func newInspectCmd() *cobra.Command {
 					DurationMS int64   `json:"duration_ms"`
 					Error      string  `json:"error"`
 				} `json:"events"`
-				Count int `json:"count"`
+				Count int  `json:"count"`
+				Total int  `json:"total"`
+				Trunc bool `json:"truncated"`
 			}
 			_ = json.Unmarshal(data, &result)
-			fmt.Printf("Recent events for %s (%d):\n", service, result.Count)
+			// The count printed is the count shown, and the total says so when the two
+			// differ: the request asks for the last 100, so before #1237 exposed `total`
+			// this line reported 100 for a run that had recorded thousands.
+			if result.Trunc {
+				fmt.Printf("Recent events for %s (showing %d of %d):\n", service, result.Count, result.Total)
+			} else {
+				fmt.Printf("Recent events for %s (%d):\n", service, result.Count)
+			}
 			for _, ev := range result.Events {
 				errStr := ""
 				if ev.Error != "" {

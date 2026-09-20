@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A request log an out-of-process consumer can count with** (#1237). A Go test that starts the
+  emulator counts requests through `EventStore.GetEvents`; a consumer that runs `substrate server`
+  as a separate process cannot reach that store at all — objectfs mounts a bucket under a real
+  `sudo mount -t objectfs`, so the mount is a different process by construction — and its only
+  alternative was to list the bucket before and after and diff the listing, which cannot see a PUT
+  that rewrote an object with identical bytes and cannot tell "nothing was attempted" from
+  "something was attempted and refused". `GET /v1/debug/events` already carried the data; what it
+  could not do was answer a question about one operation, and what it answered about a long run was
+  a count that was silently short. It now honours **`operation=`** (with `op=` as the alias #1237
+  proposed, because silently ignoring one spelling of the filter answers "how many PutObjects" with
+  every event in the log), and reports **`total`** — the number matching the filter before `limit`
+  is applied — alongside **`truncated`**. `count` keeps its meaning, the length of `events`, so the
+  debug UI and `substrate inspect` are unaffected; a counting caller reads `total`. The distinction
+  is the point: `limit` trims the *oldest* matching events, so before this a run that recorded more
+  than the default 500 hid a write that happened early behind the same false negative the state
+  diff gives. `EventFilter.Operation` and the store's `byOperation` index had both existed all
+  along with nothing reading either from HTTP. `substrate inspect <service>` now prints
+  `showing 100 of N` when the run was longer than the page it asked for.
+- **The status a request was answered with is recorded whether or not bodies are** (#1237). The
+  `status_code` on a `/v1/debug/events` entry was read off the recorded response, which
+  `event_store.include_bodies` governs — so in the default configuration it was absent from every
+  entry, and because S3 reports a refused write as a *response* rather than as an error, a refused
+  PUT and an accepted one were the same entry in the log. A status is a number, not a body, so the
+  size argument that member exists for never applied to it: `Event` now carries `StatusCode`
+  unconditionally, derived by `recordedStatusCode` the way `Server.writeError` derives the status it
+  writes, so a recorded refusal cannot disagree with the one the caller saw. `error_code` is now a
+  member of the entry too; it was already recorded on every event and reached no reader. `method`
+  and `path` are deliberately still absent — they live on the recorded request, so they would be
+  empty in exactly the default a consumer runs, and service plus operation identifies an operation
+  in every configuration. `ExportCSV`'s header is unchanged; widening an export format is not this
+  field's question.
+
 ### Fixed
 
 - **Every ELBv2 response carried a document namespace one character from the published one**

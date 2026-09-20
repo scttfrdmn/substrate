@@ -24,6 +24,17 @@ func (s *Server) handleDebugUI(w http.ResponseWriter, _ *http.Request) {
 
 // debugEventSummary is a trimmed Event representation returned by /v1/debug/events.
 // Request and response bodies are omitted to keep the payload small.
+//
+// StatusCode and ErrorCode are both recorded whether or not bodies are, which is what
+// lets a caller running the default configuration tell a refused request from an
+// accepted one (#1237). StatusCode used to be read off the recorded response, so it was
+// absent in exactly that configuration — and a plugin that reports a refusal as a
+// response rather than as an error, which S3 does, left no trace of the refusal at all.
+//
+// Method and path are deliberately not members: they live on the recorded request, which
+// `event_store.include_bodies` governs because a body is what makes an event large, so a
+// `path` member would be empty in the configuration a consumer runs by default. Service
+// plus operation identifies an operation in every configuration.
 type debugEventSummary struct {
 	Sequence   int64   `json:"seq"`
 	ID         string  `json:"id"`
@@ -33,6 +44,7 @@ type debugEventSummary struct {
 	StatusCode int     `json:"status_code,omitempty"`
 	Cost       float64 `json:"cost,omitempty"`
 	DurationMS int64   `json:"duration_ms"`
+	ErrorCode  string  `json:"error_code,omitempty"`
 	Error      string  `json:"error,omitempty"`
 	StreamID   string  `json:"stream_id,omitempty"`
 	AccountID  string  `json:"account_id,omitempty"`
@@ -40,13 +52,48 @@ type debugEventSummary struct {
 }
 
 // handleDebugEvents returns a filtered list of events from the store.
-// Query params: ?service=, ?stream=, ?limit= (default 500), ?after= (min sequence).
+//
+// Query params: ?service=, ?operation= (or ?op=), ?stream=, ?limit= (default 500),
+// ?after= (min sequence).
+//
+// **This is the request log an out-of-process consumer counts with**, which is what
+// #1237 asked for and what shaped the two changes here. A consumer that runs
+// `substrate server` as a separate process — objectfs mounts a bucket under a real
+// `sudo mount -t objectfs`, so the mount cannot reach an in-process recorder — has no
+// access to [EventStore.GetEvents] and had no way to ask this endpoint for one
+// operation. Its alternative was to diff a state listing, which cannot see a PUT that
+// rewrote identical bytes and cannot tell "no write was attempted" from "a write was
+// attempted and refused".
+//
+// `operation` is honored because [EventFilter] has carried the member and the store
+// has carried a `byOperation` index all along, and nothing read either from HTTP.
+// `op` is accepted as an alias because that is the spelling #1237 proposed: silently
+// ignoring one spelling of the filter would answer a "count my PutObjects" request
+// with every event in the log, which is the over-count this endpoint exists to rule
+// out. `operation` is the canonical name because the member it fills is named
+// `operation` in every entry.
+//
+// `total` is the number of events matching the filter **before** `limit` is applied,
+// and `truncated` says whether any were dropped. `count` keeps its meaning — the
+// length of `events` — so the existing UI and `substrate inspect` are unaffected. The
+// distinction is the whole point for a counting caller: the limit trims the *oldest*
+// matching events, so before this a run that recorded more than the limit answered a
+// count that was silently short, and a write early in the run became invisible — the
+// same false negative the state diff gives. A caller asserting a count reads `total`;
+// a caller displaying a tail reads `events`. A `limit` that is not a positive number
+// is ignored in favor of the default, and `truncated` is what makes that visible.
 func (s *Server) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
+	operation := q.Get("operation")
+	if operation == "" {
+		operation = q.Get("op")
+	}
+
 	filter := EventFilter{
-		Service:  q.Get("service"),
-		StreamID: q.Get("stream"),
+		Service:   q.Get("service"),
+		StreamID:  q.Get("stream"),
+		Operation: operation,
 	}
 
 	if after := q.Get("after"); after != "" {
@@ -68,15 +115,18 @@ func (s *Server) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Trim to limit.
+	// Counted before the trim, because the trim is what makes a count short.
+	total := len(events)
 	if len(events) > limit {
 		events = events[len(events)-limit:]
 	}
 
 	summaries := make([]debugEventSummary, 0, len(events))
 	for _, ev := range events {
-		statusCode := 0
-		if ev.Response != nil {
+		// The event's own status, not the recorded response's: a stream recorded before
+		// #1237 carries neither, and one recorded without bodies carries only this.
+		statusCode := ev.StatusCode
+		if statusCode == 0 && ev.Response != nil {
 			statusCode = ev.Response.StatusCode
 		}
 		summaries = append(summaries, debugEventSummary{
@@ -88,6 +138,7 @@ func (s *Server) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 			StatusCode: statusCode,
 			Cost:       ev.Cost,
 			DurationMS: ev.Duration.Milliseconds(),
+			ErrorCode:  ev.ErrorCode,
 			Error:      ev.Error,
 			StreamID:   ev.StreamID,
 			AccountID:  ev.AccountID,
@@ -96,8 +147,10 @@ func (s *Server) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result := map[string]interface{}{
-		"events": summaries,
-		"count":  len(summaries),
+		"events":    summaries,
+		"count":     len(summaries),
+		"total":     total,
+		"truncated": total > len(summaries),
 	}
 	writeJSONDebug(w, s.logger, result)
 }

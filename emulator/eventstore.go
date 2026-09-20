@@ -183,6 +183,24 @@ type Event struct {
 	// StateHashAfter is a SHA-256 hash of service state after this request.
 	StateHashAfter string `json:"state_hash_after,omitempty"`
 
+	// StatusCode is the HTTP status the caller was answered with, recorded whether or
+	// not bodies are.
+	//
+	// It was readable only through Response before #1237, so in the default
+	// configuration — `include_bodies` off — a refused request and an accepted one were
+	// the same entry in the request log, and an out-of-process consumer asking "did
+	// anything try to write?" could not tell an attempt that was refused from no attempt
+	// at all. A status is a number, not a body, so the size argument `include_bodies`
+	// exists for never applied to it.
+	//
+	// Derived by [recordedStatusCode] the way [Server.writeError] derives the status it
+	// writes, so the recorded value is the one the caller saw. Zero on a stream recorded
+	// before this field existed, and on an event recorded by [EventStore.RecordEvent]
+	// directly, which has no response to read. [EventStore.ExportCSV] does not carry it:
+	// its header is a pinned column list, and widening an export format is not this
+	// field's question.
+	StatusCode int `json:"status_code,omitempty"`
+
 	// Error is the string representation of any error returned by the handler.
 	Error string `json:"error,omitempty"`
 
@@ -433,6 +451,9 @@ func (e *EventStore) RecordRequest(
 		Operation: req.Operation,
 		Duration:  duration,
 		Cost:      cost,
+
+		// Outside the IncludeBodies block below, deliberately: see [Event.StatusCode].
+		StatusCode: recordedStatusCode(resp, err),
 	}
 
 	if reqCtx.Principal != nil {
