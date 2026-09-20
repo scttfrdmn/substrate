@@ -1681,6 +1681,46 @@ func SeedSNSTopicAttributeForTest(
 	return nil
 }
 
+// SeedSNSSubscriptionAttributeForTest writes an attribute straight into a subscription record's stored
+// map, bypassing SetSubscriptionAttributes and its allowlist.
+//
+// The subscription counterpart of [SeedSNSTopicAttributeForTest], and it exists for the same reason:
+// getSubscriptionAttributes merges the stored map first and its derived members over the top, and since
+// setSubscriptionAttributes refuses all five of the read-only names API_GetSubscriptionAttributes
+// publishes, there is no request that can put one in the map. Seeding through state keeps the assertion
+// about the merge order rather than about the refusal, which is a different test.
+//
+// The key is built through [snsSubStateKey] from the account and Region the caller subscribed under —
+// not the ARN's segments — because that is where [SNSPlugin.requireSubscription] will look for it.
+func SeedSNSSubscriptionAttributeForTest(
+	ctx context.Context, state StateManager, accountID, region, subARN, name, value string,
+) error {
+	key := snsSubStateKey(accountID, region, subARN)
+	data, err := state.Get(ctx, snsNamespace, key)
+	if err != nil {
+		return fmt.Errorf("seed sns subscription attribute state.Get: %w", err)
+	}
+	if data == nil {
+		return fmt.Errorf("seed sns subscription attribute: no subscription at %s/%s", snsNamespace, key)
+	}
+	var sub SNSSubscription
+	if err := json.Unmarshal(data, &sub); err != nil {
+		return fmt.Errorf("seed sns subscription attribute unmarshal: %w", err)
+	}
+	if sub.Attributes == nil {
+		sub.Attributes = make(map[string]string)
+	}
+	sub.Attributes[name] = value
+	encoded, err := json.Marshal(&sub)
+	if err != nil {
+		return fmt.Errorf("seed sns subscription attribute marshal: %w", err)
+	}
+	if err := state.Put(ctx, snsNamespace, key, encoded); err != nil {
+		return fmt.Errorf("seed sns subscription attribute state.Put: %w", err)
+	}
+	return nil
+}
+
 // ParseLambdaOperationForTest wraps parseLambdaOperation for external tests.
 //
 // Exported because the parser decides more than routing: it is Lambda's entry in

@@ -11949,8 +11949,8 @@ Resource Groups Tagging API operations are free.
 | Unsubscribe | Idempotent |
 | ListSubscriptions | |
 | ListSubscriptionsByTopic | |
-| GetSubscriptionAttributes | |
-| SetSubscriptionAttributes | |
+| GetSubscriptionAttributes | Seven members derived, the rest passed through as stored; `InvalidParameter`/400 for an ARN that is not a subscription's |
+| SetSubscriptionAttributes | Only the 6 published names are settable; anything else is `InvalidParameter`/400. A stored `FilterPolicy` does not filter delivery |
 | Publish | Dispatches to subscribed Lambda/SQS via cross-service dispatch |
 | PublishBatch | |
 | AddPermission | Accepted; no policy is stored |
@@ -12255,6 +12255,67 @@ answer does not depend on whether a topic of that name already exists.
 `AWS::SNS::Topic`'s `DisplayName` property travels through this map, as the wire form a
 real `CreateTopic` carries. The type's other attribute-valued properties are not
 forwarded; see the CloudFormation section for what it does send.
+
+### Subscription attributes: six settable, seven derived, one inert
+
+`SetSubscriptionAttributes` was a stub until #1125 — it read `SubscriptionArn` into `_`,
+read neither `AttributeName` nor `AttributeValue`, touched no state and answered 200 —
+and `GetSubscriptionAttributes` answered a fixed four entries built from the record, so
+nothing a caller set could ever be read back. Both halves now go through one merge.
+
+**Settable (6).** Exactly the `AttributeName` values `API_SetSubscriptionAttributes`
+publishes: `DeliveryPolicy`, `FilterPolicy`, `FilterPolicyScope`, `RawMessageDelivery`,
+`RedrivePolicy` and `SubscriptionRoleArn`. Anything else is `InvalidParameter`/400.
+
+Six, not seven. `ReplayPolicy` and `ReplayStatus` appear on `API_Subscribe`, under a
+heading reading "The following attributes apply only to FIFO topics", and on neither of
+the two attribute pages — so substrate refuses both here. The `ReplayLimitExceeded`/403
+this page *does* publish is an error shared with `Subscribe` and says nothing about which
+names the operation accepts.
+
+The Firehose-only qualification on `SubscriptionRoleArn` is recorded and not enforced:
+the page states the attribute "applies only to" Firehose subscriptions but publishes no
+error for setting it elsewhere, so substrate accepts it on any protocol rather than
+inventing a refusal.
+
+**Derived (7).** `ConfirmationWasAuthenticated`, `Endpoint`, `Owner`,
+`PendingConfirmation`, `Protocol`, `SubscriptionArn` and `TopicArn` are projected from the
+record and merged *over* the stored map, so a stored value cannot shadow one.
+`PendingConfirmation` is `false` and `ConfirmationWasAuthenticated` is `true` because
+substrate mints no unconfirmed subscription — there is no `ConfirmSubscription` operation,
+and `Subscribe` returns a real ARN rather than the "pending confirmation" string — so a
+subscription is confirmed by the authenticated `Subscribe` call itself and never by an
+out-of-band token. This is the same reasoning that makes a topic's `SubscriptionsPending`
+`"0"`.
+
+`Protocol` and `Endpoint` are reported although `API_GetSubscriptionAttributes`' list
+omits them. That list is explicitly open ("Attributes in this map include the
+following"), both are `Subscribe` parameters a caller has no other way to read back for a
+single subscription, and `ListSubscriptions` already reports both for the same record —
+dropping them would make two readers disagree about one subscription.
+
+**Not modelled.** `EffectiveDeliveryPolicy` is omitted. The page defines it as the policy
+"that takes into account the topic delivery policy and account system defaults", and
+substrate models neither the defaults nor the merge; reporting the subscription's own
+`DeliveryPolicy` under the name would claim a computation that did not happen, so the
+member is absent rather than invented (#827).
+
+**A stored `FilterPolicy` does not filter delivery.** It round-trips through
+`GetSubscriptionAttributes` as the JSON string the caller sent, and `Publish` delivers to
+the subscription regardless of whether a message would match. Delivering only matching
+messages is the subscription's runtime behaviour rather than an API observation, so it
+stays outside the boundary — the same reading that keeps a Lambda's handler from being
+executed. `SNSSubscription` carries a separate `FilterPolicy` field that `Publish` does
+consult, but no operation writes it: it is reachable only by a test writing the record
+directly. A consumer asserting "a non-matching message was not delivered" will therefore
+see it delivered here, which is the deliberate divergence.
+
+**ARN refusals.** Both operations answer `InvalidParameter`/400 for a string that is not a
+subscription ARN and `NotFound`/404 for one that names no subscription, in that order.
+Before #1125 neither had a site for the first: a topic ARN — a perfectly good SNS ARN
+naming no subscription — was reported as a subscription that did not exist. `Unsubscribe`
+still answers `NotFound`/404 rather than `InvalidParameter`/400 for a malformed ARN; that
+remainder is #1259.
 
 ### An empty result element is not the same as no result element
 
