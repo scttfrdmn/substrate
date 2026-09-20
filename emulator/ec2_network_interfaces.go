@@ -109,7 +109,16 @@ func ec2PrimaryInterface(interfaces []EC2NetworkInterface) *EC2NetworkInterface 
 // separately generated one: they describe the same interface, and letting them differ
 // would mean an instance whose top-level privateIpAddress is not the address of any
 // interface it has.
-func (p *EC2Plugin) ec2AttachInterfaces(inst *EC2Instance, declared []EC2NetworkInterface, instanceIndex int, region string) {
+//
+// m mints the interface ids the request left unset, so a replayed launch reproduces
+// them (#856).
+func (p *EC2Plugin) ec2AttachInterfaces(
+	m *IDMint,
+	inst *EC2Instance,
+	declared []EC2NetworkInterface,
+	instanceIndex int,
+	region string,
+) {
 	if len(declared) == 0 {
 		return
 	}
@@ -119,7 +128,7 @@ func (p *EC2Plugin) ec2AttachInterfaces(inst *EC2Instance, declared []EC2Network
 		ifc := declared[n]
 		ifc.SecurityGroupIDs = filterEmpty(ifc.SecurityGroupIDs)
 		if ifc.NetworkInterfaceID == "" {
-			ifc.NetworkInterfaceID = generateENIID()
+			ifc.NetworkInterfaceID = generateENIID(m)
 		}
 		if ifc.InterfaceType == "" {
 			ifc.InterfaceType = "interface"

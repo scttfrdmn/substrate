@@ -2167,6 +2167,51 @@ rather than to the state manager the reset clears.
 
 ---
 
+## An identifier a replay mints is the one it recorded
+
+**An identifier substrate mints is derived from the request's own ID, so replaying that request
+mints the same identifier.** A replayed `CreateVpc` answers with the `vpc-…` the recording
+answered with, the recorded `CreateSubnet` that names it succeeds, and a replay of a stream
+containing creates can be asserted to produce **zero** differences with state-hash validation on.
+
+Before [#856](https://github.com/scttfrdmn/substrate/issues/856) most identifiers came straight
+from `crypto/rand`, and three things followed. A replayed create answered with a *new* identifier,
+so the next recorded request naming the old one answered `InvalidVpcID.NotFound` and every later
+describe reported an absent item. `ValidateState` reported a `state_hash_after` mismatch for every
+stream containing a create — the right answer, and one that made state validation useless. And a
+replayed `Authorization` header named an access key absent from replayed state, so the caller
+resolved to no principal and authorisation **failed open**.
+
+The derivation is HMAC-SHA256 keyed by the request ID, over a counter that advances with each
+identifier the request mints — so one `RunInstances` with `MaxCount=3` publishes three distinct
+instance IDs, and two `CreateAccessKey` calls for one user publish two distinct keys even though
+the requests are byte-identical. A replay derives from the *recorded* request ID, which is what
+makes it reproduce the recording in this process or any other. Each identifier is rendered in the
+alphabet its own API publishes: hex for an EC2 resource ID, 21 characters of uppercase base36 for
+an IAM `AIDA…`/`AROA…`/`AKIA…`, base64 for an STS session token, a v4-shaped UUID where AWS
+documents one.
+
+The cost is that an identifier is **guessable** from a request ID. That is deliberate and already
+true of the request ID itself: substrate is a test emulator, its identifiers name nothing outside
+it, and none of them is a secret. A caller needing unpredictability from a test double is asking
+the wrong tool.
+
+Three kinds of value stay random, and one more is still migrating:
+
+- The request ID itself, which is the seed, and substrate's own bookkeeping IDs — an event ID, a
+  snapshot ID, a replay ID — which no AWS call observes.
+- EC2 key-pair **material**, which needs a deterministic reader into the key generator rather than
+  a derived string. A replayed `CreateKeyPair` still diverges on the key and its fingerprint.
+- Anything already derived from its inputs rather than drawn at all: a public IP from its instance
+  ID, a NAT gateway's private IP from its gateway ID, a secret's ARN from its name, and
+  CloudFormation's [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic),
+  which predate this rule and are what generalising it was modelled on.
+- EC2, IAM and STS identifiers are derived today. The remaining services are migrating one family
+  at a time, tracked on #856; until a service moves, its identifiers are still drawn from
+  `crypto/rand` and a replay of a stream creating one of its resources still diverges.
+
+---
+
 ## CloudFormation
 
 **Endpoint:** `cloudformation.{region}.amazonaws.com`
@@ -3321,6 +3366,10 @@ The UUID in a stack or change-set ARN is derived from the account, region and
 name, not from a clock or a PRNG, so the same call produces the same ARN on a
 replay. `StackId` is stable across `CreateStack`, `DescribeStacks` and
 `ListStacks`.
+
+This was substrate's first derived identifier and is the one the general rule was
+modelled on; see [An identifier a replay mints is the one it
+recorded](#an-identifier-a-replay-mints-is-the-one-it-recorded).
 
 ### Cost
 

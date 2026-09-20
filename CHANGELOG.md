@@ -49,6 +49,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   empty in exactly the default a consumer runs, and service plus operation identifies an operation
   in every configuration. `ExportCSV`'s header is unchanged; widening an export format is not this
   field's question.
+- **`IDMint` and `RequestContext.IDs`, the seam every minted identifier is derived through** (#856).
+  An identifier is `HMAC-SHA256(key = RequestContext.RequestID, msg = ordinal)`, rendered in the
+  alphabet its own API publishes — `Hex`, `Chars`, `Digits`, `UUID`, `Base64` — and the ordinal
+  advances per draw, so one `RunInstances` with `MaxCount=3` publishes three distinct instance IDs.
+  The request ID is the source rather than the request because two `CreateAccessKey` calls for one
+  user are byte-identical and must still mint two keys; it is per request rather than per plugin
+  because a mint belonging to one request is concurrency-safe by construction, where the seeded PRNG
+  `OmicsPlugin` uses hands two callers whatever order they won its mutex in and is seeded per
+  process besides; and it is derived rather than counted in the `StateManager` because a counter
+  costs a state write per identifier and leaves something to rewind in `ResetForRun`. A mint with no
+  request ID to derive from — a nil `RequestContext.IDs`, which is what the CloudFormation
+  deployer's internal contexts still carry — falls back to `crypto/rand`, so a site not yet migrated
+  behaves exactly as it did. The cost, stated in `docs/services.md`: an identifier is guessable from
+  a request ID, which is already true of the request ID and is acceptable for a test emulator whose
+  identifiers name nothing outside it.
 
 ### Changed
 
@@ -126,6 +141,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A replayed EC2, IAM or STS create mints the identifier its recording minted** (#856). These
+  identifiers came straight from `crypto/rand`, so a replay answered with new ones and three things
+  followed. The recorded `CreateSnapshot` naming the recorded volume answered
+  `InvalidVolume.NotFound`, and every describe after it reported an absent item — which is why the
+  #1140 regression tests had to be built on caller-chosen bucket and key names: no stream containing
+  a create could be asserted to replay with zero differences. `ValidateState`, honoured since
+  v0.115.0, reported a `state_hash_after` mismatch for every such stream: the right answer, and one
+  that made state validation useless. And a replayed `Authorization` header named an access key
+  absent from replayed state, so `resolvePrincipal` returned nil and `CheckAccess` **failed open** —
+  a replay authorised everything, silently. EC2's 20 resource-ID minters, its fleet and
+  capacity-reservation IDs, IAM's `AIDA…`/`AROA…`/`AGPA…`/`ANPA…`/`AKIA…`/`AIPA…` IDs and
+  service-linked-role deletion-task UUIDs, and STS's `ASIA…` keys, secrets and session tokens are
+  now derived from the request's own ID through `IDMint`. A recorded stream creating a VPC, a subnet,
+  an instance with a block device and an access key now replays with **zero** differences and
+  `StateValid` true, twice over and in a second process. `generateRequestID`, which is the seed,
+  gained a random suffix: it was the wall clock alone, and every other identifier now derives from
+  it, so two requests served within one tick of a coarse clock would have minted the same volume ID.
+  Remaining on `crypto/rand`: 32 draw sites in the other services, migrating one family at a time on
+  #856; EC2 key-pair material, which needs a deterministic reader into the key generator rather than
+  a string; and substrate's own event, snapshot and replay IDs, which no AWS call observes.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

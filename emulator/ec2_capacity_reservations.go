@@ -295,11 +295,11 @@ func (r EC2CapacityReservation) arn() string {
 // generateCapacityReservationID mints a Capacity Reservation ID, "cr-" followed by
 // seventeen hex characters in AWS's long-ID form.
 //
-// [randomHex] takes a **byte** count, so eight bytes is sixteen characters; the seventeenth
+// [IDMint.Hex] takes a **byte** count, so eight bytes is sixteen characters; the seventeenth
 // comes from AWS's own shape, whose IDs are "cr-" plus seventeen. One character is dropped
 // from a nine-byte draw rather than eight bytes being padded, so every character is minted.
-func generateCapacityReservationID() string {
-	return "cr-" + randomHex(9)[:17]
+func generateCapacityReservationID(m *IDMint) string {
+	return "cr-" + m.Hex(9)[:17]
 }
 
 // ec2CapacityReservationStateKey returns the state key for a Capacity Reservation.
@@ -392,7 +392,7 @@ func (p *EC2Plugin) createCapacityReservation(reqCtx *RequestContext, req *AWSRe
 
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	reservation := EC2CapacityReservation{
-		CapacityReservationID:  generateCapacityReservationID(),
+		CapacityReservationID:  generateCapacityReservationID(reqCtx.IDs),
 		AccountID:              reqCtx.AccountID,
 		Region:                 reqCtx.Region,
 		AvailabilityZone:       zone,

@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	cryptorand "crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -282,9 +280,9 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	assumedRoleID := role.RoleID + ":" + sessionName
 
 	creds := STSSessionCredentials{
-		AccessKeyID:     generateIAMID("ASIA"),
-		SecretAccessKey: stsGenerateSecret(),
-		SessionToken:    stsGenerateToken(),
+		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
+		SecretAccessKey: stsGenerateSecret(ctx.IDs),
+		SessionToken:    stsGenerateToken(ctx.IDs),
 		Expiration:      expiry,
 		PrincipalARN:    fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", ctx.AccountID, roleName, sessionName),
 		AccountID:       ctx.AccountID,
@@ -503,9 +501,9 @@ func (p *STSPlugin) getSessionToken(ctx *RequestContext, req *AWSRequest) (*AWSR
 	expiry := now.Add(time.Duration(duration) * time.Second)
 
 	creds := STSSessionCredentials{
-		AccessKeyID:     generateIAMID("ASIA"),
-		SecretAccessKey: stsGenerateSecret(),
-		SessionToken:    stsGenerateToken(),
+		AccessKeyID:     generateIAMID(ctx.IDs, "ASIA"),
+		SecretAccessKey: stsGenerateSecret(ctx.IDs),
+		SessionToken:    stsGenerateToken(ctx.IDs),
 		Expiration:      expiry,
 		AccountID:       ctx.AccountID,
 	}
@@ -627,20 +625,17 @@ func stsXMLResponse(status int, v any) (*AWSResponse, error) {
 	}, nil
 }
 
-// stsGenerateSecret generates a 40-character secret access key.
-func stsGenerateSecret() string {
-	b := make([]byte, 30)
-	if _, err := cryptorand.Read(b); err != nil {
-		panic(fmt.Sprintf("stsGenerateSecret: crypto/rand read: %v", err))
-	}
-	return base64.StdEncoding.EncodeToString(b)[:40]
+// stsGenerateSecret generates a 40-character secret access key, derived from the request's
+// own id so that a replayed AssumeRole hands back the credentials the recording handed back
+// (#856).
+func stsGenerateSecret(m *IDMint) string {
+	return m.Base64(30)[:40]
 }
 
 // stsGenerateToken generates a session token string.
-func stsGenerateToken() string {
-	b := make([]byte, 96)
-	if _, err := cryptorand.Read(b); err != nil {
-		panic(fmt.Sprintf("stsGenerateToken: crypto/rand read: %v", err))
-	}
-	return base64.StdEncoding.EncodeToString(b)
+//
+// Ninety-six bytes is past one HMAC digest, so [IDMint.bytes] extends the derivation in
+// counter mode; the token is still one ordinal, not three.
+func stsGenerateToken(m *IDMint) string {
+	return m.Base64(96)
 }

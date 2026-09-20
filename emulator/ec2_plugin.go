@@ -668,13 +668,13 @@ func (p *EC2Plugin) runInstancesWithTags(
 		return nil, sgCheckErr
 	}
 
-	reservationID := generateReservationID()
+	reservationID := generateReservationID(reqCtx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	var instances []EC2Instance
 
 	for i := 0; i < maxCount; i++ {
 		inst := EC2Instance{
-			InstanceID:         generateEC2InstanceID(),
+			InstanceID:         generateEC2InstanceID(reqCtx.IDs),
 			ReservationID:      reservationID,
 			ImageID:            imageID,
 			InstanceType:       instanceType,
@@ -728,7 +728,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 
 		// Record the interfaces last, since the primary's address and DNS name are
 		// the instance's own and those were only just resolved.
-		p.ec2AttachInterfaces(&inst, networkInterfaces, i, reqCtx.Region)
+		p.ec2AttachInterfaces(reqCtx.IDs, &inst, networkInterfaces, i, reqCtx.Region)
 
 		data, err := json.Marshal(inst)
 		if err != nil {
@@ -745,7 +745,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 		// Materialize this instance's volumes, after the instance so they can carry
 		// its ID and its zone. Each instance of a multi-count launch gets its own
 		// volumes with their own IDs — two instances cannot share one EBS volume.
-		if err := p.ec2CreateLaunchVolumes(&inst, blockDeviceMappings, volumeTags, now); err != nil {
+		if err := p.ec2CreateLaunchVolumes(reqCtx.IDs, &inst, blockDeviceMappings, volumeTags, now); err != nil {
 			return nil, err
 		}
 		instances = append(instances, inst)
@@ -1576,7 +1576,7 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if cidr == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "CidrBlock is required", HTTPStatus: http.StatusBadRequest}
 	}
-	vpcID := generateVPCID()
+	vpcID := generateVPCID(reqCtx.IDs)
 	vpc := EC2VPC{
 		VPCID:            vpcID,
 		CIDRBlock:        cidr,
@@ -1783,7 +1783,7 @@ func (p *EC2Plugin) createSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
 		return nil, awsErr
 	}
-	subnetID := generateSubnetID()
+	subnetID := generateSubnetID(reqCtx.IDs)
 	subnet := EC2Subnet{
 		SubnetID:         subnetID,
 		VPCID:            vpcID,
@@ -1910,7 +1910,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 	groupName := req.Params["GroupName"]
 	description := req.Params["GroupDescription"]
 	vpcID := req.Params["VpcId"]
-	sgID := generateSGID()
+	sgID := generateSGID(reqCtx.IDs)
 	sg := EC2SecurityGroup{
 		GroupID:     sgID,
 		GroupName:   groupName,
@@ -2193,7 +2193,7 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 }
 
 func (p *EC2Plugin) createInternetGateway(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	igwID := generateIGWID()
+	igwID := generateIGWID(reqCtx.IDs)
 	igw := EC2InternetGateway{
 		InternetGatewayID: igwID,
 		AccountID:         reqCtx.AccountID,
@@ -2436,7 +2436,7 @@ func (p *EC2Plugin) createRouteTable(reqCtx *RequestContext, req *AWSRequest) (*
 }
 
 func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localCIDR string, main bool, igwID string) (string, error) {
-	rtbID := generateRTBID()
+	rtbID := generateRTBID(reqCtx.IDs)
 	rtb := EC2RouteTable{
 		RouteTableID: rtbID,
 		VPCID:        vpcID,
@@ -2452,7 +2452,7 @@ func (p *EC2Plugin) createRouteTableForVPC(reqCtx *RequestContext, vpcID, localC
 		rtb.Routes = append(rtb.Routes, EC2Route{DestinationCIDR: "0.0.0.0/0", GatewayID: igwID, State: "active"})
 	}
 	if main {
-		rtb.Associations = []EC2RTAssociation{{AssociationID: generateAssociationID(), Main: true}}
+		rtb.Associations = []EC2RTAssociation{{AssociationID: generateAssociationID(reqCtx.IDs), Main: true}}
 	}
 	data, _ := json.Marshal(rtb)
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
@@ -2591,7 +2591,7 @@ func (p *EC2Plugin) associateRouteTable(reqCtx *RequestContext, req *AWSRequest)
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 associateRouteTable unmarshal: %w", unmarshalErr)
 	}
-	assocID := generateAssociationID()
+	assocID := generateAssociationID(reqCtx.IDs)
 	rtb.Associations = append(rtb.Associations, EC2RTAssociation{AssociationID: assocID, SubnetID: subnetID})
 	newData, _ := json.Marshal(rtb)
 	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
@@ -2814,7 +2814,7 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 	if sourceKey == newKey {
 		target.Associations = sourceAssocs
 	}
-	newAssocID := generateAssociationID()
+	newAssocID := generateAssociationID(reqCtx.IDs)
 	target.Associations = append(target.Associations, EC2RTAssociation{AssociationID: newAssocID, SubnetID: moved.SubnetID, Main: moved.Main})
 	newData, marshalErr := json.Marshal(target)
 	if marshalErr != nil {
@@ -3491,7 +3491,7 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	kp := EC2KeyPair{
-		KeyPairID:   generateKeyPairID(),
+		KeyPairID:   generateKeyPairID(reqCtx.IDs),
 		KeyName:     name,
 		Fingerprint: fp,
 		KeyType:     keyType,
@@ -3674,7 +3674,7 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	kp := EC2KeyPair{
-		KeyPairID:   generateKeyPairID(),
+		KeyPairID:   generateKeyPairID(reqCtx.IDs),
 		KeyName:     name,
 		Fingerprint: fp,
 		KeyType:     keyType,
@@ -3865,7 +3865,7 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	}
 
 	// Create default VPC.
-	vpcID := generateVPCID()
+	vpcID := generateVPCID(reqCtx.IDs)
 	created := EC2VPC{
 		VPCID:              vpcID,
 		CIDRBlock:          "172.31.0.0/16",
@@ -3886,7 +3886,7 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	}
 
 	// Create default security group.
-	sgID := generateSGID()
+	sgID := generateSGID(reqCtx.IDs)
 	sg := EC2SecurityGroup{
 		GroupID:     sgID,
 		GroupName:   "default",
@@ -3905,7 +3905,7 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 
 	// Create and attach a default internet gateway so the main route table can
 	// carry a 0.0.0.0/0 → igw route, matching a real default VPC.
-	igwID := generateIGWID()
+	igwID := generateIGWID(reqCtx.IDs)
 	igw := EC2InternetGateway{
 		InternetGatewayID: igwID,
 		Attachments:       []EC2IGWAttachment{{VPCID: vpcID, State: "available"}},
@@ -3934,7 +3934,7 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 }
 
 func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestContext, vpc *EC2VPC) (*EC2Subnet, error) {
-	subnetID := generateSubnetID()
+	subnetID := generateSubnetID(reqCtx.IDs)
 	subnet := EC2Subnet{
 		SubnetID:            subnetID,
 		VPCID:               vpc.VPCID,
@@ -4335,7 +4335,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if err != nil {
 		return nil, err
 	}
-	snapshotID := generateEBSSnapshotID()
+	snapshotID := generateEBSSnapshotID(reqCtx.IDs)
 	snap := EC2Snapshot{
 		SnapshotID:  snapshotID,
 		VolumeID:    rootVolumeID,
@@ -4355,7 +4355,7 @@ func (p *EC2Plugin) createImage(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		return nil, fmt.Errorf("ec2 createImage snapshot put: %w", err)
 	}
 
-	imageID := generateImageID()
+	imageID := generateImageID(reqCtx.IDs)
 	img := EC2Image{
 		ImageID:      imageID,
 		Name:         name,
@@ -4489,7 +4489,7 @@ func (p *EC2Plugin) registerImage(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		virtualizationType = "paravirtual"
 	}
 
-	imageID := generateImageID()
+	imageID := generateImageID(reqCtx.IDs)
 	img := EC2Image{
 		ImageID:             imageID,
 		Name:                name,
@@ -5150,7 +5150,7 @@ func (p *EC2Plugin) createPlacementGroup(reqCtx *RequestContext, req *AWSRequest
 
 	pg := EC2PlacementGroup{
 		GroupName: name,
-		GroupID:   generatePlacementGroupID(),
+		GroupID:   generatePlacementGroupID(reqCtx.IDs),
 		Strategy:  strategy,
 		State:     "available",
 		Tags:      tags,
@@ -5386,7 +5386,7 @@ func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*A
 	if domain == "" {
 		domain = "vpc"
 	}
-	allocationID := generateAllocationID()
+	allocationID := generateAllocationID(reqCtx.IDs)
 	publicIP := generatePublicIP(allocationID)
 	eip := EC2ElasticIP{
 		AllocationID: allocationID,
@@ -5441,7 +5441,7 @@ func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ec2 associateAddress unmarshal: %w", unmarshalErr)
 	}
 
-	assocID := generateEIPAssociationID()
+	assocID := generateEIPAssociationID(reqCtx.IDs)
 	eip.AssociationID = assocID
 	eip.InstanceID = instanceID
 	eip.NetworkInterfaceID = networkInterfaceID
@@ -5658,7 +5658,7 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ec2 createNatGateway unmarshal subnet: %w", unmarshalErr)
 	}
 
-	natID := generateNATGatewayID()
+	natID := generateNATGatewayID(reqCtx.IDs)
 
 	// Compute a stable private IP using FNV hash on the NAT gateway ID.
 	h := fnv.New32a()
@@ -6406,7 +6406,7 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		}
 	}
 
-	ltID := generateLaunchTemplateID()
+	ltID := generateLaunchTemplateID(ctx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 
 	ltData := parseLaunchTemplateData(req.Params)
@@ -6926,7 +6926,7 @@ func (p *EC2Plugin) createVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	throughput, _ := strconv.Atoi(req.Params["Throughput"])
 
 	vol := EC2Volume{
-		VolumeID:         generateVolumeID(),
+		VolumeID:         generateVolumeID(reqCtx.IDs),
 		Size:             size,
 		VolumeType:       volType,
 		AvailabilityZone: az,

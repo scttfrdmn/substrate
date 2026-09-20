@@ -469,11 +469,17 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		return r.replayControlPlaneEvent(ctx, event, replay)
 	}
 
+	requestID := replayRequestID(event)
 	reqCtx := &RequestContext{
-		RequestID: replayRequestID(event),
+		RequestID: requestID,
 		AccountID: event.AccountID,
 		Region:    event.Region,
 		Timestamp: event.Timestamp,
+		// Seeded from the recorded request id, which is what makes a replayed create mint
+		// the identifier the recording minted (#856). A stream recorded before the event
+		// carried a request id falls back to the event id, per replayRequestID, and then
+		// mints identifiers of its own — the original values were never written down.
+		IDs: NewIDMint(requestID),
 		// The caller the recording was served for. Without it every authorization
 		// door — the pipeline's step 2 and each plugin's own p.authorize — sees a nil
 		// principal and leaves the request unenforced, so a replay authorized nothing

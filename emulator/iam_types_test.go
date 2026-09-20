@@ -119,7 +119,7 @@ func TestGenerateIAMID_Format(t *testing.T) {
 		{"AKIA", 21},
 	}
 	for _, tt := range tests {
-		id := emulator.GenerateIAMIDForTest(tt.prefix)
+		id := emulator.GenerateIAMIDForTest("", tt.prefix)
 		assert.Len(t, id, tt.length, "prefix %s", tt.prefix)
 		assert.True(t, strings.HasPrefix(id, tt.prefix), "id %s should start with %s", id, tt.prefix)
 		// All chars must be uppercase alphanumeric.

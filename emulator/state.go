@@ -146,6 +146,11 @@ func (m *MemoryStateManager) List(_ context.Context, namespace, prefix string) (
 			keys = append(keys, k)
 		}
 	}
+	// Sorted, because a map's range order is random and two of substrate's guarantees
+	// read a List result in order: a replay that re-executes the same operation must
+	// produce the same response bytes, and a state hash computed over a listing must
+	// match the recorded one. #856 asks for this ordering explicitly; it has been here
+	// since the manager was written, and this is the note saying so.
 	sort.Strings(keys)
 
 	return keys, nil

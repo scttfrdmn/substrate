@@ -153,9 +153,12 @@ type EC2Fleet struct {
 
 // generateFleetID generates an EC2 Fleet ID in the AWS format, "fleet-"
 // followed by a UUID-shaped hex string.
-func generateFleetID() string {
-	return fmt.Sprintf("fleet-%s-%s-%s-%s-%s",
-		randomHex(4), randomHex(2), randomHex(2), randomHex(2), randomHex(6))
+// The five segments come from one draw rather than five, so the id is one ordinal off the
+// request's mint (#856) — five draws would be reproducible too, but would consume four
+// ordinals that mean nothing to a reader of the stream.
+func generateFleetID(m *IDMint) string {
+	h := m.Hex(16)
+	return fmt.Sprintf("fleet-%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
 }
 
 // ec2FleetStateKey returns the state key for a fleet.
@@ -300,7 +303,7 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	fleet := EC2Fleet{
-		FleetID:                   generateFleetID(),
+		FleetID:                   generateFleetID(reqCtx.IDs),
 		FleetState:                "active",
 		Type:                      fleetType,
 		TotalTargetCapacity:       total,

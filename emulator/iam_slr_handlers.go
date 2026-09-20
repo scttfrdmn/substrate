@@ -131,7 +131,7 @@ func (p *IAMPlugin) createServiceLinkedRole(ctx *RequestContext, req *AWSRequest
 
 	role := &IAMRole{
 		RoleName:                 roleName,
-		RoleID:                   generateIAMID("AROA"),
+		RoleID:                   generateIAMID(ctx.IDs, "AROA"),
 		ARN:                      roleARN,
 		Path:                     slrPath,
 		Description:              params.Description,
@@ -224,7 +224,7 @@ func (p *IAMPlugin) deleteServiceLinkedRole(ctx *RequestContext, req *AWSRequest
 
 	service := iamSLRServiceFromPath(role.Path)
 	task := &IAMSLRDeletionTask{
-		DeletionTaskID: iamSLRDeletionTaskID(service, role.RoleName, iamSLRTaskUUID()),
+		DeletionTaskID: iamSLRDeletionTaskID(service, role.RoleName, iamSLRTaskUUID(ctx.IDs)),
 		RoleName:       role.RoleName,
 		ServiceName:    service,
 		Status:         iamSLRDeletionSucceeded,

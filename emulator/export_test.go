@@ -27,8 +27,12 @@ func AwaitTestServerForTest(baseURL string, deadline time.Duration) error {
 	return awaitTestServer(baseURL, deadline)
 }
 
-// GenerateIAMIDForTest wraps generateIAMID for external tests.
-func GenerateIAMIDForTest(prefix string) string { return generateIAMID(prefix) }
+// GenerateIAMIDForTest wraps generateIAMID for external tests, minting from a fresh
+// [IDMint] over seed. An empty seed exercises the crypto/rand fallback, which is what
+// a mint site reached outside a request still does (#856).
+func GenerateIAMIDForTest(seed, prefix string) string {
+	return generateIAMID(NewIDMint(seed), prefix)
+}
 
 // IAMUserARNForTest wraps iamUserARN for external tests.
 func IAMUserARNForTest(accountID, path, name string) string { return iamUserARN(accountID, path, name) }
@@ -935,7 +939,7 @@ func LaunchVolumesForTest(instanceID, availabilityZone string, mappings []EC2Blo
 		AccountID:        "123456789012",
 		Region:           "us-east-1",
 	}
-	return ec2LaunchVolumesFor(inst, mappings, nil, "2026-01-01T00:00:00Z")
+	return ec2LaunchVolumesFor(NewIDMint("launch-volumes-for-test"), inst, mappings, nil, "2026-01-01T00:00:00Z")
 }
 
 // RequestTagKeysForTest wraps requestTagKeys for external tests.

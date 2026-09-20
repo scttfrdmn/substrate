@@ -151,11 +151,13 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	// every step. #480 did this for S3 alone; #572 generalized it to the rest.
 	resolveOperationName(req)
 
+	requestID := generateRequestID()
 	reqCtx := &RequestContext{
-		RequestID: generateRequestID(),
+		RequestID: requestID,
 		AccountID: defaultAccountID,
 		Region:    region,
 		Timestamp: time.Now(),
+		IDs:       NewIDMint(requestID),
 		Metadata:  make(map[string]interface{}),
 	}
 
@@ -829,6 +831,14 @@ func extractServiceFromAuth(authHeader string) string {
 // the same objection iamSLRTaskUUID's comment records — and every consumer that
 // correlates a response with a log line needs them distinct. Making every minted
 // value derived, request ids included, is #856's question, not this one's (#866).
+//
+// #856 made distinctness load-bearing rather than merely tidy: every other identifier a
+// request mints is derived from this one ([RequestContext.IDs]), so two requests sharing an
+// id would mint the same volume id as each other. The wall clock alone does not guarantee
+// that — Windows and some container runtimes report a coarse monotonic clock, and two
+// requests served within one tick would agree — so a random suffix is appended. It costs
+// nothing in reproducibility: the value is recorded on the event and restored on replay, not
+// re-derived.
 func generateRequestID() string {
-	return fmt.Sprintf("req-%d", time.Now().UnixNano())
+	return fmt.Sprintf("req-%d-%s", time.Now().UnixNano(), NewIDMint("").Hex(4))
 }
