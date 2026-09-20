@@ -48,6 +48,17 @@
 //     exported as a standalone test, turning a once-seen scenario into a
 //     permanent guard.
 //
+// "Replays identically" includes timestamps: the simulated clock is **frozen**
+// at the recorded event's own timestamp for the duration of that event's replay
+// ([ReplayEngine.replayEvent]), so a value a handler renders from
+// [TimeController.Now] is the recorded value and not one near it. That was not
+// true before #1217 — the clock was set to the recorded timestamp and then left
+// advancing with wall time, so a date rendered at second resolution matched the
+// recording except when the recorded and replayed reads straddled a second
+// boundary. A regression fixture built out of a recorded run carried the same
+// one-in-N exposure, off CI, with nothing to point at. Use
+// [TestServer.FreezeTimeAt] to get the same exactness out of a *live* run.
+//
 // # Seeding: determinism without sacrificing coverage
 //
 // Determinism does not mean every test sees the same result. Seeding is the

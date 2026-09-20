@@ -231,11 +231,22 @@ type SnapshotableStateManager interface {
 //
 // Calling SetTime or SetScale resets both baselines atomically so the new
 // value takes effect immediately without a discontinuous jump.
+//
+// The first sentence above is true only while the clock is **frozen**, which is
+// what [TimeController.Freeze] is for. A baseline that advances with wall time
+// means SetTime sets where the clock starts from, not what it reads: two reads of
+// Now() after the same SetTime differ by however long the code between them took,
+// so a value rendered from the clock is reproducible across runs only to within
+// that latency. At second resolution — which is what RFC3339 without fractional
+// seconds gives, and what most AWS timestamps are rendered at — that is a
+// difference whenever the two reads straddle a second boundary, and identical
+// otherwise. [ReplayEngine.replayEvent] freezes for exactly this reason (#1217).
 type TimeController struct {
 	mu           sync.RWMutex
-	simBaseline  time.Time // simulated time at last SetTime/SetScale call
-	wallBaseline time.Time // real wall time at last SetTime/SetScale call
+	simBaseline  time.Time // simulated time at last SetTime/SetScale/Freeze call
+	wallBaseline time.Time // real wall time at last SetTime/SetScale/Unfreeze call
 	scale        float64
+	frozen       bool // when set, Now returns simBaseline and ignores wall time
 }
 
 // NewTimeController creates a TimeController whose simulated clock starts at t
@@ -250,9 +261,17 @@ func NewTimeController(t time.Time) *TimeController {
 
 // Now returns the current controlled time, advanced from the last SetTime or
 // SetScale call by (wall elapsed) * scale.
+//
+// While the clock is frozen it returns the simulated baseline itself, so every
+// read between a [TimeController.Freeze] and the matching
+// [TimeController.Unfreeze] returns the same instant no matter how long the code
+// between them takes.
 func (c *TimeController) Now() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	if c.frozen {
+		return c.simBaseline
+	}
 	elapsed := time.Since(c.wallBaseline)
 	return c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
 }
@@ -260,11 +279,67 @@ func (c *TimeController) Now() time.Time {
 // SetTime sets the simulated clock to ts.  The scale factor is preserved and
 // wall-time tracking restarts from this point, so subsequent Now() calls
 // advance from ts.
+//
+// The frozen state is preserved too, which is the combination a replay wants:
+// freeze, then SetTime to the recorded timestamp, and every read of the clock
+// returns that timestamp exactly rather than advancing from it.
 func (c *TimeController) SetTime(ts time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.simBaseline = ts
 	c.wallBaseline = time.Now()
+}
+
+// Freeze stops the simulated clock at the instant Now() currently reports, so
+// every subsequent read returns that same instant until Unfreeze.  Freezing an
+// already-frozen clock changes nothing.
+//
+// This is the mechanism that makes a value rendered from the clock *exactly*
+// reproducible rather than nearly so (#1217). It is a distinct state rather than a
+// scale of zero, because the scale is reported over the control plane
+// (GET /v1/control/time) and that endpoint refuses to set a scale of zero — so a
+// frozen clock reported as scale 0 would be a state a caller could read and not
+// restore, and would conflate "stopped for the duration of one replayed event"
+// with "running at a factor the API says is invalid".
+//
+// To stop the clock at a *chosen* instant, call Freeze and then SetTime, in that
+// order. The reverse advances the clock by the wall interval between the two calls
+// before stopping it, because Freeze stops the clock where it currently reads —
+// tens of nanoseconds, which is invisible until something renders the difference.
+// [TestServer.FreezeTimeAt] is the ordering written down once.
+func (c *TimeController) Freeze() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen {
+		return
+	}
+	// Capture the time the clock currently reads, so freezing is not itself a jump.
+	elapsed := time.Since(c.wallBaseline)
+	c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+	c.wallBaseline = time.Now()
+	c.frozen = true
+}
+
+// Unfreeze resumes advance from the instant the clock was stopped at, at the
+// scale it was configured with.  Unfreezing a clock that is not frozen changes
+// nothing.
+func (c *TimeController) Unfreeze() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.frozen {
+		return
+	}
+	// Restart wall tracking here rather than from the Freeze call, so the interval
+	// the clock was stopped for is not paid back in one step.
+	c.wallBaseline = time.Now()
+	c.frozen = false
+}
+
+// Frozen reports whether the simulated clock is stopped.
+func (c *TimeController) Frozen() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.frozen
 }
 
 // Scale returns the current time acceleration factor.
@@ -278,13 +353,20 @@ func (c *TimeController) Scale() float64 {
 // 3600.0 makes one real second equal one simulated hour; 86400.0 makes one
 // real second equal one simulated day.  The current simulated time is
 // captured atomically so there is no jump at the transition.
+//
+// A frozen clock stays frozen and does not advance: the capture below is skipped,
+// because while frozen the simulated baseline already *is* the time the clock
+// reads, and advancing it by the wall interval since the freeze would undo the
+// freeze in the act of changing the scale.
 func (c *TimeController) SetScale(scale float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	// Capture current simulated time before changing scale.
-	elapsed := time.Since(c.wallBaseline)
-	c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
-	c.wallBaseline = time.Now()
+	if !c.frozen {
+		// Capture current simulated time before changing scale.
+		elapsed := time.Since(c.wallBaseline)
+		c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+		c.wallBaseline = time.Now()
+	}
 	c.scale = scale
 }
 

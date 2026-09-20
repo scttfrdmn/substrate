@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`TestServer.FreezeTimeAt`, and a named frozen state on the simulated clock** (#1217). A test that
+  asserts an exact timestamp needs the clock to stop, and the only way to ask for that was
+  `SetScale(0)` — a value the control plane's own endpoint refuses, so the state was reachable from a
+  test and not from a caller. `FreezeTimeAt(t)` stops the clock at exactly `t`, with `FreezeTime`,
+  `UnfreezeTime` and `TimeFrozen` for the pieces. `FreezeTimeAt` exists rather than leaving callers to
+  compose the two because the obvious order — `SetTime(t)` then `FreezeTime()` — stops the clock a few
+  tens of nanoseconds *after* `t`, since freezing stops it where it currently reads; that is invisible
+  until something renders it, and then it is a second boundary crossed for no reason a reader of the
+  test could see.
 - **A request log an out-of-process consumer can count with** (#1237). A Go test that starts the
   emulator counts requests through `EventStore.GetEvents`; a consumer that runs `substrate server`
   as a separate process cannot reach that store at all — objectfs mounts a bucket under a real
@@ -109,6 +118,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A replayed timestamp is the recorded one, not a value near it** (#1217). `replayEvent` called
+  `SetTime(event.Timestamp)` before dispatching, and `SetTime` sets a *baseline* the clock then
+  advances from at its scale — so a handler reading `TimeController.Now()` during a replay saw the
+  recorded timestamp plus however long the replay dispatch took. Rendered at second resolution, which
+  is what RFC3339 without fractional seconds gives and what most AWS timestamps are, that agreed with
+  the recording whenever the two reads landed in the same second and differed by exactly one second
+  when they straddled a boundary. It surfaced as a flake in
+  `TestReplayBodyDiff_ARecordedListingReplaysByteIdentically` on a **documentation-only** PR, in both
+  Go 1.26 and 1.27 — the worst version of the failure substrate's whole architecture exists to remove,
+  because the reviewer's first hypothesis is their own change and the evidence points nowhere near it.
+  It was also a fidelity claim, not only a test defect: a recorded run offered as a regression fixture
+  (`doc.go`) carried the same one-in-N exposure off CI, with no test to point at. The clock is now
+  **frozen** for the duration of an event's replay, so every read while replaying one event returns
+  `event.Timestamp` exactly, and restored afterwards — a replay on a live emulator does not stop its
+  clock, and a clock the caller had already frozen is left frozen rather than started. `TimeController`
+  gained `Freeze`, `Unfreeze` and `Frozen` for it, and `SetScale` now leaves a frozen clock frozen
+  instead of advancing its baseline by the interval since the freeze. A frozen *state* rather than a
+  scale of zero, because the control plane reports the scale over `GET /v1/control/time` and its
+  `SetScale` endpoint refuses a scale of zero — so a frozen clock reported as scale 0 was a state a
+  caller could read and not restore. `replay_plugin_reset_test.go`, the one place in the tree that
+  froze by asking for scale 0, now says what it means. **The regression test is deterministic where the
+  flake was not:** it records on a clock frozen one nanosecond before a second boundary and releases it
+  before replaying, so any forward motion at all crosses the boundary and reproduces the exact CI
+  failure — `2026-09-20T00:36:20Z -> 2026-09-20T00:36:21Z (major)` — on every run. Every other replay
+  assertion in the tree was checked and the result recorded in
+  `emulator/replay_frozen_clock_test.go`: one more was exposed and silent about it —
+  `TestELBResponseMetadata_AReplayReproducesTheRecordedRequestID` filters its assertion to the request
+  id, so a one-second divergence in the classic `CreatedTime` was tolerated rather than reported.
 - **`GetLogEvents` reports both of its published tokens, so the documented termination rule works**
   (#1223). `API_GetLogEvents` states termination in terms of a pair: *"As long as the
   `nextBackwardToken` or `nextForwardToken` returned is NOT equal to the `nextToken` that you passed

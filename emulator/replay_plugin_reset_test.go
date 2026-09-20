@@ -53,11 +53,16 @@ var resetFrozenClock = time.Date(2024, 6, 1, 12, 0, 0, 0, time.UTC)
 
 // startFrozenServer starts a recording test server whose simulated clock does not
 // advance, so a minted "<clock>-<counter>" identifier varies only in its counter.
+//
+// This asked for a scale of zero before #1217 gave the controller a named frozen
+// state. The two compute the same Now(), but a scale of zero is a value the control
+// plane's own SetScale endpoint refuses, so it was a state this file could reach and a
+// caller could not.
 func startFrozenServer(t *testing.T) *emulator.TestServer {
 	t.Helper()
 	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
 	ts.SetTime(resetFrozenClock)
-	ts.SetScale(0)
+	ts.FreezeTime()
 	return ts
 }
 

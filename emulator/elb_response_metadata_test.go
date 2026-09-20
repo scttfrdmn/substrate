@@ -256,6 +256,13 @@ func TestELBResponseMetadata_TheIDIsTheOneTheEventRecorded(t *testing.T) {
 // the recorded classic create mints a DNS-name suffix that a replay mints again, which is #856's
 // open divergence and is honestly reported. Asserting zero differences overall would fail on that
 // pre-existing debt and say nothing about this one.
+//
+// The filter had a second effect that was not intended: the classic `CreatedTime` renders from the
+// simulated clock (`elb_classic.go:529`), and until #1217 froze the clock for the duration of a
+// replayed event a replay reproduced it only to within the dispatch latency. A one-second divergence
+// there was tolerated here rather than reported, which is why this test never showed the flake that
+// `replay_frozen_clock_test.go` now pins deterministically. The filter stays, for the #856 reason
+// above; the exposure behind it is gone.
 func TestELBResponseMetadata_AReplayReproducesTheRecordedRequestID(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())

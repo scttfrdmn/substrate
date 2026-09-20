@@ -362,10 +362,16 @@ func TestResponseBodyComparison_MemberUnionIsDeterministic(t *testing.T) {
 //
 // ListBuckets is the operation to prove it on, because its body carries three things
 // a replay has to get right for the comparison to be usable: the bucket names, their
-// creation dates — rendered from the simulated clock, which replayEvent sets to the
+// creation dates — rendered from the simulated clock, which replayEvent freezes at the
 // recorded event's timestamp — and the request id, which is reproducible only because
 // the event records it (#866). Any one of the three going wrong would report a
 // difference here.
+//
+// The word is "freezes" rather than "sets" because this comment said "sets" and that
+// was the defect: SetTime alone sets a baseline the clock then advances from, so the
+// creation dates were reproduced only to within the wall-clock latency of the replay
+// path, and this test failed roughly once per (4 × latency / 1s) runs — including on a
+// documentation-only PR, which is where it was found (#1217).
 func TestReplayBodyDiff_ARecordedListingReplaysByteIdentically(t *testing.T) {
 	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
 
