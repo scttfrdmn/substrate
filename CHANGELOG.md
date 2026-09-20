@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.120.0] - 2026-09-19
+
 ### Added
+
 - **The Classic Load Balancer API is routed by the `Version` a Query request carries** (#844, Tier 1a).
   Elastic Load Balancing is two APIs at one endpoint: `2012-06-01` and `2015-12-01` share a signing
   name, an IAM prefix and three action names — `CreateLoadBalancer`, `DescribeLoadBalancers`,
@@ -278,176 +281,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `execute-api` gets no `### Cost` subsection, because writing "free" would state a policy where there
   is only the omission #1202 tracks.
 
-### Fixed
-- **Batch's three resource describes answered a well-formed page one to a `nextToken` they could not
-  have issued, and did it through one shared helper** (#1086). `DescribeComputeEnvironments`,
-  `DescribeJobQueues` and `DescribeJobDefinitions` all paginate through `batchPage`, which carried the
-  pre-#915 idiom — `base64.StdEncoding.DecodeString` then `strconv.Atoi`, both errors discarded — so an
-  unusable token left the offset at zero and every one of the three restarted the listing, the one wrong
-  answer a paginating caller cannot detect. All three now answer **`ClientException` / 400**, published
-  in each operation's own Errors section and glossed *"These errors are usually caused by a client
-  action. … Another cause is specifying an identifier that's not valid."*; each Batch page publishes
-  exactly two errors and Batch publishes no common-errors page, so that is the whole published
-  vocabulary and nothing is borrowed from a sibling. The footing for the condition is each page's own
-  description of the parameter — *"The `nextToken` value returned from a previous paginated `Describe…`
-  request where `maxResults` was used …"*, naming the operation itself as the source — with the *"Treat
-  this token as an opaque identifier"* sentence recorded as addressed to the caller rather than to the
-  service. **The decode had to move out of the shared helper**: `DescribeJobDefinitions` loads the
-  job-definition index before it reaches the helper, so a decode there would have sat below a state read
-  on one of the three, and the refusal is now unconditional for all three (#887), asserted by sealing
-  the state store. Token non-portability between the three is asserted rather than implied, since the
-  token carries an offset and nothing else, and a past-the-end offset still clamps to a final empty
-  page. **This closes #1086**: with Batch converted, no listing in the tree answers page one to a token
-  it could not have issued.
-- **EventBridge Scheduler `ListSchedules` answered a well-formed page one to a `NextToken` it could
-  not have issued** (#1086). The handler carried the pre-#915 idiom — `base64.StdEncoding.DecodeString`
-  then `strconv.Atoi`, both errors discarded — so an unusable token left the offset at zero and the
-  listing restarted, which is the one wrong answer a paginating caller cannot detect: a loop running
-  until the token comes back empty is handed the first page again, so it spins or reprocesses the same
-  schedules, and nothing in the response says so. It now answers **`ValidationException` / 400**,
-  published in the operation's own Errors section and glossed *"The input fails to satisfy the
-  constraints specified by an AWS service."* The footing for the condition is the request parameter's
-  own sentence — *"The token returned by a previous call to retrieve the next set of results."* — so a
-  token no previous call returned is not what the parameter is documented to accept; what remains
-  substrate's reading is only that this input problem is the one that gloss covers, since the page
-  publishes no code AWS attributes to a token. The message uses the service's `1 validation error
-  detected: …` shape with the member spelled `nextToken`, because `ValidationException` is Scheduler's
-  only refusal for a bad input and a caller told the input failed a constraint cannot otherwise tell
-  which input AWS means. The token is decoded **above** the index load (#887), asserted by sealing the
-  state store; the published Length of 1–2048 is subsumed by the issuability round trip; and a
-  past-the-end offset still clamps to a final empty page, because a token substrate issued over a
-  listing that has since shrunk is still a token it issued. This is the ninth of #1086's ten sites and
-  the only one whose token travels in a query string — Batch's shared paginator behind three describes
-  remains, so #1086 stays open.
-- **EventBridge Scheduler `ListSchedules` read all five of its query parameters under names the page
-  does not publish, so every filter and the whole cursor were inert** (#1226). `API_ListSchedules`
-  publishes `GET /schedules?MaxResults=…&NamePrefix=…&NextToken=…&ScheduleGroup=…&State=…` —
-  PascalCase throughout, with the group bound to **`ScheduleGroup`** even though the parameter list
-  calls it `GroupName`, so `GroupName` never appears on the wire. Substrate read `groupName`,
-  `namePrefix`, `state`, `nextToken` and `maxResults`, and `AWSRequest.Params` is populated verbatim
-  from the query string, so **no SDK could set any of the five**: every call answered the `default`
-  group's first twenty schedules, attached a `NextToken` the next call then ignored, and applied no
-  filter. A paginating loop either spun or reread the same page, and nothing in any response said so
-  — the same undetectable failure #1086 is about, arriving by a different route. **The split is the
-  API Reference's own, not substrate's**, which is why the fix is one operation wide:
-  `API_GetSchedule` publishes `?groupName=` and `API_DeleteSchedule` publishes
-  `?clientToken=&groupName=`, so those two handlers were already right and are deliberately left
-  alone, with both spellings now named in one file so neither can later be "corrected" into the
-  other. The lowerCamel names are **not** kept as aliases: AWS ignores a query parameter its model
-  does not carry, so honouring one would be the same defect facing the other way — a call that
-  filters against substrate and silently does not against AWS. This is also why the defect survived,
-  and the evidence is in the diff: every test in the tree built its query string in substrate's
-  dialect rather than AWS's, so the pagination and filter tests passed while the operation was
-  unusable from an SDK. Two readings of substrate's own are recorded rather than changed: `MaxResults`
-  has **no published default**, so the page size of 20 is substrate's choice, and a value above the
-  published maximum of 100 is clamped rather than refused.
-- **Every routed Lambda operation is reachable under the API version date its own page publishes, not
-  only `2015-03-31`** (#1142). A REST service puts the version in the path, and Lambda dates each
-  operation's URI at the version that operation was introduced — `2014-11-13` for `InvokeAsync`,
-  `2015-03-31` for the function CRUD, `Invoke`, the resource policy and the event source mappings,
-  `2017-03-31` for `TagResource`/`UntagResource`/`ListTags`, and `2019-09-25` for
-  `PutFunctionEventInvokeConfig`. Substrate's parser reached its arms by trimming the literal prefix
-  `/2015-03-31`, so a path under any other date kept its version segment, matched nothing, and fell
-  through to `UnknownOperationException`/404. `lambda.TagResource` against a function substrate had
-  just created answered *"The action POST /2017-03-31/tags/arn:aws:lambda:… is not recognized"* even
-  though the dispatch arm, the handler and the parser's own `/tags/` arm were all there: **three
-  operations were unreachable in a plugin that implements them**, and two more were reachable only at
-  a date AWS does not serve. The dates are confirmed mechanically against
-  `aws-sdk-go-v2/service/lambda`'s serializer, whose 50 distinct URIs carry 17 different dates; of the
-  paths substrate routes, three families were on the wrong one and the rest were right. **A request
-  under an undocumented date is still refused** — the version is matched rather than stripped, because
-  accepting `/2015-03-31/tags/…`, which no SDK emits and AWS does not serve, would make substrate the
-  only implementation that does and would hide the defect until deployment. The cost of matching is
-  that nine of substrate's own tests were posting to the date the parser wanted rather than the one the
-  API publishes; they move with the fix, which is the evidence these routes were never exercised as an
-  SDK drives them, and the one site already using `/2017-03-31/tags/…`
-  (`lambda_warm_container_test.go`) asserted nothing about the status and so passed against the 404.
-  The same parser is Lambda's entry in the operation-name resolver, so authorization, metering and
-  fault injection all saw `Unknown` for a tag call — an IAM policy naming `lambda:TagResource` could
-  neither allow nor deny it, and a seeded fault could not fire; the resource half moves with it, and a
-  tags request is now authorized against the ARN it names verbatim rather than one reassembled from the
-  caller's own account and Region, which would retarget a cross-account ARN at the caller's own
-  function of that name.
-- **SNS `TagResource` and `UntagResource` emit the empty result element their pages publish, so an
-  SDK can call them at all** (#1141). Both wrote the tag, saved the topic and answered 200 — and a
-  caller using `aws-sdk-go-v2/service/sns` still saw the operation fail with *"deserialization failed,
-  failed to decode response body, TagResourceResult node not found"*. The query protocol decides
-  whether `<{Operation}Response>` holds an `<{Operation}Result>` by the operation's modeled output, and
-  the two memberless cases look identical from substrate's side: an output of `smithy.api#Unit` has no
-  result element, an output that is an empty **structure** has the element, empty. AWS publishes both
-  halves as samples — `API_TagResource` and `API_UntagResource` show `<TagResourceResult/>` and
-  `<UntagResourceResult/>`, while `API_DeleteTopic`, `API_Unsubscribe` and `API_AddPermission` show
-  `<ResponseMetadata>` as the response's only child — and substrate emitted the second shape for all
-  eight, which is right for six of them. This is the worst shape a divergence can take: the write had
-  already happened, so state was right and only the envelope was wrong, while every caller that checks
-  its error treated a successful tag as a failure, which no create → converge → tag sequence gets past.
-  A hand-written client cannot see the difference, because the element carries nothing, which is why
-  every existing SNS test stayed green; the regression test is a real-SDK journey, and the six `Unit`
-  operations' *absence* of the element is pinned by asserting the response root's children exactly.
-  **The sweep for further instances closes negative**: the SDK's SNS deserializer requires a result
-  element for 31 operations and none of the six is among them, and the two in-tree precedents for the
-  distinction (`cwRenderQueryXML` for CloudWatch, `elbEmptyOKResponse` for ELBv2) already draw it, so
-  these two were the only sites in the tree.
-- **The three updates whose own page publishes full replacement now replace instead of merging**
-  (#1089). `API_UpdateSchedule` states it outright — *"EventBridge Scheduler uses all the information
-  that you have provided and replaces your schedule. You will lose any information that you haven't
-  provided, such as a description"* — and `API_UpdateUserPool` and `API_UpdateUserPoolClient` carry the
-  same Important box word for word: *"If you don't provide a value for an attribute, Amazon Cognito sets
-  it to its default value."* All three handlers assigned each optional member only when the request
-  supplied a non-empty one, so a caller doing exactly what those pages advise — build the request from
-  the current configuration, accept losing what you omit — saw a stale `Description`,
-  `ScheduleExpressionTimezone`, `State`, `Target.Input`, `Target.RetryPolicy`, `Policies`,
-  `LambdaConfig`, `MfaConfiguration`, `UserPoolTags`, `ClientName` or `ExplicitAuthFlows` survive where
-  AWS resets it. The divergence was invisible until something was omitted, and the merge was
-  **unasserted in either direction**, which is how it drifted. Each create now resolves a body through
-  the same function as its update, so the two doors cannot disagree again about what an omitted member
-  means. Full replacement governs only the members an operation *publishes*: `Schema` is absent from
-  `API_UpdateUserPool`'s Request Syntax, so `SchemaAttributes` is preserved rather than cleared, as are
-  `ProviderName`, `Status`, `Arn` and `CreationDate` — an operation cannot reset a member it does not
-  accept.
-- **`UpdateUserPool` answers a byte-empty body, and `PoolName` and `UserPoolTags` are decoded at all**
-  (#1089). Its Response Syntax is `HTTP/1.1 200` followed by nothing, where `UpdateUserPoolClient`'s
-  publishes a `UserPoolClient` object; substrate answered `{}` for both. The two updates differ and each
-  is now answered as its own page publishes rather than made symmetrical — empty rather than `{}`
-  follows AppSync's in-tree precedent, that `{}` is a member-less object where the page promises no
-  object at all. `PoolName` and `UserPoolTags` were published request members the handler never
-  decoded, so neither could be updated; a member the decode drops cannot be replaced either.
-- **`GetSchedule` no longer reports `ClientToken`** (#1089). It is not among that page's fifteen
-  published response elements — it is a request-only idempotency token, published on the create and the
-  update and on no read. It came off the wire *with* the full-replace fix rather than on its own because
-  an omitted member now reverts: leaving it would have made an unpublished field start changing under
-  callers who never named it. The record keeps it as recorded intent.
-- **`RunInstances`, `StartInstances`, `StopInstances` and `TerminateInstances` answer the transient
-  state AWS publishes in their own sample responses** (#514). Substrate applied every state change in
-  the request that asked for it, so all four reported the *settled* state: `running` where
-  `API_StartInstances` shows `currentState` 0 / `pending` beside `previousState` 80 / `stopped`, and
-  `stopped` where `API_StopInstances` shows 64 / `stopping` beside 16 / `running`. A consumer reading
-  the transition out of the call it just made — which is a waiter's first observation — was told a
-  transition that had already finished. This is a published-response divergence independent of seeding,
-  so it is corrected for every caller rather than behind a seed; the record still settles, so an
-  unseeded describe answers exactly as before and no existing fixture changes. `pending`, `stopping`
-  and `shutting-down` were three of the six codes `instanceState`'s own Valid Values publish and that
-  no code path could produce, and **no test asserted `currentState` anywhere**, which is how they
-  stayed unreachable.
-- **`StartInstances` and `StopInstances` refuse a `terminated` instance instead of resurrecting it**
-  (#514). Both wrote the new state unconditionally, so a stop of a terminated instance produced a
-  `stopped` one and a start produced a `running` one — against the lifecycle page's state table, which
-  says such an instance *"has been permanently deleted and cannot be started"*. The code is
-  `IncorrectInstanceState` / 400, whose published description is the general rule this is an instance
-  of (*"The instance is in an incorrect state for the requested action"*). Provenance differs between
-  the two halves and the doc comment records the difference: the start refusal rests on that sentence
-  directly, while the stop refusal rests on *"permanently deleted"* alone — no page found states a stop
-  precondition — and is substrate's reading rather than letting a stop resurrect a deleted instance
-  into a state it could then start from. Neither operation page publishes an error of its own, so the
-  message text is substrate's.
-- **`docs/services.md` no longer claims a seed replays like any other state** (#1140, found while
-  implementing #514). Seeds do live in the state manager, and that is precisely why: a replay resets the
-  state manager before re-executing, and a control-plane write is not an AWS request and so never
-  enters the event stream at all — so a stream recorded under a seed replays as the *unseeded*
-  sequence, with no event failing to make it visible. General to every seed in substrate; filed as
-  #1140, which carries the three candidate fixes.
-
-### Added
 - **The full-replacement property is asserted in the shape a merge cannot pass, and the boundary around
   it is asserted too** (#1089, #671). Each of the three operations is created with every optional member
   set, updated naming only the required ones, and read back through `GetSchedule` / `DescribeUserPool` /
@@ -515,7 +348,173 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   minted instance ID, because a replayed `RunInstances` mints a new one and a recorded request naming
   the old one is unreplayable (#856).
 
+- **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
+  assertion beside #1007's** (#1066). Transfer Family, CodeDeploy, CodePipeline and CodeBuild had no row
+  in `invalid_body_inventory_test.go` at all, which is the whole explanation for how thirty leaking
+  guards survived: the table is what routes a site past `assertNoDecoderText`. `CreateBackupSelection`
+  goes in `TestInvalidBodyBelowAResourceLookup` instead, because it loads the plan before it decodes —
+  also why its leak outlived `createBackupPlan`'s in the same file.
+  `TestInvalidBodyDecoderTextLeaksAreFullyCovered` is a **sibling** of
+  `TestInvalidBodyTailIsFullyCovered` rather than an extension of it: `tailSites = 60` is a closed count
+  of the sites whose decode error was *discarded*, and these thirty-five had no error to discard, so the
+  two populations are disjoint in both directions and merging them would destroy both. The table's own
+  header count was also corrected — it read "one hundred and eighty-nine cases across thirty-six
+  entries" where the table held 184, so it is now counted (218 across 42) rather than carried.
+- **Eleven rows in `memberComplaintServices` and a code assertion on FSx's three refusals** (#1063).
+  Every one of the eleven corrected codes passed the full suite before *and* after the change, which is
+  to say nothing pinned any of them — the same gap #1090 records for ECR, and the reason these rows are
+  the load-bearing part of the fix rather than a formality. They go in the existing table because its
+  one `code:` per service is what forces a plugin's decision to be made once. FSx's own tests asserted
+  only a 400 status, which cannot distinguish `BadRequest` from the `InvalidRequest` it was answering;
+  `assertFSxError` asserts both, and a new test covers the required-member refusal itself.
+- **A tripwire asserting that `ValidationError` and `ValidationException` are never sourced to each
+  other's page** (#1064). They are different codes with different sources, a distinction re-derived
+  more than once: `ValidationError` appears *only* on a common-errors page, in all three generations,
+  and `ValidationException` *only* in an operation's own Errors section, on no common-errors page in
+  any generation. ACM publishes both with different glosses, which is why a sentence was not enough.
+  `TestCommonErrors_ValidationExceptionIsNeverSourcedToTheCommonPage` parses every non-test file in
+  `emulator/` and fails any function that answers `ValidationException` while citing a common-errors
+  page in its own doc comment. It allows the negated form ("absent from its Common Errors page"), which
+  is how #950 and #1007 ruled codes out, because a rule that failed those would push the next author
+  toward deleting the provenance rather than writing it. It also carries its own control — the same
+  predicates must still find a `ValidationError` constructor citing the common page — so a green run
+  cannot come from a broken detector.
+- **Twenty-five rows in `memberComplaintServices`, four new service entries, and a WAFv2 `Scope` test
+  file** (#1062). The four entries are SSO, the two Cognito services and DynamoDB Streams — named for
+  the API rather than a host, because substrate routes the Streams operations through DynamoDB's own
+  host and target prefix, so the operation name is the only discriminator. The five WAFv2 rows that used
+  to name `Id` for a `{}` body are now **pairs**: `Scope` is checked first, so retargeting them would
+  have silently stopped testing #1063's `Id` refusals, and the second row of each pair supplies a
+  `Scope` to reach the check underneath. `wafv2_scope_test.go` carries the two halves the one-code table
+  cannot — the invalid-value code at all eight required operations, applied per handler so a handler that
+  forgot the call fails, and `GetWebACL`'s exemption, which needs a message assertion because both of
+  its refusals are `ValidationError`/400.
+- **`emulator/sso_errors.go`, `emulator/cognito_errors.go` and `emulator/dynamodb_streams_errors.go`**
+  (#1062), following the `glue_errors.go`/`fsx_errors.go` shape #1063 established: one constructor per
+  service carrying the code, the status and the published sentence it rests on, so a correction moves one
+  line rather than a plugin's worth of literals. `ssoInvalidBody` and the plugin's two inline
+  `ValidationException` literals now route through `ssoValidationException`, and `wafv2ValidateScope`
+  joins `wafv2ValidateCreateIPSet` in `wafv2_validate.go` so the enum's two published values are written
+  once.
+- **`emulator/stepfunctions_asl_structure.go`, and `ASLState.ItemProcessor`** (#1073). One file holds
+  every structural rule with the AWS sentence it rests on beside it, so a correction is a one-place edit
+  and the two boundaries — structure over semantics, and only what AWS itself publishes — are stated
+  where the rules are rather than in a commit message. `ItemProcessor` is the one member the rules needed
+  that the type did not model, so the issue's claim that no schema widening is required is not quite
+  right: AWS marks `ItemProcessor` *"(Required)"* on the inline-`Map` page, lists `Iterator` under
+  *"Deprecated fields"*, and then tells Step Functions Local users to prefer `Iterator` — exactly the
+  class of tool substrate is. Refusing either spelling would therefore reject a document AWS accepts, so
+  the rule is *exactly one of the two*, and carrying both is refused because nothing publishes a
+  precedence between them.
+- **`emulator/stepfunctions_create.go`, and eleven tests over the two creates** (#1072). One file holds
+  what both handlers check before they store anything and what a repeat answers, because the name
+  constraint list is published identically on both pages down to its wording — one validator serving two
+  operations is what keeps the two from drifting apart again. The tests are the load-bearing part:
+  **nothing pinned any of the corrected behaviour**, since every existing caller — the CFN builders and
+  every helper in the suite — already supplies a conforming name and a real `roleArn`, so the full suite
+  passed both before and after with no test edited. A twelve-case table walks each published constraint,
+  including a control character and U+FFFE constructed as runes; `sfnCreateRefused` asserts the code, the
+  400 *and* that the body no longer carries `InvalidParameterException`; and the idempotency tests assert
+  the two responses are equal JSON, that a repeat differing only in `roleArn` leaves
+  `DescribeStateMachine` reporting the **first** role, and that a repeated `CreateActivity` leaves
+  `ListTagsForResource` reporting the first call's tags.
+- **Five tests over the structural rules, including one that pins the determinism** (#1073). A
+  twenty-eight-case refusal table runs at **both** writers, each case asserting the code, the status,
+  AWS's message, the fault named in the decoded `Message`, and that nothing was stored or that the stored
+  definition did not move. An eleven-document acceptance test states what must still create — a `Succeed`
+  with neither `Next` nor `End`, a `Next` on a `Succeed`, nested `And`/`Not` with no `Next`, a
+  self-contained `Parallel`, both `Map` spellings, an `ItemProcessor` carrying an unmodelled
+  `ProcessorConfig` — because a validator is only as good as the documents it leaves alone.
+  `TestSFNASL_TwoFaultsReportTheSameOneEveryTime` runs a two-fault definition twelve times and asserts
+  the response body is byte-identical, which is the property sorted iteration exists for.
+  `TestSFNDefinition_ASLConformanceIsNotChecked` becomes `TestSFNDefinition_ASLStructureIsChecked` over
+  the same four definitions, each with the fault its message must now name.
+- **`emulator/kms_alias_validate.go`, and ten tests over the three alias operations** (#1085). One file
+  holds the name rules, the three-page table behind them and the key-family derivation, because the rules
+  are per-operation and a reader who found them spread over three handlers would reasonably assume the
+  differences were oversights. As with #1072, **nothing pinned any of the corrected behaviour** — the full
+  suite passed before and after with no test edited, since every existing caller supplies a prefixed name
+  and a real key. Two of the tests exist because the acceptance criteria as written would have passed
+  against the defect: existence is asserted through `DescribeKey` on the alias rather than through
+  `ListAliases`, since `updateAlias` never touched the index and so the alias it fabricated was invisible
+  there either way; and the key-state asymmetry is asserted in **both** directions, because "a key pending
+  deletion is refused" is only half true and a test asserting the half would have pinned a bug. The
+  type-match cases assert the *message*, not just the code, and are paired with three accepted moves —
+  including two asymmetric keys of different specs — so that a handler refusing everything could not
+  satisfy them.
+- **`docs/services.md` has an AppSync section** (#1065, #1093). AppSync was an index row and nothing
+  else, so none of its 24 routed operations, its routes, its ARN shapes or its divergences were
+  documented anywhere. The section carries the operation table with each published route, why path
+  matching is case-sensitive and what that cost, the three arms that carry a verb as well as a name, the
+  200-not-204 reading, what each refusal reports and which published codes have no site, the
+  deterministic ARN and ID shapes, the two ways `ExecuteGraphQL` is reached (`POST /graphql` and any
+  `.appsync-api.` host), that the execution endpoint answers a stub on the `doc.go` boundary, the
+  CloudFormation resource types, and the $4.00-per-million cost model. This is one of the 20 sectionless
+  services #1093 owes; authoring it here rather than twice is deliberate, and #1093 shrinks by one
+  service and 24 operations. Two AppSync wire divergences are recorded there and filed rather than fixed,
+  because each is a persisted-shape change with an in-tree CloudFormation consumer: the `graphqlApi`
+  object spells its ARN `apiArn` where `API_GraphqlApi` publishes `arn` and adds `region` and `accountId`
+  which it publishes nowhere (#1121), and `CreateApiKey` discards the `expires` the caller sends and
+  defaults to 365 days where the page publishes 7, which leaves
+  `ApiKeyValidityOutOfBoundsException`/400 with no site (#1122).
+
+- **Substrate's own bookkeeping fields are now inventoried and ratcheted, and the inventory is 330
+  fields rather than the 343 estimated** (#756). Five fields exist for the emulator's own use —
+  `AccountID`, `Region`, `CreatedAt`, `UpdatedAt`, `EverTagged` — and AWS publishes none of them on any
+  shape, so a handler that marshals a persisted record straight into an `AWSResponse.Body` ships
+  members the service does not have. `make wire-bookkeeping-check` (`scripts/check-wire-bookkeeping.sh`,
+  in the shape of `check-discarded-unmarshal.sh`) now enumerates every such field carrying a
+  wire-visible json tag and diffs it against `scripts/wire-bookkeeping-baseline.txt`, failing both on a
+  field missing from the baseline and on a baseline line the tree no longer has. It runs in CI as `Wire
+  Bookkeeping Drift`, because a baseline nothing executes is a TODO list rather than a ratchet — which
+  is precisely how this inventory went untaken for as long as it did.
+
+  **The measured surface is 330 fields across 146 struct types in 67 files**, correcting the planned
+  estimate of 343 across roughly 40 files. Two exclusions narrow it, both deliberate and both recorded
+  in the script:
+  `organizations_account_test.go`'s `orgCreateStatus.AccountID` reads `CreateAccountStatus.AccountId`,
+  which AWS *does* publish, and both ELB generations publish `CreatedTime` as a real member, so a field
+  of that name is the service's data rather than substrate's. (`CloudFrontDistribution.CreatedTime` is a
+  divergence — CloudFront publishes `LastModifiedTime` — but that is a wrong member, not a bookkeeping
+  leak.) Two things the inventory makes visible that a tag-name scan could not: one `AccountID` renders
+  as `json:"a"` and one `Region` as `json:"r"`, and `AccountID` renders **ten** different ways in all,
+  so the Go identifier is the only stable key. And `json:"-"` — the one tag that would keep a bookkeeping
+  field out of a response without removing it — is used on **none** of the 330.
+
+  **The reachability half was answered by observation, not by analysis, and is recorded on the issue.**
+  The rule one wants is "no bookkeeping field reaches an `AWSResponse.Body`", which no grep can state
+  and which would need dataflow through 500-plus bare `json.Marshal(x)` calls and 60-odd per-plugin
+  response helpers; substrate depends on neither `golang.org/x/tools` nor any vendored analysis, so a
+  precise answer would mean adding a dependency to serve one check. Instead every plugin's
+  `HandleRequest` was temporarily instrumented with a deferred hook that walked the body it was about to
+  return, and the suite was run: **213 wire-visible observations across 31 services and 97 operations,
+  of which 194 — across 25 services and 86 operations — are members AWS publishes nowhere**. That is a
+  floor and not a ceiling, because it sees only what the suite exercises, and the instrumentation was
+  deliberately not committed, so the script asserts the declaration surface, which is the upper bound
+  and exactly decidable. ECR calibrates the pass: after #1090, its only remaining
+  bookkeeping-named wire member is `createdAt`, which `API_Repository` publishes, and the pass reports
+  that and nothing else.
+
+  Ten pages were read to separate a leak from a published member, because a wrong "published" call
+  would hide a real one. Genuinely published, so not leaks: ECR `createdAt`, ECS `Service.createdAt`,
+  Batch `JobDetail.createdAt`, ACM `CertificateDetail.CreatedAt`, Firehose
+  `DeliveryStreamDescription.CreateTimestamp`, RedshiftData `DescribeStatement.CreatedAt`/`UpdatedAt`,
+  Organizations `CreateAccountStatus.AccountId`, SSO `AccountAssignment.AccountId`, EC2
+  `SpotPlacementScore.region`, and Health `Event.region`. The same reads settled the co-located members
+  the other way: Firehose publishes no `AccountId` or `Region`, ACM no `AccountID` or `Region`, and
+  AppSync's `GraphqlApi` and SES v2's `GetEmailIdentity` publish none of the trio each emits. **EFS is
+  the sharpest case found**: substrate spells `CreatedAt` where `FileSystemDescription` publishes
+  `CreationTime`, so the leak is a near-miss of a real member rather than an obvious extra. Two
+  DynamoDB observations (`/Items/[]/CreatedAt`, `/Items/[]/Meta/M/Region`) are false positives —
+  caller-supplied item attributes, which the pass cannot distinguish from substrate's fields in a
+  schemaless service.
+
+  Fixing the services the inventory names is v0.121.0 work; this change takes the inventory and stops it
+  growing. `make wire-bookkeeping-write` regenerates the baseline after a deliberate change. Also
+  added `tag-releases-check` to the `Makefile`'s `.PHONY` list, where it had been missing.
+
 ### Changed
+
 - **Every common-errors citation in `emulator/` re-verified against the page as it reads now, and the
   reference turns out to have three live generations rather than two** (#1064). #950 and #1007 sourced
   error codes from AWS's "Common Errors" pages on the understanding that there were two lists — a
@@ -1089,118 +1088,192 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interface's *invocation* endpoint, so starting a container invokes the handler once with an empty
   payload — harmless on the ZIP path, an unrequested invocation on the image path, which is #1129.
 
-### Added
-- **Thirty-five rows across six new service entries in the body-parse inventory, and a second count
-  assertion beside #1007's** (#1066). Transfer Family, CodeDeploy, CodePipeline and CodeBuild had no row
-  in `invalid_body_inventory_test.go` at all, which is the whole explanation for how thirty leaking
-  guards survived: the table is what routes a site past `assertNoDecoderText`. `CreateBackupSelection`
-  goes in `TestInvalidBodyBelowAResourceLookup` instead, because it loads the plan before it decodes —
-  also why its leak outlived `createBackupPlan`'s in the same file.
-  `TestInvalidBodyDecoderTextLeaksAreFullyCovered` is a **sibling** of
-  `TestInvalidBodyTailIsFullyCovered` rather than an extension of it: `tailSites = 60` is a closed count
-  of the sites whose decode error was *discarded*, and these thirty-five had no error to discard, so the
-  two populations are disjoint in both directions and merging them would destroy both. The table's own
-  header count was also corrected — it read "one hundred and eighty-nine cases across thirty-six
-  entries" where the table held 184, so it is now counted (218 across 42) rather than carried.
-- **Eleven rows in `memberComplaintServices` and a code assertion on FSx's three refusals** (#1063).
-  Every one of the eleven corrected codes passed the full suite before *and* after the change, which is
-  to say nothing pinned any of them — the same gap #1090 records for ECR, and the reason these rows are
-  the load-bearing part of the fix rather than a formality. They go in the existing table because its
-  one `code:` per service is what forces a plugin's decision to be made once. FSx's own tests asserted
-  only a 400 status, which cannot distinguish `BadRequest` from the `InvalidRequest` it was answering;
-  `assertFSxError` asserts both, and a new test covers the required-member refusal itself.
-- **A tripwire asserting that `ValidationError` and `ValidationException` are never sourced to each
-  other's page** (#1064). They are different codes with different sources, a distinction re-derived
-  more than once: `ValidationError` appears *only* on a common-errors page, in all three generations,
-  and `ValidationException` *only* in an operation's own Errors section, on no common-errors page in
-  any generation. ACM publishes both with different glosses, which is why a sentence was not enough.
-  `TestCommonErrors_ValidationExceptionIsNeverSourcedToTheCommonPage` parses every non-test file in
-  `emulator/` and fails any function that answers `ValidationException` while citing a common-errors
-  page in its own doc comment. It allows the negated form ("absent from its Common Errors page"), which
-  is how #950 and #1007 ruled codes out, because a rule that failed those would push the next author
-  toward deleting the provenance rather than writing it. It also carries its own control — the same
-  predicates must still find a `ValidationError` constructor citing the common page — so a green run
-  cannot come from a broken detector.
-- **Twenty-five rows in `memberComplaintServices`, four new service entries, and a WAFv2 `Scope` test
-  file** (#1062). The four entries are SSO, the two Cognito services and DynamoDB Streams — named for
-  the API rather than a host, because substrate routes the Streams operations through DynamoDB's own
-  host and target prefix, so the operation name is the only discriminator. The five WAFv2 rows that used
-  to name `Id` for a `{}` body are now **pairs**: `Scope` is checked first, so retargeting them would
-  have silently stopped testing #1063's `Id` refusals, and the second row of each pair supplies a
-  `Scope` to reach the check underneath. `wafv2_scope_test.go` carries the two halves the one-code table
-  cannot — the invalid-value code at all eight required operations, applied per handler so a handler that
-  forgot the call fails, and `GetWebACL`'s exemption, which needs a message assertion because both of
-  its refusals are `ValidationError`/400.
-- **`emulator/sso_errors.go`, `emulator/cognito_errors.go` and `emulator/dynamodb_streams_errors.go`**
-  (#1062), following the `glue_errors.go`/`fsx_errors.go` shape #1063 established: one constructor per
-  service carrying the code, the status and the published sentence it rests on, so a correction moves one
-  line rather than a plugin's worth of literals. `ssoInvalidBody` and the plugin's two inline
-  `ValidationException` literals now route through `ssoValidationException`, and `wafv2ValidateScope`
-  joins `wafv2ValidateCreateIPSet` in `wafv2_validate.go` so the enum's two published values are written
-  once.
-- **`emulator/stepfunctions_asl_structure.go`, and `ASLState.ItemProcessor`** (#1073). One file holds
-  every structural rule with the AWS sentence it rests on beside it, so a correction is a one-place edit
-  and the two boundaries — structure over semantics, and only what AWS itself publishes — are stated
-  where the rules are rather than in a commit message. `ItemProcessor` is the one member the rules needed
-  that the type did not model, so the issue's claim that no schema widening is required is not quite
-  right: AWS marks `ItemProcessor` *"(Required)"* on the inline-`Map` page, lists `Iterator` under
-  *"Deprecated fields"*, and then tells Step Functions Local users to prefer `Iterator` — exactly the
-  class of tool substrate is. Refusing either spelling would therefore reject a document AWS accepts, so
-  the rule is *exactly one of the two*, and carrying both is refused because nothing publishes a
-  precedence between them.
-- **`emulator/stepfunctions_create.go`, and eleven tests over the two creates** (#1072). One file holds
-  what both handlers check before they store anything and what a repeat answers, because the name
-  constraint list is published identically on both pages down to its wording — one validator serving two
-  operations is what keeps the two from drifting apart again. The tests are the load-bearing part:
-  **nothing pinned any of the corrected behaviour**, since every existing caller — the CFN builders and
-  every helper in the suite — already supplies a conforming name and a real `roleArn`, so the full suite
-  passed both before and after with no test edited. A twelve-case table walks each published constraint,
-  including a control character and U+FFFE constructed as runes; `sfnCreateRefused` asserts the code, the
-  400 *and* that the body no longer carries `InvalidParameterException`; and the idempotency tests assert
-  the two responses are equal JSON, that a repeat differing only in `roleArn` leaves
-  `DescribeStateMachine` reporting the **first** role, and that a repeated `CreateActivity` leaves
-  `ListTagsForResource` reporting the first call's tags.
-- **Five tests over the structural rules, including one that pins the determinism** (#1073). A
-  twenty-eight-case refusal table runs at **both** writers, each case asserting the code, the status,
-  AWS's message, the fault named in the decoded `Message`, and that nothing was stored or that the stored
-  definition did not move. An eleven-document acceptance test states what must still create — a `Succeed`
-  with neither `Next` nor `End`, a `Next` on a `Succeed`, nested `And`/`Not` with no `Next`, a
-  self-contained `Parallel`, both `Map` spellings, an `ItemProcessor` carrying an unmodelled
-  `ProcessorConfig` — because a validator is only as good as the documents it leaves alone.
-  `TestSFNASL_TwoFaultsReportTheSameOneEveryTime` runs a two-fault definition twelve times and asserts
-  the response body is byte-identical, which is the property sorted iteration exists for.
-  `TestSFNDefinition_ASLConformanceIsNotChecked` becomes `TestSFNDefinition_ASLStructureIsChecked` over
-  the same four definitions, each with the fault its message must now name.
-- **`emulator/kms_alias_validate.go`, and ten tests over the three alias operations** (#1085). One file
-  holds the name rules, the three-page table behind them and the key-family derivation, because the rules
-  are per-operation and a reader who found them spread over three handlers would reasonably assume the
-  differences were oversights. As with #1072, **nothing pinned any of the corrected behaviour** — the full
-  suite passed before and after with no test edited, since every existing caller supplies a prefixed name
-  and a real key. Two of the tests exist because the acceptance criteria as written would have passed
-  against the defect: existence is asserted through `DescribeKey` on the alias rather than through
-  `ListAliases`, since `updateAlias` never touched the index and so the alias it fabricated was invisible
-  there either way; and the key-state asymmetry is asserted in **both** directions, because "a key pending
-  deletion is refused" is only half true and a test asserting the half would have pinned a bug. The
-  type-match cases assert the *message*, not just the code, and are paired with three accepted moves —
-  including two asymmetric keys of different specs — so that a handler refusing everything could not
-  satisfy them.
-- **`docs/services.md` has an AppSync section** (#1065, #1093). AppSync was an index row and nothing
-  else, so none of its 24 routed operations, its routes, its ARN shapes or its divergences were
-  documented anywhere. The section carries the operation table with each published route, why path
-  matching is case-sensitive and what that cost, the three arms that carry a verb as well as a name, the
-  200-not-204 reading, what each refusal reports and which published codes have no site, the
-  deterministic ARN and ID shapes, the two ways `ExecuteGraphQL` is reached (`POST /graphql` and any
-  `.appsync-api.` host), that the execution endpoint answers a stub on the `doc.go` boundary, the
-  CloudFormation resource types, and the $4.00-per-million cost model. This is one of the 20 sectionless
-  services #1093 owes; authoring it here rather than twice is deliberate, and #1093 shrinks by one
-  service and 24 operations. Two AppSync wire divergences are recorded there and filed rather than fixed,
-  because each is a persisted-shape change with an in-tree CloudFormation consumer: the `graphqlApi`
-  object spells its ARN `apiArn` where `API_GraphqlApi` publishes `arn` and adds `region` and `accountId`
-  which it publishes nowhere (#1121), and `CreateApiKey` discards the `expires` the caller sends and
-  defaults to 365 days where the page publishes 7, which leaves
-  `ApiKeyValidityOutOfBoundsException`/400 with no site (#1122).
+- **Three CloudWatch Logs divergences the token fix deliberately leaves in place are now recorded**
+  (#1086). All four response members publish "The token expires after 24 hours." and no page publishes
+  a code for presenting an expired token, so a token substrate issues stays valid for the life of the
+  store. `GetLogEvents` publishes a **pair** of directional tokens, states "The returned tokens are
+  never null", and documents termination as the returned token equalling the one passed in; substrate
+  emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
+  caller following that rule cannot terminate and must use the empty-token rule. And
+  `ResourceNotFoundException` — published on three of the four pages at HTTP **400**, not 404 — has no
+  site at these four doors, because none of them resolves the log group, so a listing over a group that
+  does not exist is empty rather than refused.
+- **Neither Athena listing enforces its published `MaxResults` range, and that is now recorded rather
+  than silent** (#1086). A value above the published maximum of 50 is honoured and one at or below zero
+  is rewritten to 50; the rewrite is named `athenaListDefaultPageSize` and documented as substrate's
+  choice, since neither page publishes a default. The unenforced range is a separate defect from the
+  token and is left as it was, stated in `docs/services.md` so the token fix is not read as covering it.
 
 ### Fixed
+
+- **Batch's three resource describes answered a well-formed page one to a `nextToken` they could not
+  have issued, and did it through one shared helper** (#1086). `DescribeComputeEnvironments`,
+  `DescribeJobQueues` and `DescribeJobDefinitions` all paginate through `batchPage`, which carried the
+  pre-#915 idiom — `base64.StdEncoding.DecodeString` then `strconv.Atoi`, both errors discarded — so an
+  unusable token left the offset at zero and every one of the three restarted the listing, the one wrong
+  answer a paginating caller cannot detect. All three now answer **`ClientException` / 400**, published
+  in each operation's own Errors section and glossed *"These errors are usually caused by a client
+  action. … Another cause is specifying an identifier that's not valid."*; each Batch page publishes
+  exactly two errors and Batch publishes no common-errors page, so that is the whole published
+  vocabulary and nothing is borrowed from a sibling. The footing for the condition is each page's own
+  description of the parameter — *"The `nextToken` value returned from a previous paginated `Describe…`
+  request where `maxResults` was used …"*, naming the operation itself as the source — with the *"Treat
+  this token as an opaque identifier"* sentence recorded as addressed to the caller rather than to the
+  service. **The decode had to move out of the shared helper**: `DescribeJobDefinitions` loads the
+  job-definition index before it reaches the helper, so a decode there would have sat below a state read
+  on one of the three, and the refusal is now unconditional for all three (#887), asserted by sealing
+  the state store. Token non-portability between the three is asserted rather than implied, since the
+  token carries an offset and nothing else, and a past-the-end offset still clamps to a final empty
+  page. **This closes #1086**: with Batch converted, no listing in the tree answers page one to a token
+  it could not have issued.
+- **EventBridge Scheduler `ListSchedules` answered a well-formed page one to a `NextToken` it could
+  not have issued** (#1086). The handler carried the pre-#915 idiom — `base64.StdEncoding.DecodeString`
+  then `strconv.Atoi`, both errors discarded — so an unusable token left the offset at zero and the
+  listing restarted, which is the one wrong answer a paginating caller cannot detect: a loop running
+  until the token comes back empty is handed the first page again, so it spins or reprocesses the same
+  schedules, and nothing in the response says so. It now answers **`ValidationException` / 400**,
+  published in the operation's own Errors section and glossed *"The input fails to satisfy the
+  constraints specified by an AWS service."* The footing for the condition is the request parameter's
+  own sentence — *"The token returned by a previous call to retrieve the next set of results."* — so a
+  token no previous call returned is not what the parameter is documented to accept; what remains
+  substrate's reading is only that this input problem is the one that gloss covers, since the page
+  publishes no code AWS attributes to a token. The message uses the service's `1 validation error
+  detected: …` shape with the member spelled `nextToken`, because `ValidationException` is Scheduler's
+  only refusal for a bad input and a caller told the input failed a constraint cannot otherwise tell
+  which input AWS means. The token is decoded **above** the index load (#887), asserted by sealing the
+  state store; the published Length of 1–2048 is subsumed by the issuability round trip; and a
+  past-the-end offset still clamps to a final empty page, because a token substrate issued over a
+  listing that has since shrunk is still a token it issued. This is the ninth of #1086's ten sites and
+  the only one whose token travels in a query string — Batch's shared paginator behind three describes
+  remains, so #1086 stays open.
+- **EventBridge Scheduler `ListSchedules` read all five of its query parameters under names the page
+  does not publish, so every filter and the whole cursor were inert** (#1226). `API_ListSchedules`
+  publishes `GET /schedules?MaxResults=…&NamePrefix=…&NextToken=…&ScheduleGroup=…&State=…` —
+  PascalCase throughout, with the group bound to **`ScheduleGroup`** even though the parameter list
+  calls it `GroupName`, so `GroupName` never appears on the wire. Substrate read `groupName`,
+  `namePrefix`, `state`, `nextToken` and `maxResults`, and `AWSRequest.Params` is populated verbatim
+  from the query string, so **no SDK could set any of the five**: every call answered the `default`
+  group's first twenty schedules, attached a `NextToken` the next call then ignored, and applied no
+  filter. A paginating loop either spun or reread the same page, and nothing in any response said so
+  — the same undetectable failure #1086 is about, arriving by a different route. **The split is the
+  API Reference's own, not substrate's**, which is why the fix is one operation wide:
+  `API_GetSchedule` publishes `?groupName=` and `API_DeleteSchedule` publishes
+  `?clientToken=&groupName=`, so those two handlers were already right and are deliberately left
+  alone, with both spellings now named in one file so neither can later be "corrected" into the
+  other. The lowerCamel names are **not** kept as aliases: AWS ignores a query parameter its model
+  does not carry, so honouring one would be the same defect facing the other way — a call that
+  filters against substrate and silently does not against AWS. This is also why the defect survived,
+  and the evidence is in the diff: every test in the tree built its query string in substrate's
+  dialect rather than AWS's, so the pagination and filter tests passed while the operation was
+  unusable from an SDK. Two readings of substrate's own are recorded rather than changed: `MaxResults`
+  has **no published default**, so the page size of 20 is substrate's choice, and a value above the
+  published maximum of 100 is clamped rather than refused.
+- **Every routed Lambda operation is reachable under the API version date its own page publishes, not
+  only `2015-03-31`** (#1142). A REST service puts the version in the path, and Lambda dates each
+  operation's URI at the version that operation was introduced — `2014-11-13` for `InvokeAsync`,
+  `2015-03-31` for the function CRUD, `Invoke`, the resource policy and the event source mappings,
+  `2017-03-31` for `TagResource`/`UntagResource`/`ListTags`, and `2019-09-25` for
+  `PutFunctionEventInvokeConfig`. Substrate's parser reached its arms by trimming the literal prefix
+  `/2015-03-31`, so a path under any other date kept its version segment, matched nothing, and fell
+  through to `UnknownOperationException`/404. `lambda.TagResource` against a function substrate had
+  just created answered *"The action POST /2017-03-31/tags/arn:aws:lambda:… is not recognized"* even
+  though the dispatch arm, the handler and the parser's own `/tags/` arm were all there: **three
+  operations were unreachable in a plugin that implements them**, and two more were reachable only at
+  a date AWS does not serve. The dates are confirmed mechanically against
+  `aws-sdk-go-v2/service/lambda`'s serializer, whose 50 distinct URIs carry 17 different dates; of the
+  paths substrate routes, three families were on the wrong one and the rest were right. **A request
+  under an undocumented date is still refused** — the version is matched rather than stripped, because
+  accepting `/2015-03-31/tags/…`, which no SDK emits and AWS does not serve, would make substrate the
+  only implementation that does and would hide the defect until deployment. The cost of matching is
+  that nine of substrate's own tests were posting to the date the parser wanted rather than the one the
+  API publishes; they move with the fix, which is the evidence these routes were never exercised as an
+  SDK drives them, and the one site already using `/2017-03-31/tags/…`
+  (`lambda_warm_container_test.go`) asserted nothing about the status and so passed against the 404.
+  The same parser is Lambda's entry in the operation-name resolver, so authorization, metering and
+  fault injection all saw `Unknown` for a tag call — an IAM policy naming `lambda:TagResource` could
+  neither allow nor deny it, and a seeded fault could not fire; the resource half moves with it, and a
+  tags request is now authorized against the ARN it names verbatim rather than one reassembled from the
+  caller's own account and Region, which would retarget a cross-account ARN at the caller's own
+  function of that name.
+- **SNS `TagResource` and `UntagResource` emit the empty result element their pages publish, so an
+  SDK can call them at all** (#1141). Both wrote the tag, saved the topic and answered 200 — and a
+  caller using `aws-sdk-go-v2/service/sns` still saw the operation fail with *"deserialization failed,
+  failed to decode response body, TagResourceResult node not found"*. The query protocol decides
+  whether `<{Operation}Response>` holds an `<{Operation}Result>` by the operation's modeled output, and
+  the two memberless cases look identical from substrate's side: an output of `smithy.api#Unit` has no
+  result element, an output that is an empty **structure** has the element, empty. AWS publishes both
+  halves as samples — `API_TagResource` and `API_UntagResource` show `<TagResourceResult/>` and
+  `<UntagResourceResult/>`, while `API_DeleteTopic`, `API_Unsubscribe` and `API_AddPermission` show
+  `<ResponseMetadata>` as the response's only child — and substrate emitted the second shape for all
+  eight, which is right for six of them. This is the worst shape a divergence can take: the write had
+  already happened, so state was right and only the envelope was wrong, while every caller that checks
+  its error treated a successful tag as a failure, which no create → converge → tag sequence gets past.
+  A hand-written client cannot see the difference, because the element carries nothing, which is why
+  every existing SNS test stayed green; the regression test is a real-SDK journey, and the six `Unit`
+  operations' *absence* of the element is pinned by asserting the response root's children exactly.
+  **The sweep for further instances closes negative**: the SDK's SNS deserializer requires a result
+  element for 31 operations and none of the six is among them, and the two in-tree precedents for the
+  distinction (`cwRenderQueryXML` for CloudWatch, `elbEmptyOKResponse` for ELBv2) already draw it, so
+  these two were the only sites in the tree.
+- **The three updates whose own page publishes full replacement now replace instead of merging**
+  (#1089). `API_UpdateSchedule` states it outright — *"EventBridge Scheduler uses all the information
+  that you have provided and replaces your schedule. You will lose any information that you haven't
+  provided, such as a description"* — and `API_UpdateUserPool` and `API_UpdateUserPoolClient` carry the
+  same Important box word for word: *"If you don't provide a value for an attribute, Amazon Cognito sets
+  it to its default value."* All three handlers assigned each optional member only when the request
+  supplied a non-empty one, so a caller doing exactly what those pages advise — build the request from
+  the current configuration, accept losing what you omit — saw a stale `Description`,
+  `ScheduleExpressionTimezone`, `State`, `Target.Input`, `Target.RetryPolicy`, `Policies`,
+  `LambdaConfig`, `MfaConfiguration`, `UserPoolTags`, `ClientName` or `ExplicitAuthFlows` survive where
+  AWS resets it. The divergence was invisible until something was omitted, and the merge was
+  **unasserted in either direction**, which is how it drifted. Each create now resolves a body through
+  the same function as its update, so the two doors cannot disagree again about what an omitted member
+  means. Full replacement governs only the members an operation *publishes*: `Schema` is absent from
+  `API_UpdateUserPool`'s Request Syntax, so `SchemaAttributes` is preserved rather than cleared, as are
+  `ProviderName`, `Status`, `Arn` and `CreationDate` — an operation cannot reset a member it does not
+  accept.
+- **`UpdateUserPool` answers a byte-empty body, and `PoolName` and `UserPoolTags` are decoded at all**
+  (#1089). Its Response Syntax is `HTTP/1.1 200` followed by nothing, where `UpdateUserPoolClient`'s
+  publishes a `UserPoolClient` object; substrate answered `{}` for both. The two updates differ and each
+  is now answered as its own page publishes rather than made symmetrical — empty rather than `{}`
+  follows AppSync's in-tree precedent, that `{}` is a member-less object where the page promises no
+  object at all. `PoolName` and `UserPoolTags` were published request members the handler never
+  decoded, so neither could be updated; a member the decode drops cannot be replaced either.
+- **`GetSchedule` no longer reports `ClientToken`** (#1089). It is not among that page's fifteen
+  published response elements — it is a request-only idempotency token, published on the create and the
+  update and on no read. It came off the wire *with* the full-replace fix rather than on its own because
+  an omitted member now reverts: leaving it would have made an unpublished field start changing under
+  callers who never named it. The record keeps it as recorded intent.
+- **`RunInstances`, `StartInstances`, `StopInstances` and `TerminateInstances` answer the transient
+  state AWS publishes in their own sample responses** (#514). Substrate applied every state change in
+  the request that asked for it, so all four reported the *settled* state: `running` where
+  `API_StartInstances` shows `currentState` 0 / `pending` beside `previousState` 80 / `stopped`, and
+  `stopped` where `API_StopInstances` shows 64 / `stopping` beside 16 / `running`. A consumer reading
+  the transition out of the call it just made — which is a waiter's first observation — was told a
+  transition that had already finished. This is a published-response divergence independent of seeding,
+  so it is corrected for every caller rather than behind a seed; the record still settles, so an
+  unseeded describe answers exactly as before and no existing fixture changes. `pending`, `stopping`
+  and `shutting-down` were three of the six codes `instanceState`'s own Valid Values publish and that
+  no code path could produce, and **no test asserted `currentState` anywhere**, which is how they
+  stayed unreachable.
+- **`StartInstances` and `StopInstances` refuse a `terminated` instance instead of resurrecting it**
+  (#514). Both wrote the new state unconditionally, so a stop of a terminated instance produced a
+  `stopped` one and a start produced a `running` one — against the lifecycle page's state table, which
+  says such an instance *"has been permanently deleted and cannot be started"*. The code is
+  `IncorrectInstanceState` / 400, whose published description is the general rule this is an instance
+  of (*"The instance is in an incorrect state for the requested action"*). Provenance differs between
+  the two halves and the doc comment records the difference: the start refusal rests on that sentence
+  directly, while the stop refusal rests on *"permanently deleted"* alone — no page found states a stop
+  precondition — and is substrate's reading rather than letting a stop resurrect a deleted instance
+  into a state it could then start from. Neither operation page publishes an error of its own, so the
+  message text is substrate's.
+- **`docs/services.md` no longer claims a seed replays like any other state** (#1140, found while
+  implementing #514). Seeds do live in the state manager, and that is precisely why: a replay resets the
+  state manager before re-executing, and a control-plane write is not an AWS request and so never
+  enters the event stream at all — so a stream recorded under a seed replays as the *unseeded*
+  sequence, with no event failing to make it visible. General to every seed in substrate; filed as
+  #1140, which carries the three candidate fixes.
+
 - **SQS `CreateQueue` and Kinesis `CreateStream` dropped a tag set their own pages publish** (#1087).
   Both decoded every other member and no tag member at all, so a create-with-tags call answered 200,
   the resource existed, and `ListQueueTags` / `ListTagsForStream` reported nothing — indistinguishable,
@@ -1407,64 +1480,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   three with the audited figures, which is why this correction is confined to the two places the
   estimate outlived it.
 
-### Added
-
-- **Substrate's own bookkeeping fields are now inventoried and ratcheted, and the inventory is 330
-  fields rather than the 343 estimated** (#756). Five fields exist for the emulator's own use —
-  `AccountID`, `Region`, `CreatedAt`, `UpdatedAt`, `EverTagged` — and AWS publishes none of them on any
-  shape, so a handler that marshals a persisted record straight into an `AWSResponse.Body` ships
-  members the service does not have. `make wire-bookkeeping-check` (`scripts/check-wire-bookkeeping.sh`,
-  in the shape of `check-discarded-unmarshal.sh`) now enumerates every such field carrying a
-  wire-visible json tag and diffs it against `scripts/wire-bookkeeping-baseline.txt`, failing both on a
-  field missing from the baseline and on a baseline line the tree no longer has. It runs in CI as `Wire
-  Bookkeeping Drift`, because a baseline nothing executes is a TODO list rather than a ratchet — which
-  is precisely how this inventory went untaken for as long as it did.
-
-  **The measured surface is 330 fields across 146 struct types in 67 files**, correcting the planned
-  estimate of 343 across roughly 40 files. Two exclusions narrow it, both deliberate and both recorded
-  in the script:
-  `organizations_account_test.go`'s `orgCreateStatus.AccountID` reads `CreateAccountStatus.AccountId`,
-  which AWS *does* publish, and both ELB generations publish `CreatedTime` as a real member, so a field
-  of that name is the service's data rather than substrate's. (`CloudFrontDistribution.CreatedTime` is a
-  divergence — CloudFront publishes `LastModifiedTime` — but that is a wrong member, not a bookkeeping
-  leak.) Two things the inventory makes visible that a tag-name scan could not: one `AccountID` renders
-  as `json:"a"` and one `Region` as `json:"r"`, and `AccountID` renders **ten** different ways in all,
-  so the Go identifier is the only stable key. And `json:"-"` — the one tag that would keep a bookkeeping
-  field out of a response without removing it — is used on **none** of the 330.
-
-  **The reachability half was answered by observation, not by analysis, and is recorded on the issue.**
-  The rule one wants is "no bookkeeping field reaches an `AWSResponse.Body`", which no grep can state
-  and which would need dataflow through 500-plus bare `json.Marshal(x)` calls and 60-odd per-plugin
-  response helpers; substrate depends on neither `golang.org/x/tools` nor any vendored analysis, so a
-  precise answer would mean adding a dependency to serve one check. Instead every plugin's
-  `HandleRequest` was temporarily instrumented with a deferred hook that walked the body it was about to
-  return, and the suite was run: **213 wire-visible observations across 31 services and 97 operations,
-  of which 194 — across 25 services and 86 operations — are members AWS publishes nowhere**. That is a
-  floor and not a ceiling, because it sees only what the suite exercises, and the instrumentation was
-  deliberately not committed, so the script asserts the declaration surface, which is the upper bound
-  and exactly decidable. ECR calibrates the pass: after #1090, its only remaining
-  bookkeeping-named wire member is `createdAt`, which `API_Repository` publishes, and the pass reports
-  that and nothing else.
-
-  Ten pages were read to separate a leak from a published member, because a wrong "published" call
-  would hide a real one. Genuinely published, so not leaks: ECR `createdAt`, ECS `Service.createdAt`,
-  Batch `JobDetail.createdAt`, ACM `CertificateDetail.CreatedAt`, Firehose
-  `DeliveryStreamDescription.CreateTimestamp`, RedshiftData `DescribeStatement.CreatedAt`/`UpdatedAt`,
-  Organizations `CreateAccountStatus.AccountId`, SSO `AccountAssignment.AccountId`, EC2
-  `SpotPlacementScore.region`, and Health `Event.region`. The same reads settled the co-located members
-  the other way: Firehose publishes no `AccountId` or `Region`, ACM no `AccountID` or `Region`, and
-  AppSync's `GraphqlApi` and SES v2's `GetEmailIdentity` publish none of the trio each emits. **EFS is
-  the sharpest case found**: substrate spells `CreatedAt` where `FileSystemDescription` publishes
-  `CreationTime`, so the leak is a near-miss of a real member rather than an obvious extra. Two
-  DynamoDB observations (`/Items/[]/CreatedAt`, `/Items/[]/Meta/M/Region`) are false positives —
-  caller-supplied item attributes, which the pass cannot distinguish from substrate's fields in a
-  schemaless service.
-
-  Fixing the services the inventory names is v0.121.0 work; this change takes the inventory and stops it
-  growing. `make wire-bookkeeping-write` regenerates the baseline after a deliberate change. Also
-  added `tag-releases-check` to the `Makefile`'s `.PHONY` list, where it had been missing.
-
-### Fixed
 - **SNS's three listings answered a well-formed page one for a `NextToken` they never issued** (#1086).
   `ListTopics`, `ListSubscriptions` and `ListSubscriptionsByTopic` all carried the pre-#915 idiom that
   decodes a base64 offset and discards both errors, so a token from another operation, a truncated copy
@@ -1529,24 +1544,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   member the required-member refusal keeps precedence, and because both carry the same published code
   the message is the only thing that distinguishes them, so the precedence is asserted rather than left
   to the reader.
-
-### Changed
-
-- **Three CloudWatch Logs divergences the token fix deliberately leaves in place are now recorded**
-  (#1086). All four response members publish "The token expires after 24 hours." and no page publishes
-  a code for presenting an expired token, so a token substrate issues stays valid for the life of the
-  store. `GetLogEvents` publishes a **pair** of directional tokens, states "The returned tokens are
-  never null", and documents termination as the returned token equalling the one passed in; substrate
-  emits `nextForwardToken` only when a further page exists and never emits `nextBackwardToken`, so a
-  caller following that rule cannot terminate and must use the empty-token rule. And
-  `ResourceNotFoundException` — published on three of the four pages at HTTP **400**, not 404 — has no
-  site at these four doors, because none of them resolves the log group, so a listing over a group that
-  does not exist is empty rather than refused.
-- **Neither Athena listing enforces its published `MaxResults` range, and that is now recorded rather
-  than silent** (#1086). A value above the published maximum of 50 is honoured and one at or below zero
-  is rewritten to 50; the rewrite is named `athenaListDefaultPageSize` and documented as substrate's
-  choice, since neither page publishes a default. The unenforced range is a separate defect from the
-  token and is left as it was, stated in `docs/services.md` so the token fix is not read as covering it.
 
 ## [v0.119.0] - 2026-09-18
 
@@ -18179,7 +18176,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.119.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.120.0...HEAD
+[v0.120.0]: https://github.com/scttfrdmn/substrate/compare/v0.119.0...v0.120.0
 [v0.119.0]: https://github.com/scttfrdmn/substrate/compare/v0.118.0...v0.119.0
 [v0.118.0]: https://github.com/scttfrdmn/substrate/compare/v0.117.0...v0.118.0
 [v0.117.0]: https://github.com/scttfrdmn/substrate/compare/v0.116.0...v0.117.0
