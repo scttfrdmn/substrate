@@ -109,6 +109,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Athena's primary workgroup is one workgroup, and every reader now says so** (#1222). Every AWS
+  account has a `primary` workgroup, and `API_DeleteWorkGroup`'s own description states "The primary
+  workgroup cannot be deleted" — so both the existence and the refusal are published by the API
+  reference, not merely by the user guide, which repeats the sentence verbatim. Substrate synthesised
+  the record in `GetWorkGroup` alone, while `ListWorkGroups` read only the workgroup-names index that
+  `CreateWorkGroup` appends to. So `GetWorkGroup("primary")` answered 200, `ListWorkGroups` answered
+  `[]`, and `ListQueryExecutions` reported every query that named no workgroup under a workgroup the
+  listing said did not exist — three answers that cannot all be true of one account, and a consumer
+  listing workgroups to find the default found none. `DeleteWorkGroup` compounded it: it accepted
+  `primary` as a name and then answered `WorkGroup primary not found`, the right code for the wrong
+  reason, in the same breath as `GetWorkGroup` reporting that workgroup as present. Both readers now
+  go through one `loadWorkGroup`, so they cannot disagree about whether a workgroup exists or about
+  what it says, and `DeleteWorkGroup` refuses `primary` with `InvalidRequestException`/400 and the
+  published sentence as its message — the code unchanged, because that is the only 400-class error the
+  page publishes. **Three observable changes:** `ListWorkGroups` returns an entry where it returned
+  nothing; `DeleteWorkGroup{"primary"}` answers a different message and leaves the workgroup in place
+  where it previously answered not-found; and `GetWorkGroup` omits `Description` for a workgroup
+  created without one rather than sending `""`, which both `API_WorkGroup` and `API_WorkGroupSummary`
+  give *Required: No* — previously the two readers differed over a workgroup neither was wrong about,
+  since the listing omitted the member. The synthesised entry is **prepended**, and the position is
+  part of the contract: `ListWorkGroups` pages by an offset into this order (#1086), the primary
+  workgroup exists before any workgroup a caller creates, and prepending is the only position that
+  leaves every other entry's offset unchanged — appending would move it on each `CreateWorkGroup` and
+  leave a token issued mid-walk pointing at a different element. A caller that creates its own
+  workgroup named `primary` gets its stored record from both readers, listed once, and still cannot
+  delete it, because AWS's statement is flat and the refusal is on the name rather than on the absence
+  of a record. `Description: "Primary workgroup"` is substrate's own placeholder with no published
+  authority and is recorded as such in `docs/services.md`; assert on `Name` and `State`.
 - **CloudFormation tests that deployed nothing and passed** (#1123). `StackDeployer.Deploy` reports a
   resource it could not create on that resource's own `DeployedResource.Error` and returns no Go error,
   so `require.NoError(t, err)` followed by `result != nil` is satisfied by a template in which every

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"time"
 )
 
@@ -398,6 +399,65 @@ func (p *AthenaPlugin) createWorkGroup(ctx *RequestContext, req *AWSRequest) (*A
 	return athenaJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
+// athenaPrimaryWorkGroupName is the workgroup Athena gives every account, and the one
+// StartQueryExecution attributes a query to when the request names none.
+//
+// It is not substrate's convention. API_DeleteWorkGroup's own description states "The primary
+// workgroup cannot be deleted", and the Athena user guide's Manage workgroups page repeats it verbatim
+// in its delete row — so the name is published by the API reference, not merely by the guide.
+const athenaPrimaryWorkGroupName = "primary"
+
+// athenaPrimaryWorkGroup is the record substrate synthesizes for the workgroup that exists without
+// having been created.
+//
+// One producer, because until #1222 there were nearly two: getWorkGroup synthesized this record while
+// listWorkGroups read only the workgroup-names index, which CreateWorkGroup alone appends to. So
+// GetWorkGroup reported an ENABLED primary, ListWorkGroups reported an empty list, and
+// ListQueryExecutions reported every unqualified query under a workgroup the listing said did not
+// exist — three answers that cannot all be true of one account. A second copy of the literal would
+// have let them drift apart again.
+//
+// State is ENABLED because the workgroup is usable: a query naming no workgroup is attributed to it and
+// runs, and API_WorkGroupSummary publishes only ENABLED and DISABLED, so a usable workgroup has exactly
+// one of the two values available. Description is substrate's own placeholder — AWS publishes no
+// description for the primary workgroup, and a real one has none — and is recorded as such in
+// docs/services.md rather than presented as a read.
+func athenaPrimaryWorkGroup() AthenaWorkGroup {
+	return AthenaWorkGroup{
+		Name:        athenaPrimaryWorkGroupName,
+		State:       "ENABLED",
+		Description: "Primary workgroup",
+	}
+}
+
+// loadWorkGroup returns the workgroup a name identifies, synthesizing the primary one when no record
+// was ever written for it, or nil when the name is neither.
+//
+// The single reader behind getWorkGroup and listWorkGroups, so the two cannot disagree about whether a
+// workgroup exists or about what it says — which is the whole of #1222. A caller that has created a
+// workgroup of its own named `primary` gets that record instead, because the stored one is read first:
+// CreateWorkGroup writes the key unconditionally, and answering the synthesized record over a real one
+// would discard a write.
+func (p *AthenaPlugin) loadWorkGroup(goCtx context.Context, ctx *RequestContext, name string) (*AthenaWorkGroup, error) {
+	wgKey := "workgroup:" + ctx.AccountID + "/" + ctx.Region + "/" + name
+	data, err := p.state.Get(goCtx, athenaNamespace, wgKey)
+	if err != nil {
+		return nil, fmt.Errorf("athena loadWorkGroup get: %w", err)
+	}
+	if data == nil {
+		if name != athenaPrimaryWorkGroupName {
+			return nil, nil
+		}
+		wg := athenaPrimaryWorkGroup()
+		return &wg, nil
+	}
+	var wg AthenaWorkGroup
+	if err := json.Unmarshal(data, &wg); err != nil {
+		return nil, fmt.Errorf("athena loadWorkGroup unmarshal: %w", err)
+	}
+	return &wg, nil
+}
+
 // getWorkGroup returns an Athena workgroup. The "primary" workgroup auto-exists.
 func (p *AthenaPlugin) getWorkGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
@@ -407,37 +467,71 @@ func (p *AthenaPlugin) getWorkGroup(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "WorkGroup is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	goCtx := context.Background()
-	wgKey := "workgroup:" + ctx.AccountID + "/" + ctx.Region + "/" + body.WorkGroup
-	data, _ := p.state.Get(goCtx, athenaNamespace, wgKey)
-
-	var wg AthenaWorkGroup
-	if data == nil {
-		// "primary" always exists as the default workgroup.
-		if body.WorkGroup != "primary" {
-			return nil, &AWSError{
-				Code:       "InvalidRequestException",
-				Message:    "WorkGroup " + body.WorkGroup + " not found",
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		wg = AthenaWorkGroup{Name: "primary", State: "ENABLED", Description: "Primary workgroup"}
-	} else {
-		if err := json.Unmarshal(data, &wg); err != nil {
-			return nil, fmt.Errorf("getWorkGroup: unmarshal: %w", err)
-		}
+	wg, err := p.loadWorkGroup(context.Background(), ctx, body.WorkGroup)
+	if err != nil {
+		return nil, err
+	}
+	if wg == nil {
+		return nil, athenaNoSuchWorkGroup(body.WorkGroup)
 	}
 
 	return athenaJSONResponse(http.StatusOK, map[string]interface{}{
-		"WorkGroup": map[string]interface{}{
-			"Name":        wg.Name,
-			"State":       wg.State,
-			"Description": wg.Description,
-		},
+		"WorkGroup": athenaWorkGroupMembers(wg),
 	})
 }
 
-// deleteWorkGroup deletes an Athena workgroup.
+// athenaWorkGroupMembers renders the members API_WorkGroup and API_WorkGroupSummary have in common.
+//
+// One renderer for both, so GetWorkGroup and ListWorkGroups cannot describe one workgroup two ways —
+// the same reason loadWorkGroup is one reader (#1222). The two shapes are not identical on the wire
+// (API_WorkGroup adds Configuration, API_WorkGroupSummary adds EngineVersion and
+// IdentityCenterApplicationArn, neither of which substrate carries), but every member substrate does
+// carry appears on both pages, so nothing here is published by only one of them.
+//
+// Description is omitted when empty rather than sent as "": both pages give it "Required: No" with a
+// minimum length of 0, and a workgroup created without one has no description rather than an empty
+// one. Before #1222 GetWorkGroup sent the empty string and ListWorkGroups sent no Description member
+// at all, so a caller comparing the two readers' answers found them different for a workgroup neither
+// reader was wrong about.
+func athenaWorkGroupMembers(wg *AthenaWorkGroup) map[string]interface{} {
+	members := map[string]interface{}{
+		"Name":  wg.Name,
+		"State": wg.State,
+	}
+	if wg.Description != "" {
+		members["Description"] = wg.Description
+	}
+	return members
+}
+
+// athenaNoSuchWorkGroup reports that no workgroup of that name exists.
+//
+// InvalidRequestException/400 is the only 400-class error API_GetWorkGroup and API_DeleteWorkGroup
+// publish — "Indicates that something is wrong with the input to the request. For example, a required
+// parameter may be missing or out of range" — so an absent workgroup has no more specific code to be
+// answered with. The message text is substrate's; the reference publishes codes and not messages.
+func athenaNoSuchWorkGroup(name string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidRequestException",
+		Message:    "WorkGroup " + name + " not found",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// deleteWorkGroup deletes an Athena workgroup, refusing the primary one.
+//
+// API_DeleteWorkGroup's description states "The primary workgroup cannot be deleted", and the user
+// guide's Manage workgroups page repeats it verbatim, so the refusal is a read rather than an
+// inference. Before #1222 the answer was "WorkGroup primary not found" — wrong under either reading of
+// the page, since GetWorkGroup reported the same workgroup as existing in the same breath.
+//
+// The check precedes the record load, because the primary workgroup has no record and an
+// existence-first order would reach the not-found arm and answer the wrong reason. It is deliberately
+// on the *name* and not on the absence of a record: a caller that created its own workgroup named
+// `primary` still cannot delete it, which is what AWS's flat statement says.
+//
+// InvalidRequestException/400 is the code, being the only 400-class error the page publishes. AWS
+// publishes no message for the refusal, so the message restates the published sentence.
 func (p *AthenaPlugin) deleteWorkGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		WorkGroup string `json:"WorkGroup"`
@@ -445,16 +539,19 @@ func (p *AthenaPlugin) deleteWorkGroup(ctx *RequestContext, req *AWSRequest) (*A
 	if err := json.Unmarshal(req.Body, &body); err != nil || body.WorkGroup == "" {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "WorkGroup is required", HTTPStatus: http.StatusBadRequest}
 	}
+	if body.WorkGroup == athenaPrimaryWorkGroupName {
+		return nil, &AWSError{
+			Code:       "InvalidRequestException",
+			Message:    "The primary workgroup cannot be deleted",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 
 	goCtx := context.Background()
 	wgKey := "workgroup:" + ctx.AccountID + "/" + ctx.Region + "/" + body.WorkGroup
 	existing, _ := p.state.Get(goCtx, athenaNamespace, wgKey)
 	if existing == nil {
-		return nil, &AWSError{
-			Code:       "InvalidRequestException",
-			Message:    "WorkGroup " + body.WorkGroup + " not found",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return nil, athenaNoSuchWorkGroup(body.WorkGroup)
 	}
 	if err := p.state.Delete(goCtx, athenaNamespace, wgKey); err != nil {
 		return nil, fmt.Errorf("deleteWorkGroup: delete: %w", err)
@@ -486,6 +583,19 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 	namesKey := "workgroup_names:" + ctx.AccountID + "/" + ctx.Region
 	names := athenaLoadStringIndex(goCtx, p.state, namesKey)
 
+	// The primary workgroup is prepended rather than appended, and the choice matters to the offset
+	// pagination #1086 converted this walk to. It exists before any workgroup a caller creates, so
+	// creation order puts it first — and prepending is the only position that keeps every other entry's
+	// offset stable, where appending would move it on each CreateWorkGroup and leave a token issued
+	// mid-walk pointing at a different element.
+	//
+	// The guard is against the index rather than against the record, because the index is what this walk
+	// orders: CreateWorkGroup appends the name it was given, so a caller that created its own workgroup
+	// named `primary` is already in the list and must not appear twice.
+	if !slices.Contains(names, athenaPrimaryWorkGroupName) {
+		names = append([]string{athenaPrimaryWorkGroupName}, names...)
+	}
+
 	maxResults := body.MaxResults
 	if maxResults <= 0 {
 		maxResults = athenaListDefaultPageSize
@@ -499,19 +609,15 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 
 	wgs := make([]map[string]interface{}, 0, len(page))
 	for _, name := range page {
-		wgKey := "workgroup:" + ctx.AccountID + "/" + ctx.Region + "/" + name
-		d, _ := p.state.Get(goCtx, athenaNamespace, wgKey)
-		if d == nil {
+		// The same reader GetWorkGroup uses, which is what makes the two agree about the primary
+		// workgroup: it has no record, so reading state directly here is what left it out of every
+		// listing (#1222). A load error is skipped rather than returned, matching the unmarshal skip
+		// this loop already made — a listing drops an unreadable record instead of failing wholesale.
+		wg, err := p.loadWorkGroup(goCtx, ctx, name)
+		if err != nil || wg == nil {
 			continue
 		}
-		var wg AthenaWorkGroup
-		if err := json.Unmarshal(d, &wg); err != nil {
-			continue
-		}
-		wgs = append(wgs, map[string]interface{}{
-			"Name":  wg.Name,
-			"State": wg.State,
-		})
+		wgs = append(wgs, athenaWorkGroupMembers(wg))
 	}
 	resp := map[string]interface{}{"WorkGroups": wgs}
 	if nextToken != "" {
