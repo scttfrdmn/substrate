@@ -21,6 +21,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it, which is the one case where the divergence outlives the request that caused it. #1140 stays
   open: its remaining criteria are the decision between the three candidate fixes and the rule that
   observation counters must reset rather than be preserved.
+- **Four doc comments described behaviour the tree does not have** (#1234). None is a behaviour bug —
+  in all four the code is right and the prose is wrong, which is the worse direction, because a doc
+  comment that argues its case is trusted. `fsx_errors.go` recorded a `FileSystemNotFound` 404-vs-400
+  divergence as still open when all three sites already answer 400, so a future sweep was pointed at a
+  phantom site; the note is corrected rather than deleted, because the Glue and WAFv2 sites it was
+  grouped with do still answer 404 and the class has to stay findable. `fsx_plugin.go` told a reader
+  the target prefix is `AmazonFSx.<Op>` where `routing.go` registers
+  `AWSSimbaAPIService_v20180301` — the one sentence a reader consults to hand-craft an FSx request
+  was the one that would make it 404, and FSx's prefix names an internal codename rather than the
+  public service, which is exactly why the sentence exists. `cfn_resources_v32.go` said the
+  `AWS::Transfer::Server` `Ref` is the server ID where the template reference publishes the **ARN**
+  and offers the ID only as the `ServerId` `Fn::GetAtt` attribute; `cfn_intrinsics.go` already
+  resolves the ARN, so only the comment had drifted from the v0.32.0 stub. And
+  `invalid_body_refusals.go` counted eight routed CodeDeploy operations where the plugin routes
+  **nine** — eight is the number of `codedeployInvalidBody` call sites, since `listApplications`
+  decodes no body at all, so "eight operations" and "the other six" were both off by one. Both counts
+  are now named and distinguished, so the conflation cannot recur; the paragraph's conclusion,
+  `ValidationError` service-wide rather than `InvalidInputException` at two sites, is unaffected,
+  which is why this survived review.
 
 ## [v0.120.0] - 2026-09-19
 

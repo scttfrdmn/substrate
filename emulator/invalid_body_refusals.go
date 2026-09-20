@@ -423,11 +423,15 @@ func transferInvalidBody() *AWSError {
 // fifteen-code list #1097 identified, which CodeDeploy carries byte-identically along
 // with Transfer and CodePipeline.
 //
+// Two counts are in play here and conflating them is how this paragraph came to be wrong
+// (#1234): substrate routes **nine** CodeDeploy operations and has **eight**
+// codedeployInvalidBody call sites, because listApplications decodes no body at all.
+//
 // The declined alternative is worth stating, because it reads better and was what the
 // eight sites answered. InvalidInputException at 400 is glossed "The input was
 // specified in an invalid format.", which fits this condition precisely — but
-// CodeDeploy publishes it on only two of the eight operations substrate routes,
-// API_CreateDeployment and API_CreateDeploymentGroup. The other six publish nothing
+// CodeDeploy publishes it on only two of the nine operations substrate routes,
+// API_CreateDeployment and API_CreateDeploymentGroup. The other seven publish nothing
 // generic at all, only per-parameter codes: ApplicationNameRequiredException and
 // InvalidApplicationNameException on the application operations,
 // InvalidDeploymentGroupNameException on the deployment-group ones,
