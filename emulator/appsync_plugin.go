@@ -167,7 +167,7 @@ func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 	}
 	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID)
 
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": api})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": appsyncAPIToWire(api)})
 }
 
 func (p *AppSyncPlugin) listGraphqlAPIs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -186,7 +186,7 @@ func (p *AppSyncPlugin) listGraphqlAPIs(reqCtx *RequestContext, req *AWSRequest)
 			apis = append(apis, api)
 		}
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApis": apis})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApis": appsyncAPIsToWire(apis)})
 }
 
 func (p *AppSyncPlugin) getGraphqlAPI(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -194,7 +194,7 @@ func (p *AppSyncPlugin) getGraphqlAPI(reqCtx *RequestContext, req *AWSRequest, a
 	if err != nil {
 		return nil, err
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": api})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": appsyncAPIToWire(api)})
 }
 
 func (p *AppSyncPlugin) updateGraphqlAPI(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -219,7 +219,7 @@ func (p *AppSyncPlugin) updateGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKey(reqCtx.AccountID, reqCtx.Region, apiID), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync api: %w", err3)
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": api})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": appsyncAPIToWire(api)})
 }
 
 func (p *AppSyncPlugin) deleteGraphqlAPI(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -265,7 +265,7 @@ func (p *AppSyncPlugin) createDataSource(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("put appsync datasource: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), input.Name)
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": ds})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": appsyncDataSourceToWire(ds)})
 }
 
 func (p *AppSyncPlugin) listDataSources(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -283,7 +283,7 @@ func (p *AppSyncPlugin) listDataSources(reqCtx *RequestContext, req *AWSRequest,
 			dsList = append(dsList, ds)
 		}
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSources": dsList})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSources": appsyncDataSourcesToWire(dsList)})
 }
 
 func (p *AppSyncPlugin) getDataSource(reqCtx *RequestContext, req *AWSRequest, apiID, name string) (*AWSResponse, error) {
@@ -291,7 +291,7 @@ func (p *AppSyncPlugin) getDataSource(reqCtx *RequestContext, req *AWSRequest, a
 	if err != nil {
 		return nil, err
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": ds})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": appsyncDataSourceToWire(ds)})
 }
 
 func (p *AppSyncPlugin) updateDataSource(reqCtx *RequestContext, req *AWSRequest, apiID, name string) (*AWSResponse, error) {
@@ -316,7 +316,7 @@ func (p *AppSyncPlugin) updateDataSource(reqCtx *RequestContext, req *AWSRequest
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncDataSourceKey(reqCtx.AccountID, reqCtx.Region, apiID, name), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync datasource: %w", err3)
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": ds})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": appsyncDataSourceToWire(ds)})
 }
 
 func (p *AppSyncPlugin) deleteDataSource(reqCtx *RequestContext, req *AWSRequest, apiID, name string) (*AWSResponse, error) {
@@ -368,7 +368,7 @@ func (p *AppSyncPlugin) createResolver(reqCtx *RequestContext, req *AWSRequest, 
 		return nil, fmt.Errorf("put appsync resolver: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+input.FieldName)
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": res})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": appsyncResolverToWire(res)})
 }
 
 func (p *AppSyncPlugin) listResolvers(reqCtx *RequestContext, req *AWSRequest, apiID, typeName string) (*AWSResponse, error) {
@@ -390,7 +390,7 @@ func (p *AppSyncPlugin) listResolvers(reqCtx *RequestContext, req *AWSRequest, a
 			resolvers = append(resolvers, res)
 		}
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolvers": resolvers})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolvers": appsyncResolversToWire(resolvers)})
 }
 
 func (p *AppSyncPlugin) getResolver(reqCtx *RequestContext, req *AWSRequest, apiID, typeName, fieldName string) (*AWSResponse, error) {
@@ -398,7 +398,7 @@ func (p *AppSyncPlugin) getResolver(reqCtx *RequestContext, req *AWSRequest, api
 	if err != nil {
 		return nil, err
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": res})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": appsyncResolverToWire(res)})
 }
 
 func (p *AppSyncPlugin) updateResolver(reqCtx *RequestContext, req *AWSRequest, apiID, typeName, fieldName string) (*AWSResponse, error) {
@@ -427,7 +427,7 @@ func (p *AppSyncPlugin) updateResolver(reqCtx *RequestContext, req *AWSRequest, 
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncResolverKey(reqCtx.AccountID, reqCtx.Region, apiID, typeName, fieldName), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync resolver: %w", err3)
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": res})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": appsyncResolverToWire(res)})
 }
 
 func (p *AppSyncPlugin) deleteResolver(reqCtx *RequestContext, req *AWSRequest, apiID, typeName, fieldName string) (*AWSResponse, error) {
@@ -473,7 +473,7 @@ func (p *AppSyncPlugin) createFunction(reqCtx *RequestContext, req *AWSRequest, 
 		return nil, fmt.Errorf("put appsync function: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID)
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"functionConfiguration": fn})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"functionConfiguration": appsyncFunctionToWire(fn)})
 }
 
 func (p *AppSyncPlugin) listFunctions(reqCtx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
@@ -491,7 +491,7 @@ func (p *AppSyncPlugin) listFunctions(reqCtx *RequestContext, req *AWSRequest, a
 			fns = append(fns, fn)
 		}
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"functions": fns})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"functions": appsyncFunctionsToWire(fns)})
 }
 
 func (p *AppSyncPlugin) getFunction(reqCtx *RequestContext, req *AWSRequest, apiID, funcID string) (*AWSResponse, error) {
@@ -499,7 +499,7 @@ func (p *AppSyncPlugin) getFunction(reqCtx *RequestContext, req *AWSRequest, api
 	if err != nil {
 		return nil, err
 	}
-	return appsyncJSONResponse(http.StatusOK, map[string]any{"functionConfiguration": fn})
+	return appsyncJSONResponse(http.StatusOK, map[string]any{"functionConfiguration": appsyncFunctionToWire(fn)})
 }
 
 func (p *AppSyncPlugin) deleteFunction(reqCtx *RequestContext, req *AWSRequest, apiID, funcID string) (*AWSResponse, error) {

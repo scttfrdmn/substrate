@@ -52,15 +52,18 @@ func (d *StackDeployer) deployAppSyncGraphQLApi(
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
+		// `arn`, not `apiArn`: the plugin answers the member API_GraphqlApi publishes since #1121,
+		// and this reader is the one in-tree consumer of that response. It has to move in the same
+		// commit or AWS::AppSync::GraphQLApi loses the ARN its Ref and Fn::GetAtt report.
 		var result struct {
 			GraphQLAPI struct {
-				APIID  string `json:"apiId"`
-				APIARN string `json:"apiArn"`
+				APIID string `json:"apiId"`
+				ARN   string `json:"arn"`
 			} `json:"graphqlApi"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
 			dr.PhysicalID = result.GraphQLAPI.APIID
-			dr.ARN = result.GraphQLAPI.APIARN
+			dr.ARN = result.GraphQLAPI.ARN
 		}
 	}
 	return dr, cost, nil

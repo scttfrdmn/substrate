@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **AppSync answered its GraphQL API's ARN under a member no SDK reads** (#1121). `API_GraphqlApi`
+  publishes the ARN as **`arn`**; substrate's persisted record spells it `apiArn`, and the record was
+  handed straight to the caller by `CreateGraphqlApi`, `GetGraphqlApi`, `UpdateGraphqlApi` and
+  `ListGraphqlApis` — so `aws.ToString(out.GraphqlApi.Arn)` was `""` with no error, a silent wrong
+  answer rather than a refusal. The ARN substrate computes was always right and is unchanged; only the
+  member name was. The same record also carried `region` and `accountId`, which the page publishes
+  nowhere (#756's class), and `dataSource`, `resolver` and `functionConfiguration` each carried an
+  `apiId` that `API_DataSource`, `API_Resolver` and `API_FunctionConfiguration` do not list — the API
+  is the path segment the request was addressed to, not data the shape carries, which is the reading
+  API Gateway v2's `Route` shape already records. All four are now rendered from types tagged from the
+  API model and projected from the record (`appsync_wire.go`), the pattern #529 established for API
+  Gateway v1 and #1013 and #1090 repeated for DynamoDB and ECR. The records keep their own tags on
+  purpose: they are what `state.Put` writes and what a replay reads back, so retagging a persisted
+  field in place would make an already-recorded run decode differently — which is also why the
+  wire-bookkeeping baseline is unchanged, since the declaration surface is. `AWS::AppSync::GraphQLApi`
+  reads the ARN out of the plugin's own response rather than rebuilding it, so the CloudFormation
+  reader moved in the same commit and a test now pins that `Ref` and `Fn::GetAtt Arn` still report it.
 - **Glue and WAFv2 answered 404 for fifteen refusals their pages publish at 400** (#1098). Glue's
   twelve `EntityNotFoundException` sites — `GetDatabase`, `UpdateDatabase`, `GetTable`, `UpdateTable`,
   `GetConnection`, `UpdateConnection`, `GetCrawler`, `UpdateCrawler`, `GetJob`, `UpdateJob`,

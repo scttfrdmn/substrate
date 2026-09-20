@@ -14949,17 +14949,37 @@ introspection of it.
 An API ID is 13 hex characters and a function or api-key ID is 26, both from the shared random source,
 so they differ between runs but are recorded in the event log and reproduce on replay.
 
+### The wire is projected from the state, not handed over
+
+Four AppSync records used to be answered straight out of state, and the persisted shape is not the
+published one ([#1121](https://github.com/scttfrdmn/substrate/issues/1121)):
+
+- The `graphqlApi` object spelled its ARN **`apiArn`**, where `API_GraphqlApi` publishes **`arn`** —
+  *"The Amazon Resource Name (ARN)"*. `aws.ToString(out.GraphqlApi.Arn)` was therefore `""` with no
+  error at `CreateGraphqlApi`, `GetGraphqlApi`, `UpdateGraphqlApi` and `ListGraphqlApis`: a silent
+  wrong answer rather than a refusal. The ARN substrate computes was always right; only the member
+  name was wrong, and the value is unchanged.
+- The same object carried `region` and `accountId`, which the page publishes nowhere. That is
+  [#756](https://github.com/scttfrdmn/substrate/issues/756)'s class, whose worked instance is ECR.
+- A data source, resolver and function each carried an `apiId`. `API_DataSource`, `API_Resolver` and
+  `API_FunctionConfiguration` publish no such member: the API is the path segment the request was
+  addressed to, not data the shape carries — the same reading API Gateway v2's `Route` shape records.
+
+Each response is now rendered from a type tagged from the API model and projected from the record
+(`appsync_wire.go`), which is the pattern API Gateway v1 (#529), DynamoDB (#1013) and ECR (#1090)
+already follow. The records themselves are unchanged, deliberately: they are what `state.Put` writes
+and what a replay reads back, so retagging a persisted field in place would make an already-recorded
+run decode differently. Members AppSync publishes but substrate does not model are absent from the
+projection rather than present and empty.
+
+Because `AWS::AppSync::GraphQLApi`'s `Ref` and `Fn::GetAtt Arn` are read out of the plugin's own
+response rather than rebuilt in the deployer, the CloudFormation reader moved with the rename.
+
 ### Known divergences in the wire shape
 
 These are recorded rather than fixed, each with the issue that owns it, so that a consumer reading
 this page is not surprised by a member:
 
-- **The `graphqlApi` object answers `arn` as `apiArn`** and carries two members AppSync publishes
-  nowhere, `region` and `accountId`. An SDK reading `GraphqlApi.Arn` therefore gets an empty string
-  with no error. [#1121](https://github.com/scttfrdmn/substrate/issues/1121) — it is not a rename
-  because the struct is the persisted shape as well as the wire shape.
-- **A data source, resolver and function each answer an `apiId`** their published types do not list.
-  Same issue; it is the class [#756](https://github.com/scttfrdmn/substrate/issues/756) inventories.
 - **An api key expires 365 days out and a caller's `expires` is ignored**, where the page publishes a
   7-day default and a 1-to-365-day bound enforced by `ApiKeyValidityOutOfBoundsException`/400.
   [#1122](https://github.com/scttfrdmn/substrate/issues/1122).
