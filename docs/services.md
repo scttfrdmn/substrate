@@ -1623,13 +1623,55 @@ or `State` decodes cleanly against another and indexes into a listing the caller
 a property every offset paginator in the tree has, recorded here because the refusal's name invites
 the stronger reading. And a past-the-end offset still clamps to a final empty page rather than being
 refused, because a token substrate issued over a listing that has since shrunk is still a token it
-issued. Left as they were: the `State` filter is applied **after** the page is cut, so a state-filtered
-request can be answered a page shorter than `MaxResults` while still carrying a `NextToken` where AWS
-publishes `State` as a filter on the listing
-([#1229](https://github.com/scttfrdmn/substrate/issues/1229)); and a `MaxResults` above the published maximum of 100 is
-clamped rather than refused, with a value of zero or below silently ignored in favour of substrate's
-own default of 20. Both are separate classes from the token, and changing either changes which
-schedules a page contains rather than which tokens are accepted.
+issued. The `State` filter was also left as it was — applied **after** the page is cut, so a
+state-filtered request could be answered a page shorter than `MaxResults` while still carrying a
+`NextToken` — and has since been fixed under
+[#1229](https://github.com/scttfrdmn/substrate/issues/1229); see
+[the next section](#a-published-filter-selects-what-the-page-is-cut-from). Still left as it was: a
+`MaxResults` above the published maximum of 100 is clamped rather than refused, with a value of zero or
+below silently ignored in favour of substrate's own default of 20. That is a separate class from the
+token, and changing it changes which schedules a page contains rather than which tokens are accepted.
+
+### A published filter selects what the page is cut from
+
+`ListSchedules` read its three filters in three different places relative to the cut. `ScheduleGroup`
+chose which name index to load and `NamePrefix` filtered that index — both ahead of the cut — but
+**`State` was applied inside the render loop**, on the records the page had already selected. So a
+state-filtered request was answered `MaxResults` schedules minus however many of *that page* failed the
+filter, while the `NextToken` alongside had been computed from the unfiltered listing
+([#1229](https://github.com/scttfrdmn/substrate/issues/1229)).
+
+`API_ListSchedules` publishes `State` in the same URI-parameter list as the other two and in the same
+words — *"If specified, only lists the schedules whose current state matches the given filter."*
+against `NamePrefix`'s *"Schedule name prefix to return the filtered list of resources."* — so it is a
+filter on the listing, and the listing is what a page is cut from. The response member is the ordinary
+cursor: *"Indicates whether there are additional results to retrieve. If the value is null, there are
+no more results."* Nothing on the page says a page may be shorter than the `MaxResults` it was asked
+for.
+
+Two observations changed, the second worse than the first. `?State=ENABLED&MaxResults=20` over a group
+of 40 where half are `DISABLED` answered fewer than 20 enabled schedules with a `NextToken`, where AWS
+answers 20. And when every schedule on a page failed the filter, the answer was
+`{"Schedules":[],"NextToken":"…"}` with matches still to come — a shape a caller that stops at an empty
+list reads as "the filter matched nothing". AWS can produce that shape too, but from server-side scan
+limits, never from applying a filter it publishes.
+
+**The cost is a `state.Get` per schedule in the group, per call**, because `State` lives in the record
+and not in the name index, so a state-filtered listing cannot be assembled from names alone. That is
+the deliberate reading: the alternative is to copy `State` into the name index so the filter stays
+index-only, which would duplicate a field of the record into an index and leave `UpdateSchedule` with
+two places to write it — the class [#756](https://github.com/scttfrdmn/substrate/issues/756) exists
+for.
+
+**What is unchanged.** The offset now counts *matching* schedules, so a token issued with a `State`
+filter and replayed without one indexes into a different listing — already true of `NamePrefix`, and
+already recorded above as a property of every offset paginator in the tree. And a name the index holds
+with no record behind it, or a record that will not decode, is still skipped: those are store
+inconsistencies rather than published filters, there is no request a caller could send to produce
+either, and the page publishes no code for substrate's own index and records disagreeing, so a refusal
+would be inventing one. What changed is that skipping one can no longer shorten a *page* — it shortens
+the listing being cut from, exactly as a filter does, and a page is short only when the listing has run
+out.
 
 ### Batch's three describes shared one paginator, so the decode had to leave it
 
@@ -14260,7 +14302,7 @@ EventBridge custom events: $1.00 per million events.
 | GetSchedule | `GET /schedules/{Name}` | |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
-| ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one |
+| ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one. All three filters are applied [before the page is cut](#a-published-filter-selects-what-the-page-is-cut-from), so a page carries `min(MaxResults, remaining matches)` and never an empty array alongside a cursor |
 
 ### What a create or update is refused for
 

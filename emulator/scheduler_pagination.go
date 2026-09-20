@@ -52,11 +52,10 @@ package emulator
 //
 // # Not fixed here, so that the conversion is not read as having fixed it
 //
-//   - **The `State` filter is applied after the page is cut**, not before, so a request filtering by
-//     state can be answered a page shorter than `MaxResults` while still carrying a `NextToken`. AWS
-//     publishes `State` as a filter on the listing, which would put it ahead of the cut. Left as it
-//     was, and filed separately: it is a different defect from the token, and fixing it changes which
-//     schedules a page contains rather than which tokens are accepted.
+// The `State` filter was one of these, applied after the page is cut rather than before. It was fixed
+// in #1229 — see scheduler_list_filters.go, which is where the argument for the ordering now lives.
+// Until then it was recorded here as "not fixed here", which is what this heading is for.
+//
 //   - **`MaxResults` above the published maximum of 100 is clamped, not refused**, and a value of
 //     zero or below is silently ignored in favor of substrate's own default of 20 — see
 //     scheduler_query_keys.go. Refusing an out-of-range page size is its own class.
