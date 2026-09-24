@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -280,7 +279,7 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		Environment:   body.Environment.Variables,
 		CodeSize:      0,
 		CodeSha256:    "",
-		RevisionID:    generateLambdaRevisionID(),
+		RevisionID:    generateLambdaRevisionID(ctx.IDs),
 		State:         "Active",
 		PackageType:   pkgType,
 		Architectures: archs,
@@ -395,7 +394,7 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 	// fresh random value on every update — a caller comparing it across two updates
 	// is asking whether the code changed, and a random value answers "always". A
 	// RevisionID is not a digest of anything and stays random.
-	fn.RevisionID = generateLambdaRevisionID()
+	fn.RevisionID = generateLambdaRevisionID(ctx.IDs)
 	fn.LastModified = p.tc.Now()
 
 	switch {
@@ -481,7 +480,7 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 	if body.Environment.Variables != nil {
 		fn.Environment = body.Environment.Variables
 	}
-	fn.RevisionID = generateLambdaRevisionID()
+	fn.RevisionID = generateLambdaRevisionID(ctx.IDs)
 	fn.LastModified = p.tc.Now()
 
 	resp, err := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
@@ -1128,11 +1127,22 @@ func (p *LambdaPlugin) sizeS3Package(bucket, key, versionID string) (int64, stri
 	return obj.Size, strings.Trim(obj.ETag, `"`)
 }
 
-// generateLambdaRevisionID generates a unique revision/code ID.
-func generateLambdaRevisionID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateLambdaRevisionID returns a UUID-shaped revision/code ID minted from m.
+//
+// This is the second shared draw site after [randomHex], and the wider one of the two:
+// six other services publish an identifier from here — ECS task IDs, Step Functions
+// execution names, SQS message IDs, EventBridge event IDs, CloudWatch Logs sequence
+// tokens and Service Quotas request IDs — so it moved to [IDMint] together with Lambda's
+// own revision IDs rather than waiting for each of those services' turn (#856).
+//
+// The rendering is the raw hex of sixteen bytes in UUID *shape*, not an RFC 4122
+// version-4 UUID with its version and variant bits set. That is what this function
+// published before; #856 is about making an identifier reproducible across a replay, not
+// about changing which bytes a caller sees, so [IDMint.UUID] is deliberately not used
+// here.
+func generateLambdaRevisionID(m *IDMint) string {
+	h := m.Hex(16)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // parseInt parses a string into an int.
@@ -1262,7 +1272,7 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		functionARN = "arn:aws:lambda:" + ctx.Region + ":" + ctx.AccountID + ":function:" + input.FunctionName
 	}
 
-	uuid := generateLambdaRevisionID()
+	uuid := generateLambdaRevisionID(ctx.IDs)
 	esm := &ESMConfig{
 		UUID:             uuid,
 		FunctionARN:      functionARN,

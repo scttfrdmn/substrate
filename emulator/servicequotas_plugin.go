@@ -56,7 +56,7 @@ func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequ
 	case "GetAWSDefaultServiceQuota":
 		return p.getAWSDefaultServiceQuota(req)
 	case "RequestServiceQuotaIncrease":
-		return p.requestServiceQuotaIncrease(sqAccountID(reqCtx), req)
+		return p.requestServiceQuotaIncrease(reqCtx.IDs, sqAccountID(reqCtx), req)
 	// The second name is not one AWS has; it is the name this handler shipped
 	// under, kept as an alias so a fixture that drives the plugin by a hand-built
 	// X-Amz-Target keeps working. See the handler's doc comment (#636).
@@ -196,7 +196,7 @@ func (p *ServiceQuotasPlugin) getAWSDefaultServiceQuota(req *AWSRequest) (*AWSRe
 	return p.getServiceQuota(req)
 }
 
-func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(accountID string, req *AWSRequest) (*AWSResponse, error) {
+func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(mint *IDMint, accountID string, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ServiceCode  string  `json:"ServiceCode"`
 		QuotaCode    string  `json:"QuotaCode"`
@@ -209,7 +209,7 @@ func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(accountID string, req 
 		return nil, sqIllegalArgument("ServiceCode and QuotaCode are required")
 	}
 
-	id := generateSQSMessageID() // reuse UUID generator
+	id := generateSQSMessageID(mint) // reuse UUID generator
 
 	qi := &QuotaIncrease{
 		ID:           id,

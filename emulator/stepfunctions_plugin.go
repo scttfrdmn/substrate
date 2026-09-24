@@ -665,7 +665,7 @@ func (p *StepFunctionsPlugin) startExecution(ctx *RequestContext, req *AWSReques
 
 	execName := input.Name
 	if execName == "" {
-		execName = "exec-" + generateLambdaRevisionID()[:8]
+		execName = "exec-" + generateLambdaRevisionID(ctx.IDs)[:8]
 	}
 
 	// The execution belongs to the state machine, so its ARN, its record and its index entry are all
@@ -760,7 +760,7 @@ func (p *StepFunctionsPlugin) startSyncExecution(ctx *RequestContext, req *AWSRe
 
 	execName := input.Name
 	if execName == "" {
-		execName = "sync-" + generateLambdaRevisionID()[:8]
+		execName = "sync-" + generateLambdaRevisionID(ctx.IDs)[:8]
 	}
 
 	execArn := fmt.Sprintf("arn:aws:states:%s:%s:express:%s:%s", target.Region, target.AccountID, target.Name, execName)

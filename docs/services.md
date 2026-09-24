@@ -2206,9 +2206,22 @@ Three kinds of value stay random, and one more is still migrating:
   ID, a NAT gateway's private IP from its gateway ID, a secret's ARN from its name, and
   CloudFormation's [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic),
   which predate this rule and are what generalising it was modelled on.
-- EC2, IAM and STS identifiers are derived today. The remaining services are migrating one family
-  at a time, tracked on #856; until a service moves, its identifiers are still drawn from
-  `crypto/rand` and a replay of a stream creating one of its resources still diverges.
+- EC2, IAM, STS, SQS, SNS, Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge,
+  CloudWatch Logs and Service Quotas identifiers are derived today. The remaining services are
+  migrating one family at a time, tracked on #856; until a service moves, its identifiers are
+  still drawn from `crypto/rand` and a replay of a stream creating one of its resources still
+  diverges.
+
+Six of those services publish an identifier from one shared generator rather than declaring their
+own, so they moved together: an ECS task ID, a Step Functions execution name, an SQS message ID,
+an EventBridge event ID, a CloudWatch Logs upload sequence token and a Service Quotas request ID
+are all the same sixteen derived bytes rendered in UUID *shape* — `8-4-4-4-12` lowercase hex
+without the RFC 4122 version and variant bits, which is the form substrate published before it
+derived them and is unchanged by deriving them.
+
+An SQS send mints a message's initial receipt handle and each receive replaces it, matching real
+SQS: two `ReceiveMessage` calls that return the same message hand back different handles and only
+the most recent one deletes. A replay of either call reproduces the handle that call recorded.
 
 ---
 

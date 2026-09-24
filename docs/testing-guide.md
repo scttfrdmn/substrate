@@ -335,9 +335,10 @@ makes `Differences` empty — and `StateValid` true, with `WithRecordedStateHash
 all; before #856 every such stream diverged on its first create, which is why the #1140
 tests above are built on caller-chosen bucket and key names instead.
 
-Two caveats. **Only EC2, IAM and STS identifiers are derived so far**; the remaining
-services are migrating one family at a time, and until a service moves, a replay of a
-stream creating one of its resources still diverges. And a recording made against an
+Two caveats. **Not every service's identifiers are derived yet.** EC2, IAM, STS, SQS, SNS,
+Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge, CloudWatch Logs and Service
+Quotas are; the rest are migrating one family at a time, and until a service moves, a
+replay of a stream creating one of its resources still diverges. And a recording made against an
 **unfrozen** clock can still diverge on a `state_hash_after` even when every identifier
 matches, because a handler reading the live clock stamps its record a few hundred
 nanoseconds after the event's own timestamp — invisible in a response rendering seconds,

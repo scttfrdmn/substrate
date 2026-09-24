@@ -567,7 +567,7 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return nil, err
 	}
 	topicName := target.Name
-	subID := generateSNSSubID()
+	subID := generateSNSSubID(ctx.IDs)
 	// The subscription ARN is minted under the account and Region of the topic, because a
 	// subscription ARN is the topic's ARN with the subscription's identifier appended — its account
 	// segment is the topic's, not the subscriber's. The record and the two indexes below stay keyed by
@@ -910,7 +910,7 @@ func (p *SNSPlugin) publish(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		return nil, err
 	}
 
-	msgID := generateSNSSubID()
+	msgID := generateSNSSubID(ctx.IDs)
 
 	for _, subARN := range subIDs {
 		sub, loadErr := p.loadSub(goCtx, ctx.AccountID, ctx.Region, subARN)
@@ -947,7 +947,7 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 	}
 	switch sub.Protocol {
 	case "sqs":
-		envelope := p.buildSNSEnvelope(sub, message, subject)
+		envelope := p.buildSNSEnvelope(ctx.IDs, sub, message, subject)
 		envelopeBytes, _ := json.Marshal(envelope)
 		queueURL := sub.Endpoint
 		_, err := p.registry.RouteRequest(ctx, &AWSRequest{
@@ -995,7 +995,7 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 			p.logger.Warn("sns dispatch to lambda failed", "function", fnName, "err", err)
 		}
 	case "http", "https":
-		envelope := p.buildSNSEnvelope(sub, message, subject)
+		envelope := p.buildSNSEnvelope(ctx.IDs, sub, message, subject)
 		envelopeBytes, _ := json.Marshal(envelope)
 		httpReq, reqErr := http.NewRequest(http.MethodPost, sub.Endpoint, bytes.NewReader(envelopeBytes))
 		if reqErr != nil {
@@ -1017,11 +1017,12 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 	}
 }
 
-// buildSNSEnvelope wraps a message in the standard SNS notification JSON envelope.
-func (p *SNSPlugin) buildSNSEnvelope(sub *SNSSubscription, message, subject string) map[string]interface{} {
+// buildSNSEnvelope wraps a message in the standard SNS notification JSON envelope,
+// minting the envelope's MessageId from m.
+func (p *SNSPlugin) buildSNSEnvelope(m *IDMint, sub *SNSSubscription, message, subject string) map[string]interface{} {
 	return map[string]interface{}{
 		"Type":             "Notification",
-		"MessageId":        generateSNSSubID(),
+		"MessageId":        generateSNSSubID(m),
 		"TopicArn":         sub.TopicARN,
 		"Subject":          subject,
 		"Message":          message,
@@ -1112,7 +1113,7 @@ func (p *SNSPlugin) publishBatch(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		}
 		message := req.Params[fmt.Sprintf("PublishBatchRequestEntries.member.%d.Message", i)]
 		batchSubject := req.Params[fmt.Sprintf("PublishBatchRequestEntries.member.%d.Subject", i)]
-		msgID := generateSNSSubID()
+		msgID := generateSNSSubID(ctx.IDs)
 		for _, subARN := range subIDs {
 			sub, loadErr := p.loadSub(goCtx, ctx.AccountID, ctx.Region, subARN)
 			if loadErr != nil || sub == nil {

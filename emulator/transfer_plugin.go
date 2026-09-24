@@ -82,7 +82,7 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 		input.EndpointType = "PUBLIC"
 	}
 
-	serverID := generateTransferServerID()
+	serverID := generateTransferServerID(reqCtx.IDs)
 	server := TransferServer{
 		ServerID:             serverID,
 		Arn:                  fmt.Sprintf("arn:aws:transfer:%s:%s:server/%s", reqCtx.Region, reqCtx.AccountID, serverID),
