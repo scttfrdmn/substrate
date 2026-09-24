@@ -67,6 +67,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
+  1.58.0→1.59.0, pulling `modernc.org/libc` 1.75.6→1.75.7. `test/e2e`:
+  `aws-sdk-go-v2/config` 1.33.4→1.33.5, `credentials` 1.20.4→1.20.5, `service/dynamodb`
+  1.68.0→1.69.0, `service/ec2` 1.332.0→1.335.0, `service/lambda` 1.90.1→1.108.0,
+  `service/sns` 1.39.17→1.47.1, `service/sts` 1.50.0→1.51.0 and `smithy-go` 1.28.1→1.28.2.
+  Taken as one change rather than as the two Dependabot PRs that proposed them (#1267, #1268),
+  because `test/e2e` requires the root module through a `replace` directive and the E2E job
+  asserts `test/e2e/go.mod` is tidy — so a root-only `modernc.org/sqlite` bump leaves the e2e
+  module's indirect requires stale and cannot pass CI on its own, which is how #1267 failed as
+  authored. Same reasoning as #895 and #786.
+
 - **SNS subscription attributes round-trip, and a stub stops answering 200 to everything** (#1125).
   `SetSubscriptionAttributes` was a literal stub: it read `SubscriptionArn` into `_`, read neither
   `AttributeName` nor `AttributeValue`, touched no state and answered 200. So a subscription that did
