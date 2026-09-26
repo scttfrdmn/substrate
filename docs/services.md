@@ -14478,6 +14478,9 @@ KMS API requests: $0.03 per 10,000 requests.
 | PutLogEvents | Accepts up to 10,000 events per call |
 | GetLogEvents | Issues both `nextForwardToken` and `nextBackwardToken`; reads `startFromHead`; refuses a `nextToken` it did not issue |
 | FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
+| TagResource | Takes the **unsuffixed** log-group ARN — see below; refuses the 51st tag |
+| UntagResource | Same ARN rule; an absent key and an empty `tagKeys` are both no-ops |
+| ListTagsForResource | Same ARN rule; an untagged group answers `{"tags":{}}` |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.
 
@@ -14494,7 +14497,9 @@ field read raised `KeyError`. All four now emit the API's member names.
 `DescribeLogGroups` reports **both** ARN forms the reference documents as distinct
 members: `logGroupArn` without a trailing `:*`, which is what a
 `logGroupIdentifier` input or a tagging API wants, and `arn` with it, which is
-what an IAM policy wants for most actions. They differ only in that suffix.
+what an IAM policy wants for most actions. They differ only in that suffix, and
+which of the two the tagging operations accept is [a rule of its
+own](#tagging-a-log-group-takes-the-unsuffixed-arn).
 
 A group with no retention policy omits `retentionInDays` entirely rather than
 reporting `0`, because the API has no value meaning "never" — the member's absence
@@ -14519,6 +14524,63 @@ All four paginating operations refuse a `nextToken` substrate could not have iss
 for the provenance, the one divergence the change deliberately leaves in place (the published
 24-hour token expiry, which is declined rather than deferred), and the argument that the token
 is validated before any listing is read.
+
+### Tagging a log group takes the unsuffixed ARN
+
+The three tagging operations accept the **unsuffixed** log-group ARN and refuse the
+IAM-policy form:
+
+```
+arn:aws:logs:us-west-2:123456789012:log-group:/aws/lambda/foray-gateway       accepted
+arn:aws:logs:us-west-2:123456789012:log-group:/aws/lambda/foray-gateway:*     ValidationException: Invalid resourceArn
+```
+
+The trap is that substrate hands a caller the refused form itself: as the section
+above records, `DescribeLogGroups` reports both, and the suffixed one travels under
+the shorter member name `arn`. Reaching for it is the natural mistake, since it is
+also the ARN an IAM policy wants, and a hand-written fake that accepts any ARN keeps
+a tagging path green offline and then fails on every group of a live deploy — which
+is the report [#1273](https://github.com/scttfrdmn/substrate/issues/1273) was filed
+from.
+
+The same rule applies to all three operations, not to the write alone: a convergence
+path reads before it writes, and a `ListTagsForResource` that accepted the suffixed
+form would report a group as untagged rather than telling the caller which ARN to
+send.
+
+**Provenance.** `ValidationException` / `Invalid resourceArn` is **observed** real-AWS
+behaviour (us-west-2), not published: the pages for all three operations list
+`InvalidParameterException`/400, `ResourceNotFoundException`/400 and
+`ServiceUnavailableException`/500, plus `TooManyTagsException`/400 on `TagResource`,
+and none of them lists a `ValidationException` at all. What *is* published supports
+refusing — `resourceArn` carries Pattern `[\w+=/:,.@-]*`, a character class with no
+`*` in it, so the suffixed form violates the request model before any resource is
+resolved. Only the code and the message text come from observation.
+
+A `:log-stream:{name}` suffix is refused the same way, since a stream is not one of
+the two types these operations accept. The other type that *is* accepted —
+`destination:{name}` — answers `ResourceNotFoundException`, because substrate models
+no destinations at all: the ARN names a taggable type and a resource that cannot
+exist here, so it is the resource that is missing rather than the ARN that is wrong.
+
+Three further readings worth knowing:
+
+- `tags` is a **string-to-string map** on both the `TagResource` request and the
+  `ListTagsForResource` response, not the array of `{key, value}` objects most
+  services use. An untagged group answers `{"tags":{}}` rather than omitting the
+  member, so a caller comparing maps never has to tell nil from empty.
+- `CreateLogGroup`'s inline `tags` are persisted and read back by
+  `ListTagsForResource`. They were decoded and discarded before #1273, so a group
+  created with tags inline reported none.
+- The 50-tag ceiling is enforced at `TagResource` only, against the **merged** set —
+  a request of one tag against a group already holding fifty is refused with
+  `TooManyTagsException`. `CreateLogGroup` accepts more, because its page publishes
+  no error code for exceeding the `tags` map maximum and inventing one would assert a
+  refusal AWS documents nowhere ([#671](https://github.com/scttfrdmn/substrate/issues/671)).
+
+Note also what tagging does **not** reach: a log group is not resolvable through the
+Resource Groups Tagging API, which has no `logs` arm in its ARN resolver, so
+`GetResources` does not report one.
 
 ### GetLogEvents pages by a pair of tokens
 
