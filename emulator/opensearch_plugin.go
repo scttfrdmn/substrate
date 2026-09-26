@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -202,7 +200,7 @@ func (p *OpenSearchPlugin) putMapping(_ *RequestContext, index string) (*AWSResp
 func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, index, docID string) (*AWSResponse, error) {
 	goCtx := context.Background()
 	if docID == "" {
-		docID = generateOpenSearchID()
+		docID = generateOpenSearchID(ctx.IDs)
 	}
 	// Ensure the index exists (auto-create).
 	indexKey := "index:" + index
@@ -304,7 +302,7 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 					body := []byte(lines[i])
 					i++
 					if docID == "" {
-						docID = generateOpenSearchID()
+						docID = generateOpenSearchID(ctx.IDs)
 					}
 					docKey := "doc:" + idx + "/" + docID
 					isNew := true
@@ -340,7 +338,6 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 			}
 		}
 	}
-	_ = ctx
 	return openSearchOK(map[string]interface{}{
 		"took":   1,
 		"errors": false,
@@ -383,7 +380,7 @@ func (p *OpenSearchPlugin) search(ctx *RequestContext, req *AWSRequest, index st
 		scrollTTL = body.Scroll
 	}
 	if scrollTTL != "" {
-		scrollID := generateOpenSearchID()
+		scrollID := generateOpenSearchID(ctx.IDs)
 		// Store remaining IDs (skip first page) as scroll state.
 		allIDs := make([]string, 0, len(filtered))
 		for _, d := range filtered {
@@ -996,11 +993,26 @@ func osMinAgg(docs []map[string]interface{}, field string) map[string]interface{
 	return map[string]interface{}{"value": min}
 }
 
-// generateOpenSearchID generates a random URL-safe base64 ID.
-func generateOpenSearchID() string {
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	return base64.RawURLEncoding.EncodeToString(b)
+// generateOpenSearchID mints a URL-safe base64 ID from m — sixteen characters from twelve bytes,
+// which is byte-for-byte the width and alphabet the crypto/rand form produced.
+//
+// It serves two kinds of value, and the wider one is the reason deriving it matters. A document `_id`
+// substrate generates is returned in the index response and is the path of every later `GET`, `PUT`
+// and `DELETE` of that document; a `_scroll_id` is handed straight back to `_search/scroll`. Both are
+// values a caller sends back, so a re-minted one turned a recorded read into a `not_found` 404 and a
+// recorded scroll continuation into `search_context_missing_exception` against a cursor the recording
+// had just opened.
+//
+// There is no AWS API model here to consult: the document and scroll APIs are OpenSearch's own REST
+// interface rather than the `es`/`opensearch` control plane, so the shape substrate publishes is
+// OpenSearch's convention rather than an AWS constraint — which is the other reason not to change it
+// while deriving it. Real OpenSearch generates a wider id (a 20-character Flake); substrate's
+// sixteen characters are narrower and always were, and #856 is not where that changes.
+//
+// [IDMint.Base64URL] rather than [IDMint.Base64], because a document id travels in a URL path and the
+// two encodings differ in exactly the characters that would need escaping there.
+func generateOpenSearchID(m *IDMint) string {
+	return m.Base64URL(12)
 }
 
 func orEmpty(v interface{}) interface{} {

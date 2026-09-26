@@ -1482,3 +1482,317 @@ func idsJSONTargetCall(t *testing.T, ts *emulator.TestServer, host, target strin
 	require.Less(t, resp.StatusCode, 300, "%s %s: %s", host, target, out)
 	return out
 }
+
+// Tier 5 of #856: the analytics family — Athena, Redshift Data, Glue, Timestream, OpenSearch and
+// QuickSight.
+//
+// What this tier adds to the property the tiers above assert is the *shape of the call* the
+// identifier gates. An analytics identifier names a submission rather than a resource: a query
+// execution, a statement, a job run, a scroll cursor. Nothing else addresses it — there is no name
+// to fall back on the way an S3 bucket or a Glue job has one — so the minted value is the only
+// handle a consumer's poll loop holds, which is why an underived one broke the loop outright rather
+// than merely reporting a different string. Athena is the extreme: `GetQueryExecution`,
+// `GetQueryResults` and `StopQueryExecution` all key on the one id `StartQueryExecution` returned.
+
+// TestIDs_OneBulkIndexMintsOneIDPerDocument is the ordinal's test for this tier, on the one request
+// in the tree that draws an unbounded number of times: a `_bulk` body whose actions carry no `_id`
+// mints one per document.
+//
+// A mint that ignored its ordinal would answer one id for all three, and here that is worse than a
+// cosmetic collision — the documents are keyed by it, so the second and third would overwrite the
+// first and one document would be left where three were indexed.
+func TestIDs_OneBulkIndexMintsOneIDPerDocument(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	body := strings.Join([]string{
+		`{"index":{}}`, `{"n":1}`,
+		`{"index":{}}`, `{"n":2}`,
+		`{"index":{}}`, `{"n":3}`,
+	}, "\n") + "\n"
+
+	var bulk struct {
+		Items []map[string]struct {
+			ID     string `json:"_id"`
+			Result string `json:"result"`
+		} `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(idsNDJSONCall(t, ts, idsOpenSearchHost,
+		"/ids-tier5-bulk/_bulk", body), &bulk))
+	require.Len(t, bulk.Items, 3, "one item per action")
+
+	seen := make(map[string]bool, 3)
+	for _, item := range bulk.Items {
+		for op, res := range item {
+			require.Equal(t, "index", op)
+			require.Len(t, res.ID, 16, "a generated document id is sixteen URL-safe base64 characters")
+			assert.Equal(t, "created", res.Result,
+				"each document is new, which it would not be if two shared an id")
+			seen[res.ID] = true
+		}
+	}
+	assert.Len(t, seen, 3, "three documents indexed in one request draw three ids")
+}
+
+// TestReplay_TheAnalyticsFamilyReplaysWithTheIdentifiersItMinted is the wire-level assertion for
+// tier 5, and the same claim the four tiers above make for their families: a stream whose later
+// requests *name* what its earlier ones minted replays with no differences and reaches the recorded
+// state.
+//
+// Every service contributes a submission followed by the read that can only reach it through the
+// minted handle — a GetQueryExecution and a GetQueryResults on an Athena query id, a
+// DescribeStatement and a GetStatementResult on a Redshift Data statement id, a GetJobRun on a Glue
+// run id, a document GET and a scroll continuation on OpenSearch's two kinds of generated id, and a
+// DescribeIngestion whose URL path is the ingestion id CreateDataSet minted. A re-minted value
+// refuses each of those by name: InvalidRequestException for Athena, ResourceNotFoundException for
+// Redshift Data, EntityNotFoundException for Glue, a 404 for a document and an expired-context
+// refusal for a scroll. Timestream is the exception and is here for the other half of the property:
+// its QueryId reaches no later call, so what a fresh draw costs there is a body difference rather
+// than a refusal — which is still a difference, and still enough to make a recorded Query fail to
+// replay.
+func TestReplay_TheAnalyticsFamilyReplaysWithTheIdentifiersItMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordAnalyticsSubmissions(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the submissions")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"an analytics submission's identifier replays as the one recorded: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordAnalyticsSubmissions records the tier-5 stream, one interlocked group per service.
+func idsRecordAnalyticsSubmissions(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: a replay pins the clock to the
+	// recorded event's timestamp, so a handler stamping a record off a live clock diverges in the
+	// state hash for a reason that has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	idsRecordAthena(t, ts)
+	idsRecordRedshiftData(t, ts)
+	idsRecordGlue(t, ts)
+	idsRecordTimestream(t, ts)
+	idsRecordOpenSearch(t, ts)
+	idsRecordQuickSight(t, ts)
+}
+
+// idsRecordAthena records a query execution and the two reads that address it by the id it minted.
+func idsRecordAthena(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var started struct {
+		QueryExecutionID string `json:"QueryExecutionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsAthenaHost,
+		"AmazonAthena.StartQueryExecution", map[string]any{
+			"QueryString": "SELECT 1",
+			"ResultConfiguration": map[string]any{
+				"OutputLocation": "s3://ids-tier5-results/",
+			},
+		}), &started))
+	idsRequireHexUUID(t, started.QueryExecutionID, "an Athena query execution id")
+
+	idsJSONTargetCall(t, ts, idsAthenaHost, "AmazonAthena.GetQueryExecution",
+		map[string]any{"QueryExecutionId": started.QueryExecutionID})
+	idsJSONTargetCall(t, ts, idsAthenaHost, "AmazonAthena.GetQueryResults",
+		map[string]any{"QueryExecutionId": started.QueryExecutionID})
+}
+
+// idsRecordRedshiftData records a statement and the two reads that address it by its id.
+func idsRecordRedshiftData(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var executed struct {
+		ID string `json:"Id"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsRedshiftDataHost,
+		"RedshiftData.ExecuteStatement", map[string]any{
+			"WorkgroupName": "ids-tier5", "Database": "dev", "Sql": "SELECT 1",
+		}), &executed))
+	idsRequireHexUUID(t, executed.ID, "a Redshift Data statement id")
+
+	idsJSONTargetCall(t, ts, idsRedshiftDataHost, "RedshiftData.DescribeStatement",
+		map[string]any{"Id": executed.ID})
+	idsJSONTargetCall(t, ts, idsRedshiftDataHost, "RedshiftData.GetStatementResult",
+		map[string]any{"Id": executed.ID})
+}
+
+// idsRecordGlue records a job, a run of it, and the GetJobRun that names the run id.
+//
+// The job is addressed by the caller's own name throughout, so the run id is the only value in the
+// group substrate mints — which is what makes GetJobRun a read of the mint and not of the request.
+func idsRecordGlue(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	idsJSONTargetCall(t, ts, idsGlueHost, "AWSGlue.CreateJob", map[string]any{
+		"Name": "ids-tier5-job", "Role": "arn:aws:iam::123456789012:role/GlueRole",
+		"Command": map[string]any{"Name": "glueetl", "ScriptLocation": "s3://ids-tier5/etl.py"},
+	})
+
+	var run struct {
+		JobRunID string `json:"JobRunId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsGlueHost, "AWSGlue.StartJobRun",
+		map[string]any{"JobName": "ids-tier5-job"}), &run))
+	require.True(t, strings.HasPrefix(run.JobRunID, "jr_"),
+		"a Glue job run id keeps its jr_ prefix, got %q", run.JobRunID)
+	require.Len(t, run.JobRunID, len("jr_")+32, "and 32 hex characters after it")
+
+	idsJSONTargetCall(t, ts, idsGlueHost, "AWSGlue.GetJobRun",
+		map[string]any{"JobName": "ids-tier5-job", "RunId": run.JobRunID})
+}
+
+// idsRecordTimestream records one Query, whose QueryId nothing addresses.
+//
+// It is in the stream for what [timestreamQueryID]'s comment records: the id is a response member no
+// later call names, so it can only be observed by being compared against the recording — which is
+// exactly what a replay does.
+func idsRecordTimestream(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var queried struct {
+		QueryID string `json:"QueryId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsTimestreamQueryHost,
+		"Timestream_20181101.Query",
+		map[string]any{"QueryString": "SELECT 1"}), &queried))
+	require.Len(t, queried.QueryID, 32,
+		"a Timestream QueryId is 32 hex characters, the alphabet [a-zA-Z0-9]+ admits")
+	require.NotContains(t, queried.QueryID, "-",
+		"and not a UUID: the published pattern excludes the hyphens one would carry")
+}
+
+// idsRecordOpenSearch records two documents indexed without an `_id`, a read of the first by the id
+// the index minted, and a scrolled search followed by its continuation.
+//
+// Both kinds of generated value are here because they break differently: a re-minted document id
+// answers the recorded GET with a 404, and a re-minted scroll id answers the recorded continuation
+// with search_context_missing_exception against a cursor the recording had just opened.
+func idsRecordOpenSearch(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const index = "ids-tier5-index"
+
+	first := idsOpenSearchIndexDoc(t, ts, index, map[string]any{"n": 1})
+	idsOpenSearchIndexDoc(t, ts, index, map[string]any{"n": 2})
+
+	idsRESTCall(t, ts, idsOpenSearchHost, http.MethodGet, "/"+index+"/_doc/"+first, nil)
+
+	// A page of one over two documents, so the scroll has a second page to continue into; the TTL
+	// travels in the body rather than in a `?scroll=` parameter to keep the group a test about the
+	// identifier and not about query-string round-tripping.
+	var searched struct {
+		ScrollID string `json:"_scroll_id"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsOpenSearchHost, http.MethodPost,
+		"/"+index+"/_search", map[string]any{"size": 1, "scroll": "1m"}), &searched))
+	require.Len(t, searched.ScrollID, 16, "a scroll id is minted in the same shape a document id is")
+	require.NotEqual(t, first, searched.ScrollID, "and is a separate draw")
+
+	idsRESTCall(t, ts, idsOpenSearchHost, http.MethodPost, "/_search/scroll",
+		map[string]any{"scroll_id": searched.ScrollID})
+}
+
+// idsOpenSearchIndexDoc indexes one document with no `_id` and returns the id OpenSearch minted.
+func idsOpenSearchIndexDoc(t *testing.T, ts *emulator.TestServer, index string, doc any) string {
+	t.Helper()
+
+	var indexed struct {
+		ID     string `json:"_id"`
+		Result string `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsOpenSearchHost, http.MethodPost,
+		"/"+index+"/_doc", doc), &indexed))
+	require.Equal(t, "created", indexed.Result)
+	require.Len(t, indexed.ID, 16, "a generated document id is sixteen URL-safe base64 characters")
+	return indexed.ID
+}
+
+// idsRecordQuickSight records a data source, a read of it, a data set, and the DescribeIngestion
+// whose path is the ingestion id CreateDataSet minted.
+//
+// The data source and data set ids are the caller's own, which is why the ingestion id is the value
+// under test: it is the one identifier in the group substrate chooses, and the only one a replay
+// could get wrong.
+func idsRecordQuickSight(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const base = "/accounts/123456789012/"
+
+	idsRESTCall(t, ts, idsQuickSightHost, http.MethodPost, base+"data-sources", map[string]any{
+		"DataSourceId": "ids-tier5-source", "Name": "ids-tier5", "Type": "ATHENA",
+	})
+	idsRESTCall(t, ts, idsQuickSightHost, http.MethodGet, base+"data-sources/ids-tier5-source", nil)
+
+	var set struct {
+		IngestionID string `json:"IngestionId"`
+		RequestID   string `json:"RequestId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsQuickSightHost, http.MethodPost,
+		base+"data-sets", map[string]any{
+			"DataSetId": "ids-tier5-set", "Name": "ids-tier5",
+		}), &set))
+	idsRequireHexUUID(t, set.IngestionID, "a QuickSight ingestion id")
+	assert.NotEqual(t, set.IngestionID, set.RequestID,
+		"one CreateDataSet draws the ingestion id and the response's request id separately")
+
+	idsRESTCall(t, ts, idsQuickSightHost, http.MethodGet,
+		base+"data-sets/ids-tier5-set/ingestions/"+set.IngestionID, nil)
+}
+
+// idsRequireHexUUID requires that id is in the 8-4-4-4-12 lowercase-hex shape [IDMint.HexUUID]
+// renders — the form five of this tier's six identifiers publish.
+func idsRequireHexUUID(t *testing.T, id, what string) {
+	t.Helper()
+
+	require.Len(t, id, 36, "%s is 36 characters, got %q", what, id)
+	for i, group := range strings.Split(id, "-") {
+		require.Len(t, group, []int{8, 4, 4, 4, 12}[i], "%s group %d of %q", what, i, id)
+		require.Regexp(t, "^[0-9a-f]+$", group, "%s is lowercase hex: %q", what, id)
+	}
+}
+
+// The hosts the tier-5 services are addressed at. Timestream is two endpoints and this is the query
+// one, because Query is the operation that mints.
+const (
+	idsAthenaHost          = "athena.us-east-1.amazonaws.com"
+	idsRedshiftDataHost    = "redshift-data.us-east-1.amazonaws.com"
+	idsGlueHost            = "glue.us-east-1.amazonaws.com"
+	idsTimestreamQueryHost = "query.timestream.us-east-1.amazonaws.com"
+	idsOpenSearchHost      = "search-ids-tier5.us-east-1.es.amazonaws.com"
+	idsQuickSightHost      = "quicksight.us-east-1.amazonaws.com"
+)
+
+// idsNDJSONCall issues one newline-delimited-JSON request, which is what OpenSearch's `_bulk` takes
+// and the only body in these tests that is not a single JSON document.
+func idsNDJSONCall(t *testing.T, ts *emulator.TestServer, host, path, body string) []byte {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+path,
+		strings.NewReader(body))
+	require.NoError(t, err)
+	req.Host = host
+	req.Header.Set("Content-Type", "application/x-ndjson")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Less(t, resp.StatusCode, 300, "%s %s: %s", host, path, out)
+	return out
+}
