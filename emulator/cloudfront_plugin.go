@@ -3,7 +3,6 @@ package emulator
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -43,29 +42,39 @@ func (p *CloudFrontPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches a CloudFront REST/XML request to the appropriate handler.
 // The operation is derived from the HTTP method and URL path.
 func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, distID := parseCloudFrontOperation(requestMethod(req), req.Path, req.Params)
+	op, resourceID := parseCloudFrontOperation(requestMethod(req), req.Path, req.Params)
 	// Handle GetInvalidation (op includes invID after colon).
 	if strings.HasPrefix(op, "GetInvalidation:") {
 		invID := strings.TrimPrefix(op, "GetInvalidation:")
-		return p.getInvalidation(ctx, distID, invID)
+		return p.getInvalidation(ctx, resourceID, invID)
 	}
 	switch op {
 	case "CreateDistribution":
 		return p.createDistribution(ctx, req)
+	case "CreateDistributionWithTags":
+		return p.createDistributionWithTags(ctx, req)
 	case "GetDistribution":
-		return p.getDistribution(ctx, req, distID)
+		return p.getDistribution(ctx, req, resourceID)
 	case "GetDistributionConfig":
-		return p.getDistributionConfig(ctx, req, distID)
+		return p.getDistributionConfig(ctx, req, resourceID)
 	case "UpdateDistribution":
-		return p.updateDistribution(ctx, req, distID)
+		return p.updateDistribution(ctx, req, resourceID)
 	case "DeleteDistribution":
-		return p.deleteDistribution(ctx, req, distID)
+		return p.deleteDistribution(ctx, req, resourceID)
 	case "ListDistributions":
 		return p.listDistributions(ctx, req)
 	case "CreateInvalidation":
-		return p.createInvalidation(ctx, req, distID)
+		return p.createInvalidation(ctx, req, resourceID)
 	case "ListInvalidations":
-		return p.listInvalidations(ctx, distID)
+		return p.listInvalidations(ctx, resourceID)
+	case "CreateOriginAccessControl":
+		return p.createOriginAccessControl(ctx, req)
+	case "GetOriginAccessControl":
+		return p.getOriginAccessControl(ctx, resourceID)
+	case "ListOriginAccessControls":
+		return p.listOriginAccessControls(ctx)
+	case "DeleteOriginAccessControl":
+		return p.deleteOriginAccessControl(ctx, req, resourceID)
 	case "TagResource":
 		return p.tagResource(ctx, req)
 	case "UntagResource":
@@ -78,8 +87,13 @@ func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 }
 
 // parseCloudFrontOperation derives the CloudFront operation name and optional
-// distribution ID from the HTTP method, URL path, and query parameters.
-func parseCloudFrontOperation(method, path string, params map[string]string) (op, distID string) {
+// resource ID from the HTTP method, URL path, and query parameters.
+//
+// The second return is a distribution ID for every operation on /distribution and an origin
+// access control ID for every operation on /origin-access-control; it is named resourceID rather
+// than distID because the two path families now share it, and a name that says "distribution"
+// would invite a caller to pass an OAC's ID into a distribution lookup.
+func parseCloudFrontOperation(method, path string, params map[string]string) (op, resourceID string) {
 	// Normalise path: strip trailing slash and leading "/2020-05-31".
 	const apiVersion = "/2020-05-31"
 	p2 := strings.TrimSuffix(path, "/")
@@ -118,7 +132,37 @@ func parseCloudFrontOperation(method, path string, params map[string]string) (op
 		}
 	}
 
+	// The origin access control family, whose four operations are addressed by path shape
+	// alone: POST and GET on the collection, GET and DELETE on one member.
+	const oacPath = "/origin-access-control"
+	if p2 == oacPath || strings.HasPrefix(p2, oacPath+"/") {
+		oacID := strings.TrimPrefix(strings.TrimPrefix(p2, oacPath), "/")
+		switch {
+		case oacID == "" && method == http.MethodPost:
+			return "CreateOriginAccessControl", ""
+		case oacID == "" && method == http.MethodGet:
+			return "ListOriginAccessControls", ""
+		case method == http.MethodGet:
+			return "GetOriginAccessControl", oacID
+		case method == http.MethodDelete:
+			return "DeleteOriginAccessControl", oacID
+		}
+		// A method the family does not publish for this path — a PUT, which would be
+		// UpdateOriginAccessControl, an operation substrate does not implement — resolves to
+		// no operation and is refused by the default arm rather than falling through to the
+		// distribution parsing below.
+		return "", oacID
+	}
+
 	switch {
+	// CreateDistributionWithTags is the same method and path as CreateDistribution,
+	// distinguished only by the WithTags query parameter: the reference publishes it as
+	// "POST /2020-05-31/distribution?WithTags HTTP/1.1". The key carries no value, so the test
+	// is for its *presence* — the parser substitutes the sentinel "1" for a bare query key,
+	// and testing for a particular value would route a request AWS accepts to the untagged
+	// create, silently dropping the tags the caller sent in the same body.
+	case p2 == "/distribution" && method == http.MethodPost && cfHasWithTags(params):
+		return "CreateDistributionWithTags", ""
 	case p2 == "/distribution" && method == http.MethodPost:
 		return "CreateDistribution", ""
 	case p2 == "/distribution" && method == http.MethodGet:
@@ -177,38 +221,116 @@ func parseCloudFrontOperation(method, path string, params map[string]string) (op
 	return "", id
 }
 
+// cfHasWithTags reports whether a request's query string carries the WithTags key that selects
+// CreateDistributionWithTags.
+//
+// Presence, not value: the key is published bare ("?WithTags"), and a bare key reaches a plugin as
+// the sentinel value "1" (parser.go). The comparison folds case because the cost of the two
+// directions is not symmetric — treating "withtags" as absent creates an untagged distribution from
+// a body that asked for tags and reports 201, while treating it as present routes a request to a
+// decoder that refuses anything but a DistributionConfigWithTags body.
+func cfHasWithTags(params map[string]string) bool {
+	for key := range params {
+		if strings.EqualFold(key, "WithTags") {
+			return true
+		}
+	}
+	return false
+}
+
 // --- Distribution operations ------------------------------------------------
+
+// cfDistributionConfigBody is the part of a DistributionConfig substrate records: the two members
+// CreateDistribution has always decoded. docs/services.md's "A configuration is not a
+// distribution" section is the standing note on the three required members that are not here and
+// on what that costs; #1271 is where the rest of the configuration starts being recorded.
+//
+// It is a named type rather than an anonymous struct because CreateDistributionWithTags decodes
+// the same document one level down, inside DistributionConfigWithTags, and the two must decode it
+// identically — a member the tagged create reads from a different element name would make the two
+// creates record different distributions from the same body.
+type cfDistributionConfigBody struct {
+	XMLName xml.Name `xml:"DistributionConfig"`
+	Comment string   `xml:"Comment"`
+	Enabled string   `xml:"Enabled"`
+}
 
 func (p *CloudFrontPlugin) createDistribution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Parse optional comment and enabled flag from XML body.
-	var xmlBody struct {
-		XMLName xml.Name `xml:"DistributionConfig"`
-		Comment string   `xml:"Comment"`
-		Enabled string   `xml:"Enabled"`
-	}
+	var xmlBody cfDistributionConfigBody
 	if len(req.Body) > 0 {
 		// Tolerate wrapper element names (CreateDistributionRequest, DistributionConfig).
 		_ = xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlBody)
 	}
+	return p.createDistributionFrom(ctx, xmlBody, nil)
+}
 
-	distID, err := generateCloudFrontID()
-	if err != nil {
-		return nil, fmt.Errorf("cloudfront createDistribution generateID: %w", err)
+// createDistributionWithTags handles POST /2020-05-31/distribution?WithTags.
+//
+// The body is a DistributionConfigWithTags wrapping the same DistributionConfig CreateDistribution
+// takes and a Tags document in the shape TagResource takes. Both children are documented
+// Required: Yes, and the operation is documented as requiring both the CreateDistribution and the
+// TagResource permission — so it is one call doing the work of two, and here it is one decode
+// feeding the two halves [CloudFrontPlugin.createDistributionFrom] already writes.
+//
+// Unlike CreateDistribution, the decode error is *not* discarded: a caller reaching this operation
+// has asked for tags, and a body substrate cannot read would otherwise create an untagged
+// distribution and report success — the failure mode #883 closed on the tagging path. The refusal
+// is InvalidArgument/400, which the operation publishes alongside InvalidTagging/400.
+func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var body struct {
+		XMLName xml.Name                 `xml:"DistributionConfigWithTags"`
+		Config  cfDistributionConfigBody `xml:"DistributionConfig"`
+		Tags    struct {
+			Items []struct {
+				Key   string `xml:"Key"`
+				Value string `xml:"Value"`
+			} `xml:"Items>Tag"`
+		} `xml:"Tags"`
 	}
+	if err := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&body); err != nil {
+		return nil, cfInvalidTagBody("DistributionConfigWithTags", err)
+	}
+
+	tags := make(map[string]string, len(body.Tags.Items))
+	for _, tag := range body.Tags.Items {
+		tags[tag.Key] = tag.Value
+	}
+	return p.createDistributionFrom(ctx, body.Config, tags)
+}
+
+// createDistributionFrom records a distribution and answers the Distribution document both creates
+// return.
+//
+// tags is nil for CreateDistribution and the decoded tag set for CreateDistributionWithTags. It is
+// applied here rather than by a second call into the tagging path because the tags arrive with the
+// create: writing the record and then tagging it would make a distribution observable untagged
+// between the two writes, and would answer the create's 201 with the tagging's own errors still
+// ahead of it.
+func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, xmlBody cfDistributionConfigBody, tags map[string]string) (*AWSResponse, error) {
+	distID := generateCloudFrontID(ctx.IDs)
 
 	enabled := !strings.EqualFold(xmlBody.Enabled, "false")
 	arn := fmt.Sprintf("arn:aws:cloudfront::%s:distribution/%s", ctx.AccountID, distID)
 	domainName := distID + ".cloudfront.net"
 	now := p.tc.Now()
 
+	if tags == nil {
+		tags = map[string]string{}
+	}
 	dist := CloudFrontDistribution{
-		ID:               distID,
-		ARN:              arn,
-		Status:           "Deployed",
-		DomainName:       domainName,
-		Comment:          xmlBody.Comment,
-		Enabled:          enabled,
-		Tags:             map[string]string{},
+		ID:         distID,
+		ARN:        arn,
+		Status:     "Deployed",
+		DomainName: domainName,
+		Comment:    xmlBody.Comment,
+		Enabled:    enabled,
+		Tags:       tags,
+		// EverTagged is set from the create's own tags, so that a distribution created with
+		// tags and then untagged to empty is still distinguishable from one that was never
+		// tagged — which is the distinction [taggingEverTagged] exists to preserve and which
+		// the Resource Groups Tagging API's GetResources reads.
+		EverTagged:       taggingEverTagged(false, 0, len(tags)),
 		CreatedTime:      now,
 		LastModifiedTime: now,
 		AccountID:        ctx.AccountID,
@@ -403,12 +525,8 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest
 		return nil, err
 	}
 
-	invID, err := generateCloudFrontID()
-	if err != nil {
-		return nil, fmt.Errorf("cloudfront createInvalidation generateID: %w", err)
-	}
 	// Use I prefix for invalidation IDs per CloudFront API convention.
-	invID = "I" + invID[1:]
+	invID := "I" + generateCloudFrontID(ctx.IDs)[1:]
 
 	now := p.tc.Now().UTC()
 	inv := CloudFrontInvalidation{
@@ -823,19 +941,42 @@ func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (
 	})
 }
 
-// generateCloudFrontID generates a CloudFront-style distribution identifier
-// of the form E followed by 13 uppercase alphanumeric characters.
-func generateCloudFrontID() (string, error) {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 13)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generateCloudFrontID rand.Read: %w", err)
-	}
-	out := make([]byte, 13)
-	for i, ch := range b {
-		out[i] = chars[int(ch)%len(chars)]
-	}
-	return "E" + string(out), nil
+// cfIDAlphabet is the alphabet every CloudFront identifier substrate mints draws from: the
+// uppercase letters and the digits, as a CloudFront distribution ID is rendered.
+//
+// Named rather than written inline because three kinds of identifier draw from it — a
+// distribution ID, an invalidation ID and an origin access control's ID and ETag — and #856's
+// conversion turned the one function that held it into a mint call. A second copy would be a
+// second alphabet the day someone corrected one of them. [cfnOAIIDChars] (cfn_resources_v23.go)
+// is a deliberate third copy, derived for CloudFormation's own reasons and documented there.
+const cfIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// cfOACLocation is the prefix of the Location header CreateOriginAccessControl answers: the
+// service endpoint and the operation's own path, which the new control's ID is appended to.
+const cfOACLocation = "https://cloudfront.amazonaws.com/2020-05-31/origin-access-control/"
+
+// generateCloudFrontID mints a CloudFront-style identifier: E followed by 13 characters of
+// [cfIDAlphabet].
+//
+// It draws from the request's [IDMint] rather than from crypto/rand, so replaying a recorded
+// CreateDistribution, CreateInvalidation or CreateOriginAccessControl mints the identifier the
+// recording minted (#856). A nil or seedless mint still falls back to crypto/rand inside the
+// mint, which is why there is no error to return: the byte source cannot fail in a way a caller
+// here could act on, and the mapping — alphabet[b%len(alphabet)] — is the same one this function
+// performed before the conversion, so an ID recorded by an earlier substrate is still the shape
+// this one mints.
+func generateCloudFrontID(m *IDMint) string {
+	return "E" + m.Chars(13, cfIDAlphabet)
+}
+
+// cfMintETag mints the version identifier an origin access control carries in its ETag.
+//
+// AWS publishes no shape for a CloudFront ETag — the reference says only that it identifies the
+// current version of a resource — so the rendering is substrate's: the same E-prefixed form as an
+// ID, from the same mint, so that a replayed create reproduces the version its recording handed
+// out and a recorded delete's If-Match still matches.
+func cfMintETag(m *IDMint) string {
+	return generateCloudFrontID(m)
 }
 
 // cloudfrontXMLResponse serializes v to XML and returns an AWSResponse with

@@ -123,7 +123,10 @@ const cfnOAIIDLen = 13
 // cfnGeneratedName records for its own suffix: UpdateStack in substrate re-deploys the whole
 // template, so an ID minted from crypto/rand would change on every update and leak the identity
 // it replaced. It is derived rather than reused from generateCloudFrontID
-// (cloudfront_plugin.go), which produces exactly this shape but reads crypto/rand.
+// (cloudfront_plugin.go), which produces exactly this shape but draws from the *request's* mint:
+// that makes a replayed CreateDistribution reproduce its ID (#856), and says nothing about an
+// UpdateStack in the same run, which is a second request with a second request id and so a second
+// mint. What this ID has to be stable across is redeployment, not replay.
 //
 // The two obvious deterministic helpers do not fit. cfnGeneratedName returns a hyphenated
 // {stack}-{logical}-{suffix}, which is not this shape. cfnNameSuffix is pinned to twelve base-36
