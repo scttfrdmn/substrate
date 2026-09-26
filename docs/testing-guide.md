@@ -339,8 +339,9 @@ Two caveats. **Not every service's identifiers are derived yet.** EC2, IAM, STS,
 Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge, CloudWatch Logs, CloudFront,
 Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR Serverless, ECR, ELB, Route 53,
 Cognito (both APIs), IAM Identity Center, KMS, ACM, Secrets Manager, WAFv2, Athena,
-Redshift Data, Glue, Timestream, OpenSearch, QuickSight, CodeBuild, CodeDeploy and
-CodePipeline are; the rest are migrating one family at a time, and until a service moves, a
+Redshift Data, Glue, Timestream, OpenSearch, QuickSight, CodeBuild, CodeDeploy,
+CodePipeline, SSM Run Command, RAM, AWS Backup and Bedrock batch inference are; the rest are
+migrating one family at a time, and until a service moves, a
 replay of a stream creating one of its resources still diverges. And a recording made against an
 **unfrozen** clock can still diverge on a `state_hash_after` even when every identifier
 matches, because a handler reading the live clock stamps its record a few hundred

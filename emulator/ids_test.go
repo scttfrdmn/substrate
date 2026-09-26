@@ -2022,3 +2022,257 @@ const (
 	idsCodeDeployHost   = "codedeploy.us-east-1.amazonaws.com"
 	idsCodePipelineHost = "codepipeline.us-east-1.amazonaws.com"
 )
+
+// Tier 7 of #856: the long tail — SSM Run Command, RAM, AWS Backup and Bedrock batch inference.
+//
+// The four services have nothing in common except being what is left, and that is the point: the tier
+// is where the two rules the tiers above balanced finally point in opposite directions. Three of the
+// four keep [emulator.IDMint.HexUUID] because their pages publish no pattern, so the rendering their
+// draw sites produced is the rendering a caller parses and #856 does not touch it. Bedrock's does
+// not: `jobArn` is published as `arn:aws…:model-invocation-job/[a-z0-9]{12}`, which excludes the
+// hyphen and fixes the length at twelve, so the UUID substrate minted violated the model. The
+// no-byte-changes rule protects a rendering the model permits; it cannot protect one the model
+// forbids, and the shape changes here.
+//
+// AWS Backup also brings the ordinal test back, which tier 6 had to do without: `CreateBackupPlan`
+// mints a plan id *and* a version id in one request, the only draw site in the tier that draws twice.
+
+// TestIDs_OneCreateBackupPlanMintsAPlanAndAVersion is the ordinal's test for this tier.
+//
+// A mint that ignored its ordinal would answer one value for both, and the collision would not be
+// cosmetic: `GetBackupPlan` reports the version of the revision it answered from, so a plan whose
+// version id equals its plan id tells a consumer tracking revisions that the plan is its own version
+// — and `UpdateBackupPlan` mints a *third* value, which has to differ from both.
+func TestIDs_OneCreateBackupPlanMintsAPlanAndAVersion(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	var created struct {
+		BackupPlanID string `json:"BackupPlanId"`
+		VersionID    string `json:"VersionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+		"/backup/plans", map[string]any{
+			"BackupPlan": map[string]any{"BackupPlanName": "ids-tier7-plan"},
+		}), &created))
+	idsRequireHexUUID(t, created.BackupPlanID, "a backup plan id")
+	idsRequireHexUUID(t, created.VersionID, "a backup plan version id")
+	require.NotEqual(t, created.BackupPlanID, created.VersionID,
+		"two draws in one request advance the ordinal")
+
+	var updated struct {
+		VersionID string `json:"VersionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+		"/backup/plans/"+created.BackupPlanID, map[string]any{
+			"BackupPlan": map[string]any{"BackupPlanName": "ids-tier7-plan-renamed"},
+		}), &updated))
+	idsRequireHexUUID(t, updated.VersionID, "the version id an update mints")
+	assert.NotEqual(t, created.VersionID, updated.VersionID,
+		"a revision is a new version: %q", updated.VersionID)
+}
+
+// TestIDs_ABedrockJobIDIsTwelveCharactersOfThePublishedAlphabet is the tier's shape assertion, and
+// the one place in the migration where a published pattern overrides the rendering a draw site had.
+//
+// The claim is narrow and checkable: the twelve characters come from `[a-z0-9]`, and the hyphens the
+// UUID carried are gone. A caller that validates the ARN it was handed, or hands the bare id back to
+// `GetModelInvocationJob`, is what the pattern exists for — and the round trip below is that caller.
+func TestIDs_ABedrockJobIDIsTwelveCharactersOfThePublishedAlphabet(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	jobID := idsCreateBedrockJob(t, ts, "ids-tier7-job")
+	assert.Regexp(t, `^[a-z0-9]{12}$`, jobID,
+		"the published jobArn pattern is [a-z0-9]{12}: %q", jobID)
+	assert.NotContains(t, jobID, "-",
+		"which excludes the hyphens the crypto/rand UUID carried: %q", jobID)
+
+	var got struct {
+		JobName string `json:"jobName"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBedrockHost, http.MethodGet,
+		"/model-invocation-job/"+jobID, nil), &got))
+	assert.Equal(t, "ids-tier7-job", got.JobName,
+		"and the bare id is what GetModelInvocationJob takes")
+}
+
+// TestReplay_TheLongTailReplaysWithTheIdentifiersItMinted is the wire-level assertion for tier 7, the
+// same claim the six tiers above make for their families.
+//
+// Every one of the four identifiers is addressed by a later request in the stream, so an underived
+// draw is refused rather than merely reported differently: `GetCommandInvocation` answers
+// `InvocationDoesNotExist`, `UpdateResourceShare` answers `UnknownResourceException` for an ARN whose
+// minted half moved, `GetBackupPlan` and `GetBackupSelection` answer
+// `ResourceNotFoundException`, and so does `GetModelInvocationJob`. Backup is the strongest of the
+// four because the selection is stored *under* the plan id, so a re-minted plan id strands the
+// selection as well.
+func TestReplay_TheLongTailReplaysWithTheIdentifiersItMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordLongTailCreates(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the creates")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"a long-tail identifier replays as the one recorded: %s", replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordLongTailCreates records the tier-7 stream, one interlocked group per service.
+func idsRecordLongTailCreates(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: all four plugins stamp their records
+	// off the time controller — a command's RequestedDateTime, a share's LastUpdatedTime, a plan's
+	// CreationDate, a job's SubmitTime — so a live clock diverges in the state hash for a reason that
+	// has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	idsRecordSSMCommand(t, ts)
+	idsRecordRAMShare(t, ts)
+	idsRecordBackupPlan(t, ts)
+	idsRecordBedrockJob(t, ts)
+}
+
+// idsRecordSSMCommand records a SendCommand and the GetCommandInvocation that addresses it by the
+// command id — the only handle SendCommand hands back, since a command has no caller-chosen name.
+func idsRecordSSMCommand(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const instance = "i-0123456789abcdef0"
+
+	var sent struct {
+		Command struct {
+			CommandID string `json:"CommandId"`
+		} `json:"Command"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsSSMHost, "AmazonSSM.SendCommand",
+		map[string]any{
+			"DocumentName": "AWS-RunShellScript",
+			"InstanceIds":  []string{instance},
+			"Parameters":   map[string][]string{"commands": {"true"}},
+		}), &sent))
+	idsRequireHexUUID(t, sent.Command.CommandID, "an SSM command id")
+	require.Len(t, sent.Command.CommandID, 36,
+		"and is the fixed length of 36 the model publishes: %q", sent.Command.CommandID)
+
+	idsJSONTargetCall(t, ts, idsSSMHost, "AmazonSSM.GetCommandInvocation", map[string]any{
+		"CommandId": sent.Command.CommandID, "InstanceId": instance,
+	})
+}
+
+// idsRecordRAMShare records a CreateResourceShare and the UpdateResourceShare that addresses it by
+// the whole ARN, which is how RAM names a share — the minted id never travels on its own.
+func idsRecordRAMShare(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var created struct {
+		ResourceShare struct {
+			ResourceShareArn string `json:"resourceShareArn"`
+		} `json:"resourceShare"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsRAMHost, http.MethodPost,
+		"/createresourceshare", map[string]any{"name": "ids-tier7-share"}), &created))
+	arn := created.ResourceShare.ResourceShareArn
+	minted, ok := strings.CutPrefix(arn, "arn:aws:ram:us-east-1:123456789012:resource-share/")
+	require.True(t, ok, "a share ARN carries the minted id in its resource segment: %q", arn)
+	idsRequireHexUUID(t, minted, "the minted half of a resource-share ARN")
+
+	idsRESTCall(t, ts, idsRAMHost, http.MethodPost, "/updateresourceshare", map[string]any{
+		"resourceShareArn": arn, "name": "ids-tier7-share-renamed",
+	})
+}
+
+// idsRecordBackupPlan records a plan, a selection under it, and a read of each.
+//
+// The selection is the interlock worth having: its state key is built from the *plan* id, so a
+// re-minted plan id strands the selection under a plan nothing addresses, and the recorded
+// GetBackupSelection is refused for a reason two draws upstream of it.
+func idsRecordBackupPlan(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var plan struct {
+		BackupPlanID string `json:"BackupPlanId"`
+		VersionID    string `json:"VersionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+		"/backup/plans", map[string]any{
+			"BackupPlan": map[string]any{"BackupPlanName": "ids-tier7-plan"},
+		}), &plan))
+	idsRequireHexUUID(t, plan.BackupPlanID, "a backup plan id")
+	idsRequireHexUUID(t, plan.VersionID, "a backup plan version id")
+	idsRESTCall(t, ts, idsBackupHost, http.MethodGet, "/backup/plans/"+plan.BackupPlanID, nil)
+
+	var selection struct {
+		SelectionID string `json:"SelectionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+		"/backup/plans/"+plan.BackupPlanID+"/selections", map[string]any{
+			"BackupSelection": map[string]any{
+				"SelectionName": "ids-tier7-selection",
+				"IamRoleArn":    "arn:aws:iam::123456789012:role/BackupRole",
+				"Resources":     []string{"arn:aws:ec2:us-east-1:123456789012:volume/vol-0123456789abcdef0"},
+			},
+		}), &selection))
+	idsRequireHexUUID(t, selection.SelectionID, "a backup selection id")
+	idsRESTCall(t, ts, idsBackupHost, http.MethodGet,
+		"/backup/plans/"+plan.BackupPlanID+"/selections/"+selection.SelectionID, nil)
+}
+
+// idsRecordBedrockJob records a batch-inference job and the GetModelInvocationJob that addresses it
+// by the bare twelve-character id its ARN carries.
+func idsRecordBedrockJob(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	jobID := idsCreateBedrockJob(t, ts, "ids-tier7-job")
+	require.Regexp(t, `^[a-z0-9]{12}$`, jobID)
+	idsRESTCall(t, ts, idsBedrockHost, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+}
+
+// idsCreateBedrockJob creates one model-invocation job and returns the id inside the ARN it reports,
+// which is the only thing CreateModelInvocationJob answers with.
+func idsCreateBedrockJob(t *testing.T, ts *emulator.TestServer, name string) string {
+	t.Helper()
+
+	var created struct {
+		JobArn string `json:"jobArn"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBedrockHost, http.MethodPost,
+		"/model-invocation-job", map[string]any{
+			"jobName": name,
+			"modelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+			"roleArn": "arn:aws:iam::123456789012:role/BedrockBatch",
+			"inputDataConfig": map[string]any{
+				"s3InputDataConfig": map[string]string{"s3Uri": "s3://ids-tier7-in/"},
+			},
+			"outputDataConfig": map[string]any{
+				"s3OutputDataConfig": map[string]string{"s3Uri": "s3://ids-tier7-out/"},
+			},
+		}), &created))
+
+	jobID, ok := strings.CutPrefix(created.JobArn,
+		"arn:aws:bedrock:us-east-1:123456789012:model-invocation-job/")
+	require.True(t, ok, "a job ARN carries the minted id in its resource segment: %q", created.JobArn)
+	return jobID
+}
+
+// The hosts the tier-7 services are addressed at. Bedrock's batch-inference control plane answers on
+// `bedrock.` rather than `bedrock-runtime.`, which is the alias parser.go records.
+const (
+	idsSSMHost     = "ssm.us-east-1.amazonaws.com"
+	idsRAMHost     = "ram.us-east-1.amazonaws.com"
+	idsBackupHost  = "backup.us-east-1.amazonaws.com"
+	idsBedrockHost = "bedrock.us-east-1.amazonaws.com"
+)

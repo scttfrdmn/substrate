@@ -386,6 +386,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the nine uppercase alphanumeric characters substrate mints. Reading AWS's example is not the
   borrowing-a-bound-from-a-sibling #671 rules out, and it is all the reference offers; the docs now say so
   where they previously called the shape published.
+- **The long tail of draw sites is derived** (#856). Four generators across four unrelated services
+  move onto `IDMint`: an SSM Run Command `CommandId`, the identifier inside a RAM `resourceShareArn`,
+  AWS Backup's `BackupPlanId`, `VersionId` and `SelectionId`, and a Bedrock batch-inference job ID.
+  Three of the four keep the exact rendering their `crypto/rand` version produced, because their pages
+  publish no pattern to follow (#671). Backup is the only draw site in the tree that mints **twice in
+  one request** — `CreateBackupPlan` answers a plan ID and a version ID, and `UpdateBackupPlan` mints a
+  third — so the mint's counter is what keeps a plan from being reported as its own version. Every one
+  of the four identifiers is addressed by a later call, so an underived one was refused rather than
+  merely reported differently: reverting the Backup minter alone to confirm the tier's replay assertion
+  is not vacuous produces 14 differences and 3 refused reads out of a 10-request stream, because a
+  selection is stored *under* its plan ID and a re-minted plan strands it too. 2 draw sites remain on
+  `crypto/rand`: `randomHex`, whose one caller is the CloudFormation deployer, and `IDMint`'s own
+  seedless fallback, which goes when the deployer threads a request ID through.
+- **A Bedrock batch-inference job ID is twelve characters, not a UUID** (#856). `jobArn` is published as
+  `arn:aws:bedrock:{region}:{account}:model-invocation-job/[a-z0-9]{12}` and `jobIdentifier` as that ARN
+  or a bare `[a-z0-9]{12}` — an alphabet that **excludes the hyphen** and a length fixed at twelve, and
+  the 36-character UUID substrate minted satisfied neither, so a consumer validating the ARN it was
+  handed, or handing the bare ID back to `GetModelInvocationJob`, was validating against a value AWS
+  would never issue. This is the one place in #856 where the rendering changes: the
+  no-byte-changes rule protects a rendering the model permits and cannot protect one the model forbids.
+  `GetModelInvocationJob`'s own sample request shows `BATCHJOB1234`, which the pattern beside it would
+  reject; the pattern is the model.
+- **An AWS Backup plan ARN's case is recorded as an observed difference** (#856). AWS's sample is
+  `arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50`, an **uppercase**
+  UUID where substrate renders lowercase. `BackupPlanId` publishes no pattern and no length, so this is
+  observed from the example rather than required; it is documented beside the `backup-plan` vs. `plan`
+  segment gap (#1181) rather than folded into the derivation, since it is a rendering question and not
+  one about where the bytes come from.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

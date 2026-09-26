@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -83,7 +81,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 
 	goCtx := context.Background()
 	now := p.tc.Now()
-	shareArn := fmt.Sprintf("arn:aws:ram:%s:%s:resource-share/%s", reqCtx.Region, reqCtx.AccountID, generateRAMShareID())
+	shareArn := fmt.Sprintf("arn:aws:ram:%s:%s:resource-share/%s", reqCtx.Region, reqCtx.AccountID, generateRAMShareID(reqCtx.IDs))
 	share := RAMResourceShare{
 		ResourceShareArn:        shareArn,
 		Name:                    input.Name,
@@ -451,15 +449,18 @@ func buildRAMAssociations(share *RAMResourceShare, principals, resourceArns []st
 	return assocs
 }
 
-// generateRAMShareID generates a UUID-style string for RAM resource share IDs.
-func generateRAMShareID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateRAMShareID mints the identifier inside a resource-share ARN from m, derived from the
+// request id so a replayed CreateResourceShare reports the ARN the recording reported (#856).
+//
+// RAM addresses a share by its whole ARN rather than by this ID — `resourceShareArns` is what
+// `GetResourceShares`, `AssociateResourceShare` and `DeleteResourceShare` take — so the ID is never
+// sent back on its own, and a re-minted one breaks a recorded call by making the *ARN* unrecognized.
+//
+// Neither `API_CreateResourceShare` nor the `ResourceShare` type publishes a pattern or a length for
+// `resourceShareArn`, so nothing constrains the rendering and it keeps the shape the crypto/rand form
+// produced: [IDMint.HexUUID] (#671).
+func generateRAMShareID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // ramJSONResponse serializes v to JSON and returns an AWSResponse with Content-Type application/json.

@@ -61,7 +61,9 @@ import (
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): 6 draw sites remain on crypto/rand, tiered by service family on the issue.
+// TODO(#856): 2 draw sites remain on crypto/rand — randomHex, whose one caller is the
+// CloudFormation deployer, and bytes's own seedless fallback, which goes when the deployer
+// threads a request id through.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.
@@ -203,9 +205,11 @@ func (m *IDMint) Base64URL(n int) string {
 //
 // The callers are Lambda revision and code ids, ECS task ids, Step Functions execution names,
 // SQS message ids, EventBridge event ids, CloudWatch Logs upload sequence tokens, Service Quotas
-// request ids, Batch job ids and EMR Serverless job-run ids. Until this method existed the first
-// seven of those reached a helper declared in lambda_plugin.go, which is how a Batch job id came
-// to be minted by a function named for a Lambda revision.
+// request ids, Batch job ids, EMR Serverless job-run ids, CodeBuild build and CodeDeploy
+// application and deployment-group ids, SSM command ids, RAM resource-share ids and AWS Backup
+// plan, version and selection ids. Until this method existed the first seven of those reached a
+// helper declared in lambda_plugin.go, which is how a Batch job id came to be minted by a
+// function named for a Lambda revision.
 func (m *IDMint) HexUUID() string {
 	h := m.Hex(16)
 	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -873,7 +872,7 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "InvalidDocument", Message: "DocumentName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	commandID := generateSSMCommandID()
+	commandID := generateSSMCommandID(ctx.IDs)
 	nowUnix := float64(p.tc.Now().Unix())
 
 	cmd := SSMCommand{
@@ -1034,12 +1033,19 @@ func (p *SSMPlugin) describeInstanceInformation(ctx *RequestContext, _ *AWSReque
 	})
 }
 
-// generateSSMCommandID generates a UUID-format command ID.
-func generateSSMCommandID() string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("ssm: rand.Read: %v", err))
-	}
-	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
-		b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateSSMCommandID mints a Run Command command ID from m, derived from the request id so a
+// replayed SendCommand returns the ID the recording returned (#856).
+//
+// A command ID is addressed: `ListCommands`, `ListCommandInvocations` and `GetCommandInvocation` all
+// take it, and `GetCommandInvocation` publishes `InvalidCommandId` for one it does not recognize. It
+// is also the only handle SendCommand hands back — there is no caller-chosen name for a command the
+// way there is for a document.
+//
+// `Command.CommandId` publishes a **fixed length of 36** and no pattern, on both the request and the
+// response side. The 36 characters are what decides the rendering here: [IDMint.HexUUID] is exactly
+// 36, so the published bound is met without changing a byte the crypto/rand form produced. AWS's own
+// sample response shows a version-4 UUID, but the model pins no position, so the two nibbles
+// [IDMint.UUID] would set stay unset (#671).
+func generateSSMCommandID(m *IDMint) string {
+	return m.HexUUID()
 }
