@@ -131,7 +131,15 @@ func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*Deploy
 	// threaded — substrate's defaults are the right answer here rather than a
 	// placeholder for one. An in-process caller that does need another partition
 	// can pass WithDeployerIdentity to NewStackDeployer directly.
-	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs)
+	//
+	// The mint is seeded from a fresh request id rather than left nil, so the
+	// deployment's resource identifiers are derived from one seed instead of drawn
+	// one at a time (#856). The seed is random because an in-process Deploy is not a
+	// recorded AWS request — there is no outer event for a replay to re-run — and
+	// that is enough: each dispatched request records the derived id it used, and a
+	// replay of *those* events reuses it.
+	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs,
+		WithDeployerMint(NewIDMint(generateRequestID())))
 
 	streamID := fmt.Sprintf("deploy-%d", b.tc.Now().UnixNano())
 	result, err := deployer.Deploy(ctx, cfn, streamID, nil)

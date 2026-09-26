@@ -34,6 +34,17 @@ func GenerateIAMIDForTest(seed, prefix string) string {
 	return generateIAMID(NewIDMint(seed), prefix)
 }
 
+// APIGatewayInternalRequestIDForTest wraps apigwInternalRequestID for external tests,
+// minting from a fresh [IDMint] over seed.
+//
+// Exported because the seedless branch is not reachable through the proxy integration: a
+// request that arrives over the wire always carries a mint, so only a hand-built
+// [RequestContext] — the shape a plugin unit test constructs — reaches the fallback, and
+// #856's tier 8 turns on that branch existing rather than deriving from an empty seed.
+func APIGatewayInternalRequestIDForTest(seed string) string {
+	return apigwInternalRequestID(NewIDMint(seed))
+}
+
 // IAMUserARNForTest wraps iamUserARN for external tests.
 func IAMUserARNForTest(accountID, path, name string) string { return iamUserARN(accountID, path, name) }
 

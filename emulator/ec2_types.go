@@ -495,8 +495,8 @@ func generateAssociationID(m *IDMint) string {
 // flag day: a caller moves by taking a mint and calling [IDMint.Hex] with the same width.
 // EC2's own ids no longer come through here.
 //
-// TODO(#856): 2 draw sites remain on crypto/rand — this one and [IDMint.bytes]'s own fallback;
-// delete this function when the last caller moves.
+// TODO(#856): one caller remains — the AIPA… instance profile id minted inside a describe,
+// which is a fidelity bug of its own (#1291). Delete this function when it moves.
 func randomHex(n int) string {
 	b := make([]byte, n)
 	if _, err := rand.Read(b); err != nil {

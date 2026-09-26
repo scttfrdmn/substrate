@@ -335,6 +335,13 @@ makes `Differences` empty — and `StateValid` true, with `WithRecordedStateHash
 all; before #856 every such stream diverged on its first create, which is why the #1140
 tests above are built on caller-chosen bucket and key names instead.
 
+**That now includes a CloudFormation stack.** A deploy turns each resource into an internal
+request, and those requests used to carry no mint, so every physical resource ID in every
+stack was random even though the deployer holds no draw site of its own — a replayed
+`DescribeStackResources` reported different IDs, in a 200, and `CreateStack`'s
+`state_hash_after` never matched. A stack of a handful of resources now replays with zero
+differences and `StateValid` true.
+
 Two caveats. **Not every service's identifiers are derived yet.** EC2, IAM, STS, SQS, SNS,
 Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge, CloudWatch Logs, CloudFront,
 Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR Serverless, ECR, ELB, Route 53,
