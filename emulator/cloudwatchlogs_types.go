@@ -18,6 +18,15 @@ type CWLogGroup struct {
 
 	// RetentionInDays is the number of days to retain log events (0 = never expire).
 	RetentionInDays int `json:"RetentionInDays,omitempty"`
+
+	// Tags are the log group's tags, keyed by tag key.
+	//
+	// Written by CreateLogGroup's inline `tags` member and by TagResource, read by
+	// ListTagsForResource. PascalCase like every member above it, because this struct is the
+	// persisted encoding and not the wire — see the note below the type. No tags at all is a nil
+	// map and is omitted from the record rather than stored as an empty object; the read projects
+	// it back to `{}`, which is the shape the response publishes.
+	Tags map[string]string `json:"Tags,omitempty"`
 }
 
 // CWLogStream represents an emulated Amazon CloudWatch Logs log stream.

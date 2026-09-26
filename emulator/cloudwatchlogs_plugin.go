@@ -14,7 +14,8 @@ import (
 // CloudWatchLogsPlugin emulates the Amazon CloudWatch Logs JSON-protocol API.
 // It handles CreateLogGroup, DeleteLogGroup, DescribeLogGroups,
 // PutRetentionPolicy, DeleteRetentionPolicy, CreateLogStream, DeleteLogStream,
-// DescribeLogStreams, PutLogEvents, GetLogEvents, and FilterLogEvents.
+// DescribeLogStreams, PutLogEvents, GetLogEvents, FilterLogEvents, TagResource,
+// UntagResource, and ListTagsForResource.
 type CloudWatchLogsPlugin struct {
 	state  StateManager
 	logger Logger
@@ -65,6 +66,12 @@ func (p *CloudWatchLogsPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.getLogEvents(ctx, req)
 	case "FilterLogEvents":
 		return p.filterLogEvents(ctx, req)
+	case "TagResource":
+		return p.tagResource(req)
+	case "UntagResource":
+		return p.untagResource(req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -95,11 +102,15 @@ func (p *CloudWatchLogsPlugin) createLogGroup(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "ResourceAlreadyExistsException", Message: "Log group already exists: " + body.LogGroupName, HTTPStatus: http.StatusConflict}
 	}
 
+	// The tags the request carries are persisted, so ListTagsForResource reports them. They were
+	// decoded and dropped before #1273 added the tagging trio: a group created with tags inline
+	// read back as untagged, which is the half of the convergence path that looked like it worked.
 	lg := CWLogGroup{
 		LogGroupName:    body.LogGroupName,
 		ARN:             cwLogGroupARN(ctx.Region, ctx.AccountID, body.LogGroupName),
 		CreationTime:    p.tc.Now().UnixMilli(),
 		RetentionInDays: body.RetentionInDays,
+		Tags:            body.Tags,
 	}
 	data, err := json.Marshal(lg)
 	if err != nil {

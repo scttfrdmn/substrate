@@ -99,6 +99,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `OriginAccessControlAlreadyExists`/409 is published for a control "with the specified parameters"
   without publishing which parameters, and a control carries no `CallerReference` to key a duplicate
   on. `UpdateOriginAccessControl` is not implemented.
+- **CloudWatch Logs tagging: `TagResource`, `UntagResource` and `ListTagsForResource`, and the ARN
+  rule that decides which ARN they take** (#1273). The issue reports a validation refusal on
+  `TagResource`; the operation was absent, so the request was refused as an unknown action rather
+  than accepted with the wrong ARN, and the trio arrives with the rule because a rule on an
+  unroutable operation is untestable. The rule is that the operations take the **unsuffixed**
+  log-group ARN and refuse the IAM-policy form with the trailing `:*`. Substrate hands a caller the
+  refused form itself — `DescribeLogGroups` reports both, and the suffixed one travels under the
+  shorter member name `arn` — so reaching for it is the natural mistake, and a fake that accepts any
+  ARN keeps a tagging path green offline and then fails on every log group of a live deploy. The rule
+  is applied to the read as well as to the two writes: a convergence path reads before it writes, and
+  a `ListTagsForResource` that accepted the suffixed form would report a group untagged rather than
+  naming the ARN to send. The refusal is `ValidationException` / `Invalid resourceArn`, which is
+  **observed** behavior rather than published — none of the three pages lists a `ValidationException`
+  at all — though what is published supports refusing: `resourceArn` carries Pattern `[\w+=/:,.@-]*`,
+  a character class with no `*` in it, so the suffixed form violates the request model before any
+  resource is resolved. Only the code and the message text come from observation. A `:log-stream:`
+  suffix is refused the same way; a `destination:` ARN — the
+  other type all three pages publish as taggable — answers `ResourceNotFoundException`, because
+  substrate models no destinations, so it is the resource that is absent rather than the ARN that is
+  wrong. `CreateLogGroup`'s inline `tags` are now persisted and read back, having been decoded and
+  discarded before, which is the half of the convergence path that looked like it worked. `tags` is a
+  string-to-string map on both the request and the response, not the `{key, value}` array most
+  services use, and an untagged group answers `{"tags":{}}` rather than omitting the member. The
+  50-tag ceiling is enforced at `TagResource` against the *merged* set, since a one-tag request
+  against a group holding fifty exceeds it while the request alone does not; `CreateLogGroup` is left
+  without it, because its page publishes no code for exceeding the `tags` maximum and
+  `TooManyTagsException` is published on `TagResource` alone (#671). The account and Region come from
+  the ARN and never from the caller's context — #826's rule, which is why the three handlers are the
+  only ones in the plugin that take no request context at all.
 
 ### Changed
 
