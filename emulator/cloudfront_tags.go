@@ -44,19 +44,22 @@ import (
 // tagging. See this file's preamble for the types deliberately refused and why.
 const cfDistributionResourceType = "distribution"
 
-// CloudFront state-key prefixes. The namespace holds four kinds: a distribution record, the
-// per-account index of distribution IDs, an invalidation record and the per-distribution index of
-// invalidation IDs. Only the distribution stores tags — the reference says so, in the sentence
-// this file's preamble quotes — hence [cfKeyIsTaggable] in front of the merge.
+// CloudFront state-key prefixes. The namespace holds six kinds: a distribution record, the
+// per-account index of distribution IDs, an invalidation record, the per-distribution index of
+// invalidation IDs, an origin access control record and the per-account index of origin access
+// control IDs. Only the distribution stores tags — the reference says so, in the sentence this
+// file's preamble quotes — hence [cfKeyIsTaggable] in front of the merge.
 //
-// Every prefix is tested colon-terminated, because "cfdist" is a prefix of "cfdist_ids" and
-// "cfinval" of "cfinval_ids". A bare-prefix test would report the distribution index taggable and
-// merge a tags member into a JSON array of ID strings.
+// Every prefix is tested colon-terminated, because "cfdist" is a prefix of "cfdist_ids",
+// "cfinval" of "cfinval_ids" and "cfoac" of "cfoac_ids". A bare-prefix test would report the
+// distribution index taggable and merge a tags member into a JSON array of ID strings.
 const (
 	cfDistKeyPrefix     = "cfdist:"
 	cfDistIDsKeyPrefix  = "cfdist_ids:"
 	cfInvalKeyPrefix    = "cfinval:"
 	cfInvalIDsKeyPrefix = "cfinval_ids:"
+	cfOACKeyPrefix      = "cfoac:"
+	cfOACIDsKeyPrefix   = "cfoac_ids:"
 )
 
 // cfGlobalRegion is the Region AWS attributes a CloudFront distribution to when a per-Region
@@ -92,9 +95,11 @@ func cfInvalIDsKey(accountID, distID string) string {
 //
 // Only the distribution does, and that is the reference's boundary rather than substrate's
 // convenience: "You can tag distributions, but you can't tag origin access identities or
-// invalidations." The two index keys store no tags either, and no ARN addresses one.
+// invalidations." An origin access control is outside the list of taggable resource types too —
+// it publishes no tags member on create and no ARN at all — and the index keys store no tags
+// either, nor does any ARN address one.
 //
-// A single positive test rather than an enumeration of the three refusals, which is the safe
+// A single positive test rather than an enumeration of the five refusals, which is the safe
 // direction: a key kind added later is refused by default, and refusing is the conservative
 // outcome — merging tags into a record that does not model them writes a member nothing reads and
 // reports success.

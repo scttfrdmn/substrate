@@ -61,7 +61,7 @@ import (
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): 29 draw sites remain on crypto/rand, tiered by service family on the issue.
+// TODO(#856): 28 draw sites remain on crypto/rand, tiered by service family on the issue.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.

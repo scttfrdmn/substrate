@@ -2207,7 +2207,9 @@ Three kinds of value stay random, and one more is still migrating:
   CloudFormation's [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic),
   which predate this rule and are what generalising it was modelled on.
 - EC2, IAM, STS, SQS, SNS, Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge,
-  CloudWatch Logs and Service Quotas identifiers are derived today. The remaining services are
+  CloudWatch Logs, CloudFront and Service Quotas identifiers are derived today. A CloudFront
+  distribution, invalidation and origin access control all draw from one generator, so the three
+  moved together with the origin access control family (#1277). The remaining services are
   migrating one family at a time, tracked on #856; until a service moves, its identifiers are
   still drawn from `crypto/rand` and a replay of a stream creating one of its resources still
   diverges.
@@ -16650,7 +16652,8 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 
 | Operation | Notes |
 |-----------|-------|
-| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}` |
+| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277) |
+| CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`. A body substrate cannot decode is refused rather than creating an untagged distribution |
 | GetDistribution | |
 | GetDistributionConfig | Answers `DistributionConfig` members only, and two of its five required ones — see [A configuration is not a distribution](#a-configuration-is-not-a-distribution) |
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb |
@@ -16662,6 +16665,10 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 | TagResource | Body is a `<Tags>` document; a body of another shape is refused rather than read as an empty tag set (#883) |
 | UntagResource | Body is a `<TagKeys><Items><Key>` document. Removing a key the distribution does not carry succeeds — AWS documents no error for it, so that reading is substrate's (#883) |
 | ListTagsForResource | Reports the `<Tags><Items>` members sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
+| CreateOriginAccessControl | 201 with the `ETag` and `Location` headers; the four required config members are validated against their published enums — see [The origin access control family](#the-origin-access-control-family) |
+| GetOriginAccessControl | 200 with the `ETag` header; absent → `NoSuchOriginAccessControl` |
+| ListOriginAccessControls | An account using no origin access controls answers **no `Items` element** |
+| DeleteOriginAccessControl | 204. `If-Match` required: missing or malformed → `InvalidIfMatchVersion`, well-formed but stale → `PreconditionFailed`. `OriginAccessControlInUse` is not answered — see below |
 
 All three tagging operations share the `POST`/`GET /2020-05-31/tagging` path and are told apart
 by the query string: `Operation=Tag`, `Operation=Untag`, and a `GET` carrying only `Resource`. A
@@ -16677,6 +16684,55 @@ CloudFront's own operations only. No other CloudFront resource type is reachable
 for why `GetResources` reports a distribution in `us-east-1` alone.
 
 All CloudFront resources are stored under `us-east-1` (global service).
+
+### The origin access control family
+
+An origin access control is what lets a distribution read a private S3 bucket: CloudFront signs the
+origin request with SigV4 and the bucket policy trusts the distribution rather than the world. The
+four operations live on their own path — `POST`/`GET /2020-05-31/origin-access-control` for the
+collection, `GET`/`DELETE …/origin-access-control/{Id}` for one member — and substrate routed none
+of it before #1277, so a consumer keeping its bucket private could not run against the emulator at
+all: the create reached the unknown-route refusal.
+
+`OriginAccessControlConfig` marks four members `Required: Yes`, and three of the four publish a
+closed set of values: `OriginAccessControlOriginType` is `s3|mediastore|mediapackagev2|lambda`,
+`SigningBehavior` is `never|always|no-override`, and `SigningProtocol` is `sigv4`. A missing member
+or a value outside its enum is `InvalidArgument`/400, which is the code the operation publishes for
+both. The comparison is case-sensitive: accepting `S3` would let a request through substrate that
+AWS refuses, which is the direction a consumer pays for with a failed live deploy.
+
+The control carries an **ETag**, and it is the one version substrate models on this service. The
+create answers it as a header alongside `Location`, the get answers it as a header, and
+`DeleteOriginAccessControl` requires it in `If-Match`, and the published description of
+`InvalidIfMatchVersion` — *"The If-Match version is missing or not valid"* — is two cases in one
+sentence: a **missing** header and a value that is **not a version substrate could have issued** are
+both `InvalidIfMatchVersion`/400, while a well-formed version that is not the current one is
+`PreconditionFailed`/412. Three published codes for three different mistakes, so a caller that sent
+no version at all is not told its version was stale.
+
+The `ETag` *shape* is substrate's: AWS publishes only that the value identifies the current version,
+so substrate mints the same `E`-prefixed form it mints IDs in, from the same per-request mint, which
+is what makes a replayed create hand out the version its recording did. That is also what makes
+"malformed" decidable at all — a value outside that shape was never handed out here, so it cannot be
+a stale one — and it is a statement about substrate's own minting rather than a claim about what
+CloudFront accepts. A quoted `If-Match` is accepted as well as a bare one, since HTTP ETags are
+conventionally quoted and CloudFront's are not.
+
+`ListOriginAccessControls` answers the whole list, and an account using none answers **no `Items`
+element at all** rather than an empty one — the page states exactly that, and it is the difference
+between a caller's `len(Items) == 0` and a decode that has nothing to decode. `Marker`, `MaxItems`
+and `NextMarker` are published members and are not rendered, for the reason `ListDistributions`
+omits them: substrate holds no value for a page boundary it never draws.
+
+Two published behaviours are deliberately absent. **`OriginAccessControlInUse`/409** on delete needs
+to know that some distribution names the control, and substrate records no origins — that is the gap
+[A configuration is not a distribution](#a-configuration-is-not-a-distribution) describes, and
+[#1271](https://github.com/scttfrdmn/substrate/issues/1271) is where a distribution starts recording
+its configuration and the check becomes answerable. **`OriginAccessControlAlreadyExists`/409** on
+create is published for a control "with the specified parameters", which parameters is not published,
+and a control carries no `CallerReference` to key a duplicate on the way a distribution does; a
+repeated create mints a second control, so a consumer converging by name should list first.
+`UpdateOriginAccessControl` is not implemented.
 
 ### A configuration is not a distribution
 
@@ -16700,6 +16756,11 @@ value for the other three, and neither page publishes an example of a configurat
 shape from. An `Origins` needs `Items` and a `Quantity`; a `DefaultCacheBehavior` needs a whole
 subtree. Omitting a member substrate holds no value for is the honest answer; inventing one would
 assert a shape AWS has not published.
+
+The unrecorded `Origins` is also what defers `OriginAccessControlInUse`/409: an origin access
+control is referenced *from* an origin, so until a distribution records the origins it was created
+with, a delete cannot tell an unused control from one a live distribution depends on. Both halves
+land together in [#1271](https://github.com/scttfrdmn/substrate/issues/1271).
 
 `API_GetDistributionConfig` publishes, on its `Id` parameter: *"The distribution's ID. If the ID is
 empty, an empty distribution configuration is returned."* An empty ID is reachable — the path

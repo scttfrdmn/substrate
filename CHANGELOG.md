@@ -64,6 +64,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   behaves exactly as it did. The cost, stated in `docs/services.md`: an identifier is guessable from
   a request ID, which is already true of the request ID and is acceptable for a test emulator whose
   identifiers name nothing outside it.
+- **CloudFront's origin access control family, and `CreateDistributionWithTags`** (#1277). An origin
+  access control is what lets a distribution serve a **private** S3 bucket — CloudFront signs the
+  origin request with SigV4 and the bucket policy trusts the distribution rather than the world — and
+  substrate routed none of it: `/2020-05-31/origin-access-control` was not a path the plugin knew, so
+  the create reached the unknown-route refusal and a consumer keeping its bucket private could not run
+  against the emulator at all. That was the first of ten missing operations an adopter found by
+  replacing ~1,100 lines of hand-written AWS fakes with substrate (#1274), and the one it named as
+  blocking. `CreateOriginAccessControl` answers 201 with the `ETag` and `Location` headers — neither is
+  in the API Reference's Response Syntax block, both are output members in the CLI and the SDKs, and
+  the ETag is what a later delete has to echo. The four `Required: Yes` config members are validated,
+  three of them against their published enums (`s3|mediastore|mediapackagev2|lambda`,
+  `never|always|no-override`, `sigv4`), case-sensitively: accepting `S3` would pass a request through
+  substrate that AWS refuses, which is the direction a consumer pays for with a failed live deploy.
+  `GetOriginAccessControl` answers the same document and the same version; `ListOriginAccessControls`
+  answers the account's controls whole, and an account using none answers **no `Items` element at
+  all**, which is what the page states and what a decoder cannot distinguish from an empty one — so
+  the test asserts on the raw XML. `DeleteOriginAccessControl` requires `If-Match` and separates the
+  ways it can fail: an absent control is `NoSuchOriginAccessControl`/404, a version that is *missing
+  or malformed* is `InvalidIfMatchVersion`/400 — the code's own published description is "missing or
+  not valid", which is two cases in one sentence — and a well-formed but stale one is
+  `PreconditionFailed`/412, because telling a caller that sent no version, or a typo, that its version
+  was stale is a wrong answer. Malformed is decidable only because the ETag rendering is substrate's
+  own: a value outside the shape substrate mints was never handed out here, so it cannot be a stale
+  one, and that is a statement about substrate's minting rather than about what CloudFront accepts.
+  `CreateDistributionWithTags` is
+  the same path and verb as `CreateDistribution` with `?WithTags` — a bare query key, so the routing
+  tests for the key's *presence*; testing for a value would have sent a tagged create to the untagged
+  handler and dropped the tags while answering 201. Its body is decoded strictly, unlike
+  `CreateDistribution`'s: a caller that asked for tags must not be handed an untagged distribution and
+  a success, which is #883's argument applied to the create. Two published behaviors are deliberately
+  absent and documented as such in `docs/services.md`: `OriginAccessControlInUse`/409 needs to know a
+  distribution's origins and substrate records none (#1271 is where that changes), and
+  `OriginAccessControlAlreadyExists`/409 is published for a control "with the specified parameters"
+  without publishing which parameters, and a control carries no `CallerReference` to key a duplicate
+  on. `UpdateOriginAccessControl` is not implemented.
 
 ### Changed
 
@@ -198,6 +233,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   receives an SQS message, subscribes to an SNS topic and creates an EFS file system with an access
   point — each later request naming what an earlier one minted — now replays with **zero**
   differences and `StateValid` true.
+- **A replayed CloudFront create mints the identifiers its recording minted** (#856). One generator
+  produces every identifier this service publishes — a distribution ID, an invalidation ID, and now an
+  origin access control's ID and its ETag — so the whole service moved with #1277 rather than waiting
+  for its turn in the per-family tiering: adding a fourth `crypto/rand` caller to a list #856 is
+  actively shortening was the wrong direction. `generateCloudFrontID` now takes the request's `IDMint`
+  and has no error to return, the alphabet it maps onto is a named constant the three callers share,
+  and the mapping is byte-for-byte the one it performed before, so an ID recorded by an earlier
+  substrate is still the shape this one mints. A recorded stream that creates a control, reads it back,
+  creates a distribution, invalidates inside it and deletes the control with the ETag the create handed
+  out now replays with **zero** differences and `StateValid` true. That last step is what makes the
+  claim load-bearing rather than cosmetic: a re-minted ETag turns the recorded delete into a
+  `PreconditionFailed` against a control nothing had changed. 28 draw sites remain on `crypto/rand`.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a
