@@ -354,7 +354,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   published by AWS — these are the domain's own REST API, not the `es` control plane — so substrate's
   sixteen characters are a convention it keeps rather than a constraint it meets.
 - **A Timestream `QueryId` is hex where a Redshift Data statement ID is a dashed UUID** (#856). Both are
-  the same sixteen derived bytes and the difference is the published model, not a preference:
+  sixteen derived bytes apiece and the difference is the published model, not a preference:
   `API_query_Query` constrains `QueryId` to `[a-zA-Z0-9]+`, which **excludes** the hyphen, while
   `API_ExecuteStatement` documents `Id` as a UUID and publishes the dashed pattern. Neither constrains a
   position, so both are indifferent to the RFC 4122 version and variant bits — which is why deriving

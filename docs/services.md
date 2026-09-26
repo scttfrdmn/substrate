@@ -2254,11 +2254,11 @@ back, so one function serving both meant a change to how a request ID is rendere
 the identifier a recorded path depends on.
 
 **The published alphabet decides the rendering, where there is one.** Two identifiers in the
-analytics family are minted from the same sixteen derived bytes and rendered differently, and the
+analytics family are minted from sixteen derived bytes apiece and rendered differently, and the
 difference is the API model rather than a preference. Redshift Data documents a statement `Id` as a
 UUID and publishes `[a-z0-9]{8}(-[a-z0-9]{4}){3}-[a-z0-9]{12}`, so the hyphenated form is required;
-Timestream publishes `QueryId` as `[a-zA-Z0-9]+`, which **excludes** the hyphen, so the same bytes are
-rendered as 32 unbroken hex characters. Neither pattern constrains a position, so both are
+Timestream publishes `QueryId` as `[a-zA-Z0-9]+`, which **excludes** the hyphen, so its bytes are
+rendered as 32 unbroken hex characters instead. Neither pattern constrains a position, so both are
 indifferent to the RFC 4122 version and variant bits — which is why deriving them preserved the exact
 rendering substrate published before, rather than quietly setting two nibbles (#671).
 
