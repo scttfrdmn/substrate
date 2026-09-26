@@ -654,3 +654,418 @@ func idsEFSCall(t *testing.T, ts *emulator.TestServer, method, path string, body
 	require.Less(t, resp.StatusCode, 300, "%s %s: %s", method, path, out)
 	return out
 }
+
+// Tier 3 of #856: the compute and edge family — API Gateway (v1 and v2), AppSync, Batch, EMR
+// Serverless, ECR, ELB and Route 53.
+//
+// Same two layers as the tiers above. One property is asserted on the mint directly, because
+// this tier is the first to change an identifier's *alphabet* rather than only its source, and
+// one recorded stream is asserted over the wire, because interlocked creates are what a
+// re-minted identifier actually breaks.
+
+// TestIDMint_TheAPIGatewayAlphabetIsTheWholePublishedSet pins the one rendering change tier 3
+// makes.
+//
+// The crypto/rand form of generateAPIGatewayID read five bytes and mapped each *nibble*
+// through a 36-character alphabet, so only the first sixteen characters — `a` through `p` —
+// could ever appear in an API Gateway identifier and a digit never did. [emulator.IDMint.Chars]
+// draws one byte per character, which is both the correct use of the seam and the alphabet API
+// Gateway publishes. The seed is fixed, so this is a deterministic statement about the mapping
+// and not a sample of a random source.
+func TestIDMint_TheAPIGatewayAlphabetIsTheWholePublishedSet(t *testing.T) {
+	t.Parallel()
+
+	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+	mint := emulator.NewIDMint("ids-tier3-alphabet")
+
+	used := map[rune]bool{}
+	for range 50 {
+		id := mint.Chars(10, alphabet)
+		require.Len(t, id, 10)
+		for _, c := range id {
+			require.True(t, strings.ContainsRune(alphabet, c),
+				"%q is outside the published alphabet", c)
+			used[c] = true
+		}
+	}
+
+	beyondNibbleRange := 0
+	for c := range used {
+		if strings.IndexRune(alphabet, c) >= 16 {
+			beyondNibbleRange++
+		}
+	}
+	assert.Positive(t, beyondNibbleRange,
+		"the nibble mapping this replaces could reach only a-p; %d of the alphabet's last 20 "+
+			"characters appear", beyondNibbleRange)
+}
+
+// TestIDs_OneCreateRestApiMintsDistinctIdentifiers is the ordinal's test for this tier: one
+// request that mints two identifiers, the API's own and its root resource's.
+//
+// A mint that ignored its ordinal would answer the same value for both, and every later
+// request addressing the root resource would address the API instead.
+func TestIDs_OneCreateRestApiMintsDistinctIdentifiers(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	var api struct {
+		ID             string `json:"id"`
+		RootResourceID string `json:"rootResourceId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodPost,
+		"/restapis", map[string]any{"name": "ids-tier3"}), &api))
+
+	require.Len(t, api.ID, 10, "an API Gateway identifier is ten characters")
+	require.Len(t, api.RootResourceID, 10)
+	assert.NotEqual(t, api.ID, api.RootResourceID,
+		"one CreateRestApi mints the API's id and its root resource's id, not one value twice")
+}
+
+// TestIDs_OneCreateHostedZoneMintsAZoneAndAChangeID is the same property on the other kind of
+// two-draw request: Route 53 answers a zone identifier and the identifier of the change that
+// created it, from one call.
+func TestIDs_OneCreateHostedZoneMintsAZoneAndAChangeID(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	zoneID, changeID := idsCreateHostedZone(t, ts, "ids-tier3.example.")
+	assert.NotEqual(t, zoneID, changeID,
+		"a hosted zone and the change that created it are two identifiers: %q and %q",
+		zoneID, changeID)
+	assert.Contains(t, changeID, "/change/C", "a change id keeps its published prefix")
+}
+
+// TestReplay_TheComputeAndEdgeFamiliesReplayWithTheIdentifiersTheyMinted is the wire-level
+// assertion for tier 3, and the same claim the tiers above make for EC2/IAM and for the
+// messaging/storage group: a stream whose later requests *name* what its earlier ones minted
+// replays with no differences and reaches the recorded state.
+//
+// Each of the seven services contributes a create followed by a request that can only succeed
+// against the identifier that create minted — a resource under a REST API's root, an API key
+// on an AppSync API, a record set in a hosted zone, a listener on a load balancer and its
+// target group, a DescribeJobs naming a job id, a GetJobRun naming an application and a run,
+// and a BatchGetImage naming an image digest. A re-minted identifier turns one of those into a
+// refusal rather than into a differently-worded success.
+func TestReplay_TheComputeAndEdgeFamiliesReplayWithTheIdentifiersTheyMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordComputeAndEdgeCreates(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the creates")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"a compute or edge identifier replays as the one recorded: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordComputeAndEdgeCreates records the tier-3 stream, one interlocked pair or triple per
+// service.
+func idsRecordComputeAndEdgeCreates(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: a replay pins the clock to the
+	// recorded event's timestamp, so a handler stamping a record off a live clock diverges in
+	// the state hash for a reason that has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	idsRecordAPIGateway(t, ts)
+	idsRecordAppSync(t, ts)
+	idsRecordRoute53(t, ts)
+	idsRecordELB(t, ts)
+	idsRecordBatchAndEMRServerless(t, ts)
+	idsRecordECR(t, ts)
+}
+
+// idsRecordAPIGateway records a REST API, a resource under the root resource it minted, and a
+// deployment.
+func idsRecordAPIGateway(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var api struct {
+		ID             string `json:"id"`
+		RootResourceID string `json:"rootResourceId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodPost,
+		"/restapis", map[string]any{"name": "ids-tier3"}), &api))
+	require.NotEmpty(t, api.ID)
+	require.NotEmpty(t, api.RootResourceID)
+
+	idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodPost,
+		"/restapis/"+api.ID+"/resources/"+api.RootResourceID,
+		map[string]any{"pathPart": "things"})
+	idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodPost,
+		"/restapis/"+api.ID+"/deployments", map[string]any{"stageName": "prod"})
+	idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodGet,
+		"/restapis/"+api.ID+"/resources", nil)
+}
+
+// idsRecordAppSync records a GraphQL API, then an API key and a function on it.
+func idsRecordAppSync(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var created struct {
+		API struct {
+			APIID string `json:"apiId"`
+		} `json:"graphqlApi"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsAppSyncHost, http.MethodPost,
+		"/v1/apis", map[string]any{"name": "ids-tier3", "authenticationType": "API_KEY"}),
+		&created))
+	apiID := created.API.APIID
+	require.NotEmpty(t, apiID)
+
+	idsRESTCall(t, ts, idsAppSyncHost, http.MethodPost,
+		"/v1/apis/"+apiID+"/apikeys", map[string]any{"description": "ids-tier3"})
+
+	var fn struct {
+		Function struct {
+			FunctionID string `json:"functionId"`
+		} `json:"functionConfiguration"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsAppSyncHost, http.MethodPost,
+		"/v1/apis/"+apiID+"/functions", map[string]any{"name": "idsFn"}), &fn))
+	require.NotEmpty(t, fn.Function.FunctionID)
+
+	// Two reads that name what was minted: the function by its own id, and the key collection
+	// on the API's id.
+	idsRESTCall(t, ts, idsAppSyncHost, http.MethodGet,
+		"/v1/apis/"+apiID+"/functions/"+fn.Function.FunctionID, nil)
+	idsRESTCall(t, ts, idsAppSyncHost, http.MethodGet, "/v1/apis/"+apiID+"/apikeys", nil)
+}
+
+// idsRecordRoute53 records a hosted zone, a record set inside it, and a read of the zone.
+func idsRecordRoute53(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	zoneID, _ := idsCreateHostedZone(t, ts, "ids-tier3.example.")
+	idsXMLCall(t, ts, idsRoute53Host, http.MethodPost, "/2013-04-01/hostedzone/"+zoneID+"/rrset",
+		`<ChangeResourceRecordSetsRequest><ChangeBatch><Changes><Change>`+
+			`<Action>CREATE</Action><ResourceRecordSet><Name>www.ids-tier3.example.</Name>`+
+			`<Type>A</Type><TTL>300</TTL><ResourceRecords><ResourceRecord>`+
+			`<Value>192.0.2.1</Value></ResourceRecord></ResourceRecords>`+
+			`</ResourceRecordSet></Change></Changes></ChangeBatch>`+
+			`</ChangeResourceRecordSetsRequest>`)
+	idsXMLCall(t, ts, idsRoute53Host, http.MethodGet, "/2013-04-01/hostedzone/"+zoneID, "")
+}
+
+// idsCreateHostedZone creates one hosted zone and returns its id and the change id the create
+// answered with.
+func idsCreateHostedZone(t *testing.T, ts *emulator.TestServer, name string) (zoneID, changeID string) {
+	t.Helper()
+
+	var created struct {
+		Zone struct {
+			ID string `xml:"Id"`
+		} `xml:"HostedZone"`
+		Change struct {
+			ID string `xml:"Id"`
+		} `xml:"ChangeInfo"`
+	}
+	body := idsXMLCall(t, ts, idsRoute53Host, http.MethodPost, "/2013-04-01/hostedzone",
+		`<CreateHostedZoneRequest><Name>`+name+`</Name>`+
+			`<CallerReference>ids-tier3</CallerReference></CreateHostedZoneRequest>`)
+	require.NoError(t, xml.Unmarshal(body, &created))
+	require.NotEmpty(t, created.Zone.ID, "CreateHostedZone returned no zone: %s", body)
+
+	// The zone id is reported as "/hostedzone/Z…" and addressed as either form.
+	return strings.TrimPrefix(created.Zone.ID, "/hostedzone/"), created.Change.ID
+}
+
+// idsRecordELB records a load balancer, a target group, and a listener naming both — three
+// draws of the ELB suffix, each carried in an ARN a later request must match.
+func idsRecordELB(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var lb struct {
+		ARNs []string `xml:"CreateLoadBalancerResult>LoadBalancers>member>LoadBalancerArn"`
+	}
+	require.NoError(t, xml.Unmarshal(idsELBCall(t, ts, map[string]string{
+		"Action": "CreateLoadBalancer", "Name": "ids-tier3-lb",
+		"Subnets.member.1": "subnet-0123456789abcdef0",
+	}), &lb))
+	require.Len(t, lb.ARNs, 1)
+
+	var tg struct {
+		ARNs []string `xml:"CreateTargetGroupResult>TargetGroups>member>TargetGroupArn"`
+	}
+	require.NoError(t, xml.Unmarshal(idsELBCall(t, ts, map[string]string{
+		"Action": "CreateTargetGroup", "Name": "ids-tier3-tg",
+		"Protocol": "HTTP", "Port": "80", "VpcId": "vpc-0123456789abcdef0",
+	}), &tg))
+	require.Len(t, tg.ARNs, 1)
+
+	idsELBCall(t, ts, map[string]string{
+		"Action": "CreateListener", "LoadBalancerArn": lb.ARNs[0],
+		"Protocol": "HTTP", "Port": "80",
+		"DefaultActions.member.1.Type":           "forward",
+		"DefaultActions.member.1.TargetGroupArn": tg.ARNs[0],
+	})
+	idsELBCall(t, ts, map[string]string{
+		"Action": "DescribeListeners", "LoadBalancerArn": lb.ARNs[0],
+	})
+}
+
+// idsRecordBatchAndEMRServerless records a Batch job and an EMR Serverless application and job
+// run, each followed by a read naming what was minted.
+func idsRecordBatchAndEMRServerless(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var job struct {
+		JobID string `json:"jobId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBatchHost, http.MethodPost,
+		"/v1/submitjob", map[string]any{
+			"jobName": "ids-tier3", "jobQueue": "ids-queue", "jobDefinition": "ids-def",
+		}), &job))
+	require.NotEmpty(t, job.JobID)
+	idsRESTCall(t, ts, idsBatchHost, http.MethodPost, "/v1/describejobs",
+		map[string]any{"jobs": []string{job.JobID}})
+
+	var app struct {
+		ApplicationID string `json:"applicationId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodPost,
+		"/applications", map[string]any{
+			"name": "ids-tier3", "type": "SPARK", "releaseLabel": "emr-6.9.0",
+		}), &app))
+	require.NotEmpty(t, app.ApplicationID)
+
+	var run struct {
+		JobRunID string `json:"jobRunId"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodPost,
+		"/applications/"+app.ApplicationID+"/jobruns", map[string]any{"name": "ids-run"}), &run))
+	require.NotEmpty(t, run.JobRunID)
+	idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodGet,
+		"/applications/"+app.ApplicationID+"/jobruns/"+run.JobRunID, nil)
+}
+
+// idsRecordECR records a repository, an image whose digest the emulator mints, and a
+// BatchGetImage naming that digest.
+func idsRecordECR(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	idsECRCall(t, ts, "CreateRepository", map[string]any{"repositoryName": "ids-tier3"})
+
+	var put struct {
+		Image struct {
+			ImageID struct {
+				ImageDigest string `json:"imageDigest"`
+			} `json:"imageId"`
+		} `json:"image"`
+	}
+	require.NoError(t, json.Unmarshal(idsECRCall(t, ts, "PutImage", map[string]any{
+		"repositoryName": "ids-tier3", "imageTag": "v1",
+		"imageManifest": `{"schemaVersion":2}`,
+	}), &put))
+	digest := put.Image.ImageID.ImageDigest
+	require.NotEmpty(t, digest)
+
+	idsECRCall(t, ts, "BatchGetImage", map[string]any{
+		"repositoryName": "ids-tier3",
+		"imageIds":       []map[string]string{{"imageDigest": digest}},
+	})
+}
+
+// The hosts the tier-3 services are addressed at. Substrate routes by Host header, so these
+// are what select the plugin for a request that carries no X-Amz-Target.
+const (
+	idsAPIGatewayHost    = "apigateway.us-east-1.amazonaws.com"
+	idsAppSyncHost       = "appsync.us-east-1.amazonaws.com"
+	idsRoute53Host       = "route53.amazonaws.com"
+	idsBatchHost         = "batch.us-east-1.amazonaws.com"
+	idsEMRServerlessHost = "emr-serverless.us-east-1.amazonaws.com"
+	idsECRHost           = "api.ecr.us-east-1.amazonaws.com"
+	idsELBHost           = "elasticloadbalancing.us-east-1.amazonaws.com"
+)
+
+// idsELBCall issues one unsigned ELBv2 query-protocol request and returns the response body.
+func idsELBCall(t *testing.T, ts *emulator.TestServer, params map[string]string) []byte {
+	t.Helper()
+	return idsQueryCall(t, ts, idsELBHost, "2015-12-01", params)
+}
+
+// idsRESTCall issues one REST/JSON request against host and requires a 2xx.
+func idsRESTCall(t *testing.T, ts *emulator.TestServer, host, method, path string, body any) []byte {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		reader = strings.NewReader(string(raw))
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, ts.URL+path, reader)
+	require.NoError(t, err)
+	req.Host = host
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Less(t, resp.StatusCode, 300, "%s %s %s: %s", host, method, path, out)
+	return out
+}
+
+// idsXMLCall issues one REST/XML request against host and requires a 2xx.
+func idsXMLCall(t *testing.T, ts *emulator.TestServer, host, method, path, body string) []byte {
+	t.Helper()
+
+	var reader io.Reader
+	if body != "" {
+		reader = strings.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, ts.URL+path, reader)
+	require.NoError(t, err)
+	req.Host = host
+	if body != "" {
+		req.Header.Set("Content-Type", "application/xml")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Less(t, resp.StatusCode, 300, "%s %s %s: %s", host, method, path, out)
+	return out
+}
+
+// idsECRCall issues one ECR JSON-1.1 request, which is target-routed rather than path-routed.
+func idsECRCall(t *testing.T, ts *emulator.TestServer, op string, body any) []byte {
+	t.Helper()
+
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/",
+		strings.NewReader(string(raw)))
+	require.NoError(t, err)
+	req.Host = idsECRHost
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", "AmazonEC2ContainerRegistry_V20150921."+op)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", op, out)
+	return out
+}

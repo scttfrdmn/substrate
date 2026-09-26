@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -401,7 +400,7 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 
 	digest := body.ImageDigest
 	if digest == "" {
-		digest = generateECRDigest()
+		digest = generateECRDigest(ctx.IDs)
 	}
 
 	img := ECRImage{
@@ -1213,11 +1212,16 @@ func (p *ECRPlugin) saveImageTagsMap(goCtx context.Context, tagsKey string, m ma
 	_ = p.state.Put(goCtx, ecrNamespace, tagsKey, b)
 }
 
-// generateECRDigest creates a random sha256 digest string.
-func generateECRDigest() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("sha256:%x", b)
+// generateECRDigest mints a sha256-shaped image digest from m, for a PutImage that supplied no
+// `imageDigest` of its own.
+//
+// A real digest is the SHA-256 of the image manifest, so ECR computes the same one for two pushes
+// of identical manifest bytes and treats the second as the same image. Substrate mints an
+// unrelated value instead, which is why every image it stores is distinct even when the manifests
+// are byte-identical; #1283 tracks deriving it from the manifest, which is a change to what the
+// digest *means* rather than to where its bytes come from and so is not #856's to make.
+func generateECRDigest(m *IDMint) string {
+	return "sha256:" + m.Hex(32)
 }
 
 // ecrJSONResponse marshals v as JSON and returns an AWSResponse with

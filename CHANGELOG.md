@@ -274,6 +274,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   out now replays with **zero** differences and `StateValid` true. That last step is what makes the
   claim load-bearing rather than cosmetic: a re-minted ETag turns the recorded delete into a
   `PreconditionFailed` against a control nothing had changed. 28 draw sites remain on `crypto/rand`.
+- **The compute and edge family — API Gateway, AppSync, Batch, EMR Serverless, ECR, ELB and
+  Route 53 — mints derived identifiers** (#856). Eleven generators across nine plugin files moved,
+  so a recorded stream that creates a REST API and a resource under its root, an AppSync API with a
+  key and a function, a hosted zone and a record-set change inside it, a load balancer with a target
+  group and a listener naming both ARNs, a Batch job, an EMR Serverless application and job run, and
+  an ECR repository with an image read back by the digest the push minted now replays with **zero**
+  differences and `StateValid` true. Every one of those later requests names what an earlier one
+  minted, which is what makes the stream an assertion rather than a smoke test.
+- **The shared UUID-shaped generator is now `IDMint.HexUUID`** (#856). Batch job IDs and EMR
+  Serverless job-run IDs publish the same `8-4-4-4-12` rendering the six services in the previous
+  tier do, and the helper they would have called was declared in the Lambda plugin and named for a
+  Lambda revision. Promoting it to a method on the mint and rewriting its thirteen call sites is what
+  keeps a Batch job ID from being minted by `generateLambdaRevisionID`; the rendering is unchanged.
+- **An API Gateway ID can now contain a digit** (#856). The `crypto/rand` version read five bytes and
+  mapped each *nibble* through the service's 36-character alphabet, so only `a` through `p` could
+  ever appear and a digit never did. Deriving it draws a byte per character, which reaches the whole
+  published set, so an API, resource, deployment, authorizer or usage-plan ID — and an API Gateway v2
+  route, integration or mapping ID — now looks like one AWS would issue. This is the one identifier
+  whose *alphabet* changed when it was derived, and it widened rather than narrowed. 23 draw sites
+  remain on `crypto/rand`.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

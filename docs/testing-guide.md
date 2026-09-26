@@ -336,8 +336,9 @@ all; before #856 every such stream diverged on its first create, which is why th
 tests above are built on caller-chosen bucket and key names instead.
 
 Two caveats. **Not every service's identifiers are derived yet.** EC2, IAM, STS, SQS, SNS,
-Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge, CloudWatch Logs, CloudFront and
-Service Quotas are; the rest are migrating one family at a time, and until a service moves, a
+Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge, CloudWatch Logs, CloudFront,
+Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR Serverless, ECR, ELB and Route 53
+are; the rest are migrating one family at a time, and until a service moves, a
 replay of a stream creating one of its resources still diverges. And a recording made against an
 **unfrozen** clock can still diverge on a `state_hash_after` even when every identifier
 matches, because a handler reading the live clock stamps its record a few hundred

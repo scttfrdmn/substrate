@@ -131,7 +131,7 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 		scheme = "internet-facing"
 	}
 	vpcID := req.Params["VpcId"]
-	suffix := generateELBSuffix()
+	suffix := generateELBSuffix(reqCtx.IDs)
 	arn := elbLoadBalancerARN(reqCtx.Region, reqCtx.AccountID, lbType, name, suffix)
 	dnsName := elbDNSName(name, suffix, reqCtx.Region)
 
@@ -281,7 +281,7 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 	if targetType == "" {
 		targetType = "instance"
 	}
-	suffix := generateELBSuffix()
+	suffix := generateELBSuffix(reqCtx.IDs)
 	arn := elbTargetGroupARN(reqCtx.Region, reqCtx.AccountID, name, suffix)
 
 	tags, tagErr := elbTagsForCreate(req, false, elbKindTargetGroup)
@@ -562,7 +562,7 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, tagErr
 	}
 
-	suffix := generateELBSuffix()
+	suffix := generateELBSuffix(reqCtx.IDs)
 	arn, ok := elbListenerARN(lbARN, suffix)
 	if !ok {
 		// The listener's ARN carries the load balancer's name and id, so an unparseable
@@ -741,7 +741,7 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, tagErr
 	}
 
-	suffix := generateELBSuffix()
+	suffix := generateELBSuffix(reqCtx.IDs)
 	arn, ok := elbRuleARN(listenerARN, suffix)
 	if !ok {
 		// As in createListener: a rule's ARN is built from its listener's, so an unparseable

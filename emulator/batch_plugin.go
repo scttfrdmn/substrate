@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
@@ -578,7 +577,7 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, &AWSError{Code: "MissingParameter", Message: "jobName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	jobID := generateBatchJobID()
+	jobID := generateBatchJobID(ctx.IDs)
 	job := BatchJob{
 		JobID:         jobID,
 		JobName:       body.JobName,
@@ -878,11 +877,9 @@ func (p *BatchPlugin) nextJobDefinitionRevision(goCtx context.Context, ctx *Requ
 	return highest, nil
 }
 
-// generateBatchJobID generates a random UUID-formatted job ID.
-func generateBatchJobID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateBatchJobID mints a UUID-shaped job ID from m.
+func generateBatchJobID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // batchJSONResponse serializes v to JSON and returns an AWSResponse.

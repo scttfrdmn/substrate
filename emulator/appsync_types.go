@@ -109,19 +109,20 @@ func appSyncAPIKeyIDsKey(acct, region, apiID string) string {
 	return fmt.Sprintf("apikey_ids:%s/%s/%s", acct, region, apiID)
 }
 
-// generateAppSyncAPIID returns a new unique AppSync API ID (13 lowercase hex chars).
-func generateAppSyncAPIID() string {
-	return randomHex(13)
+// generateAppSyncAPIID mints a new unique AppSync API ID from m (26 lowercase hex chars,
+// which is the width AppSync publishes an API ID in).
+func generateAppSyncAPIID(m *IDMint) string {
+	return m.Hex(13)
 }
 
-// generateAppSyncFunctionID returns a new unique AppSync function ID.
-func generateAppSyncFunctionID() string {
-	return randomHex(26)
+// generateAppSyncFunctionID mints a new unique AppSync function ID from m.
+func generateAppSyncFunctionID(m *IDMint) string {
+	return m.Hex(26)
 }
 
-// generateAppSyncAPIKeyID returns a new unique AppSync API key ID.
-func generateAppSyncAPIKeyID() string {
-	return randomHex(26)
+// generateAppSyncAPIKeyID mints a new unique AppSync API key ID from m.
+func generateAppSyncAPIKeyID(m *IDMint) string {
+	return m.Hex(26)
 }
 
 // parseAppSyncOperation derives the AppSync operation name from the HTTP method

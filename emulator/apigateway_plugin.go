@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -115,7 +114,7 @@ func (p *APIGatewayPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "DeleteUsagePlan":
 		return p.deleteUsagePlan(ctx, params["planId"])
 	case "CreateUsagePlanKey":
-		return apigwJSONResponse(http.StatusCreated, map[string]string{"id": generateAPIGatewayID(), "type": "API_KEY"})
+		return apigwJSONResponse(http.StatusCreated, map[string]string{"id": generateAPIGatewayID(ctx.IDs), "type": "API_KEY"})
 	case "CreateDomainName":
 		return p.createDomainName(ctx, req)
 	case "GetDomainName":
@@ -391,8 +390,8 @@ func (p *APIGatewayPlugin) createRestAPI(ctx *RequestContext, req *AWSRequest) (
 		return nil, &AWSError{Code: "BadRequestException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	apiID := generateAPIGatewayID()
-	rootResID := generateAPIGatewayID()
+	apiID := generateAPIGatewayID(ctx.IDs)
+	rootResID := generateAPIGatewayID(ctx.IDs)
 	now := p.tc.Now()
 
 	api := RestAPIState{
@@ -567,7 +566,7 @@ func (p *APIGatewayPlugin) createResource(ctx *RequestContext, req *AWSRequest, 
 	}
 	fullPath += body.PathPart
 
-	resID := generateAPIGatewayID()
+	resID := generateAPIGatewayID(ctx.IDs)
 	res := ResourceState{
 		ID:        resID,
 		ParentID:  parentID,
@@ -837,7 +836,7 @@ func (p *APIGatewayPlugin) createDeployment(ctx *RequestContext, req *AWSRequest
 	}
 
 	dep := DeploymentState{
-		ID:          generateAPIGatewayID(),
+		ID:          generateAPIGatewayID(ctx.IDs),
 		Description: body.Description,
 		CreatedDate: p.tc.Now(),
 		APIId:       apiID,
@@ -1061,7 +1060,7 @@ func (p *APIGatewayPlugin) createAuthorizer(ctx *RequestContext, req *AWSRequest
 	}
 
 	auth := AuthorizerState{
-		ID:             generateAPIGatewayID(),
+		ID:             generateAPIGatewayID(ctx.IDs),
 		Name:           body.Name,
 		Type:           body.Type,
 		ProviderARNs:   body.ProviderARNs,
@@ -1282,7 +1281,7 @@ func (p *APIGatewayPlugin) createUsagePlan(ctx *RequestContext, req *AWSRequest)
 	}
 
 	plan := UsagePlanState{
-		ID:          generateAPIGatewayID(),
+		ID:          generateAPIGatewayID(ctx.IDs),
 		Name:        body.Name,
 		Description: body.Description,
 		Tags:        body.Tags,
@@ -1498,18 +1497,21 @@ func (p *APIGatewayPlugin) getBasePathMappings(ctx *RequestContext, req *AWSRequ
 
 // --- ID generation -----------------------------------------------------------
 
-// generateAPIGatewayID generates a 10-character lowercase alphanumeric ID
-// suitable for use as an API Gateway resource identifier.
-func generateAPIGatewayID() string {
-	b := make([]byte, 5)
-	_, _ = rand.Read(b)
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	out := make([]byte, 10)
-	for i, by := range b {
-		out[i*2] = chars[by>>4%36]
-		out[i*2+1] = chars[by&0xf%36]
-	}
-	return string(out)
+// apigwIDAlphabet is the alphabet API Gateway publishes its 10-character identifiers in —
+// an API id, a resource id, a deployment id, an authorizer id and a usage-plan id are all
+// drawn from it.
+const apigwIDAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// generateAPIGatewayID mints a 10-character lowercase alphanumeric ID from m, suitable for
+// use as an API Gateway (v1 or v2) resource identifier.
+//
+// The derived form draws from the whole alphabet, which the crypto/rand form it replaces did
+// not: that one read five bytes and mapped each *nibble* through the 36-character alphabet,
+// so only its first sixteen characters — `a` through `p` — could ever appear and a digit
+// never did. Widening it moves the identifier toward what the service publishes rather than
+// away from it, so the rendering change is a fix and not a cost of #856.
+func generateAPIGatewayID(m *IDMint) string {
+	return m.Chars(10, apigwIDAlphabet)
 }
 
 // --- Response helper ---------------------------------------------------------

@@ -95,7 +95,7 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	}
 
 	isPrivate := strings.EqualFold(xmlReq.Config.PrivateZone, "true")
-	suffix := generateHostedZoneID()
+	suffix := generateHostedZoneID(reqCtx.IDs)
 	zoneID := "Z" + suffix
 	fullID := "/hostedzone/" + zoneID
 
@@ -118,7 +118,7 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	}
 
 	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(),
+		ID:          generateChangeID(reqCtx.IDs),
 		Status:      "INSYNC",
 		SubmittedAt: p.now().UTC(),
 	}
@@ -280,7 +280,7 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 	p.removeFromList(reqCtx.AccountID, "hostedzone_ids", id)
 
 	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(),
+		ID:          generateChangeID(reqCtx.IDs),
 		Status:      "INSYNC",
 		SubmittedAt: p.now().UTC(),
 	}
@@ -306,7 +306,7 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 
 // --- Resource Record Set operations ---
 
-func (p *Route53Plugin) changeResourceRecordSets(_ *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
+func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
 
 	// Parse the XML change batch.
@@ -380,7 +380,7 @@ func (p *Route53Plugin) changeResourceRecordSets(_ *RequestContext, req *AWSRequ
 	}
 
 	changeInfo := Route53ChangeInfo{
-		ID:          generateChangeID(),
+		ID:          generateChangeID(reqCtx.IDs),
 		Status:      "INSYNC",
 		SubmittedAt: p.now().UTC(),
 		Comment:     xmlReq.ChangeBatch.Comment,
