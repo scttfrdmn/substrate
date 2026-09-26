@@ -169,7 +169,7 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 
 	now := p.tc.Now()
 	arn := generateSecretARN(ctx.Region, ctx.AccountID, input.Name)
-	versionID := generateVersionID()
+	versionID := generateVersionID(ctx.IDs)
 
 	secret := &SecretState{
 		ARN:              arn,
@@ -300,7 +300,7 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
 
-	versionID := generateVersionID()
+	versionID := generateVersionID(ctx.IDs)
 	value := input.SecretString
 	if value == "" {
 		value = input.SecretBinary
@@ -476,7 +476,7 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 		value = input.SecretBinary
 	}
 	if value != "" {
-		versionID = generateVersionID()
+		versionID = generateVersionID(ctx.IDs)
 		if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID), []byte(value)); err != nil {
 			return nil, fmt.Errorf("sm updateSecret store value: %w", err)
 		}

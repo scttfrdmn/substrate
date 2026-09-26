@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -91,10 +90,7 @@ func (p *ACMPlugin) requestCertificate(ctx *RequestContext, req *AWSRequest) (*A
 		keyAlgo = "RSA_2048"
 	}
 
-	certID, err := generateACMCertID()
-	if err != nil {
-		return nil, fmt.Errorf("acm requestCertificate generateACMCertID: %w", err)
-	}
+	certID := generateACMCertID(ctx.IDs)
 	certArn := fmt.Sprintf("arn:aws:acm:%s:%s:certificate/%s", ctx.Region, ctx.AccountID, certID)
 
 	tags := make(map[string]string, len(body.Tags))
@@ -405,14 +401,20 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 	return acmJSONResponse(http.StatusOK, response{Tags: tags})
 }
 
-// generateACMCertID generates a UUID-like string for an ACM certificate ID
-// using cryptographically random bytes.
-func generateACMCertID() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("generateACMCertID rand.Read: %w", err)
-	}
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16]), nil
+// generateACMCertID mints an ACM certificate ID from m, in the UUID shape API_RequestCertificate
+// writes into the ARN form it documents:
+// `arn:aws:acm:us-east-1:123456789012:certificate/12345678-1234-1234-1234-123456789012`.
+//
+// [IDMint.HexUUID] rather than [IDMint.UUID]: the crypto/rand form reshaped sixteen raw bytes
+// without setting the RFC 4122 version and variant nibbles, and #856 does not change which bytes a
+// caller sees. `CertificateArn`'s published pattern ends `[\w+=,.@-]+(/[\w+=,.@-]+)*`, which admits
+// either rendering, so nothing in the API model distinguishes them (#671).
+//
+// It no longer returns an error. The mint cannot fail where rand.Read could, so the caller's error
+// branch went with it — and it no longer serves API Gateway's API keys either, which drew from it
+// before [generateAPIGatewayAPIKey] existed.
+func generateACMCertID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // acmJSONResponse marshals v as JSON and returns an AWSResponse with

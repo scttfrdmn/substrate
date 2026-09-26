@@ -1069,3 +1069,416 @@ func idsECRCall(t *testing.T, ts *emulator.TestServer, op string, body any) []by
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", op, out)
 	return out
 }
+
+// Tier 4 of #856: the identity, keys and certificates family — Cognito (both APIs), IAM Identity
+// Center, KMS, ACM, Secrets Manager, WAFv2 and API Gateway's API keys.
+//
+// What this tier adds to the property the tiers above assert is the kind of value being derived.
+// These services mint things a caller *authenticates or decrypts or locks with* and not only things
+// it addresses a resource by: a Cognito client secret, a KMS data key, a WAFv2 lock token, a secret
+// version id. ids.go's file comment argues why those belong in the mint, and the stream below is the
+// assertion that a recorded one replays as itself.
+
+// TestIDs_OneCreateUserPoolClientMintsAClientIDAndASecret is the ordinal's test for this tier, on
+// the one request in the tree that draws three times: the client id, and the two halves a client
+// secret is concatenated from.
+//
+// A mint that ignored its ordinal would answer one value three times over, so a client id would be
+// the first half of its own secret — and the secret would be that half twice.
+func TestIDs_OneCreateUserPoolClientMintsAClientIDAndASecret(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	poolID := idsCognitoUserPool(t, ts, "ids-tier4")
+
+	var created struct {
+		Client struct {
+			ClientID     string `json:"ClientId"`
+			ClientSecret string `json:"ClientSecret"`
+		} `json:"UserPoolClient"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIDPHost,
+		"AWSCognitoIdentityProviderService.CreateUserPoolClient", map[string]any{
+			"UserPoolId": poolID, "ClientName": "ids-tier4", "GenerateSecret": true,
+		}), &created))
+
+	id, secret := created.Client.ClientID, created.Client.ClientSecret
+	require.Len(t, id, 12, "a Cognito client id is twelve characters")
+	require.Len(t, secret, 24,
+		"and a client secret is two of them, which is exactly the published 24-character minimum")
+
+	assert.NotEqual(t, id, secret[:12], "a client id is not the first half of its own secret")
+	assert.NotEqual(t, secret[:12], secret[12:], "and a secret's two halves are two draws")
+}
+
+// TestReplay_TheIdentityAndKeyFamiliesReplayWithTheIdentifiersTheyMinted is the wire-level
+// assertion for tier 4, and the same claim the three tiers above make for their families: a stream
+// whose later requests *name* what its earlier ones minted replays with no differences and reaches
+// the recorded state.
+//
+// Every service contributes a create followed by at least one request that can only succeed against
+// what that create minted — a user pool client on a pool id, a sign-up on a client id, credentials
+// on an identity id, a permission set on a lazily-minted instance ARN, a Decrypt of a data key's
+// ciphertext, tags on a certificate ARN, a GetSecretValue naming a version id, an UpdateWebACL
+// holding a lock token, and a GetApiKey naming a key id. A re-minted value breaks one of those
+// rather than merely rewording it: a refusal (WAFOptimisticLockException for the ACL, a not-found
+// for most), or — see [idsRecordSecretsManager] — a 200 that has quietly lost a member.
+func TestReplay_TheIdentityAndKeyFamiliesReplayWithTheIdentifiersTheyMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordIdentityAndKeyCreates(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the creates")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"an identity, key or certificate identifier replays as the one recorded: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordIdentityAndKeyCreates records the tier-4 stream, one interlocked group per service.
+func idsRecordIdentityAndKeyCreates(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: a replay pins the clock to the
+	// recorded event's timestamp, so a handler stamping a record off a live clock diverges in the
+	// state hash for a reason that has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	idsRecordCognitoIDP(t, ts)
+	idsRecordCognitoIdentity(t, ts)
+	idsRecordSSO(t, ts)
+	idsRecordKMS(t, ts)
+	idsRecordACM(t, ts)
+	idsRecordSecretsManager(t, ts)
+	idsRecordWAFv2(t, ts)
+	idsRecordAPIGatewayAPIKey(t, ts)
+}
+
+// idsRecordCognitoIDP records a user pool, a client with a secret on it, a sign-up against that
+// client id, and two reads naming what was minted.
+func idsRecordCognitoIDP(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	poolID := idsCognitoUserPool(t, ts, "ids-tier4-pool")
+
+	var created struct {
+		Client struct {
+			ClientID     string `json:"ClientId"`
+			ClientSecret string `json:"ClientSecret"`
+		} `json:"UserPoolClient"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIDPHost,
+		"AWSCognitoIdentityProviderService.CreateUserPoolClient", map[string]any{
+			"UserPoolId": poolID, "ClientName": "ids-tier4", "GenerateSecret": true,
+		}), &created))
+	clientID := created.Client.ClientID
+	require.NotEmpty(t, clientID)
+	require.NotEmpty(t, created.Client.ClientSecret)
+
+	// SignUp is addressed by the client id alone — the handler finds the pool through it — and
+	// mints the user's `sub`, so it is both a read of one minted value and a draw of another.
+	idsJSONTargetCall(t, ts, idsCognitoIDPHost, "AWSCognitoIdentityProviderService.SignUp",
+		map[string]any{"ClientId": clientID, "Username": "ids-user", "Password": "Passw0rd!"})
+
+	idsJSONTargetCall(t, ts, idsCognitoIDPHost,
+		"AWSCognitoIdentityProviderService.DescribeUserPoolClient",
+		map[string]any{"UserPoolId": poolID, "ClientId": clientID})
+	idsJSONTargetCall(t, ts, idsCognitoIDPHost,
+		"AWSCognitoIdentityProviderService.AdminGetUser",
+		map[string]any{"UserPoolId": poolID, "Username": "ids-user"})
+}
+
+// idsCognitoUserPool creates one user pool and returns the `{region}_{12 chars}` id it minted.
+//
+// The member is read as `UserPoolId` and not as the `Id` that API_UserPoolType publishes, which is
+// substrate's own wire shape rather than AWS's — a fidelity gap this tier found and #1286 tracks.
+// Reading the member substrate actually sends is what keeps this a test about the mint.
+func idsCognitoUserPool(t *testing.T, ts *emulator.TestServer, name string) string {
+	t.Helper()
+
+	var created struct {
+		Pool struct {
+			ID string `json:"UserPoolId"`
+		} `json:"UserPool"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIDPHost,
+		"AWSCognitoIdentityProviderService.CreateUserPool",
+		map[string]any{"PoolName": name}), &created))
+
+	region, suffix, ok := strings.Cut(created.Pool.ID, "_")
+	require.True(t, ok, "a user pool id is {region}_{suffix}, got %q", created.Pool.ID)
+	require.NotEmpty(t, region)
+	require.Len(t, suffix, 12, "the minted half of a user pool id is twelve characters")
+	return created.Pool.ID
+}
+
+// idsRecordCognitoIdentity records an identity pool, a read of it, and a GetId followed by
+// credentials for the identity id that GetId minted.
+func idsRecordCognitoIdentity(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var pool struct {
+		IdentityPoolID string `json:"IdentityPoolId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIdentityHost,
+		"AWSCognitoIdentityService.CreateIdentityPool", map[string]any{
+			"IdentityPoolName": "ids-tier4", "AllowUnauthenticatedIdentities": true,
+		}), &pool))
+	require.NotEmpty(t, pool.IdentityPoolID)
+
+	idsJSONTargetCall(t, ts, idsCognitoIdentityHost,
+		"AWSCognitoIdentityService.DescribeIdentityPool",
+		map[string]any{"IdentityPoolId": pool.IdentityPoolID})
+
+	var got struct {
+		IdentityID string `json:"IdentityId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIdentityHost,
+		"AWSCognitoIdentityService.GetId",
+		map[string]any{"IdentityPoolId": pool.IdentityPoolID}), &got))
+	require.NotEmpty(t, got.IdentityID)
+
+	idsJSONTargetCall(t, ts, idsCognitoIdentityHost,
+		"AWSCognitoIdentityService.GetCredentialsForIdentity",
+		map[string]any{"IdentityId": got.IdentityID})
+}
+
+// idsRecordSSO records the lazily-minted instance, a permission set under it, an account assignment
+// naming that permission set, and a listing naming both.
+//
+// ListInstances is the request that *creates* the instance, which is the laziness sso_types.go's
+// preamble records: the instance ARN and its identity store id belong to the ordinal stream of a
+// read.
+func idsRecordSSO(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var instances struct {
+		Instances []struct {
+			InstanceArn     string `json:"InstanceArn"`
+			IdentityStoreID string `json:"IdentityStoreId"`
+		} `json:"Instances"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsSSOHost,
+		"SWBExternalService.ListInstances", map[string]any{}), &instances))
+	require.Len(t, instances.Instances, 1)
+	instanceArn := instances.Instances[0].InstanceArn
+	require.NotEmpty(t, instanceArn)
+	require.NotEmpty(t, instances.Instances[0].IdentityStoreID)
+
+	var permSet struct {
+		PermissionSet struct {
+			PermissionSetArn string `json:"PermissionSetArn"`
+		} `json:"PermissionSet"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsSSOHost,
+		"SWBExternalService.CreatePermissionSet", map[string]any{
+			"InstanceArn": instanceArn, "Name": "ids-tier4",
+		}), &permSet))
+	permSetArn := permSet.PermissionSet.PermissionSetArn
+	require.NotEmpty(t, permSetArn)
+	require.Contains(t, permSetArn, instanceArn,
+		"a permission set ARN is a child of the instance ARN, so one mint carries the other")
+
+	idsJSONTargetCall(t, ts, idsSSOHost, "SWBExternalService.DescribePermissionSet",
+		map[string]any{"InstanceArn": instanceArn, "PermissionSetArn": permSetArn})
+	idsJSONTargetCall(t, ts, idsSSOHost, "SWBExternalService.CreateAccountAssignment",
+		map[string]any{
+			"InstanceArn": instanceArn, "PermissionSetArn": permSetArn,
+			"TargetId": "123456789012", "TargetType": "AWS_ACCOUNT",
+			"PrincipalType": "USER", "PrincipalId": "ids-principal",
+		})
+	idsJSONTargetCall(t, ts, idsSSOHost, "SWBExternalService.ListAccountAssignments",
+		map[string]any{
+			"InstanceArn": instanceArn, "PermissionSetArn": permSetArn,
+			"AccountId": "123456789012",
+		})
+}
+
+// idsRecordKMS records a key, a data key wrapped by it, and a Decrypt of the ciphertext that
+// GenerateDataKey answered with.
+//
+// The data key is the one value in this tier that is not an identifier: it is reported as the
+// response's Plaintext and wrapped into its CiphertextBlob, so a re-minted key changes both members
+// of the recorded response. [kmsStubDataKey]'s comment records why that puts it in #856's scope.
+func idsRecordKMS(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var key struct {
+		Metadata struct {
+			KeyID string `json:"KeyId"`
+		} `json:"KeyMetadata"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsKMSHost,
+		"TrentService.CreateKey", map[string]any{"Description": "ids-tier4"}), &key))
+	keyID := key.Metadata.KeyID
+	require.NotEmpty(t, keyID)
+
+	var dataKey struct {
+		CiphertextBlob string `json:"CiphertextBlob"`
+		Plaintext      string `json:"Plaintext"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsKMSHost,
+		"TrentService.GenerateDataKey",
+		map[string]any{"KeyId": keyID, "KeySpec": "AES_256"}), &dataKey))
+	require.NotEmpty(t, dataKey.CiphertextBlob)
+	require.NotEmpty(t, dataKey.Plaintext)
+
+	idsJSONTargetCall(t, ts, idsKMSHost, "TrentService.Decrypt",
+		map[string]any{"CiphertextBlob": dataKey.CiphertextBlob})
+	idsJSONTargetCall(t, ts, idsKMSHost, "TrentService.DescribeKey",
+		map[string]any{"KeyId": keyID})
+}
+
+// idsRecordACM records a certificate and two requests naming the ARN its id was minted into.
+func idsRecordACM(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var cert struct {
+		CertificateArn string `json:"CertificateArn"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsACMHost,
+		"CertificateManager.RequestCertificate",
+		map[string]any{"DomainName": "ids-tier4.example.com"}), &cert))
+	require.NotEmpty(t, cert.CertificateArn)
+
+	idsJSONTargetCall(t, ts, idsACMHost, "CertificateManager.AddTagsToCertificate",
+		map[string]any{
+			"CertificateArn": cert.CertificateArn,
+			"Tags":           []map[string]string{{"Key": "tier", "Value": "4"}},
+		})
+	idsJSONTargetCall(t, ts, idsACMHost, "CertificateManager.DescribeCertificate",
+		map[string]any{"CertificateArn": cert.CertificateArn})
+}
+
+// idsRecordSecretsManager records a secret, a second version of it, and a GetSecretValue naming the
+// version id the create minted.
+//
+// That last request is the quietest interlock in the tier: a re-minted version id does not make it
+// fail, it makes it answer 200 with no `SecretString` at all, because substrate reports an unknown
+// version by omitting the member. Reverting the minter turns the recorded `"first"` into `""`.
+func idsRecordSecretsManager(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var created struct {
+		ARN       string `json:"ARN"`
+		VersionID string `json:"VersionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsSecretsManagerHost,
+		"secretsmanager.CreateSecret",
+		map[string]any{"Name": "ids-tier4", "SecretString": "first"}), &created))
+	require.NotEmpty(t, created.ARN)
+	require.Len(t, created.VersionID, 16,
+		"a version id is sixteen uppercase hex characters until #1285 widens it")
+
+	var put struct {
+		VersionID string `json:"VersionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsSecretsManagerHost,
+		"secretsmanager.PutSecretValue",
+		map[string]any{"SecretId": "ids-tier4", "SecretString": "second"}), &put))
+	require.NotEqual(t, created.VersionID, put.VersionID,
+		"two versions of one secret are two draws")
+
+	idsJSONTargetCall(t, ts, idsSecretsManagerHost, "secretsmanager.GetSecretValue",
+		map[string]any{"SecretId": "ids-tier4", "VersionId": created.VersionID})
+	idsJSONTargetCall(t, ts, idsSecretsManagerHost, "secretsmanager.ListSecretVersionIds",
+		map[string]any{"SecretId": "ids-tier4"})
+}
+
+// idsRecordWAFv2 records a web ACL and an update holding the lock token the create answered with,
+// which is the tier's one interlock that fails as WAFOptimisticLockException rather than as a
+// not-found.
+func idsRecordWAFv2(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var created struct {
+		Summary struct {
+			ID        string `json:"Id"`
+			LockToken string `json:"LockToken"`
+		} `json:"Summary"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsWAFv2Host,
+		"AWSWAF_20190729.CreateWebACL", map[string]any{
+			"Name": "ids-tier4", "Scope": "REGIONAL",
+			"DefaultAction": map[string]any{"Allow": map[string]any{}},
+		}), &created))
+	id, lockToken := created.Summary.ID, created.Summary.LockToken
+	require.NotEmpty(t, id)
+	require.NotEmpty(t, lockToken)
+	require.NotEqual(t, id, lockToken, "an ACL's id and its first lock token are two draws")
+
+	idsJSONTargetCall(t, ts, idsWAFv2Host, "AWSWAF_20190729.UpdateWebACL", map[string]any{
+		"Name": "ids-tier4", "Scope": "REGIONAL", "Id": id, "LockToken": lockToken,
+		"Description": "updated under the recorded lock token",
+	})
+	idsJSONTargetCall(t, ts, idsWAFv2Host, "AWSWAF_20190729.GetWebACL",
+		map[string]any{"Name": "ids-tier4", "Scope": "REGIONAL", "Id": id})
+}
+
+// idsRecordAPIGatewayAPIKey records an API key and a read naming its id.
+//
+// The key is path-routed rather than target-routed, and it is in this tier rather than tier 3
+// because its two values came from ACM's certificate-ID generator until [generateAPIGatewayAPIKey]
+// existed — one service minting another's identifiers.
+func idsRecordAPIGatewayAPIKey(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	var key struct {
+		ID    string `json:"id"`
+		Value string `json:"value"`
+	}
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodPost,
+		"/apikeys", map[string]any{"name": "ids-tier4", "enabled": true}), &key))
+	require.NotEmpty(t, key.ID)
+	require.NotEmpty(t, key.Value)
+	require.NotEqual(t, key.ID, key.Value,
+		"one CreateApiKey draws the key's id and its value separately")
+
+	idsRESTCall(t, ts, idsAPIGatewayHost, http.MethodGet, "/apikeys/"+key.ID, nil)
+}
+
+// The hosts the tier-4 services are addressed at.
+const (
+	idsCognitoIDPHost      = "cognito-idp.us-east-1.amazonaws.com"
+	idsCognitoIdentityHost = "cognito-identity.us-east-1.amazonaws.com"
+	idsSSOHost             = "sso.us-east-1.amazonaws.com"
+	idsKMSHost             = "kms.us-east-1.amazonaws.com"
+	idsACMHost             = "acm.us-east-1.amazonaws.com"
+	idsSecretsManagerHost  = "secretsmanager.us-east-1.amazonaws.com"
+	idsWAFv2Host           = "wafv2.us-east-1.amazonaws.com"
+)
+
+// idsJSONTargetCall issues one JSON-1.1 request routed by X-Amz-Target and requires a 2xx. target
+// is the whole header value, prefix included, because the seven services in this tier publish seven
+// different prefixes.
+func idsJSONTargetCall(t *testing.T, ts *emulator.TestServer, host, target string, body any) []byte {
+	t.Helper()
+
+	raw, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/",
+		strings.NewReader(string(raw)))
+	require.NoError(t, err)
+	req.Host = host
+	req.Header.Set("Content-Type", "application/x-amz-json-1.1")
+	req.Header.Set("X-Amz-Target", target)
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Less(t, resp.StatusCode, 300, "%s %s: %s", host, target, out)
+	return out
+}

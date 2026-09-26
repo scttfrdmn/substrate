@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -119,17 +117,20 @@ func wafv2ARN(region, accountID, scope, resourceType, name, id string) string {
 		region, accountID, strings.ToLower(scope), resourceType, name, id)
 }
 
-// generateWAFv2Token returns a new random UUID string for use as a LockToken or ID.
-func generateWAFv2Token() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateWAFv2Token mints a UUID-shaped string from m, for use as a web ACL or IP set `Id` or as a
+// `LockToken`.
+//
+// API_WebACLSummary publishes the identical constraint on both members — 1–36 characters matching
+// `^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$` — which is why one minter serves both and why the
+// rendering is lowercase hex in the 8-4-4-4-12 grouping. The pattern is indifferent to the RFC 4122
+// version and variant nibbles, and [IDMint.UUID] sets them exactly as the crypto/rand form did, so
+// a token this mints is the shape a previous substrate recorded.
+//
+// The optimistic-locking contract is what makes deriving this worth more here than elsewhere: a
+// caller must hand a `LockToken` back to `UpdateWebACL`, so a replay that re-minted the token would
+// answer the recorded update with WAFOptimisticLockException rather than the recorded success.
+func generateWAFv2Token(m *IDMint) string {
+	return m.UUID()
 }
 
 func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -153,8 +154,8 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 
-	id := generateWAFv2Token()
-	lockToken := generateWAFv2Token()
+	id := generateWAFv2Token(reqCtx.IDs)
+	lockToken := generateWAFv2Token(reqCtx.IDs)
 	arn := wafv2ARN(reqCtx.Region, reqCtx.AccountID, input.Scope, "webacl", input.Name, id)
 
 	acl := WAFv2WebACL{
@@ -284,7 +285,7 @@ func (p *WAFv2Plugin) updateWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 		acl.VisibilityConfig = input.VisibilityConfig
 	}
 	// Regenerate lock token.
-	newToken := generateWAFv2Token()
+	newToken := generateWAFv2Token(reqCtx.IDs)
 	acl.LockToken = newToken
 
 	data, err := json.Marshal(acl)
@@ -483,8 +484,8 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
-	id := generateWAFv2Token()
-	lockToken := generateWAFv2Token()
+	id := generateWAFv2Token(reqCtx.IDs)
+	lockToken := generateWAFv2Token(reqCtx.IDs)
 	arn := wafv2ARN(reqCtx.Region, reqCtx.AccountID, input.Scope, "ipset", input.Name, id)
 
 	ipset := WAFv2IPSet{
@@ -578,7 +579,7 @@ func (p *WAFv2Plugin) updateIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if input.Addresses != nil {
 		ipset.Addresses = input.Addresses
 	}
-	newToken := generateWAFv2Token()
+	newToken := generateWAFv2Token(reqCtx.IDs)
 	ipset.LockToken = newToken
 
 	data, err := json.Marshal(ipset)

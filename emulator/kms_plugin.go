@@ -364,7 +364,7 @@ func (p *KMSPlugin) createKey(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		}
 	}
 
-	keyID := generateKMSKeyID()
+	keyID := generateKMSKeyID(ctx.IDs)
 	arn := kmsKeyARN(ctx.Region, ctx.AccountID, keyID)
 	key := &KMSKey{
 		KeyID:       keyID,
@@ -1791,7 +1791,7 @@ func (p *KMSPlugin) generateDataKey(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	// Generate a stub 32-byte data key.
-	dataKeyHex := randomHex(16)
+	dataKeyHex := kmsStubDataKey(ctx.IDs)
 	plaintextB64 := base64.StdEncoding.EncodeToString([]byte(dataKeyHex))
 	ciphertext := kmsEncryptStub(key, kmsSymmetricDefaultAlgorithm, input.EncryptionContext, []byte(dataKeyHex))
 
@@ -1860,7 +1860,7 @@ func (p *KMSPlugin) generateDataKeyWithoutPlaintext(ctx *RequestContext, req *AW
 		return nil, stateErr
 	}
 
-	dataKeyHex := randomHex(16)
+	dataKeyHex := kmsStubDataKey(ctx.IDs)
 	ciphertext := kmsEncryptStub(key, kmsSymmetricDefaultAlgorithm, input.EncryptionContext, []byte(dataKeyHex))
 
 	out := map[string]interface{}{

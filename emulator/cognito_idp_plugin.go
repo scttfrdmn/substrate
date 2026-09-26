@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -132,7 +131,7 @@ func (p *CognitoIDPPlugin) createUserPool(ctx *RequestContext, req *AWSRequest) 
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "PoolName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	poolID := ctx.Region + "_" + generateCognitoID()
+	poolID := ctx.Region + "_" + generateCognitoID(ctx.IDs)
 	arn := fmt.Sprintf("arn:aws:cognito-idp:%s:%s:userpool/%s", ctx.Region, ctx.AccountID, poolID)
 	providerName := fmt.Sprintf("cognito-idp.%s.amazonaws.com/%s", ctx.Region, poolID)
 
@@ -362,10 +361,10 @@ func (p *CognitoIDPPlugin) createUserPoolClient(ctx *RequestContext, req *AWSReq
 		return nil, err
 	}
 
-	clientID := generateCognitoID()
+	clientID := generateCognitoID(ctx.IDs)
 	var secret string
 	if body.GenerateSecret {
-		secret = generateCognitoID() + generateCognitoID()
+		secret = generateCognitoID(ctx.IDs) + generateCognitoID(ctx.IDs)
 	}
 
 	now := p.tc.Now()
@@ -1023,7 +1022,7 @@ func (p *CognitoIDPPlugin) signUp(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + body.ClientID, HTTPStatus: http.StatusNotFound}
 	}
 
-	userSub := generateCognitoID()
+	userSub := generateCognitoID(ctx.IDs)
 	now := p.tc.Now()
 	attrs := body.UserAttributes
 	attrs = append(attrs, CognitoAttribute{Name: "sub", Value: userSub})
@@ -1223,17 +1222,24 @@ func (p *CognitoIDPPlugin) loadUser(ctx *RequestContext, poolID, username string
 	return &user, nil
 }
 
-// generateCognitoID generates a 12-character uppercase alphanumeric ID using
-// crypto/rand for use as Cognito pool IDs, client IDs, and user sub values.
-func generateCognitoID() string {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 12)
-	_, _ = rand.Read(b)
-	out := make([]byte, 12)
-	for i, ch := range b {
-		out[i] = chars[int(ch)%len(chars)]
-	}
-	return string(out)
+// cognitoIDAlphabet is the alphabet substrate draws its 12-character Cognito identifiers from.
+//
+// The uppercase-alphanumeric choice is substrate's, and it satisfies every constraint AWS
+// publishes for the three members it renders: API_UserPoolType's `Id` is 1–55 characters matching
+// `[\w-]+_[0-9a-zA-Z]+`, which `{region}_{12 chars}` meets; API_UserPoolClientType's `ClientId` is
+// 1–128 matching `[\w+]+`; and its `ClientSecret` is **24–64** matching the same pattern, which is
+// why a secret is two of these concatenated and exactly reaches the published minimum. Nothing here
+// is a shape #856 needs to revisit, so it does not.
+const cognitoIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// generateCognitoID mints a 12-character uppercase alphanumeric ID from m, for use as the suffix
+// of a user pool ID, as a client ID, or as a user's `sub`.
+//
+// The mapping is one byte per character through [cognitoIDAlphabet], which is byte-for-byte what
+// the crypto/rand form did, so an ID a previous substrate recorded is still the shape this one
+// mints. A client *secret* is two of these concatenated, which is the one caller that draws twice.
+func generateCognitoID(m *IDMint) string {
+	return m.Chars(12, cognitoIDAlphabet)
 }
 
 // cognitoIDPJSONResponse serializes v as JSON and returns an AWSResponse with the

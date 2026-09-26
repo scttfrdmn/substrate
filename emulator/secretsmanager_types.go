@@ -122,7 +122,21 @@ func generateSecretARN(region, accountID, name string) string {
 	return fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s", region, accountID, name)
 }
 
-// generateVersionID returns a new uppercase hex version ID.
-func generateVersionID() string {
-	return strings.ToUpper(randomHex(8))
+// generateVersionID mints a secret version ID from m — sixteen uppercase hex characters, which is
+// byte-for-byte the width and case the crypto/rand form produced, so a version ID a previous
+// substrate recorded is still the shape this one mints.
+//
+// Deriving it matters more than a bare identifier would, because a version ID is a *key*: a caller
+// reads a specific version back through `GetSecretValue`'s `VersionId`. A replay that re-minted one
+// answers that recorded read with no `SecretString` at all — substrate reports an unknown version by
+// omitting the member rather than by refusing — which is the quietest way an identifier can break a
+// replay and the reason the tier-4 stream in ids_test.go records exactly that pair.
+//
+// TODO(#1285): the width is short of what AWS publishes, and the caller's own `ClientRequestToken`
+// is ignored. API_PutSecretValue gives `VersionId` a length of 32–64 and states that the request's
+// `ClientRequestToken` — itself 32–64 — "becomes the VersionId of the new version". Substrate emits
+// sixteen characters and mints its own regardless. Both are fidelity gaps rather than derivation
+// ones, so #856 preserves the shape and #1285 changes it.
+func generateVersionID(m *IDMint) string {
+	return strings.ToUpper(m.Hex(8))
 }

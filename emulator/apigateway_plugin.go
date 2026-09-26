@@ -1162,14 +1162,8 @@ func (p *APIGatewayPlugin) createAPIKey(ctx *RequestContext, req *AWSRequest) (*
 		}
 	}
 
-	keyID, err := generateACMCertID()
-	if err != nil {
-		return nil, fmt.Errorf("apigateway createApiKey generateID: %w", err)
-	}
-	keyValue, err := generateACMCertID()
-	if err != nil {
-		return nil, fmt.Errorf("apigateway createApiKey generateValue: %w", err)
-	}
+	keyID := generateAPIGatewayAPIKey(ctx.IDs)
+	keyValue := generateAPIGatewayAPIKey(ctx.IDs)
 
 	key := APIKeyState{
 		ID:          keyID,
@@ -1512,6 +1506,20 @@ const apigwIDAlphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
 // away from it, so the rendering change is a fix and not a cost of #856.
 func generateAPIGatewayID(m *IDMint) string {
 	return m.Chars(10, apigwIDAlphabet)
+}
+
+// generateAPIGatewayAPIKey mints one of the two UUID-shaped strings a `CreateApiKey` response
+// carries — the key's `id` and its `value` — each drawn from m in turn, so the two differ.
+//
+// It replaces a call into ACM's certificate-ID generator, which is where `createAPIKey` used to
+// reach for a UUID; one service minting another's identifiers meant a change to ACM's rendering
+// silently moved API Gateway's, and #856 splits them.
+//
+// The rendering is [IDMint.HexUUID]'s, unchanged from the crypto/rand form, and nothing in the API
+// model asks otherwise: API_ApiKey publishes **no** length constraint and **no** pattern on either
+// `id` or `value`, so the shape is substrate's to keep rather than #856's to revisit (#671).
+func generateAPIGatewayAPIKey(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // --- Response helper ---------------------------------------------------------

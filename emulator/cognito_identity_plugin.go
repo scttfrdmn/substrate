@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -84,7 +82,7 @@ func (p *CognitoIdentityPlugin) createIdentityPool(ctx *RequestContext, req *AWS
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "IdentityPoolName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	poolID := generateIdentityPoolID(ctx.Region)
+	poolID := generateIdentityPoolID(ctx.IDs, ctx.Region)
 	now := p.tc.Now()
 	pool := CognitoIdentityPool{
 		IdentityPoolID:                 poolID,
@@ -224,7 +222,7 @@ func (p *CognitoIdentityPlugin) listIdentityPools(ctx *RequestContext, req *AWSR
 // --- Identity operations -----------------------------------------------------
 
 func (p *CognitoIdentityPlugin) getID(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	identityID := generateIdentityPoolID(ctx.Region)
+	identityID := generateIdentityPoolID(ctx.IDs, ctx.Region)
 	type response struct {
 		IdentityID string `json:"IdentityId"`
 	}
@@ -242,7 +240,7 @@ func (p *CognitoIdentityPlugin) getCredentialsForIdentity(ctx *RequestContext, r
 	}
 	identityID := body.IdentityID
 	if identityID == "" {
-		identityID = generateIdentityPoolID(ctx.Region)
+		identityID = generateIdentityPoolID(ctx.IDs, ctx.Region)
 	}
 
 	expiration := p.tc.Now().Add(time.Hour)
@@ -345,25 +343,17 @@ func (p *CognitoIdentityPlugin) loadIdentityPool(ctx *RequestContext, poolID str
 	return &pool, nil
 }
 
-// generateIdentityPoolID returns a Cognito Identity Pool ID of the form
-// {region}:{xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx} using crypto/rand.
-func generateIdentityPoolID(region string) string {
-	return region + ":" + generateIdentityUUID()
-}
-
-// generateIdentityUUID generates a lowercase hex UUID in the standard
-// xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx format using crypto/rand.
-func generateIdentityUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	// Set version 4 and variant bits.
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateIdentityPoolID mints a Cognito identity pool ID from m, in the form
+// API_CreateIdentityPool publishes for its `IdentityPoolId` response element: "an identity pool ID
+// in the format REGION:GUID", 1–55 characters matching `[\w-]+:[0-9a-f-]+`. The pattern's `[0-9a-f]`
+// is why the GUID half is lowercase hex and not the uppercase the IDP plugin's IDs use.
+//
+// [IDMint.UUID] rather than [IDMint.HexUUID], because the generator this replaces set the RFC 4122
+// version and variant bits itself, and UUID is the method that sets them; the rendering is
+// unchanged. The same minter serves `GetId`'s identity IDs, which the same page publishes in the
+// same form.
+func generateIdentityPoolID(m *IDMint, region string) string {
+	return region + ":" + m.UUID()
 }
 
 // cognitoIdentityJSONResponse serializes v as JSON and returns an AWSResponse with
