@@ -2209,7 +2209,8 @@ Three kinds of value stay random, and one more is still migrating:
 - EC2, IAM, STS, SQS, SNS, Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge,
   CloudWatch Logs, CloudFront, Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR
   Serverless, ECR, ELB, Route 53, Cognito (both the user-pool and the identity-pool API), IAM
-  Identity Center, KMS, ACM, Secrets Manager and WAFv2 identifiers are derived today. A CloudFront
+  Identity Center, KMS, ACM, Secrets Manager, WAFv2, Athena, Redshift Data, Glue, Timestream,
+  OpenSearch and QuickSight identifiers are derived today. A CloudFront
   distribution, invalidation and origin access control all draw from one generator, so the three
   moved together with the origin access control family (#1277). The remaining services are
   migrating one family at a time, tracked on #856; until a service moves, its identifiers are still
@@ -2245,7 +2246,30 @@ blob either way.)
 **One service used to mint another's identifiers.** An API Gateway API key's `id` and `value` were
 drawn from ACM's certificate-ID generator, which meant a change to ACM's rendering would silently
 move API Gateway's. #856 split them into separate minters; both still render the UUID shape they
-always did, because neither API publishes a pattern that would decide the question (#671).
+always did, because neither API publishes a pattern that would decide the question (#671). The same
+split was needed inside QuickSight, where `CreateDataSet` drew its SPICE **ingestion ID** from the
+generator that mints the `RequestId` every QuickSight response carries: an ingestion ID is a handle —
+a recorded `DescribeIngestion` URL contains it — where a request ID is observed once and never sent
+back, so one function serving both meant a change to how a request ID is rendered would have moved
+the identifier a recorded path depends on.
+
+**The published alphabet decides the rendering, where there is one.** Two identifiers in the
+analytics family are minted from the same sixteen derived bytes and rendered differently, and the
+difference is the API model rather than a preference. Redshift Data documents a statement `Id` as a
+UUID and publishes `[a-z0-9]{8}(-[a-z0-9]{4}){3}-[a-z0-9]{12}`, so the hyphenated form is required;
+Timestream publishes `QueryId` as `[a-zA-Z0-9]+`, which **excludes** the hyphen, so the same bytes are
+rendered as 32 unbroken hex characters. Neither pattern constrains a position, so both are
+indifferent to the RFC 4122 version and variant bits — which is why deriving them preserved the exact
+rendering substrate published before, rather than quietly setting two nibbles (#671).
+
+**One service in the family publishes no AWS pattern at all.** An OpenSearch document `_id` and
+`_scroll_id` come from the domain's own REST API rather than from the `es`/`opensearch` control
+plane, so no AWS reference constrains their shape and substrate's sixteen URL-safe base64 characters
+are a convention rather than a published form — narrower than the 20-character Flake ID real
+OpenSearch generates, and unchanged by #856. Both are values a caller hands back: a generated
+document ID is the path of every later `GET`, `PUT` and `DELETE` of that document, and a scroll
+cursor goes straight back to `_search/scroll`, where a re-minted one answers a recorded continuation
+with `search_context_missing_exception` against a cursor the recording had just opened.
 
 An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
 a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
@@ -17165,7 +17189,7 @@ EFS standard storage: $0.30 per GB-month.
 | GetJob | |
 | DeleteJob | |
 | GetJobs | |
-| StartJobRun | Returns JobRunId |
+| StartJobRun | Returns a `jr_`-prefixed JobRunId — 32 hex characters after the prefix, derived from the request ID (#856). The prefix is the service's own convention, not a published pattern |
 | GetJobRun | Transitions to SUCCEEDED after describe |
 | GetJobRuns | |
 

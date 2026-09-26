@@ -61,7 +61,7 @@ import (
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): 15 draw sites remain on crypto/rand, tiered by service family on the issue.
+// TODO(#856): 11 draw sites remain on crypto/rand, tiered by service family on the issue.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.
@@ -178,6 +178,18 @@ func (m *IDMint) UUID() string {
 // and secret access keys in.
 func (m *IDMint) Base64(n int) string {
 	return base64.StdEncoding.EncodeToString(m.bytes(n))
+}
+
+// Base64URL returns n bytes in unpadded URL-safe base64, the encoding OpenSearch generates a
+// document id in.
+//
+// Separate from [IDMint.Base64] because the two differ in the two characters that matter here: a
+// document id reaches an OpenSearch caller inside a URL path, so `-` and `_` are the alphabet and
+// `+` and `/` are not. Unpadded because a generated id carries no `=`, and at OpenSearch's twelve
+// bytes there would be none to carry — 12 divides by 3 — so the distinction only shows if a later
+// caller asks for a width that does not.
+func (m *IDMint) Base64URL(n int) string {
+	return base64.RawURLEncoding.EncodeToString(m.bytes(n))
 }
 
 // HexUUID returns sixteen bytes in UUID *shape* — 8-4-4-4-12 lowercase hex — without the RFC

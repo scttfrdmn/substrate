@@ -861,7 +861,7 @@ func (p *GluePlugin) startJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	now := p.tc.Now()
-	runID := "jr_" + randomHex(16)
+	runID := glueJobRunID(reqCtx.IDs)
 	run := GlueJobRun{
 		ID:          runID,
 		JobName:     input.JobName,
@@ -1122,6 +1122,22 @@ func (p *GluePlugin) loadGlueTags(goCtx context.Context, ns, key string) (map[st
 		}
 	}
 	return nil, nil
+}
+
+// glueJobRunID mints a job-run ID from m — the `jr_` prefix real Glue uses, followed by 32 lowercase
+// hex characters, which is what [randomHex] produced at the site this replaces.
+//
+// Deriving it is what lets a recorded Glue run be polled: `GetJobRun` and `BatchStopJobRun` address
+// the run by this ID, so a re-minted one answered a recorded poll with EntityNotFoundException against
+// a run the recording had just started — and a consumer's wait-for-SUCCEEDED loop is the whole reason
+// StartJobRun is worth emulating.
+//
+// The prefix is not in the API model. API_StartJobRun publishes `JobRunId` at 1–255 characters against
+// a pattern that admits nearly any text, so the shape is substrate's to keep rather than #856's to
+// revisit (#671); `jr_` is kept because it is what the service's own run IDs look like and what a
+// consumer's log-scraping or ID-shape assertion would have recorded.
+func glueJobRunID(m *IDMint) string {
+	return "jr_" + m.Hex(16)
 }
 
 // glueJSONResponse serializes v to JSON and returns an AWSResponse.

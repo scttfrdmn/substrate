@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -154,7 +153,7 @@ func (p *AthenaPlugin) startQueryExecution(ctx *RequestContext, req *AWSRequest)
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	qID := generateAthenaQueryID()
+	qID := generateAthenaQueryID(ctx.IDs)
 	now := float64(p.tc.Now().UnixNano()) / 1e9
 	outputLoc := ""
 	if body.ResultConfiguration != nil {
@@ -688,11 +687,23 @@ func athenaLoadStringIndex(ctx context.Context, state StateManager, key string) 
 	return ids
 }
 
-// generateAthenaQueryID generates a UUID-formatted query execution ID.
-func generateAthenaQueryID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateAthenaQueryID mints a query execution ID from m, in the UUID shape AWS's own examples
+// write.
+//
+// Deriving it is what makes a recorded Athena session replay at all: every operation after
+// `StartQueryExecution` addresses the query by this id — `GetQueryExecution`, `GetQueryResults`,
+// `StopQueryExecution` — so a re-minted one turned each of them into an `InvalidRequestException`
+// against a query the recording had just created. Athena is the service in this family where a
+// single identifier gates the most recorded follow-on calls, which is the poll loop substrate exists
+// to let a consumer test.
+//
+// [IDMint.HexUUID] rather than [IDMint.UUID]: the crypto/rand form reshaped sixteen raw bytes
+// without setting the RFC 4122 version and variant nibbles, and #856 does not change which bytes a
+// caller sees. API_StartQueryExecution gives `QueryExecutionId` a length of 1–128 and the pattern
+// `\S+`, which admits any non-whitespace string at all, so nothing in the API model distinguishes
+// the two renderings (#671).
+func generateAthenaQueryID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // athenaJSONResponse serializes v to JSON and returns an AWSResponse.

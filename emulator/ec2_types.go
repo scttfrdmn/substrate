@@ -495,7 +495,7 @@ func generateAssociationID(m *IDMint) string {
 // flag day: a caller moves by taking a mint and calling [IDMint.Hex] with the same width.
 // EC2's own ids no longer come through here.
 //
-// TODO(#856): 15 draw sites remain on crypto/rand, tiered by service family on the issue;
+// TODO(#856): 11 draw sites remain on crypto/rand, tiered by service family on the issue;
 // delete this function when the last caller moves.
 func randomHex(n int) string {
 	b := make([]byte, n)

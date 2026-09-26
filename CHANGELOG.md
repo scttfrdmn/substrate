@@ -325,6 +325,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes are the `Plaintext`, and the same bytes are wrapped into the `CiphertextBlob`. A recorded
   `Decrypt` was never affected — substrate's ciphertext carries its own plaintext, so a replayed
   decrypt answers from the recorded blob regardless — so the break was in the create, not the read.
+- **The analytics family of draw sites is derived** (#856). Seven generators across six services move
+  onto `IDMint`: an Athena query execution ID, a Redshift Data statement ID, a Glue job-run ID, a
+  Timestream `QueryId`, an OpenSearch document `_id` and `_scroll_id`, and a QuickSight ingestion ID
+  and response `RequestId`. Every rendering is byte-for-byte the one the `crypto/rand` version
+  produced, so an identifier a previous substrate recorded is still the shape this one mints. 11 draw
+  sites remain on `crypto/rand`.
+- **A recorded Athena poll loop replays against the query it started** (#856). An analytics identifier
+  names a submission rather than a resource, so unlike a bucket or a job there is no caller-chosen name
+  to fall back on: `GetQueryExecution`, `GetQueryResults` and `StopQueryExecution` all key on the one ID
+  `StartQueryExecution` returned, and a re-minted one answered every recorded poll with
+  `InvalidRequestException` against a query the recording had just created. Redshift Data breaks the
+  same way with `ResourceNotFoundException` and Glue with `EntityNotFoundException`. Reverting the
+  Athena minter alone to confirm the family's replay assertion is not vacuous produces 38 differences
+  and two refused reads out of a 19-request stream.
+- **A QuickSight ingestion ID is no longer minted by the request-ID generator** (#856). `CreateDataSet`
+  drew the SPICE ingestion ID it reports from the same function that mints the `RequestId` every
+  QuickSight response carries — the second instance of the cross-service borrow the ACM/API Gateway
+  split fixed. An ingestion ID is a handle a recorded `DescribeIngestion` URL contains, where a request
+  ID is observed once and never sent back, so one function serving both meant a change to how a request
+  ID renders would have moved the identifier a recorded path depends on. Both now have their own
+  minter and the rendering is unchanged.
+- **`IDMint.Base64URL`, for the one identifier that travels in a URL path** (#856). An OpenSearch
+  document `_id` is the path of every later `GET`, `PUT` and `DELETE` of that document, so its alphabet
+  is `-` and `_` rather than standard base64's `+` and `/`; a `_scroll_id` is handed straight back to
+  `_search/scroll`, where a re-minted one answers a recorded continuation with
+  `search_context_missing_exception` against a cursor the recording had just opened. Neither shape is
+  published by AWS — these are the domain's own REST API, not the `es` control plane — so substrate's
+  sixteen characters are a convention it keeps rather than a constraint it meets.
+- **A Timestream `QueryId` is hex where a Redshift Data statement ID is a dashed UUID** (#856). Both are
+  the same sixteen derived bytes and the difference is the published model, not a preference:
+  `API_query_Query` constrains `QueryId` to `[a-zA-Z0-9]+`, which **excludes** the hyphen, while
+  `API_ExecuteStatement` documents `Id` as a UUID and publishes the dashed pattern. Neither constrains a
+  position, so both are indifferent to the RFC 4122 version and variant bits — which is why deriving
+  them preserved each rendering instead of quietly setting two nibbles (#671).
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -189,7 +188,7 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("createDataSource: put: %w", err)
 	}
 
-	reqID := generateQuickSightRequestID()
+	reqID := generateQuickSightRequestID(ctx.IDs)
 	return quicksightJSONResponse(http.StatusCreated, map[string]interface{}{
 		"DataSourceId":   body.DataSourceID,
 		"Arn":            arn,
@@ -215,7 +214,7 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 	}
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
 		"DataSource": ds,
-		"RequestId":  generateQuickSightRequestID(),
+		"RequestId":  generateQuickSightRequestID(ctx.IDs),
 		"Status":     http.StatusOK,
 	})
 }
@@ -230,7 +229,7 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 	}
 
 	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:dataset/%s", ctx.Region, ctx.AccountID, body.DataSetID)
-	ingestionID := generateQuickSightRequestID()
+	ingestionID := generateQuickSightIngestionID(ctx.IDs)
 
 	ds := QuickSightDataSet{
 		DataSetID:   body.DataSetID,
@@ -255,7 +254,7 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 		"DataSetId":   body.DataSetID,
 		"Arn":         arn,
 		"IngestionId": ingestionID,
-		"RequestId":   generateQuickSightRequestID(),
+		"RequestId":   generateQuickSightRequestID(ctx.IDs),
 	})
 }
 
@@ -286,16 +285,41 @@ func (p *QuickSightPlugin) describeIngestion(ctx *RequestContext, _ *AWSRequest,
 			},
 			"CreatedTime": createdTime,
 		},
-		"RequestId": generateQuickSightRequestID(),
+		"RequestId": generateQuickSightRequestID(ctx.IDs),
 		"Status":    http.StatusOK,
 	})
 }
 
-// generateQuickSightRequestID generates a UUID-formatted request ID.
-func generateQuickSightRequestID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateQuickSightRequestID mints the `RequestId` every QuickSight response carries.
+//
+// QuickSight is unusual in publishing the request id as a *body* member on every operation, success
+// and error alike, rather than only as a header — API_CreateIngestion documents it as "the AWS request
+// ID for this operation" with no type constraint beyond String. So it is an observation a caller can
+// make, and #856 applies for the ordinary reason: a replayed response must carry the recorded value.
+//
+// It is minted rather than taken from [RequestContext.RequestID], and the reason is the shape.
+// Substrate's own request id is `req-{nanos}-{8 hex}` (see generateRequestID) — deliberately
+// wall-clock, per #866 — which is not a form AWS ever sends, and nothing observes the two together:
+// substrate sets no `x-amzn-RequestId` header, so the body member has nothing to disagree with.
+// Echoing the internal id would trade a shape a caller can parse for a correspondence no call can see.
+func generateQuickSightRequestID(m *IDMint) string {
+	return m.HexUUID()
+}
+
+// generateQuickSightIngestionID mints the SPICE ingestion ID a `CreateDataSet` response reports and
+// `DescribeIngestion` addresses.
+//
+// It is its own minter rather than a second call into [generateQuickSightRequestID], which is where
+// `createDataSet` used to reach: an ingestion ID is a *handle* — the recorded `DescribeIngestion` path
+// contains it — where a request ID is observed once and never sent back, so one function serving both
+// meant a change to how substrate renders a request ID would silently move the identifier a recorded
+// URL depends on. The same split #856 made between ACM's certificate IDs and API Gateway's API keys.
+//
+// The rendering is unchanged from the shared generator's, and the API model permits it:
+// API_CreateIngestion publishes `IngestionId` at 1–128 characters matching `^[a-zA-Z0-9-_]+$`, which
+// the UUID shape satisfies — the hyphens included.
+func generateQuickSightIngestionID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // quicksightJSONResponse serializes v to JSON and returns an AWSResponse.
