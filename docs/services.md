@@ -16668,7 +16668,7 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 | CreateOriginAccessControl | 201 with the `ETag` and `Location` headers; the four required config members are validated against their published enums — see [The origin access control family](#the-origin-access-control-family) |
 | GetOriginAccessControl | 200 with the `ETag` header; absent → `NoSuchOriginAccessControl` |
 | ListOriginAccessControls | An account using no origin access controls answers **no `Items` element** |
-| DeleteOriginAccessControl | 204. `If-Match` required: missing → `InvalidIfMatchVersion`, stale → `PreconditionFailed`. `OriginAccessControlInUse` is not answered — see below |
+| DeleteOriginAccessControl | 204. `If-Match` required: missing or malformed → `InvalidIfMatchVersion`, well-formed but stale → `PreconditionFailed`. `OriginAccessControlInUse` is not answered — see below |
 
 All three tagging operations share the `POST`/`GET /2020-05-31/tagging` path and are told apart
 by the query string: `Operation=Tag`, `Operation=Untag`, and a `GET` carrying only `Resource`. A
@@ -16703,14 +16703,20 @@ AWS refuses, which is the direction a consumer pays for with a failed live deplo
 
 The control carries an **ETag**, and it is the one version substrate models on this service. The
 create answers it as a header alongside `Location`, the get answers it as a header, and
-`DeleteOriginAccessControl` requires it in `If-Match`: a missing header is
-`InvalidIfMatchVersion`/400 and a value that is not the current one is `PreconditionFailed`/412 —
-two published codes for two different mistakes, so a caller that sent no version is not told its
-version was stale. The `ETag` *shape* is substrate's: AWS publishes only that the value identifies
-the current version, so substrate mints the same `E`-prefixed form it mints IDs in, from the same
-per-request mint, which is what makes a replayed create hand out the version its recording did.
-A quoted `If-Match` is accepted as well as a bare one, since HTTP ETags are conventionally quoted
-and CloudFront's are not.
+`DeleteOriginAccessControl` requires it in `If-Match`, and the published description of
+`InvalidIfMatchVersion` — *"The If-Match version is missing or not valid"* — is two cases in one
+sentence: a **missing** header and a value that is **not a version substrate could have issued** are
+both `InvalidIfMatchVersion`/400, while a well-formed version that is not the current one is
+`PreconditionFailed`/412. Three published codes for three different mistakes, so a caller that sent
+no version at all is not told its version was stale.
+
+The `ETag` *shape* is substrate's: AWS publishes only that the value identifies the current version,
+so substrate mints the same `E`-prefixed form it mints IDs in, from the same per-request mint, which
+is what makes a replayed create hand out the version its recording did. That is also what makes
+"malformed" decidable at all — a value outside that shape was never handed out here, so it cannot be
+a stale one — and it is a statement about substrate's own minting rather than a claim about what
+CloudFront accepts. A quoted `If-Match` is accepted as well as a bare one, since HTTP ETags are
+conventionally quoted and CloudFront's are not.
 
 `ListOriginAccessControls` answers the whole list, and an account using none answers **no `Items`
 element at all** rather than an empty one — the page states exactly that, and it is the difference

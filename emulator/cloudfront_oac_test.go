@@ -269,6 +269,22 @@ func TestCloudFrontOAC_DeleteRequiresTheCurrentVersion(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, awsErr.HTTPStatus)
 	})
 
+	t.Run("a malformed If-Match is InvalidIfMatchVersion", func(t *testing.T) {
+		// Not a version substrate could have issued, so it is "not valid" rather than stale —
+		// the other half of the code's published description.
+		for _, bad := range []string{"not-a-version", "E", "Etoolowercase0", "EWAYTOOLONGAVERSION"} {
+			req := cfRequest(http.MethodDelete, path, nil, "")
+			req.Headers["If-Match"] = bad
+			resp, err := p.HandleRequest(ctx, req)
+			assert.Nil(t, resp, "If-Match %q", bad)
+
+			var awsErr *emulator.AWSError
+			require.ErrorAs(t, err, &awsErr, "If-Match %q", bad)
+			assert.Equal(t, "InvalidIfMatchVersion", awsErr.Code, "If-Match %q", bad)
+			assert.Equal(t, http.StatusBadRequest, awsErr.HTTPStatus)
+		}
+	})
+
 	t.Run("a stale If-Match is PreconditionFailed", func(t *testing.T) {
 		req := cfRequest(http.MethodDelete, path, nil, "")
 		req.Headers["If-Match"] = "EOUTOFDATE0000"

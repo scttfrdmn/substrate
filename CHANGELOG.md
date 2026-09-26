@@ -81,9 +81,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   answers the account's controls whole, and an account using none answers **no `Items` element at
   all**, which is what the page states and what a decoder cannot distinguish from an empty one — so
   the test asserts on the raw XML. `DeleteOriginAccessControl` requires `If-Match` and separates the
-  three ways it can fail: an absent control is `NoSuchOriginAccessControl`/404, a *missing* version is
-  `InvalidIfMatchVersion`/400 and a stale one is `PreconditionFailed`/412, because telling a caller
-  that sent no version that its version was stale is a wrong answer. `CreateDistributionWithTags` is
+  ways it can fail: an absent control is `NoSuchOriginAccessControl`/404, a version that is *missing
+  or malformed* is `InvalidIfMatchVersion`/400 — the code's own published description is "missing or
+  not valid", which is two cases in one sentence — and a well-formed but stale one is
+  `PreconditionFailed`/412, because telling a caller that sent no version, or a typo, that its version
+  was stale is a wrong answer. Malformed is decidable only because the ETag rendering is substrate's
+  own: a value outside the shape substrate mints was never handed out here, so it cannot be a stale
+  one, and that is a statement about substrate's minting rather than about what CloudFront accepts.
+  `CreateDistributionWithTags` is
   the same path and verb as `CreateDistribution` with `?WithTags` — a bare query key, so the routing
   tests for the key's *presence*; testing for a value would have sent a tagged create to the untagged
   handler and dropped the tags while answering 201. Its body is decoded strictly, unlike

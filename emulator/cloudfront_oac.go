@@ -255,12 +255,22 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext) (*AWSRe
 
 // deleteOriginAccessControl handles DELETE /2020-05-31/origin-access-control/{Id}.
 //
-// The three refusals are three different failures and the reference gives each its own code: an
-// absent control is NoSuchOriginAccessControl/404, a missing If-Match is
-// InvalidIfMatchVersion/400 ("The If-Match version is missing or not valid"), and a version that
-// is present but not the current one is PreconditionFailed/412. Answering the precondition
-// failure for a *missing* header would tell a caller its version was stale when it never sent
-// one.
+// The refusals are four different failures and the reference gives each its own code. An absent
+// control is NoSuchOriginAccessControl/404. A missing or malformed If-Match is
+// InvalidIfMatchVersion/400 — the reference's own description is "The If-Match version is missing
+// or not valid", which is two cases in one sentence. A version that is well formed but not the
+// current one is PreconditionFailed/412.
+//
+// The distinctions are all load-bearing in the same direction: answering the precondition failure
+// for a *missing* header would tell a caller its version was stale when it never sent one, and
+// answering it for a value substrate could not have issued would say the same of a typo.
+//
+// "Malformed" is decidable here only because the ETag rendering is substrate's own (see
+// [CloudFrontOriginAccessControl]): a value that is not E followed by thirteen characters of
+// [cfIDAlphabet] is not a version this emulator ever handed out, so it cannot be a stale one. The
+// shape test is therefore a statement about substrate's own minting and not a claim about what
+// CloudFront accepts; either way the request is refused, so the reading costs a caller nothing but
+// the code it reads.
 //
 // The absence is checked before the header, so a caller deleting an already-deleted control is
 // told that rather than being asked for a version of something that is gone.
@@ -273,7 +283,7 @@ func (p *CloudFrontPlugin) deleteOriginAccessControl(ctx *RequestContext, req *A
 	// A quoted value is tolerated: HTTP ETags are conventionally quoted, CloudFront's are not,
 	// and a caller that re-quotes the value substrate handed it means the version it was given.
 	ifMatch := strings.Trim(strings.TrimSpace(headerValueFold(req.Headers, "If-Match")), `"`)
-	if ifMatch == "" {
+	if !cfIsMintedVersion(ifMatch) {
 		return nil, &AWSError{
 			Code:       "InvalidIfMatchVersion",
 			Message:    "The If-Match version is missing or not valid for the resource.",
@@ -295,6 +305,18 @@ func (p *CloudFrontPlugin) deleteOriginAccessControl(ctx *RequestContext, req *A
 	removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID), oacID)
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
+}
+
+// cfIsMintedVersion reports whether a value has the shape [cfMintETag] produces: E followed by
+// thirteen characters of [cfIDAlphabet]. An empty value is not one, which is what makes the single
+// test cover both halves of "missing or not valid".
+func cfIsMintedVersion(version string) bool {
+	if len(version) != 14 || version[0] != 'E' {
+		return false
+	}
+	return strings.IndexFunc(version[1:], func(r rune) bool {
+		return !strings.ContainsRune(cfIDAlphabet, r)
+	}) < 0
 }
 
 // cfOACWireFrom maps a stored control onto the OriginAccessControl document, for [cfOACResponse].
