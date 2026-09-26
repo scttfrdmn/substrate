@@ -359,6 +359,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `API_ExecuteStatement` documents `Id` as a UUID and publishes the dashed pattern. Neither constrains a
   position, so both are indifferent to the RFC 4122 version and variant bits — which is why deriving
   them preserved each rendering instead of quietly setting two nibbles (#671).
+- **The CI/CD family of draw sites is derived** (#856). Five generators across three services move onto
+  `IDMint`: a CodeBuild build ID, a CodeDeploy `applicationId`, `deploymentGroupId` and `deploymentId`,
+  and a CodePipeline `pipelineExecutionId`. Every rendering is byte-for-byte the one the `crypto/rand`
+  version produced, including the `{projectName}:` a build ID is prefixed with, which is CodeBuild's own
+  composition rather than a derived value. 6 draw sites remain on `crypto/rand`.
+- **An underived CodeBuild build ID stalled a poll loop instead of failing it** (#856). A build ID is the
+  only handle `StartBuild` hands back, and `BatchGetBuilds` reports an unknown one under `buildsNotFound`
+  in a **200** with an empty `builds` list — so a replay that re-minted it did not refuse the recorded
+  read, it answered a consumer's wait-for-`buildStatus` loop with nothing to wait on. CodeDeploy's
+  `deploymentId` and CodePipeline's `pipelineExecutionId` are the family's other addressed identifiers and
+  break the loud way, with `DeploymentDoesNotExistException` and `PipelineExecutionNotFoundException`.
+  Reverting the deployment-ID minter alone to confirm the family's replay assertion is not vacuous
+  produces 10 differences and one refused read out of a 12-request stream.
+- **A CodePipeline execution ID keeps its version-4 nibbles where the rest of the family does not** (#856).
+  It is the one identifier of the five with a published pattern —
+  `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}` — and the one draw site that set RFC
+  4122's version and variant bits. The pattern admits any hex digit in either position, so it is satisfied
+  by the looser shape too; substrate keeps the `4` because a consumer validating the value as a version-4
+  UUID would start failing if it vanished, and #856 changes where an identifier comes from rather than
+  which bytes a caller sees. CodeBuild's build ID and CodeDeploy's two identity IDs publish no pattern at
+  all and did not set those bits, so they keep the bare UUID shape (#671).
+- **A CodeDeploy `deploymentId`'s shape is documented as observed, not published** (#856).
+  `API_CreateDeployment` gives `deploymentId` as a String with neither a pattern nor length constraints,
+  but the page's own sample response is `d-IIMHK0NHC` — which is the whole provenance for the `d-` prefix
+  and the nine uppercase alphanumeric characters substrate mints. Reading AWS's example is not the
+  borrowing-a-bound-from-a-sibling #671 rules out, and it is all the reference offers; the docs now say so
+  where they previously called the shape published.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -253,7 +251,7 @@ func (p *CodeBuildPlugin) startBuild(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, err
 	}
 
-	buildUUID := generateCodeBuildUUID()
+	buildUUID := generateCodeBuildUUID(reqCtx.IDs)
 	buildID := input.ProjectName + ":" + buildUUID
 	now := p.tc.Now()
 
@@ -358,15 +356,22 @@ func codebuildBuildIDsKey(acct, region string) string {
 	return "build_ids:" + acct + "/" + region
 }
 
-// generateCodeBuildUUID generates a UUID-style string for build IDs.
-func generateCodeBuildUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateCodeBuildUUID mints the UUID-shaped half of a build ID from m, derived from the
+// request id so a replayed StartBuild returns the build ID the recording returned (#856).
+//
+// A build ID is the *only* handle StartBuild hands back: `BatchGetBuilds` takes `ids`, and the
+// build ARN is that same string appended to `…:build/`. So a re-minted one turned the recorded
+// read of a build into an empty `builds` list with the id reported under `buildsNotFound`,
+// which is a 200 — the poll loop a consumer writes around `buildStatus` then never terminates
+// rather than failing outright.
+//
+// `Build.id` publishes no pattern — API_Build gives the type as String with a minimum length
+// of 1 and nothing more — so #671 leaves the rendering exactly as the crypto/rand form
+// produced it: [IDMint.HexUUID], the 8-4-4-4-12 hex shape without RFC 4122's version and
+// variant nibbles. The `{projectName}:` prefix its one caller prepends is CodeBuild's own
+// composition, not something derived, and stays where it is.
+func generateCodeBuildUUID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // codebuildJSONResponse serializes v to JSON and returns an AWSResponse with

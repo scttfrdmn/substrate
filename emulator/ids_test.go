@@ -1796,3 +1796,229 @@ func idsNDJSONCall(t *testing.T, ts *emulator.TestServer, host, path, body strin
 	require.Less(t, resp.StatusCode, 300, "%s %s: %s", host, path, out)
 	return out
 }
+
+// Tier 6 of #856: the CI/CD family — CodeBuild, CodeDeploy and CodePipeline.
+//
+// What this tier adds is that *three renderings* of the same sixteen derived bytes coexist in one
+// family, and which one a site gets is decided by what its caller already parses rather than by
+// what looks tidiest. CodePipeline publishes a UUID pattern and its draw site set RFC 4122's
+// version and variant nibbles, so it mints through [emulator.IDMint.UUID]. CodeBuild's build id and
+// CodeDeploy's two identity ids publish no pattern at all and their draw sites did *not* set those
+// nibbles, so they keep [emulator.IDMint.HexUUID] — #856 changes where an identifier comes from,
+// not which bytes a caller sees. CodeDeploy's deployment id is neither: it is `d-` and nine
+// uppercase alphanumerics, a shape with no published pattern that AWS's own sample response shows.
+//
+// The tier has no unbounded-draw site — every one of the five operations mints exactly once — so the
+// ordinal assertion the tiers above make on a batch has nothing to bite on here. What replaces it is
+// the rendering assertion below, which is the property this family can get wrong.
+
+// TestIDs_TheCICDFamilyKeepsTheRenderingsItsCallersParse pins the three shapes against the two
+// things that decide them: the published pattern where there is one, and the bytes the crypto/rand
+// form produced where there is not.
+//
+// The substantive claim is the version nibble. A CodePipeline execution id is published as
+// `[0-9a-f]{8}-…`, which admits any hex digit in the version position and so would be satisfied by
+// a plain hex rendering too; substrate keeps the `4` because its draw site always set it and a
+// consumer validating the value as a version-4 UUID would start failing if it vanished.
+func TestIDs_TheCICDFamilyKeepsTheRenderingsItsCallersParse(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	idsJSONTargetCall(t, ts, idsCodePipelineHost, "CodePipeline_20150709.CreatePipeline",
+		map[string]any{"pipeline": map[string]any{"name": "ids-tier6-pipeline"}})
+	var started struct {
+		PipelineExecutionID string `json:"pipelineExecutionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodePipelineHost,
+		"CodePipeline_20150709.StartPipelineExecution",
+		map[string]any{"name": "ids-tier6-pipeline"}), &started))
+	idsRequireHexUUID(t, started.PipelineExecutionID, "a pipeline execution id")
+	assert.Equal(t, "4", started.PipelineExecutionID[14:15],
+		"a pipeline execution id is a version-4 UUID: %q", started.PipelineExecutionID)
+	assert.Contains(t, "89ab", started.PipelineExecutionID[19:20],
+		"and carries RFC 4122's variant bits: %q", started.PipelineExecutionID)
+
+	var deployed struct {
+		DeploymentID string `json:"deploymentId"`
+	}
+	idsJSONTargetCall(t, ts, idsCodeDeployHost, "CodeDeploy_20141006.CreateApplication",
+		map[string]any{"applicationName": "ids-tier6-app"})
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeDeployHost,
+		"CodeDeploy_20141006.CreateDeployment",
+		map[string]any{"applicationName": "ids-tier6-app"}), &deployed))
+	require.Len(t, deployed.DeploymentID, len("d-")+9,
+		"a deployment id is d- and nine characters, as AWS's own sample response shows")
+	assert.Regexp(t, `^d-[A-Z0-9]{9}$`, deployed.DeploymentID,
+		"in uppercase letters and digits: %q", deployed.DeploymentID)
+}
+
+// TestReplay_TheCICDFamilyReplaysWithTheIdentifiersItMinted is the wire-level assertion for tier 6,
+// the same claim the five tiers above make for their families.
+//
+// Two of the five identifiers are *addressed* by a later request in the stream, and those are the
+// ones a fresh draw refuses outright: `BatchGetBuilds` reports a re-minted build id under
+// `buildsNotFound` — a 200 whose `builds` list is empty, which is how an underived id stalls a
+// consumer's poll loop rather than failing it — and `GetPipelineExecution` answers
+// `PipelineExecutionNotFoundException`. The other three are reported rather than addressed:
+// CodeDeploy's application and deployment-group ids are echoed by reads keyed on names, so what a
+// fresh draw costs there is a body difference and a `state_hash_after` mismatch on the create,
+// which is still enough to make the recording unreplayable. `GetDeployment` sits on the addressed
+// side with the deployment id.
+func TestReplay_TheCICDFamilyReplaysWithTheIdentifiersItMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordCICDCreates(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the creates")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"a CI/CD identifier replays as the one recorded: %s", replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordCICDCreates records the tier-6 stream, one interlocked group per service.
+func idsRecordCICDCreates(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: all three plugins stamp their
+	// records off the time controller, so a live clock diverges in the state hash for a reason that
+	// has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	idsRecordCodeBuild(t, ts)
+	idsRecordCodeDeploy(t, ts)
+	idsRecordCodePipeline(t, ts)
+}
+
+// idsRecordCodeBuild records a project, a build of it, and the BatchGetBuilds that names the build
+// id — the one read in the family that answers a wrong id with a 200.
+func idsRecordCodeBuild(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const project = "ids-tier6-project"
+
+	idsJSONTargetCall(t, ts, idsCodeBuildHost, "CodeBuild_20161006.CreateProject", map[string]any{
+		"name":        project,
+		"serviceRole": "arn:aws:iam::123456789012:role/CodeBuildRole",
+		"source":      map[string]any{"type": "GITHUB", "location": "https://example.invalid/r"},
+	})
+
+	var build struct {
+		Build struct {
+			ID string `json:"id"`
+		} `json:"build"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeBuildHost,
+		"CodeBuild_20161006.StartBuild", map[string]any{"projectName": project}), &build))
+	uuid, ok := strings.CutPrefix(build.Build.ID, project+":")
+	require.True(t, ok, "a build id is the project name and a colon, then the minted half: %q",
+		build.Build.ID)
+	idsRequireHexUUID(t, uuid, "the minted half of a build id")
+
+	var got struct {
+		Builds         []map[string]any `json:"builds"`
+		BuildsNotFound []string         `json:"buildsNotFound"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeBuildHost,
+		"CodeBuild_20161006.BatchGetBuilds",
+		map[string]any{"ids": []string{build.Build.ID}}), &got))
+	require.Len(t, got.Builds, 1, "the recorded read reaches the build by its minted id")
+	require.Empty(t, got.BuildsNotFound,
+		"and a wrong id would land here, in a 200 rather than an error")
+}
+
+// idsRecordCodeDeploy records an application, a deployment group, a deployment, and a read of each.
+//
+// The group exercises both halves of the tier. GetApplication and GetDeploymentGroup are keyed on
+// the caller's own names and merely echo the two identity ids, so what an underived one costs there
+// is a body difference and a state-hash mismatch; GetDeployment takes the deployment id itself, and
+// an underived one is refused outright.
+func idsRecordCodeDeploy(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const (
+		app   = "ids-tier6-app"
+		group = "ids-tier6-group"
+	)
+
+	var created struct {
+		ApplicationID string `json:"applicationId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeDeployHost,
+		"CodeDeploy_20141006.CreateApplication", map[string]any{
+			"applicationName": app, "computePlatform": "Server",
+		}), &created))
+	idsRequireHexUUID(t, created.ApplicationID, "a CodeDeploy application id")
+	idsJSONTargetCall(t, ts, idsCodeDeployHost, "CodeDeploy_20141006.GetApplication",
+		map[string]any{"applicationName": app})
+
+	var grouped struct {
+		DeploymentGroupID string `json:"deploymentGroupId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeDeployHost,
+		"CodeDeploy_20141006.CreateDeploymentGroup", map[string]any{
+			"applicationName": app, "deploymentGroupName": group,
+			"serviceRoleArn": "arn:aws:iam::123456789012:role/CodeDeployRole",
+		}), &grouped))
+	idsRequireHexUUID(t, grouped.DeploymentGroupID, "a CodeDeploy deployment-group id")
+	require.NotEqual(t, created.ApplicationID, grouped.DeploymentGroupID,
+		"two requests minting the same shape still mint different values")
+	idsJSONTargetCall(t, ts, idsCodeDeployHost, "CodeDeploy_20141006.GetDeploymentGroup",
+		map[string]any{"applicationName": app, "deploymentGroupName": group})
+
+	var deployed struct {
+		DeploymentID string `json:"deploymentId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodeDeployHost,
+		"CodeDeploy_20141006.CreateDeployment", map[string]any{
+			"applicationName": app, "deploymentGroupName": group,
+		}), &deployed))
+	require.Regexp(t, `^d-[A-Z0-9]{9}$`, deployed.DeploymentID)
+	idsJSONTargetCall(t, ts, idsCodeDeployHost, "CodeDeploy_20141006.GetDeployment",
+		map[string]any{"deploymentId": deployed.DeploymentID})
+}
+
+// idsRecordCodePipeline records a pipeline, an execution of it, and the GetPipelineExecution that
+// addresses the execution by the id StartPipelineExecution minted.
+func idsRecordCodePipeline(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	const pipeline = "ids-tier6-pipeline"
+
+	idsJSONTargetCall(t, ts, idsCodePipelineHost, "CodePipeline_20150709.CreatePipeline",
+		map[string]any{"pipeline": map[string]any{
+			"name":    pipeline,
+			"roleArn": "arn:aws:iam::123456789012:role/CodePipelineRole",
+		}})
+
+	var started struct {
+		PipelineExecutionID string `json:"pipelineExecutionId"`
+	}
+	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCodePipelineHost,
+		"CodePipeline_20150709.StartPipelineExecution",
+		map[string]any{"name": pipeline}), &started))
+	idsRequireHexUUID(t, started.PipelineExecutionID, "a pipeline execution id")
+
+	idsJSONTargetCall(t, ts, idsCodePipelineHost, "CodePipeline_20150709.GetPipelineExecution",
+		map[string]any{
+			"pipelineName":        pipeline,
+			"pipelineExecutionId": started.PipelineExecutionID,
+		})
+}
+
+// The hosts the tier-6 services are addressed at.
+const (
+	idsCodeBuildHost    = "codebuild.us-east-1.amazonaws.com"
+	idsCodeDeployHost   = "codedeploy.us-east-1.amazonaws.com"
+	idsCodePipelineHost = "codepipeline.us-east-1.amazonaws.com"
+)
