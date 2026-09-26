@@ -67,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`test/e2e` dependencies bumped again**: `aws-sdk-go-v2/service/lambda` 1.108.0→1.109.0 and
+  `service/s3` 1.113.1→1.113.2. The root module is untouched this time, so unlike the bump below
+  this one needed no matching re-tidy of the other module — but it still lands as a PR carrying a
+  changelog line rather than as the Dependabot proposal (#1270) that raised it.
+
 - **Dependencies bumped across both modules, tidied together.** Root: `modernc.org/sqlite`
   1.58.0→1.59.0, pulling `modernc.org/libc` 1.75.6→1.75.7. `test/e2e`:
   `aws-sdk-go-v2/config` 1.33.4→1.33.5, `credentials` 1.20.4→1.20.5, `service/dynamodb`
