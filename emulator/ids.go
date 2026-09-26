@@ -61,7 +61,7 @@ import (
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): 28 draw sites remain on crypto/rand, tiered by service family on the issue.
+// TODO(#856): 23 draw sites remain on crypto/rand, tiered by service family on the issue.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.
@@ -178,4 +178,23 @@ func (m *IDMint) UUID() string {
 // and secret access keys in.
 func (m *IDMint) Base64(n int) string {
 	return base64.StdEncoding.EncodeToString(m.bytes(n))
+}
+
+// HexUUID returns sixteen bytes in UUID *shape* — 8-4-4-4-12 lowercase hex — without the RFC
+// 4122 version and variant bits [IDMint.UUID] sets.
+//
+// It exists because a dozen call sites across nine services published exactly this rendering
+// from crypto/rand, and #856 is about making an identifier reproducible across a replay rather
+// than about changing which bytes a caller sees: setting the two nibbles UUID sets would change
+// every one of them. A new mint site that wants a real version-4 shape should use UUID; this is
+// for the identifiers substrate already publishes in the looser form.
+//
+// The callers are Lambda revision and code ids, ECS task ids, Step Functions execution names,
+// SQS message ids, EventBridge event ids, CloudWatch Logs upload sequence tokens, Service Quotas
+// request ids, Batch job ids and EMR Serverless job-run ids. Until this method existed the first
+// seven of those reached a helper declared in lambda_plugin.go, which is how a Batch job id came
+// to be minted by a function named for a Lambda revision.
+func (m *IDMint) HexUUID() string {
+	h := m.Hex(16)
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }

@@ -2207,19 +2207,33 @@ Three kinds of value stay random, and one more is still migrating:
   CloudFormation's [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic),
   which predate this rule and are what generalising it was modelled on.
 - EC2, IAM, STS, SQS, SNS, Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge,
-  CloudWatch Logs, CloudFront and Service Quotas identifiers are derived today. A CloudFront
-  distribution, invalidation and origin access control all draw from one generator, so the three
-  moved together with the origin access control family (#1277). The remaining services are
-  migrating one family at a time, tracked on #856; until a service moves, its identifiers are
-  still drawn from `crypto/rand` and a replay of a stream creating one of its resources still
-  diverges.
+  CloudWatch Logs, CloudFront, Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR
+  Serverless, ECR, ELB and Route 53 identifiers are derived today. A CloudFront distribution,
+  invalidation and origin access control all draw from one generator, so the three moved together
+  with the origin access control family (#1277). The remaining services are migrating one family
+  at a time, tracked on #856; until a service moves, its identifiers are still drawn from
+  `crypto/rand` and a replay of a stream creating one of its resources still diverges.
 
-Six of those services publish an identifier from one shared generator rather than declaring their
+Nine of those services publish an identifier from one shared generator rather than declaring their
 own, so they moved together: an ECS task ID, a Step Functions execution name, an SQS message ID,
-an EventBridge event ID, a CloudWatch Logs upload sequence token and a Service Quotas request ID
-are all the same sixteen derived bytes rendered in UUID *shape* — `8-4-4-4-12` lowercase hex
-without the RFC 4122 version and variant bits, which is the form substrate published before it
-derived them and is unchanged by deriving them.
+an EventBridge event ID, a CloudWatch Logs upload sequence token, a Service Quotas request ID, a
+Lambda revision ID, a Batch job ID and an EMR Serverless job-run ID are all the same sixteen
+derived bytes rendered in UUID *shape* — `8-4-4-4-12` lowercase hex without the RFC 4122 version
+and variant bits, which is the form substrate published before it derived them and is unchanged by
+deriving them.
+
+One identifier's **alphabet** changed when it was derived, and widened rather than narrowed. An API
+Gateway ID is ten lowercase alphanumeric characters; the `crypto/rand` version read five bytes and
+mapped each *nibble* through that 36-character alphabet, so only `a` through `p` could appear and a
+digit never did. Drawing a byte per character reaches the whole published set, so an API ID,
+resource ID, deployment ID, authorizer ID, usage-plan ID or API Gateway v2 route, integration and
+mapping ID now looks like one AWS would issue.
+
+An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
+a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
+store two images where AWS stores one. [#1283](https://github.com/scttfrdmn/substrate/issues/1283)
+tracks deriving it from the manifest, which changes what the digest *means* rather than where its
+bytes come from.
 
 An SQS send mints a message's initial receipt handle and each receive replaces it, matching real
 SQS: two `ReceiveMessage` calls that return the same message hand back different handles and only

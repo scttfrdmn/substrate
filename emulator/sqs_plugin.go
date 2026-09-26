@@ -1834,9 +1834,10 @@ func getAttrOrDefault(attrs map[string]string, key, fallback string) string {
 	return fallback
 }
 
-// generateSQSMessageID mints a unique SQS message ID from m.
+// generateSQSMessageID mints a unique SQS message ID from m, in the UUID shape SQS publishes
+// one in.
 func generateSQSMessageID(m *IDMint) string {
-	return generateLambdaRevisionID(m) // Reuse UUID-style generator.
+	return m.HexUUID()
 }
 
 // generateSQSReceiptHandle mints a unique receipt handle from m.

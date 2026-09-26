@@ -419,7 +419,7 @@ func (p *CloudWatchLogsPlugin) createLogStream(ctx *RequestContext, req *AWSRequ
 		LogStreamName:       body.LogStreamName,
 		ARN:                 cwLogStreamARN(ctx.Region, ctx.AccountID, body.LogGroupName, body.LogStreamName),
 		CreationTime:        now,
-		UploadSequenceToken: generateLambdaRevisionID(ctx.IDs),
+		UploadSequenceToken: ctx.IDs.HexUUID(),
 	}
 	data, err := json.Marshal(ls)
 	if err != nil {
@@ -607,7 +607,7 @@ func (p *CloudWatchLogsPlugin) putLogEvents(ctx *RequestContext, req *AWSRequest
 	var ls CWLogStream
 	if json.Unmarshal(streamData, &ls) == nil {
 		ls.LastIngestionTime = now
-		ls.UploadSequenceToken = generateLambdaRevisionID(ctx.IDs)
+		ls.UploadSequenceToken = ctx.IDs.HexUUID()
 		if updated, marshalErr := json.Marshal(ls); marshalErr == nil {
 			_ = p.state.Put(goCtx, cloudwatchLogsNamespace, streamKey, updated)
 		}

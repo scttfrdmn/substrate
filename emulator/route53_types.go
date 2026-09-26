@@ -93,14 +93,14 @@ type Route53ChangeInfo struct {
 	Comment string `json:"Comment,omitempty"`
 }
 
-// generateHostedZoneID generates a random hosted zone ID suffix (12 uppercase hex chars).
-func generateHostedZoneID() string {
-	return strings.ToUpper(randomHex(6))
+// generateHostedZoneID mints a hosted zone ID suffix from m (12 uppercase hex chars).
+func generateHostedZoneID(m *IDMint) string {
+	return strings.ToUpper(m.Hex(6))
 }
 
-// generateChangeID generates a random Route 53 change ID.
-func generateChangeID() string {
-	return "/change/C" + strings.ToUpper(randomHex(8))
+// generateChangeID mints a Route 53 change ID from m.
+func generateChangeID(m *IDMint) string {
+	return "/change/C" + strings.ToUpper(m.Hex(8))
 }
 
 // parseRoute53Operation extracts the operation name and zone ID from the HTTP

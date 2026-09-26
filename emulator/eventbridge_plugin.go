@@ -465,7 +465,7 @@ func (p *EventBridgePlugin) putEvents(ctx *RequestContext, req *AWSRequest) (*AW
 			Detail:       entry.Detail,
 			EventBusName: busName,
 			Time:         now,
-			EventID:      generateLambdaRevisionID(ctx.IDs),
+			EventID:      ctx.IDs.HexUUID(),
 		}
 		existing = append(existing, ev)
 		results = append(results, resultEntry{EventID: ev.EventID})

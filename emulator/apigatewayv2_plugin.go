@@ -274,7 +274,7 @@ func (p *APIGatewayV2Plugin) createAPI(ctx *RequestContext, req *AWSRequest) (*A
 		body.ProtocolType = "HTTP"
 	}
 
-	apiID := generateAPIGatewayID()
+	apiID := generateAPIGatewayID(ctx.IDs)
 	api := V2ApiState{
 		APIID:        apiID,
 		Name:         body.Name,
@@ -408,7 +408,7 @@ func (p *APIGatewayV2Plugin) createRoute(ctx *RequestContext, req *AWSRequest, a
 	}
 
 	route := V2RouteState{
-		RouteID:           generateAPIGatewayID(),
+		RouteID:           generateAPIGatewayID(ctx.IDs),
 		RouteKey:          body.RouteKey,
 		Target:            body.Target,
 		AuthorizationType: body.AuthorizationType,
@@ -493,7 +493,7 @@ func (p *APIGatewayV2Plugin) createIntegration(ctx *RequestContext, req *AWSRequ
 	}
 
 	integ := V2IntegrationState{
-		IntegrationID:        generateAPIGatewayID(),
+		IntegrationID:        generateAPIGatewayID(ctx.IDs),
 		IntegrationType:      body.IntegrationType,
 		IntegrationURI:       body.IntegrationURI,
 		PayloadFormatVersion: body.PayloadFormatVersion,
@@ -667,7 +667,7 @@ func (p *APIGatewayV2Plugin) createAuthorizerV2(ctx *RequestContext, req *AWSReq
 	}
 
 	auth := V2AuthorizerState{
-		AuthorizerID:     generateAPIGatewayID(),
+		AuthorizerID:     generateAPIGatewayID(ctx.IDs),
 		Name:             body.Name,
 		AuthorizerType:   body.AuthorizerType,
 		IdentitySource:   body.IdentitySource,
@@ -750,7 +750,7 @@ func (p *APIGatewayV2Plugin) createDeploymentV2(ctx *RequestContext, req *AWSReq
 	}
 
 	dep := V2DeploymentState{
-		DeploymentID:     generateAPIGatewayID(),
+		DeploymentID:     generateAPIGatewayID(ctx.IDs),
 		DeploymentStatus: "DEPLOYED",
 		Description:      body.Description,
 		CreatedDate:      p.tc.Now(),
@@ -843,7 +843,7 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "BadRequestException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	mappingID := generateAPIGatewayID()
+	mappingID := generateAPIGatewayID(ctx.IDs)
 	mapping := v2APIMappingState{
 		APIMappingID:  mappingID,
 		APIID:         body.APIID,

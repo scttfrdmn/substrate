@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -171,7 +170,7 @@ func (p *EMRServerlessPlugin) createApplication(ctx *RequestContext, req *AWSReq
 		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 
-	appID := generateEMRServerlessAppID()
+	appID := generateEMRServerlessAppID(ctx.IDs)
 	arn := fmt.Sprintf("arn:aws:emr-serverless:%s:%s:/applications/%s", ctx.Region, ctx.AccountID, appID)
 	app := EMRServerlessApp{
 		ApplicationID: appID,
@@ -236,7 +235,7 @@ func (p *EMRServerlessPlugin) startJobRun(ctx *RequestContext, req *AWSRequest, 
 		}
 	}
 
-	runID := generateEMRServerlessRunID()
+	runID := generateEMRServerlessRunID(ctx.IDs)
 	arn := fmt.Sprintf("arn:aws:emr-serverless:%s:%s:/applications/%s/jobruns/%s",
 		ctx.Region, ctx.AccountID, appID, runID)
 	run := EMRServerlessJobRun{
@@ -328,19 +327,15 @@ func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, _ *AWSRequest, ap
 	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRuns": summaries})
 }
 
-// generateEMRServerlessAppID generates a numeric-looking EMR Serverless application ID.
-func generateEMRServerlessAppID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
-	n := uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
-	return fmt.Sprintf("00%08x", n)
+// generateEMRServerlessAppID mints an EMR Serverless application ID from m, in the
+// "00"-prefixed lowercase-hex form the service publishes one in.
+func generateEMRServerlessAppID(m *IDMint) string {
+	return "00" + m.Hex(4)
 }
 
-// generateEMRServerlessRunID generates a UUID-formatted job run ID.
-func generateEMRServerlessRunID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// generateEMRServerlessRunID mints a UUID-shaped job run ID from m.
+func generateEMRServerlessRunID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // emrServerlessJSONResponse serializes v to JSON and returns an AWSResponse.

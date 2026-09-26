@@ -517,7 +517,7 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 	lb := ELBClassicLoadBalancer{
 		Name:              name,
 		ARN:               elbClassicLoadBalancerARN(reqCtx.Region, reqCtx.AccountID, name),
-		DNSName:           elbClassicDNSName(name, generateELBSuffix(), reqCtx.Region, scheme),
+		DNSName:           elbClassicDNSName(name, generateELBSuffix(reqCtx.IDs), reqCtx.Region, scheme),
 		Scheme:            scheme,
 		Listeners:         listeners,
 		AvailabilityZones: extractIndexedParams(req.Params, "AvailabilityZones.member"),

@@ -140,7 +140,7 @@ func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 		input.AuthenticationType = "API_KEY"
 	}
 
-	apiID := generateAppSyncAPIID()
+	apiID := generateAppSyncAPIID(reqCtx.IDs)
 	acct := reqCtx.AccountID
 	region := reqCtx.Region
 	arn := fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s", region, acct, apiID)
@@ -458,7 +458,7 @@ func (p *AppSyncPlugin) createFunction(reqCtx *RequestContext, req *AWSRequest, 
 		return nil, &AWSError{Code: "BadRequestException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
 	}
 	acct, region := reqCtx.AccountID, reqCtx.Region
-	funcID := generateAppSyncFunctionID()
+	funcID := generateAppSyncFunctionID(reqCtx.IDs)
 	fn := AppSyncFunction{
 		APIID:          apiID,
 		FunctionID:     funcID,
@@ -540,7 +540,7 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 		return nil, expiresErr
 	}
 
-	keyID := generateAppSyncAPIKeyID()
+	keyID := generateAppSyncAPIKeyID(reqCtx.IDs)
 	key := AppSyncAPIKey{
 		ID:          keyID,
 		Description: input.Description,

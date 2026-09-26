@@ -218,9 +218,11 @@ type ELBRule struct {
 	EverTagged bool `json:"ever_tagged,omitempty"`
 }
 
-// generateELBSuffix generates a unique 17-character ELB resource suffix.
-func generateELBSuffix() string {
-	return "0" + randomHex(8)
+// generateELBSuffix mints a unique 17-character ELB resource suffix from m. It is the trailing
+// segment of a load balancer, target group, listener or rule ARN, and of a classic load
+// balancer's DNS name.
+func generateELBSuffix(m *IDMint) string {
+	return "0" + m.Hex(8)
 }
 
 // elbARNSubtypes maps a `Type` a caller sends to `CreateLoadBalancer` onto the abbreviation AWS's
