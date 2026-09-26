@@ -1,8 +1,6 @@
 package emulator
 
 import (
-	"crypto/rand"
-	"fmt"
 	"time"
 )
 
@@ -61,15 +59,28 @@ type CodeDeployDeployment struct {
 	Region string `json:"region"`
 }
 
-// generateCodeDeployDeploymentID generates a deployment ID in the form d-XXXXXXXXX
-// using 9 random uppercase alphanumeric characters, matching the real CodeDeploy format.
-func generateCodeDeployDeploymentID() string {
-	const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-	b := make([]byte, 9)
-	rnd := make([]byte, 9)
-	_, _ = rand.Read(rnd)
-	for i := range b {
-		b[i] = chars[int(rnd[i])%len(chars)]
-	}
-	return fmt.Sprintf("d-%s", b)
+// codedeployDeploymentIDChars is the alphabet a `d-` deployment ID is rendered in: uppercase
+// letters and digits, which is what AWS's own sample responses show and the narrowest alphabet
+// consistent with them. See [generateCodeDeployDeploymentID] for why the alphabet is observed
+// rather than published.
+const codedeployDeploymentIDChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+
+// generateCodeDeployDeploymentID mints a deployment ID in the form `d-XXXXXXXXX` from m, derived
+// from the request id so a replayed CreateDeployment returns the ID the recording returned (#856).
+//
+// This is the one identifier in the CI/CD family that is *addressed* rather than reported:
+// `GetDeployment`, `StopDeployment` and `ListDeploymentTargets` all take `deploymentId`, and it is
+// the only handle CreateDeployment hands back. A re-minted one made the recorded `GetDeployment`
+// answer `DeploymentDoesNotExistException`, so a consumer's wait-for-`Succeeded` loop failed on a
+// deployment the replay had just created.
+//
+// The shape has *observed* provenance, not published: `CreateDeployment` gives `deploymentId` as
+// String with no pattern and no length constraints, but the page's own sample response is
+// `{"deploymentId": "d-IIMHK0NHC"}` — the `d-` prefix, nine characters, uppercase alphanumeric.
+// #671 forbids inventing a bound from a sibling operation; it does not forbid reading AWS's own
+// example, and that example is all substrate has here. The rendering is therefore unchanged from
+// the crypto/rand form: [IDMint.Chars] over the same alphabet, which reproduces its modulo
+// mapping byte for byte.
+func generateCodeDeployDeploymentID(m *IDMint) string {
+	return "d-" + m.Chars(9, codedeployDeploymentIDChars)
 }

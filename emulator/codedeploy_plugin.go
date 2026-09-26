@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -90,7 +88,7 @@ func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSReq
 		return nil, &AWSError{Code: "ApplicationAlreadyExistsException", Message: "Application " + input.ApplicationName + " already exists.", HTTPStatus: http.StatusBadRequest}
 	}
 
-	appID := generateCodeDeployAppID()
+	appID := generateCodeDeployAppID(reqCtx.IDs)
 	app := CodeDeployApp{
 		ApplicationID:   appID,
 		ApplicationName: input.ApplicationName,
@@ -202,7 +200,7 @@ func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AW
 		return nil, &AWSError{Code: "DeploymentGroupAlreadyExistsException", Message: "Deployment group " + input.DeploymentGroupName + " already exists.", HTTPStatus: http.StatusBadRequest}
 	}
 
-	groupID := generateCodeDeployGroupID()
+	groupID := generateCodeDeployGroupID(reqCtx.IDs)
 	group := CodeDeployGroup{
 		DeploymentGroupID:   groupID,
 		DeploymentGroupName: input.DeploymentGroupName,
@@ -298,7 +296,7 @@ func (p *CodeDeployPlugin) createDeployment(reqCtx *RequestContext, req *AWSRequ
 		}
 	}
 
-	deploymentID := generateCodeDeployDeploymentID()
+	deploymentID := generateCodeDeployDeploymentID(reqCtx.IDs)
 	now := p.tc.Now()
 	deployment := CodeDeployDeployment{
 		DeploymentID:        deploymentID,
@@ -420,26 +418,34 @@ func codedeployDeploymentKey(acct, region, deployID string) string {
 	return "deployment:" + acct + "/" + region + "/" + deployID
 }
 
-// generateCodeDeployAppID generates a UUID-style ID for CodeDeploy applications.
-func generateCodeDeployAppID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateCodeDeployAppID mints a CodeDeploy application ID from m, derived from the request id
+// so a replayed CreateApplication reports the ID the recording reported (#856).
+//
+// Both CodeDeploy identity IDs are reported rather than addressed: every operation here keys off
+// `applicationName` and `deploymentGroupName`, so a re-minted application ID does not break a
+// later call the way a deployment ID does. What it breaks is state validation — the ID is
+// persisted in the application record, so a replayed create writes a record differing from the
+// recorded one and `ValidateState` reports a `state_hash_after` mismatch for the create and for
+// every event after it in the stream.
+//
+// `ApplicationInfo.applicationId` publishes neither a pattern nor length constraints — the type
+// is String and the description is "The application ID" — so #671 keeps the rendering the
+// crypto/rand form produced: [IDMint.HexUUID], 8-4-4-4-12 hex without RFC 4122's version and
+// variant nibbles.
+func generateCodeDeployAppID(m *IDMint) string {
+	return m.HexUUID()
 }
 
-// generateCodeDeployGroupID generates a UUID-style ID for CodeDeploy deployment groups.
-func generateCodeDeployGroupID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateCodeDeployGroupID mints a CodeDeploy deployment-group ID from m, derived from the
+// request id so a replayed CreateDeploymentGroup reports the ID the recording reported (#856).
+//
+// `DeploymentGroupInfo.deploymentGroupId` publishes as little as the application ID does — type
+// String, no pattern, no length constraints — so it takes the same rendering, for the reason
+// [generateCodeDeployAppID] records. It stays a separate function because the two IDs are
+// separate concepts that happen to share a shape, and folding them together is how a Batch job
+// id came to be minted by a function named for a Lambda revision (see [IDMint.HexUUID]).
+func generateCodeDeployGroupID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // codedeployJSONResponse serializes v to JSON and returns an AWSResponse with

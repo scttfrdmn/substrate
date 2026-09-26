@@ -2210,7 +2210,8 @@ Three kinds of value stay random, and one more is still migrating:
   CloudWatch Logs, CloudFront, Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR
   Serverless, ECR, ELB, Route 53, Cognito (both the user-pool and the identity-pool API), IAM
   Identity Center, KMS, ACM, Secrets Manager, WAFv2, Athena, Redshift Data, Glue, Timestream,
-  OpenSearch and QuickSight identifiers are derived today. A CloudFront
+  OpenSearch, QuickSight, CodeBuild, CodeDeploy and CodePipeline identifiers are derived today. A
+  CloudFront
   distribution, invalidation and origin access control all draw from one generator, so the three
   moved together with the origin access control family (#1277). The remaining services are
   migrating one family at a time, tracked on #856; until a service moves, its identifiers are still
@@ -2270,6 +2271,29 @@ OpenSearch generates, and unchanged by #856. Both are values a caller hands back
 document ID is the path of every later `GET`, `PUT` and `DELETE` of that document, and a scroll
 cursor goes straight back to `_search/scroll`, where a re-minted one answers a recorded continuation
 with `search_context_missing_exception` against a cursor the recording had just opened.
+
+**Three renderings of the same sixteen bytes coexist in the CI/CD family, and the published model
+picks each one.** A CodePipeline `pipelineExecutionId` is the only identifier of the five that
+publishes a pattern — `[0-9a-f]{8}-[0-9a-f]{4}-…` — and the only draw site that set RFC 4122's
+version and variant nibbles; that pattern admits any hex digit in either position, so the nibbles
+are substrate's own behaviour rather than a requirement, and they are kept because a consumer
+validating the value as a version-4 UUID would start failing if the `4` vanished. CodeBuild's build
+ID and CodeDeploy's `applicationId` and `deploymentGroupId` publish no pattern and no length
+constraints at all, so they keep the looser UUID *shape* their `crypto/rand` form produced. The
+`{projectName}:` a CodeBuild build ID carries is CodeBuild's own composition, not a derived value,
+and stays outside the mint.
+
+A CodeDeploy `deploymentId` is the family's one **observed** shape: `CreateDeployment` documents it
+as a String with neither a pattern nor length constraints, but the page's own sample response is
+`d-IIMHK0NHC`, which is where the `d-` prefix and nine uppercase alphanumeric characters come from.
+Reading AWS's example is not the same as inventing a bound from a sibling operation — the rule
+[#671](https://github.com/scttfrdmn/substrate/issues/671) settled — and the example is all the
+reference offers here. It is also the family's only *addressed* identifier: `GetDeployment` and
+`StopDeployment` take it, so a re-minted one answered a recorded read with
+`DeploymentDoesNotExistException`. The other four are reported rather than addressed, except
+CodeBuild's, which is worse than a refusal — `BatchGetBuilds` reports an unknown ID under
+`buildsNotFound` in a **200**, so an underived one stalled a consumer's poll loop instead of
+failing it.
 
 An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
 a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
@@ -19924,7 +19948,7 @@ Before writing any test against this service, know that
 | CreateDeploymentGroup | Verifies the application exists; `serviceRoleArn` is `Required: Yes` and [stored without a check](#no-codedeploy-name-role-or-compute-platform-is-checked). The other nineteen published members — `ec2TagFilters`, `deploymentStyle`, `blueGreenDeploymentConfiguration`, `alarmConfiguration`, `triggerConfigurations` and the rest — are not read |
 | GetDeploymentGroup | Four of the twenty-three published `deploymentGroupInfo` members, [plus two of Substrate's own](#the-three-codedeploy-record-shapes-are-truncated) |
 | DeleteDeploymentGroup | Answers the published `hooksNotCleanedUp` as an empty array, which is what AWS's own sample response shows, and [refuses an absent group under an unpublished code](#three-codedeploy-refusals-answer-codes-their-own-page-does-not-publish) |
-| CreateDeployment | Verifies the application, and the deployment group when one is named. `revision` is `Required: No` and unread, so a deployment with no artifact at all succeeds. Answers the published `deploymentId` in the published `d-XXXXXXXXX` shape |
+| CreateDeployment | Verifies the application, and the deployment group when one is named. `revision` is `Required: No` and unread, so a deployment with no artifact at all succeeds. Answers the published `deploymentId` in the `d-XXXXXXXXX` shape AWS's own sample response shows — the page publishes no pattern for it — derived from the request ID (#856) |
 | GetDeployment | Six of the thirty-one published `deploymentInfo` members. [An absent `deploymentId` is reported as an absent deployment](#an-absent-deploymentid-is-reported-as-an-absent-deployment) |
 
 The thirty-nine unrouted operations include everything that would let a consumer observe a deployment

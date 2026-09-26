@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -272,7 +270,7 @@ func (p *CodePipelinePlugin) startPipelineExecution(reqCtx *RequestContext, req 
 		return nil, err
 	}
 
-	execID := generateCodePipelineExecID()
+	execID := generateCodePipelineExecID(reqCtx.IDs)
 	exec := CodePipelineExecution{
 		PipelineExecutionID: execID,
 		PipelineName:        pipeline.Name,
@@ -401,17 +399,23 @@ func codepipelineExecKey(acct, region, execID string) string {
 	return "execution:" + acct + "/" + region + "/" + execID
 }
 
-// generateCodePipelineExecID generates a UUID for pipeline execution IDs.
-func generateCodePipelineExecID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	b[6] = (b[6] & 0x0f) | 0x40
-	b[8] = (b[8] & 0x3f) | 0x80
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateCodePipelineExecID mints a pipeline execution ID from m, derived from the request id so
+// a replayed StartPipelineExecution returns the ID the recording returned (#856).
+//
+// An execution ID is addressed: `GetPipelineExecution` takes `pipelineExecutionId`, so a
+// re-minted one made the recorded read answer `PipelineExecutionNotFoundException` for the
+// execution the replay had just started.
+//
+// This is the only identifier in the CI/CD family with a *published* pattern —
+// `StartPipelineExecution` gives `pipelineExecutionId` as
+// `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}` — and it is also the only draw
+// site in the family that set RFC 4122's version and variant nibbles. The pattern does not
+// require them: `[0-9a-f]` admits any hex digit in either position, so it is satisfied by
+// [IDMint.HexUUID] too. It uses [IDMint.UUID] anyway, because #856 is about making an identifier
+// reproducible across a replay and not about changing which bytes a caller sees, and a consumer
+// validating this as a version-4 UUID would start failing if the `4` disappeared.
+func generateCodePipelineExecID(m *IDMint) string {
+	return m.UUID()
 }
 
 // codepipelineJSONResponse serializes v to JSON and returns an AWSResponse with
