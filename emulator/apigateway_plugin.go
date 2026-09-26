@@ -1628,11 +1628,18 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 		Headers:   map[string]string{"Content-Type": "application/json"},
 		Body:      eventJSON,
 	}
+	// Derived from the request that reached the integration, so the invocation this
+	// dispatches mints what it minted in the recording (#856). A proxy integration is
+	// one of the tree's internal dispatch paths: the context is built here rather than
+	// parsed off the wire, so nothing gave it a mint and every identifier the invoked
+	// function's plugin published fell back to crypto/rand.
+	invokeRequestID := apigwInternalRequestID(reqCtx.IDs)
 	invokeCtx := &RequestContext{
-		RequestID: generateRequestID(),
+		RequestID: invokeRequestID,
 		AccountID: reqCtx.AccountID,
 		Region:    reqCtx.Region,
 		Timestamp: reqCtx.Timestamp,
+		IDs:       NewIDMint(invokeRequestID),
 		Metadata:  make(map[string]interface{}),
 	}
 	invokeResp, invokeErr := p.registry.RouteRequest(invokeCtx, invokeReq)
@@ -1814,6 +1821,22 @@ func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]by
 		},
 	}
 	return json.Marshal(event)
+}
+
+// apigwInternalRequestID returns the request id for the Lambda invocation a proxy
+// integration dispatches, derived from m when it derives.
+//
+// Separate from generateRequestID because the value seeds the invocation's own mint:
+// a wall-clock id makes every identifier the invoked function's plugin publishes
+// unreproducible, which is the gap #856's tier 8 closes on the two internal dispatch
+// sites that have a recorded request behind them — this one and the CloudFormation
+// deployer's. A mint that does not derive — an in-process caller with no request behind
+// it — falls back to the wall clock, which is what this always did.
+func apigwInternalRequestID(m *IDMint) string {
+	if !m.Derived() {
+		return generateRequestID()
+	}
+	return "req-apigw-" + m.Hex(12)
 }
 
 // buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload.

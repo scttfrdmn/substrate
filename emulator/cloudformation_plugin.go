@@ -75,7 +75,8 @@ func (p *CloudFormationPlugin) deployerFor(reqCtx *RequestContext, att cfnAttrib
 	return NewStackDeployer(p.registry, p.store, p.state, p.tc, p.logger, p.costs,
 		WithDeployerIdentity(reqCtx.AccountID, reqCtx.Region),
 		WithDeployerAttribution(att.roleARN, att.creator),
-		WithDeployerAuth(p.auth))
+		WithDeployerAuth(p.auth),
+		WithDeployerMint(reqCtx.IDs))
 }
 
 // Name returns the service name "cloudformation".

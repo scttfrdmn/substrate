@@ -414,6 +414,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   observed from the example rather than required; it is documented beside the `backup-plan` vs. `plan`
   segment gap (#1181) rather than folded into the derivation, since it is a rendering question and not
   one about where the bytes come from.
+- **Every identifier of every resource in every CloudFormation stack was random** (#856). This is the
+  part of #856 that counting draw sites could not find: `StackDeployer` holds no `crypto/rand` call of
+  its own, it turns each resource into an *internal* EC2, IAM or S3 request — and those requests were
+  built with a fresh request ID and no mint, so every plugin they reached took `IDMint`'s seedless
+  fallback however carefully its own minters had been migrated. A replayed `DescribeStackResources`
+  reported four different `PhysicalResourceId` values in a **200**, and `CreateStack`'s
+  `state_hash_after` never matched because that hash covers all of them. Two changes were needed and
+  they fix different failures: an internal request now carries `IDs: NewIDMint(requestID)`, which makes
+  a replayed internal event reproduce, and the internal request ID is itself derived from the stack
+  request's ID through the new `WithDeployerMint` option, which makes a replayed `CreateStack` — which
+  re-runs the whole deployment — reproduce too. Reverting either half alone was measured: seven
+  differences without the mint, six without the derived request ID. The sequence is reproducible because
+  a deploy already orders resources by type priority and then logical ID, never by map iteration. The
+  same dispatch fix reaches an API Gateway proxy integration, which invokes a Lambda through an internal
+  request. A Lambda event-source-mapping poll is deliberately left on the fallback and now says so in
+  the code: its dispatches come from a wall-clock ticker and are recorded nowhere, so there is no
+  recorded ID to derive from (#1292).
+- **A `StackDriftDetectionId` was substrate's internal request ID, verbatim** (#856). `DetectStackDrift`
+  answered the `req-…` string substrate stamps on a request, a shape no AWS reference describes, in a
+  response element a consumer hands straight back to `DescribeStackDriftDetectionStatus`.
+  `StackDriftDetectionId` publishes a **maximum length of 36** and no pattern, and the page's own sample
+  is `2f2b2d60-df86-11e7-bea1-500c2example` — so it is now the UUID shape within that bound, derived from
+  the request ID. A recorded detection replays with the ID it recorded, where before the poll that
+  followed it resolved to nothing.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

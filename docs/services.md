@@ -2318,6 +2318,36 @@ a third — so the counter is what keeps a plan from being its own version. AWS'
 shows the UUID in *upper* case where substrate renders lower; that is an observed difference the model
 does not require, tracked with the [resource segment](#arn-shapes) rather than with the derivation.
 
+**A request that dispatches another request has to hand the mint along with it.** Counting draw
+sites finds the places that call `crypto/rand`; it cannot find a plugin that derives its
+identifiers correctly and is *called* with nothing to derive from. CloudFormation's deployer is
+that case: deploying a stack turns each resource into an internal EC2, IAM or S3 request, and those
+requests were built with a fresh request ID and no mint, so every plugin they reached took the
+seedless fallback. The consequence is larger than the count suggested — **every identifier of every
+resource in every CloudFormation stack** was undirected randomness, while the deployer itself
+contains no draw site at all. A stack's `vpc-…`, its subnet, its security group and its role were
+all unreproducible, and a `ValidateState` replay of the outer `CreateStack` reported a
+`state_hash_after` mismatch because that hash covers all of them.
+
+Two separate things had to change, and each fixes a different failure. An internal request carries a
+mint seeded from its own ID, which is what makes a replayed *internal* event reproduce. And the
+internal ID is itself derived from the stack request's ID, which is what makes a replayed
+`CreateStack` reproduce — replaying it re-runs the whole deployment, so the internal IDs must come
+out the same way twice. The sequence is reproducible because a deploy orders resources by type
+priority and then by logical ID, never by map iteration. Both halves are load-bearing and were
+measured that way: dropping the mint produces seven differences in a four-resource stack, dropping
+the derived request ID produces six. Notably the replay reported every event as a **success** — a
+200 describing four resources that were not the recorded ones, which is the silent-wrong-answer
+class rather than a visible failure.
+
+Removing substrate's internal request ID from that path also removed it from an AWS response.
+`DetectStackDrift` answered a `StackDriftDetectionId` that was literally substrate's `req-…` string,
+which no AWS reference describes; it is now UUID-shaped within the published maximum length of 36.
+The same dispatch fix applies to an API Gateway proxy integration, which invokes a Lambda through an
+internal request. A Lambda event-source-mapping poll is deliberately left random: its dispatches come
+from a wall-clock ticker and are recorded nowhere, so there is no recorded ID to derive from and a
+seed there would be no more reproducible than the fallback ([#1292](https://github.com/scttfrdmn/substrate/issues/1292)).
+
 An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
 a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
 store two images where AWS stores one. [#1283](https://github.com/scttfrdmn/substrate/issues/1283)
@@ -2351,7 +2381,7 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 | ExecuteChangeSet | Applies the change and its tags, and consumes the set |
 | ListChangeSets | Pending change sets for a stack |
 | DeleteChangeSet | Discards a pending set; deleting an absent set succeeds |
-| DetectStackDrift | Returns a `StackDriftDetectionId` |
+| DetectStackDrift | Returns a `StackDriftDetectionId` — UUID-shaped within the published maximum length of 36, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) (#856). It used to be substrate's internal `req-…` string, a shape no AWS reference describes |
 | DescribeStackDriftDetectionStatus | Resolves that ID to a completed detection |
 | DescribeStackResourceDrifts | Per-resource drift; honours `StackResourceDriftStatusFilters.member.N` |
 | ListExports | Every exported output value in the caller's account and Region, in one page |
@@ -3488,6 +3518,14 @@ replay. `StackId` is stable across `CreateStack`, `DescribeStacks` and
 This was substrate's first derived identifier and is the one the general rule was
 modelled on; see [An identifier a replay mints is the one it
 recorded](#an-identifier-a-replay-mints-is-the-one-it-recorded).
+
+The **physical** IDs of the resources a stack deploys are derived too, and were
+not until #856's dispatch fix: the deployer turns each resource into an internal
+request, and those requests carried no mint, so a replayed stack reported
+different `PhysicalResourceId` values and a different `state_hash_after` for
+`CreateStack`. The internal request IDs now derive from the stack request's own
+ID, in the order a deploy already uses — type priority, then logical ID — so a
+replayed `CreateStack` re-runs the deployment and arrives at the same IDs.
 
 ### Cost
 
@@ -12951,7 +12989,7 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | RemoveTagsFromResource | Removes only the named keys |
 | ListTagsForResource | Reports `TagList` sorted by key; an empty list, never `null` |
 | LabelParameterVersion | Accepted; always reports `ParameterVersion: 1` |
-| SendCommand | Run Command; records the intent — substrate does not execute the command. The `CommandId` is the published fixed length of 36, [derived from the request ID](#derived-identifiers) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
+| SendCommand | Run Command; records the intent — substrate does not execute the command. The `CommandId` is the published fixed length of 36, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetCommandInvocation | |
 | DescribeInstanceInformation | |
 
@@ -19533,7 +19571,7 @@ The published example differs in one more way the table does not show: AWS's sam
 `arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50`, an **uppercase**
 UUID, where Substrate renders lowercase. `BackupPlanId` publishes no pattern and no length, so this is
 observed from the example rather than required by the model, and it is a rendering question rather than
-a derivation one — the plan ID is [derived from the request ID](#derived-identifiers) either way.
+a derivation one — the plan ID is [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) either way.
 
 ### Cost
 
@@ -19567,7 +19605,7 @@ running.
 |-----------|-------|
 | InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
 | ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
-| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked. The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#derived-identifiers) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
+| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked. The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports a [seeded status](#seeding-a-batch-job-status) if one is set |
 | ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; the seeded status is applied here too, so a poll on either operation agrees. Every published query filter is ignored and no `nextToken` is emitted |
 | StopModelInvocationJob | `POST /model-invocation-job/{jobIdentifier}/stop`. [Stops a job in any state and skips `Stopping`](#stopping-a-batch-job-is-immediate) |

@@ -2276,3 +2276,137 @@ const (
 	idsBackupHost  = "backup.us-east-1.amazonaws.com"
 	idsBedrockHost = "bedrock.us-east-1.amazonaws.com"
 )
+
+// Tier 8 of #856: the internal dispatch paths — CloudFormation's deployer, and an API Gateway proxy
+// integration's Lambda invoke.
+//
+// The seven tiers above each moved a family of generators. This one moves no generator at all: it
+// gives a *mint* to the request contexts substrate builds in-process rather than parsing off the wire,
+// which is how every identifier of every resource in every CloudFormation stack came to be undirected
+// randomness while the draw-site count read two. A plugin reached through `StackDeployer.dispatch` was
+// handed a context with a nil `IDs`, so it took `IDMint`'s seedless fallback — the count never saw it,
+// because the deployer contains no `rand.Read` of its own.
+//
+// Two changes, fixing two different failures. Setting `IDs` on the dispatched context makes a replayed
+// *internal* event reproduce its recording, the property every recorded event already had. Deriving
+// the internal request *id* from the stack's own request makes a replayed outer `CreateStack`
+// reproduce it too — a create is itself a recorded event, so replaying one re-runs the whole
+// deployment, and without this the two halves of a replayed CloudFormation stream disagreed with each
+// other rather than merely with the recording.
+
+// TestReplay_ACloudFormationStackReplaysWithTheIdentifiersItCreated is the assertion #856 was opened
+// to be able to make, and the one the tiers above could not: a *stack* replays identically.
+//
+// The template is four resources across three services and the deployer's own stub, chosen so that
+// every kind of minted value in a deployment is present — a VPC and a subnet minted by EC2's plugin
+// through a dispatched request, a security group whose id a later describe addresses, and an
+// `AWS::SSM::Association` physical id the deployer mints itself with no service behind it. The outer
+// `CreateStack` event's `state_hash_after` covers all four at once, which is what makes this a single
+// assertion rather than four.
+func TestReplay_ACloudFormationStackReplaysWithTheIdentifiersItCreated(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+	ts.FreezeTime()
+
+	idsQueryCall(t, ts, idsCFNHost, "2010-05-15", map[string]string{
+		"Action":       "CreateStack",
+		"StackName":    "ids-tier8-stack",
+		"TemplateBody": idsTier8Template,
+	})
+	resources := string(idsQueryCall(t, ts, idsCFNHost, "2010-05-15", map[string]string{
+		"Action":    "DescribeStackResources",
+		"StackName": "ids-tier8-stack",
+	}))
+	assert.Contains(t, resources, "vpc-", "the stack created a VPC: %s", resources)
+	assert.Contains(t, resources, "subnet-", "and a subnet")
+	assert.Contains(t, resources, "sg-", "and a security group")
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the stack's own requests")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request — the create and each resource call it dispatched — answers")
+	assert.Empty(t, results.Differences,
+		"a stack's resources replay with the identifiers they were created with: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state the deployment reaches is the recorded state: %v", results.StateErrors)
+}
+
+// TestIDs_ADriftDetectionIDIsDerivedAndUUIDShaped covers the one identifier the deployer answers
+// directly rather than through a dispatched request.
+//
+// It is addressed — `DescribeStackDriftDetectionStatus` takes it — and it was `generateRequestID`,
+// which put substrate's internal `req-…` format into an AWS response element as well as making the
+// value unreproducible. `API_DetectStackDrift` publishes a maximum length of 36 and no pattern, and
+// its sample response is a UUID, so 36 hex-and-hyphen characters is the published bound met at its
+// limit in the shape AWS's own example shows.
+func TestIDs_ADriftDetectionIDIsDerivedAndUUIDShaped(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	idsQueryCall(t, ts, idsCFNHost, "2010-05-15", map[string]string{
+		"Action":       "CreateStack",
+		"StackName":    "ids-tier8-drift",
+		"TemplateBody": idsTier8Template,
+	})
+	var detected struct {
+		ID string `xml:"DetectStackDriftResult>StackDriftDetectionId"`
+	}
+	require.NoError(t, xml.Unmarshal(idsQueryCall(t, ts, idsCFNHost, "2010-05-15", map[string]string{
+		"Action":    "DetectStackDrift",
+		"StackName": "ids-tier8-drift",
+	}), &detected))
+
+	idsRequireHexUUID(t, detected.ID, "a drift detection id")
+	require.Len(t, detected.ID, 36, "the published maximum length, met exactly: %q", detected.ID)
+	assert.NotContains(t, detected.ID, "req-",
+		"substrate's internal request-id format does not reach an AWS response element: %q",
+		detected.ID)
+
+	// Addressed, which is why deriving it matters: the status read takes the id back.
+	status := string(idsQueryCall(t, ts, idsCFNHost, "2010-05-15", map[string]string{
+		"Action":                "DescribeStackDriftDetectionStatus",
+		"StackDriftDetectionId": detected.ID,
+	}))
+	assert.Contains(t, status, detected.ID, "and answers for it: %s", status)
+}
+
+// A proxy integration's internal request id is the other half of the same seam, and its seedless
+// branch is only reachable from a hand-built RequestContext — the shape every plugin unit test
+// builds — so it is asserted directly rather than through the integration.
+func TestIDs_AProxyIntegrationInvokeIDDerivesFromTheRequestThatReachedIt(t *testing.T) {
+	t.Parallel()
+
+	first := emulator.APIGatewayInternalRequestIDForTest("req-tier8-seed")
+	assert.Equal(t, first, emulator.APIGatewayInternalRequestIDForTest("req-tier8-seed"),
+		"one request id mints one invoke id, which is what makes the invocation replay")
+	assert.Regexp(t, `^req-apigw-[0-9a-f]{24}$`, first, "and it is hex over the seed: %q", first)
+	assert.NotEqual(t, first, emulator.APIGatewayInternalRequestIDForTest("req-tier8-other"),
+		"two requests do not share an invoke id")
+
+	// No request behind the caller: the wall-clock id, which is what this path always used.
+	fallback := emulator.APIGatewayInternalRequestIDForTest("")
+	assert.NotContains(t, fallback, "req-apigw-",
+		"a seedless mint cannot derive, so it must not claim to: %q", fallback)
+	assert.NotEqual(t, fallback, emulator.APIGatewayInternalRequestIDForTest(""),
+		"and two seedless draws must not collide onto one invocation")
+}
+
+// idsTier8Template is four resources over three services plus the deployer's own stub, sorted by the
+// deployer into VPC, then subnet and security group, then the association — the order the mint's
+// ordinal advances in, and the reason a re-run reproduces it.
+const idsTier8Template = `{"Resources":{` +
+	`"Net":{"Type":"AWS::EC2::VPC","Properties":{"CidrBlock":"10.8.0.0/16"}},` +
+	`"Sub":{"Type":"AWS::EC2::Subnet","Properties":{"VpcId":{"Ref":"Net"},"CidrBlock":"10.8.1.0/24"}},` +
+	`"Sg":{"Type":"AWS::EC2::SecurityGroup","Properties":{"GroupDescription":"ids tier 8",` +
+	`"VpcId":{"Ref":"Net"}}},` +
+	`"Assoc":{"Type":"AWS::SSM::Association","Properties":{"Name":"AWS-RunShellScript"}}}}`
+
+// The host CloudFormation's query protocol is addressed at.
+const idsCFNHost = "cloudformation.us-east-1.amazonaws.com"

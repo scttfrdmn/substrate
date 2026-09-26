@@ -1005,6 +1005,12 @@ type StackDeployer struct {
 	// nil to authorize nothing. Taken from PluginConfig.Options["auth_controller"]
 	// the same way event_store and cost_controller are.
 	auth *AuthController
+
+	// mint derives the request id of every request this deployment dispatches, and
+	// so — transitively — every identifier of every resource in the stack. Nil
+	// means the deployment's internal request ids are drawn from the wall clock,
+	// which is what they all were before #856's tier 8. See WithDeployerMint.
+	mint *IDMint
 }
 
 // StackDeployerOption configures optional behavior of a [StackDeployer].
@@ -1027,6 +1033,34 @@ type StackDeployerOption func(*StackDeployer)
 func WithDeployerIdentity(accountID, region string) StackDeployerOption {
 	return func(d *StackDeployer) {
 		d.identity = cfnIdentity{accountID: accountID, region: region}
+	}
+}
+
+// WithDeployerMint derives this deployment's internal request ids from m, which is
+// the mint of the request that asked for the deployment.
+//
+// A stack's resources are created by requests substrate builds in this package and
+// dispatches through the registry, and each of those requests mints its resource's
+// identifier from its own request id. Those ids came from generateRequestID, which
+// is the wall clock, so **every identifier in every CloudFormation stack was
+// undirected randomness** — which is the part of #856 the draw-site count never
+// showed, because the deployer contains no `rand.Read` call of its own.
+//
+// Deriving them fixes two different failures at once. A replayed *internal* event
+// reproduces its recording because the recorded request id is the seed, which is
+// true of any recorded event (see replayEvent). And a replayed outer `CreateStack`
+// — which re-runs the whole deployment, since the create is itself a recorded
+// event — reproduces it too, because the re-run derives the same sequence of
+// internal ids from the same outer request. The second is why the option exists:
+// without it the two halves of a replayed CloudFormation stream disagreed with each
+// other, not merely with the recording.
+//
+// The sequence is reproducible because [StackDeployer.DeployWithOptions] sorts its
+// resources by type priority and then by logical id before dispatching any of them.
+// A deployment is single-goroutine, so the mint's ordinal advances in that order.
+func WithDeployerMint(m *IDMint) StackDeployerOption {
+	return func(d *StackDeployer) {
+		d.mint = m
 	}
 }
 
@@ -2023,7 +2057,19 @@ func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName 
 		return "", cfnErrf(ErrCFNStackNotFound, "cfn StartStackDriftDetection: stack %q not found", stackName)
 	}
 
-	detectionID := generateRequestID()
+	// Minted from the deployment's mint, so a replayed DetectStackDrift returns the id
+	// the recording returned and the recorded DescribeStackDriftDetectionStatus that
+	// names it is answered rather than refused (#856). It was generateRequestID, which
+	// is the wall clock — and which also put substrate's internal `req-…` request-id
+	// format into an AWS response element.
+	//
+	// `API_DetectStackDrift` publishes `StackDriftDetectionId` as a String with a
+	// **maximum length of 36** and no pattern, and its sample response is
+	// `2f2b2d60-df86-11e7-bea1-500c2example` — a UUID shape. 36 is exactly what
+	// [IDMint.HexUUID] renders, so the published bound is met at its limit and the value
+	// looks like one CloudFormation would issue. Reading AWS's example is the provenance
+	// #671 allows; inventing a bound from a sibling operation is not.
+	detectionID := d.mint.HexUUID()
 	// Persist the in-progress record before running detection.
 	inProgress := &CFNDriftDetectionStatus{
 		StackDriftDetectionID: detectionID,
@@ -4255,6 +4301,12 @@ func (d *StackDeployer) deploySSMParameter(
 }
 
 // deploySSMAssociation is a stub for SSM::Association resources.
+//
+// The association id is minted from the deployment's own mint rather than dispatched
+// for, because there is no request to dispatch: SSM's plugin models Run Command and
+// Parameter Store, not State Manager, so this resource has no service behind it and
+// the physical id is the whole of what a template can observe. It was the last
+// [randomHex] caller in the deployer (#856).
 func (d *StackDeployer) deploySSMAssociation(
 	_ context.Context,
 	logicalID string,
@@ -4262,7 +4314,7 @@ func (d *StackDeployer) deploySSMAssociation(
 	_ string,
 	_ *cfnContext,
 ) (DeployedResource, float64, error) {
-	assocID := randomHex(16)
+	assocID := d.mint.Hex(16)
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::SSM::Association",
@@ -4582,6 +4634,21 @@ func extractXMLField(b []byte, name string) string {
 	return s[start : start+end]
 }
 
+// internalRequestID returns the request id for the next request this deployment
+// dispatches.
+//
+// Derived from the deployment's mint when it has one, so the sequence reproduces on
+// a re-run of the same template (see [WithDeployerMint]); drawn from the wall clock
+// otherwise, which is what every in-process dispatch did before. The `req-` prefix
+// and the width match generateRequestID, because this value reaches the event log
+// and `/v1/debug/events` beside ids that came from there.
+func (d *StackDeployer) internalRequestID() string {
+	if !d.mint.Derived() {
+		return generateRequestID()
+	}
+	return "req-cfn-" + d.mint.Hex(12)
+}
+
 // dispatch performs in-process request routing, records the event, and returns
 // the response, the estimated cost, and any routing error.
 func (d *StackDeployer) dispatch(
@@ -4589,11 +4656,19 @@ func (d *StackDeployer) dispatch(
 	req *AWSRequest,
 	streamID string,
 ) (*AWSResponse, float64, error) {
+	requestID := d.internalRequestID()
 	reqCtx := &RequestContext{
-		RequestID: generateRequestID(),
+		RequestID: requestID,
 		AccountID: d.identity.accountID,
 		Region:    d.identity.region,
 		Timestamp: d.tc.Now(),
+		// Seeded from the request id above, which is what makes the resource this
+		// request creates carry the identifier it carried in the recording (#856).
+		// Before this the deployer dispatched with a nil mint, so every plugin it
+		// reached fell back to crypto/rand — a replayed stack re-created every one
+		// of its resources under a new identifier, and ValidateState reported a
+		// state_hash mismatch for the create that was the right answer.
+		IDs:       NewIDMint(requestID),
 		Principal: d.attribution.resolve(),
 		Metadata:  map[string]interface{}{"stream_id": streamID},
 	}

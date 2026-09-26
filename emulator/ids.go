@@ -55,15 +55,19 @@ import (
 //
 // The request id itself, which is the seed (#866 settled that it is wall-clock and recorded
 // rather than derived). Substrate's own bookkeeping ids — an event id, a snapshot id, a
-// replay id — which no AWS call observes. EC2 key-pair *material*, which needs a
+// replay id — which no AWS call observes. A Lambda ESM poll's dispatches, which are driven by
+// a wall-clock ticker and recorded nowhere, so there is nothing for a replay to derive from
+// (#1292). EC2 key-pair *material*, which needs a
 // deterministic reader into the key generator rather than a string; a replayed CreateKeyPair
 // still diverges on the key and its fingerprint (see the #856 checklist). And everything
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): 2 draw sites remain on crypto/rand — randomHex, whose one caller is the
-// CloudFormation deployer, and bytes's own seedless fallback, which goes when the deployer
-// threads a request id through.
+// TODO(#856): one draw site remains on crypto/rand: randomHex, whose last caller mints an
+// EC2 instance profile's AIPA… id inside a *describe* (#1291). bytes's own seedless fallback
+// stays: a nil or seedless mint is what a hand-built RequestContext has, which is how every
+// plugin unit test — substrate's and a consumer's — constructs one, and generateRequestID
+// draws through it because the request id is the seed and is deliberately random.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.

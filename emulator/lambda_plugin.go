@@ -1617,6 +1617,14 @@ func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
 		Path:    "/",
 		Body:    nil,
 	}
+	// No mint, deliberately. Substrate has four internal dispatch sites — a context built
+	// here rather than parsed off the wire — and #856's tier 8 gave a derived mint to the
+	// two that had something to derive from: the CloudFormation deployer's and an API
+	// Gateway proxy integration's. The other two are this poller's receive and its invoke
+	// below. An ESM poll is driven by a wall-clock ticker and is recorded nowhere, so
+	// there is no recorded request id for a replay to derive from and a seed here would be
+	// exactly as random as the nil mint it replaced. What this path needs is a simulated
+	// clock and a recorded dispatch, which is #1292.
 	rxCtx := &RequestContext{
 		RequestID: generateRequestID(),
 		AccountID: acct,
@@ -1689,6 +1697,8 @@ func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
 		Headers:   map[string]string{"Content-Type": "application/json"},
 		Body:      eventJSON,
 	}
+	// Mintless for the same reason as the receive above (#1292): the identifier this
+	// invocation's plugin would publish has no recorded request id behind it.
 	invokeCtx := &RequestContext{
 		RequestID: generateRequestID(),
 		AccountID: fnAcct,
