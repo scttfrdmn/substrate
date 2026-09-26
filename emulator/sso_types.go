@@ -1,8 +1,6 @@
 package emulator
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"time"
 )
 
@@ -61,36 +59,39 @@ type SSOAccountAssignment struct {
 	InstanceArn string `json:"InstanceArn"`
 }
 
-// generateSSOInstanceArn generates a random IAM Identity Center instance ARN.
-func generateSSOInstanceArn() string {
-	b := make([]byte, 13)
-	_, _ = rand.Read(b)
-	return "arn:aws:sso:::instance/" + hex.EncodeToString(b)[:26]
+// The four SSO minters take the request's [IDMint] as a parameter rather than reading it off a
+// [RequestContext], because two of them are reached from [SSOPlugin.ensureInstance], which takes an
+// account ID and a Go context and not a request context (#856's established shape for a helper that
+// mints without a request in scope — see buildSNSEnvelope).
+//
+// The instance is minted **lazily, by whichever request touches SSO first**, including a read:
+// `ListInstances` creates it as readily as `CreatePermissionSet` does. That is replay-stable rather
+// than in spite of the laziness — a replay re-issues the recorded requests in their recorded order,
+// so the same request creates the instance and mints the same ARN — but it does mean the instance
+// ARN belongs to the ordinal stream of a request that did not ask for one.
+
+// generateSSOInstanceArn mints an IAM Identity Center instance ARN from m.
+//
+// Thirteen bytes is 26 hex characters, so the `[:26]` the crypto/rand form applied truncated
+// nothing; the width is unchanged.
+func generateSSOInstanceArn(m *IDMint) string {
+	return "arn:aws:sso:::instance/" + m.Hex(13)
 }
 
-// generateSSOIdentityStoreID generates a random identity store ID.
-func generateSSOIdentityStoreID() string {
-	b := make([]byte, 5)
-	_, _ = rand.Read(b)
-	return "d-" + hex.EncodeToString(b)[:10]
+// generateSSOIdentityStoreID mints an identity store ID from m, in the `d-`-prefixed form.
+func generateSSOIdentityStoreID(m *IDMint) string {
+	return "d-" + m.Hex(5)
 }
 
-// generateSSOPermissionSetArn generates an ARN for a permission set.
-func generateSSOPermissionSetArn(instanceArn string) string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return instanceArn + "/ps-" + hex.EncodeToString(b)
+// generateSSOPermissionSetArn mints a permission set ARN from m, as a child of instanceArn.
+func generateSSOPermissionSetArn(m *IDMint, instanceArn string) string {
+	return instanceArn + "/ps-" + m.Hex(8)
 }
 
-// generateSSORequestID generates a UUID-style request ID for async SSO operations.
-func generateSSORequestID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateSSORequestID mints a UUID-shaped request ID from m, for the async SSO operations that
+// report one.
+func generateSSORequestID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // State key helpers.

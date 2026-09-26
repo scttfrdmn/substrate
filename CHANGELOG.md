@@ -294,6 +294,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   route, integration or mapping ID — now looks like one AWS would issue. This is the one identifier
   whose *alphabet* changed when it was derived, and it widened rather than narrowed. 23 draw sites
   remain on `crypto/rand`.
+- **The identity, key and certificate family of draw sites is derived** (#856). Eight generators
+  across seven services move onto `IDMint`: a Cognito user-pool ID, user-pool client ID and client
+  secret, a Cognito identity-pool ID and identity ID, an IAM Identity Center permission-set ID, a KMS
+  key ID, an ACM certificate ID, a Secrets Manager version ID, a WAFv2 web ACL and IP set ID, and an
+  API Gateway API key's ID and value. Every rendering is byte-for-byte the shape the `crypto/rand`
+  version produced — the width, the case and the alphabet — so an identifier a previous substrate
+  recorded is still the shape this one mints; nothing in any of the seven API models distinguishes the
+  two renderings of a UUID-shaped value, which is why #671's "only what the API model states" leaves
+  them alone. 15 draw sites remain on `crypto/rand`.
+- **A replayed secret version ID answers the read it recorded** (#856). This is the quietest way an
+  identifier can break a replay, and the reason the family's replay test records the pair: substrate
+  reports an unknown `VersionId` to `GetSecretValue` by *omitting* `SecretString` rather than by
+  refusing, so before this a replay answered a recorded read with a **200 that had silently lost a
+  member**. A version ID is a key a caller hands back, not a bare identifier, which is what puts it
+  above the rest of the family. Reverting the minter to confirm the assertion is not vacuous produces
+  21 differences, of which that lost member is one.
+- **A replayed WAFv2 `LockToken` still unlocks the update it recorded** (#856). The optimistic-locking
+  contract requires a caller to hand the token back to `UpdateWebACL`, so a replay that re-minted it
+  answered the recorded update with `WAFOptimisticLockException` instead of the recorded success. One
+  minter serves the web ACL ID, the IP set ID and both lock tokens because API_WebACLSummary publishes
+  the identical 1–36 character `^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$` constraint on each.
+- **An API Gateway API key is no longer minted by ACM's certificate generator** (#856). `CreateApiKey`
+  reached into `generateACMCertID` for both UUID-shaped strings it returns, so a change to ACM's
+  rendering would have silently moved API Gateway's. The two now have their own minters and the `id`
+  and `value` draw in turn, so they differ. `generateACMCertID` no longer returns an error either —
+  the mint cannot fail where `rand.Read` could, so the caller's dead error branch went with it.
+- **A KMS `GenerateDataKey` response is reproducible in both of its members** (#856). The stub data key
+  is not an identifier, and it is in scope because a caller observes it twice over in one response: the
+  bytes are the `Plaintext`, and the same bytes are wrapped into the `CiphertextBlob`. A recorded
+  `Decrypt` was never affected — substrate's ciphertext carries its own plaintext, so a replayed
+  decrypt answers from the recorded blob regardless — so the break was in the create, not the read.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

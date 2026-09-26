@@ -225,10 +225,39 @@ type KMSTag struct {
 	TagValue string `json:"TagValue"`
 }
 
-// generateKMSKeyID generates a UUID-like KMS key ID.
-func generateKMSKeyID() string {
-	h := randomHex(32)
-	return fmt.Sprintf("%s-%s-%s-%s-%s", h[0:8], h[8:12], h[12:16], h[16:20], h[20:32])
+// generateKMSKeyID mints a KMS key ID from m, in the UUID shape AWS's own examples write
+// (`1234abcd-12ab-34cd-56ef-1234567890ab`).
+//
+// [IDMint.HexUUID] rather than [IDMint.UUID]: the crypto/rand form reshaped 32 hex characters
+// without setting the RFC 4122 version and variant nibbles, and #856 does not change which bytes a
+// caller sees. API_KeyMetadata's `KeyId` is "the globally unique identifier for the KMS key" at a
+// length of 1–2048 with **no pattern**, so nothing in the API model distinguishes the two
+// renderings — which is also why the shape is not something to revisit here (#671).
+func generateKMSKeyID(m *IDMint) string {
+	return m.HexUUID()
+}
+
+// kmsStubDataKey mints the stub a `GenerateDataKey` response's plaintext and ciphertext are both
+// built from — 32 lowercase hex characters, which is what substrate calls the data key's bytes.
+//
+// Shared by GenerateDataKey and GenerateDataKeyWithoutPlaintext so the two cannot diverge, which is
+// the same reason [kmsDataKeyKeySpecError] is shared.
+//
+// Deriving it is #856's rule applied to a value that is *not* an identifier, and the reason it is in
+// scope is that the caller observes it twice over: the bytes are the response's `Plaintext`, and the
+// same bytes are wrapped into its `CiphertextBlob`, so a re-minted key makes both members of a
+// recorded response unreproducible. (A recorded `Decrypt` still answers the recorded plaintext
+// either way — [kmsEncryptStub] carries the plaintext inside the blob, so what a replayed Decrypt
+// reports comes from the recorded ciphertext rather than from a fresh draw. The break is in the
+// GenerateDataKey response itself.)
+//
+// STS secret access keys and session tokens are already derived for the same reason, and the
+// argument is the one ids.go's file comment makes — a test emulator's stub data key protects
+// nothing, and a caller who needs an unguessable key from a test double is asking the wrong tool.
+// EC2 key-pair material stays random because it needs a deterministic reader into a key generator
+// rather than a string; this needs only a string.
+func kmsStubDataKey(m *IDMint) string {
+	return m.Hex(16)
 }
 
 // kmsKeyMaterialID mints the identifier of a key's key material from the key's own ARN.

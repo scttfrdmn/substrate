@@ -72,7 +72,7 @@ func (p *SSOPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWS
 
 // ensureInstance auto-creates the singleton SSO instance for an account on first access,
 // following the same pattern as ensureOrganization in organizations_plugin.go.
-func (p *SSOPlugin) ensureInstance(goCtx context.Context, acct string) (*SSOInstance, error) {
+func (p *SSOPlugin) ensureInstance(goCtx context.Context, m *IDMint, acct string) (*SSOInstance, error) {
 	key := ssoInstanceKey(acct)
 	data, err := p.state.Get(goCtx, ssoNamespace, key)
 	if err != nil {
@@ -87,8 +87,8 @@ func (p *SSOPlugin) ensureInstance(goCtx context.Context, acct string) (*SSOInst
 	}
 
 	inst := SSOInstance{
-		InstanceArn:     generateSSOInstanceArn(),
-		IdentityStoreID: generateSSOIdentityStoreID(),
+		InstanceArn:     generateSSOInstanceArn(m),
+		IdentityStoreID: generateSSOIdentityStoreID(m),
 		Status:          "ACTIVE",
 		CreatedDate:     p.tc.Now(),
 		AccountID:       acct,
@@ -105,7 +105,7 @@ func (p *SSOPlugin) ensureInstance(goCtx context.Context, acct string) (*SSOInst
 
 func (p *SSOPlugin) listInstances(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
-	inst, err := p.ensureInstance(goCtx, reqCtx.AccountID)
+	inst, err := p.ensureInstance(goCtx, reqCtx.IDs, reqCtx.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +140,7 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 	}
 
 	goCtx := context.Background()
-	inst, err := p.ensureInstance(goCtx, reqCtx.AccountID)
+	inst, err := p.ensureInstance(goCtx, reqCtx.IDs, reqCtx.AccountID)
 	if err != nil {
 		return nil, err
 	}
@@ -149,7 +149,7 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 		instanceArn = inst.InstanceArn
 	}
 
-	permSetArn := generateSSOPermissionSetArn(instanceArn)
+	permSetArn := generateSSOPermissionSetArn(reqCtx.IDs, instanceArn)
 	ps := SSOPermissionSet{
 		PermissionSetArn: permSetArn,
 		Name:             input.Name,
@@ -385,7 +385,7 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
 	updateStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
 
-	requestID := generateSSORequestID()
+	requestID := generateSSORequestID(reqCtx.IDs)
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
 		"AccountAssignmentCreationStatus": map[string]interface{}{
 			"Status":           "SUCCEEDED",
@@ -435,7 +435,7 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
 	removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
 
-	requestID := generateSSORequestID()
+	requestID := generateSSORequestID(reqCtx.IDs)
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
 		"AccountAssignmentDeletionStatus": map[string]interface{}{
 			"Status":    "SUCCEEDED",
