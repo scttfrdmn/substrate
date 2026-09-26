@@ -94,7 +94,7 @@ func (p *EFSPlugin) createFileSystem(reqCtx *RequestContext, req *AWSRequest) (*
 		input.ThroughputMode = "bursting"
 	}
 
-	fsID := generateEFSFileSystemID()
+	fsID := generateEFSFileSystemID(reqCtx.IDs)
 	arn := fmt.Sprintf("arn:aws:elasticfilesystem:%s:%s:file-system/%s",
 		reqCtx.Region, reqCtx.AccountID, fsID)
 
@@ -256,7 +256,7 @@ func (p *EFSPlugin) createAccessPoint(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, efsBadRequest("FileSystemId is required")
 	}
 
-	apID := generateEFSAccessPointID()
+	apID := generateEFSAccessPointID(reqCtx.IDs)
 	arn := fmt.Sprintf("arn:aws:elasticfilesystem:%s:%s:access-point/%s",
 		reqCtx.Region, reqCtx.AccountID, apID)
 
@@ -380,7 +380,7 @@ func (p *EFSPlugin) createMountTarget(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, efsBadRequest("FileSystemId is required")
 	}
 
-	mtID := generateEFSMountTargetID()
+	mtID := generateEFSMountTargetID(reqCtx.IDs)
 	mt := EFSMountTarget{
 		MountTargetID:  mtID,
 		FileSystemID:   input.FileSystemID,
@@ -695,17 +695,17 @@ func efsJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	}, nil
 }
 
-// generateEFSFileSystemID generates an EFS file system ID (fs- + 8 hex chars).
-func generateEFSFileSystemID() string {
-	return "fs-" + randomHex(8)
+// generateEFSFileSystemID mints an EFS file system ID (fs- + 16 hex chars) from m.
+func generateEFSFileSystemID(m *IDMint) string {
+	return "fs-" + m.Hex(8)
 }
 
-// generateEFSAccessPointID generates an EFS access point ID (fsap- + 8 hex chars).
-func generateEFSAccessPointID() string {
-	return "fsap-" + randomHex(8)
+// generateEFSAccessPointID mints an EFS access point ID (fsap- + 16 hex chars) from m.
+func generateEFSAccessPointID(m *IDMint) string {
+	return "fsap-" + m.Hex(8)
 }
 
-// generateEFSMountTargetID generates an EFS mount target ID (fsmt- + 8 hex chars).
-func generateEFSMountTargetID() string {
-	return "fsmt-" + randomHex(8)
+// generateEFSMountTargetID mints an EFS mount target ID (fsmt- + 16 hex chars) from m.
+func generateEFSMountTargetID(m *IDMint) string {
+	return "fsmt-" + m.Hex(8)
 }

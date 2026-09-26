@@ -56,10 +56,10 @@ type FSxTag struct {
 	Value string `json:"Value"`
 }
 
-// generateFSxFileSystemID returns a unique FSx file system ID of the form
-// "fs-" followed by 8 lowercase hex digits.
-func generateFSxFileSystemID() string {
-	return "fs-" + randomHex(8)
+// generateFSxFileSystemID mints a unique FSx file system ID from m, of the form
+// "fs-" followed by 16 lowercase hex digits.
+func generateFSxFileSystemID(m *IDMint) string {
+	return "fs-" + m.Hex(8)
 }
 
 // fsxDNSName derives a DNS name for a file system based on its ID and region.
@@ -141,7 +141,7 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		input.StorageType = "SSD"
 	}
 
-	fsID := generateFSxFileSystemID()
+	fsID := generateFSxFileSystemID(ctx.IDs)
 	arn := fmt.Sprintf("arn:aws:fsx:%s:%s:file-system/%s", ctx.Region, ctx.AccountID, fsID)
 
 	// Derive VPC ID from the first subnet when available (simplified).
@@ -171,7 +171,7 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		if lustreDeploymentType == "SCRATCH_2" || lustreDeploymentType == "" {
 			lustreMountName = "fsx"
 		} else {
-			lustreMountName = randomHex(8)
+			lustreMountName = ctx.IDs.Hex(8)
 		}
 	}
 

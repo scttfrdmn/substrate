@@ -1,8 +1,6 @@
 package emulator
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"time"
 )
 
@@ -63,12 +61,10 @@ type TransferTag struct {
 	Value string `json:"Value"`
 }
 
-// generateTransferServerID generates a server ID in the form s-{17 hex chars},
+// generateTransferServerID mints a server ID from m in the form s-{17 hex chars},
 // matching the real AWS Transfer Family server ID format.
-func generateTransferServerID() string {
-	b := make([]byte, 9) // 9 bytes → 18 hex chars; we use 17
-	_, _ = rand.Read(b)
-	return "s-" + hex.EncodeToString(b)[:17]
+func generateTransferServerID(m *IDMint) string {
+	return "s-" + m.Hex(9)[:17] // 9 bytes → 18 hex chars; we use 17.
 }
 
 // State key helpers.

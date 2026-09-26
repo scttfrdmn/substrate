@@ -169,9 +169,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `StateValid` true, twice over and in a second process. `generateRequestID`, which is the seed,
   gained a random suffix: it was the wall clock alone, and every other identifier now derives from
   it, so two requests served within one tick of a coarse clock would have minted the same volume ID.
-  Remaining on `crypto/rand`: 32 draw sites in the other services, migrating one family at a time on
+  Remaining on `crypto/rand`: 29 draw sites in the other services, migrating one family at a time on
   #856; EC2 key-pair material, which needs a deterministic reader into the key generator rather than
   a string; and substrate's own event, snapshot and replay IDs, which no AWS call observes.
+- **The shared UUID-shaped identifier, and the messaging/storage family, are derived too** (#856).
+  Substrate had two shared draw sites, not one. `randomHex` was the known one; the other was a
+  UUID-shaped generator declared in the Lambda plugin that **six other services** publish an
+  identifier from — an ECS task ID, a Step Functions execution name, an SQS message ID, an
+  EventBridge event ID, a CloudWatch Logs upload sequence token and a Service Quotas request ID — so
+  it moved to `IDMint` together with Lambda's own revision IDs rather than waiting for each of those
+  services' turn in the per-family tiering. Its rendering is unchanged: sixteen derived bytes in
+  UUID *shape*, `8-4-4-4-12` lowercase hex without the RFC 4122 version and variant bits, because
+  #856 is about reproducing an identifier across a replay and not about changing which bytes a
+  caller sees. Moving with it: SQS receipt handles, SNS subscription IDs and notification-envelope
+  message IDs, EFS file-system/access-point/mount-target IDs, FSx file-system IDs and Lustre mount
+  names, and Transfer Family server IDs. A send mints a message's initial receipt handle and each
+  receive replaces it, which matches real SQS — two `ReceiveMessage` calls returning one message
+  hand back two handles, and only the most recent deletes — so the handle derives from the mint's
+  ordinal rather than from the message, and each call's handle replays as the one that call
+  recorded. Three helpers that minted
+  without a request context in scope now take the mint as a parameter: `buildSNSEnvelope`,
+  `requestServiceQuotaIncrease` and FSx's Lustre mount-name branch. A recorded stream that sends and
+  receives an SQS message, subscribes to an SNS topic and creates an EFS file system with an access
+  point — each later request naming what an earlier one minted — now replays with **zero**
+  differences and `StateValid` true.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a

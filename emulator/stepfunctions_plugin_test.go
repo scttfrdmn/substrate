@@ -1035,3 +1035,48 @@ func TestSFN_Choice_IsNull(t *testing.T) {
 	assert.Equal(t, "SUCCEEDED", d2["status"])
 	assert.Contains(t, d2["output"], "was-present")
 }
+
+// TestStepFunctions_StartExecutionMintsANameWhenNoneIsGiven covers the branch that names an
+// execution for a caller who did not name one. `name` is optional on StartExecution, and the
+// minted name is `exec-` followed by eight characters of the shared UUID-shaped identifier —
+// which since #856 is derived from the request's own ID, so replaying the start reproduces the
+// execution ARN the recording answered with rather than minting a new one.
+//
+// Two properties are asserted together because each is the other's control: two starts under
+// one mint get different names, so the mint's ordinal is honored; and a second mint over the
+// same seed reproduces the first name, so the source is the request ID and not a draw.
+func TestStepFunctions_StartExecutionMintsANameWhenNoneIsGiven(t *testing.T) {
+	arnFor := func(mint *emulator.IDMint, machine string) []string {
+		p, ctx := setupStepFunctionsPlugin(t)
+		ctx.IDs = mint
+		_, err := p.HandleRequest(ctx, sfnRequest("CreateStateMachine", map[string]any{
+			"name":       machine,
+			"definition": testSMDefinition,
+			"roleArn":    "arn:aws:iam::123456789012:role/sfn-role",
+		}))
+		require.NoError(t, err)
+
+		arns := make([]string, 0, 2)
+		for range 2 {
+			resp, startErr := p.HandleRequest(ctx, sfnRequest("StartExecution", map[string]any{
+				"stateMachineArn": "arn:aws:states:us-east-1:123456789012:stateMachine:" + machine,
+			}))
+			require.NoError(t, startErr)
+			require.Equal(t, 200, resp.StatusCode)
+			arn, ok := sfnBody(t, resp)["executionArn"].(string)
+			require.True(t, ok)
+			arns = append(arns, arn)
+		}
+		return arns
+	}
+
+	first := arnFor(emulator.NewIDMint("req-mints-a-name"), "UnnamedExecSM")
+	assert.Regexp(t, `:execution:UnnamedExecSM:exec-[0-9a-f]{8}$`, first[0],
+		"an unnamed execution is named exec- plus eight hex characters")
+	assert.NotEqual(t, first[0], first[1],
+		"two unnamed starts in one request mint two names")
+
+	second := arnFor(emulator.NewIDMint("req-mints-a-name"), "UnnamedExecSM")
+	assert.Equal(t, first, second,
+		"the name derives from the request ID, so the same ID mints the same name (#856)")
+}

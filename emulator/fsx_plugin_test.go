@@ -339,3 +339,41 @@ func TestFSx_SDKTargetRouting(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &out))
 	assert.True(t, strings.HasPrefix(out.FileSystem.FileSystemId, "fs-"))
 }
+
+// TestFSx_LustreMountNameIsMintedForANonScratchDeployment covers the other half of the
+// MountName branch: SCRATCH_2 always reports "fsx", and every other Lustre deployment type
+// reports a minted value instead.
+//
+// Since #856 that value derives from the request's own ID rather than from crypto/rand, so a
+// replayed CreateFileSystem reports the mount name its recording reported. The assertion is on
+// the shape and on its difference from the SCRATCH_2 constant; the derivation itself is
+// asserted end-to-end in ids_test.go.
+func TestFSx_LustreMountNameIsMintedForANonScratchDeployment(t *testing.T) {
+	ts := httptest.NewServer(newFSxTestServer(t))
+	t.Cleanup(ts.Close)
+
+	mountNameFor := func(deploymentType string) string {
+		resp := fsxRequest(t, ts, "CreateFileSystem", `{
+			"FileSystemType": "LUSTRE",
+			"StorageCapacity": 1200,
+			"SubnetIds": ["subnet-12345678"],
+			"LustreConfiguration": {"DeploymentType": "`+deploymentType+`"}
+		}`)
+		body := readFSxBody(t, resp)
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+		var created struct {
+			FileSystem struct {
+				LustreConfiguration struct {
+					MountName string `json:"MountName"`
+				} `json:"LustreConfiguration"`
+			} `json:"FileSystem"`
+		}
+		require.NoError(t, json.Unmarshal(body, &created))
+		return created.FileSystem.LustreConfiguration.MountName
+	}
+
+	assert.Equal(t, "fsx", mountNameFor("SCRATCH_2"),
+		"SCRATCH_2's mount name is the documented constant, not a minted value")
+	assert.Regexp(t, `^[0-9a-f]{16}$`, mountNameFor("PERSISTENT_1"),
+		"a persistent deployment reports a minted mount name")
+}

@@ -830,7 +830,7 @@ func (p *ECSPlugin) runTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 
 	var tasks []ECSTask
 	for i := 0; i < body.Count; i++ {
-		taskID := generateLambdaRevisionID()[:16]
+		taskID := generateLambdaRevisionID(ctx.IDs)[:16]
 		task := ECSTask{
 			TaskArn:           fmt.Sprintf("arn:aws:ecs:%s:%s:task/%s/%s", ctx.Region, ctx.AccountID, clusterName, taskID),
 			TaskDefinitionArn: td.TaskDefinitionArn,

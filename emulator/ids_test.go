@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
@@ -438,4 +439,218 @@ func idsEC2Call(t *testing.T, ts *emulator.TestServer, params map[string]string)
 	require.NoError(t, resp.Body.Close())
 	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", params["Action"], body)
 	return body
+}
+
+// Tier 2 of #856: the shared UUID-shaped draw site, and the messaging/storage family.
+//
+// [emulator.IDMint] arrived with EC2, IAM and STS moved onto it. The assertions below are
+// about the second of substrate's two shared draw sites — the one Lambda declares and six
+// other services publish an identifier from — and about the SQS/SNS/EFS/FSx/Transfer group
+// that moved with it. They are the same two layers as above: a distinctness property
+// asserted directly on one request that mints several identifiers, and a replayed stream
+// asserted over the wire.
+
+// TestIDs_OneSendMessageBatchMintsDistinctMessageIDs is the ordinal's test for the shared
+// generator, in the same shape as the RunInstances one above: several identifiers from a
+// single request, so a mint that ignored its ordinal would answer one ID three times.
+//
+// SQS is the interesting caller because it mints twice per message on two different paths —
+// a message ID on send and a receipt handle on receive — so the two must not collide either.
+func TestIDs_OneSendMessageBatchMintsDistinctMessageIDs(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTime()
+
+	queueURL := idsSQSQueue(t, ts, "ids-batch")
+
+	params := map[string]string{"Action": "SendMessageBatch", "QueueUrl": queueURL}
+	for i := 1; i <= 3; i++ {
+		params["SendMessageBatchRequestEntry."+strconv.Itoa(i)+".Id"] = "e" + strconv.Itoa(i)
+		params["SendMessageBatchRequestEntry."+strconv.Itoa(i)+".MessageBody"] = "same body"
+	}
+	var batch struct {
+		Entries []struct {
+			MessageID string `xml:"MessageId"`
+		} `xml:"SendMessageBatchResult>SendMessageBatchResultEntry"`
+	}
+	require.NoError(t, xml.Unmarshal(idsSQSCall(t, ts, params), &batch))
+	require.Len(t, batch.Entries, 3)
+
+	minted := make([]string, 0, 3)
+	for _, e := range batch.Entries {
+		require.NotEmpty(t, e.MessageID)
+		minted = append(minted, e.MessageID)
+	}
+	assert.Len(t, idsUnique(minted), 3,
+		"one SendMessageBatch mints one message ID per entry, and the bodies are identical: %v",
+		minted)
+}
+
+// TestReplay_TheSharedMintReplaysWithTheIdentifiersItMinted is the wire-level assertion for
+// Tier 2, and the same claim [TestReplay_ACreateReplaysWithTheIdentifiersItMinted] makes for
+// EC2 and IAM: a stream whose later requests *name* the identifiers its earlier ones minted
+// replays with no differences and reaches the recorded state.
+//
+// The interlocking is what makes it more than a comparison of five responses. A re-minted
+// queue URL, subscription ARN, file-system ID or receipt handle turns the request that names
+// it into a refusal rather than into a differently-worded success.
+func TestReplay_TheSharedMintReplaysWithTheIdentifiersItMinted(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	idsRecordSharedMintCreates(t, ts)
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the creates")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"an identifier from the shared mint replays as the one recorded: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
+// idsRecordSharedMintCreates records the Tier 2 stream: a create per family that mints
+// through the shared generator or through one of the messaging/storage generators, each
+// followed by a request naming what the create minted.
+func idsRecordSharedMintCreates(t *testing.T, ts *emulator.TestServer) {
+	t.Helper()
+
+	// Frozen for the reason [idsRecordInterlockedCreates] gives: a replay pins the clock to
+	// the recorded event's timestamp, so a handler that stamps a record off a live clock
+	// diverges in the state hash for a reason that has nothing to do with an identifier.
+	ts.FreezeTime()
+
+	// SQS: a message ID from the shared generator on send, a receipt handle on receive, and
+	// a delete that names the handle.
+	queueURL := idsSQSQueue(t, ts, "ids-shared-mint")
+	idsSQSCall(t, ts, map[string]string{
+		"Action": "SendMessage", "QueueUrl": queueURL, "MessageBody": "one",
+	})
+	var received struct {
+		Handles []string `xml:"ReceiveMessageResult>Message>ReceiptHandle"`
+	}
+	require.NoError(t, xml.Unmarshal(idsSQSCall(t, ts, map[string]string{
+		"Action": "ReceiveMessage", "QueueUrl": queueURL, "MaxNumberOfMessages": "1",
+	}), &received))
+	require.Len(t, received.Handles, 1, "the message just sent has to be received")
+	idsSQSCall(t, ts, map[string]string{
+		"Action": "DeleteMessage", "QueueUrl": queueURL, "ReceiptHandle": received.Handles[0],
+	})
+
+	// SNS: a subscription ID, then a get that names the ARN carrying it.
+	var topic struct {
+		ARN string `xml:"CreateTopicResult>TopicArn"`
+	}
+	require.NoError(t, xml.Unmarshal(idsSNSCall(t, ts, map[string]string{
+		"Action": "CreateTopic", "Name": "ids-shared-mint",
+	}), &topic))
+	require.NotEmpty(t, topic.ARN)
+
+	var sub struct {
+		ARN string `xml:"SubscribeResult>SubscriptionArn"`
+	}
+	require.NoError(t, xml.Unmarshal(idsSNSCall(t, ts, map[string]string{
+		"Action": "Subscribe", "TopicArn": topic.ARN,
+		"Protocol": "email", "Endpoint": "nobody@example.invalid",
+	}), &sub))
+	require.NotEmpty(t, sub.ARN)
+	idsSNSCall(t, ts, map[string]string{
+		"Action": "GetSubscriptionAttributes", "SubscriptionArn": sub.ARN,
+	})
+
+	// EFS: a file-system ID, then an access point and a mount target that name it.
+	var fs struct {
+		ID string `json:"FileSystemId"`
+	}
+	require.NoError(t, json.Unmarshal(idsEFSCall(t, ts, http.MethodPost, "/2015-02-01/file-systems",
+		map[string]any{"CreationToken": "ids-shared-mint"}), &fs))
+	require.NotEmpty(t, fs.ID)
+	idsEFSCall(t, ts, http.MethodPost, "/2015-02-01/access-points",
+		map[string]any{"ClientToken": "ids-ap", "FileSystemId": fs.ID})
+	idsEFSCall(t, ts, http.MethodGet, "/2015-02-01/file-systems?FileSystemId="+fs.ID, nil)
+}
+
+// idsSQSQueue creates one SQS queue and returns its URL.
+func idsSQSQueue(t *testing.T, ts *emulator.TestServer, name string) string {
+	t.Helper()
+
+	var created struct {
+		URL string `xml:"CreateQueueResult>QueueUrl"`
+	}
+	body := idsSQSCall(t, ts, map[string]string{"Action": "CreateQueue", "QueueName": name})
+	require.NoError(t, xml.Unmarshal(body, &created))
+	require.NotEmpty(t, created.URL, "CreateQueue returned no URL: %s", body)
+	return created.URL
+}
+
+// idsSQSCall issues an unsigned SQS query-protocol request and returns the response body.
+func idsSQSCall(t *testing.T, ts *emulator.TestServer, params map[string]string) []byte {
+	t.Helper()
+	return idsQueryCall(t, ts, "sqs.us-east-1.amazonaws.com", "2012-11-05", params)
+}
+
+// idsSNSCall issues an unsigned SNS query-protocol request and returns the response body.
+func idsSNSCall(t *testing.T, ts *emulator.TestServer, params map[string]string) []byte {
+	t.Helper()
+	return idsQueryCall(t, ts, "sns.us-east-1.amazonaws.com", "2010-03-31", params)
+}
+
+// idsQueryCall issues one unsigned query-protocol request against host and requires a 200.
+func idsQueryCall(t *testing.T, ts *emulator.TestServer, host, version string,
+	params map[string]string,
+) []byte {
+	t.Helper()
+
+	form := url.Values{}
+	form.Set("Version", version)
+	for k, v := range params {
+		form.Set(k, v)
+	}
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/",
+		strings.NewReader(form.Encode()))
+	require.NoError(t, err)
+	req.Host = host
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", params["Action"], body)
+	return body
+}
+
+// idsEFSCall issues one EFS REST/JSON request and requires a 2xx.
+func idsEFSCall(t *testing.T, ts *emulator.TestServer, method, path string, body any) []byte {
+	t.Helper()
+
+	var reader io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		require.NoError(t, err)
+		reader = strings.NewReader(string(raw))
+	}
+	req, err := http.NewRequestWithContext(t.Context(), method, ts.URL+path, reader)
+	require.NoError(t, err)
+	req.Host = "elasticfilesystem.us-east-1.amazonaws.com"
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	out, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Less(t, resp.StatusCode, 300, "%s %s: %s", method, path, out)
+	return out
 }

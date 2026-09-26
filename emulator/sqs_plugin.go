@@ -2,8 +2,7 @@ package emulator
 
 import (
 	"context"
-	"crypto/md5" //nolint:gosec // SQS MD5OfBody is defined by the protocol; not used for security.
-	"crypto/rand"
+	"crypto/md5"    //nolint:gosec // SQS MD5OfBody is defined by the protocol; not used for security.
 	"crypto/sha256" //nolint:gosec // SHA-256 used for content-based deduplication; not for security.
 	"encoding/json"
 	"encoding/xml"
@@ -957,7 +956,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			})
 		}
 		// Record this deduplication ID.
-		msgID := generateSQSMessageID()
+		msgID := generateSQSMessageID(ctx.IDs)
 		p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now())
 
 		md5Body := computeMD5(msgBody)
@@ -965,7 +964,7 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		now := p.tc.Now()
 		msg := &SQSMessage{
 			MessageID:     msgID,
-			ReceiptHandle: generateSQSReceiptHandle(),
+			ReceiptHandle: generateSQSReceiptHandle(ctx.IDs),
 			Body:          msgBody,
 			MD5OfBody:     md5Body,
 			Attributes: map[string]string{
@@ -1019,14 +1018,14 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		})
 	}
 
-	msgID := generateSQSMessageID()
+	msgID := generateSQSMessageID(ctx.IDs)
 	md5Body := computeMD5(msgBody)
 	md5Attrs := sqsMD5OfMessageAttributes(msgAttrs)
 	now := p.tc.Now()
 
 	msg := &SQSMessage{
 		MessageID:     msgID,
-		ReceiptHandle: generateSQSReceiptHandle(),
+		ReceiptHandle: generateSQSReceiptHandle(ctx.IDs),
 		Body:          msgBody,
 		MD5OfBody:     md5Body,
 		Attributes: map[string]string{
@@ -1155,11 +1154,11 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 				failures = append(failures, sqsBatchFailure(entry.ID, awsErr))
 				continue
 			}
-			msgID := generateSQSMessageID()
+			msgID := generateSQSMessageID(ctx.IDs)
 			md5Body := computeMD5(entry.MessageBody)
 			msg := &SQSMessage{
 				MessageID:     msgID,
-				ReceiptHandle: generateSQSReceiptHandle(),
+				ReceiptHandle: generateSQSReceiptHandle(ctx.IDs),
 				Body:          entry.MessageBody,
 				MD5OfBody:     md5Body,
 				Attributes: map[string]string{
@@ -1240,12 +1239,12 @@ func (p *SQSPlugin) sendMessageBatch(ctx *RequestContext, req *AWSRequest) (*AWS
 			continue
 		}
 
-		msgID := generateSQSMessageID()
+		msgID := generateSQSMessageID(ctx.IDs)
 		md5Body := computeMD5(body)
 
 		msg := &SQSMessage{
 			MessageID:     msgID,
-			ReceiptHandle: generateSQSReceiptHandle(),
+			ReceiptHandle: generateSQSReceiptHandle(ctx.IDs),
 			Body:          body,
 			MD5OfBody:     md5Body,
 			Attributes: map[string]string{
@@ -1436,7 +1435,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 
 		// Update receipt handle and visibility timeout.
-		newHandle := generateSQSReceiptHandle()
+		newHandle := generateSQSReceiptHandle(ctx.IDs)
 		msg.ReceiptHandle = newHandle
 		msg.VisibleAfter = now.Add(time.Duration(visTimeout) * time.Second)
 		msg.ReceiveCount++
@@ -1835,16 +1834,20 @@ func getAttrOrDefault(attrs map[string]string, key, fallback string) string {
 	return fallback
 }
 
-// generateSQSMessageID generates a unique SQS message ID.
-func generateSQSMessageID() string {
-	return generateLambdaRevisionID() // Reuse UUID-style generator.
+// generateSQSMessageID mints a unique SQS message ID from m.
+func generateSQSMessageID(m *IDMint) string {
+	return generateLambdaRevisionID(m) // Reuse UUID-style generator.
 }
 
-// generateSQSReceiptHandle generates a unique receipt handle.
-func generateSQSReceiptHandle() string {
-	b := make([]byte, 32)
-	_, _ = rand.Read(b) //nolint:gosec // Receipt handle just needs to be unique, not cryptographically secure.
-	return fmt.Sprintf("%x", b)
+// generateSQSReceiptHandle mints a unique receipt handle from m.
+//
+// A send mints the message's initial handle and each receive replaces it, so two
+// ReceiveMessage calls returning the same message hand back different handles — which is
+// also true of real SQS, where a handle belongs to a receive and only the most recent one
+// deletes. That is why the mint's ordinal rather than the message ID is the right source
+// here: deriving from the message would make every receive of one message agree.
+func generateSQSReceiptHandle(m *IDMint) string {
+	return m.Hex(32)
 }
 
 // computeMD5 computes the hex MD5 of s.

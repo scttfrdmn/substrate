@@ -86,7 +86,7 @@ func snsSubscriptionARN(region, accountID, topicName, subID string) string {
 	return fmt.Sprintf("arn:aws:sns:%s:%s:%s:%s", region, accountID, topicName, subID)
 }
 
-// generateSNSSubID returns a short random ID for SNS subscriptions.
-func generateSNSSubID() string {
-	return randomHex(8)
+// generateSNSSubID mints a short ID for SNS subscriptions from m.
+func generateSNSSubID(m *IDMint) string {
+	return m.Hex(8)
 }
