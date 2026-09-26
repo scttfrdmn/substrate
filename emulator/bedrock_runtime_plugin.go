@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -311,11 +310,26 @@ func bedrockModelInvocationJobIDsKey(acct, region string) string {
 	return "job_ids:" + acct + "/" + region
 }
 
-// generateBedrockJobID generates a UUID-formatted model invocation job ID.
-func generateBedrockJobID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+// bedrockJobIDChars is the alphabet Bedrock publishes a batch-inference job ID in: `[a-z0-9]`, from
+// the `jobArn` pattern on API_CreateModelInvocationJob and API_GetModelInvocationJob.
+const bedrockJobIDChars = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// generateBedrockJobID mints a model-invocation job ID from m, derived from the request id so a
+// replayed CreateModelInvocationJob reports the ARN the recording reported (#856).
+//
+// This is the tier's one *shape* change, and it is a fidelity fix rather than a consequence of
+// deriving the value. Bedrock publishes `jobArn` as
+// `arn:aws…:model-invocation-job/[a-z0-9]{12}` and `jobIdentifier` as that ARN or a bare
+// `[a-z0-9]{12}`, so the published alphabet **excludes the hyphen** and the length is twelve — and
+// the UUID substrate minted here satisfied neither. #856's rule is not to change the bytes a caller
+// sees, but that rule exists to protect a rendering the API model permits; it cannot preserve one
+// the model forbids. Twelve characters over the whole published set is what a caller validating the
+// ARN, or handing the bare ID back to `GetModelInvocationJob`, can accept.
+//
+// The `GetModelInvocationJob` sample request shows `BATCHJOB1234`, which the pattern it sits beside
+// would reject. The pattern is the model, so the rendering follows the pattern.
+func generateBedrockJobID(m *IDMint) string {
+	return m.Chars(12, bedrockJobIDChars)
 }
 
 // createModelInvocationJob handles CreateModelInvocationJob, storing a new batch
@@ -335,7 +349,7 @@ func (p *BedrockRuntimePlugin) createModelInvocationJob(ctx *RequestContext, req
 		return nil, bedrockValidationError("jobName is required")
 	}
 
-	jobID := generateBedrockJobID()
+	jobID := generateBedrockJobID(ctx.IDs)
 	jobArn := fmt.Sprintf("arn:aws:bedrock:%s:%s:model-invocation-job/%s", ctx.Region, ctx.AccountID, jobID)
 	job := BedrockModelInvocationJob{
 		JobArn:           jobArn,

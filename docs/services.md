@@ -2210,7 +2210,8 @@ Three kinds of value stay random, and one more is still migrating:
   CloudWatch Logs, CloudFront, Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR
   Serverless, ECR, ELB, Route 53, Cognito (both the user-pool and the identity-pool API), IAM
   Identity Center, KMS, ACM, Secrets Manager, WAFv2, Athena, Redshift Data, Glue, Timestream,
-  OpenSearch, QuickSight, CodeBuild, CodeDeploy and CodePipeline identifiers are derived today. A
+  OpenSearch, QuickSight, CodeBuild, CodeDeploy, CodePipeline, Systems Manager Run Command, RAM,
+  AWS Backup and Bedrock batch inference identifiers are derived today. A
   CloudFront
   distribution, invalidation and origin access control all draw from one generator, so the three
   moved together with the origin access control family (#1277). The remaining services are
@@ -2294,6 +2295,28 @@ reference offers here. It is also the family's only *addressed* identifier: `Get
 CodeBuild's, which is worse than a refusal — `BatchGetBuilds` reports an unknown ID under
 `buildsNotFound` in a **200**, so an underived one stalled a consumer's poll loop instead of
 failing it.
+
+**A published pattern outranks the rendering a draw site had.** Everywhere else in #856 the
+identifier a caller sees is byte-for-byte what substrate published before it was derived, because the
+point of the change is where the bytes come from and not what they look like. Bedrock's batch-inference
+job ID is the one exception, and the API model forces it: `CreateModelInvocationJob` publishes `jobArn`
+as `arn:aws:bedrock:{region}:{account}:model-invocation-job/[a-z0-9]{12}` and `GetModelInvocationJob`
+publishes `jobIdentifier` as that ARN or a bare `[a-z0-9]{12}`, which **excludes the hyphen** and fixes
+the length at twelve — and the 36-character UUID substrate minted satisfied neither. The
+no-byte-changes rule protects a rendering the model permits; it cannot protect one the model forbids,
+so a job ID is now twelve characters of the published alphabet. A consumer that validates the ARN it
+was handed, or hands the bare ID back to `GetModelInvocationJob`, is what the pattern exists for.
+(`GetModelInvocationJob`'s own sample request shows `BATCHJOB1234`, which the pattern beside it would
+reject. The pattern is the model.)
+
+The other three services in that family publish no pattern to follow. An SSM `CommandId` publishes a
+**fixed length of 36** and no pattern, which the UUID shape already met; a RAM `resourceShareArn` and
+an AWS Backup `BackupPlanId`, `VersionId` and `SelectionId` publish neither, so all four keep the
+rendering their draw sites produced (#671). Backup's is the only site in the tree that mints **twice
+in one request** — `CreateBackupPlan` answers a plan ID and a version ID, and `UpdateBackupPlan` mints
+a third — so the counter is what keeps a plan from being its own version. AWS's own sample plan ARN
+shows the UUID in *upper* case where substrate renders lower; that is an observed difference the model
+does not require, tracked with the [resource segment](#arn-shapes) rather than with the derivation.
 
 An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
 a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
@@ -12928,7 +12951,7 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | RemoveTagsFromResource | Removes only the named keys |
 | ListTagsForResource | Reports `TagList` sorted by key; an empty list, never `null` |
 | LabelParameterVersion | Accepted; always reports `ParameterVersion: 1` |
-| SendCommand | Run Command; records the intent — substrate does not execute the command |
+| SendCommand | Run Command; records the intent — substrate does not execute the command. The `CommandId` is the published fixed length of 36, [derived from the request ID](#derived-identifiers) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetCommandInvocation | |
 | DescribeInstanceInformation | |
 
@@ -19506,6 +19529,12 @@ vault matches; its plan does not, in the API handler and in the CloudFormation d
 IAM policy or an ARN parser written against Substrate's plan ARN matches nothing on AWS
 ([#1181](https://github.com/scttfrdmn/substrate/issues/1181)).
 
+The published example differs in one more way the table does not show: AWS's sample is
+`arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50`, an **uppercase**
+UUID, where Substrate renders lowercase. `BackupPlanId` publishes no pattern and no length, so this is
+observed from the example rather than required by the model, and it is a rendering question rather than
+a derivation one — the plan ID is [derived from the request ID](#derived-identifiers) either way.
+
 ### Cost
 
 `CreateBackupPlan` is attributed $0.000001 per call. Real AWS Backup charges for protected storage
@@ -19538,7 +19567,7 @@ running.
 |-----------|-------|
 | InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
 | ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
-| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked |
+| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked. The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#derived-identifiers) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports a [seeded status](#seeding-a-batch-job-status) if one is set |
 | ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; the seeded status is applied here too, so a poll on either operation agrees. Every published query filter is ignored and no `nextToken` is emitted |
 | StopModelInvocationJob | `POST /model-invocation-job/{jobIdentifier}/stop`. [Stops a job in any state and skips `Stopping`](#stopping-a-batch-job-is-immediate) |

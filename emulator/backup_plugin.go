@@ -2,8 +2,6 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -177,8 +175,8 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "BackupPlanName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	planID := generateBackupUUID()
-	versionID := generateBackupUUID()
+	planID := generateBackupUUID(reqCtx.IDs)
+	versionID := generateBackupUUID(reqCtx.IDs)
 	now := p.tc.Now()
 
 	plan := BackupPlan{
@@ -252,7 +250,7 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 	if input.BackupPlan.Rules != nil {
 		plan.Rules = input.BackupPlan.Rules
 	}
-	plan.VersionID = generateBackupUUID()
+	plan.VersionID = generateBackupUUID(reqCtx.IDs)
 
 	goCtx := context.Background()
 	data, err := json.Marshal(plan)
@@ -331,7 +329,7 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "SelectionName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	selectionID := generateBackupUUID()
+	selectionID := generateBackupUUID(reqCtx.IDs)
 	now := p.tc.Now()
 	selection := BackupSelection{
 		SelectionID:   selectionID,
@@ -455,15 +453,24 @@ func (p *BackupPlugin) loadSelection(acct, region, planID, selectionID string) (
 	return &selection, nil
 }
 
-// generateBackupUUID generates a UUID-style string for backup resource IDs.
-func generateBackupUUID() string {
-	b := make([]byte, 16)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b[0:4]) + "-" +
-		hex.EncodeToString(b[4:6]) + "-" +
-		hex.EncodeToString(b[6:8]) + "-" +
-		hex.EncodeToString(b[8:10]) + "-" +
-		hex.EncodeToString(b[10:16])
+// generateBackupUUID mints one of AWS Backup's three identifiers from m — a backup-plan ID, a plan
+// version ID or a selection ID — derived from the request id so a replayed create reports what the
+// recording reported (#856).
+//
+// It is the tier's one generator with more than one call site, and the only one that draws *twice in
+// one request*: `CreateBackupPlan` mints a plan ID and a version ID, so the ordinal is what keeps
+// them apart. Both are addressed — every later `GetBackupPlan`, `UpdateBackupPlan`,
+// `DeleteBackupPlan` and `CreateBackupSelection` takes the plan ID in its URL path — and a plan
+// version is how Backup reports which revision a read answered from.
+//
+// Nothing about the shape is published: `BackupPlanId` is a String with no pattern and no length,
+// and `VersionId` is documented only as "unique, randomly generated … at most 1,024 bytes long". So
+// the rendering is the one the crypto/rand form produced, [IDMint.HexUUID] (#671). AWS's own sample
+// ARN — `arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50` — shows
+// the UUID in *upper* case where substrate renders lower; that is an observed difference the model
+// does not require, and changing it is a rendering change rather than part of deriving the value.
+func generateBackupUUID(m *IDMint) string {
+	return m.HexUUID()
 }
 
 // backupJSONResponse serializes v to JSON and returns an AWSResponse with
