@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **An exported per-plugin operation catalog, generated from each plugin's dispatch switch** (#1095).
+  `emulator.RoutedServices()` returns the plugins the registry files, and
+  `emulator.RoutedOperations(service)` the operations each one routes — the first time the set of
+  operations substrate routes is readable without grepping Go source. It could not be before:
+  `Plugin` exposes `Name`, `Initialize`, `Shutdown` and `HandleRequest`, `PluginRouting` carries the
+  routing predicates, and the operation set existed only as `case` labels inside each
+  `HandleRequest`. That is why #1015's drift check — fail when a routed operation has no
+  documentation row — could not be written, and why three counts of the same tree produced 945, 950
+  and "at least 1,009". The answer is **1,017 operations across 67 plugins**, and a test asserts it.
+  The catalog is *derived from* the router rather than declared beside it: `cmd/gen-operation-catalog`
+  walks the dispatch AST into `emulator/operation_catalog_gen.go`, with `make operation-catalog` /
+  `make operation-catalog-check` in CI, mirroring `cmd/gen-authz-reference`. An `Operations()` method
+  on `Plugin` was rejected because it can drift from the switch it sits next to and would break every
+  out-of-tree plugin; a table-driven dispatch, which would make the catalog *be* the router, was
+  rejected for this change because it rewrites 67 plugins' dispatch in service of a documentation
+  check. The generator refuses to emit a short catalog rather than guessing: an unrecognized
+  `HandleRequest`, a plugin absent from the registration table, or a `Name()` it cannot resolve is a
+  build failure. Two plugins route no operation *names* and say so in the generated file —
+  `execute-api` serves a deployed API's own routes (AWS's action there is the single
+  `execute-api:Invoke`) and `opensearch` dispatches on HTTP method plus path shape (AWS's own actions
+  there are the per-verb `es:ESHttp*`) — and the generator fails if either ever gains one, so an empty
+  entry is always a stated decision. No plugin file changed and no operation's behaviour moved.
 - **`TestServer.FreezeTimeAt`, and a named frozen state on the simulated clock** (#1217). A test that
   asserts an exact timestamp needs the clock to stop, and the only way to ask for that was
   `SetScale(0)` — a value the control plane's own endpoint refuses, so the state was reachable from a
@@ -130,6 +152,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only ones in the plugin that take no request context at all.
 
 ### Changed
+
+- **The coverage matrix in `docs/services.md` reports a per-service routed-operation count** (#1095),
+  read from the operation catalog, with the total in its lede. Both counts are now generated from the
+  same source the router uses, so neither can drift; `cmd/gen-service-reference` also refuses to render
+  if the catalog and the registry disagree in either direction, since a plugin the catalog does not
+  cover would otherwise render a `0` that reads as "routes no operations" rather than as an error.
 
 - **`test/e2e` dependencies bumped again**: `aws-sdk-go-v2/service/lambda` 1.108.0→1.109.0 and
   `service/s3` 1.113.1→1.113.2. The root module is untouched this time, so unlike the bump below
