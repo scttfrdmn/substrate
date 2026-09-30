@@ -128,6 +128,13 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # Before the matrix check, because the matrix is rendered *from* the catalog: a
+      # stale catalog would fail docs-reference-check with a message about the wrong
+      # file. The catalog is generated from each plugin's dispatch switch, so this is
+      # what makes a newly routed operation impossible to leave out of it (#1095).
+      - name: Check the operation catalog is in sync with the plugins' dispatch
+        run: make operation-catalog-check
+
       - name: Check docs/services.md is in sync with the plugin registry
         run: make docs-reference-check
 

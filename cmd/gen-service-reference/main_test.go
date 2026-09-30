@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -101,12 +102,66 @@ func TestReplaceMatrix_RendersFromTheRoutingTable(t *testing.T) {
 	if !strings.HasPrefix(out, "before\n") || !strings.HasSuffix(out, "\nafter\n") {
 		t.Errorf("content outside the markers changed: %q", out)
 	}
-	want := "| 1 | " + routing["sqs"].Display + " | `sqs` | " + routing["sqs"].Protocol + " |"
+	want := fmt.Sprintf("| 1 | %s | `sqs` | %s | %d |",
+		routing["sqs"].Display, routing["sqs"].Protocol, len(emu.RoutedOperations("sqs")))
 	if !strings.Contains(out, want) {
 		t.Errorf("want a row %q in:\n%s", want, out)
 	}
 	if !strings.Contains(out, "**1 built-in service plugins**") {
 		t.Error("want the count to come from the name list")
+	}
+	if want := fmt.Sprintf("routing **%d operations**", len(emu.RoutedOperations("sqs"))); !strings.Contains(out, want) {
+		t.Errorf("want the operation total to come from the catalog (%q) in:\n%s", want, out)
+	}
+}
+
+// TestCheckCatalog_RefusesDriftInBothDirections asserts the catalog half of the
+// drift check fires. Neither refusal should ever be reachable in a tree whose
+// generated catalog is current, which is exactly why they are tested directly: an
+// untested drift check is one nobody knows still fires (#739).
+func TestCheckCatalog_RefusesDriftInBothDirections(t *testing.T) {
+	tests := []struct {
+		name       string
+		registered []string
+		cataloged  []string
+		want       string
+	}{
+		{
+			name:       "registered plugin the catalog does not cover",
+			registered: []string{"sqs", "brandnew"},
+			cataloged:  []string{"sqs"},
+			want:       `plugin "brandnew" is registered but absent from the operation catalog`,
+		},
+		{
+			name:       "catalog entry naming no plugin",
+			registered: []string{"sqs"},
+			cataloged:  []string{"sqs", "ghost"},
+			want:       `operation catalog covers "ghost", which is not a registered plugin`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCatalog(tt.registered, tt.cataloged)
+			if err == nil {
+				t.Fatal("want a refusal, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("want error containing %q, got %q", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestCheckCatalog_AcceptsTheLiveTree is the positive half, and the assertion that
+// makes the refusals above worth having: the generated catalog covers exactly the
+// plugins RegisterDefaultPlugins registers.
+func TestCheckCatalog_AcceptsTheLiveTree(t *testing.T) {
+	names, err := registeredPlugins()
+	if err != nil {
+		t.Fatalf("registeredPlugins: %v", err)
+	}
+	if err := checkCatalog(names, emu.RoutedServices()); err != nil {
+		t.Fatalf("checkCatalog: %v", err)
 	}
 }
 

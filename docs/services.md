@@ -3,81 +3,89 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins**. This section is generated
-from the plugin registry (`make docs-reference`), so the count and plugin list
-cannot drift from the implementation. The live count is also available from the
-`/ready` endpoint (`curl http://localhost:4566/ready`). Per-service operation,
-CloudFormation, and cost detail follows below the matrix.
+Substrate ships **67 built-in service plugins** routing **1018 operations**. This
+section is generated from the plugin registry and the operation catalog
+(`make docs-reference`), so the counts and the plugin list cannot drift from the
+implementation: the catalog is itself generated from each plugin's dispatch switch
+(`make operation-catalog`) and is readable at run time through
+`emulator.RoutedServices` and `emulator.RoutedOperations`. The live plugin count is
+also available from the `/ready` endpoint (`curl http://localhost:4566/ready`).
+Per-service operation, CloudFormation, and cost detail follows below the matrix.
 
-| # | Service | Plugin name | Protocol |
-|---|---------|-------------|----------|
-| 1 | Account Management | `account` | REST/JSON |
-| 2 | ACM | `acm` | JSON |
-| 3 | API Gateway (REST) | `apigateway` | REST/JSON |
-| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON |
-| 5 | AppSync | `appsync` | REST/JSON |
-| 6 | Athena | `athena` | JSON |
-| 7 | Backup | `backup` | REST/JSON |
-| 8 | Batch | `batch` | REST/JSON |
-| 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON |
-| 10 | Budgets | `budgets` | JSON |
-| 11 | Cost Explorer | `ce` | JSON |
-| 12 | CloudFormation | `cloudformation` | Query |
-| 13 | CloudFront | `cloudfront` | REST/XML |
-| 14 | CloudTrail | `cloudtrail` | JSON |
-| 15 | CodeBuild | `codebuild` | JSON |
-| 16 | CodeDeploy | `codedeploy` | JSON |
-| 17 | CodePipeline | `codepipeline` | JSON |
-| 18 | Cognito Identity | `cognito-identity` | JSON |
-| 19 | Cognito Identity Provider | `cognito-idp` | JSON |
-| 20 | Config | `config` | JSON |
-| 21 | DynamoDB | `dynamodb` | JSON |
-| 22 | EC2 / VPC | `ec2` | Query |
-| 23 | ECR | `ecr` | JSON |
-| 24 | ECS | `ecs` | JSON |
-| 25 | EFS | `efs` | REST/JSON |
-| 26 | ElastiCache | `elasticache` | Query |
-| 27 | ELBv2 | `elasticloadbalancing` | Query |
-| 28 | EMR Serverless | `emrserverless` | REST/JSON |
-| 29 | EventBridge | `eventbridge` | JSON |
-| 30 | API Gateway (execute-api) | `execute-api` | REST/JSON |
-| 31 | Kinesis Data Firehose | `firehose` | JSON |
-| 32 | FSx | `fsx` | JSON |
-| 33 | Glue | `glue` | JSON |
-| 34 | Health | `health` | JSON |
-| 35 | IAM | `iam` | Query |
-| 36 | Kinesis Data Streams | `kinesis` | JSON |
-| 37 | KMS | `kms` | JSON |
-| 38 | Lambda | `lambda` | REST/JSON |
-| 39 | CloudWatch Logs | `logs` | JSON |
-| 40 | CloudWatch | `monitoring` | CBOR / JSON / Query |
-| 41 | MSK | `msk` | REST/JSON |
-| 42 | HealthOmics | `omics` | REST/JSON |
-| 43 | OpenSearch | `opensearch` | REST/JSON |
-| 44 | Organizations | `organizations` | JSON |
-| 45 | Price List Query API | `pricing` | JSON |
-| 46 | QuickSight | `quicksight` | REST/JSON |
-| 47 | RAM | `ram` | REST/JSON |
-| 48 | RDS | `rds` | Query |
-| 49 | Redshift | `redshift` | Query |
-| 50 | Redshift Data API | `redshift-data` | JSON |
-| 51 | Route 53 | `route53` | REST/XML |
-| 52 | S3 | `s3` | REST/XML |
-| 53 | SageMaker | `sagemaker` | JSON |
-| 54 | EventBridge Scheduler | `scheduler` | REST/JSON |
-| 55 | Secrets Manager | `secretsmanager` | JSON |
-| 56 | Service Quotas | `servicequotas` | JSON |
-| 57 | SES v2 | `sesv2` | REST/JSON |
-| 58 | SNS | `sns` | Query |
-| 59 | SQS | `sqs` | JSON |
-| 60 | SSM | `ssm` | JSON |
-| 61 | SSO / Identity Store | `sso` | JSON |
-| 62 | Step Functions | `states` | JSON |
-| 63 | STS | `sts` | Query |
-| 64 | Resource Groups Tagging | `tagging` | JSON |
-| 65 | Timestream | `timestream` | JSON |
-| 66 | Transfer Family | `transfer` | JSON |
-| 67 | WAFv2 | `wafv2` | JSON |
+Two plugins route **0** operations, and that is their protocol rather than a gap:
+`execute-api` serves a deployed API's own routes (AWS's action for it is the single
+`execute-api:Invoke`), and `opensearch` dispatches on the HTTP method plus path
+shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
+
+| # | Service | Plugin name | Protocol | Operations |
+|---|---------|-------------|----------|-----------:|
+| 1 | Account Management | `account` | REST/JSON | 4 |
+| 2 | ACM | `acm` | JSON | 8 |
+| 3 | API Gateway (REST) | `apigateway` | REST/JSON | 41 |
+| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 26 |
+| 5 | AppSync | `appsync` | REST/JSON | 24 |
+| 6 | Athena | `athena` | JSON | 9 |
+| 7 | Backup | `backup` | REST/JSON | 12 |
+| 8 | Batch | `batch` | REST/JSON | 10 |
+| 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
+| 10 | Budgets | `budgets` | JSON | 5 |
+| 11 | Cost Explorer | `ce` | JSON | 3 |
+| 12 | CloudFormation | `cloudformation` | Query | 18 |
+| 13 | CloudFront | `cloudfront` | REST/XML | 17 |
+| 14 | CloudTrail | `cloudtrail` | JSON | 8 |
+| 15 | CodeBuild | `codebuild` | JSON | 7 |
+| 16 | CodeDeploy | `codedeploy` | JSON | 9 |
+| 17 | CodePipeline | `codepipeline` | JSON | 8 |
+| 18 | Cognito Identity | `cognito-identity` | JSON | 8 |
+| 19 | Cognito Identity Provider | `cognito-idp` | JSON | 31 |
+| 20 | Config | `config` | JSON | 25 |
+| 21 | DynamoDB | `dynamodb` | JSON | 26 |
+| 22 | EC2 / VPC | `ec2` | Query | 92 |
+| 23 | ECR | `ecr` | JSON | 17 |
+| 24 | ECS | `ecs` | JSON | 21 |
+| 25 | EFS | `efs` | REST/JSON | 13 |
+| 26 | ElastiCache | `elasticache` | Query | 17 |
+| 27 | ELBv2 | `elasticloadbalancing` | Query | 24 |
+| 28 | EMR Serverless | `emrserverless` | REST/JSON | 7 |
+| 29 | EventBridge | `eventbridge` | JSON | 9 |
+| 30 | API Gateway (execute-api) | `execute-api` | REST/JSON | 0 |
+| 31 | Kinesis Data Firehose | `firehose` | JSON | 6 |
+| 32 | FSx | `fsx` | JSON | 3 |
+| 33 | Glue | `glue` | JSON | 33 |
+| 34 | Health | `health` | JSON | 4 |
+| 35 | IAM | `iam` | Query | 74 |
+| 36 | Kinesis Data Streams | `kinesis` | JSON | 17 |
+| 37 | KMS | `kms` | JSON | 24 |
+| 38 | Lambda | `lambda` | REST/JSON | 20 |
+| 39 | CloudWatch Logs | `logs` | JSON | 14 |
+| 40 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
+| 41 | MSK | `msk` | REST/JSON | 9 |
+| 42 | HealthOmics | `omics` | REST/JSON | 4 |
+| 43 | OpenSearch | `opensearch` | REST/JSON | 0 |
+| 44 | Organizations | `organizations` | JSON | 34 |
+| 45 | Price List Query API | `pricing` | JSON | 3 |
+| 46 | QuickSight | `quicksight` | REST/JSON | 4 |
+| 47 | RAM | `ram` | REST/JSON | 8 |
+| 48 | RDS | `rds` | Query | 23 |
+| 49 | Redshift | `redshift` | Query | 10 |
+| 50 | Redshift Data API | `redshift-data` | JSON | 3 |
+| 51 | Route 53 | `route53` | REST/XML | 6 |
+| 52 | S3 | `s3` | REST/XML | 44 |
+| 53 | SageMaker | `sagemaker` | JSON | 10 |
+| 54 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
+| 55 | Secrets Manager | `secretsmanager` | JSON | 12 |
+| 56 | Service Quotas | `servicequotas` | JSON | 8 |
+| 57 | SES v2 | `sesv2` | REST/JSON | 5 |
+| 58 | SNS | `sns` | Query | 18 |
+| 59 | SQS | `sqs` | JSON | 16 |
+| 60 | SSM | `ssm` | JSON | 15 |
+| 61 | SSO / Identity Store | `sso` | JSON | 12 |
+| 62 | Step Functions | `states` | JSON | 18 |
+| 63 | STS | `sts` | Query | 3 |
+| 64 | Resource Groups Tagging | `tagging` | JSON | 3 |
+| 65 | Timestream | `timestream` | JSON | 12 |
+| 66 | Transfer Family | `transfer` | JSON | 10 |
+| 67 | WAFv2 | `wafv2` | JSON | 13 |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---

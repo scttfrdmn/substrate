@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -57,6 +57,12 @@ authz-reference-check: ## Fail if authz_reference_gen.go is out of date with emu
 
 authz-reference-fetch: ## Refresh emulator/authzref/*.json from AWS (REQUIRES NETWORK; run by hand, never in CI)
 	go run ./cmd/gen-authz-reference -fetch
+
+operation-catalog: ## Regenerate emulator/operation_catalog_gen.go from each plugin's dispatch switch
+	go run ./cmd/gen-operation-catalog
+
+operation-catalog-check: ## Fail if operation_catalog_gen.go is out of date with the plugins' dispatch
+	go run ./cmd/gen-operation-catalog -check
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
