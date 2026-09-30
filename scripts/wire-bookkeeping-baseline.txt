@@ -38,11 +38,18 @@
 # json:"-" would make a field invisible on the wire without removing it. It is
 # used on none of these.
 #
+# Eleven fields whose Go identifier is one of the five but whose *member* the
+# service publishes are excluded, per site, by the map in
+# check-wire-bookkeeping.sh — ECS's `createdAt`, IAM's `Region` on RoleLastUsed and
+# RoleUsageType, Health's `region` and the rest. A published member recorded here
+# would be filed as a defect owed a deletion, and deleting it would drop something
+# AWS does publish, so the line would point at the wrong fix. The script names each
+# one with its reference page.
+#
 # Regenerate after a deliberate change:  ./scripts/check-wire-bookkeeping.sh --write
 emulator/account_plugin.go	accountRegionOpt	UpdatedAt	updated_at
 emulator/account_plugin.go	accountRegionRequest	AccountID	AccountId
 emulator/acm_types.go	ACMCertificate	AccountID	AccountID
-emulator/acm_types.go	ACMCertificate	CreatedAt	CreatedAt
 emulator/acm_types.go	ACMCertificate	EverTagged	ever_tagged,omitempty
 emulator/acm_types.go	ACMCertificate	Region	Region
 emulator/apigateway_types.go	APIKeyState	AccountID	AccountID
@@ -87,7 +94,6 @@ emulator/backup_types.go	BackupSelection	Region	Region
 emulator/backup_types.go	BackupVault	AccountID	AccountID
 emulator/backup_types.go	BackupVault	Region	Region
 emulator/batch_plugin.go	BatchJob	AccountID	accountID
-emulator/batch_plugin.go	BatchJob	CreatedAt	createdAt
 emulator/batch_plugin.go	BatchJob	Region	region
 emulator/bedrock_runtime_plugin.go	BedrockModelInvocationJob	AccountID	accountID
 emulator/bedrock_runtime_plugin.go	BedrockModelInvocationJob	Region	region
@@ -148,7 +154,6 @@ emulator/ec2_capacity_reservations.go	EC2CapacityReservation	AccountID	accountId
 emulator/ec2_capacity_reservations.go	EC2CapacityReservation	Region	region
 emulator/ec2_fleet.go	EC2Fleet	AccountID	accountId
 emulator/ec2_fleet.go	EC2Fleet	Region	region
-emulator/ec2_spot_placement_control.go	ec2SpotPlacementScoreSeed	Region	region,omitempty
 emulator/ec2_types.go	EC2ElasticIP	AccountID	account_id
 emulator/ec2_types.go	EC2ElasticIP	Region	region
 emulator/ec2_types.go	EC2Image	AccountID	account_id
@@ -183,12 +188,10 @@ emulator/ecr_types.go	ECRRepository	AccountID	AccountID
 emulator/ecr_types.go	ECRRepository	CreatedAt	createdAt
 emulator/ecr_types.go	ECRRepository	EverTagged	ever_tagged,omitempty
 emulator/ecr_types.go	ECRRepository	Region	Region
-emulator/ecr_wire.go	ecrRepositoryOut	CreatedAt	createdAt
 emulator/ecs_types.go	ECSCluster	AccountID	AccountID
 emulator/ecs_types.go	ECSCluster	EverTagged	ever_tagged,omitempty
 emulator/ecs_types.go	ECSCluster	Region	Region
 emulator/ecs_types.go	ECSService	AccountID	AccountID
-emulator/ecs_types.go	ECSService	CreatedAt	createdAt
 emulator/ecs_types.go	ECSService	EverTagged	ever_tagged,omitempty
 emulator/ecs_types.go	ECSService	Region	Region
 emulator/ecs_types.go	ECSTask	AccountID	AccountID
@@ -264,11 +267,8 @@ emulator/glue_types.go	GlueJobRun	Region	Region
 emulator/glue_types.go	GlueTable	AccountID	AccountID
 emulator/glue_types.go	GlueTable	CreatedAt	CreatedAt
 emulator/glue_types.go	GlueTable	Region	Region
-emulator/health_plugin.go	HealthEvent	Region	region
-emulator/iam_service_linked_roles.go	IAMSLRRoleUsage	Region	Region
 emulator/iam_types.go	IAMAccessKey	AccountID	AccountId,omitempty
 emulator/iam_types.go	IAMRole	EverTagged	ever_tagged,omitempty
-emulator/iam_types.go	IAMRoleLastUsed	Region	Region
 emulator/iam_types.go	IAMUser	EverTagged	ever_tagged,omitempty
 emulator/kinesis_plugin.go	kinesisIterator	AccountID	a
 emulator/kinesis_plugin.go	kinesisIterator	Region	r
@@ -286,7 +286,6 @@ emulator/msk_types.go	MSKCluster	Region	Region
 emulator/omics_plugin.go	OmicsRun	AccountID	accountID
 emulator/omics_plugin.go	OmicsRun	Region	region
 emulator/organizations_account.go	orgPendingAccountOutcome	AccountID	accountId,omitempty
-emulator/organizations_types.go	OrgCreateAccountStatus	AccountID	AccountId,omitempty
 emulator/quicksight_plugin.go	QuickSightDataSet	AccountID	AccountID
 emulator/quicksight_plugin.go	QuickSightDataSet	Region	Region
 emulator/quicksight_plugin.go	QuickSightDataSource	AccountID	AccountID
@@ -318,7 +317,6 @@ emulator/redshift_types.go	RedshiftClusterSubnetGroup	Region	region
 emulator/redshift_types.go	RedshiftSnapshot	AccountID	accountID
 emulator/redshift_types.go	RedshiftSnapshot	Region	region
 emulator/redshiftdata_types.go	RedshiftDataStatement	AccountID	AccountID
-emulator/redshiftdata_types.go	RedshiftDataStatement	CreatedAt	CreatedAt
 emulator/redshiftdata_types.go	RedshiftDataStatement	Region	Region
 emulator/route53_types.go	Route53HostedZone	AccountID	AccountID
 emulator/s3_types.go	S3Bucket	AccountID	account_id
