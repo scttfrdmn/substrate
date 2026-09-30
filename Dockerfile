@@ -15,7 +15,16 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     -o /substrate ./cmd/substrate
 
 # Stage 2: runtime
-FROM alpine:3.21
+#
+# The minor pin is what the security workflow's image scan is asserting against, so it moves
+# when a branch stops receiving fixes rather than on a schedule. 3.21 was left behind at
+# 3.21.8, whose openssl 3.3.7-r1 carries CVE-2026-75804 and CVE-2026-84782 (both HIGH) with
+# no 3.3.7-r2 published on the v3.21 branch — an `apk upgrade` here had nothing to pull
+# (#1301). Neither CVE is reachable through substrate itself: the binary is CGO_ENABLED=0 and
+# serves TLS from Go's crypto/tls, and libssl3/libcrypto3 are in the base as apk's own
+# dependency. The scan still has to be green, because a red one nobody can act on is a red one
+# everybody learns to ignore.
+FROM alpine:3.23
 RUN apk --no-cache add ca-certificates tzdata && \
     addgroup -S substrate && adduser -S substrate -G substrate && \
     mkdir -p /var/lib/substrate && chown substrate:substrate /var/lib/substrate

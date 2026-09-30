@@ -926,6 +926,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ValidationError` service-wide rather than `InvalidInputException` at two sites, is unaffected,
   which is why this survived review.
 
+### Security
+
+- **The runtime image moves from Alpine 3.21 to 3.23, clearing two HIGH openssl CVEs the base
+  carried** (#1301). `CVE-2026-75804` (DoS via unenforced QUIC connection flow control) and
+  `CVE-2026-84782` (information disclosure via DTLS handshake retransmission) were published on
+  2026-09-30 and turned `Container Image Scan` red between one green run of `main` and the next, on a
+  documentation-only PR — nothing in the tree had changed. Both reach `libssl3` and `libcrypto3` in
+  `alpine:3.21`'s own layer, at `openssl 3.3.7-r1`, and the `3.3.7-r2` the advisories name as the fix
+  is not published on the v3.21 branch, so an `apk --no-cache upgrade` in the runtime stage had
+  nothing to pull; `alpine:3.23` carries `openssl 3.5.9-r0`, rebuilt the same day, and scans clean at
+  HIGH and CRITICAL. **Neither CVE is reachable through substrate's own surface**: the binary is built
+  `CGO_ENABLED=0`, serves TLS from Go's `crypto/tls`, and the two libraries are present only as
+  `apk-tools`' dependency, while the `HEALTHCHECK` shells out to busybox `wget` over plain HTTP on
+  localhost. They are still real for anything else a consumer runs in the container, which is why the
+  answer is a base that has the fix rather than an `--ignore-unfixed` or a severity threshold. Alpine
+  3.21 is supported into November 2026, so this is moving early rather than being forced; the pin now
+  carries a comment saying it tracks the branch that is still receiving fixes, since the reason a
+  minor pin moves is exactly what gets lost. No behaviour, entrypoint, non-root user or health
+  endpoint changed.
+
 ## [v0.120.0] - 2026-09-19
 
 ### Added
