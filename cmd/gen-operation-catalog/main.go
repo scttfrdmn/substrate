@@ -58,6 +58,7 @@ import (
 	"go/format"
 	"go/parser"
 	"go/token"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -91,46 +92,60 @@ var operationTags = map[string]bool{"op": true, "action": true, "operation": tru
 const maxClaimDepth = 2
 
 func main() {
-	check := flag.Bool("check", false, "exit non-zero if the generated file is out of date instead of writing it")
-	dir := flag.String("dir", "emulator", "directory holding the plugin sources")
-	out := flag.String("out", filepath.Join("emulator", "operation_catalog_gen.go"), "path to the generated Go file")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "gen-operation-catalog:", err)
+		os.Exit(1)
+	}
+}
+
+// run parses args, builds the catalog and either writes the generated file or, under -check,
+// reports that it is stale.
+//
+// main is a wrapper around it so that the -check flag's own behavior is reachable from a
+// test. That flag is the whole reason the catalog can be relied on as a projection of the
+// router rather than as a snapshot of it, and an untested drift check is one nobody knows
+// still fires (#739).
+func run(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("gen-operation-catalog", flag.ContinueOnError)
+	fs.SetOutput(stdout)
+	check := fs.Bool("check", false, "exit non-zero if the generated file is out of date instead of writing it")
+	dir := fs.String("dir", "emulator", "directory holding the plugin sources")
+	out := fs.String("out", filepath.Join("emulator", "operation_catalog_gen.go"), "path to the generated Go file")
+	if err := fs.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
 
 	cat, err := build(*dir)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gen-operation-catalog:", err)
-		os.Exit(1)
+		return err
 	}
 
 	generated, err := render(cat)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gen-operation-catalog:", err)
-		os.Exit(1)
+		return err
 	}
 
 	existing, err := os.ReadFile(*out)
 	if err != nil && !os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "gen-operation-catalog: read %s: %v\n", *out, err)
-		os.Exit(1)
+		return fmt.Errorf("read %s: %w", *out, err)
 	}
 
 	if *check {
 		if !bytes.Equal(existing, generated) {
-			fmt.Fprintf(os.Stderr, "gen-operation-catalog: %s is out of date with %s; run `make operation-catalog` and commit the result\n", *out, *dir)
-			os.Exit(1)
+			return fmt.Errorf("%s is out of date with %s; run `make operation-catalog` and commit the result", *out, *dir)
 		}
-		return
+		return nil
 	}
 
 	if bytes.Equal(existing, generated) {
-		fmt.Printf("%s already up to date (%d plugins, %d operations)\n", *out, len(cat), cat.total())
-		return
+		_, _ = fmt.Fprintf(stdout, "%s already up to date (%d plugins, %d operations)\n", *out, len(cat), cat.total())
+		return nil
 	}
 	if err := os.WriteFile(*out, generated, 0o644); err != nil { //nolint:gosec // generated source, world-readable is fine.
-		fmt.Fprintln(os.Stderr, "gen-operation-catalog:", err)
-		os.Exit(1)
+		return fmt.Errorf("write %s: %w", *out, err)
 	}
-	fmt.Printf("updated %s (%d plugins, %d operations)\n", *out, len(cat), cat.total())
+	_, _ = fmt.Fprintf(stdout, "updated %s (%d plugins, %d operations)\n", *out, len(cat), cat.total())
+	return nil
 }
 
 // catalog maps a registered plugin name to the operations that plugin routes, sorted.

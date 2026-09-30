@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -281,6 +285,126 @@ func TestBuildFrom_RefusesWhatItCannotRead(t *testing.T) {
 	}
 }
 
+// TestBuildFrom_RefusesANameMethodItCannotRead collects the Name shapes this generator does
+// not read. The registry key comes from Name and from nothing else, so guessing one — the
+// type name lowercased, say — would produce a catalog that looks complete and that nothing
+// can look a plugin up in.
+func TestBuildFrom_RefusesANameMethodItCannotRead(t *testing.T) {
+	const table = `package emulator
+
+func RegisterDefaultPlugins() error {
+	registrations := []struct {
+		plugin Plugin
+		name   string
+	}{
+		{&ThingPlugin{}, "label"},
+	}
+	_ = registrations
+	return nil
+}
+
+type ThingPlugin struct{}
+
+func (p *ThingPlugin) HandleRequest(req *AWSRequest) error {
+	switch req.Operation {
+	case "CreateThing":
+		return nil
+	}
+	return nil
+}
+`
+	tests := []struct {
+		name string
+		decl string
+		want string
+	}{
+		{
+			name: "absent",
+			decl: "",
+			want: "has no Name method",
+		},
+		{
+			name: "more than one statement",
+			decl: "func (p *ThingPlugin) Name() string {\n\tn := \"thing\"\n\treturn n\n}\n",
+			want: "has 2 statements; this generator reads a single return",
+		},
+		{
+			name: "a single statement that is not a return",
+			decl: "func (p *ThingPlugin) Name() string {\n\tpanic(\"thing\")\n}\n",
+			want: "does not return a single value",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cat, err := buildFrom(parse(t, table+"\n"+tt.decl))
+			if err == nil {
+				t.Fatalf("want a refusal, got catalog %v", cat)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("want error containing %q, got %q", tt.want, err)
+			}
+		})
+	}
+}
+
+// TestRegisteredTypes_SkipsWhatIsNotAPluginRegistration pins how narrowly the registration
+// table is read. Only `&XPlugin{}` is an entry; anything else in there — and the same type
+// registered twice — must not become a catalog key, because a key with no plugin behind it
+// fails the registry cross-check in cmd/gen-service-reference for a reason nobody can act on.
+func TestRegisteredTypes_SkipsWhatIsNotAPluginRegistration(t *testing.T) {
+	src := `package emulator
+
+var thingSingleton = ThingPlugin{}
+
+func RegisterDefaultPlugins() error {
+	registrations := []struct {
+		plugin Plugin
+		name   string
+	}{
+		{nil, "not an address"},
+		{&thingSingleton, "not a composite literal"},
+		{&thingRouter{}, "type name does not end in Plugin"},
+		{&ThingPlugin{}, "label"},
+		{&ThingPlugin{}, "the same type twice"},
+	}
+	_ = registrations
+	return nil
+}
+`
+	types, err := registeredTypes(parse(t, src))
+	if err != nil {
+		t.Fatalf("registeredTypes: %v", err)
+	}
+	if got, want := strings.Join(types, ","), "ThingPlugin"; got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// TestBuildFrom_DoesNotFollowAHelperWithTheWrongParameterType is the other half of the
+// claim-chain scoping: the helper is a method on the same receiver returning (T, bool), but it
+// takes the request rather than the operation name, so it is a request handler and not a claim.
+func TestBuildFrom_DoesNotFollowAHelperWithTheWrongParameterType(t *testing.T) {
+	src := plugin("ThingPlugin", `"thing"`, `	if h, ok := p.claim(req); ok {
+		return h(req)
+	}
+	return nil`) + `
+type handler func(req *AWSRequest) error
+
+func (p *ThingPlugin) claim(req *AWSRequest) (handler, bool) {
+	switch req.Operation {
+	case "NotADispatch":
+		return nil, true
+	}
+	return nil, false
+}
+`
+	if _, err := buildFrom(parse(t, src)); err == nil {
+		t.Fatal("want a refusal: nothing in HandleRequest dispatches, so the catalog would be empty")
+	} else if !strings.Contains(err.Error(), "no operations extracted") {
+		t.Errorf("want the empty-catalog refusal, got %q", err)
+	}
+}
+
 // TestBuildFrom_RefusesAPluginWithNoHandleRequest guards the case a registration table can
 // present but a compiling tree cannot: a plugin type that does not satisfy Plugin. It is
 // worth a refusal rather than a skip because a skip is how a plugin leaves the catalog
@@ -390,5 +514,100 @@ func TestBuild_AgreesWithTheCommittedFile(t *testing.T) {
 func TestParseDir_RefusesADirectoryWithNoSources(t *testing.T) {
 	if _, err := parseDir(token.NewFileSet(), t.TempDir()); err == nil {
 		t.Fatal("want a refusal, got nil")
+	}
+}
+
+// TestParseDir_RefusesUnparseableSource keeps a half-written plugin file from producing a
+// catalog short by exactly the plugins that file declares.
+func TestParseDir_RefusesUnparseableSource(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "broken.go"), []byte("package emulator\n\nfunc {\n"), 0o600); err != nil {
+		t.Fatalf("write synthetic source: %v", err)
+	}
+	if _, err := parseDir(token.NewFileSet(), dir); err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+}
+
+// TestRun_WritesTheCatalogAndThenAgreesWithIt walks the two paths `make operation-catalog` and
+// `make operation-catalog-check` take, against the live tree but not the committed file: -out
+// is a temporary path, so the first call writes it and the second finds it current.
+func TestRun_WritesTheCatalogAndThenAgreesWithIt(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "operation_catalog_gen.go")
+	args := []string{"-dir", "../../emulator", "-out", out}
+
+	var written bytes.Buffer
+	if err := run(args, &written); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if got := written.String(); !strings.HasPrefix(got, "updated ") {
+		t.Errorf("want the write path to report what it wrote, got %q", got)
+	}
+
+	var again bytes.Buffer
+	if err := run(args, &again); err != nil {
+		t.Fatalf("run a second time: %v", err)
+	}
+	if got := again.String(); !strings.Contains(got, "already up to date") {
+		t.Errorf("want the no-op path to say so, got %q", got)
+	}
+
+	if err := run(append(args, "-check"), io.Discard); err != nil {
+		t.Errorf("-check against the file run just wrote: %v", err)
+	}
+}
+
+// TestRun_CheckRefusesAStaleFile is the failure `make operation-catalog-check` exists to
+// produce, and the reason the committed catalog cannot silently fall behind the router. The
+// message names both the file and the directory, because regenerating is the only useful reply.
+func TestRun_CheckRefusesAStaleFile(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "operation_catalog_gen.go")
+	if err := os.WriteFile(out, []byte("package emulator\n"), 0o600); err != nil {
+		t.Fatalf("write a stale catalog: %v", err)
+	}
+	err := run([]string{"-check", "-dir", "../../emulator", "-out", out}, io.Discard)
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	if want := "is out of date with"; !strings.Contains(err.Error(), want) {
+		t.Errorf("want error containing %q, got %q", want, err)
+	}
+}
+
+// TestRun_RefusesWhatItCannotRead covers the ways run gives up before it has a catalog, each
+// of which has to be an exit code rather than an empty file that then passes its own -check.
+func TestRun_RefusesWhatItCannotRead(t *testing.T) {
+	empty := t.TempDir()
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{
+			name: "an unknown flag",
+			args: []string{"-nope"},
+			want: "parse flags",
+		},
+		{
+			name: "a directory holding no plugin sources",
+			args: []string{"-dir", empty},
+			want: "no Go sources found",
+		},
+		{
+			name: "an -out that is not a file",
+			args: []string{"-dir", "../../emulator", "-out", empty},
+			want: "read " + empty,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := run(tt.args, io.Discard)
+			if err == nil {
+				t.Fatal("want a refusal, got nil")
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("want error containing %q, got %q", tt.want, err)
+			}
+		})
 	}
 }
