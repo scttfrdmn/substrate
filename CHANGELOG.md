@@ -314,6 +314,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Eleven lines of the wire-bookkeeping baseline filed a member AWS *does* publish as a defect**
+  (#756). The check keys on the Go identifier, because that is the only stable key — one `AccountID`
+  renders as `json:"a"` — but eleven fields named `AccountID`, `Region` or `CreatedAt` render a
+  member the service's own reference publishes: ECS `Service.createdAt`, ACM
+  `CertificateDetail.CreatedAt`, Redshift Data `DescribeStatement.CreatedAt`, Batch
+  `JobDetail.createdAt`, Firehose `DeliveryStreamDescription.CreateTimestamp`, Health
+  `Event.region`, EC2 `SpotPlacementScore.region`, Organizations `CreateAccountStatus.AccountId`,
+  IAM `RoleLastUsed.Region` and `RoleUsageType.Region`, and — the sharpest of them —
+  `ecrRepositoryOut.CreatedAt`, a field on the wire struct #1090 *added* to fix ECR, so the baseline
+  was filing the fix as part of the defect. A line there means "owed a deletion", and deleting any of
+  these would drop a published member, so each was pointing at the wrong fix. All eleven join
+  `batchJobSummary.CreatedAt` in the per-site exclusion map, keyed file/type/field so an exclusion
+  cannot spread to another struct, each with its reference page named. Batch's was the one kept on
+  purpose, on the argument that `BatchJob`'s `AccountID` and `Region` leak alongside it — the wrong
+  unit of analysis, since the exclusion is per field and a leaking sibling says nothing about this
+  one; those two siblings stay in the baseline, where `JobDetail` publishing neither is what puts
+  them. Firehose's is the case the identifier key costs the most: the field renders as
+  `json:"CreateTimestamp"`, so only the Go name collides and the rendered name was right all along.
+  The honest count is therefore **319 declared, 13 projected, 306 still reachable** rather than
+  330/13/317. Three of the eleven publish the right name and the wrong type — ACM's, Redshift
+  Data's and Firehose's are `time.Time`, so they render RFC3339 where all three services' JSON
+  protocol publishes epoch seconds — which is a live decode failure rather than a cosmetic one and
+  is filed as #1305; the script says so where it excludes them, because "not a bookkeeping leak"
+  must not read as "correct". A second leak-impossible struct is named for the same reason:
+  `orgPendingAccountOutcome.AccountID` is a control-plane seed record, read at request time and
+  rendered into no body.
 - **Every EFS response is rendered from the published shape, and a file system finally reports
   `CreationTime`** (#756). All three EFS records — file system, access point, mount target — were
   handed to the JSON writer directly at each of the ten sites that answer a resource, so every one

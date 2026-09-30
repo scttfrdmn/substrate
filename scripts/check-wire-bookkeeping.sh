@@ -70,7 +70,7 @@
 # #756's AC3 drives to zero is the difference between the two files —
 # reported below as "still reachable".
 #
-# Note that json:"-" is used on zero of the 330 fields. The exclusion is available
+# Note that json:"-" is used on zero of the declared fields. The exclusion is available
 # and has never been reached for, and for a field already written to state it is
 # not the fix: see above.
 set -euo pipefail
@@ -95,29 +95,75 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 # field is excluded when the operation's own reference publishes a member of that
 # name on the shape the struct renders. The BEGIN block below holds those, keyed by
 # file, type and Go field so the exclusion cannot spread to another struct by
-# accident. It currently holds one:
+# accident.
+#
+# Recording a published member in the baseline files it as a defect owed a
+# deletion, and deleting it would drop a member AWS does publish — so the entry is
+# worse than useless, it points at the wrong fix. Twelve are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
 #     the wire struct this check recommends building (#1090's pattern), carrying
-#     only published members. Tagging it `json:"-"` would drop a published member;
-#     recording it in the baseline would file a published member as a defect owed a
-#     deletion. (emulator/batch_plugin.go's BatchJob.CreatedAt is a separate line,
-#     still in the baseline and unchanged here: that struct is the persisted record
-#     and its AccountID and Region leak alongside, which is what #756 is about.)
+#     only published members.
+#   - batch_plugin.go BatchJob.CreatedAt — the same member on the other shape.
+#     DescribeJobs marshals the persisted BatchJob straight into `{"jobs": […]}`,
+#     which is JobDetail, and `API_JobDetail` publishes `createdAt`, Type: Long,
+#     "the Unix timestamp (in milliseconds) for when the job was created" — which
+#     is exactly what the field is (int64, epoch milliseconds). This line was kept
+#     once on the argument that BatchJob's AccountID and Region leak alongside, and
+#     that is the wrong unit of analysis: the exclusion is per field, and a sibling
+#     leaking says nothing about this one. AccountID and Region stay in the
+#     baseline, where JobDetail publishing neither is what puts them.
+#   - ecr_wire.go ecrRepositoryOut.CreatedAt — `API_Repository` publishes
+#     `createdAt`. This one is the sharpest illustration of the mistake: the struct
+#     is the wire struct #1090 *added* to fix ECR, so the baseline was filing the
+#     fix as part of the defect.
+#   - acm_types.go ACMCertificate.CreatedAt — `API_CertificateDetail` publishes
+#     `CreatedAt`, Timestamp, Required: No.
+#   - ecs_types.go ECSService.CreatedAt — `API_Service` publishes `createdAt`.
+#   - redshiftdata_types.go RedshiftDataStatement.CreatedAt —
+#     `API_DescribeStatement` publishes `CreatedAt`.
+#   - firehose_types.go FirehoseDeliveryStream.CreatedAt — the field renders as
+#     `json:"CreateTimestamp"`, and `API_DeliveryStreamDescription` publishes
+#     `CreateTimestamp`, Timestamp, Required: No. This is the case the identifier key
+#     costs the most: the rendered name is right and only the Go name collides, so
+#     the field-name scan that catches `json:"a"` catches this too. Its AccountID
+#     and Region stay in the baseline — that same page publishes neither.
+#   - health_plugin.go HealthEvent.Region — `API_Event` publishes `region`.
+#   - ec2_spot_placement_control.go ec2SpotPlacementScoreSeed.Region —
+#     `API_SpotPlacementScore` publishes `region`.
+#   - organizations_types.go OrgCreateAccountStatus.AccountID —
+#     `API_CreateAccountStatus` publishes `AccountId`, Required: No.
+#   - iam_types.go IAMRoleLastUsed.Region and iam_service_linked_roles.go
+#     IAMSLRRoleUsage.Region — `API_RoleLastUsed` and `API_RoleUsageType` each
+#     publish `Region`, "the name of the AWS Region in which the role was last
+#     used" and "where the service-linked role is being used". A Region member is
+#     the service's own data on both shapes, not substrate scoping a record.
+#
+# Three of the twelve publish the *name* and diverge on the *type*: ACM's, Redshift
+# Data's and Firehose's are `time.Time`, so they render RFC3339 where all three
+# services' JSON protocol publishes a Timestamp as epoch seconds (ECS already uses
+# EpochSeconds, which is what right looks like). That is a wrong-type divergence
+# rather than a bookkeeping leak — #1305 — and it is named here rather than left
+# implied, because "excluded from this check" must not read as "correct".
 #
 # Test files are skipped. A bookkeeping-named field in a _test.go file is a decode
 # target — a test reading a member off a response — not wire surface, and one
 # exists: organizations_account_test.go's orgCreateStatus.AccountID reads
 # CreateAccountStatus.AccountId, which AWS does publish.
 #
-# One further reason the 330 is an upper bound rather than a leak count: a request
-# decode struct is matched too, and cannot leak. Exactly one entry is of that kind
-# — accountRegionRequest.AccountID (account_plugin.go:568), which decodes the
-# AccountId that Account's own operations publish as an input. There is no lexical
-# way to tell a request struct from a response struct, and excluding by a name
-# suffix would be a heuristic that silently drops real surface, so it stays in and
-# is named here instead.
+# One further reason the count is an upper bound rather than a leak count: a struct
+# that never reaches a response is matched too, and cannot leak. Two entries are of
+# that kind, and both stay in and are named here instead of being excluded, because
+# there is no lexical way to tell such a struct from a response struct and excluding
+# by a name suffix would be a heuristic that silently drops real surface:
+#
+#   - account_plugin.go accountRegionRequest.AccountID, a request decode struct,
+#     which decodes the AccountId that Account's own operations publish as an input.
+#   - organizations_account.go orgPendingAccountOutcome.AccountID, a control-plane
+#     seed record. Its `accountId` is the seed's own encoding — no Organizations
+#     shape spells it that way — and the seed is read at request time, never
+#     rendered into a body.
 #
 # The awk is written for the POSIX subset because CI's awk is mawk, not gawk:
 # matching the struct header on field position rather than on an escaped brace
@@ -133,6 +179,17 @@ extract() {
       # Published members whose Go identifier collides with the five names; see the
       # header. Keyed file, type, field — tab-separated, as the output is.
       published["emulator/batch_list_jobs.go\tbatchJobSummary\tCreatedAt"] = 1
+      published["emulator/batch_plugin.go\tBatchJob\tCreatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrRepositoryOut\tCreatedAt"] = 1
+      published["emulator/acm_types.go\tACMCertificate\tCreatedAt"] = 1
+      published["emulator/ecs_types.go\tECSService\tCreatedAt"] = 1
+      published["emulator/redshiftdata_types.go\tRedshiftDataStatement\tCreatedAt"] = 1
+      published["emulator/firehose_types.go\tFirehoseDeliveryStream\tCreatedAt"] = 1
+      published["emulator/health_plugin.go\tHealthEvent\tRegion"] = 1
+      published["emulator/ec2_spot_placement_control.go\tec2SpotPlacementScoreSeed\tRegion"] = 1
+      published["emulator/organizations_types.go\tOrgCreateAccountStatus\tAccountID"] = 1
+      published["emulator/iam_types.go\tIAMRoleLastUsed\tRegion"] = 1
+      published["emulator/iam_service_linked_roles.go\tIAMSLRRoleUsage\tRegion"] = 1
     }
     FILENAME ~ /_test\.go$/ { next }
     $1 == "type" && $3 == "struct" { t = $2; next }
