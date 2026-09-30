@@ -14870,16 +14870,23 @@ CloudWatch Logs ingestion: $0.50 per GB. Storage: $0.03 per GB-month.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateEventBus | |
-| DescribeEventBus | |
-| DeleteEventBus | |
-| ListEventBuses | |
+| ListEventBuses | Returns the default bus only, with the calling account's and Region's ARN |
 | PutRule | |
 | DescribeRule | |
 | DeleteRule | |
 | ListRules | |
-| PutEvents | Stores last 100 events in ring buffer |
+| PutTargets | Merges by target `Id`; `ResourceNotFoundException` if the rule does not exist |
+| RemoveTargets | |
 | ListTargetsByRule | |
+| PutEvents | Stores last 100 events in ring buffer |
+
+**Not modelled: `CreateEventBus`, `DescribeEventBus`, `DeleteEventBus`.** This table listed
+all three until #1015, which is what the operation-docs check was written to catch — the
+heading says *Supported*, and none of the three is in the dispatch. Substrate models the
+default bus and no other, so there is no custom bus for them to act on. A rule's
+`EventBusName` is recorded (defaulting to `default`) and echoed back, but it is not part of
+the rule's key, so two rules of one name on different buses are one rule here and not two.
+`PutTargets` and `RemoveTargets`, meanwhile, were routed all along and had no row.
 
 ### CloudFormation resource types
 
@@ -15273,8 +15280,7 @@ result with no error (#529).
 | PutMethod | |
 | GetMethod | |
 | DeleteMethod | |
-| PutIntegration | |
-| GetIntegration | |
+| PutIntegration | `GetIntegration` is **not** modelled — see below |
 | CreateDeployment | |
 | GetDeployment | |
 | GetDeployments | Pages on `limit`/`position`; ascending deployment ID, which is unrelated to `createdDate` (#1025) |
@@ -15291,6 +15297,13 @@ result with no error (#529).
 | GetUsagePlan | |
 | GetUsagePlans | Pages on `limit`/`position`; ascending plan ID. `keyId` unread (#1025) |
 | DeleteUsagePlan | |
+
+**Not modelled: `GetIntegration`.** AWS publishes it on this API — `GET
+/restapis/{restapi_id}/resources/{resource_id}/methods/{http_method}/integration` — and this
+table claimed it until #1015. The path is parsed, but only `PUT` on it routes, so a `GET`
+reaches the unknown-action refusal. What made the wrong row hard to see is that API Gateway
+v2 *does* route `GetIntegration`, so the name is in this file twice and only one of the two
+is real.
 
 ### CloudFormation resource types
 
@@ -17411,7 +17424,11 @@ Cost Explorer API calls: $0.01 per request.
 | UpdateBudget | |
 | DeleteBudget | |
 | DescribeBudgets | Lists all budgets for account |
-| DescribeBudgetActionsForBudget | |
+
+**Not modelled: `DescribeBudgetActionsForBudget`.** This table claimed it until #1015; it is
+not in the dispatch. Budget *actions* — the IAM/SCP/target policies a budget can apply when a
+threshold is breached — are a separate resource substrate holds no state for, so the operation
+would have nothing to enumerate. `AWS::Budgets::BudgetsAction` is likewise unmodelled.
 
 ### CloudFormation resource types
 

@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -63,6 +63,12 @@ operation-catalog: ## Regenerate emulator/operation_catalog_gen.go from each plu
 
 operation-catalog-check: ## Fail if operation_catalog_gen.go is out of date with the plugins' dispatch
 	go run ./cmd/gen-operation-catalog -check
+
+operation-docs-check: ## Fail if a routed operation has no row in docs/services.md, or a row names none
+	go run ./cmd/check-operation-docs
+
+operation-docs-write: ## Rewrite the undocumented-operations inventory (run by hand after writing rows)
+	go run ./cmd/check-operation-docs -write
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
