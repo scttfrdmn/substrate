@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1017 operations**. This
+Substrate ships **67 built-in service plugins** routing **1018 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -31,7 +31,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 10 | Budgets | `budgets` | JSON | 5 |
 | 11 | Cost Explorer | `ce` | JSON | 3 |
 | 12 | CloudFormation | `cloudformation` | Query | 18 |
-| 13 | CloudFront | `cloudfront` | REST/XML | 16 |
+| 13 | CloudFront | `cloudfront` | REST/XML | 17 |
 | 14 | CloudTrail | `cloudtrail` | JSON | 8 |
 | 15 | CodeBuild | `codebuild` | JSON | 7 |
 | 16 | CodeDeploy | `codedeploy` | JSON | 9 |

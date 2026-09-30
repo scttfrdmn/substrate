@@ -29,7 +29,7 @@ const (
 	// place. Updating this figure is the deliberate half of adding or removing an
 	// operation; `make operation-catalog` regenerates the catalog and this test then says
 	// by how much the total moved.
-	routedOperationTotal = 1017
+	routedOperationTotal = 1018
 
 	// routedPluginTotal is the number of plugins RegisterDefaultPlugins registers. The
 	// coverage matrix in docs/services.md reports the same figure from the same source.
@@ -98,6 +98,7 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 
 	counts := map[string]int{
 		"ec2":                  92,
+		"cloudfront":           17,
 		"iam":                  74,
 		"s3":                   44,
 		"apigateway":           41,
@@ -119,6 +120,13 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 		"organizations":        "CreateAccount",
 		"config":               "PutConfigurationRecorder",
 		"elasticloadbalancing": "CreateLoadBalancer",
+
+		// CloudFront's GetInvalidation is routed by a strings.HasPrefix guard ahead of the
+		// switch, because parseCloudFrontOperation encodes the invalidation id into the
+		// operation name ("GetInvalidation:"+invID) so one value carries both ids. The first
+		// catalog missed it, and what found the miss was #1015's reverse check: the docs
+		// claimed the operation and the catalog did not.
+		"cloudfront": "GetInvalidation",
 	}
 	for service, op := range present {
 		assert.Contains(t, emulator.RoutedOperations(service), op)

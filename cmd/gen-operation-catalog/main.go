@@ -41,6 +41,12 @@
 //     case: its parser hands the name it derived straight to that switch, as in
 //     `bucket, key, op := parseS3Operation(req); req.Operation = op; switch op {…}`.
 //
+// Two dispatch arms are not switch cases and are read as well: a claim chain of
+// `func(string) (handler, bool)` helpers (ConfigService and Organizations, 59 operations that
+// appear in no switch inside HandleRequest), and a `strings.HasPrefix` guard ahead of the
+// switch (CloudFront's GetInvalidation, whose parser encodes the invalidation id into the
+// operation name). See [claimChainOperations] and [prefixGuardOperation].
+//
 // Two plugins route no operation names at all and are declared as exceptions below, so
 // that an empty catalog is always a stated decision rather than an extraction failure.
 //
@@ -61,6 +67,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -85,6 +92,12 @@ var emptyByDesign = map[string]string{
 // a filter name, an attribute name, a resource type — is not a dispatch and is skipped,
 // which is the distinction a `case "…"` grep cannot make and the reason it miscounts.
 var operationTags = map[string]bool{"op": true, "action": true, "operation": true}
+
+// operationNamePattern is what an AWS operation name looks like: PascalCase, letters and
+// digits. It is the test [prefixGuardOperation] applies before reading a prefix guard's
+// literal as an operation, so that a guard on the dispatch variable which is not a dispatch
+// arm fails generation rather than inventing a catalog entry.
+var operationNamePattern = regexp.MustCompile(`^[A-Z][A-Za-z0-9]+$`)
 
 // maxClaimDepth bounds how far a claim chain is followed. ConfigService and Organizations
 // route through one level of `func(string) (handler, bool)` claim helpers; nothing in the
@@ -209,7 +222,10 @@ func buildFrom(files []*ast.File) (catalog, error) {
 		if !ok {
 			return nil, fmt.Errorf("plugin %s (%q) has no HandleRequest method", typeName, service)
 		}
-		ops := operations(handler, methods, 0)
+		ops, err := operations(handler, methods, 0)
+		if err != nil {
+			return nil, fmt.Errorf("%s.HandleRequest: %w", typeName, err)
+		}
 		_, exempt := emptyByDesign[service]
 		switch {
 		case len(ops) == 0 && !exempt:
@@ -391,13 +407,29 @@ func pluginTypeOf(e ast.Expr) string {
 }
 
 // operations gathers the case-clause strings of every dispatch switch reachable from fn,
-// following claim helpers when fn dispatches through a claim chain rather than a switch.
-func operations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) []string {
+// plus any operation routed by a prefix guard ahead of that switch, following claim helpers
+// when fn dispatches through a claim chain rather than a switch.
+func operations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) ([]string, error) {
 	if fn == nil || fn.Body == nil || depth > maxClaimDepth {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]bool)
+	var guardErr error
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if guardErr != nil {
+			return false
+		}
+		if call, ok := n.(*ast.CallExpr); ok {
+			op, found, err := prefixGuardOperation(call)
+			switch {
+			case err != nil:
+				guardErr = err
+				return false
+			case found:
+				seen[op] = true
+			}
+			return true
+		}
 		sw, ok := n.(*ast.SwitchStmt)
 		if !ok || !isDispatchTag(sw.Tag) {
 			return true
@@ -415,9 +447,16 @@ func operations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) [
 		}
 		return true
 	})
+	if guardErr != nil {
+		return nil, guardErr
+	}
 
 	if len(seen) == 0 {
-		for _, op := range claimChainOperations(fn, methods, depth) {
+		chained, err := claimChainOperations(fn, methods, depth)
+		if err != nil {
+			return nil, err
+		}
+		for _, op := range chained {
 			seen[op] = true
 		}
 	}
@@ -427,7 +466,53 @@ func operations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) [
 		ops = append(ops, op)
 	}
 	sort.Strings(ops)
-	return ops
+	return ops, nil
+}
+
+// prefixGuardOperation reads the one dispatch arm that is not a switch case: a
+// `strings.HasPrefix(op, "Name:")` guard ahead of the switch, which routes an operation whose
+// parser encodes a second identifier into the operation name.
+//
+// CloudFront is the site, and it is why this exists. parseCloudFrontOperation returns
+// "GetInvalidation:"+invalidationID so the handler can take both ids from one value, so the
+// guard at cloudfront_plugin.go:47 routes GetInvalidation and no `case` label names it. The
+// first version of this generator missed it, and the miss was found by #1015's reverse
+// check — the docs claim GetInvalidation and the catalog did not — which is the argument for
+// having both checks rather than either.
+//
+// A literal that survives the trailing separator but does not look like an operation name is
+// an error, not a skip. The whole guard against a short catalog is that an unread dispatch
+// shape fails generation, and a `strings.HasPrefix` against the dispatch variable is a
+// dispatch whatever its literal turns out to be.
+func prefixGuardOperation(call *ast.CallExpr) (string, bool, error) {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "HasPrefix" || len(call.Args) != 2 {
+		return "", false, nil
+	}
+	if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "strings" {
+		return "", false, nil
+	}
+	if !isDispatchTag(call.Args[0]) {
+		return "", false, nil
+	}
+	// A prefix computed rather than written — a named constant or a variable — names no
+	// operation this can read, and every such site in the tree is an X-Amz-Target prefix being
+	// stripped rather than a dispatch arm.
+	lit, ok := call.Args[1].(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return "", false, nil
+	}
+	prefix, err := strconv.Unquote(lit.Value)
+	if err != nil {
+		return "", false, fmt.Errorf("unquote %s: %w", lit.Value, err)
+	}
+	op := strings.TrimSuffix(prefix, ":")
+	if !operationNamePattern.MatchString(op) {
+		return "", false, fmt.Errorf("strings.HasPrefix guards the dispatch variable with %q, which is not an "+
+			"operation name; either it routes an operation this cannot name — in which case teach the generator "+
+			"the shape rather than leaving the catalog short — or the guard is not a dispatch arm", prefix)
+	}
+	return op, true, nil
 }
 
 // claimChainOperations follows the claim helpers ConfigService and Organizations dispatch
@@ -440,16 +525,20 @@ func operations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) [
 // switches. Following them at all is what finds the 59 operations these two plugins route
 // that appear in no switch inside HandleRequest, and which every hand count therefore
 // missed.
-func claimChainOperations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) []string {
+func claimChainOperations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, depth int) ([]string, error) {
 	if fn.Recv == nil || len(fn.Recv.List) != 1 {
-		return nil
+		return nil, nil
 	}
 	recv := receiverType(fn.Recv.List[0].Type)
 	if recv == "" {
-		return nil
+		return nil, nil
 	}
 	var ops []string
+	var claimErr error
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if claimErr != nil {
+			return false
+		}
 		sel, ok := n.(*ast.SelectorExpr)
 		if !ok {
 			return true
@@ -458,10 +547,15 @@ func claimChainOperations(fn *ast.FuncDecl, methods map[string]*ast.FuncDecl, de
 		if !ok || claim == fn || !isClaimHelper(claim) {
 			return true
 		}
-		ops = append(ops, operations(claim, methods, depth+1)...)
+		claimed, err := operations(claim, methods, depth+1)
+		if err != nil {
+			claimErr = err
+			return false
+		}
+		ops = append(ops, claimed...)
 		return true
 	})
-	return ops
+	return ops, claimErr
 }
 
 // isDispatchTag reports whether a switch tag names the operation being dispatched.

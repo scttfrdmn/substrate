@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 67 plugins, 1017 routed operations.
+// 67 plugins, 1018 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -215,6 +215,7 @@ var routedOperations = map[string][]string{
 		"DeleteOriginAccessControl",
 		"GetDistribution",
 		"GetDistributionConfig",
+		"GetInvalidation",
 		"GetOriginAccessControl",
 		"ListDistributions",
 		"ListInvalidations",

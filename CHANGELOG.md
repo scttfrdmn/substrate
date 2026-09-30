@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   routing predicates, and the operation set existed only as `case` labels inside each
   `HandleRequest`. That is why #1015's drift check — fail when a routed operation has no
   documentation row — could not be written, and why three counts of the same tree produced 945, 950
-  and "at least 1,009". The answer is **1,017 operations across 67 plugins**, and a test asserts it.
+  and "at least 1,009". The answer is **1,018 operations across 67 plugins**, and a test asserts it.
   The catalog is *derived from* the router rather than declared beside it: `cmd/gen-operation-catalog`
   walks the dispatch AST into `emulator/operation_catalog_gen.go`, with `make operation-catalog` /
   `make operation-catalog-check` in CI, mirroring `cmd/gen-authz-reference`. An `Operations()` method
@@ -30,7 +30,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `execute-api` serves a deployed API's own routes (AWS's action there is the single
   `execute-api:Invoke`) and `opensearch` dispatches on HTTP method plus path shape (AWS's own actions
   there are the per-verb `es:ESHttp*`) — and the generator fails if either ever gains one, so an empty
-  entry is always a stated decision. No plugin file changed and no operation's behaviour moved.
+  entry is always a stated decision. Three dispatch arms are read, not one: the switch, the
+  `func(string) (handler, bool)` claim chains Config Service and Organizations route through (59
+  operations that appear in no switch inside `HandleRequest`), and the `strings.HasPrefix` guard
+  ahead of CloudFront's switch that routes `GetInvalidation`, whose parser encodes the invalidation
+  id into the operation name. That last one the first catalog missed, and what found it was the
+  reverse of #1015's check — `docs/services.md` claims `GetInvalidation` and the catalog did not — so
+  the two checks audit each other. No plugin file changed and no operation's behaviour moved.
 - **`TestServer.FreezeTimeAt`, and a named frozen state on the simulated clock** (#1217). A test that
   asserts an exact timestamp needs the clock to stop, and the only way to ask for that was
   `SetScale(0)` — a value the control plane's own endpoint refuses, so the state was reachable from a

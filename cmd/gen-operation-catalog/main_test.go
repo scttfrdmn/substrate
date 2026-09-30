@@ -196,6 +196,79 @@ func (p *ThingPlugin) render(req *AWSRequest) error {
 	}
 }
 
+// TestBuildFrom_ReadsAPrefixGuard covers CloudFront's GetInvalidation, the one dispatch arm
+// in the tree that is neither a switch case nor a claim helper. Its parser returns
+// "GetInvalidation:"+invalidationID so the handler can take both ids from one value, and a
+// strings.HasPrefix guard ahead of the switch routes it.
+//
+// The first version of this generator missed it and reported 1017 operations rather than 1018.
+// What found the miss was the reverse of #1015's check — docs/services.md claims
+// GetInvalidation in CloudFront's operation table and the catalog did not list it — which is
+// the argument for having both directions rather than either.
+func TestBuildFrom_ReadsAPrefixGuard(t *testing.T) {
+	body := `	if strings.HasPrefix(op, "GetInvalidation:") {
+		return p.getInvalidation(strings.TrimPrefix(op, "GetInvalidation:"))
+	}
+	switch op {
+	case "CreateInvalidation":
+		return nil
+	case "ListInvalidations":
+		return nil
+	}
+	return nil`
+	cat, err := buildFrom(parse(t, plugin("CloudFrontPlugin", `"cloudfront"`, body)))
+	if err != nil {
+		t.Fatalf("buildFrom: %v", err)
+	}
+	want := "CreateInvalidation,GetInvalidation,ListInvalidations"
+	if got := strings.Join(cat["cloudfront"], ","); got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
+// TestBuildFrom_RefusesAPrefixGuardItCannotName keeps the prefix-guard shape from becoming a
+// second way to be silently short. A HasPrefix against the dispatch variable is a dispatch arm
+// whatever its literal is, so a literal that is not an operation name has to stop generation.
+func TestBuildFrom_RefusesAPrefixGuardItCannotName(t *testing.T) {
+	body := `	if strings.HasPrefix(op, "get-") {
+		return nil
+	}
+	switch op {
+	case "CreateThing":
+		return nil
+	}
+	return nil`
+	_, err := buildFrom(parse(t, plugin("ThingPlugin", `"thing"`, body)))
+	if err == nil {
+		t.Fatal("want a refusal, got nil")
+	}
+	if want := `guards the dispatch variable with "get-"`; !strings.Contains(err.Error(), want) {
+		t.Errorf("want error containing %q, got %q", want, err)
+	}
+}
+
+// TestBuildFrom_IgnoresAPrefixThatIsNotALiteral pins the site the tree actually has several of:
+// a HasPrefix against a named prefix constant, which is how a JSON service strips its
+// X-Amz-Target prefix. None of those is a dispatch arm, and none may become an error.
+func TestBuildFrom_IgnoresAPrefixThatIsNotALiteral(t *testing.T) {
+	body := `	if strings.HasPrefix(op, targetPrefix) {
+		op = strings.TrimPrefix(op, targetPrefix)
+	}
+	switch op {
+	case "CreateThing":
+		return nil
+	}
+	return nil`
+	src := plugin("ThingPlugin", `"thing"`, body) + "\nconst targetPrefix = \"Thing_20131202.\"\n"
+	cat, err := buildFrom(parse(t, src))
+	if err != nil {
+		t.Fatalf("buildFrom: %v", err)
+	}
+	if got, want := strings.Join(cat["thing"], ","), "CreateThing"; got != want {
+		t.Errorf("want %q, got %q", want, got)
+	}
+}
+
 // TestBuildFrom_ResolvesANameConstant covers ELB, whose Name returns elbServiceName rather
 // than a literal — and whose registry key ("elasticloadbalancing") differs from the label
 // beside it in the registration table ("elb"). Keying the catalog by the label would produce
