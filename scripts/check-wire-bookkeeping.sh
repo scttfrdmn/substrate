@@ -153,10 +153,10 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 # CreateAccountStatus.AccountId, which AWS does publish.
 #
 # One further reason the count is an upper bound rather than a leak count: a struct
-# that never reaches a response is matched too, and cannot leak. Two entries are of
-# that kind, and both stay in and are named here instead of being excluded, because
-# there is no lexical way to tell such a struct from a response struct and excluding
-# by a name suffix would be a heuristic that silently drops real surface:
+# whose members cannot become response members is matched too. Three entries are of
+# that kind, and all three stay in and are named here instead of being excluded,
+# because there is no lexical way to tell such a struct from a response struct and
+# excluding by a name suffix would be a heuristic that silently drops real surface:
 #
 #   - account_plugin.go accountRegionRequest.AccountID, a request decode struct,
 #     which decodes the AccountId that Account's own operations publish as an input.
@@ -164,6 +164,13 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #     seed record. Its `accountId` is the seed's own encoding — no Organizations
 #     shape spells it that way — and the seed is read at request time, never
 #     rendered into a body.
+#   - dynamodb_plugin.go DynamoDBStreamCursor.AccountID and .Region. This one *is*
+#     marshalled into a response, and still cannot leak: the JSON is base64-encoded
+#     into the opaque `ShardIterator` string GetShardIterator answers, so neither
+#     member is ever a member of a body. A real shard iterator is opaque too, so
+#     carrying the account and Region inside it is faithful rather than a divergence.
+#     Left in the baseline because the day it stops being base64-wrapped is the day
+#     these become real, and nothing lexical would notice.
 #
 # The awk is written for the POSIX subset because CI's awk is mawk, not gawk:
 # matching the struct header on field position rather than on an escaped brace

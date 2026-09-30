@@ -314,6 +314,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four services were already rendering their responses from a wire struct and were still counted as
+  leaking** (#756). API Gateway v1 (#529), API Gateway v2, DynamoDB (#1013) and AppSync (#1121) each
+  project every persisted record they answer — verified site by site, including the two API Gateway
+  operations that echo the caller's own request body and answer no record at all — but none of them
+  had a line in `scripts/wire-bookkeeping-projected.txt`, so 34 declared fields across 17 records
+  were still being reported as reachable. The reachability inventory on the issue says `appsync`
+  leaks `accountId` and `region`; it predates #1121 and is stale. Recording them takes the count from
+  **306 still reachable to 272** without touching a plugin. Two assertions had to be written first,
+  because an `,omitempty` member is absent from a body whenever its value is the zero one:
+  `RestAPIState.EverTagged` and `DynamoDBTable.EverTagged` were passing every existing absence check
+  on records that had never been tagged — `EverTagged` is set by `TagResource` alone, never by
+  create-with-tags — which is the vacuous assertion #1304 shipped on EFS before it was caught. Both
+  new tests set the flag, prove from a response that it is set, and were checked against a
+  deliberately reintroduced leak on every site they cover. `DynamoDBStreamCursor`'s `accountId` and
+  `region` are named in the script as a third leak-impossible kind: they *are* marshalled into a
+  response and still cannot leak, because the JSON is base64-encoded into the opaque `ShardIterator`
+  string — which is what a real shard iterator is too.
 - **Eleven lines of the wire-bookkeeping baseline filed a member AWS *does* publish as a defect**
   (#756). The check keys on the Go identifier, because that is the only stable key — one `AccountID`
   renders as `json:"a"` — but eleven fields named `AccountID`, `Region` or `CreatedAt` render a
