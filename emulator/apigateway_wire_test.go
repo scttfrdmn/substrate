@@ -76,9 +76,15 @@ func agwItem(t *testing.T, what string, m map[string]any) map[string]any {
 // agwNoInternalFields checks the raw bytes, not a decoded top-level map: substrate's
 // AccountID or Region nested inside a resourceMethods map would pass a top-level key
 // check while still reaching the caller. #529 requires no response carry either.
+//
+// `ever_tagged` is RestAPIState's third unpublished member (#756, #938). It is checked
+// here so every operation guards it, but it is ,omitempty — so on a record whose flag is
+// false the assertion passes for free. The non-vacuous version, which sets the flag first,
+// is TestAPIGatewayWire_RestAPIOmitsEverTaggedOnceItIsSet.
 func agwNoInternalFields(t *testing.T, what string, raw []byte) {
 	t.Helper()
-	for _, bad := range []string{`"AccountID"`, `"Region"`, `"accountId"`, `"region"`, `"APIId"`, `"apiId"`} {
+	for _, bad := range []string{`"AccountID"`, `"Region"`, `"accountId"`, `"region"`,
+		`"APIId"`, `"apiId"`, `"ever_tagged"`} {
 		if bytes.Contains(raw, []byte(bad)) {
 			t.Errorf("%s: response carries substrate's internal %s: %s", what, bad, raw)
 		}

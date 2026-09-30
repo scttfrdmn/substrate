@@ -199,3 +199,81 @@ func TestDynamoDB_TagsAndTTLStayReadableThroughTheirOwnOperations(t *testing.T) 
 		assert.Equal(t, "ENABLED", out.TimeToLiveDescription.TimeToLiveStatus)
 	})
 }
+
+// TestDynamoDB_TableDescriptionOmitsEverTaggedOnceItIsSet is the assertion #756's
+// projected inventory cites for DynamoDBTable, and it exists because the test above
+// cannot make it.
+//
+// DynamoDBTable declares a third member AWS does not publish — EverTagged, tagged
+// `ever_tagged,omitempty` (#938) — and the subset assertion above never sees it.
+// EverTagged is set by TagResource and UntagResource alone (dynamodb_plugin.go, via
+// [taggingEverTagged]); CreateTable with a Tags list does not set it, whatever the
+// table's tags say. So while the flag is false, `,omitempty` removes the member from
+// the body and every absence assertion passes on a response that could never have
+// carried it.
+//
+// That is the vacuous-assertion trap #1304 walked into on EFS. The fix is a presence
+// anchor: tag the table through the operation that actually sets the flag, prove from
+// the response that the tag landed, and only then assert the member is gone.
+//
+// Three of the four description sites, not four: CreateTable answers before any
+// TagResource can have run, so its record's flag is necessarily false and the site
+// cannot carry the member. The test above covers CreateTable for everything else.
+func TestDynamoDB_TableDescriptionOmitsEverTaggedOnceItIsSet(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+	const arn = "arn:aws:dynamodb:us-east-1:123456789012:table/flagged"
+
+	resp := dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName":            "flagged",
+		"AttributeDefinitions": []map[string]string{{"AttributeName": "id", "AttributeType": "S"}},
+		"KeySchema":            []map[string]string{{"AttributeName": "id", "KeyType": "HASH"}},
+		"BillingMode":          "PAY_PER_REQUEST",
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "CreateTable")
+	require.NoError(t, resp.Body.Close(), "close CreateTable body")
+
+	resp = dynamodbRequest(t, srv, "TagResource", map[string]any{
+		"ResourceArn": arn,
+		"Tags":        []map[string]string{{"Key": "env", "Value": "test"}},
+	})
+	require.Equal(t, http.StatusOK, resp.StatusCode, "TagResource")
+	require.NoError(t, resp.Body.Close(), "close TagResource body")
+
+	// The anchor. ListTagsOfResource reporting the tag proves TagResource reached the
+	// record, which is the same write that sets EverTagged — so the assertions below are
+	// running against a record whose flag is true.
+	var tags struct {
+		Tags []emulator.DynamoDBTag `json:"Tags"`
+	}
+	decodeDynamoJSON(t, dynamodbRequest(t, srv,
+		"ListTagsOfResource", map[string]any{"ResourceArn": arn}), &tags)
+	require.Equal(t, []emulator.DynamoDBTag{{Key: "env", Value: "test"}}, tags.Tags,
+		"the anchor: without the tag on the record, EverTagged is false and every assertion below is vacuous")
+
+	t.Run("DescribeTable", func(t *testing.T) {
+		keys, raw := ddbDescriptionKeys(t, dynamodbRequest(t, srv,
+			"DescribeTable", map[string]any{"TableName": "flagged"}), "Table")
+		assertOnlyTableDescriptionMembers(t, keys, raw, "DescribeTable")
+		assert.NotContains(t, raw, "ever_tagged", "DescribeTable: %s", raw)
+	})
+
+	t.Run("UpdateTable", func(t *testing.T) {
+		keys, raw := ddbDescriptionKeys(t, dynamodbRequest(t, srv, "UpdateTable", map[string]any{
+			"TableName":   "flagged",
+			"BillingMode": "PROVISIONED",
+			"ProvisionedThroughput": map[string]any{
+				"ReadCapacityUnits":  5,
+				"WriteCapacityUnits": 5,
+			},
+		}), "TableDescription")
+		assertOnlyTableDescriptionMembers(t, keys, raw, "UpdateTable")
+		assert.NotContains(t, raw, "ever_tagged", "UpdateTable: %s", raw)
+	})
+
+	t.Run("DeleteTable", func(t *testing.T) {
+		keys, raw := ddbDescriptionKeys(t, dynamodbRequest(t, srv,
+			"DeleteTable", map[string]any{"TableName": "flagged"}), "TableDescription")
+		assertOnlyTableDescriptionMembers(t, keys, raw, "DeleteTable")
+		assert.NotContains(t, raw, "ever_tagged", "DeleteTable: %s", raw)
+	})
+}
