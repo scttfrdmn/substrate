@@ -17396,15 +17396,15 @@ ElastiCache cache.t3.micro: $0.017 per node-hour (approximate).
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFileSystem | |
-| DescribeFileSystems | |
+| CreateFileSystem | `CreationTime` is reported in epoch seconds, as the Response Syntax publishes it. `SizeInBytes.Value` is always **0** — substrate stores no file data, so the metered size of a file system nothing has written to is the published minimum — and `SizeInBytes.Timestamp` is the file system's own creation time, because that is when the 0 was determined. `ValueInIA`, `ValueInStandard` and `ValueInArchive` are absent rather than zero, since no storage class is modelled. `Tags` is always an array, never `null` |
+| DescribeFileSystems | Same file-system shape as CreateFileSystem. An account with no file systems answers `"FileSystems": []` |
 | UpdateFileSystem | `202 Accepted` with the updated file system; `FileSystemNotFound`/404 for an absent one. Only `ThroughputMode` is applied — `ProvisionedThroughputInMibps` is decoded and unread, so a switch to `provisioned` reports the mode without the throughput |
 | DeleteFileSystem | |
-| CreateMountTarget | |
-| DescribeMountTargets | |
+| CreateMountTarget | Reports `OwnerId`. `AvailabilityZoneId`, `AvailabilityZoneName`, `Ipv6Address` and `NetworkInterfaceId` are absent: substrate models no subnet topology and creates no network interface, so it has no value for any of them |
+| DescribeMountTargets | Same mount-target shape as CreateMountTarget |
 | DeleteMountTarget | |
-| CreateAccessPoint | |
-| DescribeAccessPoints | |
+| CreateAccessPoint | Reports `OwnerId`. `ClientToken` is absent — the request's idempotency token is not decoded, so there is none to report |
+| DescribeAccessPoints | Same access-point shape as CreateAccessPoint |
 | DeleteAccessPoint | |
 | TagResource | `204 No Content`; merges into the existing set. The `ResourceId` path member selects the resource by prefix: `fs-` (`FileSystemNotFound`/404 if absent) and `fsap-` (`AccessPointNotFound`/404), and any other prefix is a `BadRequest` — a mount-target ID reaches nothing |
 | ListTagsForResource | `Tags` as a `Key`/`Value` array, never `null`; an untagged resource answers with an empty array |

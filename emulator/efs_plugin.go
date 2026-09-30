@@ -134,7 +134,7 @@ func (p *EFSPlugin) createFileSystem(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 	updateStringIndex(goCtx, p.state, efsNamespace, "filesystem_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, fsID)
 
-	return efsJSONResponse(http.StatusCreated, fs)
+	return efsJSONResponse(http.StatusCreated, efsFileSystemToWire(fs))
 }
 
 func (p *EFSPlugin) describeFileSystems(reqCtx *RequestContext, req *AWSRequest, resourceID string) (*AWSResponse, error) {
@@ -159,7 +159,7 @@ func (p *EFSPlugin) describeFileSystems(reqCtx *RequestContext, req *AWSRequest,
 			return nil, fmt.Errorf("efs describeFileSystems unmarshal: %w", err)
 		}
 		return efsJSONResponse(http.StatusOK, map[string]interface{}{
-			"FileSystems": []EFSFileSystem{fs},
+			"FileSystems": efsFileSystemsToWire([]EFSFileSystem{fs}),
 		})
 	}
 
@@ -179,11 +179,8 @@ func (p *EFSPlugin) describeFileSystems(reqCtx *RequestContext, req *AWSRequest,
 		}
 		filesystems = append(filesystems, fs)
 	}
-	if filesystems == nil {
-		filesystems = []EFSFileSystem{}
-	}
 	return efsJSONResponse(http.StatusOK, map[string]interface{}{
-		"FileSystems": filesystems,
+		"FileSystems": efsFileSystemsToWire(filesystems),
 	})
 }
 
@@ -222,7 +219,7 @@ func (p *EFSPlugin) updateFileSystem(reqCtx *RequestContext, req *AWSRequest, fs
 	if err := p.state.Put(goCtx, efsNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("efs updateFileSystem put: %w", err)
 	}
-	return efsJSONResponse(http.StatusAccepted, fs)
+	return efsJSONResponse(http.StatusAccepted, efsFileSystemToWire(fs))
 }
 
 func (p *EFSPlugin) deleteFileSystem(reqCtx *RequestContext, _ *AWSRequest, fsID string) (*AWSResponse, error) {
@@ -292,7 +289,7 @@ func (p *EFSPlugin) createAccessPoint(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	updateStringIndex(goCtx, p.state, efsNamespace, "accesspoint_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, apID)
 
-	return efsJSONResponse(http.StatusOK, ap)
+	return efsJSONResponse(http.StatusOK, efsAccessPointToWire(ap))
 }
 
 func (p *EFSPlugin) describeAccessPoints(reqCtx *RequestContext, req *AWSRequest, resourceID string) (*AWSResponse, error) {
@@ -317,7 +314,7 @@ func (p *EFSPlugin) describeAccessPoints(reqCtx *RequestContext, req *AWSRequest
 			return nil, fmt.Errorf("efs describeAccessPoints unmarshal: %w", err)
 		}
 		return efsJSONResponse(http.StatusOK, map[string]interface{}{
-			"AccessPoints": []EFSAccessPoint{ap},
+			"AccessPoints": efsAccessPointsToWire([]EFSAccessPoint{ap}),
 		})
 	}
 
@@ -342,11 +339,8 @@ func (p *EFSPlugin) describeAccessPoints(reqCtx *RequestContext, req *AWSRequest
 		}
 		accessPoints = append(accessPoints, ap)
 	}
-	if accessPoints == nil {
-		accessPoints = []EFSAccessPoint{}
-	}
 	return efsJSONResponse(http.StatusOK, map[string]interface{}{
-		"AccessPoints": accessPoints,
+		"AccessPoints": efsAccessPointsToWire(accessPoints),
 	})
 }
 
@@ -404,7 +398,7 @@ func (p *EFSPlugin) createMountTarget(reqCtx *RequestContext, req *AWSRequest) (
 	updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.FileSystemID, mtID)
 	p.incrementMountTargetCount(goCtx, reqCtx, input.FileSystemID)
 
-	return efsJSONResponse(http.StatusOK, mt)
+	return efsJSONResponse(http.StatusOK, efsMountTargetToWire(mt))
 }
 
 func (p *EFSPlugin) describeMountTargets(reqCtx *RequestContext, req *AWSRequest, resourceID string) (*AWSResponse, error) {
@@ -430,7 +424,7 @@ func (p *EFSPlugin) describeMountTargets(reqCtx *RequestContext, req *AWSRequest
 			return nil, fmt.Errorf("efs describeMountTargets unmarshal: %w", err)
 		}
 		return efsJSONResponse(http.StatusOK, map[string]interface{}{
-			"MountTargets": []EFSMountTarget{mt},
+			"MountTargets": efsMountTargetsToWire([]EFSMountTarget{mt}),
 		})
 	}
 
@@ -459,11 +453,8 @@ func (p *EFSPlugin) describeMountTargets(reqCtx *RequestContext, req *AWSRequest
 		}
 		mountTargets = append(mountTargets, mt)
 	}
-	if mountTargets == nil {
-		mountTargets = []EFSMountTarget{}
-	}
 	return efsJSONResponse(http.StatusOK, map[string]interface{}{
-		"MountTargets": mountTargets,
+		"MountTargets": efsMountTargetsToWire(mountTargets),
 	})
 }
 

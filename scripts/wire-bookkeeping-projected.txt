@@ -29,3 +29,6 @@
 # pattern, emulator/iam_shape_members_test.go:115 the template for the assertion), then add
 # the record here in the same commit.
 emulator/ecr_types.go	ECRRepository	TestECR_RepositoryResponsesCarryNoBookkeepingMember
+emulator/efs_types.go	EFSAccessPoint	TestEFS_ResourceResponsesCarryNoBookkeepingMember
+emulator/efs_types.go	EFSFileSystem	TestEFS_ResourceResponsesCarryNoBookkeepingMember
+emulator/efs_types.go	EFSMountTarget	TestEFS_ResourceResponsesCarryNoBookkeepingMember
