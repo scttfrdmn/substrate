@@ -43,26 +43,42 @@
 # ## What the baseline is, and why it is not a suppression
 #
 # scripts/wire-bookkeeping-baseline.txt is not an allowlist of approved sites. It
-# is an inventory of known defects, and every line in it is something #756 says
-# should eventually be deleted. The reason is therefore the same for all of them
-# and is stated once, in the file's own header, rather than per line.
+# is an inventory of known defects. The reason is therefore the same for all of
+# them and is stated once, in the file's own header, rather than per line.
 #
 # That is the opposite of check-discarded-unmarshal.sh's ALLOWED_FILES, where each
 # entry is a site that should stay and so has to argue for itself. Here an entry
 # is a site that should go, so the check fails in both directions: a field absent
 # from the baseline is new leak surface, and a baseline entry that no longer
-# matches the tree is a stale record. Fixing a service means shrinking this file,
-# and the check makes that mandatory rather than optional — which is what keeps
-# the inventory from rotting the way a plain TODO list does.
+# matches the tree is a stale record.
 #
-# Note that json:"-" — the tag that would make a bookkeeping field invisible on
-# the wire without removing it — is used on zero of the 330 fields. The exclusion
-# is available and has never been reached for.
+# ## Why the count of declarations is not the count of leaks
+#
+# The baseline was written expecting each line to be deleted as its service was
+# fixed. It does not work that way, and ECR is the proof: #1090 fixed ECR by the
+# route this script recommends, and all four of its lines are still here. They
+# have to be. emulator/ecr_wire.go states the reason — `json:"-"` and retyping a
+# field in place both change the format of every recorded run, because
+# MemoryStateManager snapshots those bytes and a replay reads them back. A fix
+# removes the field from the *response*, not from the record, so it leaves the
+# declaration standing.
+#
+# So a fixed service records itself in scripts/wire-bookkeeping-projected.txt
+# instead: one line per persisted record that is rendered through a wire struct,
+# citing the test that asserts on the raw response bytes that no unpublished
+# member appears. That file is where an entry argues for itself, and the number
+# #756's AC3 drives to zero is the difference between the two files —
+# reported below as "still reachable".
+#
+# Note that json:"-" is used on zero of the 330 fields. The exclusion is available
+# and has never been reached for, and for a field already written to state it is
+# not the fix: see above.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 BASELINE="scripts/wire-bookkeeping-baseline.txt"
+PROJECTED="scripts/wire-bookkeeping-projected.txt"
 
 # The five field names, matched on the Go identifier rather than on the rendered
 # json tag. Keying on the identifier is what catches the abbreviated tags: one
@@ -136,6 +152,11 @@ if [[ ! -f "$BASELINE" ]]; then
   exit 1
 fi
 
+if [[ ! -f "$PROJECTED" ]]; then
+  echo "check-wire-bookkeeping: $PROJECTED is missing" >&2
+  exit 1
+fi
+
 current="$(mktemp)"
 recorded="$(mktemp)"
 trap 'rm -f "$current" "$recorded"' EXIT
@@ -174,7 +195,35 @@ if [[ -n "$removed" ]]; then
   echo
 fi
 
-if [[ "$status" -ne 0 ]]; then
+# Every projected record must still have bookkeeping fields declared, and must still
+# have the test it cites. Both directions matter: the first catches a claim left behind
+# by a record that lost its fields, the second stops the third column from decaying
+# into a comment when a test is renamed.
+declared=0
+projected_records=0
+while IFS=$'\t' read -r file type test; do
+  [[ -z "$file" || "$file" == \#* ]] && continue
+  projected_records=$((projected_records + 1))
+  fields="$(awk -F'\t' -v f="$file" -v t="$type" '$1 == f && $2 == t' "$recorded" | wc -l | tr -d ' ')"
+  if [[ "$fields" -eq 0 ]]; then
+    status=1
+    echo "$PROJECTED claims $file $type is projected, but $BASELINE records no bookkeeping field"
+    echo "    on that type. A projection for a record with no such field is a stale claim (#756)."
+    echo
+    continue
+  fi
+  declared=$((declared + fields))
+  if ! grep -lq "^func ${test}(" emulator/*_test.go 2>/dev/null; then
+    status=1
+    echo "$PROJECTED cites ${test} for $file $type, and emulator/ defines no such test."
+    echo "    The citation is the only thing holding the projection; rename the entry with the test."
+    echo
+  fi
+done < "$PROJECTED"
+
+# The advice below is about the baseline, so it prints only when the baseline is what
+# disagreed. A projected-file failure has already said what to do about itself.
+if [[ -n "$added" || -n "$removed" ]]; then
   cat <<'EOF'
 A field named AccountID, Region, CreatedAt, UpdatedAt or EverTagged is
 substrate's own bookkeeping. No AWS shape publishes any of them, so a handler
@@ -182,22 +231,30 @@ that marshals the persisted record straight into an AWSResponse.Body ships a
 member the service does not have — and EFS shows the sharp case, where substrate
 spells CreatedAt over AWS's published CreationTime.
 
-If you ADDED a field: don't give it a wire-visible json tag. Either tag it
-`json:"-"` so it stays in state and off the wire, or — better, and what #1090 did
-for ECR — keep the persisted struct internal and render the response from a
-separate wire struct carrying only published members. Raw-JSON assertions are the
+If you ADDED a field: keep the persisted struct internal and render the response
+from a separate wire struct carrying only published members. That is what #1090
+did for ECR, and emulator/ecr_wire.go is the pattern. Raw-JSON assertions are the
 part that makes such a fix stick; emulator/iam_shape_members_test.go:115 is the
-template, and ECR is the worked precedent.
+template, and the record then earns a line in
+scripts/wire-bookkeeping-projected.txt citing that test.
 
-If you REMOVED a field: delete its line from the baseline in the same commit.
-The baseline is an inventory of defects, not a suppression list, so it is
-expected to shrink and a stale line is as much a failure as a new one.
+`json:"-"` is available and is not the fix for a field already written to state:
+it changes the format of every recorded run, because MemoryStateManager snapshots
+those bytes and a replay reads them back. On a field that has never been
+persisted it is fine.
+
+If you REMOVED a field: delete its line from the baseline in the same commit. A
+stale line is as much a failure as a new one.
 
 Regenerate with:  ./scripts/check-wire-bookkeeping.sh --write
 EOF
 fi
 
 if [[ "$status" -eq 0 ]]; then
-  echo "check-wire-bookkeeping: ok — $(wc -l < "$current" | tr -d ' ') wire-visible bookkeeping fields, all recorded"
+  total="$(wc -l < "$current" | tr -d ' ')"
+  noun="records"
+  [[ "$projected_records" -eq 1 ]] && noun="record"
+  echo "check-wire-bookkeeping: ok — $total declared, $declared projected across" \
+    "$projected_records $noun, $((total - declared)) still reachable (#756)"
 fi
 exit "$status"

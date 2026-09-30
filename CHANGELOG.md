@@ -199,6 +199,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`make wire-bookkeeping-check` reports how many bookkeeping fields still reach a response, not
+  just how many are declared** (#756). The ratchet was written expecting each of its 330 lines to be
+  deleted as its service was fixed, and that is not how the fix works: ECR was fixed in #1090 by the
+  route the script itself recommends — the record stays internal and the response is rendered from a
+  wire struct — and all four ECR lines are still in the baseline, because the fields are still
+  declared and still persisted. `emulator/ecr_wire.go` says why they have to be: `json:"-"` and
+  retyping a field in place both change the format of every recorded run, since
+  `MemoryStateManager` snapshots those bytes and a replay reads them back. So the baseline is the
+  declaration surface and the upper bound, and a fixed record now records itself in the new
+  `scripts/wire-bookkeeping-projected.txt` — one line per record, citing by name the test that
+  asserts on the raw response bytes that no unpublished member appears. The check refuses an entry
+  whose type has no baseline line (a projection for a record with no bookkeeping field is a stale
+  claim) and one whose cited test `emulator/` does not define, which is what keeps the third column
+  a citation rather than a comment; it stays pure bash and grep, so the CI job still needs no Go
+  toolchain. The run now reports `330 declared, 4 projected across 1 record, 326 still reachable`,
+  and that last number is the one #756's third criterion drives to zero. Both file headers and the
+  failure advice are corrected to match: the advice no longer offers `json:"-"` as a co-equal fix
+  for a field already written to state.
+
 - **The coverage matrix in `docs/services.md` reports a per-service routed-operation count** (#1095),
   read from the operation catalog, with the total in its lede. Both counts are now generated from the
   same source the router uses, so neither can drift; `cmd/gen-service-reference` also refuses to render

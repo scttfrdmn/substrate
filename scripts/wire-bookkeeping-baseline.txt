@@ -10,12 +10,23 @@
 # AWSResponse.Body therefore ships to the caller.
 #
 # The shared reason, which is why the lines do not each carry their own: none of
-# these is approved. Each is expected to be deleted as its service is fixed, so
-# scripts/check-wire-bookkeeping.sh fails both on a field missing from this file
-# (new leak surface) and on a line the tree no longer has (a stale record). A fix
-# must shrink this file in the same commit. ECR is the worked precedent (#1090):
+# these is approved. scripts/check-wire-bookkeeping.sh fails both on a field
+# missing from this file (new leak surface) and on a line the tree no longer has
+# (a stale record).
+#
+# What this file is *not* is a count of leaks. It is the declaration surface — the
+# upper bound — and a fix does not shrink it. ECR is the worked precedent (#1090):
 # the persisted struct stayed internal and the response was rendered from a wire
-# struct carrying only published members.
+# struct carrying only published members, and all four ECR lines are still here,
+# because the fields are still declared and still persisted. emulator/ecr_wire.go
+# says why they have to be: `json:"-"` and retyping in place both change the
+# format of every recorded run, since MemoryStateManager snapshots those bytes and
+# a replay reads them back.
+#
+# A line is therefore discharged by a projection recorded in
+# scripts/wire-bookkeeping-projected.txt — one entry per record, citing the test
+# that asserts on the raw response bytes — and not only by deletion. Deletion is
+# still right where a field is written and never read; it is the narrower case.
 #
 # Two things the columns make visible and a tag-name scan would not:
 #   - One AccountID renders as `json:"a"` and one Region as `json:"r"`, so the
