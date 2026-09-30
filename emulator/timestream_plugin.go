@@ -364,9 +364,9 @@ func (p *TimestreamPlugin) cancelQuery(_ *RequestContext, _ *AWSRequest) (*AWSRe
 }
 
 // timestreamQueryID mints a `Query` response's QueryId from m — 32 lowercase hex characters, which is
-// what [randomHex] produced at the site this replaces and what API_query_Query permits: `QueryId` is
-// 1–64 characters matching `[a-zA-Z0-9]+`, so hex is inside the published alphabet where a UUID's
-// hyphens would not be.
+// what the shared crypto/rand helper produced at the site this replaces and what API_query_Query
+// permits: `QueryId` is 1–64 characters matching `[a-zA-Z0-9]+`, so hex is inside the published
+// alphabet where a UUID's hyphens would not be.
 //
 // It is the loosest case in this family, because substrate's Query is synchronous and its QueryId
 // reaches nothing: `CancelQuery` ignores the ID it is given and answers an empty body, and there is no

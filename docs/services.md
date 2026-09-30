@@ -2196,30 +2196,27 @@ true of the request ID itself: substrate is a test emulator, its identifiers nam
 it, and none of them is a secret. A caller needing unpredictability from a test double is asking
 the wrong tool.
 
-Three kinds of value stay random, and one more is still migrating:
+**The migration is complete.** Every service's minted identifiers are derived, and no plugin draws
+one from `crypto/rand`: the shared helper they all used is deleted, and the only `crypto/rand` read
+left in the tree is the mint's own fallback for a request that has no ID to derive from — which is
+what a hand-built request context has, and is how every plugin unit test constructs one.
+
+Three kinds of value are not request-derived, each for its own reason:
 
 - The request ID itself, which is the seed, and substrate's own bookkeeping IDs — an event ID, a
   snapshot ID, a replay ID — which no AWS call observes.
 - EC2 key-pair **material**, which needs a deterministic reader into the key generator rather than
   a derived string. A replayed `CreateKeyPair` still diverges on the key and its fingerprint.
 - Anything already derived from its inputs rather than drawn at all: a public IP from its instance
-  ID, a NAT gateway's private IP from its gateway ID, a secret's ARN from its name, and
-  CloudFormation's [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic),
-  which predate this rule and are what generalising it was modelled on.
-- EC2, IAM, STS, SQS, SNS, Lambda, EFS, FSx, Transfer, ECS, Step Functions, EventBridge,
-  CloudWatch Logs, CloudFront, Service Quotas, API Gateway (v1 and v2), AppSync, Batch, EMR
-  Serverless, ECR, ELB, Route 53, Cognito (both the user-pool and the identity-pool API), IAM
-  Identity Center, KMS, ACM, Secrets Manager, WAFv2, Athena, Redshift Data, Glue, Timestream,
-  OpenSearch, QuickSight, CodeBuild, CodeDeploy, CodePipeline, Systems Manager Run Command, RAM,
-  AWS Backup and Bedrock batch inference identifiers are derived today. A
-  CloudFront
-  distribution, invalidation and origin access control all draw from one generator, so the three
-  moved together with the origin access control family (#1277). The remaining services are
-  migrating one family at a time, tracked on #856; until a service moves, its identifiers are still
-  drawn from `crypto/rand` and a replay of a stream creating one of its resources still diverges.
+  ID, a NAT gateway's private IP from its gateway ID, a secret's ARN from its name, an
+  [unresolvable instance profile's `AIPA…` ID](#an-instances-iaminstanceprofile-is-resolved-from-iam-not-minted-per-read)
+  from its own name, and CloudFormation's
+  [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic), which predate this
+  rule and are what generalising it was modelled on. A value of this kind is stable across two
+  *different* requests, which a request-derived one is not — the property a repeated read needs.
 
-Nine of those services publish an identifier from one shared generator rather than declaring their
-own, so they moved together: an ECS task ID, a Step Functions execution name, an SQS message ID,
+Nine services published an identifier from one shared generator rather than declaring their own, so
+they moved together: an ECS task ID, a Step Functions execution name, an SQS message ID,
 an EventBridge event ID, a CloudWatch Logs upload sequence token, a Service Quotas request ID, a
 Lambda revision ID, a Batch job ID and an EMR Serverless job-run ID are all the same sixteen
 derived bytes rendered in UUID *shape* — `8-4-4-4-12` lowercase hex without the RFC 4122 version
@@ -7443,6 +7440,57 @@ path. `CreateLaunchTemplate` and `CreateLaunchTemplateVersion` deliberately do
 AWS does not make. A template may therefore carry an AMI that no longer resolves;
 the launch from it is where that surfaces.
 
+### An instance's `iamInstanceProfile` is resolved from IAM, not minted per read
+
+**Substrate reports the id and ARN IAM stored for the profile the instance names.** Real EC2
+reports the id of the actual instance profile, which is stable for the life of that profile, and
+`RunInstances` and `DescribeInstances` report the same one.
+
+This was a read that was not idempotent ([#1291](https://github.com/scttfrdmn/substrate/issues/1291)).
+The builder both operations render an instance through drew the id on **every call**, so two
+`DescribeInstances` on one unchanged instance reported two different `iamInstanceProfile.id`
+values — each in a 200, each well-formed, so a consumer that describes and compares (a drift
+check, a Terraform refresh, a cache) saw a change that had not happened. The id also named
+nothing: substrate's IAM plugin mints a real `AIPA…` id when `CreateInstanceProfile` runs, and
+the drawn value was unrelated to it, so a caller handing the id back to IAM got a not-found.
+
+Resolving also fixes the ARN, which a synthesized value could not get right. IAM's ARN carries
+the profile's **path**, so a profile created at `/dev/` is now reported as
+`arn:aws:iam::123456789012:instance-profile/dev/app` rather than at the root — the member a
+caller writes into an `iam:PassRole` condition.
+
+| The instance recorded | Reported |
+|-----------------------|----------|
+| A name IAM has a profile for | That profile's stored id and ARN, path included |
+| An ARN IAM has a profile for | The same, resolved in the **ARN's** account, not the caller's |
+| A name or ARN IAM has no profile for | The ARN as named, and an id derived from the account and the profile name |
+
+The account comes from the ARN and never from the caller's context (#826): an instance launched
+with `arn:aws:iam::999999999999:instance-profile/app` must not report the caller's same-named
+profile's id. An ARN that omits the account field names no other account, so it resolves for the
+caller. The profile's **name** is the ARN's last segment, because an ARN for a profile at a path
+spells the path out — `instance-profile/team/app` — where IAM keys the profile by `app` alone.
+
+Substrate lets an instance launch with a profile name that was never created, so the last row
+has to answer for a profile that does not exist. It **derives** the id from the account and the
+name — as a public IP is derived from its instance id and a secret's ARN from its name — rather
+than drawing one, which keeps the stability property for that instance too: one profile name is
+one id, whichever instance names it. It deliberately does not derive from the request id the way
+[#856](https://github.com/scttfrdmn/substrate/issues/856) derives a minted identifier; a
+request-derived value is stable across a *replay* of one request and would still differ between
+two describes, which is the bug. A record that cannot be read — bytes that do not parse, or a
+record carrying no id, which a state encoding from an older substrate can present — is treated as
+absent and derived for instead, since reporting what it holds would put an empty `id` into the
+response.
+
+EC2's `API_IamInstanceProfile` publishes `id` as a String with no pattern and no length, so the
+shape comes from the IAM page the value belongs to: `API_InstanceProfile` publishes
+`InstanceProfileId` with a minimum length of 16, a maximum of 128, and pattern `[\w]+`. A derived
+id uses the 21-character `AIPA` + `[A-Z0-9]` rendering substrate's IAM plugin already mints, so a
+consumer cannot tell a derived id from a stored one. The old 20-character lowercase-hex form
+satisfied the published pattern too — this was not a #671 violation — but it disagreed with the
+rendering a resolved profile reports.
+
 ### Which AMIs resolve
 
 Three kinds of AMI resolve, and nothing else does.
@@ -7606,7 +7654,9 @@ The instance profile is stored as the single string the request supplied, matchi
 the shape an instance holds, so it is echoed back from
 `DescribeLaunchTemplateVersions` in whichever member it arrived in — `arn` for an
 `arn:`-prefixed value and `name` otherwise. `DescribeInstances` surfaces it as an ARN
-either way, because AWS's instance response shape has no name member; for a
+either way, because AWS's instance response shape has no name member — the ARN it
+reports is [resolved out of IAM](#an-instances-iaminstanceprofile-is-resolved-from-iam-not-minted-per-read),
+so a bare name reaches the instance response with the profile's path; for a
 *template* read-back, synthesizing the other member would report the template as
 naming something the caller never wrote.
 

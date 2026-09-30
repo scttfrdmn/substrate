@@ -1,9 +1,6 @@
 package emulator
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"fmt"
 	"net"
 	"strings"
 )
@@ -488,22 +485,16 @@ func generateAssociationID(m *IDMint) string {
 	return "rtbassoc-" + m.Hex(8)
 }
 
-// randomHex generates n random bytes returned as a lowercase hex string.
+// randomHex is deleted. It was the shared crypto/rand draw site every service's ids came
+// through before #856, and the migration was arranged around it: a caller moved by taking a
+// mint and calling [IDMint.Hex] with the same width, which is what let the tiers proceed one
+// service family at a time instead of as a flag day. Its last caller minted an AIPA…
+// instance-profile id inside a *describe*, which #1291 resolved from IAM state instead — so
+// the only crypto/rand read left in the tree is [IDMint]'s own seedless fallback.
 //
-// It is the shared draw site for every service whose ids have not moved to [IDMint] yet,
-// which is what lets that migration proceed one service family at a time instead of as a
-// flag day: a caller moves by taking a mint and calling [IDMint.Hex] with the same width.
-// EC2's own ids no longer come through here.
-//
-// TODO(#856): one caller remains — the AIPA… instance profile id minted inside a describe,
-// which is a fidelity bug of its own (#1291). Delete this function when it moves.
-func randomHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("ec2_types: rand.Read failed: %v", err))
-	}
-	return hex.EncodeToString(b)
-}
+// The note stays where the function was because a dozen mint sites' doc comments say what they
+// replaced, and a reader who follows one of those — or an old changelog entry, or #856 itself —
+// otherwise finds the name and nothing explaining where it went.
 
 // EC2Image represents an Amazon Machine Image (AMI) registered in Substrate.
 type EC2Image struct {

@@ -63,11 +63,13 @@ import (
 // already derived from its inputs: a public IP from its instance id, a secret's ARN from its
 // name, CloudFormation's stack UUIDs from account and region.
 //
-// TODO(#856): one draw site remains on crypto/rand: randomHex, whose last caller mints an
-// EC2 instance profile's AIPA… id inside a *describe* (#1291). bytes's own seedless fallback
-// stays: a nil or seedless mint is what a hand-built RequestContext has, which is how every
-// plugin unit test — substrate's and a consumer's — constructs one, and generateRequestID
-// draws through it because the request id is the seed and is deliberately random.
+// No plugin draw site remains. randomHex, the shared helper the migration was arranged
+// around, is deleted: its last caller minted an EC2 instance profile's AIPA… id inside a
+// *describe*, which #1291 resolved out of IAM state instead. [IDMint.bytes]'s own seedless
+// fallback is the only crypto/rand read left in the tree, and it stays: a nil or seedless
+// mint is what a hand-built RequestContext has, which is how every plugin unit test —
+// substrate's and a consumer's — constructs one, and generateRequestID draws through it
+// because the request id is the seed and is deliberately random.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.

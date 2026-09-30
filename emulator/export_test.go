@@ -1756,3 +1756,14 @@ func ParseLambdaOperationForTest(method, path string) (op, name, subResource str
 func LambdaAuthzResourceARNForTest(path, region, accountID string) string {
 	return lambdaAuthzResourceARN(path, region, accountID)
 }
+
+// IAMInstanceProfileStateKeyForTest returns the namespace and key IAM stores one instance profile
+// under, so a test can write there through [TestServer.StateManager].
+//
+// Exported for the resolution EC2 does on an instance's iamInstanceProfile (#1291): it has to
+// answer for a record the IAM plugin would not itself write — a state encoding from an older
+// substrate, or one a replayed event log restored that predates a field — and the only way in
+// through the wire is a record IAM created, which is by construction well-formed.
+func IAMInstanceProfileStateKeyForTest(accountID, name string) (namespace, key string) {
+	return iamNamespace, iamInstanceProfileKey(accountID, name)
+}

@@ -1125,7 +1125,7 @@ func (p *GluePlugin) loadGlueTags(goCtx context.Context, ns, key string) (map[st
 }
 
 // glueJobRunID mints a job-run ID from m — the `jr_` prefix real Glue uses, followed by 32 lowercase
-// hex characters, which is what [randomHex] produced at the site this replaces.
+// hex characters, which is what the shared crypto/rand helper produced at the site this replaces.
 //
 // Deriving it is what lets a recorded Glue run be polled: `GetJobRun` and `BatchStopJobRun` address
 // the run by this ID, so a re-minted one answered a recorded poll with EntityNotFoundException against

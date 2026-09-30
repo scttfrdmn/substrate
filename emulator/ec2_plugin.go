@@ -868,16 +868,10 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 		BlockDeviceMappings: mappings,
 		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
 	}
-	// Echo the IAM instance profile set at launch (#331). The stored value is the name
-	// or ARN supplied; surface it as the ARN and derive an id so a caller can read back
-	// the profile it attached.
-	if inst.IamInstanceProfile != "" {
-		arn := inst.IamInstanceProfile
-		if !strings.HasPrefix(arn, "arn:") {
-			arn = "arn:aws:iam::" + reqCtx.AccountID + ":instance-profile/" + inst.IamInstanceProfile
-		}
-		item.IamInstanceProfile = &ec2IAMInstanceProfileItem{ARN: arn, ID: "AIPA" + randomHex(8)}
-	}
+	// Echo the IAM instance profile set at launch (#331), resolved against IAM state so
+	// two describes of one instance report one id (#1291). The stored value is the name
+	// or ARN supplied; see ec2_instance_profile.go for what decides the id and the ARN.
+	item.IamInstanceProfile = p.ec2InstanceProfileItem(reqCtx, inst.IamInstanceProfile)
 	// Echo launch-time tags (from TagSpecifications) — real EC2 populates tagSet in
 	// the RunInstances response, not just DescribeInstances (#351).
 	for _, t := range inst.Tags {
