@@ -314,6 +314,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every EFS response is rendered from the published shape, and a file system finally reports
+  `CreationTime`** (#756). All three EFS records — file system, access point, mount target — were
+  handed to the JSON writer directly at each of the ten sites that answer a resource, so every one
+  of those bodies carried `AccountID` and `Region` unconditionally, `ever_tagged` on a record that
+  had been tagged, and, on a file system, `CreatedAt` as an RFC3339 string. AWS publishes none of
+  the four. The last is why EFS was taken first: it is not merely an extra member but a near-miss of
+  a real one — `API_FileSystemDescription` publishes **`CreationTime`**, in epoch seconds,
+  Required: Yes, so a consumer reading it off a substrate response got nothing while a member one
+  letter-group away held the value under the wrong name and the wrong type. `emulator/efs_wire.go`
+  projects the records onto the published shapes, which also closes three members substrate reported
+  nowhere: `CreationTime` and `SizeInBytes` on a file system (both Required: Yes), and `OwnerId` on
+  an access point and a mount target — the latter two from the very `AccountID` that was leaking, so
+  the same value now reaches the caller under the name AWS publishes rather than being deleted.
+  `SizeInBytes.Value` is 0 with the file system's own creation time as its `Timestamp`, because
+  substrate stores no file data and that is when the 0 was determined; the three storage-class
+  breakdowns stay absent rather than present and zero, per #1013. `Tags` is an array and never
+  `null`. `AccountID`, `Region` and `EverTagged` stay on the records untouched: removing a persisted
+  member changes the format of every recorded run, since `MemoryStateManager` snapshots those bytes
+  and a replay reads them back, and `TaggingPlugin.scanEFSFileSystems` reads `EverTagged` across the
+  service boundary besides. So EFS keeps its nine baseline lines and earns three entries in
+  `scripts/wire-bookkeeping-projected.txt` — **330 declared, 13 projected, 317 still reachable**. One
+  provenance note is recorded in the file so the shape is not "fixed" backwards later: AWS's own
+  `API_CreateFileSystem` page disagrees with itself, its Response Syntax publishing `"OwnerId"`,
+  `"FileSystemId"` and `"CreationTime": number` where both of its sample responses render
+  `"ownerId"`, `"fileSystemId"` and `"CreationTime":"1403301078"`. The Response Syntax is what the
+  SDK decoder follows and what substrate matches.
 - **Five rows in `docs/services.md` claimed operations substrate does not route, and EventBridge's
   table omitted two it does** (#1015). Under a heading that reads *Supported operations*, EventBridge
   listed `CreateEventBus`, `DescribeEventBus` and `DeleteEventBus` — none in the dispatch, and
