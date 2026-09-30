@@ -7483,6 +7483,13 @@ record carrying no id, which a state encoding from an older substrate can presen
 absent and derived for instead, since reporting what it holds would put an empty `id` into the
 response.
 
+There is no migration for an instance record written before this. The record stores the profile the
+launch named and nothing else — it never held an id, which is why one was invented at render time —
+so a record restored from an older event log resolves exactly as a new one does. The alternative of
+storing a resolved id on the instance at launch was considered and rejected for that reason: it
+would make the describe a pure render at the cost of a record that can disagree with IAM, and a
+profile can be created, deleted and recreated after the launch that named it.
+
 EC2's `API_IamInstanceProfile` publishes `id` as a String with no pattern and no length, so the
 shape comes from the IAM page the value belongs to: `API_InstanceProfile` publishes
 `InstanceProfileId` with a minimum length of 16, a maximum of 128, and pattern `[\w]+`. A derived
