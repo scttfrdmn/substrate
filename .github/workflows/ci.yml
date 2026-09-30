@@ -138,6 +138,14 @@ jobs:
       - name: Check docs/services.md is in sync with the plugin registry
         run: make docs-reference-check
 
+      # The matrix check above compares operation *counts*; this compares the operations
+      # themselves against each service's hand-written table, in both directions. It runs
+      # in CI and not only in `make` for the reason the wire-bookkeeping baseline does: an
+      # inventory nothing executes is a TODO list, and a routed operation documented
+      # nowhere has to fail a PR rather than wait to be noticed (#1015).
+      - name: Check every routed operation has a row, and every row a routed operation
+        run: make operation-docs-check
+
       # Offline: regenerates from the vendored snapshots under emulator/authzref and
       # diffs. A refreshed snapshot committed without regenerating would leave the
       # authorization table disagreeing with its own source.

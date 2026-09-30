@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A drift check that fails when the service reference and the router disagree about which
+  operations substrate routes** (#1015). `make operation-docs-check` — `cmd/check-operation-docs`,
+  wired into the `Service Reference Drift` job — compares `emulator.RoutedOperations` against each
+  service's own *Supported operations* table in `docs/services.md`, in both directions: a routed
+  operation with no row, and a row naming an operation no plugin routes. The operation set comes from
+  the catalog (#1095) rather than from a grep, which is why this is Go and not another shell script,
+  and which is what four disagreeing hand counts of the same tree — 945, 849, 950, 973 — cost. The
+  measurement it makes: **1,018 routed, 110 with no row across 16 services, 5 rows naming nothing
+  routed.** Scoping matters and the scope is tight: a name must appear in the first column of its own
+  section's operation table, not anywhere in the file, because "anywhere in the file" is how Lambda's
+  `AddPermission` counted as documented on the strength of SNS's row for it (#1084). The 67-entry
+  plugin→heading map is written out rather than derived from `PluginRouting.Display`, which differs
+  for seven services, and the check fails on a plugin missing from the map, a heading the file does
+  not have, an entry naming no registered plugin, and two plugins claiming one heading — so the map
+  cannot rot into a quiet exemption list. The tables stay hand-written and are asserted, not
+  generated: their value is the notes column, which is not derivable from the router and would be
+  lost or awkward inside a generated block.
 - **An exported per-plugin operation catalog, generated from each plugin's dispatch switch** (#1095).
   `emulator.RoutedServices()` returns the plugins the registry files, and
   `emulator.RoutedOperations(service)` the operations each one routes — the first time the set of
@@ -255,6 +272,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Five rows in `docs/services.md` claimed operations substrate does not route, and EventBridge's
+  table omitted two it does** (#1015). Under a heading that reads *Supported operations*, EventBridge
+  listed `CreateEventBus`, `DescribeEventBus` and `DeleteEventBus` — none in the dispatch, and
+  substrate models the default bus and no other — while `PutTargets` and `RemoveTargets` were routed
+  all along with no row, so one nine-row table was wrong in both directions at once. API Gateway
+  (REST) listed `GetIntegration`: AWS publishes it, the path is parsed, but only `PUT` on that path
+  routes, and the wrong row was hard to see because API Gateway v2 *does* route an operation of that
+  name, so the file held it twice and one of the two was real. Budgets listed
+  `DescribeBudgetActionsForBudget`, and budget actions are a resource substrate holds no state for.
+  Each is now recorded as *not modelled* with what is true instead, rather than deleted silently —
+  the same defect class as #1084's `InvokeFunction`, which is what got the check written. With these
+  fixed, the reverse direction has no baseline and never will: a row naming an unrouted operation
+  fails outright.
 - **A replayed EC2, IAM or STS create mints the identifier its recording minted** (#856). These
   identifiers came straight from `crypto/rand`, so a replay answered with new ones and three things
   followed. The recorded `CreateSnapshot` naming the recorded volume answered

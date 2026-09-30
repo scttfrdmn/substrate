@@ -1,0 +1,127 @@
+# undocumented-operations.txt — every operation substrate routes that has no row in
+# its service's operation table in docs/services.md, as of #1015.
+#
+# Columns, tab-separated:  registered-plugin-name  Operation
+#
+# THIS FILE IS AN INVENTORY OF DEFECTS, NOT A SUPPRESSION LIST. docs/services.md heads
+# each of these tables "Supported operations", so a reader takes the table to be the
+# list — and for these operations it is short. Every line is expected to be deleted as
+# its row is written, which is why cmd/check-operation-docs fails both on an operation
+# missing from this file (new drift: an operation routed without being documented) and
+# on a line whose row now exists (a stale record). Writing a row must shrink this file
+# in the same commit. #1231 is the issue that empties it.
+#
+# The reverse direction — a row naming an operation no plugin routes — has no baseline
+# and never will: the five that existed were fixed when this check landed, so a phantom
+# row always fails. That is the defect class #1084 found, where the reference claimed
+# Lambda routed InvokeFunction and it does not.
+#
+# Regenerate after writing rows:  make operation-docs-write
+apigateway	CreateBasePathMapping
+apigateway	CreateDomainName
+apigateway	CreateUsagePlanKey
+apigateway	DeleteAuthorizer
+apigateway	DeleteDeployment
+apigateway	DeleteStage
+apigateway	GetBasePathMappings
+apigateway	GetDomainName
+apigateway	GetStages
+apigateway	PutIntegrationResponse
+apigateway	PutMethodResponse
+apigateway	UpdateRestApi
+apigateway	UpdateStage
+apigatewayv2	CreateApiMapping
+apigatewayv2	CreateDeployment
+apigatewayv2	CreateDomainName
+apigatewayv2	DeleteAuthorizer
+apigatewayv2	DeleteIntegration
+apigatewayv2	DeleteStage
+apigatewayv2	GetAuthorizer
+apigatewayv2	GetAuthorizers
+apigatewayv2	GetDeployment
+apigatewayv2	GetDomainName
+apigatewayv2	GetIntegrations
+apigatewayv2	GetRoutes
+apigatewayv2	GetStages
+apigatewayv2	UpdateApi
+ce	GetDimensionValues
+cloudformation	DescribeStackEvents
+cognito-identity	GetId
+cognito-identity	GetIdentityPoolRoles
+cognito-identity	ListIdentityPools
+cognito-identity	SetIdentityPoolRoles
+cognito-idp	AdminAddUserToGroup
+cognito-idp	AdminListGroupsForUser
+cognito-idp	AdminRemoveUserFromGroup
+cognito-idp	AdminSetUserPassword
+cognito-idp	ConfirmSignUp
+cognito-idp	CreateGroup
+cognito-idp	CreateUserPoolDomain
+cognito-idp	DeleteGroup
+cognito-idp	DeleteUserPoolDomain
+cognito-idp	DescribeUserPoolDomain
+cognito-idp	GetGroup
+cognito-idp	GetUserPoolMfaConfig
+cognito-idp	ListGroups
+cognito-idp	ListUserPoolClients
+cognito-idp	ListUsers
+cognito-idp	RespondToAuthChallenge
+cognito-idp	SetUserPoolMfaConfig
+cognito-idp	SignUp
+dynamodb	BatchExecuteStatement
+dynamodb	DescribeStream
+dynamodb	DescribeTimeToLive
+dynamodb	ExecuteStatement
+dynamodb	GetRecords
+dynamodb	GetShardIterator
+dynamodb	ListStreams
+dynamodb	ListTagsOfResource
+dynamodb	TagResource
+dynamodb	UntagResource
+dynamodb	UpdateTable
+ecr	DeleteRepositoryPolicy
+ecr	GetLifecyclePolicy
+ecr	GetRepositoryPolicy
+ecr	PutLifecyclePolicy
+ecr	SetRepositoryPolicy
+ecs	DeregisterTaskDefinition
+ecs	ListServices
+ecs	ListTagsForResource
+ecs	ListTaskDefinitionFamilies
+ecs	TagResource
+ecs	UntagResource
+efs	ListTagsForResource
+efs	TagResource
+efs	UntagResource
+efs	UpdateFileSystem
+glue	CreateConnection
+glue	CreateCrawler
+glue	DeleteConnection
+glue	DeleteCrawler
+glue	GetConnection
+glue	GetConnections
+glue	GetCrawler
+glue	GetCrawlers
+glue	GetTags
+glue	StartCrawler
+glue	StopCrawler
+glue	TagResource
+glue	UntagResource
+glue	UpdateConnection
+glue	UpdateCrawler
+glue	UpdateDatabase
+glue	UpdateJob
+glue	UpdateTable
+health	DescribeEventAggregates
+s3	DeleteBucketLifecycle
+s3	DeleteObjects
+s3	GetBucketLifecycleConfiguration
+s3	GetBucketVersioning
+s3	ListObjectVersions
+s3	PutBucketLifecycleConfiguration
+s3	PutBucketVersioning
+s3	SelectObjectContent
+servicequotas	ListRequestedServiceQuotaChangesByService
+sqs	ListQueueTags
+sqs	TagQueue
+sqs	UntagQueue
