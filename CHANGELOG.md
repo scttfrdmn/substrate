@@ -460,6 +460,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   consumer cannot tell a derived ID from a stored one. The old 20-character lowercase-hex form
   satisfied the published pattern too, so this is not a #671 case; it disagreed with the rendering a
   resolved profile reports. Reverting the resolver to a per-read draw fails 5 of the 6 new tests.
+  Filed twice — #1266 found it while landing #856's first tier and #1291 while reaching its last —
+  and the earlier of the two also asked for the replay assertion the drawn id made impossible, which
+  is now a test, and for a statement of what an instance record written before the change reports.
+  Nothing: the record stores the profile the launch named and never held an id, which is why one was
+  invented at render time, so an older record resolves exactly as a new one does. Storing a resolved
+  id on the instance at launch was the third option #1266 offered and is rejected in `docs/services.md`
+  with the reason — a profile can be created, deleted and recreated after the launch that named it.
 - **`randomHex` is deleted, and #856's draw-site migration is complete** (#856). The shared
   `crypto/rand` helper the migration was arranged around had one caller left, the instance-profile ID
   above. No plugin draws an identifier from `crypto/rand` now, and `IDMint`'s own seedless fallback is

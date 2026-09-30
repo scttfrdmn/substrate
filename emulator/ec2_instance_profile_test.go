@@ -210,6 +210,54 @@ func TestEC2_InstanceProfileARNResolvesInItsOwnAccount(t *testing.T) {
 	assert.Equal(t, local, localID)
 }
 
+// TestReplay_AnInstanceProfileReplaysWithTheIDIAMStored is the assertion in #1266's set that could
+// not be made before the resolution: the id was drawn while *rendering*, so a replayed
+// `RunInstances` and a replayed `DescribeInstances` each answered a new `AIPA…` — a body difference
+// in two events, and a state-hash difference in neither, because nothing stored the value.
+//
+// It is deliberately the weakest of this file's assertions, and worth saying why rather than
+// implying it catches something the others do not. Stability across two describes *in one run* is
+// the stronger property: the resolution's inputs are the instance's recorded profile name and IAM's
+// own record, both of which a replay restores by re-executing the recorded creates, so any
+// regression that moved the value across a replay would move it across two describes first and trip
+// this test's own precondition. Sabotaging the resolver back to a per-read draw fails at that
+// precondition, not at the replay comparison, and so does deriving the id from the request ID.
+//
+// What it does guard is the migration #1266 named as its third option — storing a resolved id on
+// the instance record at launch and making the describe a pure render. That id would land in
+// `state_hash_after`, where a re-minted one diverges on a replay while two describes in one run
+// still agree, and this is the test that would say so.
+func TestReplay_AnInstanceProfileReplaysWithTheIDIAMStored(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t,
+		emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	require.True(t, ts.Store().RecordsStateHashes(), "precondition: state_hash_after is compared")
+
+	// Frozen, for the reason idsRecordInterlockedCreates records: a replay sets the clock to the
+	// recorded event's own timestamp, and an unfrozen handler stamps a record just after it.
+	ts.FreezeTime()
+
+	// A path, so the ARN under comparison is one a synthesized value could not have produced.
+	ipCreateInstanceProfile(t, ts, "replayed-profile", "/dev/")
+	instID, _, runID := ipRunInstance(t, ts, "IamInstanceProfile.Name", "replayed-profile")
+	require.NotEmpty(t, runID, "the recorded launch has to report a profile")
+	_, describedID := ipInstanceProfile(t, ts, instID)
+	require.Equal(t, runID, describedID, "precondition: the recording itself is consistent")
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
+		Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+
+	assert.Positive(t, results.TotalEvents, "the stream has to contain the launch and the describe")
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents,
+		"every recorded request is re-executed and answers")
+	assert.Empty(t, results.Differences,
+		"a replayed describe reports the id its recording reported: %s",
+		replayDifferenceSummary(results))
+	assert.True(t, results.StateValid,
+		"and the state it reaches is the recorded state: %v", results.StateErrors)
+}
+
 // TestEC2_InstanceProfileARNWithAPathResolves pins the ARN direction of the path handling. IAM
 // keys a profile by its name alone, but an ARN for a profile at a path spells the path out —
 // `instance-profile/team/app` — so the name is the last segment and not the whole resource. Taking
