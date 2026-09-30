@@ -132,7 +132,7 @@ func kmsEncryptStub(key *KMSKey, algorithm string, encryptionContext map[string]
 	// The error is unreachable: every field is a string, a string map or a byte slice, none of which
 	// json.Marshal can fail on. Panicking rather than returning it keeps the four call sites from each
 	// growing an error path for a condition none of them can provoke, which is the disposition
-	// [randomHex] already takes for an equally unreachable crypto/rand failure.
+	// [IDMint.bytes] already takes for an equally unreachable crypto/rand failure.
 	raw, err := json.Marshal(envelope)
 	if err != nil {
 		panic(fmt.Sprintf("kms encrypt stub: marshal envelope: %v", err))

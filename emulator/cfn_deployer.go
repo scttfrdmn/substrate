@@ -4305,8 +4305,8 @@ func (d *StackDeployer) deploySSMParameter(
 // The association id is minted from the deployment's own mint rather than dispatched
 // for, because there is no request to dispatch: SSM's plugin models Run Command and
 // Parameter Store, not State Manager, so this resource has no service behind it and
-// the physical id is the whole of what a template can observe. It was the last
-// [randomHex] caller in the deployer (#856).
+// the physical id is the whole of what a template can observe. It was the deployer's
+// last caller of the shared crypto/rand helper (#856).
 func (d *StackDeployer) deploySSMAssociation(
 	_ context.Context,
 	logicalID string,

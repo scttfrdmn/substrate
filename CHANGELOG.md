@@ -397,8 +397,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   merely reported differently: reverting the Backup minter alone to confirm the tier's replay assertion
   is not vacuous produces 14 differences and 3 refused reads out of a 10-request stream, because a
   selection is stored *under* its plan ID and a re-minted plan strands it too. 2 draw sites remain on
-  `crypto/rand`: `randomHex`, whose one caller is the CloudFormation deployer, and `IDMint`'s own
-  seedless fallback, which goes when the deployer threads a request ID through.
+  `crypto/rand`: `randomHex`, whose one caller mints an EC2 instance profile's `AIPA…` ID inside a
+  *describe*, and `IDMint`'s own seedless fallback.
 - **A Bedrock batch-inference job ID is twelve characters, not a UUID** (#856). `jobArn` is published as
   `arn:aws:bedrock:{region}:{account}:model-invocation-job/[a-z0-9]{12}` and `jobIdentifier` as that ARN
   or a bare `[a-z0-9]{12}` — an alphabet that **excludes the hyphen** and a length fixed at twelve, and
@@ -438,6 +438,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is `2f2b2d60-df86-11e7-bea1-500c2example` — so it is now the UUID shape within that bound, derived from
   the request ID. A recorded detection replays with the ID it recorded, where before the poll that
   followed it resolved to nothing.
+- **Two `DescribeInstances` on one instance reported two different `iamInstanceProfile.id` values**
+  (#1291). The builder both `RunInstances` and `DescribeInstances` render an instance through minted
+  `"AIPA"` plus sixteen hex characters on **every call**, so the read was not idempotent — each
+  response a 200 and each ID well-formed, so a consumer that describes and compares (a drift check, a
+  Terraform refresh, a cache) saw a change that had not happened. The ID also named nothing:
+  substrate's IAM plugin mints a real `AIPA…` ID when `CreateInstanceProfile` runs, and the drawn
+  value was unrelated to it, so a caller handing the ID back to IAM got a not-found. Substrate now
+  resolves the profile out of IAM state and reports what IAM stored — the ID and the ARN, which
+  matters as much: IAM's ARN carries the profile's **path**, so a profile created at `/dev/` was
+  reported at the root, in the member a caller writes into an `iam:PassRole` condition. The account
+  comes from a recorded ARN and never from the caller's context (#826), so an ARN naming another
+  account's profile cannot resolve to the caller's same-named one. An instance may launch with a
+  profile name that was never created — substrate permits what AWS does not — and that ID is
+  **derived** from the account and the name, as a public IP is derived from its instance ID, rather
+  than drawn; deliberately not from the request ID through `IDMint`, because a request-derived value
+  is stable across a *replay* of one request and would still differ between two describes, which is
+  the bug. EC2's `API_IamInstanceProfile` publishes `id` with no pattern and no length, so the shape
+  comes from IAM's `API_InstanceProfile` — minimum 16, maximum 128, pattern `[\w]+` — and a derived ID
+  uses the 21-character `AIPA` + `[A-Z0-9]` rendering substrate's IAM plugin already mints, so a
+  consumer cannot tell a derived ID from a stored one. The old 20-character lowercase-hex form
+  satisfied the published pattern too, so this is not a #671 case; it disagreed with the rendering a
+  resolved profile reports. Reverting the resolver to a per-read draw fails 5 of the 6 new tests.
+- **`randomHex` is deleted, and #856's draw-site migration is complete** (#856). The shared
+  `crypto/rand` helper the migration was arranged around had one caller left, the instance-profile ID
+  above. No plugin draws an identifier from `crypto/rand` now, and `IDMint`'s own seedless fallback is
+  the only read of it left in the tree. That one stays: a nil or seedless mint is what a hand-built
+  `RequestContext` carries, which is how every plugin unit test — substrate's and a consumer's —
+  constructs one, and `generateRequestID` draws through it because the request ID is the seed. Still
+  random by design, and recorded as such rather than left to be rediscovered: the request ID itself;
+  substrate's event, snapshot and replay IDs, which no AWS call observes; a Lambda event-source-mapping
+  poll's wall-clock dispatches (#1292); and EC2 key-pair **material**, which needs a deterministic
+  reader into the key generator rather than a derived string.
 - **A stream recorded under a seed replays under the same seed** (#1140). Every seedable outcome in
   substrate is written through a control-plane endpoint, and only the AWS path recorded anything — so
   a seed never entered the event stream. A replay opens by resetting the whole `StateManager`, and a
