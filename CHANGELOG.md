@@ -314,6 +314,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ECS answered all four of its persisted records straight to the caller** (#756). Each of the
+  thirteen operations that reports a cluster, task definition, service or task carried substrate's
+  own `AccountID` and `Region` — neither has `omitempty`, so both were unconditional — and
+  `ever_tagged` once the resource had been tagged. `API_Cluster`, `API_TaskDefinition`, `API_Service`
+  and `API_Task` publish none of the three. A new `emulator/ecs_wire.go` projects each record onto
+  its published shape, on the pattern `ecr_wire.go` established (#1090), taking the count from **272
+  still reachable to 260** — twelve lines, the largest single block left on the issue. Deciding a
+  response's membership is what surfaced two members AWS does not publish on the shape substrate put
+  them on, and neither could be carried into a type whose whole purpose is to hold only published
+  members: a service reported a `clusterName` that `API_Service` has no member for (the name is the
+  ARN's last segment, which is how the real API expects to be read), and a task definition reported
+  `tags` *inside* the `taskDefinition` object, where `API_TaskDefinition` has no such member —
+  `RegisterTaskDefinition` and `DescribeTaskDefinition` publish task-definition tags one level up, as
+  a top-level response element, and `DeregisterTaskDefinition` publishes none at all. A consumer
+  reading `taskDefinition.tags` off a substrate response was reading a member the SDK's own decoder
+  discards. So that member moved rather than went away, and `DescribeTaskDefinition` now reads
+  `include` to honour the gate its reference states, because lifting the tags to the top level
+  without it would answer tags where AWS answers none. A third divergence fell out for free:
+  `startedAt` and `stoppedAt` were tagged `,omitempty` on a struct type, where the option has no
+  effect, and a zero `EpochSeconds` marshals as JSON `null` — so a running task reported
+  `"stoppedAt":null`, a member `API_Task` omits. The projection's two are pointers, which is
+  available only because the wire type is new and has no recorded encoding to preserve.
+  `DescribeClusters` and `DescribeServices` still ignore the same `include: ["TAGS"]` gate, and are
+  left alone deliberately: `tags` *is* a published member of both shapes, so over-reporting a real
+  member is a different defect from reporting one AWS does not have. All twelve fields stay on the
+  records in `ecs_types.go` — `ecr_wire.go`'s rule is that a projection changes the response and
+  leaves alone the state a recorded run replays from — and the tagging plugin reads `EverTagged`
+  across the service boundary besides, which a new test pins by reading all four records back out of
+  state. `ecsServiceOut.CreatedAt` joins the per-site exclusion map for the reason
+  `ecrRepositoryOut.CreatedAt` did: `API_Service` publishes `createdAt`, so filing the projection's
+  copy of it as a leak would point at deleting a member AWS does publish.
 - **Four services were already rendering their responses from a wire struct and were still counted as
   leaking** (#756). API Gateway v1 (#529), API Gateway v2, DynamoDB (#1013) and AppSync (#1121) each
   project every persisted record they answer — verified site by site, including the two API Gateway
