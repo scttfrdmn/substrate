@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A row in `docs/services.md` for every one of the 108 routed operations that had none** (#1231),
+  emptying the inventory #1015's check wrote. The gap spanned 15 services, concentrated in five —
+  Glue 18, Cognito user pools 18, API Gateway v2 14, API Gateway (REST) 13, DynamoDB 11 — with the
+  rest across S3, ECS, ECR, EFS, Cognito Identity, SQS, Service Quotas, Health, CloudFormation and
+  Cost Explorer. `scripts/undocumented-operations.txt` is now its header and nothing else, and a line
+  reappearing there is new drift rather than inherited debt; the header says so. Each row states what
+  the handler reads and what it accepts and does not apply, because a bare name is what let a reader
+  take *Supported operations* for a statement of support. Every note was written against the handler
+  rather than from the operation's AWS page, which is the only way the exercise finds anything: it
+  turned up `DescribeUserPoolDomain` reporting `Status: ACTIVE` for a domain that was never created,
+  `AdminAddUserToGroup` recording a membership in a group that need not exist (and outliving
+  `DeleteGroup`), `ConfirmSignUp` accepting any `ConfirmationCode`, `RespondToAuthChallenge` answering
+  the same stub tokens as `InitiateAuth` without reading the request, `ListUserPoolClients` rewriting
+  `MaxResults` to 60 and never applying it, `ListUserPools` reporting a `NextToken` it does not read
+  back, Glue's three tagging operations answering `InternalFailure`/500 for an ARN that parses but
+  names no resource, DynamoDB's `ExecuteStatement` decoding `Parameters` and not substituting them,
+  and API Gateway's `UpdateRestApi`/`UpdateStage` reporting a record back unchanged because
+  `patchOperations` is not applied. Each is recorded as a divergence with its own row rather than
+  quietly corrected — a documentation change ships no behaviour change, and a defect with a row is one
+  a consumer can plan around and the next change can be held to. Cognito user pools also loses the
+  sentence declaring its table a subset of 31 routed operations and pointing at #1093 for the rest —
+  #1093 covered the twelve services that had no section at all, so the pointer never led anywhere.
+
 - **A drift check that fails when the service reference and the router disagree about which
   operations substrate routes** (#1015). `make operation-docs-check` — `cmd/check-operation-docs`,
   wired into the `Service Reference Drift` job — compares `emulator.RoutedOperations` against each

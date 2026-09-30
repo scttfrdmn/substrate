@@ -369,11 +369,15 @@ const baselineHeader = `# undocumented-operations.txt — every operation substr
 #
 # THIS FILE IS AN INVENTORY OF DEFECTS, NOT A SUPPRESSION LIST. docs/services.md heads
 # each of these tables "Supported operations", so a reader takes the table to be the
-# list — and for these operations it is short. Every line is expected to be deleted as
-# its row is written, which is why cmd/check-operation-docs fails both on an operation
+# list — and for these operations it was short. Every line was expected to be deleted as
+# its row was written, which is why cmd/check-operation-docs fails both on an operation
 # missing from this file (new drift: an operation routed without being documented) and
 # on a line whose row now exists (a stale record). Writing a row must shrink this file
-# in the same commit. #1231 is the issue that empties it.
+# in the same commit.
+#
+# #1231 emptied it: every routed operation has a row, so the file is this header and
+# nothing else. A line reappearing here is a new defect, not inherited debt — the
+# check adds one only when an operation is routed with no row, and refuses the run.
 #
 # The reverse direction — a row naming an operation no plugin routes — has no baseline
 # and never will: the five that existed were fixed when this check landed, so a phantom
