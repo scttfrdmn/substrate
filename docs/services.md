@@ -2380,6 +2380,7 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 | DescribeStacks | One stack by `StackName`, or every stack when omitted; reports `RoleARN` when the stack has one |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
+| DescribeStackEvents | Derived from the stack record rather than stored, so it cannot disagree with `DescribeStackResources` about whether a resource failed — the two are renderings of one fact. Pages 100 events on `NextToken`, the only paging parameter the operation publishes; a stack small enough for one page gets no token |
 | GetTemplate | Returns the stored `TemplateBody` byte-for-byte |
 | CreateChangeSet | `ChangeSetType=UPDATE` only; records `Tags`; see below |
 | DescribeChangeSet | Accepts a bare change-set name or its ARN |
@@ -5068,9 +5069,11 @@ STS operations are free.
 | GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | DeleteObject | Fires S3 notifications if configured |
+| DeleteObjects | `POST /{bucket}?delete`; deletes each `<Object>` through the same path as `DeleteObject`, so notifications, versioning and delete markers behave identically; honours `<Quiet>`; an `<Object>` with an empty `<Key>` is skipped rather than reported; a key that fails is reported per-key as `<Error><Code>InternalError</Code>` and does not abort the rest |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; refuses an undecodable `continuation-token` with `400 InvalidArgument` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one); emits `<StorageClass>` per object |
+| ListObjectVersions | `GET /{bucket}?versions`; honours `prefix`, and reports every version in one response — `max-keys` is echoed as 1000 and `key-marker` / `version-id-marker` are not read, so the result is never truncated. Keys come out lexicographically and versions within a key newest-first; a key in a bucket that was never versioned is reported as one version with `VersionId` `null`; a delete marker is reported under `<DeleteMarker>` rather than `<Version>` |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
@@ -5096,6 +5099,12 @@ STS operations are free.
 | PutObjectTagging | |
 | GetObjectTagging | Reports the object's `TagSet` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | DeleteObjectTagging | |
+| PutBucketVersioning | `PUT /{bucket}?versioning`; stores `Enabled` or `Suspended`, and an empty body means `Enabled`; any other `<Status>` is `400 IllegalVersioningConfigurationException`. `x-amz-mfa` and `MfaDelete` are not read |
+| GetBucketVersioning | `GET /{bucket}?versioning`; a bucket that was never configured reports a `<VersioningConfiguration>` with no `<Status>`, as AWS does, rather than `Suspended` |
+| PutBucketLifecycleConfiguration | `PUT /{bucket}?lifecycle`; the configuration round-trips verbatim (an `aws-chunked` body is decoded first — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked)), and an empty body stores an empty `<LifecycleConfiguration/>`. No rule is ever applied: nothing expires, transitions storage class or aborts an upload on a schedule, because that is resource-internal rather than an API observation |
+| GetBucketLifecycleConfiguration | `GET /{bucket}?lifecycle`; replies with the stored bytes unchanged, so what a caller reads back is what it wrote. A bucket with no configuration — including one that does not exist — is `404 NoSuchLifecycleConfiguration` |
+| DeleteBucketLifecycle | `DELETE /{bucket}?lifecycle`; `204`, and idempotent: removing a configuration that is not there still succeeds |
+| SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
 
 ### Listing buckets
 
@@ -6414,6 +6423,9 @@ Lambda invocations: $0.0000002 per request.
 | DeleteMessageBatch | |
 | ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | PurgeQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| TagQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; merges into the existing set rather than replacing it; reads both the indexed `Tag.N.Key` spelling an SDK emits and the [unindexed `Tag.Key`/`Tag.Value` pair AWS actually publishes](#a-tag-set-at-create-time-and-the-query-spelling-aws-publishes), and enforces no tag-count limit because the API publishes none to enforce |
+| UntagQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; an unknown key is a no-op and so is an empty `TagKeys` |
+| ListQueueTags | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; `Tag` members sorted by key under the query protocol, a `Tags` map under JSON |
 
 ### One queue name is one queue per Region
 
@@ -6927,6 +6939,7 @@ SQS requests: $0.0000004 per request.
 | DescribeTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | DeleteTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | ListTables | |
+| UpdateTable | Applies `BillingMode` and `ProvisionedThroughput`; every other member — `GlobalSecondaryIndexUpdates`, the stream and SSE specifications, `TableClass`, `DeletionProtectionEnabled` — is accepted and not applied; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | PutItem | Supports ConditionExpression |
 | GetItem | Supports ProjectionExpression |
 | UpdateItem | Supports UpdateExpression (SET/REMOVE/ADD/DELETE) |
@@ -6938,6 +6951,16 @@ SQS requests: $0.0000004 per request.
 | TransactGetItems | |
 | TransactWriteItems | |
 | UpdateTimeToLive | |
+| DescribeTimeToLive | `ENABLED` with the attribute name once `UpdateTimeToLive` set one, `DISABLED` otherwise. No item ever expires — the sweep that deletes expired items is background service work, not an API observation |
+| TagResource | Merges into the table's tags by key. The table name comes from the ARN's `:table/` segment with any `/index/…` or `/stream/…` suffix dropped, but the ARN's account and Region are **not** read — the name is resolved in the caller's account and Region. An ARN with no `:table/` segment, and a name with no table behind it, are both `ResourceNotFoundException` at **400**, which is the status DynamoDB's JSON protocol uses throughout |
+| UntagResource | Deletes each key in `TagKeys`; a key that is not there is a no-op. Resolves its ARN exactly as `TagResource` does |
+| ListTagsOfResource | Reports `Tags` as the API's list of `{Key, Value}` sorted by key — see [A table description reports only its own members](#a-table-description-reports-only-its-own-members) for why this is the only place a table's tags are readable. `NextToken` is always `null`: every tag comes back in one page |
+| ExecuteStatement | A deliberately small PartiQL subset: `SELECT * FROM "table" [WHERE …]`, `INSERT INTO "table" VALUE {…}` (the `VALUE` clause is a JSON item in `AttributeValue` shape), `UPDATE "table" SET … WHERE …` and `DELETE FROM "table" WHERE …`. `WHERE` is evaluated by the same condition evaluator as `Scan`'s `FilterExpression`, over every item in the table. `Parameters` is decoded and **not** substituted, so a statement using `?` placeholders matches nothing rather than failing. A statement that does not parse, or names a verb outside those four, is `ValidationException`/400; an unknown table is `ResourceNotFoundException`/400. No `NextToken` is ever issued |
+| BatchExecuteStatement | Runs each `Statements` entry through the same evaluator as `ExecuteStatement`, in order, and reports one `Responses` entry per statement. A statement that fails contributes an `Error` entry in place and does not abort the batch; a `SELECT` contributes only its first item as `Item` |
+| ListStreams | Reports the stream of the named `TableName`, or of every table in the caller's account and Region when no name is given; a table whose `CreateTable` did not set `StreamSpecification.StreamEnabled` is skipped, and `UpdateTable` cannot turn a stream on afterwards. `StreamLabel` is the trailing segment of the stream ARN |
+| DescribeStream | Reports one shard, `shardId-00000000000000000000-00000001`, with `StreamStatus` `ENABLED`. The shard is synthesized from the ARN rather than looked up, so the description does not depend on the table existing |
+| GetShardIterator | Encodes the table, account, Region and starting sequence number into the iterator itself, so an iterator is self-describing and survives a replay. `TRIM_HORIZON` starts at zero, `LATEST` after the newest record, and `AT_SEQUENCE_NUMBER` / `AFTER_SEQUENCE_NUMBER` at and past the given one; an unrecognized `ShardIteratorType` is treated as `TRIM_HORIZON` |
+| GetRecords | Returns the records at or after the iterator's sequence number a page holds 1000 unless a smaller `Limit` asks for fewer — and a `NextShardIterator` advanced past the last one returned. An **absent** `ShardIterator` is `ValidationError`/400, the JSON protocol's common-list code rather than the `ValidationException` this plugin's control-plane operations answer, because no DynamoDB Streams page publishes a validation error at all ([#1062](https://github.com/scttfrdmn/substrate/issues/1062)). An iterator that is present but does not decode still answers `200` with an empty list. Substrate routes the four Streams operations through DynamoDB's own host and `DynamoDB_20120810` target prefix, not the `streams.dynamodb` endpoint |
 
 ### CloudFormation resource types
 
@@ -15271,6 +15294,7 @@ result with no error (#529).
 |-----------|-------|
 | CreateRestApi | Auto-creates root `/` resource |
 | GetRestApi | |
+| UpdateRestApi | `404 NotFoundException` for an unknown API; `patchOperations` is **not** applied — the stored API is reported back unchanged |
 | DeleteRestApi | |
 | GetRestApis | Pages on `limit`/`position`; ascending API ID (#1025) |
 | CreateResource | |
@@ -15281,14 +15305,21 @@ result with no error (#529).
 | GetMethod | |
 | DeleteMethod | |
 | PutIntegration | `GetIntegration` is **not** modelled — see below |
+| PutIntegrationResponse | Echoes the request body back at `201` and stores nothing, so the response is not readable afterwards; a body that will not parse is `BadRequestException`/400 |
+| PutMethodResponse | Echoes the request body back at `201` and stores nothing, so `GetMethod` does not report it; a body that will not parse is `BadRequestException`/400 |
 | CreateDeployment | |
 | GetDeployment | |
 | GetDeployments | Pages on `limit`/`position`; ascending deployment ID, which is unrelated to `createdDate` (#1025) |
+| DeleteDeployment | `204`, and idempotent: a deployment ID with nothing behind it is not refused |
 | CreateStage | |
 | GetStage | |
+| GetStages | One page, always, under the `item` envelope — the operation publishes neither `limit` nor `position`, as above. Each stage reports its `invokeUrl` |
+| UpdateStage | `404 NotFoundException` for an unknown stage; `patchOperations` is **not** applied — the stored stage is reported back unchanged |
+| DeleteStage | `204`, and idempotent: a stage name with nothing behind it is not refused |
 | CreateAuthorizer | |
 | GetAuthorizer | |
 | GetAuthorizers | Pages on `limit`/`position`; ascending authorizer ID (#1025) |
+| DeleteAuthorizer | `204`, and idempotent: an authorizer ID with nothing behind it is not refused |
 | CreateApiKey | |
 | GetApiKey | |
 | GetApiKeys | Pages on `limit`/`position`; ascending key ID. `customerId`, `includeValues` and `name` unread; the published `warnings` member is unmodelled and omitted (#1025) |
@@ -15297,6 +15328,11 @@ result with no error (#529).
 | GetUsagePlan | |
 | GetUsagePlans | Pages on `limit`/`position`; ascending plan ID. `keyId` unread (#1025) |
 | DeleteUsagePlan | |
+| CreateUsagePlanKey | Mints a key ID and reports `{id, type: "API_KEY"}`; the association is not stored, so neither the plan nor the API key records it, and there is no `GetUsagePlanKeys` to read it back |
+| CreateDomainName | Stores `domainName` and `certificateArn`, and derives `regionalDomainName` from the name and the caller's Region. `distributionDomainName`, the endpoint configuration and the mutual-TLS members are not modelled |
+| GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
+| CreateBasePathMapping | Keyed by base path within the domain, so a second mapping on the same base path replaces the first; an empty `basePath` is stored as `(none)`, as AWS reports it. The domain name is taken from the URI and is not required to exist |
+| GetBasePathMappings | Pages on `limit`/`position`; ascending base path within the domain (#917) |
 
 **Not modelled: `GetIntegration`.** AWS publishes it on this API — `GET
 /restapis/{restapi_id}/resources/{resource_id}/methods/{http_method}/integration` — and this
@@ -15352,16 +15388,30 @@ no error (#529).
 |-----------|-------|
 | CreateApi | |
 | GetApi | |
+| UpdateApi | Applies `Name` and `Description` when non-empty and ignores every other member, including `RouteSelectionExpression` and the CORS configuration; `404 NotFoundException` for an unknown API |
 | DeleteApi | |
 | GetApis | |
 | CreateRoute | |
 | GetRoute | |
+| GetRoutes | One page, in ascending route ID |
 | DeleteRoute | |
 | CreateIntegration | |
 | GetIntegration | |
+| GetIntegrations | One page, in ascending integration ID |
+| DeleteIntegration | `204`, and idempotent: an integration ID with nothing behind it is not refused |
 | CreateStage | |
 | GetStage | |
+| GetStages | One page, in ascending stage name |
+| DeleteStage | `204`, and idempotent: a stage name with nothing behind it is not refused |
 | CreateAuthorizer | |
+| GetAuthorizer | `404 NotFoundException` for an unknown authorizer |
+| GetAuthorizers | One page, in ascending authorizer ID |
+| DeleteAuthorizer | `204`, and idempotent: an authorizer ID with nothing behind it is not refused |
+| CreateDeployment | Reports `DeploymentStatus` `DEPLOYED` at once and dates the deployment from the simulated clock; the API id is taken from the path and not checked, so a deployment can be recorded against an API that does not exist |
+| GetDeployment | `404 NotFoundException` for an unknown deployment |
+| CreateDomainName | Reads `DomainName` only, and reports one `domainNameConfigurations` entry — `apiGatewayDomainName` derived from the name and the caller's Region, `endpointType` `REGIONAL`, `domainNameStatus` `AVAILABLE`. `DomainNameConfigurations` and `MutualTlsAuthentication` in the request are not read |
+| GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
+| CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`; the domain name is taken from the URI and is not required to exist. There is no `GetApiMappings` to read the collection back |
 
 ### CloudFormation resource types
 
@@ -16222,6 +16272,11 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
 | UntagResource | `tagKeys` is an array of strings, as published |
 | ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
+| SetRepositoryPolicy | Stores `policyText` verbatim and echoes it with `registryId`; nothing parses it, so an unparseable document is accepted and no ECR request is ever authorized or refused by one. `force` is unread. `RepositoryNotFoundException` [at 400](#every-ecr-refusal-is-a-400) |
+| GetRepositoryPolicy | `RepositoryPolicyNotFoundException` when the repository exists and no policy has been set — distinct from `RepositoryNotFoundException`, so a caller can tell the two apart |
+| DeleteRepositoryPolicy | Echoes the `policyText` it removed, as published; `RepositoryPolicyNotFoundException` when there is none to delete, so deleting twice refuses the second time |
+| PutLifecyclePolicy | Stores `lifecyclePolicyText` verbatim and echoes it. The rules are never evaluated — no image expires here, whatever the policy says, and `PreviewLifecyclePolicy` is unmodelled |
+| GetLifecyclePolicy | `LifecyclePolicyNotFoundException` when none has been put, on the same split as the repository policy |
 
 ### ECR's `tags` is an array with capitalized members
 
@@ -16431,15 +16486,21 @@ ECR storage: $0.10 per GB-month. Data transfer is free within the same region.
 | ListClusters | |
 | RegisterTaskDefinition | |
 | DescribeTaskDefinition | |
+| DeregisterTaskDefinition | Sets `status` to `INACTIVE` and reports the definition; the record stays, so `DescribeTaskDefinition` still resolves it. The reference accepts an ARN, `family:revision` or a bare `family` (latest revision), the same three forms every task-definition member does |
 | ListTaskDefinitions | |
+| ListTaskDefinitionFamilies | Every family in the caller's account and Region, in one page. `familyPrefix`, `status` and `maxResults` are unread, so a deregistered family is still listed and no `nextToken` is ever returned |
 | CreateService | |
 | DescribeServices | |
+| ListServices | Service ARNs for one cluster — `cluster` defaults to `default` and accepts a name or a cluster ARN. One page; `launchType`, `schedulingStrategy` and `maxResults` are unread |
 | UpdateService | |
 | DeleteService | |
 | RunTask | |
 | DescribeTasks | |
 | ListTasks | |
 | StopTask | |
+| TagResource | Addressed **only** by `resourceArn`, with no account or Region taken from the request context, so an ARN naming another account's cluster cannot reach the caller's same-named one. `ResourceNotFoundException` for an ARN that resolves nothing and for a resource that does not exist — previously both answered the 200-with-empty-body AWS documents for a *successful* tag, over a resource nothing had been written to, while `ListTagsForResource` refused the same ARN (#845) |
+| UntagResource | Same ARN resolution and same refusals; an unknown key is a no-op |
+| ListTagsForResource | The stored `tags` array. The write path edits the record as raw JSON rather than decoding one of the four shapes the ECS namespace holds, so tagging a service or task definition cannot silently truncate it to a cluster's members (#845) |
 
 ### CloudFormation resource types
 
@@ -16465,21 +16526,45 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 | Operation | Notes |
 |-----------|-------|
 | CreateUserPool | Pool ID format: `{region}_{12-char alphanum}`, derived from the request ID (#856) |
-| DescribeUserPool | |
+| DescribeUserPool | Reports the stored pool record, and is the only door that publishes it after an update |
 | UpdateUserPool | Replaces the published configuration and answers an empty body — see below |
-| DeleteUserPool | |
-| ListUserPools | |
-| CreateUserPoolClient | |
-| DescribeUserPoolClient | |
+| DeleteUserPool | Cascades: the pool's app clients, groups and users are deleted with it |
+| ListUserPools | `MaxResults` is published `Required: Yes` over 1–60 with no default, so an absent, zero or out-of-range value is refused rather than rewritten (#1062). Summaries ascend by pool ID; `NextToken` is reported as the next pool's ID but is not read back, so a second page repeats the first |
+| CreateUserPoolClient | Reads `ClientName`, `GenerateSecret` and `ExplicitAuthFlows`; a generated secret is 24 characters, two drawn IDs concatenated |
+| DescribeUserPoolClient | Reports the stored client record, `ClientSecret` included |
 | UpdateUserPoolClient | Replaces the published configuration — see below |
-| DeleteUserPoolClient | |
-| AdminCreateUser | |
-| AdminGetUser | |
-| AdminDeleteUser | |
+| DeleteUserPoolClient | Refuses an unknown client before deleting, unlike the group and user deletes |
+| ListUserPoolClients | `UserPoolClients` summaries of `ClientId`/`ClientName`/`UserPoolId`, ascending by id. One page only: `MaxResults` is rewritten to 60 and never applied as a page size, a page-size defect recorded rather than smoothed over. An absent `UserPoolId` is refused rather than answered with an empty list (#1062) |
+| CreateUserPoolDomain | Validates the pool and records the domain, answering an empty `CloudFrontDomain`. **Not modelled: the hosted UI.** No S3 bucket, distribution or sign-in page exists behind the domain |
+| DescribeUserPoolDomain | Reads no state: echoes the requested `Domain` with `Status` `ACTIVE`, so a domain that was never created still describes as active |
+| DeleteUserPoolDomain | Deletes the recorded domain with no existence check |
+| CreateGroup | Records `Description`, `RoleArn` and `Precedence` against a pool that must exist |
+| GetGroup | Reports the stored group record |
+| ListGroups | Every group of the pool in one page, ascending by name; no paging member is read |
+| DeleteGroup | `200` with no existence check, and a user's recorded membership outlives the group — see `AdminListGroupsForUser` |
+| AdminCreateUser | `UserStatus` `FORCE_CHANGE_PASSWORD`; `TemporaryPassword` is decoded and not stored |
+| AdminGetUser | Reports the user's fields at the top level rather than nested, as the operation publishes them |
+| AdminDeleteUser | `200` with no existence check |
+| AdminSetUserPassword | `Permanent: true` moves the user to `CONFIRMED`. The password itself is never stored, and nothing later verifies one — see `InitiateAuth` |
+| ListUsers | Every user of the pool in one page, ascending by username; `Filter`, `AttributesToGet` and `PaginationToken` are not read |
+| AdminAddUserToGroup | Appends to the user's recorded group names; a repeat is a no-op, and the group is **not** required to exist |
+| AdminRemoveUserFromGroup | Drops the name; a group the user is not in is a no-op |
+| AdminListGroupsForUser | Resolves the recorded names to group records, silently skipping any group deleted since |
+| SignUp | Finds the pool by scanning its pools for one holding the `ClientId`; `ResourceNotFoundException` when none does. Mints a `sub` appended to the request's attributes, `UserStatus` `UNCONFIRMED`, and answers `UserConfirmed: false`. **No password policy is enforced** |
+| ConfirmSignUp | The same client scan, then `CONFIRMED`. `ConfirmationCode` is not validated, so any code confirms — there is no code to match, since substrate delivers no message |
 | InitiateAuth | Returns stub JWT tokens |
+| RespondToAuthChallenge | The identical stub tokens, reading neither the request nor state, so no challenge is ever verified |
+| GetUserPoolMfaConfig | Reports the pool's `MfaConfiguration` and nothing else |
+| SetUserPoolMfaConfig | Stores `MfaConfiguration` and echoes it; `SmsMfaConfiguration`, `SoftwareTokenMfaConfiguration` and `EmailMfaConfiguration` are accepted and not recorded |
 
-The table above is a subset; 31 operations are routed. Completing it is
-[#1093](https://github.com/scttfrdmn/substrate/issues/1093)'s scope.
+**What the four loaders refuse.** Every operation that addresses an existing record keys through one
+resolver per type, so the refusals are uniform: an empty `UserPoolId`, `ClientId`, `GroupName` or
+`Username` is `InvalidParameterException` at 400 — the reading `cognito_errors.go` records, since this
+service's gloss on that code says *invalid* and not *missing* — an absent pool, client or group is
+`ResourceNotFoundException`, and an absent user is `UserNotFoundException`, the code that operation's
+own page publishes rather than the generic one. An unparseable body is `InvalidParameterException`.
+Substrate answers the two not-found codes at **404**; a record keyed by the caller's account and Region
+means an identifier from another account reaches nothing rather than the caller's same-named record.
 
 ### `UpdateUserPool` and `UpdateUserPoolClient` replace, they do not merge
 
@@ -16571,6 +16656,10 @@ Cognito MAUs: first 50,000 free, then $0.0055 per MAU.
 | CreateIdentityPool | |
 | DescribeIdentityPool | |
 | DeleteIdentityPool | |
+| ListIdentityPools | `MaxResults` is **required** over 1–60 and an absent value is refused rather than defaulted, because the API publishes no default (#671). Pages on `NextToken`, which is the next pool's ID rather than an opaque cursor; summaries carry `IdentityPoolId` and `IdentityPoolName` only |
+| GetId | Mints a `REGION:GUID` identity ID from the [request-derived minter](#an-identifier-a-replay-mints-is-the-one-it-recorded), so a replay answers with the ID its recording answered with (#856). The request is not read: no pool is looked up, nothing is persisted, and `IdentityPoolId` and `Logins` are ignored — a second call for one login returns a second ID |
+| GetIdentityPoolRoles | `ResourceNotFoundException`/404 for an absent pool, `InvalidParameterException`/400 for an absent `IdentityPoolId`; `Roles` is `{}` rather than `null` when none are set |
+| SetIdentityPoolRoles | Merges into the existing role map rather than replacing it, so a call omitting a previously set key leaves that key in place. Same refusals as `GetIdentityPoolRoles`; nothing validates that a role ARN exists in IAM |
 | GetCredentialsForIdentity | Returns stub temporary credentials |
 
 ### CloudFormation resource types
@@ -17309,6 +17398,7 @@ ElastiCache cache.t3.micro: $0.017 per node-hour (approximate).
 |-----------|-------|
 | CreateFileSystem | |
 | DescribeFileSystems | |
+| UpdateFileSystem | `202 Accepted` with the updated file system; `FileSystemNotFound`/404 for an absent one. Only `ThroughputMode` is applied — `ProvisionedThroughputInMibps` is decoded and unread, so a switch to `provisioned` reports the mode without the throughput |
 | DeleteFileSystem | |
 | CreateMountTarget | |
 | DescribeMountTargets | |
@@ -17316,6 +17406,9 @@ ElastiCache cache.t3.micro: $0.017 per node-hour (approximate).
 | CreateAccessPoint | |
 | DescribeAccessPoints | |
 | DeleteAccessPoint | |
+| TagResource | `204 No Content`; merges into the existing set. The `ResourceId` path member selects the resource by prefix: `fs-` (`FileSystemNotFound`/404 if absent) and `fsap-` (`AccessPointNotFound`/404), and any other prefix is a `BadRequest` — a mount-target ID reaches nothing |
+| ListTagsForResource | `Tags` as a `Key`/`Value` array, never `null`; an untagged resource answers with an empty array |
+| UntagResource | `204 No Content`; an unknown key is a no-op. Keys are read as **one comma-separated `tagKeys` value**, where AWS publishes a repeated query member — a request parameter keeps only its first value here, so `?tagKeys=a&tagKeys=b` removes `a` alone while `?tagKeys=a,b` removes both |
 
 ### CloudFormation resource types
 
@@ -17342,19 +17435,47 @@ EFS standard storage: $0.30 per GB-month.
 |-----------|-------|
 | CreateDatabase | |
 | GetDatabase | |
+| UpdateDatabase | Applies `DatabaseInput`'s `Description`, `LocationUri` and `Parameters` when each is non-empty, so a member sent empty leaves the stored one alone. The database is addressed by the request's `Name`, which is therefore not renameable |
 | DeleteDatabase | |
 | GetDatabases | |
 | CreateTable | |
 | GetTable | |
+| UpdateTable | Applies `TableInput`'s `Description`, `StorageDescriptor`, `PartitionKeys` and `Parameters` when each is non-empty. The table is addressed by `DatabaseName` and `TableInput.Name` together, so it is not renameable either, and `VersionId` is not read — substrate keeps one version of a table |
 | DeleteTable | |
 | GetTables | |
+| CreateConnection | Records the `ConnectionInput` and `Tags`, and mints `arn:aws:glue:{region}:{account}:connection/{name}`. A connection is keyed by name, so a second create with the same name replaces the first rather than being refused |
+| GetConnection | Reports the stored `Connection` with its `ConnectionProperties` verbatim; `HidePassword` is not read, so a password-like property is reported as stored |
+| GetConnections | Reports `ConnectionList` in ascending connection name; `Filter`, `MaxResults` and `NextToken` are unread, so every connection comes back in one page |
+| UpdateConnection | Applies `ConnectionInput`'s `Description`, `ConnectionType` and `ConnectionProperties` when each is non-empty |
+| DeleteConnection | Keyed by `ConnectionName`; a name with no connection behind it is not refused |
+| CreateCrawler | Records the crawler with `State` `READY` and mints `arn:aws:glue:{region}:{account}:crawler/{name}`; `Schedule`, `Classifiers`, `SchemaChangePolicy` and the rest of the request are not recorded |
+| GetCrawler | |
+| GetCrawlers | Reports `Crawlers` in ascending crawler name; `MaxResults` and `NextToken` are unread |
+| StartCrawler | A deterministic no-op at `200`: the crawler stays `READY`, and **no** table, partition or schema is ever discovered, because crawling a data store is workload-internal rather than an API observation. A name with no crawler behind it is not refused |
+| StopCrawler | A deterministic no-op at `200`, for the same reason — nothing is ever running to stop |
+| UpdateCrawler | Applies `Description` and `Targets` when each is non-empty; `Role`, `DatabaseName` and `Schedule` are not applied |
+| DeleteCrawler | A crawler name with nothing behind it is not refused |
 | CreateJob | |
 | GetJob | |
+| UpdateJob | Applies `JobUpdate`'s `Description` and `Command` and reports `JobName`; every other `JobUpdate` member, including `Role`, `MaxRetries` and `DefaultArguments`, is accepted and not applied |
 | DeleteJob | |
 | GetJobs | |
 | StartJobRun | Returns a `jr_`-prefixed JobRunId — 32 hex characters after the prefix, derived from the request ID (#856). The prefix is the service's own convention, not a published pattern |
 | GetJobRun | Transitions to SUCCEEDED after describe |
 | GetJobRuns | |
+| TagResource | Merges `TagsToAdd` into the tags on the resource the ARN names. The ARN is resolved to state, so it addresses the account and Region *in the ARN* rather than the caller's, and the five resource types it resolves are `database`, `table`, `connection`, `crawler` and `job` |
+| UntagResource | Deletes each key in `TagsToRemove`; a key that is not there is a no-op |
+| GetTags | Reports `Tags` as a JSON object, empty for a resource with none |
+
+**What the three tagging operations refuse.** An ARN without the `arn:aws:glue:` prefix, with fewer
+than three colon-separated fields, with no slash in its resource segment, or naming a resource type
+outside the five above is `InvalidInputException`/400 — the code every one of the three pages
+publishes, where earlier releases answered `InvalidParameterValueException`, a string Glue's
+reference does not contain ([#1063](https://github.com/scttfrdmn/substrate/issues/1063)). An ARN
+that *parses* and then names no resource is a different condition, and it is the one AWS answers
+with `EntityNotFoundException`: substrate fails it as `InternalFailure`/500 instead, which #1063
+recorded as a divergence rather than fixing, since the fix changes what `GetTags` answers for an
+untagged resource.
 
 ### What a refusal reports
 
@@ -17403,6 +17524,7 @@ from your test runs.
 |-----------|-------|
 | GetCostAndUsage | Aggregates event costs by service/operation |
 | GetCostForecast | Returns stub forecast based on recent usage |
+| GetDimensionValues | The service names the caller's recorded events carry, sorted, each with empty `Attributes`; `ReturnSize` equals `TotalSize` because there is one page. `Dimension` and `TimePeriod` are decoded and **unread** — every dimension answers with service names, so a caller asking for `INSTANCE_TYPE` gets services |
 
 ### Cost
 
@@ -17457,6 +17579,7 @@ allow infrastructure code that calls the Health API to run without errors.
 | DescribeEvents | Returns empty events list |
 | DescribeEventDetails | Returns empty details |
 | DescribeAffectedEntities | Returns empty entities |
+| DescribeEventAggregates | Returns empty aggregates. Nothing in substrate raises a Health event, so an empty answer is the honest one and a consumer's loop over it terminates |
 
 ### Cost
 
@@ -18519,6 +18642,7 @@ than an empty result — see below.
 | GetAWSDefaultServiceQuota | The same answer as `GetServiceQuota` — nothing here mutates a quota, so the applied value and the AWS default never diverge |
 | RequestServiceQuotaIncrease | Records a `PENDING` request; the published value does not move |
 | ListRequestedServiceQuotaChangeHistory | The caller's own requests; filterable by `ServiceCode` and `Status` |
+| ListRequestedServiceQuotaChangesByService | The same handler, and **not an operation the Service Quotas API has**: the 2019-06-24 model declares `…ChangeHistory` and `…ChangeHistoryByQuota` and nothing resembling this name, so every SDK and CLI call got `InvalidAction` and the plugin's own tests could not reach it (#636). Both names route because a fixture may already drive the invented one directly |
 | GetRequestedServiceQuotaChange | `NoSuchResourceException` for an unknown request ID |
 
 The history operation also answers to `ListRequestedServiceQuotaChangesByService`,
