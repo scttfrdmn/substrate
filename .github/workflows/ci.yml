@@ -158,6 +158,12 @@ jobs:
   # executes is not a ratchet — it is a TODO list, and #756's whole complaint is
   # that the inventory had never been taken. A new bookkeeping field with a
   # wire-visible json tag must fail a PR, not wait for someone to run a target.
+  #
+  # It asserts two files: the declaration baseline, and
+  # scripts/wire-bookkeeping-projected.txt, whose entries each cite the test that
+  # proves their record cannot reach a response body. The citation is checked by
+  # grep for the test's definition, which is why this still needs no Go toolchain
+  # — a renamed test fails here without the suite running.
   wire-bookkeeping:
     name: Wire Bookkeeping Drift
     runs-on: ubuntu-latest
