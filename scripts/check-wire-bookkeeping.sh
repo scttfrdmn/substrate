@@ -99,7 +99,7 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #
 # Recording a published member in the baseline files it as a defect owed a
 # deletion, and deleting it would drop a member AWS does publish — so the entry is
-# worse than useless, it points at the wrong fix. Twelve are excluded:
+# worse than useless, it points at the wrong fix. Thirteen are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
@@ -121,6 +121,10 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #   - acm_types.go ACMCertificate.CreatedAt — `API_CertificateDetail` publishes
 #     `CreatedAt`, Timestamp, Required: No.
 #   - ecs_types.go ECSService.CreatedAt — `API_Service` publishes `createdAt`.
+#   - ecs_wire.go ecsServiceOut.CreatedAt — the same member on the wire struct that
+#     discharges that record, the ecr_wire.go case over again. A projection has to carry
+#     every published member, so building one is what *adds* a line of this kind; the two
+#     entries are the record and its projection, not a duplicate.
 #   - redshiftdata_types.go RedshiftDataStatement.CreatedAt —
 #     `API_DescribeStatement` publishes `CreatedAt`.
 #   - firehose_types.go FirehoseDeliveryStream.CreatedAt — the field renders as
@@ -140,7 +144,7 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
 #
-# Three of the twelve publish the *name* and diverge on the *type*: ACM's, Redshift
+# Three of the thirteen publish the *name* and diverge on the *type*: ACM's, Redshift
 # Data's and Firehose's are `time.Time`, so they render RFC3339 where all three
 # services' JSON protocol publishes a Timestamp as epoch seconds (ECS already uses
 # EpochSeconds, which is what right looks like). That is a wrong-type divergence
@@ -190,6 +194,7 @@ extract() {
       published["emulator/ecr_wire.go\tecrRepositoryOut\tCreatedAt"] = 1
       published["emulator/acm_types.go\tACMCertificate\tCreatedAt"] = 1
       published["emulator/ecs_types.go\tECSService\tCreatedAt"] = 1
+      published["emulator/ecs_wire.go\tecsServiceOut\tCreatedAt"] = 1
       published["emulator/redshiftdata_types.go\tRedshiftDataStatement\tCreatedAt"] = 1
       published["emulator/firehose_types.go\tFirehoseDeliveryStream\tCreatedAt"] = 1
       published["emulator/health_plugin.go\tHealthEvent\tRegion"] = 1

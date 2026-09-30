@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -208,9 +209,9 @@ func (p *ECSPlugin) createCluster(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	updateStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), body.ClusterName)
 
 	type response struct {
-		Cluster ECSCluster `json:"cluster"`
+		Cluster ecsClusterOut `json:"cluster"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Cluster: cluster})
+	return ecsJSONResponse(http.StatusOK, response{Cluster: ecsClusterToWire(cluster)})
 }
 
 func (p *ECSPlugin) describeClusters(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -265,10 +266,10 @@ func (p *ECSPlugin) describeClusters(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	type response struct {
-		Clusters []ECSCluster `json:"clusters"`
-		Failures []failure    `json:"failures"`
+		Clusters []ecsClusterOut `json:"clusters"`
+		Failures []failure       `json:"failures"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Clusters: clusters, Failures: failures})
+	return ecsJSONResponse(http.StatusOK, response{Clusters: ecsClustersToWire(clusters), Failures: failures})
 }
 
 func (p *ECSPlugin) deleteCluster(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -306,9 +307,9 @@ func (p *ECSPlugin) deleteCluster(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), name)
 
 	type response struct {
-		Cluster ECSCluster `json:"cluster"`
+		Cluster ecsClusterOut `json:"cluster"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Cluster: cluster})
+	return ecsJSONResponse(http.StatusOK, response{Cluster: ecsClusterToWire(cluster)})
 }
 
 func (p *ECSPlugin) listClusters(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -392,10 +393,16 @@ func (p *ECSPlugin) registerTaskDefinition(ctx *RequestContext, req *AWSRequest)
 	updateStringIndex(goCtx, p.state, ecsNamespace, revKey, strconv.Itoa(revision))
 	updateStringIndex(goCtx, p.state, ecsNamespace, ecsTaskDefFamiliesKey(ctx.AccountID, ctx.Region), body.Family)
 
+	// tags is a top-level response element on RegisterTaskDefinition, not a member of
+	// TaskDefinition; see emulator/ecs_wire.go.
 	type response struct {
-		TaskDefinition ECSTaskDefinition `json:"taskDefinition"`
+		TaskDefinition ecsTaskDefinitionOut `json:"taskDefinition"`
+		Tags           []ECSTag             `json:"tags,omitempty"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{TaskDefinition: taskDef})
+	return ecsJSONResponse(http.StatusOK, response{
+		TaskDefinition: ecsTaskDefinitionToWire(taskDef),
+		Tags:           ecsTaskDefinitionTagsOrNil(taskDef.Tags),
+	})
 }
 
 func (p *ECSPlugin) deregisterTaskDefinition(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -421,15 +428,17 @@ func (p *ECSPlugin) deregisterTaskDefinition(ctx *RequestContext, req *AWSReques
 		return nil, fmt.Errorf("ecs deregisterTaskDefinition state.Put: %w", err)
 	}
 
+	// DeregisterTaskDefinition publishes no tags element at all.
 	type response struct {
-		TaskDefinition ECSTaskDefinition `json:"taskDefinition"`
+		TaskDefinition ecsTaskDefinitionOut `json:"taskDefinition"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{TaskDefinition: *td})
+	return ecsJSONResponse(http.StatusOK, response{TaskDefinition: ecsTaskDefinitionToWire(*td)})
 }
 
 func (p *ECSPlugin) describeTaskDefinition(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		TaskDefinition string `json:"taskDefinition"`
+		TaskDefinition string   `json:"taskDefinition"`
+		Include        []string `json:"include"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
@@ -441,10 +450,22 @@ func (p *ECSPlugin) describeTaskDefinition(ctx *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 
-	type response struct {
-		TaskDefinition ECSTaskDefinition `json:"taskDefinition"`
+	// tags is a top-level response element, and only when include asks for it: "If TAGS is
+	// specified, the tags are included in the response. If this field is omitted, tags
+	// aren't included in the response." See emulator/ecs_wire.go.
+	var tags []ECSTag
+	if slices.Contains(body.Include, "TAGS") {
+		tags = ecsTaskDefinitionTagsOrNil(td.Tags)
 	}
-	return ecsJSONResponse(http.StatusOK, response{TaskDefinition: *td})
+
+	type response struct {
+		TaskDefinition ecsTaskDefinitionOut `json:"taskDefinition"`
+		Tags           []ECSTag             `json:"tags,omitempty"`
+	}
+	return ecsJSONResponse(http.StatusOK, response{
+		TaskDefinition: ecsTaskDefinitionToWire(*td),
+		Tags:           tags,
+	})
 }
 
 func (p *ECSPlugin) listTaskDefinitions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -616,9 +637,9 @@ func (p *ECSPlugin) createService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	updateStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), body.ServiceName)
 
 	type response struct {
-		Service ECSService `json:"service"`
+		Service ecsServiceOut `json:"service"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Service: svc})
+	return ecsJSONResponse(http.StatusOK, response{Service: ecsServiceToWire(svc)})
 }
 
 func (p *ECSPlugin) updateService(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -668,9 +689,9 @@ func (p *ECSPlugin) updateService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	type response struct {
-		Service ECSService `json:"service"`
+		Service ecsServiceOut `json:"service"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Service: svc})
+	return ecsJSONResponse(http.StatusOK, response{Service: ecsServiceToWire(svc)})
 }
 
 func (p *ECSPlugin) describeServices(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -712,10 +733,10 @@ func (p *ECSPlugin) describeServices(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	type response struct {
-		Services []ECSService `json:"services"`
-		Failures []failure    `json:"failures"`
+		Services []ecsServiceOut `json:"services"`
+		Failures []failure       `json:"failures"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Services: services, Failures: failures})
+	return ecsJSONResponse(http.StatusOK, response{Services: ecsServicesToWire(services), Failures: failures})
 }
 
 func (p *ECSPlugin) deleteService(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -754,9 +775,9 @@ func (p *ECSPlugin) deleteService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), serviceName)
 
 	type response struct {
-		Service ECSService `json:"service"`
+		Service ecsServiceOut `json:"service"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Service: svc})
+	return ecsJSONResponse(http.StatusOK, response{Service: ecsServiceToWire(svc)})
 }
 
 func (p *ECSPlugin) listServices(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -859,10 +880,10 @@ func (p *ECSPlugin) runTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 	}
 
 	type response struct {
-		Tasks    []ECSTask `json:"tasks"`
-		Failures []failure `json:"failures"`
+		Tasks    []ecsTaskOut `json:"tasks"`
+		Failures []failure    `json:"failures"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Tasks: tasks, Failures: nil})
+	return ecsJSONResponse(http.StatusOK, response{Tasks: ecsTasksToWire(tasks), Failures: nil})
 }
 
 func (p *ECSPlugin) stopTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -917,9 +938,9 @@ func (p *ECSPlugin) stopTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	}
 
 	type response struct {
-		Task ECSTask `json:"task"`
+		Task ecsTaskOut `json:"task"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Task: task})
+	return ecsJSONResponse(http.StatusOK, response{Task: ecsTaskToWire(task)})
 }
 
 func (p *ECSPlugin) describeTasks(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -965,10 +986,10 @@ func (p *ECSPlugin) describeTasks(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	type response struct {
-		Tasks    []ECSTask `json:"tasks"`
-		Failures []failure `json:"failures"`
+		Tasks    []ecsTaskOut `json:"tasks"`
+		Failures []failure    `json:"failures"`
 	}
-	return ecsJSONResponse(http.StatusOK, response{Tasks: tasks, Failures: failures})
+	return ecsJSONResponse(http.StatusOK, response{Tasks: ecsTasksToWire(tasks), Failures: failures})
 }
 
 func (p *ECSPlugin) listTasks(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
