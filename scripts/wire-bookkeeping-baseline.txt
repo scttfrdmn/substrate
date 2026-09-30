@@ -38,13 +38,13 @@
 # json:"-" would make a field invisible on the wire without removing it. It is
 # used on none of these.
 #
-# Eleven fields whose Go identifier is one of the five but whose *member* the
+# Twelve fields whose Go identifier is one of the five but whose *member* the
 # service publishes are excluded, per site, by the map in
 # check-wire-bookkeeping.sh — ECS's `createdAt`, IAM's `Region` on RoleLastUsed and
-# RoleUsageType, Health's `region` and the rest. A published member recorded here
-# would be filed as a defect owed a deletion, and deleting it would drop something
-# AWS does publish, so the line would point at the wrong fix. The script names each
-# one with its reference page.
+# RoleUsageType, Firehose's `CreateTimestamp`, Health's `region` and the rest. A
+# published member recorded here would be filed as a defect owed a deletion, and
+# deleting it would drop something AWS does publish, so the line would point at the
+# wrong fix. The script names each one with its reference page.
 #
 # Regenerate after a deliberate change:  ./scripts/check-wire-bookkeeping.sh --write
 emulator/account_plugin.go	accountRegionOpt	UpdatedAt	updated_at
@@ -242,7 +242,6 @@ emulator/emrserverless_plugin.go	EMRServerlessJobRun	Region	region
 emulator/eventstore.go	Event	AccountID	account_id
 emulator/eventstore.go	Event	Region	region
 emulator/firehose_types.go	FirehoseDeliveryStream	AccountID	AccountId
-emulator/firehose_types.go	FirehoseDeliveryStream	CreatedAt	CreateTimestamp
 emulator/firehose_types.go	FirehoseDeliveryStream	Region	Region
 emulator/fsx_plugin.go	FSxFileSystem	AccountID	account_id
 emulator/fsx_plugin.go	FSxFileSystem	Region	region

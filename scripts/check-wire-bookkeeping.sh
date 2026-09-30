@@ -99,7 +99,7 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #
 # Recording a published member in the baseline files it as a defect owed a
 # deletion, and deleting it would drop a member AWS does publish — so the entry is
-# worse than useless, it points at the wrong fix. Eleven are excluded:
+# worse than useless, it points at the wrong fix. Twelve are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
@@ -123,6 +123,12 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #   - ecs_types.go ECSService.CreatedAt — `API_Service` publishes `createdAt`.
 #   - redshiftdata_types.go RedshiftDataStatement.CreatedAt —
 #     `API_DescribeStatement` publishes `CreatedAt`.
+#   - firehose_types.go FirehoseDeliveryStream.CreatedAt — the field renders as
+#     `json:"CreateTimestamp"`, and `API_DeliveryStreamDescription` publishes
+#     `CreateTimestamp`, Timestamp, Required: No. This is the case the identifier key
+#     costs the most: the rendered name is right and only the Go name collides, so
+#     the field-name scan that catches `json:"a"` catches this too. Its AccountID
+#     and Region stay in the baseline — that same page publishes neither.
 #   - health_plugin.go HealthEvent.Region — `API_Event` publishes `region`.
 #   - ec2_spot_placement_control.go ec2SpotPlacementScoreSeed.Region —
 #     `API_SpotPlacementScore` publishes `region`.
@@ -134,9 +140,9 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
 #
-# Two of the ten publish the *name* and diverge on the *type*: ACM's and Redshift
-# Data's `CreatedAt` are `time.Time`, so they render RFC3339 where both services'
-# JSON protocol publishes a Timestamp as epoch seconds (ECS already uses
+# Three of the twelve publish the *name* and diverge on the *type*: ACM's, Redshift
+# Data's and Firehose's are `time.Time`, so they render RFC3339 where all three
+# services' JSON protocol publishes a Timestamp as epoch seconds (ECS already uses
 # EpochSeconds, which is what right looks like). That is a wrong-type divergence
 # rather than a bookkeeping leak — #1305 — and it is named here rather than left
 # implied, because "excluded from this check" must not read as "correct".
@@ -178,6 +184,7 @@ extract() {
       published["emulator/acm_types.go\tACMCertificate\tCreatedAt"] = 1
       published["emulator/ecs_types.go\tECSService\tCreatedAt"] = 1
       published["emulator/redshiftdata_types.go\tRedshiftDataStatement\tCreatedAt"] = 1
+      published["emulator/firehose_types.go\tFirehoseDeliveryStream\tCreatedAt"] = 1
       published["emulator/health_plugin.go\tHealthEvent\tRegion"] = 1
       published["emulator/ec2_spot_placement_control.go\tec2SpotPlacementScoreSeed\tRegion"] = 1
       published["emulator/organizations_types.go\tOrgCreateAccountStatus\tAccountID"] = 1
