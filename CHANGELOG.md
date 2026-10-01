@@ -244,6 +244,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Redshift's four records are recorded as projected** (#756). `RedshiftCluster`,
+  `RedshiftClusterParameterGroup`, `RedshiftClusterSubnetGroup` and `RedshiftSnapshot` each declare
+  `AccountID` and `Region` under a wire-visible `json` tag — eight of the inventory's lines — and
+  none of the eight can reach a body: every one of the ten routed operations renders through a
+  projection struct carrying `xml` tags of its own, and `emulator/redshift_types.go` carries no `xml`
+  tag at all. The new `emulator/redshift_wire_test.go` holds one test per record, each driving every
+  operation that answers it and failing on an element named for either member at any depth. The
+  comparison is case-insensitive, since a leak would arrive as `AccountID` from a Go field name or as
+  `accountID` from the tag the record is persisted under, and it is on the element *name* because
+  both values appear legitimately in a cluster body as substrings — of `ClusterNamespaceArn` and of
+  the endpoint address. Absence alone would be vacuous, so each test first reads the stored record
+  back and requires both members to be populated: neither carries `,omitempty`, so a record found at
+  all had both. Deliberately *not* the stronger form `emulator/rds_wire_test.go` uses, which requires
+  a record's elements to be exactly the published ones: Redshift's envelope is wrong in two ways
+  #1208 owns — no `<XxxResponse>` root or `ResponseMetadata`, and `member` for an element the
+  reference names for its member type — and an expectation keyed on either shape would have to be
+  rewritten by the fix. `make wire-bookkeeping-check` moves to **151 projected across 59 records, 168
+  still reachable** of the same 319 declared.
+
 - **AWS Config's five control-plane seed records are recorded as projected** (#756). The `accountId`
   and `region` on `cfgsvcSeededRecorderStatus`, `cfgsvcSeededDeliveryStatus`,
   `cfgsvcSeededRuleCompliance`, `cfgsvcSeededPackStatus` and `cfgsvcSeededPackCompliance` were ten of

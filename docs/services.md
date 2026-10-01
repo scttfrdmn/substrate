@@ -21409,6 +21409,26 @@ documents it as "The namespace Amazon Resource Name (ARN) of the cluster" — a
 published error code for handing a namespace field a cluster ARN
 ([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
 
+### The account and Region a record carries reach no response
+
+Each of the four persisted records — `RedshiftCluster`,
+`RedshiftClusterParameterGroup`, `RedshiftClusterSubnetGroup` and
+`RedshiftSnapshot` — declares `AccountID` and `Region` under wire-visible `json`
+tags, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. Neither member is published by any of the four reference shapes, and neither
+reaches a body: every response is rendered through a projection struct that
+declares `xml` tags of its own (`redshiftClusterXML`, `redshiftParamGroupData`,
+`redshiftSubnetGroupData`, `redshiftSnapshotData`), and
+`emulator/redshift_types.go` carries no `xml` tag at all. All ten operations are
+driven by `TestRedshiftWire_ClusterResponsesCarryNoBookkeepingMember` and its
+three siblings in `emulator/redshift_wire_test.go`, which walk the raw XML and
+fail on an element named for either member at any depth, so the eight entries this
+discharges in `scripts/wire-bookkeeping-baseline.txt` stay listed as declarations
+rather than as leaks ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+The assertion is on the element *name*: the account ID and the Region both appear
+in a cluster body as substrings, of `ClusterNamespaceArn` and of the endpoint
+address, which is published.
+
 ### Marker and MaxRecords are read by nothing
 
 None of the four Describe operations paginates. Three of them do not even take the
