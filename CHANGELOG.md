@@ -199,6 +199,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`test/e2e` dependencies bumped again**, seventeen of them: `aws-sdk-go-v2` 1.47.0→1.47.1,
+  `config` 1.33.5→1.33.6, `credentials` 1.20.5→1.20.6, `service/account` 1.41.0→1.41.1,
+  `service/cloudformation` 1.81.0→1.81.1, `service/cloudwatch` 1.72.0→1.73.0, `service/configservice`
+  1.74.0→1.74.1, `service/dynamodb` 1.69.0→1.69.1, `service/ec2` 1.335.0→1.336.1, `service/iam`
+  1.64.0→1.64.1, `service/lambda` 1.109.0→1.110.0, `service/organizations` 1.60.0→1.60.1,
+  `service/s3` 1.113.2→1.113.4, `service/servicequotas` 1.43.0→1.43.1, `service/sns` 1.47.1→1.47.2,
+  `service/sts` 1.51.0→1.51.1 and `service/wafv2` 1.83.0→1.83.1, with the matching indirect bumps. The
+  root module is untouched, so as with #1276 and unlike #1269 this needs no re-tidy of the other module
+  — `test/e2e` was re-tidied anyway to confirm that. Lands as a PR carrying a changelog line rather
+  than as the Dependabot proposal (#1294) that raised it, which CLAUDE.md asks of every PR and which
+  Dependabot cannot write.
+
 - **`make wire-bookkeeping-check` reports how many bookkeeping fields still reach a response, not
   just how many are declared** (#756). The ratchet was written expecting each of its 330 lines to be
   deleted as its service was fixed, and that is not how the fix works: ECR was fixed in #1090 by the
