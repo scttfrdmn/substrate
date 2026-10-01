@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CloudFormation deploys a Classic Load Balancer** (#844).
+  `AWS::ElasticLoadBalancing::LoadBalancer` — no `V2` — had no arm in the deployer's dispatch at all,
+  so a stack declaring one reached the generic stub: it reported `CREATE_COMPLETE` for a load balancer
+  no `DescribeLoadBalancers` of either generation could find. It now deploys through the **2012-06-01**
+  `CreateLoadBalancer`, and the whole of what makes that call classic is the Query `Version` member —
+  the action name is published by both generations, so a helper omitting it would have created an
+  Application Load Balancer that still answered a `Ref` and a plausible DNS name. Seven properties are
+  forwarded: `LoadBalancerName` (defaulting to the logical ID), `Scheme`, `Listeners`,
+  `AvailabilityZones`, `Subnets`, `SecurityGroups` and `Tags`. `Listeners` is the type's one
+  `Required: Yes` property, so a template omitting it reports `CREATE_FAILED` rather than a load
+  balancer with none. Unlike the four ELBv2 types the resource-level `Tags` are sent **on the create**,
+  so an over-quota tag set is refused by the operation that publishes `TooManyTags` for it; the three
+  `aws:cloudformation:*` stamp keys and the stack's own tags land on top, through the
+  generation-blind resolver that was written for this in #1146 and needed one map entry here rather
+  than a second tagging decision. The stack sweep deletes it through the classic
+  `DeleteLoadBalancer`, which needs both `LoadBalancerName` and `Version` and so could not reuse the
+  one-parameter deleter the four ELBv2 types share. `PolicyNames` and the nine remaining CFN
+  properties are dropped: each needs a `LoadBalancerDescription` member the record does not hold, and
+  reporting a health check or a registered instance no describe could show is a worse answer than
+  omitting it.
+
 - **The classic (2012-06-01) Elastic Load Balancing tag operations are routed** (#844). `AddTags`,
   `RemoveTags` and `DescribeTags` exist in **both** Elastic Load Balancing APIs with different shapes,
   so all three now read the Query `Version` member the same way #1146's create/describe/delete trio
@@ -349,6 +370,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back into the resource record.
 
 ### Fixed
+
+- **`docs/services.md` recorded the wrong published value for the classic load balancer's `Ref`**
+  (#844). It listed `AWS::ElasticLoadBalancing::LoadBalancer` among the divergences substrate cannot
+  fix, saying AWS documents the **DNS name**. AWS documents the opposite: "When you pass the logical ID
+  of this resource to the intrinsic `Ref` function, `Ref` returns the name of the load balancer." The
+  DNS name is `Fn::GetAtt DNSName`, one of five published attributes. So there was never a `Ref`
+  divergence to record — the entry is deleted rather than amended, and the deploy helper needed no
+  `Ref` arm at all, since the name is the physical ID the default already answers. #844's own
+  acceptance criterion carried the same misreading and is corrected on the issue.
 
 - **Four of Cognito's five records were marshaled onto the wire whole, so eleven operations reported
   substrate's own bookkeeping** (#756, #1136). `CognitoUserPool`, `CognitoUserPoolClient`,
