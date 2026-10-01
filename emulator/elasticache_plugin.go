@@ -678,7 +678,7 @@ func (p *ElastiCachePlugin) createCacheParameterGroup(reqCtx *RequestContext, re
 	}
 
 	type result struct {
-		CacheParameterGroup xmlCacheParamGroupItem `xml:"CacheParameterGroup"`
+		CacheParameterGroup xmlCacheParameterGroupItem `xml:"CacheParameterGroup"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"CreateCacheParameterGroupResponse"`
@@ -687,7 +687,7 @@ func (p *ElastiCachePlugin) createCacheParameterGroup(reqCtx *RequestContext, re
 	}
 	return elasticacheXMLResponse(http.StatusOK, response{
 		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheParameterGroup: cacheParamGroupToXML(pg)},
+		Result: result{CacheParameterGroup: cacheParameterGroupToXML(pg)},
 	})
 }
 
@@ -711,19 +711,19 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 	}
 
 	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
-		func(key, _ string) (xmlCacheParamGroupItem, bool) {
+		func(key, _ string) (xmlCacheParameterGroupItem, bool) {
 			data, getErr := p.state.Get(context.Background(), elasticacheNamespace, key)
 			if getErr != nil || data == nil {
-				return xmlCacheParamGroupItem{}, false
+				return xmlCacheParameterGroupItem{}, false
 			}
 			var pg ElastiCacheCacheParameterGroup
 			if json.Unmarshal(data, &pg) != nil {
-				return xmlCacheParamGroupItem{}, false
+				return xmlCacheParameterGroupItem{}, false
 			}
 			if filterName != "" && pg.CacheParameterGroupName != filterName {
-				return xmlCacheParamGroupItem{}, false
+				return xmlCacheParameterGroupItem{}, false
 			}
-			return cacheParamGroupToXML(pg), true
+			return cacheParameterGroupToXML(pg), true
 		})
 
 	// API_DescribeCacheParameterGroups publishes CacheParameterGroupNotFound/404, glossed "The
@@ -740,8 +740,8 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 	}
 
 	type result struct {
-		CacheParameterGroups []xmlCacheParamGroupItem `xml:"CacheParameterGroups>CacheParameterGroup"`
-		Marker               string                   `xml:"Marker,omitempty"`
+		CacheParameterGroups []xmlCacheParameterGroupItem `xml:"CacheParameterGroups>CacheParameterGroup"`
+		Marker               string                       `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeCacheParameterGroupsResponse"`
@@ -902,102 +902,6 @@ func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, r
 	m["Tags"] = merged
 	updated, _ := json.Marshal(m)
 	return p.state.Put(context.Background(), elasticacheNamespace, key, updated)
-}
-
-// --- XML types ---
-
-// xmlEndpointItem is the XML representation of an ElastiCache endpoint.
-type xmlEndpointItem struct {
-	Address string `xml:"Address"`
-	Port    int    `xml:"Port"`
-}
-
-// xmlCacheClusterItem is the XML representation of an ElastiCache cache cluster.
-type xmlCacheClusterItem struct {
-	CacheClusterID        string           `xml:"CacheClusterId"`
-	CacheNodeType         string           `xml:"CacheNodeType"`
-	Engine                string           `xml:"Engine"`
-	EngineVersion         string           `xml:"EngineVersion"`
-	CacheClusterStatus    string           `xml:"CacheClusterStatus"`
-	NumCacheNodes         int              `xml:"NumCacheNodes"`
-	ARN                   string           `xml:"ARN"`
-	ReplicationGroupID    string           `xml:"ReplicationGroupId,omitempty"`
-	ConfigurationEndpoint *xmlEndpointItem `xml:"ConfigurationEndpoint,omitempty"`
-}
-
-// xmlReplicationGroupItem is the XML representation of an ElastiCache replication group.
-type xmlReplicationGroupItem struct {
-	ReplicationGroupID string `xml:"ReplicationGroupId"`
-	Description        string `xml:"Description"`
-	Status             string `xml:"Status"`
-	AutomaticFailover  string `xml:"AutomaticFailover"`
-	MultiAZ            string `xml:"MultiAZ"`
-	ARN                string `xml:"ARN"`
-}
-
-// xmlCacheSubnetGroupItem is the XML representation of an ElastiCache cache subnet group.
-type xmlCacheSubnetGroupItem struct {
-	CacheSubnetGroupName        string `xml:"CacheSubnetGroupName"`
-	CacheSubnetGroupDescription string `xml:"CacheSubnetGroupDescription"`
-	VpcID                       string `xml:"VpcId"`
-	ARN                         string `xml:"ARN"`
-}
-
-// xmlCacheParamGroupItem is the XML representation of an ElastiCache cache parameter group.
-type xmlCacheParamGroupItem struct {
-	CacheParameterGroupName   string `xml:"CacheParameterGroupName"`
-	CacheParameterGroupFamily string `xml:"CacheParameterGroupFamily"`
-	Description               string `xml:"Description"`
-	ARN                       string `xml:"ARN"`
-}
-
-func cacheClusterToXML(c ElastiCacheCacheCluster) xmlCacheClusterItem {
-	item := xmlCacheClusterItem{
-		CacheClusterID:     c.CacheClusterID,
-		CacheNodeType:      c.CacheNodeType,
-		Engine:             c.Engine,
-		EngineVersion:      c.EngineVersion,
-		CacheClusterStatus: c.CacheClusterStatus,
-		NumCacheNodes:      c.NumCacheNodes,
-		ARN:                c.CacheClusterARN,
-		ReplicationGroupID: c.ReplicationGroupID,
-	}
-	if c.ConfigurationEndpoint != nil {
-		item.ConfigurationEndpoint = &xmlEndpointItem{
-			Address: c.ConfigurationEndpoint.Address,
-			Port:    c.ConfigurationEndpoint.Port,
-		}
-	}
-	return item
-}
-
-func replicationGroupToXML(rg ElastiCacheReplicationGroup) xmlReplicationGroupItem {
-	return xmlReplicationGroupItem{
-		ReplicationGroupID: rg.ReplicationGroupID,
-		Description:        rg.Description,
-		Status:             rg.Status,
-		AutomaticFailover:  rg.AutomaticFailover,
-		MultiAZ:            rg.MultiAZ,
-		ARN:                rg.ARN,
-	}
-}
-
-func cacheSubnetGroupToXML(sg ElastiCacheCacheSubnetGroup) xmlCacheSubnetGroupItem {
-	return xmlCacheSubnetGroupItem{
-		CacheSubnetGroupName:        sg.CacheSubnetGroupName,
-		CacheSubnetGroupDescription: sg.CacheSubnetGroupDescription,
-		VpcID:                       sg.VpcID,
-		ARN:                         sg.ARN,
-	}
-}
-
-func cacheParamGroupToXML(pg ElastiCacheCacheParameterGroup) xmlCacheParamGroupItem {
-	return xmlCacheParamGroupItem{
-		CacheParameterGroupName:   pg.CacheParameterGroupName,
-		CacheParameterGroupFamily: pg.CacheParameterGroupFamily,
-		Description:               pg.Description,
-		ARN:                       pg.ARN,
-	}
 }
 
 // --- State helpers ---

@@ -1791,3 +1791,15 @@ func GlueTimeOrNilForTest(t time.Time) *EpochSeconds {
 func RDSTimeOrNilForTest(t time.Time) *time.Time {
 	return rdsTimeOrNil(t)
 }
+
+// ElastiCacheTimeOrNilForTest wraps elasticacheTimeOrNil for external tests.
+//
+// Exported for the same reason as [RDSTimeOrNilForTest], which it mirrors exactly: the zero arm is
+// reachable in principle, because deleteCacheCluster and deleteReplicationGroup each fall back to a
+// record holding only the identifier when the stored JSON will not decode, but reaching it through
+// the wire means writing undecodable bytes into the state manager, which no request does. The arm is
+// what keeps CacheClusterCreateTime and ReplicationGroupCreateTime — both Required: No — from being
+// reported as `0001-01-01T00:00:00Z` (#756).
+func ElastiCacheTimeOrNilForTest(t time.Time) *time.Time {
+	return elasticacheTimeOrNil(t)
+}
