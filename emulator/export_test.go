@@ -1767,3 +1767,15 @@ func LambdaAuthzResourceARNForTest(path, region, accountID string) string {
 func IAMInstanceProfileStateKeyForTest(accountID, name string) (namespace, key string) {
 	return iamNamespace, iamInstanceProfileKey(accountID, name)
 }
+
+// GlueTimeOrNilForTest wraps glueTimeOrNil for external tests.
+//
+// Exported because its nil arm is unreachable through the wire: every Glue handler sets the
+// record's timestamp from the simulated clock, so no request produces a record whose time is
+// zero. The arm exists for the encoding that can — a state snapshot from an older substrate, or
+// one a replayed event log restored that predates the field — and it is the whole reason the
+// projection's timestamps are pointers: a bare EpochSeconds would report `null` there, a member
+// AWS omits (#756).
+func GlueTimeOrNilForTest(t time.Time) *EpochSeconds {
+	return glueTimeOrNil(t)
+}
