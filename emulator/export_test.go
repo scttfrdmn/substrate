@@ -1779,3 +1779,15 @@ func IAMInstanceProfileStateKeyForTest(accountID, name string) (namespace, key s
 func GlueTimeOrNilForTest(t time.Time) *EpochSeconds {
 	return glueTimeOrNil(t)
 }
+
+// RDSTimeOrNilForTest wraps rdsTimeOrNil for external tests.
+//
+// Exported for the same reason as [GlueTimeOrNilForTest], with one difference worth naming: RDS's
+// zero arm *is* reachable in principle, because deleteDBInstance, deleteDBCluster and
+// deleteDBSnapshot each fall back to a record holding only the identifier when the stored JSON will
+// not decode — but reaching it through the wire means writing undecodable bytes into the state
+// manager, which no request does. The arm is what keeps a creation time AWS marks Required: No from
+// being reported as `0001-01-01T00:00:00Z` (#756).
+func RDSTimeOrNilForTest(t time.Time) *time.Time {
+	return rdsTimeOrNil(t)
+}

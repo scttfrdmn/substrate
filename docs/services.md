@@ -17253,26 +17253,26 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 
 | Operation | Notes |
 |-----------|-------|
-| CreateDBInstance | |
-| DescribeDBInstances | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
-| DeleteDBInstance | |
-| ModifyDBInstance | |
-| StartDBInstance | |
-| StopDBInstance | |
-| RebootDBInstance | |
-| CreateDBSnapshot | |
-| DescribeDBSnapshots | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSnapshotIdentifier` for a snapshot that does not exist answers `DBSnapshotNotFound` / 404; a `DBInstanceIdentifier` that names no instance stays an empty `200`, because only the snapshot filter has a published fault — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteDBSnapshot | |
-| RestoreDBInstanceFromDBSnapshot | |
-| CreateDBCluster | |
-| DescribeDBClusters | Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
-| DeleteDBCluster | |
-| CreateDBSubnetGroup | |
-| DescribeDBSubnetGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSubnetGroupName` for a group that does not exist answers `DBSubnetGroupNotFoundFault` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteDBSubnetGroup | |
-| CreateDBParameterGroup | |
-| DescribeDBParameterGroups | Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBParameterGroupName` for a group that does not exist answers `DBParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteDBParameterGroup | |
+| CreateDBInstance | Reports `InstanceCreateTime` from the simulated clock. `DBSubnetGroup` is the published object, so the group's name is one element inside it |
+| DescribeDBInstances | Same instance shape as CreateDBInstance. Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
+| DeleteDBInstance | Same instance shape as CreateDBInstance, with `DBInstanceStatus` `deleting` |
+| ModifyDBInstance | Same instance shape as CreateDBInstance |
+| StartDBInstance | Same instance shape as CreateDBInstance, `available`. Answers `StartDBInstanceResult`; it answered an unnamed `Result` element until #756, which no SDK could decode |
+| StopDBInstance | Same instance shape as CreateDBInstance, `stopped`. Answers `StopDBInstanceResult` — same fix |
+| RebootDBInstance | Same instance shape as CreateDBInstance, `available`. Answers `RebootDBInstanceResult` — same fix |
+| CreateDBSnapshot | Reports `SnapshotCreateTime` from the simulated clock. `OriginalSnapshotCreateTime` and `SourceRegion` are absent: substrate copies no snapshot, so either would claim a copy had happened |
+| DescribeDBSnapshots | Same snapshot shape as CreateDBSnapshot. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSnapshotIdentifier` for a snapshot that does not exist answers `DBSnapshotNotFound` / 404; a `DBInstanceIdentifier` that names no instance stays an empty `200`, because only the snapshot filter has a published fault — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
+| DeleteDBSnapshot | Same snapshot shape as CreateDBSnapshot |
+| RestoreDBInstanceFromDBSnapshot | Same instance shape as CreateDBInstance. The restored instance's `InstanceCreateTime` is its own, not the source instance's — substrate does not carry a creation time across a restore |
+| CreateDBCluster | Reports `ClusterCreateTime` from the simulated clock. `DBSubnetGroup` is a flat string here — `API_DBCluster` publishes the group's name, not the object `API_DBInstance` publishes |
+| DescribeDBClusters | Same cluster shape as CreateDBCluster. Paginates on `Marker`/`MaxRecords`; refuses a `MaxRecords` outside the published 20–100 with `InvalidParameterValue` — see [A page size outside the documented range](#a-page-size-outside-the-documented-range-is-refused-not-honored-or-rewritten) |
+| DeleteDBCluster | Same cluster shape as CreateDBCluster, with `Status` `deleting`. It reported only `DBClusterIdentifier`, `Status` and `DBClusterArn` until #756, where `API_DeleteDBCluster`'s response element is the whole `DBCluster` |
+| CreateDBSubnetGroup | No creation time: `API_DBSubnetGroup` publishes none. `Subnets` and `SupportedNetworkTypes` are absent because substrate reads no `SubnetIds` and so has no subnet to report |
+| DescribeDBSubnetGroups | Same subnet-group shape as CreateDBSubnetGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSubnetGroupName` for a group that does not exist answers `DBSubnetGroupNotFoundFault` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
+| DeleteDBSubnetGroup | Answers an empty result, as AWS publishes |
+| CreateDBParameterGroup | All four of `API_DBParameterGroup`'s members, which is the one RDS shape substrate models completely. No creation time: the shape publishes none |
+| DescribeDBParameterGroups | Same parameter-group shape as CreateDBParameterGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBParameterGroupName` for a group that does not exist answers `DBParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
+| DeleteDBParameterGroup | Answers an empty result, as AWS publishes |
 | ListTagsForResource | `TagList` sorted by key — see below |
 | AddTagsToResource | |
 | RemoveTagsFromResource | |
@@ -17347,6 +17347,30 @@ response renders `owner` before `environment` — so this is substrate's reading
 taken for the reason #862 records: the list was built by ranging a Go map, so two
 identical calls answered in different orders and a caller asserting on the body
 could not replay a recorded run.
+
+**Responses are rendered from the published shape.** All five RDS records — DB instance, cluster,
+snapshot, subnet group and parameter group — already were, unlike ECS's and Glue's: every one of the
+eighteen operations that reports a resource has always answered through a separate item struct, so
+substrate's own `AccountID`, `Region` and `ever_tagged` could not reach an RDS body even before
+[#756](https://github.com/scttfrdmn/substrate/issues/756). What that issue added here is the
+assertion that this stays true, and none of the three has a published home to move to: no RDS shape
+publishes an account or a Region member, and every one publishes the resource's ARN, from which a
+caller recovers both. `API_DBSnapshot.SourceRegion` is not that home — it carries a value only for a
+cross-account or cross-Region copy, which substrate does not perform, so reporting the request's
+Region there would tell a caller the snapshot had been copied.
+
+Writing that assertion settled three divergences, each noted in the table above. The first is the
+creation timestamp: substrate stored one on the instance, the cluster and the snapshot and reported
+it on none of them, while AWS publishes one on each of those three shapes under a different name —
+`InstanceCreateTime`, `ClusterCreateTime` and `SnapshotCreateTime`. All three are now reported, as
+ISO8601, which is the Query protocol's own default format; an unset one is omitted rather than
+rendered as the year-one instant. The second is `DeleteDBCluster`, which reported three members of
+the eleven it held. The third is the cluster's `DBSubnetGroup`, which was nested as the instance's
+object where `API_DBCluster` publishes a flat string, so an SDK reading `DBCluster.DBSubnetGroup`
+got `""` off a response that held the name one element deeper. The fields themselves stay on all
+five stored records, so the state a recorded run replays from is unchanged and the Resource Groups
+Tagging API — which reads those records rather than these responses — still reports an RDS
+resource's tags and whether it has ever been tagged.
 
 ### CloudFormation resource types
 

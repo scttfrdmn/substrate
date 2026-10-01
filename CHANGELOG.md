@@ -314,6 +314,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **RDS reported no creation time on any resource it stamps one on, and nothing asserted that its
+  responses were projected at all** (#756). RDS is the first service the issue has reached that was
+  already answering through a separate item struct rather than encoding its records: `RDSDBInstance`,
+  `RDSDBCluster`, `RDSDBSnapshot`, `RDSDBSubnetGroup` and `RDSDBParameterGroup` declare sixteen
+  bookkeeping fields between them and not one could reach a body, because all seventeen sites that
+  answer a resource hand an item struct to `rdsXMLResponse`. What was missing was the assertion that
+  this holds — the position ECS's four already-projecting records were in at #1308 — so the fix is a
+  new `emulator/rds_wire_test.go` plus `emulator/rds_wire.go` holding the rendering layer moved out of
+  the 1,361-line `rds_plugin.go`, taking the count from **239 still reachable to 223**. The assertion
+  is stronger than the JSON services', RDS being the first query-protocol service on the list: rather
+  than naming members expected absent, it compares the body's whole set of element *paths* against the
+  published shape's, so a member at the wrong depth fails too. Neither `AccountID` nor `Region` has a
+  published home on any RDS shape — every one publishes the resource's ARN, from which a caller
+  recovers both — and `API_DBSnapshot.SourceRegion` is not one either: it carries a value only for a
+  cross-account or cross-Region copy, which substrate does not perform, so reporting the request's
+  Region there would tell a caller the snapshot had been copied.
+- **Three published members RDS held the value for and reported wrongly or not at all**, settled while
+  deciding the projection's membership (#756). The creation time was the worst: `CreateDBInstance`,
+  `CreateDBCluster` and `CreateDBSnapshot` each stamp `CreatedAt` from the simulated clock, AWS
+  publishes a creation timestamp on each of those three shapes — `InstanceCreateTime` on
+  `API_DBInstance`, `ClusterCreateTime` on `API_DBCluster`, `SnapshotCreateTime` on `API_DBSnapshot` —
+  and substrate reported none of them, so a consumer asking a question substrate could answer got
+  nothing. All three are now reported, as a `*time.Time` so that an unset one is omitted rather than
+  rendered `0001-01-01T00:00:00Z`: `,omitempty` has no effect on a struct type in `encoding/xml` any
+  more than in `encoding/json`. No format change was needed, unlike Glue's — the Query protocol's
+  default timestamp format is ISO8601 and `encoding/xml` renders a `time.Time` as RFC3339Nano — so
+  this is not a further instance of #1305, which still stands for ACM, Redshift Data and Firehose.
+  `API_DBSubnetGroup` and `API_DBParameterGroup` publish no creation-time member, which is exactly why
+  those two records store none. Second, `DeleteDBCluster` reported three members — `DBClusterIdentifier`,
+  `Status`, `DBClusterArn` — of the eleven the record it had just read held, because its own inline
+  struct declared only those three where `API_DeleteDBCluster`'s response element is the whole
+  `DBCluster`; all three cluster sites now share one item struct, so a fourth cannot diverge again.
+  Third, the cluster's `DBSubnetGroup` was nested as `DBSubnetGroup>DBSubnetGroupName`, where
+  `API_DBCluster.DBSubnetGroup` is Type: String — the nesting is correct on the *instance*, whose
+  member is a `DBSubnetGroup` object, and that is how it reached the cluster — so an SDK decoding
+  `DBCluster.DBSubnetGroup` read `""` off a response holding the name one element deeper.
+- **`StartDBInstance`, `StopDBInstance` and `RebootDBInstance` answered an unnamed `Result`
+  element** (#756), found by the assertion above. All three go through one handler that builds its
+  envelope with placeholder element names and substitutes them afterwards, and the result element's
+  placeholder was never declared: the field was untagged, so `encoding/xml` named the element from the
+  field and wrote `<Result>`, which the substitution for `XMLResult` could not match. AWS publishes
+  `StartDBInstanceResult`, `StopDBInstanceResult` and `RebootDBInstanceResult`, so an SDK decoding any
+  of the three found no result element and read nothing from a `200`.
 - **Glue answered all six of its persisted records straight to the caller** (#756). Each of the twelve
   operations that reports a database, table, connection, crawler, job or job run carried substrate's
   own `AccountID` and `Region` — neither has `omitempty`, so both were unconditional — and

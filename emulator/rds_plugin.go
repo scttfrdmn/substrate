@@ -427,10 +427,16 @@ func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest,
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
+	// The two element names this operation's response differs in are substituted after marshaling,
+	// so each is declared here as a literal the substitution below rewrites. Result carries the tag
+	// `XMLResult` rather than being left untagged: without it encoding/xml names the element from the
+	// field, writing <Result> — which the substitution never matched, so Start, Stop and
+	// RebootDBInstance answered <Result> where API_StartDBInstance publishes StartDBInstanceResult and
+	// an SDK found no result element at all (#756).
 	type xmlResp struct {
 		XMLName xml.Name `xml:"placeholder"`
 		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result
+		Result  result   `xml:"XMLResult"`
 	}
 	resp := xmlResp{XMLNS: rdsXMLNS, Result: result{DBInstance: dbInstanceToXML(inst)}}
 	// Build raw XML with dynamic element names.
@@ -501,21 +507,8 @@ func (p *RDSPlugin) createDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 		return nil, err
 	}
 
-	type xmlClusterItem struct {
-		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
-		Engine              string `xml:"Engine"`
-		EngineVersion       string `xml:"EngineVersion"`
-		Status              string `xml:"Status"`
-		Endpoint            string `xml:"Endpoint"`
-		ReaderEndpoint      string `xml:"ReaderEndpoint"`
-		Port                int    `xml:"Port"`
-		MasterUsername      string `xml:"MasterUsername"`
-		DBSubnetGroup       string `xml:"DBSubnetGroup>DBSubnetGroupName,omitempty"`
-		MultiAZ             bool   `xml:"MultiAZ"`
-		DBClusterArn        string `xml:"DBClusterArn"`
-	}
 	type result struct {
-		DBCluster xmlClusterItem `xml:"DBCluster"`
+		DBCluster xmlDBClusterItem `xml:"DBCluster"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"CreateDBClusterResponse"`
@@ -523,20 +516,8 @@ func (p *RDSPlugin) createDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 		Result  result   `xml:"CreateDBClusterResult"`
 	}
 	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{DBCluster: xmlClusterItem{
-			DBClusterIdentifier: cluster.DBClusterIdentifier,
-			Engine:              cluster.Engine,
-			EngineVersion:       cluster.EngineVersion,
-			Status:              cluster.Status,
-			Endpoint:            cluster.Endpoint,
-			ReaderEndpoint:      cluster.ReaderEndpoint,
-			Port:                cluster.Port,
-			MasterUsername:      cluster.MasterUsername,
-			DBSubnetGroup:       cluster.DBSubnetGroupName,
-			MultiAZ:             cluster.MultiAZ,
-			DBClusterArn:        cluster.DBClusterArn,
-		}},
+		XMLNS:  rdsXMLNS,
+		Result: result{DBCluster: dbClusterToXML(cluster)},
 	})
 }
 
@@ -561,46 +542,20 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("rds describeDBClusters list: %w", err)
 	}
 
-	type xmlClusterItem struct {
-		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
-		Engine              string `xml:"Engine"`
-		EngineVersion       string `xml:"EngineVersion"`
-		Status              string `xml:"Status"`
-		Endpoint            string `xml:"Endpoint"`
-		ReaderEndpoint      string `xml:"ReaderEndpoint"`
-		Port                int    `xml:"Port"`
-		MasterUsername      string `xml:"MasterUsername"`
-		DBSubnetGroup       string `xml:"DBSubnetGroup>DBSubnetGroupName,omitempty"`
-		MultiAZ             bool   `xml:"MultiAZ"`
-		DBClusterArn        string `xml:"DBClusterArn"`
-	}
-
 	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
-		func(key, _ string) (xmlClusterItem, bool) {
+		func(key, _ string) (xmlDBClusterItem, bool) {
 			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
 			if getErr != nil || data == nil {
-				return xmlClusterItem{}, false
+				return xmlDBClusterItem{}, false
 			}
 			var c RDSDBCluster
 			if json.Unmarshal(data, &c) != nil {
-				return xmlClusterItem{}, false
+				return xmlDBClusterItem{}, false
 			}
 			if filterID != "" && c.DBClusterIdentifier != filterID {
-				return xmlClusterItem{}, false
+				return xmlDBClusterItem{}, false
 			}
-			return xmlClusterItem{
-				DBClusterIdentifier: c.DBClusterIdentifier,
-				Engine:              c.Engine,
-				EngineVersion:       c.EngineVersion,
-				Status:              c.Status,
-				Endpoint:            c.Endpoint,
-				ReaderEndpoint:      c.ReaderEndpoint,
-				Port:                c.Port,
-				MasterUsername:      c.MasterUsername,
-				DBSubnetGroup:       c.DBSubnetGroupName,
-				MultiAZ:             c.MultiAZ,
-				DBClusterArn:        c.DBClusterArn,
-			}, true
+			return dbClusterToXML(c), true
 		})
 
 	if filterID != "" && len(page) == 0 {
@@ -612,8 +567,8 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 	}
 
 	type result struct {
-		DBClusters []xmlClusterItem `xml:"DBClusters>DBCluster"`
-		Marker     string           `xml:"Marker,omitempty"`
+		DBClusters []xmlDBClusterItem `xml:"DBClusters>DBCluster"`
+		Marker     string             `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeDBClustersResponse"`
@@ -652,13 +607,12 @@ func (p *RDSPlugin) deleteDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 	p.removeFromIndex(scope, "dbcluster_ids", id)
 
-	type xmlClusterItem struct {
-		DBClusterIdentifier string `xml:"DBClusterIdentifier"`
-		Status              string `xml:"Status"`
-		DBClusterArn        string `xml:"DBClusterArn"`
-	}
+	// Through the same projection the other two cluster sites use, so DeleteDBCluster answers the
+	// full published DBCluster rather than the three members its own inline struct used to declare
+	// (#756). The record it renders is the one just read out of state, with Status moved to
+	// "deleting", so every member holds the value the cluster had.
 	type result struct {
-		DBCluster xmlClusterItem `xml:"DBCluster"`
+		DBCluster xmlDBClusterItem `xml:"DBCluster"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteDBClusterResponse"`
@@ -666,12 +620,8 @@ func (p *RDSPlugin) deleteDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 		Result  result   `xml:"DeleteDBClusterResult"`
 	}
 	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{DBCluster: xmlClusterItem{
-			DBClusterIdentifier: cluster.DBClusterIdentifier,
-			Status:              cluster.Status,
-			DBClusterArn:        cluster.DBClusterArn,
-		}},
+		XMLNS:  rdsXMLNS,
+		Result: result{DBCluster: dbClusterToXML(cluster)},
 	})
 }
 
@@ -1067,7 +1017,7 @@ func (p *RDSPlugin) createDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 	}
 
 	type result struct {
-		DBParameterGroup xmlDBParamGroupItem `xml:"DBParameterGroup"`
+		DBParameterGroup xmlDBParameterGroupItem `xml:"DBParameterGroup"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"CreateDBParameterGroupResponse"`
@@ -1100,17 +1050,17 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 	}
 
 	page, nextMarker := queryMarkerPage(keys, prefix, cursor, maxRecords,
-		func(key, _ string) (xmlDBParamGroupItem, bool) {
+		func(key, _ string) (xmlDBParameterGroupItem, bool) {
 			data, getErr := p.state.Get(context.Background(), rdsNamespace, key)
 			if getErr != nil || data == nil {
-				return xmlDBParamGroupItem{}, false
+				return xmlDBParameterGroupItem{}, false
 			}
 			var pg RDSDBParameterGroup
 			if json.Unmarshal(data, &pg) != nil {
-				return xmlDBParamGroupItem{}, false
+				return xmlDBParameterGroupItem{}, false
 			}
 			if filterName != "" && pg.DBParameterGroupName != filterName {
-				return xmlDBParamGroupItem{}, false
+				return xmlDBParameterGroupItem{}, false
 			}
 			return dbParamGroupToXML(pg), true
 		})
@@ -1130,8 +1080,8 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 	}
 
 	type result struct {
-		DBParameterGroups []xmlDBParamGroupItem `xml:"DBParameterGroups>DBParameterGroup"`
-		Marker            string                `xml:"Marker,omitempty"`
+		DBParameterGroups []xmlDBParameterGroupItem `xml:"DBParameterGroups>DBParameterGroup"`
+		Marker            string                    `xml:"Marker,omitempty"`
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DescribeDBParameterGroupsResponse"`
@@ -1171,102 +1121,9 @@ func (p *RDSPlugin) deleteDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 // live in rds_tags.go.
 
 // --- XML types ---
-
-// xmlDBInstanceItem is the XML representation of an RDS DB instance.
-type xmlDBInstanceItem struct {
-	DBInstanceIdentifier string      `xml:"DBInstanceIdentifier"`
-	DBInstanceClass      string      `xml:"DBInstanceClass"`
-	Engine               string      `xml:"Engine"`
-	EngineVersion        string      `xml:"EngineVersion"`
-	DBInstanceStatus     string      `xml:"DBInstanceStatus"`
-	MasterUsername       string      `xml:"MasterUsername"`
-	AllocatedStorage     int         `xml:"AllocatedStorage"`
-	DBInstanceArn        string      `xml:"DBInstanceArn"`
-	MultiAZ              bool        `xml:"MultiAZ"`
-	DBSubnetGroupName    string      `xml:"DBSubnetGroup>DBSubnetGroupName,omitempty"`
-	Endpoint             xmlEndpoint `xml:"Endpoint"`
-}
-
-// xmlEndpoint is the XML representation of an RDS endpoint.
-type xmlEndpoint struct {
-	Address string `xml:"Address"`
-	Port    int    `xml:"Port"`
-}
-
-// xmlDBSnapshotItem is the XML representation of an RDS DB snapshot.
-type xmlDBSnapshotItem struct {
-	DBSnapshotIdentifier string `xml:"DBSnapshotIdentifier"`
-	DBInstanceIdentifier string `xml:"DBInstanceIdentifier"`
-	SnapshotType         string `xml:"SnapshotType"`
-	Status               string `xml:"Status"`
-	Engine               string `xml:"Engine"`
-	AllocatedStorage     int    `xml:"AllocatedStorage"`
-	DBSnapshotArn        string `xml:"DBSnapshotArn"`
-}
-
-// xmlDBSubnetGroupItem is the XML representation of an RDS DB subnet group.
-type xmlDBSubnetGroupItem struct {
-	DBSubnetGroupName        string `xml:"DBSubnetGroupName"`
-	DBSubnetGroupDescription string `xml:"DBSubnetGroupDescription"`
-	SubnetGroupStatus        string `xml:"SubnetGroupStatus"`
-	VpcID                    string `xml:"VpcId"`
-	DBSubnetGroupArn         string `xml:"DBSubnetGroupArn"`
-}
-
-// xmlDBParamGroupItem is the XML representation of an RDS DB parameter group.
-type xmlDBParamGroupItem struct {
-	DBParameterGroupName   string `xml:"DBParameterGroupName"`
-	DBParameterGroupFamily string `xml:"DBParameterGroupFamily"`
-	Description            string `xml:"Description"`
-	DBParameterGroupArn    string `xml:"DBParameterGroupArn"`
-}
-
-func dbInstanceToXML(inst RDSDBInstance) xmlDBInstanceItem {
-	return xmlDBInstanceItem{
-		DBInstanceIdentifier: inst.DBInstanceIdentifier,
-		DBInstanceClass:      inst.DBInstanceClass,
-		Engine:               inst.Engine,
-		EngineVersion:        inst.EngineVersion,
-		DBInstanceStatus:     inst.DBInstanceStatus,
-		MasterUsername:       inst.MasterUsername,
-		AllocatedStorage:     inst.AllocatedStorage,
-		DBInstanceArn:        inst.DBInstanceArn,
-		MultiAZ:              inst.MultiAZ,
-		DBSubnetGroupName:    inst.DBSubnetGroupName,
-		Endpoint:             xmlEndpoint{Address: inst.Endpoint.Address, Port: inst.Endpoint.Port},
-	}
-}
-
-func dbSnapshotToXML(snap RDSDBSnapshot) xmlDBSnapshotItem {
-	return xmlDBSnapshotItem{
-		DBSnapshotIdentifier: snap.DBSnapshotIdentifier,
-		DBInstanceIdentifier: snap.DBInstanceIdentifier,
-		SnapshotType:         snap.SnapshotType,
-		Status:               snap.Status,
-		Engine:               snap.Engine,
-		AllocatedStorage:     snap.AllocatedStorage,
-		DBSnapshotArn:        snap.DBSnapshotArn,
-	}
-}
-
-func dbSubnetGroupToXML(sg RDSDBSubnetGroup) xmlDBSubnetGroupItem {
-	return xmlDBSubnetGroupItem{
-		DBSubnetGroupName:        sg.DBSubnetGroupName,
-		DBSubnetGroupDescription: sg.DBSubnetGroupDescription,
-		SubnetGroupStatus:        sg.SubnetGroupStatus,
-		VpcID:                    sg.VpcID,
-		DBSubnetGroupArn:         sg.DBSubnetGroupArn,
-	}
-}
-
-func dbParamGroupToXML(pg RDSDBParameterGroup) xmlDBParamGroupItem {
-	return xmlDBParamGroupItem{
-		DBParameterGroupName:   pg.DBParameterGroupName,
-		DBParameterGroupFamily: pg.DBParameterGroupFamily,
-		Description:            pg.Description,
-		DBParameterGroupArn:    pg.DBParameterGroupArn,
-	}
-}
+//
+// The item structs every handler above answers through, and the projections onto them, live in
+// rds_wire.go.
 
 // --- State helpers ---
 
