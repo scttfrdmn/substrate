@@ -10881,26 +10881,26 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateLoadBalancer | ALB and NLB supported; accepts `Tags.member.N` |
-| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N` |
+| CreateLoadBalancer | ALB and NLB supported; accepts `Tags.member.N`. Answers the `LoadBalancer` of `API_LoadBalancer`, including the `AvailabilityZones.member.N` derived from `Subnets.member.N` and the `SecurityGroups.member.N` the create named — both persisted and reported nowhere before [#756](https://github.com/scttfrdmn/substrate/issues/756). Carries no account or Region member |
+| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N`. Same load-balancer shape as CreateLoadBalancer |
 | DeleteLoadBalancer | |
 | DescribeLoadBalancerAttributes | |
 | ModifyLoadBalancerAttributes | |
-| CreateTargetGroup | Accepts `Tags.member.N` |
-| DescribeTargetGroups | |
+| CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
+| DescribeTargetGroups | Same target-group shape as CreateTargetGroup |
 | DeleteTargetGroup | |
-| ModifyTargetGroup | |
+| ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing still answers the empty list rather than `TargetGroupNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
 | RegisterTargets | |
 | DeregisterTargets | |
 | DescribeTargetHealth | |
-| CreateListener | Accepts `Tags.member.N` |
-| DescribeListeners | |
+| CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
+| DescribeListeners | Same listener shape as CreateListener |
 | DeleteListener | |
-| ModifyListener | |
-| CreateRule | Accepts `Tags.member.N` |
-| DescribeRules | |
+| ModifyListener | Answers the modified listener. An ARN naming nothing answers an empty `Listeners` list rather than `ListenerNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
+| CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
+| DescribeRules | Same rule shape as CreateRule |
 | DeleteRule | |
-| SetRulePriorities | |
+| SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is skipped rather than refused with `RuleNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
@@ -11013,7 +11013,8 @@ Details a consumer can observe:
 - **Eight of `LoadBalancerDescription`'s sixteen members are absent**, each because the operation
   that would set it is not routed: no instance is registered, no health check is configured, no
   policy or backend-server description exists, and no source security group is minted. `VPCId` is
-  reported empty rather than guessed, because nothing here resolves a subnet to a VPC.
+  absent rather than guessed, because nothing here resolves a subnet to a VPC — it is `omitempty` and
+  no classic create persists one.
   `PolicyNames` *is* emitted, as an empty element, because AWS publishes it as one: "The policies.
   If there are no policies enabled, the list is empty."
 - **Every refusal is a code the operation's own page publishes**: `ValidationError`/400 for a member
@@ -11399,6 +11400,28 @@ since all been removed, which is the general rule
 four records therefore carries the same persisted `ever_tagged` flag every other scanned type
 does, written by whichever writer empties the set — ELB's own `RemoveTags` or the tagging
 API's `UntagResources`.
+
+**Responses are rendered from the published shape.** All five ELB records — the four ELBv2 ones
+(load balancer, target group, listener, rule) and the classic load balancer — already were, as RDS's
+and ElastiCache's were: every one of the twelve operations that reports a resource has always
+answered through a separate item struct, so substrate's own `AccountID`, `Region`, ARN `Suffix` and
+`ever_tagged` could not reach an ELB body even before
+[#756](https://github.com/scttfrdmn/substrate/issues/756). What that issue added here is the
+assertion that this stays true, across both generations, and none of the four has a published home to
+move to: no shape in either API publishes an account or a Region member. The four ELBv2 shapes
+publish the resource's ARN, from which a caller recovers both; the classic `LoadBalancerDescription`
+publishes no ARN either, the record's own being there for IAM and the tagging API rather than for a
+response.
+
+Writing that assertion settled three divergences, noted in the table above. Two load-balancer members
+AWS publishes — the `AvailabilityZones` derived from the create's subnets and the `SecurityGroups` it
+named — were persisted and reported nowhere, and are now reported, the zones as the
+`API_AvailabilityZone` objects v2 publishes rather than the bare strings the classic shape uses. And
+two operations answered an empty result for a record they had just written: `ModifyTargetGroup` and
+`SetRulePriorities` now report what they modified. The stored fields themselves stay on all five
+records, so the state a recorded run replays from is unchanged and the Resource Groups Tagging API —
+which reads those records rather than these responses — still reports an ELB resource's tags and
+whether it has ever been tagged, in **both** generations.
 
 ### CloudFormation resource types
 

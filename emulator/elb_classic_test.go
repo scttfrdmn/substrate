@@ -353,7 +353,10 @@ func TestELBClassic_BothGenerationsCanHoldOneName(t *testing.T) {
 
 	_, body := elbClassicRawBody(t, ts.URL, map[string]string{"Action": "DescribeLoadBalancers"})
 	assert.Contains(t, body, v2ARN, "the ELBv2 describe reports the ELBv2 load balancer")
-	assert.Equal(t, 1, strings.Count(body, "<member>"),
+	// Counted on `<LoadBalancerArn>` rather than on `<member>`, which is what this asserted until the
+	// ELBv2 shape gained its published `AvailabilityZones` (#756): every load balancer now carries a
+	// second `<member>` of its own, so the bare count no longer measures how many were reported.
+	assert.Equal(t, 1, strings.Count(body, "<LoadBalancerArn>"),
 		"and reports only it: the classic record is in another key space")
 }
 
