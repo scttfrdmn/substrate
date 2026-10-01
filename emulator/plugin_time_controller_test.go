@@ -239,6 +239,10 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 			want: strconv.FormatFloat(float64(pluginClockFrozen.UnixNano())/1e9, 'f', 3, 64),
 		},
 		{
+			// Epoch seconds, like ECR and ECS above: API_UserPoolType says Cognito returns this
+			// timestamp "in UNIX epoch time format", and the record's time.Time reached the wire
+			// as a quoted RFC3339 string until #756 projected the pool through cognitoUserPoolOut.
+			// This case asserted that string, two cases below one asserting the epoch form.
 			name: "cognito-idp CreateUserPool reports UserPool.CreationDate",
 			observe: func(t *testing.T, ts *emulator.TestServer) string {
 				t.Helper()
@@ -246,7 +250,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 					"AWSCognitoIdentityProviderService.CreateUserPool", `{"PoolName":"clock"}`)
 				return pluginClockJSONField(t, got, "UserPool", "CreationDate")
 			},
-			want: rfc3339,
+			want: strconv.FormatFloat(float64(pluginClockFrozen.UnixNano())/1e9, 'f', 3, 64),
 		},
 		{
 			// The one member here that is not the clock itself: the credentials expire an
@@ -259,7 +263,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 					"cognito-identity", "AWSCognitoIdentityService.GetCredentialsForIdentity", `{}`)
 				return pluginClockJSONField(t, got, "Credentials", "Expiration")
 			},
-			want: pluginClockQuoted(pluginClockFrozen.Add(time.Hour).Format(time.RFC3339)),
+			want: strconv.FormatFloat(float64(pluginClockFrozen.Add(time.Hour).UnixNano())/1e9, 'f', 3, 64),
 		},
 		{
 			// CreateStream answers an empty body, so the stream is described back. The

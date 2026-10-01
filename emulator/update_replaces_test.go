@@ -150,9 +150,9 @@ func TestSchedulerCreateAppliesTheDocumentedStateDefault(t *testing.T) {
 // substrate routes none of the three (#1135), so the pool's own read is the only door a test has to the
 // tag set — which is enough, since `UserPoolType` publishes the tags as a response member.
 //
-// The tag assertions below read the member under the name substrate currently emits, `Tags`, so that they
-// pin the replace-not-merge property rather than accidentally pinning the wrong name. `UserPoolType`
-// publishes it as `UserPoolTags`; that is #1136, and these assertions move with it.
+// The tag assertions below read the member as `UserPoolTags`, the name `UserPoolType` publishes. They
+// read `Tags` until #1136 — the persisted struct was also the wire struct, so its storage-side tag
+// reached the body — and moved here when #756's projection landed, which is what that issue asked for.
 func TestCognitoUpdateUserPoolReplacesRatherThanMerges(t *testing.T) {
 	p, ctx := setupCognitoIDPPlugin(t)
 
@@ -167,11 +167,11 @@ func TestCognitoUpdateUserPoolReplacesRatherThanMerges(t *testing.T) {
 	require.Equal(t, http.StatusOK, createResp.StatusCode)
 	var createOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	require.NoError(t, json.Unmarshal(createResp.Body, &createOut))
-	poolID := createOut.UserPool.UserPoolID
+	poolID := createOut.UserPool.ID
 	require.NotEmpty(t, poolID)
 
 	// The update names only the identifier and the name, so every other published member must revert.
@@ -203,11 +203,14 @@ func TestCognitoUpdateUserPoolReplacesRatherThanMerges(t *testing.T) {
 	assert.Equal(t, "OFF", mfa, "an omitted MfaConfiguration reverts to substrate's OFF reading, not the stored ON")
 	assert.NotContains(t, pool, "Policies", "an omitted Policies reverts")
 	assert.NotContains(t, pool, "LambdaConfig", "an omitted LambdaConfig reverts")
-	assert.NotContains(t, pool, "Tags", "an omitted UserPoolTags reverts")
+	assert.NotContains(t, pool, "UserPoolTags", "an omitted UserPoolTags reverts")
 
 	// Full replacement governs only the members the operation publishes. `Schema` is absent from
 	// `API_UpdateUserPool`'s Request Syntax, and so are these, so the update cannot reset them.
-	for _, preserved := range []string{"Arn", "ProviderName", "Status", "CreationDate"} {
+	// `ProviderName` was in this list until #756 stopped publishing it: the member is still persisted
+	// and still survives the update, but UserPoolType does not declare it, so it is no longer a member
+	// of the response to assert on. cognito_wire_test.go asserts it is still in the record.
+	for _, preserved := range []string{"Arn", "Status", "CreationDate"} {
 		assert.Contains(t, pool, preserved, "%s is not settable by UpdateUserPool and must survive it", preserved)
 	}
 }
@@ -224,25 +227,25 @@ func TestCognitoUpdateUserPoolTagsRoundTrip(t *testing.T) {
 	require.NoError(t, err)
 	var createOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	require.NoError(t, json.Unmarshal(createResp.Body, &createOut))
 
 	_, err = p.HandleRequest(ctx, cognitoIDPRequest(t, "UpdateUserPool", map[string]any{
-		"UserPoolId":   createOut.UserPool.UserPoolID,
+		"UserPoolId":   createOut.UserPool.ID,
 		"PoolName":     "tag-pool",
 		"UserPoolTags": map[string]any{"keep": "c"},
 	}))
 	require.NoError(t, err)
 
 	describeResp, err := p.HandleRequest(ctx, cognitoIDPRequest(t, "DescribeUserPool", map[string]any{
-		"UserPoolId": createOut.UserPool.UserPoolID,
+		"UserPoolId": createOut.UserPool.ID,
 	}))
 	require.NoError(t, err)
 	var out struct {
 		UserPool struct {
-			Tags map[string]string `json:"Tags"`
+			Tags map[string]string `json:"UserPoolTags"`
 		} `json:"UserPool"`
 	}
 	require.NoError(t, json.Unmarshal(describeResp.Body, &out))

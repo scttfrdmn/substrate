@@ -166,9 +166,9 @@ func (p *CognitoIDPPlugin) createUserPool(ctx *RequestContext, req *AWSRequest) 
 	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolIDsKey(ctx.AccountID, ctx.Region), poolID)
 
 	type response struct {
-		UserPool CognitoUserPool `json:"UserPool"`
+		UserPool cognitoUserPoolOut `json:"UserPool"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: pool})
+	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: poolToOut(pool)})
 }
 
 func (p *CognitoIDPPlugin) describeUserPool(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -183,9 +183,9 @@ func (p *CognitoIDPPlugin) describeUserPool(ctx *RequestContext, req *AWSRequest
 		return nil, err
 	}
 	type response struct {
-		UserPool CognitoUserPool `json:"UserPool"`
+		UserPool cognitoUserPoolOut `json:"UserPool"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: *pool})
+	return cognitoIDPJSONResponse(http.StatusOK, response{UserPool: poolToOut(*pool)})
 }
 
 // updateUserPool replaces a pool's published configuration with the request's, per the Important box
@@ -306,12 +306,16 @@ func (p *CognitoIDPPlugin) listUserPools(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("cognito-idp listUserPools loadStringIndex: %w", err)
 	}
 
+	// poolSummary is API_UserPoolDescriptionType, whose six members are the whole shape. The two dates
+	// are epoch seconds rather than time.Time for the reason cognito_idp_wire.go gives: the page says
+	// Cognito returns them "in UNIX epoch time format", and an RFC3339 string fails the SDK's decoder.
 	type poolSummary struct {
-		ID               string    `json:"Id"`
-		Name             string    `json:"Name"`
-		Status           string    `json:"Status"`
-		CreationDate     time.Time `json:"CreationDate"`
-		LastModifiedDate time.Time `json:"LastModifiedDate"`
+		ID               string        `json:"Id"`
+		Name             string        `json:"Name"`
+		Status           string        `json:"Status"`
+		LambdaConfig     any           `json:"LambdaConfig,omitempty"`
+		CreationDate     *EpochSeconds `json:"CreationDate,omitempty"`
+		LastModifiedDate *EpochSeconds `json:"LastModifiedDate,omitempty"`
 	}
 	summaries := make([]poolSummary, 0, len(poolIDs))
 	for _, id := range poolIDs {
@@ -327,8 +331,9 @@ func (p *CognitoIDPPlugin) listUserPools(ctx *RequestContext, req *AWSRequest) (
 			ID:               pool.UserPoolID,
 			Name:             pool.Name,
 			Status:           pool.Status,
-			CreationDate:     pool.CreationDate,
-			LastModifiedDate: pool.LastModifiedDate,
+			LambdaConfig:     pool.LambdaConfig,
+			CreationDate:     cognitoTimeOrNil(pool.CreationDate),
+			LastModifiedDate: cognitoTimeOrNil(pool.LastModifiedDate),
 		})
 	}
 
@@ -392,9 +397,9 @@ func (p *CognitoIDPPlugin) createUserPoolClient(ctx *RequestContext, req *AWSReq
 	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, body.UserPoolID), clientID)
 
 	type response struct {
-		UserPoolClient CognitoUserPoolClient `json:"UserPoolClient"`
+		UserPoolClient cognitoUserPoolClientOut `json:"UserPoolClient"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: client})
+	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: clientToOut(client)})
 }
 
 func (p *CognitoIDPPlugin) describeUserPoolClient(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -410,9 +415,9 @@ func (p *CognitoIDPPlugin) describeUserPoolClient(ctx *RequestContext, req *AWSR
 		return nil, err
 	}
 	type response struct {
-		UserPoolClient CognitoUserPoolClient `json:"UserPoolClient"`
+		UserPoolClient cognitoUserPoolClientOut `json:"UserPoolClient"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: *client})
+	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: clientToOut(*client)})
 }
 
 // updateUserPoolClient replaces an app client's published configuration with the request's, on the
@@ -451,9 +456,9 @@ func (p *CognitoIDPPlugin) updateUserPoolClient(ctx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("cognito-idp updateUserPoolClient state.Put: %w", err)
 	}
 	type response struct {
-		UserPoolClient CognitoUserPoolClient `json:"UserPoolClient"`
+		UserPoolClient cognitoUserPoolClientOut `json:"UserPoolClient"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: *client})
+	return cognitoIDPJSONResponse(http.StatusOK, response{UserPoolClient: clientToOut(*client)})
 }
 
 func (p *CognitoIDPPlugin) deleteUserPoolClient(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -630,9 +635,9 @@ func (p *CognitoIDPPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*A
 	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoGroupNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.GroupName)
 
 	type response struct {
-		Group CognitoGroup `json:"Group"`
+		Group cognitoGroupOut `json:"Group"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{Group: group})
+	return cognitoIDPJSONResponse(http.StatusOK, response{Group: groupToOut(group)})
 }
 
 func (p *CognitoIDPPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -648,9 +653,9 @@ func (p *CognitoIDPPlugin) getGroup(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, err
 	}
 	type response struct {
-		Group CognitoGroup `json:"Group"`
+		Group cognitoGroupOut `json:"Group"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{Group: *group})
+	return cognitoIDPJSONResponse(http.StatusOK, response{Group: groupToOut(*group)})
 }
 
 func (p *CognitoIDPPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -681,7 +686,7 @@ func (p *CognitoIDPPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("cognito-idp listGroups loadStringIndex: %w", err)
 	}
 
-	groups := make([]CognitoGroup, 0, len(groupNames))
+	groups := make([]cognitoGroupOut, 0, len(groupNames))
 	for _, name := range groupNames {
 		data, err := p.state.Get(goCtx, cognitoIDPNamespace, cognitoGroupKey(ctx.AccountID, ctx.Region, body.UserPoolID, name))
 		if err != nil || data == nil {
@@ -691,11 +696,11 @@ func (p *CognitoIDPPlugin) listGroups(ctx *RequestContext, req *AWSRequest) (*AW
 		if json.Unmarshal(data, &g) != nil {
 			continue
 		}
-		groups = append(groups, g)
+		groups = append(groups, groupToOut(g))
 	}
 
 	type response struct {
-		Groups []CognitoGroup `json:"Groups"`
+		Groups []cognitoGroupOut `json:"Groups"`
 	}
 	return cognitoIDPJSONResponse(http.StatusOK, response{Groups: groups})
 }
@@ -740,9 +745,9 @@ func (p *CognitoIDPPlugin) adminCreateUser(ctx *RequestContext, req *AWSRequest)
 	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.Username)
 
 	type response struct {
-		User CognitoUser `json:"User"`
+		User cognitoUserOut `json:"User"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{User: user})
+	return cognitoIDPJSONResponse(http.StatusOK, response{User: userToOut(user)})
 }
 
 func (p *CognitoIDPPlugin) adminSetUserPassword(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -788,23 +793,30 @@ func (p *CognitoIDPPlugin) adminGetUser(ctx *RequestContext, req *AWSRequest) (*
 		return nil, err
 	}
 
-	// AdminGetUser returns user fields at top level (not nested).
+	// AdminGetUser reports the user's members at the top level rather than nested in a User, which is
+	// why this is its own shape and not cognitoUserOut. Member names follow API_AdminGetUser, whose
+	// Response Syntax states the two dates as `number`, with a sample response of 1.682955829578E9 —
+	// hence EpochSeconds. MFAOptions, PreferredMfaSetting and UserMFASettingList are the three
+	// published members substrate does not model, and are absent rather than present and zero (#1013).
 	type response struct {
-		Username             string             `json:"Username"`
-		UserAttributes       []CognitoAttribute `json:"UserAttributes"`
-		UserCreateDate       time.Time          `json:"UserCreateDate"`
-		UserLastModifiedDate time.Time          `json:"UserLastModifiedDate"`
-		Enabled              bool               `json:"Enabled"`
-		UserStatus           string             `json:"UserStatus"`
+		Username             string                `json:"Username"`
+		UserAttributes       []cognitoAttributeOut `json:"UserAttributes"`
+		UserCreateDate       *EpochSeconds         `json:"UserCreateDate,omitempty"`
+		UserLastModifiedDate *EpochSeconds         `json:"UserLastModifiedDate,omitempty"`
+		Enabled              bool                  `json:"Enabled"`
+		UserStatus           string                `json:"UserStatus"`
 	}
-	return cognitoIDPJSONResponse(http.StatusOK, response{
+	resp := response{
 		Username:             user.Username,
-		UserAttributes:       user.Attributes,
-		UserCreateDate:       user.UserCreateDate,
-		UserLastModifiedDate: user.UserLastModifiedDate,
+		UserCreateDate:       cognitoTimeOrNil(user.UserCreateDate),
+		UserLastModifiedDate: cognitoTimeOrNil(user.UserLastModifiedDate),
 		Enabled:              user.Enabled,
 		UserStatus:           user.UserStatus,
-	})
+	}
+	for _, a := range user.Attributes {
+		resp.UserAttributes = append(resp.UserAttributes, cognitoAttributeOut(a))
+	}
+	return cognitoIDPJSONResponse(http.StatusOK, resp)
 }
 
 func (p *CognitoIDPPlugin) adminDeleteUser(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -835,7 +847,7 @@ func (p *CognitoIDPPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("cognito-idp listUsers loadStringIndex: %w", err)
 	}
 
-	users := make([]CognitoUser, 0, len(userNames))
+	users := make([]cognitoUserOut, 0, len(userNames))
 	for _, name := range userNames {
 		data, err := p.state.Get(goCtx, cognitoIDPNamespace, cognitoUserKey(ctx.AccountID, ctx.Region, body.UserPoolID, name))
 		if err != nil || data == nil {
@@ -845,11 +857,11 @@ func (p *CognitoIDPPlugin) listUsers(ctx *RequestContext, req *AWSRequest) (*AWS
 		if json.Unmarshal(data, &u) != nil {
 			continue
 		}
-		users = append(users, u)
+		users = append(users, userToOut(u))
 	}
 
 	type response struct {
-		Users []CognitoUser `json:"Users"`
+		Users []cognitoUserOut `json:"Users"`
 	}
 	return cognitoIDPJSONResponse(http.StatusOK, response{Users: users})
 }
@@ -931,7 +943,7 @@ func (p *CognitoIDPPlugin) adminListGroupsForUser(ctx *RequestContext, req *AWSR
 	}
 
 	goCtx := context.Background()
-	groups := make([]CognitoGroup, 0, len(user.Groups))
+	groups := make([]cognitoGroupOut, 0, len(user.Groups))
 	for _, gName := range user.Groups {
 		data, err := p.state.Get(goCtx, cognitoIDPNamespace, cognitoGroupKey(ctx.AccountID, ctx.Region, body.UserPoolID, gName))
 		if err != nil || data == nil {
@@ -941,11 +953,11 @@ func (p *CognitoIDPPlugin) adminListGroupsForUser(ctx *RequestContext, req *AWSR
 		if json.Unmarshal(data, &g) != nil {
 			continue
 		}
-		groups = append(groups, g)
+		groups = append(groups, groupToOut(g))
 	}
 
 	type response struct {
-		Groups []CognitoGroup `json:"Groups"`
+		Groups []cognitoGroupOut `json:"Groups"`
 	}
 	return cognitoIDPJSONResponse(http.StatusOK, response{Groups: groups})
 }

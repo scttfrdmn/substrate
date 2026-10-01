@@ -501,6 +501,10 @@ func TestCFNGetAtt_PerResourceTypeAndAttribute(t *testing.T) {
 			// "Arn", "ProviderName", "ProviderURL" and "UserPoolId". UserPoolId had no arm and
 			// answered the physical ID, which for this type happens to be right — asserted here
 			// so the arm that makes it deliberate cannot regress into an accident again.
+			//
+			// Provider and URL are also the pin on deployCognitoUserPool deriving them: #756 stopped
+			// CreateUserPool publishing ProviderName, which UserPoolType does not declare, so the
+			// deployer computes both from the Region and the pool ID as real CloudFormation does.
 			name: "cognito user pool id, provider name and provider url",
 			resources: `"UP": {"Type": "AWS::Cognito::UserPool", "Properties": {
 				"UserPoolName": "getatt-pool"}}`,

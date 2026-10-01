@@ -1803,3 +1803,14 @@ func RDSTimeOrNilForTest(t time.Time) *time.Time {
 func ElastiCacheTimeOrNilForTest(t time.Time) *time.Time {
 	return elasticacheTimeOrNil(t)
 }
+
+// CognitoTimeOrNilForTest wraps cognitoTimeOrNil for external tests.
+//
+// Exported for the same reason as [GlueTimeOrNilForTest], which it mirrors exactly: every Cognito
+// handler stamps its record from the simulated clock, so no request produces a record whose time is
+// zero, and the arm exists for a state encoding this substrate did not write. What it keeps out of a
+// body is a published member AWS marks Required: No reported as the epoch-seconds `null` a zero
+// EpochSeconds marshals to, or — worse, had the conversion been the record's — as 1970 (#756).
+func CognitoTimeOrNilForTest(t time.Time) *EpochSeconds {
+	return cognitoTimeOrNil(t)
+}

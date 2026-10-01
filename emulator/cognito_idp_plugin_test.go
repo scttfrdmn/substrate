@@ -89,42 +89,38 @@ func TestCognitoIDP_CreateAndDescribeUserPool(t *testing.T) {
 		t.Fatalf("CreateUserPool: want 200, got %d", resp.StatusCode)
 	}
 
+	// Id, not UserPoolId: API_UserPoolType publishes the identifier as Id, and #756 stopped substrate
+	// answering it under the unpublished name. ProviderName is gone from this shape for the same
+	// reason — it is still persisted, which TestCognitoWire_ProjectionLeavesTheRecordIntact asserts.
 	var createOut struct {
 		UserPool struct {
-			UserPoolID   string `json:"UserPoolId"`
-			Name         string `json:"Name"`
-			Arn          string `json:"Arn"`
-			ProviderName string `json:"ProviderName"`
-			Status       string `json:"Status"`
+			ID     string `json:"Id"`
+			Name   string `json:"Name"`
+			Arn    string `json:"Arn"`
+			Status string `json:"Status"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(resp.Body, &createOut); err != nil {
 		t.Fatalf("unmarshal CreateUserPool response: %v", err)
 	}
 
-	poolID := createOut.UserPool.UserPoolID
+	poolID := createOut.UserPool.ID
 	if poolID == "" {
-		t.Fatal("UserPoolId is empty")
+		t.Fatal("Id is empty")
 	}
 	// Pool ID must be in the format {region}_{12-char alphanum}.
 	parts := strings.SplitN(poolID, "_", 2)
 	if len(parts) != 2 || parts[0] != "us-east-1" {
-		t.Errorf("UserPoolId %q does not match expected format {region}_{id}", poolID)
+		t.Errorf("Id %q does not match expected format {region}_{id}", poolID)
 	}
 	if len(parts[1]) != 12 {
-		t.Errorf("UserPoolId suffix %q should be 12 chars, got %d", parts[1], len(parts[1]))
+		t.Errorf("Id suffix %q should be 12 chars, got %d", parts[1], len(parts[1]))
 	}
 
 	// Verify ARN format.
 	wantARNPrefix := "arn:aws:cognito-idp:us-east-1:123456789012:userpool/"
 	if !strings.HasPrefix(createOut.UserPool.Arn, wantARNPrefix) {
 		t.Errorf("Arn %q should start with %q", createOut.UserPool.Arn, wantARNPrefix)
-	}
-
-	// Verify ProviderName format.
-	wantProviderName := "cognito-idp.us-east-1.amazonaws.com/" + poolID
-	if createOut.UserPool.ProviderName != wantProviderName {
-		t.Errorf("ProviderName = %q, want %q", createOut.UserPool.ProviderName, wantProviderName)
 	}
 
 	if createOut.UserPool.Status != "Enabled" {
@@ -145,15 +141,15 @@ func TestCognitoIDP_CreateAndDescribeUserPool(t *testing.T) {
 
 	var descOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
-			Name       string `json:"Name"`
+			ID   string `json:"Id"`
+			Name string `json:"Name"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(descResp.Body, &descOut); err != nil {
 		t.Fatalf("unmarshal DescribeUserPool: %v", err)
 	}
-	if descOut.UserPool.UserPoolID != poolID {
-		t.Errorf("DescribeUserPool UserPoolId = %q, want %q", descOut.UserPool.UserPoolID, poolID)
+	if descOut.UserPool.ID != poolID {
+		t.Errorf("DescribeUserPool Id = %q, want %q", descOut.UserPool.ID, poolID)
 	}
 	if descOut.UserPool.Name != "test-pool" {
 		t.Errorf("DescribeUserPool Name = %q, want test-pool", descOut.UserPool.Name)
@@ -173,13 +169,13 @@ func TestCognitoIDP_UserPoolClient(t *testing.T) {
 	}
 	var poolOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(poolResp.Body, &poolOut); err != nil {
 		t.Fatalf("unmarshal pool: %v", err)
 	}
-	poolID := poolOut.UserPool.UserPoolID
+	poolID := poolOut.UserPool.ID
 
 	// Create client.
 	createClient := cognitoIDPRequest(t, "CreateUserPoolClient", map[string]any{
@@ -276,13 +272,13 @@ func TestCognitoIDP_AdminCreateUser(t *testing.T) {
 	}
 	var poolOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(poolResp.Body, &poolOut); err != nil {
 		t.Fatalf("unmarshal pool: %v", err)
 	}
-	poolID := poolOut.UserPool.UserPoolID
+	poolID := poolOut.UserPool.ID
 
 	// Admin create user.
 	createUser := cognitoIDPRequest(t, "AdminCreateUser", map[string]any{
@@ -371,13 +367,13 @@ func TestCognitoIDP_InitiateAuth(t *testing.T) {
 	}
 	var poolOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(poolResp.Body, &poolOut); err != nil {
 		t.Fatalf("unmarshal pool: %v", err)
 	}
-	poolID := poolOut.UserPool.UserPoolID
+	poolID := poolOut.UserPool.ID
 
 	createClient := cognitoIDPRequest(t, "CreateUserPoolClient", map[string]any{
 		"UserPoolId": poolID,
@@ -451,13 +447,13 @@ func TestCognitoIDP_Groups(t *testing.T) {
 	}
 	var poolOut struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(poolResp.Body, &poolOut); err != nil {
 		t.Fatalf("unmarshal pool: %v", err)
 	}
-	poolID := poolOut.UserPool.UserPoolID
+	poolID := poolOut.UserPool.ID
 
 	// Create group.
 	createGroup := cognitoIDPRequest(t, "CreateGroup", map[string]any{
@@ -727,13 +723,13 @@ func createCognitoPool(t *testing.T, p *emulator.CognitoIDPPlugin, ctx *emulator
 	}
 	var out struct {
 		UserPool struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
 		t.Fatalf("unmarshal pool: %v", err)
 	}
-	return out.UserPool.UserPoolID
+	return out.UserPool.ID
 }
 
 func TestCognitoIDP_UpdateUserPool(t *testing.T) {
@@ -793,9 +789,13 @@ func TestCognitoIDP_ListUserPools(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("want 200, got %d", resp.StatusCode)
 	}
+	// This decoded `UserPoolId` before #756 — a member API_UserPoolDescriptionType does not publish
+	// and listUserPools has never sent, so the ids went unchecked and the only live assertion was the
+	// count. Reading `Id` is also what makes this the agreement half of #1286: the summary and
+	// CreateUserPool/DescribeUserPool now name the identifier identically.
 	var out struct {
 		UserPools []struct {
-			UserPoolID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPools"`
 	}
 	if err := json.Unmarshal(resp.Body, &out); err != nil {
@@ -803,6 +803,11 @@ func TestCognitoIDP_ListUserPools(t *testing.T) {
 	}
 	if len(out.UserPools) != 2 {
 		t.Errorf("want 2 pools, got %d", len(out.UserPools))
+	}
+	for i, summary := range out.UserPools {
+		if summary.ID == "" {
+			t.Errorf("UserPools[%d].Id is empty", i)
+		}
 	}
 }
 

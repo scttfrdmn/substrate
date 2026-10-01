@@ -16562,12 +16562,12 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 | Operation | Notes |
 |-----------|-------|
 | CreateUserPool | Pool ID format: `{region}_{12-char alphanum}`, derived from the request ID (#856) |
-| DescribeUserPool | Reports the stored pool record, and is the only door that publishes it after an update |
+| DescribeUserPool | Reports the pool as `UserPoolType` — so the identifier is `Id` and the tag set is `UserPoolTags` — and is the only door that publishes it after an update |
 | UpdateUserPool | Replaces the published configuration and answers an empty body — see below |
 | DeleteUserPool | Cascades: the pool's app clients, groups and users are deleted with it |
-| ListUserPools | `MaxResults` is published `Required: Yes` over 1–60 with no default, so an absent, zero or out-of-range value is refused rather than rewritten (#1062). Summaries ascend by pool ID; `NextToken` is reported as the next pool's ID but is not read back, so a second page repeats the first |
+| ListUserPools | Summaries are `UserPoolDescriptionType`, `LambdaConfig` included. `MaxResults` is published `Required: Yes` over 1–60 with no default, so an absent, zero or out-of-range value is refused rather than rewritten (#1062). Summaries ascend by pool ID; `NextToken` is reported as the next pool's ID but is not read back, so a second page repeats the first |
 | CreateUserPoolClient | Reads `ClientName`, `GenerateSecret` and `ExplicitAuthFlows`; a generated secret is 24 characters, two drawn IDs concatenated |
-| DescribeUserPoolClient | Reports the stored client record, `ClientSecret` included |
+| DescribeUserPoolClient | Reports the client as `UserPoolClientType`, `ClientSecret` included |
 | UpdateUserPoolClient | Replaces the published configuration — see below |
 | DeleteUserPoolClient | Refuses an unknown client before deleting, unlike the group and user deletes |
 | ListUserPoolClients | `UserPoolClients` summaries of `ClientId`/`ClientName`/`UserPoolId`, ascending by id. One page only: `MaxResults` is rewritten to 60 and never applied as a page size, a page-size defect recorded rather than smoothed over. An absent `UserPoolId` is refused rather than answered with an empty list (#1062) |
@@ -16575,11 +16575,11 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 | DescribeUserPoolDomain | Reads no state: echoes the requested `Domain` with `Status` `ACTIVE`, so a domain that was never created still describes as active |
 | DeleteUserPoolDomain | Deletes the recorded domain with no existence check |
 | CreateGroup | Records `Description`, `RoleArn` and `Precedence` against a pool that must exist |
-| GetGroup | Reports the stored group record |
+| GetGroup | Reports the group as `GroupType`. `Precedence` is reported as stored, including zero, which the page's `null` default is distinguishable from in the shape but not in the record |
 | ListGroups | Every group of the pool in one page, ascending by name; no paging member is read |
 | DeleteGroup | `200` with no existence check, and a user's recorded membership outlives the group — see `AdminListGroupsForUser` |
-| AdminCreateUser | `UserStatus` `FORCE_CHANGE_PASSWORD`; `TemporaryPassword` is decoded and not stored |
-| AdminGetUser | Reports the user's fields at the top level rather than nested, as the operation publishes them |
+| AdminCreateUser | `UserStatus` `FORCE_CHANGE_PASSWORD`; `TemporaryPassword` is decoded and not stored. The user is reported as `UserType`, whose seven members include neither `UserPoolId` nor a group list |
+| AdminGetUser | Reports the user's fields at the top level rather than nested, as the operation publishes them, and under the member names `UserType` uses — so no `UserPoolId` and no `Groups` |
 | AdminDeleteUser | `200` with no existence check |
 | AdminSetUserPassword | `Permanent: true` moves the user to `CONFIRMED`. The password itself is never stored, and nothing later verifies one — see `InitiateAuth` |
 | ListUsers | Every user of the pool in one page, ascending by username; `Filter`, `AttributesToGet` and `PaginationToken` are not read |
@@ -16653,19 +16653,78 @@ So the merge there is what the page describes, and substrate keeps it.
 
 AWS publishes `ListTagsForResource`, `TagResource` and `UntagResource` for `cognito-idp`. Substrate routes
 none of the three ([#1135](https://github.com/scttfrdmn/substrate/issues/1135)), so a user pool's tag set
-is readable only through `DescribeUserPool`, where `UserPoolType` publishes it. `UpdateUserPool` replaces
-the tag set outright like every other published member. Note that `DescribeUserPool` currently reports the
-set as `Tags` rather than the published `UserPoolTags`
-([#1136](https://github.com/scttfrdmn/substrate/issues/1136)).
+is readable only through `DescribeUserPool`, where `UserPoolType` publishes it as `UserPoolTags`.
+`UpdateUserPool` replaces the tag set outright like every other published member.
 
-`CreateUserPool`, `DescribeUserPool` and `UpdateUserPool` report the pool's identifier as
-`UserPool.UserPoolId`, where `UserPoolType` publishes it as `Id` and carries no `UserPoolId` member at
-all ([#1286](https://github.com/scttfrdmn/substrate/issues/1286)). The cause is that the state struct
-is also the wire struct, so its storage-side tag reaches the response; `ListUserPools` escapes it only
-because it builds a separate summary type, and already renders `Id`. So the two disagree inside one
-service, which is what makes it a shape bug rather than a naming preference — an SDK caller reads
-`CreateUserPoolOutput.UserPool.Id` as nil and must fall back to `ListUserPools` to learn the ID of the
-pool it just created.
+**Responses are rendered from the published shape.** Four of the five Cognito records — the user pool,
+its app client, a group and a user — were not. Each was embedded straight into a response struct, so
+every persisted member marshaled into the body, across eleven operations. Since
+[#756](https://github.com/scttfrdmn/substrate/issues/756) those eleven answer through the projections
+in `emulator/cognito_idp_wire.go`, and the identity pool — whose four operations already built their
+own response struct, as `ListUserPools`, `ListUserPoolClients`, `AdminGetUser` and `SignUp` did on this
+side — is pinned by the same tests. None of substrate's `AccountID`, `Region` and `ever_tagged` has a
+published home to move to: no shape in either API declares an account or a Region member, checked
+member-by-member against `API_UserPoolType`, `API_UserPoolClientType`, `API_GroupType`, `API_UserType`
+and `API_IdentityPool`. `UserPoolType` publishes the `Arn` instead, from which a caller recovers both,
+which is what the real API requires of one.
+
+Reading those shapes member-by-member to write the projection settled five divergences, noted in the
+tables above:
+
+- **Two members were reported under a name AWS does not publish.** The pool's identifier was
+  `UserPoolId`, where `UserPoolType` publishes `Id` and declares no `UserPoolId` at all
+  ([#1286](https://github.com/scttfrdmn/substrate/issues/1286)), and its tag set was `Tags`, where the
+  same shape publishes `UserPoolTags`
+  ([#1136](https://github.com/scttfrdmn/substrate/issues/1136)). The identifier is the one that bit: an
+  SDK decoding `CreateUserPool` read `UserPool.Id` as nil and had to fall back to `ListUserPools` to
+  learn the ID of the pool it had just created — and `ListUserPools` rendered `Id` correctly from its
+  own summary struct, so one service answered the same identifier under two member names depending on
+  which door a caller knocked on.
+- **Three unpublished members reached a body.** The pool's `ProviderName` is absent from all thirty-six
+  of `UserPoolType`'s members, and is derivable from the pool ID and the Region — which is how
+  substrate mints it and how the `AWS::Cognito::UserPool` deployer now recovers it for the
+  `ProviderName` and `ProviderURL` attributes rather than reading it off the response, as real
+  CloudFormation computes it. A user's `UserPoolId` and `Groups` are likewise undeclared by
+  `API_UserType`: the pool ID is how a user is keyed, and `AdminListGroupsForUser` is the operation
+  that reports a user's groups.
+- **`DescribeIdentityPool` reported a `Roles` member.** `API_DescribeIdentityPool` publishes ten
+  response members and that is not one of them. `GetIdentityPoolRoles` is the published door to a
+  pool's role mapping, substrate routes it, and the stored roles are still answered there.
+- **Every Cognito timestamp was an RFC3339 string.** All nine are now epoch seconds — see below.
+- **`ListUserPools` withheld a member its summary publishes.** `API_UserPoolDescriptionType` declares
+  `LambdaConfig`, substrate stores it, and the summary reported it nowhere; it now does.
+
+The stored fields themselves stay on all five records, so the state a recorded run replays from is
+unchanged and the Resource Groups Tagging API — which reads those records rather than these responses —
+still reports a user pool's tags and whether it has ever been tagged. `ProviderName` and a user's
+`Groups` are still persisted and still answered, by the CloudFormation deployer's derivation and by
+`AdminListGroupsForUser` respectively.
+
+Published members substrate does not model are **absent** rather than reported as zero
+([#1013](https://github.com/scttfrdmn/substrate/issues/1013)). Two are worth naming because a consumer
+is likely to look for them: `UserPoolClientType.LastModifiedDate` and `GroupType.LastModifiedDate` are
+absent because no Cognito record but the user pool persists a modification time at all, and
+`UserType.MFAOptions` because substrate records no MFA enrolment for a user. `UserPoolType`'s long
+configuration surface — `AccountRecoverySetting` through `VerificationMessageTemplate`, twenty-five
+members — is absent for the same reason.
+
+### Timestamps are epoch seconds, as both services publish them
+
+Every Cognito timestamp carries the same sentence on its page: *"Amazon Cognito returns this timestamp
+in UNIX epoch time format."* Both services speak AWS JSON, where a Timestamp is a JSON number, and
+`API_AdminGetUser`'s Response Syntax says `"UserCreateDate": number` outright with a sample response of
+`1.682955829578E9`. Substrate reported a Go `time.Time`, which marshals to an RFC3339 string, so the
+SDK's epoch-seconds decoder was handed a string — a live decode failure rather than a cosmetic one
+([#1305](https://github.com/scttfrdmn/substrate/issues/1305)). Nine members across seven sites moved
+together in #756: `CreationDate` and `LastModifiedDate` on the pool and on `ListUserPools`' summary,
+`CreationDate` on the app client and on a group, `UserCreateDate` and `UserLastModifiedDate` on a user
+and on `AdminGetUser`, and `Credentials.Expiration` on `GetCredentialsForIdentity`. The three sites
+that already projected correctly are included deliberately: a service answering the same published
+member in two formats is worse than either end state.
+
+The records keep their `time.Time`, and the conversion happens in the projection. That is
+`emulator/ecr_wire.go`'s rule — retyping a persisted field changes the format of every recorded run,
+because the state manager snapshots those bytes and a replay reads them back.
 
 ### CloudFormation resource types
 
@@ -16690,13 +16749,23 @@ Cognito MAUs: first 50,000 free, then $0.0055 per MAU.
 | Operation | Notes |
 |-----------|-------|
 | CreateIdentityPool | |
-| DescribeIdentityPool | |
+| DescribeIdentityPool | Reports the six of `API_DescribeIdentityPool`'s ten members substrate models. `Roles` is **not** among them and is no longer reported (#756) — `GetIdentityPoolRoles` is the published door to a pool's role mapping |
 | DeleteIdentityPool | |
 | ListIdentityPools | `MaxResults` is **required** over 1–60 and an absent value is refused rather than defaulted, because the API publishes no default (#671). Pages on `NextToken`, which is the next pool's ID rather than an opaque cursor; summaries carry `IdentityPoolId` and `IdentityPoolName` only |
 | GetId | Mints a `REGION:GUID` identity ID from the [request-derived minter](#an-identifier-a-replay-mints-is-the-one-it-recorded), so a replay answers with the ID its recording answered with (#856). The request is not read: no pool is looked up, nothing is persisted, and `IdentityPoolId` and `Logins` are ignored — a second call for one login returns a second ID |
 | GetIdentityPoolRoles | `ResourceNotFoundException`/404 for an absent pool, `InvalidParameterException`/400 for an absent `IdentityPoolId`; `Roles` is `{}` rather than `null` when none are set |
 | SetIdentityPoolRoles | Merges into the existing role map rather than replacing it, so a call omitting a previously set key leaves that key in place. Same refusals as `GetIdentityPoolRoles`; nothing validates that a role ARN exists in IAM |
-| GetCredentialsForIdentity | Returns stub temporary credentials |
+| GetCredentialsForIdentity | Returns stub temporary credentials, the whole of `API_Credentials`' four members. `Expiration` is one hour past the simulated clock and is reported as epoch seconds, as the page publishes it |
+
+**Responses are rendered from the published shape.** All four operations that report an identity pool
+already built their own response struct, so substrate's `AccountID` and `Region` could not reach a body
+here even before [#756](https://github.com/scttfrdmn/substrate/issues/756) — and `API_IdentityPool`
+declares neither, so neither has a published home to move to. What that issue added is the assertion
+that this stays true, and writing it caught the two divergences recorded in the table above: an
+unpublished `Roles` on `DescribeIdentityPool`, and `Credentials.Expiration` reported as an RFC3339
+string where the page publishes epoch seconds. See
+[Responses are rendered from the published shape](#cognito-user-pools) under Cognito User Pools for the
+rest of that reading; the two services were fixed together, since both answer from the same records.
 
 ### CloudFormation resource types
 
