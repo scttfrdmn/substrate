@@ -262,7 +262,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   record that never carried the member, which is the vacuous form #1304 shipped on EFS. Deliberately
   *not* the stronger form `emulator/rds_wire_test.go` uses, which requires a record's members to be
   exactly the published ones: `smToMap` answers seven of `DescribeStateMachine`'s fourteen published
-  members and `describeActivity` three of five, and an expectation keyed on that would have to be
+  members and `describeActivity` three of four, and an expectation keyed on that would have to be
   rewritten by the PR that closes the gap. Six operations carry nothing a projection could leak —
   `UpdateStateMachine`, `StopExecution`, the two deletes and the two tag writes — and are driven
   anyway, so the set reads as complete rather than as a sample. `make wire-bookkeeping-check` moves to

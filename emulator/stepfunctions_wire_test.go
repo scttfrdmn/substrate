@@ -33,7 +33,7 @@ import (
 // emulator/rds_wire_test.go, the strongest form in the suite, walks into the element that holds a
 // record and requires its members to be *exactly* the published ones. That form is not taken
 // here: smToMap answers seven of the fourteen members API_DescribeStateMachine publishes and
-// describeActivity three of API_DescribeActivity's five, so an exact-membership expectation would
+// describeActivity three of API_DescribeActivity's four, so an exact-membership expectation would
 // pin that gap and have to be rewritten by the PR that closes it. The absence walk is indifferent
 // to it, states the one thing the inventory needs, and is the form
 // emulator/configservice_wire_test.go, emulator/glue_wire_test.go and
