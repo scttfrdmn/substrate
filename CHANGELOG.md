@@ -244,6 +244,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Step Functions' three records are recorded as projected** (#756). `StateMachineState`,
+  `ExecutionState` and `ActivityState` declare `AccountID` and `Region` under wire-visible `json`
+  tags, and the two taggable ones also declare `EverTagged` as `ever_tagged` — eight of the
+  inventory's lines — and none of the eight can reach a body: all eighteen routed operations answer
+  through `statesJSONResponse` with a hand-built map, one of the two named projections `smToMap` and
+  `execToMap`, or a list entry struct declared inside its own handler, and every `json.Marshal` of a
+  record in the plugin writes to state rather than to a response. The new
+  `emulator/stepfunctions_wire_test.go` holds one test per record, each driving every operation that
+  answers it and failing on a member named for any of the three at any depth. The comparison is
+  case-insensitive — the records spell their tags with the Go identifier while every published member
+  of every shape here is lowerCamelCase — and it is on the member *name*, because the account and the
+  Region appear legitimately in every body as segments of a `states` ARN. `ever_tagged` is the part
+  worth stating: it carries `,omitempty` and is set by `TagResource` alone, never by create-with-tags
+  (#938), so the state-machine and activity tests tag the resource and require the flag on the stored
+  record *before* requiring its absence from a response — without that the absence would hold of a
+  record that never carried the member, which is the vacuous form #1304 shipped on EFS. Deliberately
+  *not* the stronger form `emulator/rds_wire_test.go` uses, which requires a record's members to be
+  exactly the published ones: `smToMap` answers seven of `DescribeStateMachine`'s fourteen published
+  members and `describeActivity` three of five, and an expectation keyed on that would have to be
+  rewritten by the PR that closes the gap. Six operations carry nothing a projection could leak —
+  `UpdateStateMachine`, `StopExecution`, the two deletes and the two tag writes — and are driven
+  anyway, so the set reads as complete rather than as a sample. `make wire-bookkeeping-check` moves to
+  **159 projected across 62 records, 160 still reachable** of the same 319 declared.
+
 - **Redshift's four records are recorded as projected** (#756). `RedshiftCluster`,
   `RedshiftClusterParameterGroup`, `RedshiftClusterSubnetGroup` and `RedshiftSnapshot` each declare
   `AccountID` and `Region` under a wire-visible `json` tag — eight of the inventory's lines — and

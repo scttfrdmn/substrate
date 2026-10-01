@@ -16300,6 +16300,42 @@ array — so the plugin disagreed with itself about the wire shape of its own ta
 a tag set at create time could not be read back in a shape any SDK decodes, and
 `TagResource` could not be called by one at all. Both now use AWS's array (#910).
 
+### The account and Region a record carries reach no response
+
+Each of the three persisted records — `StateMachineState`, `ExecutionState` and
+`ActivityState` — declares `AccountID` and `Region` under wire-visible `json`
+tags, and the two taggable ones also declare `EverTagged` as `ever_tagged`,
+because the record is what `MemoryStateManager` snapshots and a replay reads back.
+No Step Functions shape publishes any of the three, and none reaches a body: every
+one of the eighteen routed operations answers through `statesJSONResponse` with
+either a hand-built map, one of the two named projections `smToMap` and
+`execToMap`, or a list entry struct declared inside its own handler
+(`ListStateMachines`, `ListExecutions` and `ListActivities` each have one), and
+`ListTagsForResource` decodes the stored record into a one-member struct and
+answers only its tags. Every `json.Marshal` of a record in the plugin is in a
+`save*` helper writing to state.
+
+All eighteen are driven by
+`TestStepFunctionsWire_StateMachineResponsesCarryNoBookkeepingMember` and its two
+siblings in `emulator/stepfunctions_wire_test.go`, which walk the decoded document
+and fail on a member named for any of the three at any depth — so the eight
+entries this discharges in `scripts/wire-bookkeeping-baseline.txt` stay listed as
+declarations rather than as leaks
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). Two details make the
+walk worth making. The assertion is on the member *name*, because the account and
+the Region appear in every body as segments of a `states` ARN, which is published.
+And `ever_tagged` is `,omitempty` and is set by `TagResource` alone — never by
+create-with-tags (#938) — so the state-machine and activity tests tag the resource
+and assert the flag is set on the stored record *before* asserting it is absent
+from a response; without that step the absence would hold of a record that never
+carried the member, which is the vacuous form #1304 shipped on EFS.
+
+Six of the eighteen carry nothing a projection could leak and are driven anyway:
+`UpdateStateMachine` answers only `updateDate`, `StopExecution` only `stopDate`,
+and `DeleteStateMachine`, `DeleteActivity`, `TagResource` and `UntagResource` an
+empty object — none reads a member off the record it addresses. They are listed so
+the set reads as complete rather than as a sample.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
