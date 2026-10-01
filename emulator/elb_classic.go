@@ -576,7 +576,9 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 
 	// A name naming nothing is refused rather than skipped, because this operation publishes
 	// `LoadBalancerNotFound` for it — unlike ELBv2's `DescribeLoadBalancers`, which publishes the
-	// code for its own `Names` and whose handler here still filters silently.
+	// code for its own `Names` and whose handler here still filters silently. The refusal is
+	// [elbClassicNotFoundError], shared with the tag trio so that the four classic operations that
+	// can answer this code answer one message as well as one code (#844).
 	byName := make(map[string]ELBClassicLoadBalancer, len(all))
 	for _, lb := range all {
 		byName[lb.Name] = lb
@@ -587,11 +589,7 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 		for _, name := range names {
 			lb, found := byName[name]
 			if !found {
-				return nil, &AWSError{
-					Code:       "LoadBalancerNotFound",
-					Message:    fmt.Sprintf("There is no ACTIVE Load Balancer named '%s'", name),
-					HTTPStatus: http.StatusBadRequest,
-				}
+				return nil, elbClassicNotFoundError(name)
 			}
 			selected = append(selected, lb)
 		}
@@ -746,13 +744,12 @@ func classicLBToItem(lb ELBClassicLoadBalancer) elbClassicLBItem {
 // ([elbResolveAnyGenerationTaggedResource]) serve both generations without either learning what a
 // classic record looks like.
 //
-// The closure has no caller yet, and that is worth saying rather than leaving to be discovered:
-// [elbTaggedResource.encode] is called only by CloudFormation's two tag writers, and
-// [cfnELBStampableTypes] lists the four ELBv2 types alone, so nothing reaches it until the classic
-// type has a deploy helper (Tier 2 of #844). The tagging API's writes go through
-// [mergeResourceTags] on the raw JSON instead. It is written now because the alternative is a fifth
-// arm shaped differently from the other four, and a nil closure there is a panic waiting for the
-// first caller rather than a decision anyone made.
+// The closure's first caller is the classic tag trio #844's Tier 1b routed — see elb_classic_tags.go,
+// whose writes go through [elbTaggedResource.encode] so that `ever_tagged` is stamped from the
+// pre-merge count by the one function that knows it. CloudFormation's two tag writers still do not
+// reach it, because [cfnELBStampableTypes] lists the four ELBv2 types alone and will until the
+// classic type has a deploy helper (Tier 2 of #844); the tagging API's writes go through
+// [mergeResourceTags] on the raw JSON instead.
 func elbClassicDecodeTaggedResource(stateKey string, data []byte) *elbTaggedResource {
 	var lb ELBClassicLoadBalancer
 	if json.Unmarshal(data, &lb) != nil {

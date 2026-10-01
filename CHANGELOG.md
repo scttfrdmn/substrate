@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The classic (2012-06-01) Elastic Load Balancing tag operations are routed** (#844). `AddTags`,
+  `RemoveTags` and `DescribeTags` exist in **both** Elastic Load Balancing APIs with different shapes,
+  so all three now read the Query `Version` member the same way #1146's create/describe/delete trio
+  does — six action names are discriminated where three were. Before this a classic caller's `AddTags`
+  reached the ELBv2 handler and was refused `ResourceArns is required`, a member the 2012-06-01 API
+  does not have: the same defect #1146 fixed, in its other half. What differs is all of it: the
+  resource is **named** rather than ARN'd on the way in (`LoadBalancerNames.member.N`) and on the way
+  out (the classic `TagDescription` carries `LoadBalancerName`, and substrate's classic responses emit
+  no `ResourceArn` at all); `AddTags` and `RemoveTags` take **one** load balancer where ELBv2's take a
+  list, and `DescribeTags` takes 1–20; and classic `RemoveTags` names its keys as `Tags.member.N` of
+  `TagKeyOnly`, not `TagKeys.member.N` — a request in ELBv2's spelling is refused rather than
+  reporting a removal that did not happen, which is the one difference whose wrong answer would have
+  been a silent 200. The rules are not new: the published cap of **10** against ELBv2's 50, each
+  generation's own `TooManyTags` wording, and `LoadBalancerNotFound`/400 all come from #1148 and are
+  resolved from the stored record rather than from the API door, so one load balancer gets the same
+  answer through its create, through classic `AddTags` and through the Resource Groups Tagging API —
+  which is #844's last acceptance row and is now asserted in both directions. `DuplicateTagKeys`/400
+  is answered on `AddTags` only, because that is the only page publishing it, and every check runs
+  before any write, so a refused request leaves the stored tag set exactly as it was.
+  **AWS's `RemoveTags` page contradicts itself** — its parameter table publishes the indexed
+  `LoadBalancerNames.member.N` while its Sample Request shows singular `&LoadBalancerName=` — and
+  substrate follows the model, which is what every SDK serializes; `docs/services.md` records the
+  contradiction so a reader who copies AWS's own sample curl understands the refusal.
+
 - **A row in `docs/services.md` for every one of the 108 routed operations that had none** (#1231),
   emptying the inventory #1015's check wrote. The gap spanned 15 services, concentrated in five —
   Glue 18, Cognito user pools 18, API Gateway v2 14, API Gateway (REST) 13, DynamoDB 11 — with the

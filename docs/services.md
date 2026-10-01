@@ -10990,13 +10990,16 @@ before, and no error is invented for a version AWS publishes no code for. The me
 *not* used to discriminate, because a classic `DescribeLoadBalancers` can legitimately carry no
 members at all and would be indistinguishable from an ELBv2 one.
 
-Three operations are routed:
+Six operations are routed:
 
 | Operation | Notes |
 |-----------|-------|
 | CreateLoadBalancer | `LoadBalancerName` + `Listeners.member.N` required; accepts `AvailabilityZones`, `Subnets`, `SecurityGroups`, `Scheme`, `Tags.member.N`; answers **`DNSName` alone** |
 | DescribeLoadBalancers | `LoadBalancerNames.member.N`, `Marker`, `PageSize` (1–400, default 400); answers `LoadBalancerDescriptions.member.N` |
 | DeleteLoadBalancer | `LoadBalancerName`; an absent load balancer is a **success** |
+| AddTags | `LoadBalancerNames.member.N` (**one** name) + `Tags.member.N` of `Tag`; answers no members |
+| RemoveTags | `LoadBalancerNames.member.N` (**one** name) + `Tags.member.N` of **`TagKeyOnly`**; answers no members |
+| DescribeTags | `LoadBalancerNames.member.N` (1–20); answers `TagDescriptions.member.N` carrying **`LoadBalancerName`** |
 
 Details a consumer can observe:
 
@@ -11027,8 +11030,9 @@ Details a consumer can observe:
   it would invent a code for the page being implemented.
 - **A create's `Tags.member.N` reaches the record**, and its published `DuplicateTagKeys`/400 is
   answered before the record is written, so a create carrying a tag it cannot legally apply leaves no
-  load balancer behind. The tags are readable through the Resource Groups Tagging API (see the
-  tagging section below); the classic `DescribeTags` is not routed.
+  load balancer behind. The tags are readable through the classic `DescribeTags` and through the
+  Resource Groups Tagging API (see the tagging section below), and the same three rules apply
+  wherever the tag arrives from, because they are resolved from the record.
 - **A store failure is answered as one, and an unusable record is not.** A create whose record could
   not be written still has a DNS name to report and a describe whose listing could not be read still
   has an empty list to report, so both propagate as a 5xx rather than as a plausible success — the
@@ -11046,18 +11050,52 @@ Details a consumer can observe:
   share — see [Account limits](#account-limits) for why refusing replaced the fallback the other
   operation had ([#1150](https://github.com/scttfrdmn/substrate/issues/1150)).
 
-**What is deliberately not routed**, so that three operations are not read as the whole API: the
-classic tag trio (`AddTags`, `RemoveTags`, `DescribeTags` at `2012-06-01`, whose `RemoveTags` takes
-`Tags.member.N` of `TagKeyOnly`; their published cap of **10** against ELBv2's 50 is enforced
-already, by the create and by the tagging API, so routing the trio adds doors rather than a rule —
-see [#1148](https://github.com/scttfrdmn/substrate/issues/1148)),
+#### Tags
+
+The three tag operations are the same six action names' other half: `AddTags`, `RemoveTags` and
+`DescribeTags` all exist in **both** APIs with different shapes, so each is routed by the same
+`Version` member the create/describe/delete trio is
+([#844](https://github.com/scttfrdmn/substrate/issues/844)). Before they were routed, a classic
+caller's `AddTags` reached the ELBv2 handler and was refused `ResourceArns is required` — a member
+the 2012-06-01 API does not have.
+
+What differs between the generations, and therefore what a consumer has to get right:
+
+- **The resource is named, not ARN'd.** Classic takes `LoadBalancerNames.member.N` where ELBv2 takes
+  `ResourceArns.member.N`, and so does the response: the classic `TagDescription` carries
+  `LoadBalancerName` where ELBv2's carries `ResourceArn`. Substrate's classic responses do **not**
+  emit `ResourceArn` at all.
+- **`AddTags` and `RemoveTags` take one load balancer.** "You can specify one load balancer only" and
+  "You can specify a maximum of one load balancer name" respectively; ELBv2's take a list with no
+  published bound. `DescribeTags` takes 1–20 names in both generations. Neither bound has a published
+  code of its own, so exceeding it answers `ValidationError`/400 from the Query Common Errors page.
+- **Classic `RemoveTags` names the keys as `Tags.member.N` of `TagKeyOnly`, not `TagKeys.member.N`.**
+  A request in ELBv2's spelling names no key substrate reads and is refused `ValidationError`/400
+  (`Tags` is `Required: Yes`) rather than reporting a removal that did not happen.
+- **AWS's `RemoveTags` page contradicts itself about this member, and substrate follows the model.**
+  Its parameter table publishes the indexed plural `LoadBalancerNames.member.N`; its Sample Request
+  shows singular `&LoadBalancerName=my-loadbalancer`. `AddTags` and `DescribeTags` both publish *and*
+  sample the indexed form, so the singular is a typo on one page rather than a second accepted
+  spelling — and the indexed form is what every SDK serializes. A reader who copies AWS's own sample
+  curl is therefore refused `ValidationError`/400.
+- **The cap is 10, not ELBv2's 50, and each generation answers `TooManyTags` in its own published
+  wording** ([#1148](https://github.com/scttfrdmn/substrate/issues/1148)). The cap is resolved from
+  the stored record rather than from the API door, so one load balancer gets the same answer through
+  its own create, through classic `AddTags` and through the Resource Groups Tagging API. Re-tagging a
+  key already present on a load balancer at the cap succeeds, which is the published update rule.
+- **A load balancer carrying no tags is still reported** by `DescribeTags`, with an empty `Tags`
+  list. Omitting it would make "carries no tags" indistinguishable from "is not there", which the
+  operation has `LoadBalancerNotFound`/400 to distinguish — and 400 is what all three pages publish
+  for an absent load balancer, not the 404 a reader expects.
+- **`DuplicateTagKeys`/400 is published on `AddTags` only**, so a key repeated within one
+  `RemoveTags` request removes it once rather than being refused.
+
+**What is deliberately not routed**, so that six operations are not read as the whole API:
 `RegisterInstancesWithLoadBalancer`, `CreateLoadBalancerListeners`, the health-check and policy
 operations, and the `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper. Any of them answers
 `InvalidAction`/400, which is the Query family's unknown-action answer. `TooManyLoadBalancers` and
 the 20-per-Region quota are not modelled either: substrate enforces no ELB quota in **either**
-generation, and enforcing one only would be half-fidelity. A classic load balancer is therefore
-taggable through its own create and through the Resource Groups Tagging API, and not through
-classic `AddTags`.
+generation, and enforcing one only would be half-fidelity.
 
 ### Account limits
 
@@ -11185,7 +11223,7 @@ the classic API reference is the *more* specific of the two: the `2012-06-01` `A
 opens with *"Each load balancer can have a maximum of 10 tags"*, where the `2015-12-01` page
 publishes no maximum anywhere and substrate's 50 is read off the user guide's restrictions
 list. The cap is resolved from the record's own kind, so the classic 10 applies to a classic
-load balancer's own create and to the Resource Groups Tagging API alike
+load balancer's own create, to the classic `AddTags` and to the Resource Groups Tagging API alike
 ([#1148](https://github.com/scttfrdmn/substrate/issues/1148)). **AWS contradicts itself on
 the lengths and substrate follows the model:** the ELB
 user guide's restrictions list says "Maximum key length—127 Unicode characters" and

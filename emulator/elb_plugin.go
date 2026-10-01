@@ -41,11 +41,14 @@ func (p *ELBPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches an Elastic Load Balancing query-protocol request to the appropriate
 // handler.
 //
-// One endpoint serves two APIs, and three action names exist in both with different shapes, so the
-// Query protocol's own `Version` member is read first. Only those three names are discriminated:
+// One endpoint serves two APIs, and six action names exist in both with different shapes, so the
+// Query protocol's own `Version` member is read first. Only those six names are discriminated:
 // every other action belongs to one generation, and an action only the classic API publishes is
 // still an unrouted action. [elbClassicRequest] and the comment above it carry the whole argument,
 // including why an absent version resolves to ELBv2 (#844).
+//
+// The tag trio joined the create/describe/delete trio in #844's Tier 1b; elb_classic_tags.go says
+// what differs between the two generations' shapes of each.
 func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	action := req.Operation
 	if action == "" {
@@ -59,6 +62,12 @@ func (p *ELBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 			return p.describeClassicLoadBalancers(ctx, req)
 		case "DeleteLoadBalancer":
 			return p.deleteClassicLoadBalancer(ctx, req)
+		case "AddTags":
+			return p.addClassicTags(ctx, req)
+		case "RemoveTags":
+			return p.removeClassicTags(ctx, req)
+		case "DescribeTags":
+			return p.describeClassicTags(ctx, req)
 		}
 	}
 	switch action {
