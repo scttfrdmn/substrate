@@ -314,6 +314,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Glue answered all six of its persisted records straight to the caller** (#756). Each of the twelve
+  operations that reports a database, table, connection, crawler, job or job run carried substrate's
+  own `AccountID` and `Region` — neither has `omitempty`, so both were unconditional — and
+  `ever_tagged` once the resource had been tagged. `API_Database`, `API_Table`, `API_Connection`,
+  `API_Crawler`, `API_Job` and `API_JobRun` publish none of the three. A new `emulator/glue_wire.go`
+  projects each record onto its published shape, on the pattern `ecr_wire.go` established (#1090),
+  taking the count from **260 still reachable to 239** — twenty-one lines, the largest single block
+  left on the issue after ECS. Glue is also where the leak is worst, because it is not merely an extra
+  member: substrate stores one creation timestamp field on every record, and Glue publishes that
+  timestamp under four different names — `CreateTime` on `API_Database` and `API_Table`,
+  `CreationTime` on `API_Connection` and `API_Crawler`, `CreatedOn` on `API_Job` — so on five records
+  out of six the stored name was a *near-miss* of a real member, and a caller reading `CreateTime` off
+  a substrate response found nothing while the value sat beside it under a name AWS does not have.
+  Only `API_JobRun`'s `StartedOn`/`CompletedOn` were already spelled right. The same five were
+  rendered as RFC3339 strings where Glue's JSON protocol publishes an epoch-seconds number —
+  `API_GetDatabase`'s Response Syntax is literally `"CreateTime": number` — so this closes Glue's
+  instance of #1305, which still stands for ACM, Redshift Data and Firehose. Every one of them is
+  `Required: No`, and each is a `*EpochSeconds` in the projection rather than a bare one, because
+  `,omitempty` has no effect on a struct type and a zero `EpochSeconds` marshals as JSON `null`: an
+  unset optional timestamp is now absent rather than reported as a null a consumer would have to
+  branch on. Deciding a response's membership also surfaced two members AWS publishes on no Glue shape
+  at all, and neither could be carried into a type whose whole purpose is to hold only published
+  members: `Arn`, which substrate reported on five of the six records, and `Tags`, on four. Glue's tag
+  surface is `GetTags`/`TagResource`/`UntagResource`, which substrate implements and which is the only
+  place a tag is observable; an ARN is built from the account, the Region and the name, which is what
+  the real API requires of a consumer, and the SDK's own decoder was discarding both members anyway
+  for want of a field. Where the leaked account legitimately goes is `CatalogId` — "the ID of the Data
+  Catalog in which the database resides" — which `API_Database` and `API_Table` publish and
+  `API_Connection`, `API_Crawler`, `API_Job` and `API_JobRun` do not, so a database and a table still
+  report the account under its published name and the other four report none. That is the move #1304
+  made for EFS's `OwnerId`. All twenty-one fields stay on the records in `glue_types.go` —
+  `ecr_wire.go`'s rule is that a projection changes the response and leaves alone the state a recorded
+  run replays from — and the tagging plugin's `scanGlueDatabases` reads `Arn`, `Tags` and `EverTagged`
+  off the stored record across the service boundary besides, which a new test pins by reading all six
+  records back out of state. Unlike ECS, no per-site exclusion is needed in
+  `scripts/check-wire-bookkeeping.sh`: every projected timestamp is renamed to its published name, so
+  no wire field collides with the five the awk matches.
+
 - **ECS answered all four of its persisted records straight to the caller** (#756). Each of the
   thirteen operations that reports a cluster, task definition, service or task carried substrate's
   own `AccountID` and `Region` — neither has `omitempty`, so both were unconditional — and

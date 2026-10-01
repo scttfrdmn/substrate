@@ -103,8 +103,14 @@ func TestGluePlugin_DatabaseCRUD(t *testing.T) {
 	if getDB.Database.Name != "mydb" {
 		t.Errorf("expected Name=mydb, got %s", getDB.Database.Name)
 	}
-	if getDB.Database.Arn == "" {
-		t.Error("Arn empty")
+	// Inverted by #756: API_Database publishes no Arn member, so the response must not carry one.
+	// The field stays declared here so the assertion is on the decoded value rather than on nothing;
+	// TestGlueWire_DatabaseResponsesCarryNoBookkeepingMember asserts the absence on the raw bytes,
+	// which is the stronger claim. A consumer that needs the ARN builds it from the account, the
+	// Region and the name, as the real API requires — and Glue's tag surface (GetTags, exercised
+	// below) takes the ARN as input rather than reporting it.
+	if getDB.Database.Arn != "" {
+		t.Errorf("GetDatabase: API_Database publishes no Arn, got %q", getDB.Database.Arn)
 	}
 
 	// GetDatabases.
@@ -196,6 +202,10 @@ func TestGluePlugin_TableCRUD(t *testing.T) {
 	if tbl.Table.Name != "mytable" {
 		t.Errorf("expected Name=mytable, got %s", tbl.Table.Name)
 	}
+	// Inverted by #756, as in TestGluePlugin_Databases: API_Table publishes no Arn member.
+	if tbl.Table.Arn != "" {
+		t.Errorf("GetTable: API_Table publishes no Arn, got %q", tbl.Table.Arn)
+	}
 
 	// GetTables.
 	resp4 := glueRequest(t, ts, "GetTables", map[string]interface{}{"DatabaseName": "testdb"})
@@ -264,6 +274,10 @@ func TestGluePlugin_CrawlerCRUD(t *testing.T) {
 	if crawlerResp.Crawler.State != "READY" {
 		t.Errorf("expected READY, got %s", crawlerResp.Crawler.State)
 	}
+	// Inverted by #756, as in TestGluePlugin_Databases: API_Crawler publishes no Arn member.
+	if crawlerResp.Crawler.Arn != "" {
+		t.Errorf("GetCrawler: API_Crawler publishes no Arn, got %q", crawlerResp.Crawler.Arn)
+	}
 
 	// StartCrawler — deterministic no-op.
 	resp4 := glueRequest(t, ts, "StartCrawler", map[string]interface{}{"Name": "my-crawler"})
@@ -327,8 +341,12 @@ func TestGluePlugin_JobAndJobRun(t *testing.T) {
 	if err := json.Unmarshal(glueBody(t, resp2), &jobResp); err != nil {
 		t.Fatalf("decode GetJob: %v", err)
 	}
-	if jobResp.Job.Arn == "" {
-		t.Error("Job Arn empty")
+	if jobResp.Job.Name != "my-etl-job" {
+		t.Errorf("GetJob: expected Name=my-etl-job, got %s", jobResp.Job.Name)
+	}
+	// Inverted by #756, as above: API_Job publishes no Arn member.
+	if jobResp.Job.Arn != "" {
+		t.Errorf("GetJob: API_Job publishes no Arn, got %q", jobResp.Job.Arn)
 	}
 
 	// StartJobRun.

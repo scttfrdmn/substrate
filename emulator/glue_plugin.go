@@ -174,7 +174,9 @@ func (p *GluePlugin) getDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := json.Unmarshal(raw, &db); err != nil {
 		return nil, fmt.Errorf("glue getDatabase unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Database": db})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Database": glueDatabaseToWire(db, reqCtx.AccountID),
+	})
 }
 
 func (p *GluePlugin) getDatabases(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -195,10 +197,9 @@ func (p *GluePlugin) getDatabases(reqCtx *RequestContext, _ *AWSRequest) (*AWSRe
 		}
 		databases = append(databases, db)
 	}
-	if databases == nil {
-		databases = []GlueDatabase{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"DatabaseList": databases})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"DatabaseList": glueDatabasesToWire(databases, reqCtx.AccountID),
+	})
 }
 
 func (p *GluePlugin) updateDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -321,7 +322,9 @@ func (p *GluePlugin) getTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if err := json.Unmarshal(raw, &tbl); err != nil {
 		return nil, fmt.Errorf("glue getTable unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Table": tbl})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Table": glueTableToWire(tbl, reqCtx.AccountID),
+	})
 }
 
 func (p *GluePlugin) getTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -356,10 +359,9 @@ func (p *GluePlugin) getTables(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 		tables = append(tables, tbl)
 	}
-	if tables == nil {
-		tables = []GlueTable{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"TableList": tables})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"TableList": glueTablesToWire(tables, reqCtx.AccountID),
+	})
 }
 
 func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -481,7 +483,9 @@ func (p *GluePlugin) getConnection(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(raw, &conn); err != nil {
 		return nil, fmt.Errorf("glue getConnection unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Connection": conn})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Connection": glueConnectionToWire(conn),
+	})
 }
 
 func (p *GluePlugin) getConnections(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -502,10 +506,9 @@ func (p *GluePlugin) getConnections(reqCtx *RequestContext, _ *AWSRequest) (*AWS
 		}
 		connections = append(connections, conn)
 	}
-	if connections == nil {
-		connections = []GlueConnection{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"ConnectionList": connections})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"ConnectionList": glueConnectionsToWire(connections),
+	})
 }
 
 func (p *GluePlugin) updateConnection(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -622,7 +625,9 @@ func (p *GluePlugin) getCrawler(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if err := json.Unmarshal(raw, &crawler); err != nil {
 		return nil, fmt.Errorf("glue getCrawler unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Crawler": crawler})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Crawler": glueCrawlerToWire(crawler),
+	})
 }
 
 func (p *GluePlugin) getCrawlers(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -643,10 +648,9 @@ func (p *GluePlugin) getCrawlers(reqCtx *RequestContext, _ *AWSRequest) (*AWSRes
 		}
 		crawlers = append(crawlers, c)
 	}
-	if crawlers == nil {
-		crawlers = []GlueCrawler{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Crawlers": crawlers})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Crawlers": glueCrawlersToWire(crawlers),
+	})
 }
 
 // startCrawler is a deterministic no-op: crawlers always stay READY in the emulator.
@@ -764,7 +768,9 @@ func (p *GluePlugin) getJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRespon
 	if err := json.Unmarshal(raw, &job); err != nil {
 		return nil, fmt.Errorf("glue getJob unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Job": job})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Job": glueJobToWire(job),
+	})
 }
 
 func (p *GluePlugin) getJobs(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -785,10 +791,9 @@ func (p *GluePlugin) getJobs(reqCtx *RequestContext, _ *AWSRequest) (*AWSRespons
 		}
 		jobs = append(jobs, j)
 	}
-	if jobs == nil {
-		jobs = []GlueJob{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Jobs": jobs})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"Jobs": glueJobsToWire(jobs),
+	})
 }
 
 func (p *GluePlugin) updateJob(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -901,7 +906,9 @@ func (p *GluePlugin) getJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := json.Unmarshal(raw, &run); err != nil {
 		return nil, fmt.Errorf("glue getJobRun unmarshal: %w", err)
 	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"JobRun": run})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"JobRun": glueJobRunToWire(run),
+	})
 }
 
 func (p *GluePlugin) getJobRuns(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -928,10 +935,9 @@ func (p *GluePlugin) getJobRuns(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 		runs = append(runs, run)
 	}
-	if runs == nil {
-		runs = []GlueJobRun{}
-	}
-	return glueJSONResponse(http.StatusOK, map[string]interface{}{"JobRuns": runs})
+	return glueJSONResponse(http.StatusOK, map[string]interface{}{
+		"JobRuns": glueJobRunsToWire(runs),
+	})
 }
 
 // --- Tagging operations ---
