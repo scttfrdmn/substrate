@@ -132,18 +132,22 @@ func (p *CognitoIdentityPlugin) describeIdentityPool(ctx *RequestContext, req *A
 	if err != nil {
 		return nil, err
 	}
+	// Roles was here until #756 and is not published: API_DescribeIdentityPool's ten response members
+	// do not include it, and GetIdentityPoolRoles is the operation that reports a pool's role mapping
+	// — which substrate implements, and which is where the stored Roles are still answered from. The
+	// six of its ten published members that substrate does not model are absent rather than zero
+	// (#1013): AllowClassicFlow, CognitoIdentityProviders, DeveloperProviderName,
+	// OpenIdConnectProviderARNs, SamlProviderARNs and SupportedLoginProviders.
 	type response struct {
 		IdentityPoolID                 string            `json:"IdentityPoolId"`
 		IdentityPoolName               string            `json:"IdentityPoolName"`
 		AllowUnauthenticatedIdentities bool              `json:"AllowUnauthenticatedIdentities"`
-		Roles                          map[string]string `json:"Roles,omitempty"`
 		IdentityPoolTags               map[string]string `json:"IdentityPoolTags,omitempty"`
 	}
 	return cognitoIdentityJSONResponse(http.StatusOK, response{
 		IdentityPoolID:                 pool.IdentityPoolID,
 		IdentityPoolName:               pool.IdentityPoolName,
 		AllowUnauthenticatedIdentities: pool.AllowUnauthenticatedIdentities,
-		Roles:                          pool.Roles,
 		IdentityPoolTags:               pool.Tags,
 	})
 }
@@ -243,12 +247,17 @@ func (p *CognitoIdentityPlugin) getCredentialsForIdentity(ctx *RequestContext, r
 		identityID = generateIdentityPoolID(ctx.IDs, ctx.Region)
 	}
 
-	expiration := p.tc.Now().Add(time.Hour)
+	expiration := EpochSeconds(p.tc.Now().Add(time.Hour))
+	// Member names follow API_Credentials, whose four members are the whole shape. Expiration is
+	// epoch seconds rather than a time.Time for the reason cognito_idp_wire.go gives at length: the
+	// page says Cognito returns this timestamp "in UNIX epoch time format", and the RFC3339 string a
+	// time.Time marshals to fails the SDK's decoder. It is not `omitempty` because this operation
+	// always mints an expiry an hour out, so the member is never unset.
 	type credentials struct {
-		AccessKeyID  string    `json:"AccessKeyId"`
-		SecretKey    string    `json:"SecretKey"`
-		SessionToken string    `json:"SessionToken"`
-		Expiration   time.Time `json:"Expiration"`
+		AccessKeyID  string       `json:"AccessKeyId"`
+		SecretKey    string       `json:"SecretKey"`
+		SessionToken string       `json:"SessionToken"`
+		Expiration   EpochSeconds `json:"Expiration"`
 	}
 	type response struct {
 		IdentityID  string      `json:"IdentityId"`

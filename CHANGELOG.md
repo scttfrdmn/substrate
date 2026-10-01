@@ -326,6 +326,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Four of Cognito's five records were marshaled onto the wire whole, so eleven operations reported
+  substrate's own bookkeeping** (#756, #1136). `CognitoUserPool`, `CognitoUserPoolClient`,
+  `CognitoGroup` and `CognitoUser` were embedded straight into a response struct — `UserPool
+  CognitoUserPool` and its three siblings — so every persisted member marshaled into the body. The fix
+  is `emulator/cognito_idp_wire.go`, holding the four published shapes and their projections on
+  `emulator/ecr_wire.go`'s pattern, plus `emulator/cognito_wire_test.go` pinning all fifteen sites
+  across both Cognito services with #1311's member-*path* set-equality assertion. That takes the count
+  from **197 still reachable to 186**. `CognitoIdentityPool` was already projected at all four of its
+  sites, as were `ListUserPools`, `ListUserPoolClients`, `AdminGetUser` and `SignUp`, and is pinned
+  rather than rewritten. Neither `AccountID` nor `Region` has a published home to move to: no shape in
+  either API declares an account or a Region member, checked member-by-member against
+  `API_UserPoolType`, `API_UserPoolClientType`, `API_GroupType`, `API_UserType` and `API_IdentityPool`.
+  `UserPoolType` publishes the `Arn` instead, from which a caller recovers both. The stored fields stay
+  on all five records, so a recorded run replays from unchanged state and
+  `TaggingPlugin.scanCognitoUserPools` still answers `GetResources` from them.
+- **`CreateUserPool`, `DescribeUserPool` and `UpdateUserPool` reported the pool's identifier as
+  `UserPoolId`, which `UserPoolType` does not publish** (#1286). The shape publishes it as `Id` and
+  declares no `UserPoolId` at all, so an SDK read `CreateUserPoolOutput.UserPool.Id` as nil and had to
+  fall back to `ListUserPools` to learn the ID of the pool it had just created. Substrate also
+  contradicted itself: `ListUserPools`' own summary already rendered `Id`, correctly, per
+  `API_UserPoolDescriptionType` — one service answering the same identifier under two member names
+  depending on which door a caller knocked on, which is what made it a shape bug rather than a naming
+  preference. The pool's tag set moves the same way, from `Tags` to the published `UserPoolTags`
+  (#1136); it was the load-bearing half, since substrate routes none of the three published `cognito-idp`
+  tagging operations (#1135), making `DescribeUserPool` the only door to a pool's tags.
+- **Three unpublished members reached a Cognito body outside the bookkeeping list** (#756).
+  `CognitoUserPool.ProviderName` is absent from all thirty-six of `API_UserPoolType`'s members and is
+  derivable from the pool ID and the Region, so `deployCognitoUserPool` now derives it for
+  `AWS::Cognito::UserPool`'s `ProviderName` and `ProviderURL` attributes — which is how real
+  CloudFormation computes that attribute — rather than reading it off the response. `CognitoUser`'s
+  `UserPoolId` and `Groups` are likewise undeclared by `API_UserType`: the pool ID is how a user is
+  keyed, and `AdminListGroupsForUser` is the operation that reports a user's groups. And
+  `DescribeIdentityPool` reported a `Roles` member that is not one of `API_DescribeIdentityPool`'s ten,
+  where `GetIdentityPoolRoles` is the published door — which substrate routes, and still answers the
+  stored roles from. None of the four is named `AccountID`/`Region`/`EverTagged`, so
+  `check-wire-bookkeeping.sh`'s count never saw them; reading the shapes member-by-member did.
+- **Every Cognito timestamp was an RFC3339 string where both services publish epoch seconds** (#756,
+  #1305). Each of the nine members carries the same sentence — *"Amazon Cognito returns this timestamp
+  in UNIX epoch time format"* — and `API_AdminGetUser`'s Response Syntax says `"UserCreateDate": number`
+  outright, with a sample of `1.682955829578E9`. A Go `time.Time` marshals to a string, so the SDK's
+  epoch-seconds decoder was handed one: a live decode failure rather than a cosmetic one. `CreationDate`
+  and `LastModifiedDate` on the pool and on `ListUserPools`' summary, `CreationDate` on the app client
+  and on a group, `UserCreateDate` and `UserLastModifiedDate` on a user and on `AdminGetUser`, and
+  `Credentials.Expiration` on `GetCredentialsForIdentity` now all report `EpochSeconds`, the type #1090
+  introduced for ECR. The three sites that already projected correctly moved with the rest deliberately:
+  a service answering one published member in two formats is worse than either end state. #1305 stays
+  open for ACM, Redshift Data and Firehose — it was derived from #756's baseline, which matches fields
+  named `CreatedAt`/`UpdatedAt`, and Cognito's are named `CreationDate`, `LastModifiedDate`,
+  `UserCreateDate`, `UserLastModifiedDate` and `Expiration`, so that grep never reached them. The
+  records keep their `time.Time`: retyping a persisted field changes the format of every recorded run.
+  `test/e2e/journey_cognito_wire_test.go` pins the whole shape at the tier that could have caught it,
+  which is #738's argument in a second service: the e2e module had no Cognito client at all, and a real
+  SDK answers the pre-fix epoch defect with `deserialization failed, unexpected string value for float`
+  while decoding `UserPool.Id` and `UserPoolTags` as nil and an empty map without erroring at all.
+- **`ListUserPools` withheld a member its own summary shape publishes** (#756).
+  `API_UserPoolDescriptionType` declares `LambdaConfig`, `createUserPool` stores it, and the summary
+  reported it nowhere — the same gap class as the ELB availability zones fixed above.
 - **Nothing asserted that ELB's responses were projected, and two of its operations answered an empty
   result for a record they had just written** (#756). ELB is the most uniform block the issue has
   reached: `ELBLoadBalancer`, `ELBTargetGroup`, `ELBListener`, `ELBRule` and the classic

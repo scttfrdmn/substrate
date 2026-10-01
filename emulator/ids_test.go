@@ -1201,15 +1201,15 @@ func idsRecordCognitoIDP(t *testing.T, ts *emulator.TestServer) {
 
 // idsCognitoUserPool creates one user pool and returns the `{region}_{12 chars}` id it minted.
 //
-// The member is read as `UserPoolId` and not as the `Id` that API_UserPoolType publishes, which is
-// substrate's own wire shape rather than AWS's — a fidelity gap this tier found and #1286 tracks.
-// Reading the member substrate actually sends is what keeps this a test about the mint.
+// The member is read as `Id`, which is what API_UserPoolType publishes. This tier is where the gap
+// was found — substrate answered the unpublished `UserPoolId` instead, so this helper had to read that
+// to get an id at all — and #1286 closed it.
 func idsCognitoUserPool(t *testing.T, ts *emulator.TestServer, name string) string {
 	t.Helper()
 
 	var created struct {
 		Pool struct {
-			ID string `json:"UserPoolId"`
+			ID string `json:"Id"`
 		} `json:"UserPool"`
 	}
 	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsCognitoIDPHost,

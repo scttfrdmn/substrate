@@ -8,6 +8,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // ----- v0.22.0 — Cognito ---------------------------------------------------
@@ -43,23 +44,28 @@ func (d *StackDeployer) deployCognitoUserPool(
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
+		// Id, not UserPoolId: API_UserPoolType publishes the pool's identifier as Id, and #756 stopped
+		// CreateUserPool answering it under the unpublished name as well — see cognito_idp_wire.go.
 		var result struct {
 			UserPool struct {
-				ID           string `json:"UserPoolId"`
-				Arn          string `json:"Arn"`
-				ProviderName string `json:"ProviderName"`
+				ID  string `json:"Id"`
+				Arn string `json:"Arn"`
 			} `json:"UserPool"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
 			if result.UserPool.ID != "" {
 				dr.PhysicalID = result.UserPool.ID
+				// ProviderName and ProviderURL are derived rather than read off the response, because
+				// UserPoolType publishes no provider member for substrate to read. That is also what
+				// real CloudFormation does: both are Fn::GetAtt attributes of AWS::Cognito::UserPool
+				// computed from the pool's Region and ID, not members of the CreateUserPool result.
+				// The expression matches the one createUserPool mints the record's value with.
+				providerName := fmt.Sprintf("cognito-idp.%s.amazonaws.com/%s", cctx.region, result.UserPool.ID)
+				dr.Metadata["ProviderName"] = providerName
+				dr.Metadata["ProviderURL"] = "https://" + providerName
 			}
 			if result.UserPool.Arn != "" {
 				dr.ARN = result.UserPool.Arn
-			}
-			if result.UserPool.ProviderName != "" {
-				dr.Metadata["ProviderName"] = result.UserPool.ProviderName
-				dr.Metadata["ProviderURL"] = "https://" + result.UserPool.ProviderName
 			}
 		}
 	}

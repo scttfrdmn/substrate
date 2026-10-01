@@ -20,6 +20,10 @@ github.com/aws/aws-sdk-go-v2/service/cloudformation v1.81.1 h1:aQ9rndpdklEc+4Pvb
 github.com/aws/aws-sdk-go-v2/service/cloudformation v1.81.1/go.mod h1:QXZr5EpgRNj71Y8uj/ACN+VrxiHYKaLRnm+cLgdmccc=
 github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.73.0 h1:OP6MlUKPwRwYJulM6brj+OdQzjbcSpVBujPi7GRagng=
 github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.73.0/go.mod h1:7PauoCasn/NoAuZYkmRbZ8TjFJ4dr0i2SX4v64hfcBQ=
+github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.42.1 h1:Dn59f+SXDZpxtW4PeHLX9NpTUviRa7PYKljjtrTQogQ=
+github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.42.1/go.mod h1:1QRD/NN0eVdK/AeDi5c2pSx1BOLSD8kYyDBdX0/Pj1g=
+github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.74.1 h1:Wy5HBm3TF/rxjEo9IFhrSB3s+i82CBMfsZ9yLdPZCX0=
+github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.74.1/go.mod h1:4R787AIVz+VLMJGkgnAdT7YSMNtt2yoIfvF9eo5j344=
 github.com/aws/aws-sdk-go-v2/service/configservice v1.74.1 h1:OxOStYIbMJcXNPNHl2nrN8xpzVd86ApbtiEU4QAJTzo=
 github.com/aws/aws-sdk-go-v2/service/configservice v1.74.1/go.mod h1:ox714ghIk18/LArgVuB/7lf13ley7m/stcZptcAtukE=
 github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.1 h1:bKwiQA6SKqFXBO+1IwP/hTwCU5RlqeitG4gVvSuMN8U=
