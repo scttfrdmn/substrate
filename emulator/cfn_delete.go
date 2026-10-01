@@ -160,6 +160,22 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::EC2::SecurityGroupEgress":  sgRuleDeleter("RevokeSecurityGroupEgress"),
 
 	// --- Load balancing -----------------------------------------------------
+	//
+	// The classic type cannot use queryDeleter, which emits exactly one parameter: the
+	// 2012-06-01 DeleteLoadBalancer needs LoadBalancerName *and* Version, because Version is
+	// what routes it to the classic handler at all — without it the request reaches ELBv2's
+	// DeleteLoadBalancer, which would refuse a bare name for `LoadBalancerArn is required` and
+	// leave the classic record behind (#844).
+	"AWS::ElasticLoadBalancing::LoadBalancer": func(
+		_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext,
+	) *AWSRequest {
+		return &AWSRequest{Service: "elasticloadbalancing", Operation: "DeleteLoadBalancer",
+			Headers: map[string]string{},
+			Params: map[string]string{
+				"Version":          elbClassicAPIVersion,
+				"LoadBalancerName": dr.PhysicalID,
+			}}
+	},
 	"AWS::ElasticLoadBalancingV2::LoadBalancer": queryDeleter("elasticloadbalancing",
 		"DeleteLoadBalancer", "LoadBalancerArn"),
 	"AWS::ElasticLoadBalancingV2::TargetGroup": queryDeleter("elasticloadbalancing",

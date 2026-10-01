@@ -241,11 +241,17 @@ var cfnRegionalStampKinds = map[string]cfnRegionalStampKind{
 	"AWS::SQS::Queue": {namespace: sqsNamespace, prefix: "queue"},
 }
 
-// cfnELBStampableTypes are the ELBv2 CFN types whose records substrate keeps tags on.
+// cfnELBStampableTypes are the Elastic Load Balancing CFN types whose records substrate keeps tags
+// on, across both API generations.
 //
-// All four became stampable with #748, which gave ELBv2 a tag store; before that the service
-// kept no tags at all and there was nowhere for the stamp to go.
+// The four ELBv2 types became stampable with #748, which gave ELBv2 a tag store; before that the
+// service kept no tags at all and there was nowhere for the stamp to go. The classic type joined
+// them in #844's Tier 2, when [StackDeployer.deployELBClassicLoadBalancer] gave it a record to
+// stamp — and it is one entry rather than a second decision because [cfnStampELBResource] already
+// resolves by ARN through the generation-blind resolver, exactly as that function's own comment
+// anticipated.
 var cfnELBStampableTypes = map[string]bool{
+	"AWS::ElasticLoadBalancing::LoadBalancer":   true,
 	"AWS::ElasticLoadBalancingV2::LoadBalancer": true,
 	"AWS::ElasticLoadBalancingV2::TargetGroup":  true,
 	"AWS::ElasticLoadBalancingV2::Listener":     true,
@@ -320,13 +326,12 @@ func cfnStampResourceTags(
 // stack's tags reach whichever it declared. ELBv2's `AddTags` refuses a classic ARN because its own
 // page says it only tags ELBv2 resources; CloudFormation never made that claim (#844).
 //
-// **No template reaches the classic half today**, and the resolver is the generation-blind one
-// anyway: [cfnELBStampableTypes] lists the four ELBv2 types and the classic type has no deploy
-// helper, so a stack declaring one falls through to the generic stub and is not stamped at all. This
-// is the rule written where it belongs rather than a path a caller can take, so that the classic
-// deploy helper — Tier 2 of #844 — is one entry in that map and not a second tagging decision made
-// later under pressure. The live caller of the generation-blind resolver is the Resource Groups
-// Tagging API's arm.
+// **Both halves are now reachable.** The generation-blind resolver was written here before any
+// template could reach the classic one, as the rule written where it belongs rather than a path a
+// caller could take — so that the classic deploy helper, Tier 2 of #844, would be one entry in
+// [cfnELBStampableTypes] and not a second tagging decision made later under pressure. That is what
+// it turned out to be: [StackDeployer.deployELBClassicLoadBalancer] records the classic ARN this
+// resolves and nothing in this function changed.
 //
 // The resolver's refusal is treated as "nothing to stamp" rather than as an
 // error: it answers a `LoadBalancerNotFound`-shaped refusal for an ARN naming no record, which

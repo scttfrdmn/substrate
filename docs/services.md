@@ -2979,11 +2979,6 @@ does not exist in substrate to return:
 - `AWS::SNS::Subscription` — AWS documents "`Ref` returns the subscription's logical
   name". Substrate returns the subscription ARN, deliberately: the logical name is a
   value the template already has, and the ARN is the one an `Unsubscribe` takes.
-- `AWS::ElasticLoadBalancing::LoadBalancer` (classic) — documented as the DNS name.
-  The classic load balancer has no deploy helper at all and falls through to the
-  generic stub, so there is no DNS name to return. #844 routed the classic
-  `CreateLoadBalancer`, which does mint a DNS name, but a deploy helper calling it is
-  deliberately not part of that work — so this divergence stands until one exists.
 - `AWS::EC2::SecurityGroupIngress` and `::SecurityGroupEgress` — no per-rule identity
   exists, and `Ref` on the ingress type is not documented.
 - `AWS::EC2::SecurityGroup` — AWS returns the group **name** for a group created
@@ -3048,6 +3043,7 @@ documents:
 | `AWS::ElastiCache::CacheCluster` | `RedisEndpoint.Address`, `RedisEndpoint.Port` — AWS's documented spelling, translated to the `RedisEndPoint` the ElastiCache API uses |
 | `AWS::DynamoDB::Table` | `StreamArn` — empty unless a stream was recorded, so the table's own ARN is not returned in its place |
 | `AWS::SSM::Parameter` | `Type` and `Value`, recorded at deploy time |
+| `AWS::ElasticLoadBalancing::LoadBalancer` | `DNSName`, recorded at deploy time from the classic create's own response; its four other published attributes answer empty — see [the classic type](#the-classic-type) |
 
 An S3 bucket's four domain names and an HTTP API's endpoint name **AWS's** hostnames
 rather than substrate's, unlike a queue's `Ref`: they are values a template hands to
@@ -11091,11 +11087,22 @@ What differs between the generations, and therefore what a consumer has to get r
   `RemoveTags` request removes it once rather than being refused.
 
 **What is deliberately not routed**, so that six operations are not read as the whole API:
-`RegisterInstancesWithLoadBalancer`, `CreateLoadBalancerListeners`, the health-check and policy
-operations, and the `AWS::ElasticLoadBalancing::LoadBalancer` deploy helper. Any of them answers
-`InvalidAction`/400, which is the Query family's unknown-action answer. `TooManyLoadBalancers` and
-the 20-per-Region quota are not modelled either: substrate enforces no ELB quota in **either**
-generation, and enforcing one only would be half-fidelity.
+`RegisterInstancesWithLoadBalancer`, `CreateLoadBalancerListeners`, and the health-check and policy
+operations. Any of them answers `InvalidAction`/400, which is the Query family's unknown-action
+answer.
+
+Each is its own follow-up rather than one omission, and for one reason: every one of them needs a
+`LoadBalancerDescription` member the record does not hold — the registered instance list, the
+`HealthCheck` object, the policy collections, the source security group. Adding a door without the
+member behind it would report a registration or a health check that no describe could show, which is
+a worse answer than `InvalidAction`. A half-modelled instance surface is harder to remove later than
+a missing one is to add, so each waits for the issue that models its member.
+
+`TooManyLoadBalancers` and the 20-per-Region quota are not modelled either: substrate enforces no ELB
+quota in **either** generation, and enforcing one only would be half-fidelity.
+
+The CloudFormation type **is** routed — see
+[the classic type](#the-classic-type) under the resource types below.
 
 ### Account limits
 
@@ -11423,10 +11430,10 @@ records, and the two callers diverge because AWS's two pages do:
   applied to a resource that finally exists.
 - **CloudFormation's two tag writers resolve the same way**, one step removed: a template names a
   *resource type* (`AWS::ElasticLoadBalancing::LoadBalancer` against
-  `…::ElasticLoadBalancingV2::LoadBalancer`), not an API generation. No template reaches the classic
-  half yet, because the classic type has no deploy helper and falls through to the generic stub —
-  the rule is recorded where the decision belongs, so that adding the helper is one map entry and
-  not a second tagging decision.
+  `…::ElasticLoadBalancingV2::LoadBalancer`), not an API generation. Both halves are now reachable:
+  the classic type gained its deploy helper in
+  [#844](https://github.com/scttfrdmn/substrate/issues/844), and because the rule had been recorded
+  where the decision belonged, adding it was one map entry rather than a second tagging decision.
 
 A classic ARN naming **nothing** is still refused by the tagging API, at the same
 `InvalidParameterException`/400 every other absent resource answers: accepting the generation is
@@ -11469,12 +11476,54 @@ whether it has ever been tagged, in **both** generations.
 | AWS::ElasticLoadBalancingV2::TargetGroup | TargetGroupArn | |
 | AWS::ElasticLoadBalancingV2::Listener | ListenerArn | |
 | AWS::ElasticLoadBalancingV2::ListenerRule | RuleArn | |
+| AWS::ElasticLoadBalancing::LoadBalancer | the load balancer **name** | classic; see below |
 
-The deployer does not send `Tags` for any of the four, so a **template's** resource-level tags are
-still dropped. The stack-level tags do arrive: all four carry the three `aws:cloudformation:*`
-keys ([#765](https://github.com/scttfrdmn/substrate/issues/765)) and any tag on the stack itself
-([#764](https://github.com/scttfrdmn/substrate/issues/764)), written straight to the ELB record
-and readable through `DescribeTags`.
+The deployer does not send `Tags` for any of the four ELBv2 types, so a **template's**
+resource-level tags are still dropped there. The stack-level tags do arrive: all four carry the
+three `aws:cloudformation:*` keys ([#765](https://github.com/scttfrdmn/substrate/issues/765)) and
+any tag on the stack itself ([#764](https://github.com/scttfrdmn/substrate/issues/764)), written
+straight to the ELB record and readable through `DescribeTags`.
+
+#### The classic type
+
+`AWS::ElasticLoadBalancing::LoadBalancer` deploys through the **2012-06-01** `CreateLoadBalancer`
+([#844](https://github.com/scttfrdmn/substrate/issues/844)). Before that it had no deploy helper at
+all: a stack declaring one reported `CREATE_COMPLETE` for a load balancer no `DescribeLoadBalancers`
+of either generation could find. The one thing that makes the deploy classic is the Query `Version`
+member — `CreateLoadBalancer` is published by both generations, so without it the same request
+creates an Application Load Balancer that still answers a `Ref` and a DNS name.
+
+Six properties are forwarded: `LoadBalancerName` (defaulting to the logical ID), `Scheme`,
+`Listeners`, `AvailabilityZones`, `Subnets`, `SecurityGroups` and `Tags`. `Listeners` is the type's
+one `Required: Yes` property and the classic create's one required list, so a template omitting it
+reports `CREATE_FAILED` rather than a load balancer with no listener. Unlike the four ELBv2 types,
+the resource-level `Tags` **are** sent — on the create, so the eleventh tag is refused by the
+operation that publishes `TooManyTags` for it — and the stack-level tags are stamped on top.
+
+The sixth published listener member, `PolicyNames`, is dropped: substrate models no classic
+load-balancer policies, so forwarding it would name a policy nothing could resolve. The other eleven
+properties the CFN type publishes (`AccessLoggingPolicy`, `AppCookieStickinessPolicy`,
+`ConnectionDrainingPolicy`, `ConnectionSettings`, `CrossZone`, `HealthCheck`, `Instances`,
+`LBCookieStickinessPolicy`, `Policies`) have no home on the record and are likewise dropped — each
+needs a `LoadBalancerDescription` member substrate does not hold, which is the same boundary the
+unrouted classic operations sit behind.
+
+**`Ref` returns the load balancer's name**, which is what AWS publishes: "When you pass the logical
+ID of this resource to the intrinsic `Ref` function, `Ref` returns the name of the load balancer."
+Earlier releases of this document recorded the DNS name instead, as a divergence substrate could not
+fix; that was a misreading of the Template Reference, and the DNS name is `Fn::GetAtt DNSName`.
+
+| `Fn::GetAtt` attribute | Answered |
+|---|---|
+| `DNSName` | yes — the name the classic `DescribeLoadBalancers` reports for the same load balancer |
+| `CanonicalHostedZoneName` | empty — substrate mints no hosted zone for a classic load balancer |
+| `CanonicalHostedZoneNameID` | empty, for the same reason |
+| `SourceSecurityGroup.GroupName` | empty — no source security group is minted |
+| `SourceSecurityGroup.OwnerAlias` | empty, for the same reason |
+
+The four empty answers are deliberate ([#1013](https://github.com/scttfrdmn/substrate/issues/1013)):
+a plausible-looking hosted-zone ID in a stack `Output` is worse than a missing one, because a
+consumer asserts against it happily.
 
 ### Cost
 

@@ -855,6 +855,7 @@ var typePriority = map[string]int{
 	"AWS::EC2::Instance":                          3,
 	"AWS::ElasticLoadBalancingV2::TargetGroup":    3,
 	"AWS::ElasticLoadBalancingV2::LoadBalancer":   3,
+	"AWS::ElasticLoadBalancing::LoadBalancer":     3,
 	"AWS::SNS::Topic":                             3,
 	"AWS::ElasticLoadBalancingV2::Listener":       4,
 	"AWS::ElasticLoadBalancingV2::ListenerRule":   5,
@@ -2787,6 +2788,8 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployEC2RouteTable(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::EC2::Instance":
 		return d.deployEC2Instance(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::ElasticLoadBalancing::LoadBalancer":
+		return d.deployELBClassicLoadBalancer(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ElasticLoadBalancingV2::TargetGroup":
 		return d.deployELBTargetGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::ElasticLoadBalancingV2::LoadBalancer":
@@ -3767,6 +3770,164 @@ func (d *StackDeployer) deployELBLoadBalancer(
 		cfnSetMetadata(&dr, "DNSName", extractXMLField(resp.Body, "DNSName"))
 	}
 	return dr, cost, nil
+}
+
+// deployELBClassicLoadBalancer creates a Classic Load Balancer for the given CFN resource.
+//
+// This is #844's Tier 2. `AWS::ElasticLoadBalancing::LoadBalancer` — no `V2` — is the classic type,
+// and before this it had no arm in [StackDeployer.dispatchResource] at all: a template declaring one
+// reached the generic stub, so the stack reported `CREATE_COMPLETE` for a load balancer that no
+// `DescribeLoadBalancers` of either generation could find.
+//
+// **`Version` is the whole of the routing.** [elbClassicRequest] discriminates on the Query
+// `Version` member, and `CreateLoadBalancer` is one of the six action names both generations
+// publish — so the same params without `Version` reach the ELBv2 handler and quietly create an
+// Application Load Balancer instead. Nothing else here distinguishes the two, which is why
+// cfn_elb_classic_test.go asserts the result through the **classic** describe.
+//
+// **`Ref` needs no arm in [cfnRefValue].** AWS publishes it as "the name of the load balancer"
+// (`aws-properties-ec2-elb.html`), which is the physical ID set below, so the default answer is
+// already the right one. `docs/services.md` recorded the opposite — the DNS name — and that entry
+// is deleted rather than implemented. The DNS name is `Fn::GetAtt DNSName`, which is the whole of
+// this operation's published Response Elements, and it is recorded in the resource's metadata where
+// step 2 of [cfnGetAttValue] finds it.
+//
+// The four other published attributes — `CanonicalHostedZoneName`, `CanonicalHostedZoneNameID`,
+// `SourceSecurityGroup.GroupName` and `SourceSecurityGroup.OwnerAlias` — are #1013 absences and get
+// no arm either: substrate mints no hosted zone and no source security group for a classic load
+// balancer, and [cfnGetAttNamesAnARN] already refuses an attribute containing a `.` or not ending
+// in `Arn`, so each answers empty. Inventing a hosted-zone ID would be #561 in another costume.
+//
+// **The ARN is built rather than read.** No classic response carries one — the create's body is
+// `DNSName` alone — so it comes from [elbClassicLoadBalancerARN], the builder the create itself
+// used, which cannot disagree with the record. It is what lets the stack stamp and the Resource
+// Groups Tagging API reach this record at all; see [cfnELBStampableTypes].
+func (d *StackDeployer) deployELBClassicLoadBalancer(
+	ctx context.Context,
+	logicalID string,
+	props map[string]interface{},
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	name := resolveStringProp(props, "LoadBalancerName", logicalID, cctx)
+	req := &AWSRequest{
+		Service:   "elasticloadbalancing",
+		Operation: "CreateLoadBalancer",
+		Params: map[string]string{
+			"Action":           "CreateLoadBalancer",
+			"Version":          elbClassicAPIVersion,
+			"LoadBalancerName": name,
+			"Scheme":           resolveStringProp(props, "Scheme", "internet-facing", cctx),
+		},
+		Headers: map[string]string{},
+	}
+	for k, v := range cfnELBClassicListenerParams(props["Listeners"], cctx) {
+		req.Params[k] = v
+	}
+	// `AvailabilityZones` and `Subnets` are both `Conditional` on the CFN type and the classic
+	// create takes either, so neither is defaulted: a template that supplies no placement is
+	// forwarded as-is and refused by the API rather than by a guess made here.
+	for _, list := range []string{"AvailabilityZones", "Subnets", "SecurityGroups"} {
+		for i, v := range resolveStringList(props[list], cctx) {
+			req.Params[fmt.Sprintf("%s.member.%d", list, i+1)] = v
+		}
+	}
+	for k, v := range cfnELBClassicTagParams(props["Tags"], cctx) {
+		req.Params[k] = v
+	}
+
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	dr := DeployedResource{
+		LogicalID:  logicalID,
+		Type:       "AWS::ElasticLoadBalancing::LoadBalancer",
+		PhysicalID: name,
+	}
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+	} else if resp != nil {
+		dr.ARN = elbClassicLoadBalancerARN(cctx.region, cctx.accountID, name)
+		cfnSetMetadata(&dr, "DNSName", extractXMLField(resp.Body, "DNSName"))
+	}
+	return dr, cost, nil
+}
+
+// cfnELBClassicListenerParams flattens a CloudFormation `Listeners` list into the
+// `Listeners.member.N.*` query parameters the 2012-06-01 `CreateLoadBalancer` takes.
+//
+// `Listeners` is the CFN type's one `Required: Yes` property and the classic create's one required
+// list, so the two agree about it: a template omitting it produces no parameters here and the API
+// refuses the request for `Listeners.member.1 is required`, which is the refusal CloudFormation's
+// own validator would have raised.
+//
+// All five members [elbClassicParseListeners] reads are forwarded. `PolicyNames` is the sixth CFN
+// member and is deliberately dropped: substrate models no classic load-balancer policies, so
+// forwarding it would name a policy no `DescribeLoadBalancerPolicies` could resolve.
+//
+// The stop-at-the-first-member-with-no-Protocol rule is [cfnELBActionParams]', for its reason: the
+// wire format indexes from 1 contiguously, so an entry carrying no `Protocol` ends the list rather
+// than leaving a gap the plugin's own walk would stop at anyway.
+func cfnELBClassicListenerParams(prop interface{}, cctx *cfnContext) map[string]string {
+	listeners, isList := prop.([]interface{})
+	if !isList {
+		return nil
+	}
+	params := make(map[string]string, len(listeners)*4)
+	for i, l := range listeners {
+		listener, isMap := l.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		protocol := resolveStringProp(listener, "Protocol", "", cctx)
+		if protocol == "" {
+			break
+		}
+		prefix := fmt.Sprintf("Listeners.member.%d.", i+1)
+		params[prefix+"Protocol"] = protocol
+		for _, member := range []string{
+			"LoadBalancerPort", "InstancePort", "InstanceProtocol", "SSLCertificateId",
+		} {
+			if v := resolveStringProp(listener, member, "", cctx); v != "" {
+				params[prefix+member] = v
+			}
+		}
+	}
+	return params
+}
+
+// cfnELBClassicTagParams flattens a CloudFormation `Tags` list into the `Tags.member.N.{Key,Value}`
+// parameters the 2012-06-01 `CreateLoadBalancer` takes.
+//
+// Forwarded on the create rather than stamped afterwards, so the tags a template declares are
+// validated by the operation that publishes `DuplicateTagKeys` and `TooManyTags` for them — a
+// template declaring eleven tags fails its create, as it does on AWS, instead of producing a load
+// balancer over its own published quota.
+//
+// [resolveValue] rather than a string assertion for both members, for #526's reason: a tag value is
+// very often `{"Fn::Sub": "${AWS::StackName}-web"}`, and asserting on `string` dropped it silently.
+// An entry with no key is skipped rather than ending the walk, because the key is what the query
+// list is indexed by and a keyless entry carries nothing the API could store.
+func cfnELBClassicTagParams(prop interface{}, cctx *cfnContext) map[string]string {
+	tags, isList := prop.([]interface{})
+	if !isList {
+		return nil
+	}
+	params := make(map[string]string, len(tags)*2)
+	index := 0
+	for _, t := range tags {
+		tag, isMap := t.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+		key := resolveValue(tag["Key"], cctx)
+		if key == "" {
+			continue
+		}
+		index++
+		prefix := fmt.Sprintf("Tags.member.%d.", index)
+		params[prefix+"Key"] = key
+		params[prefix+"Value"] = resolveValue(tag["Value"], cctx)
+	}
+	return params
 }
 
 // cfnELBActionParams flattens a CloudFormation listener action list into the
