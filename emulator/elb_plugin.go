@@ -381,10 +381,24 @@ func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 	return elbEmptyOKResponse(reqCtx, "DeleteTargetGroup")
 }
 
+// modifyTargetGroup answers `ModifyTargetGroup`, reporting the target group it modified.
+//
+// It reported an empty `TargetGroups` list on every call until #756: the record was found, modified
+// and written back, and then discarded. `API_ModifyTargetGroup` publishes `TargetGroups.member.N`,
+// "Information about the modified target group", and its sample response carries a full member, so a
+// consumer reading the modified group off the response got nothing.
+//
+// An ARN naming no target group still answers the empty list rather than `TargetGroupNotFound`, as
+// [ELBPlugin.modifyListener] does for `ListenerNotFound`. Both refusals are published and neither is
+// here, because adding them is a behavior change separate from reporting the record that was found;
+// see #1313.
 func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	arn := req.Params["TargetGroupArn"]
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	allKeys, _ := p.state.List(context.Background(), elbNamespace, "tg:"+scope+"/")
+	type tgResult struct {
+		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
+	}
 	for _, k := range allKeys {
 		data, err := p.state.Get(context.Background(), elbNamespace, k)
 		if err != nil || data == nil {
@@ -400,12 +414,15 @@ func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		if v := req.Params["HealthCheckProtocol"]; v != "" {
 			tg.HealthCheckProtocol = v
 		}
-		newData, _ := json.Marshal(tg)
-		_ = p.state.Put(context.Background(), elbNamespace, k, newData)
-		break
-	}
-	type tgResult struct {
-		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
+		newData, marshalErr := json.Marshal(tg)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("elb modifyTargetGroup marshal: %w", marshalErr)
+		}
+		if putErr := p.state.Put(context.Background(), elbNamespace, k, newData); putErr != nil {
+			return nil, fmt.Errorf("elb modifyTargetGroup state.Put: %w", putErr)
+		}
+		return elbOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS,
+			tgResult{TargetGroups: []elbTGItem{tgToItem(tg)}})
 	}
 	return elbOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS, tgResult{})
 }
@@ -842,8 +859,23 @@ func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	return elbEmptyOKResponse(reqCtx, "DeleteRule")
 }
 
+// setRulePriorities answers `SetRulePriorities`, reporting the rules it repriced.
+//
+// It reported an empty `Rules` list on every call until #756, the same defect
+// [ELBPlugin.modifyTargetGroup] carried: each rule was found, repriced and written back, and then
+// discarded. `API_SetRulePriorities` publishes `Rules.member.N`, "Information about the rules", and
+// its sample response carries the repriced rule with its new `Priority`.
+//
+// The rules are reported in request order rather than priority order, which is the order AWS's own
+// sample shows for the one-member case and the only order this operation's input defines. A rule ARN
+// naming nothing is skipped rather than refused with the published `RuleNotFound`, as #1313 records
+// for the two modify operations.
 func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	type ruleResult struct {
+		Rules []elbRuleItem `xml:"Rules>member"`
+	}
+	var result ruleResult
 	for i := 1; ; i++ {
 		ruleARN := req.Params[fmt.Sprintf("RulePriorities.member.%d.RuleArn", i)]
 		if ruleARN == "" {
@@ -861,15 +893,18 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 				continue
 			}
 			r.Priority = priority
-			newData, _ := json.Marshal(r)
-			_ = p.state.Put(context.Background(), elbNamespace, k, newData)
+			newData, marshalErr := json.Marshal(r)
+			if marshalErr != nil {
+				return nil, fmt.Errorf("elb setRulePriorities marshal: %w", marshalErr)
+			}
+			if putErr := p.state.Put(context.Background(), elbNamespace, k, newData); putErr != nil {
+				return nil, fmt.Errorf("elb setRulePriorities state.Put: %w", putErr)
+			}
+			result.Rules = append(result.Rules, ruleToItem(r))
 			break
 		}
 	}
-	type ruleResult struct {
-		Rules []elbRuleItem `xml:"Rules>member"`
-	}
-	return elbOKResponse(reqCtx, "SetRulePriorities", elbXMLNS, ruleResult{})
+	return elbOKResponse(reqCtx, "SetRulePriorities", elbXMLNS, result)
 }
 
 // --- Helpers ---
@@ -887,130 +922,6 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 // and Route 53 publish `https://` in their own samples. RDS and ElastiCache publish `http://` and
 // substrate spells both `https://` — see #1238.
 const elbXMLNS = "http://elasticloadbalancing.amazonaws.com/doc/2015-12-01/"
-
-// elbLBItem is the XML representation of an ELBv2 load balancer.
-type elbLBItem struct {
-	LoadBalancerArn  string       `xml:"LoadBalancerArn"`
-	LoadBalancerName string       `xml:"LoadBalancerName"`
-	DNSName          string       `xml:"DNSName"`
-	Type             string       `xml:"Type"`
-	Scheme           string       `xml:"Scheme"`
-	VpcID            string       `xml:"VpcId"`
-	State            elbStateItem `xml:"State"`
-	CreatedTime      string       `xml:"CreatedTime"`
-}
-
-// elbStateItem is the XML representation of an ELBv2 load balancer state.
-type elbStateItem struct {
-	Code string `xml:"Code"`
-}
-
-func lbToItem(lb ELBLoadBalancer) elbLBItem {
-	return elbLBItem{
-		LoadBalancerArn:  lb.ARN,
-		LoadBalancerName: lb.Name,
-		DNSName:          lb.DNSName,
-		Type:             lb.Type,
-		Scheme:           lb.Scheme,
-		VpcID:            lb.VpcID,
-		State:            elbStateItem{Code: lb.State.Code},
-		CreatedTime:      lb.CreatedTime.UTC().Format(time.RFC3339),
-	}
-}
-
-// elbTGItem is the XML representation of an ELBv2 target group.
-type elbTGItem struct {
-	TargetGroupArn      string `xml:"TargetGroupArn"`
-	TargetGroupName     string `xml:"TargetGroupName"`
-	Protocol            string `xml:"Protocol"`
-	Port                int    `xml:"Port"`
-	VpcID               string `xml:"VpcId"`
-	TargetType          string `xml:"TargetType"`
-	HealthCheckPath     string `xml:"HealthCheckPath"`
-	HealthCheckProtocol string `xml:"HealthCheckProtocol"`
-	HealthCheckPort     string `xml:"HealthCheckPort"`
-}
-
-func tgToItem(tg ELBTargetGroup) elbTGItem {
-	return elbTGItem{
-		TargetGroupArn:      tg.ARN,
-		TargetGroupName:     tg.Name,
-		Protocol:            tg.Protocol,
-		Port:                tg.Port,
-		VpcID:               tg.VpcID,
-		TargetType:          tg.TargetType,
-		HealthCheckPath:     tg.HealthCheckPath,
-		HealthCheckProtocol: tg.HealthCheckProtocol,
-		HealthCheckPort:     tg.HealthCheckPort,
-	}
-}
-
-// elbListenerItem is the XML representation of an ELBv2 listener.
-type elbListenerItem struct {
-	ListenerArn     string          `xml:"ListenerArn"`
-	LoadBalancerArn string          `xml:"LoadBalancerArn"`
-	Port            int             `xml:"Port"`
-	Protocol        string          `xml:"Protocol"`
-	DefaultActions  []elbActionItem `xml:"DefaultActions>member"`
-}
-
-// elbActionItem is the XML representation of an ELBv2 action.
-type elbActionItem struct {
-	Type           string `xml:"Type"`
-	TargetGroupArn string `xml:"TargetGroupArn,omitempty"`
-	Order          int    `xml:"Order,omitempty"`
-}
-
-func listenerToItem(l ELBListener) elbListenerItem {
-	item := elbListenerItem{
-		ListenerArn:     l.ARN,
-		LoadBalancerArn: l.LoadBalancerARN,
-		Port:            l.Port,
-		Protocol:        l.Protocol,
-	}
-	for _, a := range l.DefaultActions {
-		item.DefaultActions = append(item.DefaultActions, elbActionItem{ //nolint:staticcheck
-			Type:           a.Type,
-			TargetGroupArn: a.TargetGroupArn,
-			Order:          a.Order,
-		})
-	}
-	return item
-}
-
-// elbConditionItem is the XML representation of a rule condition.
-type elbConditionItem struct {
-	Field  string   `xml:"Field"`
-	Values []string `xml:"Values>member"`
-}
-
-// elbRuleItem is the XML representation of an ELBv2 rule.
-type elbRuleItem struct {
-	RuleArn    string             `xml:"RuleArn"`
-	Priority   string             `xml:"Priority"`
-	IsDefault  bool               `xml:"IsDefault"`
-	Conditions []elbConditionItem `xml:"Conditions>member"`
-	Actions    []elbActionItem    `xml:"Actions>member"`
-}
-
-func ruleToItem(r ELBRule) elbRuleItem {
-	item := elbRuleItem{
-		RuleArn:   r.ARN,
-		Priority:  r.Priority,
-		IsDefault: r.IsDefault,
-	}
-	for _, c := range r.Conditions {
-		item.Conditions = append(item.Conditions, elbConditionItem{Field: c.Field, Values: c.Values}) //nolint:staticcheck
-	}
-	for _, a := range r.Actions {
-		item.Actions = append(item.Actions, elbActionItem{ //nolint:staticcheck
-			Type:           a.Type,
-			TargetGroupArn: a.TargetGroupArn,
-			Order:          a.Order,
-		})
-	}
-	return item
-}
 
 func (p *ELBPlugin) appendToList(scope, listName, id string) error {
 	key := listName + ":" + scope

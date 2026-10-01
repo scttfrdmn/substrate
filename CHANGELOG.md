@@ -314,6 +314,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Nothing asserted that ELB's responses were projected, and two of its operations answered an empty
+  result for a record they had just written** (#756). ELB is the most uniform block the issue has
+  reached: `ELBLoadBalancer`, `ELBTargetGroup`, `ELBListener`, `ELBRule` and the classic
+  `ELBClassicLoadBalancer` declare `AccountID`, `Region` and `EverTagged` apiece — fifteen bookkeeping
+  fields — and not one could reach a body, every one of the twelve sites that answers a resource
+  already handing an item struct to `elbOKResponse`. What was missing was the assertion that this
+  holds, so the fix is a new `emulator/elb_wire_test.go` pinning **both** generations plus
+  `emulator/elb_wire.go` holding the ELBv2 rendering layer moved out of `elb_plugin.go`, taking the
+  count from **212 still reachable to 197**. The assertion is #1311's element-*path* comparison reused.
+  No shape in either API publishes an account or a Region member: the four ELBv2 shapes publish the
+  resource's ARN, from which a caller recovers both, and the classic `LoadBalancerDescription`
+  publishes no ARN either — the record's own exists for IAM and the tagging API, not for a response.
+  The ARN `Suffix` all four ELBv2 records persist is in the same position. The stored fields stay, so a
+  recorded run replays from unchanged state and the Resource Groups Tagging API still answers from
+  those records, in both generations.
+- **`ModifyTargetGroup` now reports the target group it modified, and `SetRulePriorities` the rules it
+  repriced** (#756). Both found their record, applied the request, wrote it back — and then answered an
+  empty list, discarding it. `API_ModifyTargetGroup` publishes `TargetGroups.member.N`, "Information
+  about the modified target group", and `API_SetRulePriorities` publishes `Rules.member.N`; both
+  reference pages' sample responses carry a full member. So a consumer reading the result of its own
+  modification got nothing. The rules are reported in request order, which is the only order this
+  operation's input defines. Neither refuses an ARN that names nothing — `TargetGroupNotFound`,
+  `ListenerNotFound` and `RuleNotFound` are published and none is answered, which is #1313 rather than
+  part of this change.
+- **`CreateLoadBalancer` and `DescribeLoadBalancers` now report the availability zones and security
+  groups the record holds** (#756). `createLoadBalancer` derives a zone per `Subnets.member.N` and
+  stores `SecurityGroups.member.N` verbatim, and `API_LoadBalancer` publishes both — yet neither
+  reached a response, so substrate held the values and a consumer asking for them got nothing. The
+  zones are reported as the `API_AvailabilityZone` objects v2 publishes (`ZoneName` alone; no subnet ID
+  is persisted, so `SubnetId` is absent rather than guessed) rather than as the bare strings the
+  2012-06-01 shape uses, which is the one member on which the two generations' shapes differ.
 - **ElastiCache reported no creation time on either resource it stamps one on, and nothing asserted
   that its responses were projected at all** (#756). ElastiCache is RDS's sibling here and was in the
   same position: `ElastiCacheCacheCluster`, `ElastiCacheReplicationGroup`,
