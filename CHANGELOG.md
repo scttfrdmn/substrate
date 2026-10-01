@@ -314,6 +314,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ElastiCache reported no creation time on either resource it stamps one on, and nothing asserted
+  that its responses were projected at all** (#756). ElastiCache is RDS's sibling here and was in the
+  same position: `ElastiCacheCacheCluster`, `ElastiCacheReplicationGroup`,
+  `ElastiCacheCacheSubnetGroup` and `ElastiCacheCacheParameterGroup` declare eleven bookkeeping fields
+  between them and not one could reach a body, because all twelve sites that answer a resource hand an
+  item struct to `elasticacheXMLResponse`. What was missing was the assertion that this holds, so the
+  fix is a new `emulator/elasticache_wire_test.go` plus `emulator/elasticache_wire.go` holding the
+  rendering layer moved out of `elasticache_plugin.go`, taking the count from **223 still reachable to
+  212**. The assertion is #1311's element-*path* comparison reused — the body's whole set of paths
+  against the published shape's, so a member at the wrong depth fails too, not merely one that is
+  present. Neither `AccountID` nor `Region` has a published home on any ElastiCache shape: all four
+  publish the resource's `ARN`, from which a caller recovers both, and no shape publishes an account
+  or a Region member. The stored fields stay, so a recorded run replays from unchanged state and the
+  Resource Groups Tagging API still answers from those records.
+- **`CreateCacheCluster`, `DescribeCacheClusters`, `ModifyCacheCluster` and `DeleteCacheCluster` now
+  report `CacheClusterCreateTime`, and the four replication-group operations report
+  `ReplicationGroupCreateTime`** (#756). Substrate stamped the creation instant from the simulated
+  clock onto both records and reported it on neither; both members are published
+  (`API_CacheCluster`, `API_ReplicationGroup`, each `Type: Timestamp, Required: No`), so a consumer
+  asking when a cluster was created got nothing from a value substrate held. Rendered as the ISO8601
+  instant the Query protocol publishes, and omitted rather than reported as `0001-01-01T00:00:00Z`
+  when the record's time is zero, which the two deletes' undecodable-JSON fallback can reach.
+  `API_CacheSubnetGroup` and `API_CacheParameterGroup` publish no creation time at all, so those two
+  records store none and report none — unchanged.
 - **RDS reported no creation time on any resource it stamps one on, and nothing asserted that its
   responses were projected at all** (#756). RDS is the first service the issue has reached that was
   already answering through a separate item struct rather than encoding its records: `RDSDBInstance`,
