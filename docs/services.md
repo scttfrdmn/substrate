@@ -18678,6 +18678,36 @@ rule-level `ComplianceType` enum but not in the `Compliance` shape's subset, and
 substrate report a value no SDK enum member matches, so a consumer's `switch` would
 fall through to its default while the test passed asserting nothing.
 
+#### A seed's accountId and region scope the seed, and reach no AWS response
+
+The `accountId` and `region` a seed body carries — and the `?accountId=&region=` a
+clear accepts — are the seed's **own** scope: they are read to build its state key, and
+a lookup tries the exact pair first, then either half wildcarded, then both. That is how
+a fixture seeds "every account in `eu-west-1`" or "this account in every Region", and
+why omitting both is the same as `"*"`.
+
+They are therefore not the same thing as the account ID and Region that
+[#756](https://github.com/scttfrdmn/substrate/issues/756) is otherwise about. Elsewhere
+those are substrate's bookkeeping on a *resource* record that a handler then marshals
+onto the wire, and the fix is to answer from a projection instead. Here the fields belong
+to substrate's own control-plane request, they appear on no AWS Config shape, and no AWS
+response carries one: each seed is read at request time and its *named* values are copied
+onto the published shape. The seven responses that consult a seed are
+
+| Seed | Responses |
+|------|-----------|
+| `recorder-status` | `DescribeConfigurationRecorderStatus` |
+| `delivery-status` | `DescribeDeliveryChannelStatus` |
+| `rule-compliance` | `DescribeComplianceByConfigRule`, `GetComplianceDetailsByConfigRule` |
+| `pack-status` | `DescribeConformancePackStatus` |
+| `pack-compliance` | `DescribeConformancePackCompliance`, `GetConformancePackComplianceSummary` |
+
+and `TestConfigWire_SeededResponsesCarryNoSeedScopeMember` asserts on the raw bytes of
+every one of them that neither member appears at any depth. Four more operations consult
+a seed and carry none of it: `StartConfigurationRecorder` and `StopConfigurationRecorder`
+answer an empty body, and `PutConformancePack` and `DeleteConformancePack` read a seeded
+pack state only to decide whether the call is allowed.
+
 ### Conformance pack status advances on observation
 
 `PutConformancePack` returns `CREATE_IN_PROGRESS`, and the first

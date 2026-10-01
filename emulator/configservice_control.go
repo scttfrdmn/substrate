@@ -26,11 +26,31 @@ import (
 //	POST/DELETE /v1/config/delivery-policy          force or suppress the bucket-policy refusal
 //	POST/DELETE /v1/config/delivery-status          the DeliveryStatus a channel reports
 //	POST/DELETE /v1/config/rule-compliance/{name}   a Config rule's compliance verdict
+//	POST/DELETE /v1/config/pack-status/{name}       a conformance pack's deployment state
+//	POST/DELETE /v1/config/pack-compliance/{name}   a pack's per-rule verdicts
 //
 // Seeds live in their own namespace so a seeded status is never mistaken for a real
 // one in a state dump or during replay, and each is applied at *read* time rather
 // than written into the resource — so clearing a seed restores the real state
 // instead of leaving the seeded value behind.
+//
+// # The accountId and region every seed carries are the seed's own scope
+//
+// Five of the seed structs below declare AccountID and Region, and #756's inventory
+// lists all ten of those fields. They are not the thing that inventory is otherwise
+// about. Everywhere else, an AccountID is substrate's bookkeeping grafted onto a
+// *resource* record that a handler then marshals onto the wire, and the fix is a wire
+// struct (emulator/ecr_wire.go). Here the field is a member of substrate's own
+// control-plane request: each handler reads it off the POST body and builds the state
+// key from it, which is the whole mechanism cfgsvcCtrlKeyCandidates resolves. Deleting
+// it would delete the ability to seed one account or one Region.
+//
+// What holds instead is that no AWS response carries one. Every seeded* getter returns
+// the struct and its caller copies *named* fields onto a published shape, so the
+// projection is in the code rather than in a separate type.
+// TestConfigWire_SeededResponsesCarryNoSeedScopeMember asserts that over the raw bytes
+// of all seven responses a seed reaches, and is what
+// scripts/wire-bookkeeping-projected.txt cites for the five records.
 
 // configServiceCtrlNamespace is the state namespace for AWS Config control-plane
 // (seed) data, separate from configServiceNamespace so a seed is not mistaken for

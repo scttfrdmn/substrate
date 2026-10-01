@@ -244,6 +244,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **AWS Config's five control-plane seed records are recorded as projected** (#756). The `accountId`
+  and `region` on `cfgsvcSeededRecorderStatus`, `cfgsvcSeededDeliveryStatus`,
+  `cfgsvcSeededRuleCompliance`, `cfgsvcSeededPackStatus` and `cfgsvcSeededPackCompliance` were ten of
+  the inventory's lines and are not what the rest of it describes. Everywhere else an `AccountID` is
+  substrate's bookkeeping grafted onto a *resource* record that a handler marshals onto the wire;
+  these are members of substrate's own control-plane request, read off the POST body to build the
+  seed's state key, which is the whole mechanism that lets a fixture seed one account or one Region.
+  Deleting them would delete that, so the inventory's narrower discharge — a field written and never
+  read — was never available. What is true instead is that no AWS response carries one: each seed is
+  read at request time and its named values are copied onto a published shape. The new
+  `TestConfigWire_SeededResponsesCarryNoSeedScopeMember` proves it over the raw bytes of all seven
+  responses that consult a seed, walking each document so the claim is "no such member at any depth"
+  rather than "not at the top level" — the account ID and the Region both appear legitimately in these
+  same bodies, inside a Config ARN, so only an assertion about the member *name* is available. Four
+  more operations consult a seed and are deliberately absent, because they carry none of it:
+  `Start`/`StopConfigurationRecorder` answer an empty body, and `Put`/`DeleteConformancePack` read a
+  seeded pack state only to decide whether the call is allowed. `make wire-bookkeeping-check` moves to
+  **143 projected across 55 records, 176 still reachable** of the same 319 declared.
+
 - **`test/e2e` dependencies bumped again**, seventeen of them: `aws-sdk-go-v2` 1.47.0→1.47.1,
   `config` 1.33.5→1.33.6, `credentials` 1.20.5→1.20.6, `service/account` 1.41.0→1.41.1,
   `service/cloudformation` 1.81.0→1.81.1, `service/cloudwatch` 1.72.0→1.73.0, `service/configservice`
