@@ -11,6 +11,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/account v1.41.1
 	github.com/aws/aws-sdk-go-v2/service/cloudformation v1.81.1
 	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.73.0
+	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.42.1
+	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.74.1
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.74.1
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.69.1
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.336.1
@@ -34,8 +36,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.5.4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.8.4 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.5.4 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cognitoidentity v1.42.1 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider v1.74.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.19 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/checksum v1.11.5 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/endpoint-discovery v1.13.4 // indirect
