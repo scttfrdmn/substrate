@@ -244,6 +244,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Backup's three records are recorded as projected, with a test cited for each** (#756). `BackupVault`,
+  `BackupPlan` and `BackupSelection` each declare `AccountID` and `Region` under wire-visible `json`
+  tags, and neither reaches a response: the vault answers through `backupVaultOut` since #1325, and
+  every plan and selection response is a map built member by member. `emulator/backup_wire_test.go`
+  drives all **twelve** routed operations and walks each decoded document for a member named for either
+  at any depth, reporting the `$.a.b[0].c` path. That takes `scripts/wire-bookkeeping-projected.txt`
+  from **159 projected across 62 records to 165 across 65**, and the still-reachable count from **160
+  to 154** of the same 319 declared. Absence rather than exact membership, because `DescribeBackupVault`
+  answers 5 of 17 published members and `ListBackupVaults` 5 of 13 (#1199) and an exact expectation
+  would have to be rewritten by the PR closing that gap. Nothing here is vacuous for free: neither
+  member carries `,omitempty` on any of the three records, and Backup routes no tag operation, so no
+  record declares `EverTagged` and the trap #1304 fell into on EFS cannot arise. Each case asserts a
+  published member is present before asserting a bookkeeping one is absent, so a response that failed
+  to render the record fails as a missing anchor rather than passing as an absence. The three deletes
+  answer `{}` and read nothing off the record; they are driven anyway, and a control confirms the walk
+  catches a leak added at each.
+
 - **Step Functions' three records are recorded as projected** (#756). `StateMachineState`,
   `ExecutionState` and `ActivityState` declare `AccountID` and `Region` under wire-visible `json`
   tags, and the two taggable ones also declare `EverTagged` as `ever_tagged` — eight of the

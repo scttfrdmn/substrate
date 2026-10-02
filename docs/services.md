@@ -20066,6 +20066,32 @@ not projected through that type: `API_CreateBackupVault` publishes three members
 keeps its own map. The plan and selection handlers build their responses member by member, so no
 Backup record now reaches the wire whole.
 
+### The account and Region a record carries reach no response
+
+Each of the three persisted records — `BackupVault`, `BackupPlan` and `BackupSelection` — declares
+`AccountID` and `Region` under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. No Backup shape publishes either, and neither
+reaches a body: the vault answers through `backupVaultOut` (`emulator/backup_wire.go`), and every
+plan and selection response is a `map[string]interface{}` built member by member, so the map is the
+projection. Every `json.Marshal` of a record in the plugin is in a create handler writing to state.
+
+All **twelve** routed operations are driven by
+`TestBackupWire_VaultResponsesCarryNoBookkeepingMember` and its two siblings in
+`emulator/backup_wire_test.go`, which walk the decoded document and fail on a member named for either
+at any depth — so the six entries this discharges in `scripts/wire-bookkeeping-baseline.txt` stay
+listed as declarations rather than as leaks
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). The assertion is on the member *name*,
+because the account and the Region appear in every body as segments of a `backup` ARN, which is
+published; and each case asserts a published member is *present* before asserting a bookkeeping one is
+absent, so a response that failed to render the record at all fails as a missing anchor rather than
+passing as an absence.
+
+Neither member carries `,omitempty` on any of the three records and no Backup record declares
+`EverTagged` — Backup routes no tag operation — so the vacuous-absence trap that governs the taggable
+services (#1304, #938) does not arise here. The three deletes answer `{}` and read nothing off the
+record they address; they are driven anyway, because the set of twelve should read as complete rather
+than as a sample, and a control confirms the walk catches a leak added at each of the three.
+
 ### Every published date is a Unix timestamp
 
 Backup publishes no RFC3339 date. Each page glosses its date as *"in Unix format and Coordinated
