@@ -10849,6 +10849,36 @@ whose stored state was `active` and answer every later `DescribeCapacityReservat
 seed is recorded as an event and re-applied before the recorded `CreateCapacityReservation` is
 re-executed — see [How a seed survives a replay](#how-a-seed-survives-a-replay).
 
+### The account and Region a record carries reach no response
+
+Every EC2 record in `emulator/ec2_types.go` declares `AccountID` and `Region` under wire-visible
+`json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. No EC2
+shape publishes either, and neither reaches a body. The records carry no `xml` tag. Every response is
+marshaled from a struct declared for its operation, no XML-tagged field anywhere is typed as a record,
+and no record is embedded in a response or held behind an interface. So the projection already exists
+in code, and what each record needs is a test that proves it.
+
+Seven records have one so far: the networking set, `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`,
+`EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway` and `EC2ElasticIP`. Their **thirty-seven**
+routed operations are driven by `TestEC2Wire_VPCResponsesCarryNoBookkeepingMember` and its six
+siblings in `emulator/ec2_wire_test.go`. Each test walks the raw XML and fails on an element named for
+a bookkeeping member at any depth. As a result, the fourteen entries this discharges in
+`scripts/wire-bookkeeping-baseline.txt` stay listed as declarations rather than as leaks
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). The storage, image and compute records
+are not yet cited.
+
+The account member is spelled three ways across the records: `account_id` on most, `accountId` on
+`EC2KeyPair` and `accountID` on `EC2LaunchTemplate`. A case fold reconciles the last two with the Go
+name `AccountID`, but not the snake_case form, so the test names that form explicitly. A control run
+without it lets a leaked `<account_id>` pass. The comparison is an equality on the element *name*,
+because the account also appears in published values such as `ownerId`.
+
+Each case asserts a published element is *present* before asserting a bookkeeping one is absent. This
+means a response that failed to render the record fails as a missing anchor rather than passing as an
+absence. The stored record is also read back as raw JSON, which proves it held both members in the
+first place. Neither member carries `,omitempty` on any of these seven records, so neither can be
+absent for free.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

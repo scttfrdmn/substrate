@@ -244,6 +244,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **EC2's seven networking records are recorded as projected, with a test cited for each** (#756).
+  `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway`
+  and `EC2ElasticIP` each declare `AccountID` and `Region` under wire-visible `json` tags. Neither
+  reaches a response. `emulator/ec2_types.go` carries no `xml` tag, every response is marshaled from
+  a struct declared for its operation, and no XML-tagged field anywhere is typed as a record, so EC2
+  was already projected in code and needed only the citation. The new `emulator/ec2_wire_test.go`
+  holds one test per record. Together they drive **thirty-seven** routed operations and walk the raw
+  XML for an element named for a bookkeeping member at any depth. That takes
+  `scripts/wire-bookkeeping-projected.txt` from **171 projected across 68 records to 185 across 75**,
+  and the still-reachable count from **148 to 134** of the same 319 declared.
+  - The member list is longer than the other services' because EC2 spells the account three ways:
+    `account_id`, `accountId` and `accountID`. A fold does not reach the snake_case form, and a
+    control run without that entry lets a leaked `<account_id>` pass.
+  - `ModifyVpcAttribute` and `ModifySubnetAttribute` are sent the published parameter names, which
+    the handlers do not read (#1151). Only the response is asserted, and it is the same either way.
+  - The projected inventory is now in byte order. #1328 had placed CodeDeploy's three lines after
+    Cognito's.
+
 - **CodeDeploy's three records are recorded as projected, with a test cited for each** (#756).
   `CodeDeployApp`, `CodeDeployGroup` and `CodeDeployDeployment` each declare `AccountID` and `Region`
   under wire-visible `json` tags — tagged `accountID`/`region`, the lowercase-initial spelling, since
