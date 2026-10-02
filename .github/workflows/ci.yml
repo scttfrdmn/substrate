@@ -159,11 +159,13 @@ jobs:
   # that the inventory had never been taken. A new bookkeeping field with a
   # wire-visible json tag must fail a PR, not wait for someone to run a target.
   #
-  # It asserts two files: the declaration baseline, and
+  # It asserts three files: the declaration baseline;
   # scripts/wire-bookkeeping-projected.txt, whose entries each cite the test that
-  # proves their record cannot reach a response body. The citation is checked by
-  # grep for the test's definition, which is why this still needs no Go toolchain
-  # — a renamed test fails here without the suite running.
+  # proves their record cannot reach a response body; and
+  # scripts/wire-bookkeeping-internal.txt, whose entries each name the reader or
+  # route that keeps a record off every AWS response. Both references are checked
+  # by grep, which is why this still needs no Go toolchain — a renamed test or a
+  # removed route fails here without the suite running.
   wire-bookkeeping:
     name: Wire Bookkeeping Drift
     runs-on: ubuntu-latest

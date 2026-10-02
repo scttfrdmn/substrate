@@ -66,9 +66,10 @@
 # So a fixed service records itself in scripts/wire-bookkeeping-projected.txt
 # instead: one line per persisted record that is rendered through a wire struct,
 # citing the test that asserts on the raw response bytes that no unpublished
-# member appears. That file is where an entry argues for itself, and the number
-# #756's AC3 drives to zero is the difference between the two files —
-# reported below as "still reachable".
+# member appears. That file is where an entry argues for itself. A record no AWS
+# response renders records itself in scripts/wire-bookkeeping-internal.txt, and
+# the number #756's AC3 drives to zero is what the baseline declares less what
+# those two files discharge — reported below as "still reachable".
 #
 # Note that json:"-" is used on zero of the declared fields. The exclusion is available
 # and has never been reached for, and for a field already written to state it is
@@ -79,6 +80,7 @@ cd "$(dirname "$0")/.."
 
 BASELINE="scripts/wire-bookkeeping-baseline.txt"
 PROJECTED="scripts/wire-bookkeeping-projected.txt"
+INTERNAL="scripts/wire-bookkeeping-internal.txt"
 
 # The five field names, matched on the Go identifier rather than on the rendered
 # json tag. Keying on the identifier is what catches the abbreviated tags: one
@@ -157,24 +159,23 @@ PROJECTED="scripts/wire-bookkeeping-projected.txt"
 # CreateAccountStatus.AccountId, which AWS does publish.
 #
 # One further reason the count is an upper bound rather than a leak count: a struct
-# whose members cannot become response members is matched too. Three entries are of
-# that kind, and all three stay in and are named here instead of being excluded,
-# because there is no lexical way to tell such a struct from a response struct and
-# excluding by a name suffix would be a heuristic that silently drops real surface:
+# whose members cannot become response members is matched too, because there is no
+# lexical way to tell such a struct from a response struct, and excluding by a name
+# suffix would be a heuristic that silently drops real surface. Those records stay in
+# the baseline and are discharged by scripts/wire-bookkeeping-internal.txt instead, a
+# third file whose lines are recorded decisions rather than test citations: a record
+# no AWS response renders has no response a test could assert on. Each line names its
+# kind (a request decode target, a record only the plugin reads back, or a record only
+# one of substrate's own /v1 endpoints renders) and an anchor that must exist in the
+# tree. accountRegionRequest and orgPendingAccountOutcome, once named here as the two
+# examples of the first two kinds, are lines there now.
 #
-#   - account_plugin.go accountRegionRequest.AccountID, a request decode struct,
-#     which decodes the AccountId that Account's own operations publish as an input.
-#   - organizations_account.go orgPendingAccountOutcome.AccountID, a control-plane
-#     seed record. Its `accountId` is the seed's own encoding — no Organizations
-#     shape spells it that way — and the seed is read at request time, never
-#     rendered into a body.
-#   - dynamodb_plugin.go DynamoDBStreamCursor.AccountID and .Region. This one *is*
-#     marshalled into a response, and still cannot leak: the JSON is base64-encoded
-#     into the opaque `ShardIterator` string GetShardIterator answers, so neither
-#     member is ever a member of a body. A real shard iterator is opaque too, so
-#     carrying the account and Region inside it is faithful rather than a divergence.
-#     Left in the baseline because the day it stops being base64-wrapped is the day
-#     these become real, and nothing lexical would notice.
+# DynamoDBStreamCursor is the case that looks internal and is not. Its JSON is
+# base64-encoded into the opaque ShardIterator that GetShardIterator and GetRecords
+# answer, so it does reach an AWS body, as a token, and kinesisIterator is the same.
+# Both belong in the projected file with a raw-bytes test, which fails the day either
+# is rendered as an object rather than as a token. A real shard iterator is opaque too,
+# so carrying the account and Region inside it is faithful rather than a divergence.
 #
 # The awk is written for the POSIX subset because CI's awk is mawk, not gawk:
 # matching the struct header on field position rather than on an escaped brace
@@ -223,6 +224,11 @@ fi
 
 if [[ ! -f "$PROJECTED" ]]; then
   echo "check-wire-bookkeeping: $PROJECTED is missing" >&2
+  exit 1
+fi
+
+if [[ ! -f "$INTERNAL" ]]; then
+  echo "check-wire-bookkeeping: $INTERNAL is missing" >&2
   exit 1
 fi
 
@@ -290,6 +296,50 @@ while IFS=$'\t' read -r file type test; do
   fi
 done < "$PROJECTED"
 
+# Every internal record must still have bookkeeping fields declared, must name one of the
+# three kinds, must not also be claimed by the projected file, and must name an anchor that
+# still exists outside the tests. The anchor is what keeps the fourth column a reference: a
+# renamed reader or a removed route fails here and sends the line back for review.
+internal=0
+internal_records=0
+while IFS=$'\t' read -r file type kind anchor; do
+  [[ -z "$file" || "$file" == \#* ]] && continue
+  internal_records=$((internal_records + 1))
+  fields="$(awk -F'\t' -v f="$file" -v t="$type" '$1 == f && $2 == t' "$recorded" | wc -l | tr -d ' ')"
+  if [[ "$fields" -eq 0 ]]; then
+    status=1
+    echo "$INTERNAL claims $file $type is internal, but $BASELINE records no bookkeeping field"
+    echo "    on that type. A line for a record with no such field is a stale claim (#756)."
+    echo
+    continue
+  fi
+  case "$kind" in
+    request|state|substrate) ;;
+    *)
+      status=1
+      echo "$INTERNAL names kind '$kind' for $file $type; the kinds are request, state and substrate."
+      echo
+      continue
+      ;;
+  esac
+  if awk -F'\t' -v f="$file" -v t="$type" '$1 == f && $2 == t { found = 1 } END { exit !found }' "$PROJECTED"; then
+    status=1
+    echo "$file $type is in both $PROJECTED and $INTERNAL. A record either reaches an AWS"
+    echo "    response, and is projected with a test, or it does not, and is internal (#756)."
+    echo
+    continue
+  fi
+  if ! grep -rFq --include='*.go' --exclude='*_test.go' -- "$anchor" emulator/; then
+    status=1
+    echo "$INTERNAL anchors $file $type on '$anchor', and no non-test file under emulator/"
+    echo "    contains it. The anchor is the only thing tying the decision to the tree; review the"
+    echo "    record again and update the line."
+    echo
+    continue
+  fi
+  internal=$((internal + fields))
+done < "$INTERNAL"
+
 # The advice below is about the baseline, so it prints only when the baseline is what
 # disagreed. A projected-file failure has already said what to do about itself.
 if [[ -n "$added" || -n "$removed" ]]; then
@@ -323,7 +373,10 @@ if [[ "$status" -eq 0 ]]; then
   total="$(wc -l < "$current" | tr -d ' ')"
   noun="records"
   [[ "$projected_records" -eq 1 ]] && noun="record"
+  inoun="records"
+  [[ "$internal_records" -eq 1 ]] && inoun="record"
   echo "check-wire-bookkeeping: ok — $total declared, $declared projected across" \
-    "$projected_records $noun, $((total - declared)) still reachable (#756)"
+    "$projected_records $noun, $internal internal across $internal_records $inoun," \
+    "$((total - declared - internal)) still reachable (#756)"
 fi
 exit "$status"
