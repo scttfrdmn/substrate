@@ -138,14 +138,30 @@ func TestBackupPlugin_ListVaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListBackupVaults: %v", err)
 	}
+	// A struct of published members rather than emulator.BackupVault. Decoding a response into
+	// the record type it was built from is what let the vault go out whole unnoticed (#756), and
+	// it will not decode the published Unix date at all (#1324) — a BackupVault.CreationDate is a
+	// time.Time, so a `number` is a type error rather than a passing assertion.
 	var result struct {
-		BackupVaultList []emulator.BackupVault `json:"BackupVaultList"`
+		BackupVaultList []struct {
+			BackupVaultName string  `json:"BackupVaultName"`
+			BackupVaultArn  string  `json:"BackupVaultArn"`
+			CreationDate    float64 `json:"CreationDate"`
+		} `json:"BackupVaultList"`
 	}
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(result.BackupVaultList) != 2 {
-		t.Errorf("want 2 vaults, got %d", len(result.BackupVaultList))
+		t.Fatalf("want 2 vaults, got %d: %s", len(result.BackupVaultList), resp.Body)
+	}
+	for i, want := range []string{"vault-alpha", "vault-beta"} {
+		if got := result.BackupVaultList[i].BackupVaultName; got != want {
+			t.Errorf("vault %d: want %s, got %s", i, want, got)
+		}
+		if result.BackupVaultList[i].CreationDate == 0 {
+			t.Errorf("vault %d: want a Unix CreationDate, got %s", i, resp.Body)
+		}
 	}
 }
 

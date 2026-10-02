@@ -433,6 +433,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Every date AWS Backup answered was an RFC3339 string where every page publishes a Unix
+  timestamp** (#1324). Eight response sites across the three resources rendered a `time.Time`, so
+  `CreationDate` came back as `"2018-01-26T00:11:30.087Z"` where `API_DescribeBackupVault`,
+  `API_BackupVaultListMember`, `API_CreateBackupVault`, `API_GetBackupPlan`,
+  `API_BackupPlansListMember`, `API_CreateBackupPlan`, `API_GetBackupSelection` and
+  `API_CreateBackupSelection` each gloss it as *"in Unix format and Coordinated Universal Time (UTC)
+  … accurate to milliseconds. For example, the value 1516925490.087"* and render it as `number`. All
+  eight now answer `EpochSeconds`, which is the three-decimal form #1090 introduced for ECR. An SDK
+  v2 caller was the one who could not read these: its decoder calls `ParseEpochSeconds` on a
+  timestamp member, which a string does not satisfy. `UpdateBackupPlan`'s `UpdatedAt` is left a
+  string on purpose — no Backup page publishes the member (#1177), and giving it the published form
+  would make one that is owed deletion look more correct than it is. The assertions are on the **raw
+  bytes**: a typed decoder cannot tell `1516925490.087` from the string, both landing in the same
+  `time.Time`, and `emulator/backup_plugin_test.go` had been decoding `ListBackupVaults` into
+  `[]BackupVault` — the record type — which is how nine sites agreed on the wrong form unnoticed.
+  The clock is frozen at AWS's own worked instant, so the expectation is an exact rendering rather
+  than a tolerance.
+
+- **The backup vault record was marshaled onto the wire whole, so `DescribeBackupVault` and
+  `ListBackupVaults` reported substrate's own bookkeeping** (#756, #1324). Both sites handed the
+  persisted `BackupVault` to the marshaller, so `AccountID` and `Region` — neither carrying
+  `omitempty` — appeared as response members. The fix is `emulator/backup_wire.go` on
+  `emulator/ecr_wire.go`'s pattern, holding one `backupVaultOut`: the five members substrate models
+  are a subset of `API_DescribeBackupVault`'s seventeen **and** of `API_BackupVaultListMember`'s
+  thirteen, so one projection serves both shapes, and the twelve unmodelled members stay absent
+  rather than present and empty (#1013's rule). `CreateBackupVault` keeps its own map, because
+  `API_CreateBackupVault` publishes three members and no more — projecting it through the wider type
+  would have added two the page does not publish. The record keeps both fields; a `json:"-"` would
+  change the format of every recorded run, since the state snapshot holds those bytes and a replay
+  reads them back. The vault was the last Backup record reaching the wire whole, and the leak had to
+  go before #756's projected inventory could cite a test for these three records.
+
 - **`docs/services.md` recorded the wrong published value for the classic load balancer's `Ref`**
   (#844). It listed `AWS::ElasticLoadBalancing::LoadBalancer` among the divergences substrate cannot
   fix, saying AWS documents the **DNS name**. AWS documents the opposite: "When you pass the logical ID
