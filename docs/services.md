@@ -19974,9 +19974,9 @@ The published path is given for every operation because one of them cannot be re
 | Operation | Published path | Notes |
 |-----------|----------------|-------|
 | CreateBackupVault | `PUT /backup-vaults/{backupVaultName}` | Routed on the published verb. Answers exactly the three published members. `BackupVaultTags` and `CreatorRequestId` are not read, so a create-time tag set is dropped, and `EncryptionKeyArn` is echoed without the KMS key having to exist |
-| DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | Five of the seventeen published members, plus [two of Substrate's own](#the-backup-vault-record-goes-out-whole) |
+| DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Five of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), and nothing Substrate does not publish |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
-| ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of whole vault records; `maxResults`, `nextToken`, `shared` and `vaultType` are all ignored and no `NextToken` is emitted |
+| ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [five of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault; `maxResults`, `nextToken`, `shared` and `vaultType` are all ignored and no `NextToken` is emitted |
 | CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated, `AdvancedBackupSettings` is not read, and `CreatorRequestId` is ignored, so the published idempotency — *"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is returned"* — does not hold. The plan ARN [uses the wrong resource segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Unreachable over that path](#getbackupplan-is-unreachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
@@ -20047,15 +20047,34 @@ accepts reads for a parent it will not accept writes for.
 **vacuous** rather than unenforced. No operation creates a recovery point, so
 `NumberOfRecoveryPoints` is `0` for a vault's whole life and the condition cannot fail.
 
-### The backup vault record goes out whole
+### The backup vault is projected onto the published shape
 
-`DescribeBackupVault` and `ListBackupVaults` marshal the persisted vault straight onto the wire, so
-`AccountID` and `Region` — Substrate's own bookkeeping — appear as response members
-([#756](https://github.com/scttfrdmn/substrate/issues/756)). Five published members are present
-(`BackupVaultName`, `BackupVaultArn`, `EncryptionKeyArn`, `CreationDate`,
-`NumberOfRecoveryPoints`) and twelve are absent, `VaultState`, `Locked`, `MinRetentionDays` and
-`CreatorRequestId` among them. The plan and selection handlers build their responses member by
-member, so the vault is the only Backup record that leaks.
+`DescribeBackupVault` and `ListBackupVaults` answer a `backupVaultOut`
+(`emulator/backup_wire.go`) rather than the persisted `BackupVault`, so `AccountID` and `Region` —
+Substrate's own bookkeeping — reach no response
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). Both fields stay on the record: a
+`json:"-"` would change the format of every run already recorded, because the state snapshot holds
+those bytes and a replay reads them back.
+
+One wire type serves both sites, because the five members Substrate models — `BackupVaultName`,
+`BackupVaultArn`, `EncryptionKeyArn`, `CreationDate` and `NumberOfRecoveryPoints` — are a subset of
+`API_DescribeBackupVault`'s seventeen and of `API_BackupVaultListMember`'s thirteen alike. The twelve
+it does not model are absent rather than present and empty, `VaultState`, `Locked`,
+`MinRetentionDays` and `CreatorRequestId` among them
+([#1199](https://github.com/scttfrdmn/substrate/issues/1199)). `CreateBackupVault` is deliberately
+not projected through that type: `API_CreateBackupVault` publishes three members and no more, so it
+keeps its own map. The plan and selection handlers build their responses member by member, so no
+Backup record now reaches the wire whole.
+
+### Every published date is a Unix timestamp
+
+Backup publishes no RFC3339 date. Each page glosses its date as *"in Unix format and Coordinated
+Universal Time (UTC) … accurate to milliseconds. For example, the value 1516925490.087"*, and all
+eight sites that answer one render it that way, to exactly three decimals
+([#1324](https://github.com/scttfrdmn/substrate/issues/1324)). `UpdateBackupPlan`'s `UpdatedAt` is
+the one date still rendered as a string, which is deliberate: the member is on
+[no Backup page at all](#two-backup-plan-responses-carry-the-wrong-members), and giving it the
+published form would make a member that is owed deletion look more correct than it is.
 
 ### What a refusal reports
 

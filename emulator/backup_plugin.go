@@ -112,10 +112,12 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 	}
 	updateStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region), name)
 
+	// The three members API_CreateBackupVault publishes, and not backupVaultOut's five:
+	// the create response is a narrower shape than the describe one.
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupVaultArn":  vault.BackupVaultArn,
 		"BackupVaultName": vault.BackupVaultName,
-		"CreationDate":    vault.CreationDate,
+		"CreationDate":    EpochSeconds(vault.CreationDate),
 	})
 }
 
@@ -124,7 +126,7 @@ func (p *BackupPlugin) describeBackupVault(reqCtx *RequestContext, name string) 
 	if err != nil {
 		return nil, err
 	}
-	return backupJSONResponse(http.StatusOK, vault)
+	return backupJSONResponse(http.StatusOK, backupVaultToWire(*vault))
 }
 
 func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*AWSResponse, error) {
@@ -155,7 +157,7 @@ func (p *BackupPlugin) listBackupVaults(reqCtx *RequestContext) (*AWSResponse, e
 		vaults = append(vaults, *v)
 	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupVaultList": vaults,
+		"BackupVaultList": backupVaultsToWire(vaults),
 	})
 }
 
@@ -204,7 +206,7 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlanId":  planID,
 		"BackupPlanArn": plan.BackupPlanArn,
-		"CreationDate":  now,
+		"CreationDate":  EpochSeconds(now),
 		"VersionId":     versionID,
 	})
 }
@@ -218,7 +220,7 @@ func (p *BackupPlugin) getBackupPlan(reqCtx *RequestContext, planID string) (*AW
 		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
 		"VersionId":     plan.VersionID,
-		"CreationDate":  plan.CreationDate,
+		"CreationDate":  EpochSeconds(plan.CreationDate),
 		"BackupPlan": map[string]interface{}{
 			"BackupPlanName": plan.BackupPlanName,
 			"Rules":          plan.Rules,
@@ -262,6 +264,10 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 		return nil, fmt.Errorf("backup updateBackupPlan put: %w", err)
 	}
 
+	// UpdatedAt is left an RFC3339 string deliberately: API_UpdateBackupPlan publishes no such
+	// member, so giving it the epoch rendering the published dates now take would make a member
+	// that is owed deletion look more correct than it is.
+	// TODO(#1177): answer the published CreationDate instead of UpdatedAt.
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
@@ -300,7 +306,7 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, er
 			"BackupPlanArn":  plan.BackupPlanArn,
 			"BackupPlanName": plan.BackupPlanName,
 			"VersionId":      plan.VersionID,
-			"CreationDate":   plan.CreationDate,
+			"CreationDate":   EpochSeconds(plan.CreationDate),
 		})
 	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
@@ -356,7 +362,7 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"SelectionId":  selectionID,
 		"BackupPlanId": planID,
-		"CreationDate": now,
+		"CreationDate": EpochSeconds(now),
 	})
 }
 
@@ -368,7 +374,7 @@ func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, select
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"SelectionId":  selection.SelectionID,
 		"BackupPlanId": selection.BackupPlanID,
-		"CreationDate": selection.CreationDate,
+		"CreationDate": EpochSeconds(selection.CreationDate),
 		"BackupSelection": map[string]interface{}{
 			"SelectionName": selection.SelectionName,
 			"IamRoleArn":    selection.IamRoleArn,
