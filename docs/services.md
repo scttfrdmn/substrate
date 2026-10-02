@@ -12857,6 +12857,34 @@ instances found none: the SDK's SNS deserializer requires a result element for 3
 operations and none of the six `Unit` ones is among them, and no other query-protocol
 service in the tree omits an element its own page publishes.
 
+### The account and Region a record carries reach no response
+
+`SNSTopic` and `SNSSubscription` declare `AccountID` and `Region` under wire-visible `json` tags,
+because the record is what `MemoryStateManager` snapshots and a replay reads back. The topic also
+declares `EverTagged` as `ever_tagged`. No SNS shape publishes any of the three, and none reaches a
+body:
+
+- `emulator/sns_types.go` carries no `xml` tag.
+- Every response is marshaled from a struct declared for its operation.
+- The two subscription lists build their entries member by member.
+- Publish's delivery envelope is a map built member by member too.
+
+All **eighteen** routed operations are driven by `TestSNSWire_TopicResponsesCarryNoBookkeepingMember`
+and `TestSNSWire_SubscriptionResponsesCarryNoBookkeepingMember` in `emulator/sns_wire_test.go`. They
+walk the raw XML and fail on an element named for a bookkeeping member at any depth. As a result, the
+five entries this discharges in `scripts/wire-bookkeeping-baseline.txt` stay listed as declarations
+rather than as leaks ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+The walk also reads the *text* of every `<key>`. `GetTopicAttributes` and `GetSubscriptionAttributes`
+answer a string map rendered as `<entry><key>…</key><value>…</value></entry>`, so a member leaked
+into the map would arrive as key text under an element named `key`. An element walk alone passes
+that. A control that adds an `AccountID` attribute fails only with the key-text check in place.
+
+`ever_tagged` carries `,omitempty` and is set only by a tag write (#938). An untagged topic's
+responses would therefore be missing it for free. The topic test calls `TagResource` and reads
+`ever_tagged: true` back from the stored record before it walks any response. Without that step, the
+test fails at the read-back rather than passing vacuously, which was #1304's trap on EFS.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
