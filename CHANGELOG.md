@@ -244,6 +244,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`check-wire-bookkeeping` discharges records that no AWS response renders, through a third
+  inventory** (#756). Some records declare a bookkeeping field but never reach an AWS response at
+  all, so no raw-bytes test can say anything about them. A test that an unrelated response omits
+  their members would pass whatever they held, which is #1304's vacuous assertion applied to a whole
+  record. The new `scripts/wire-bookkeeping-internal.txt` records each one as a reviewed decision
+  rather than a proof. A line names the record's kind and an anchor:
+  - `request` is a decode target, anchored on the function that decodes it.
+  - `state` is a record only the plugin reads back, anchored on that reader.
+  - `substrate` is a record rendered only by a `/v1` endpoint, anchored on the route.
+
+  The check refuses a line whose type has no baseline entry, whose kind is unknown, whose record is
+  also claimed by the projected file, or whose anchor no longer occurs in a non-test file. Six
+  records are recorded: `accountRegionOpt`, `accountRegionRequest`, `orgPendingAccountOutcome`,
+  `Event`, `debugEventSummary` and `SESv2CapturedEmail`. The still-reachable count goes from **100
+  to 91**, and the summary now reports the internal figure separately.
+  - **Five records looked internal and are not.** `STSSessionCredentials` is rendered through
+    `xmlCreds` by `AssumeRole` and `GetSessionToken`, and `CFNStackState` through `cfnStackItem` by
+    `DescribeStacks`. `CFNChangeSet`'s `CreatedAt` feeds the published `CreationTime` in
+    `DescribeChangeSet` and `ListChangeSets`. `DynamoDBStreamCursor` and `kinesisIterator` are
+    base64-encoded into the `ShardIterator` that `GetShardIterator` and `GetRecords` answer. Each
+    reaches an AWS body, so each stays in the baseline until it is projected with a test.
+
 - **SNS's two records are recorded as projected, with a test cited for each** (#756). `SNSTopic` and
   `SNSSubscription` declare `AccountID` and `Region` under wire-visible `json` tags, and the topic
   also declares `EverTagged`. None reaches a response: `emulator/sns_types.go` carries no `xml` tag,

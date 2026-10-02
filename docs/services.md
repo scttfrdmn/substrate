@@ -19154,8 +19154,8 @@ identity always answers the same bytes.
 
 `SESv2CapturedEmail` also declares `AccountId` and `Region`, but no AWS response renders it.
 `SendEmail` answers a `MessageId`, and the record reaches a body only through Substrate's own
-`GET /v1/emails`, where the account and Region are the point. Its two entries stay with the rest of
-Substrate's own surface in `scripts/wire-bookkeeping-baseline.txt`.
+`GET /v1/emails`, where the account and Region are the point. It is recorded as such in
+`scripts/wire-bookkeeping-internal.txt`, anchored on that route.
 
 ### CloudFormation resource types
 

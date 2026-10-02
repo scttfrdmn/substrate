@@ -1,0 +1,47 @@
+# wire-bookkeeping-internal.txt — every record whose bookkeeping fields are declared but which
+# no AWS response renders at all, so there is no wire for them to leak onto.
+#
+# Columns, tab-separated:  file  struct-type  kind  anchor
+#
+# THIS FILE IS A RECORD OF DECISIONS, NOT OF PROOFS. A line in
+# scripts/wire-bookkeeping-projected.txt cites a test that asserts on the raw bytes of every
+# response that answers the record. That cannot be done here: a record no AWS response renders has
+# no response to assert on, and a test that some unrelated response omits its members would pass
+# whatever the record held. It would be the vacuous assertion #1304 shipped on EFS, applied to a
+# whole record. So a line here states which kind of non-response the record is and names the one
+# place in the tree that makes it so, and it is reviewed like code rather than proved like a test.
+#
+# The three kinds, and what each line's anchor names:
+#
+#   request    A decode target for a request body. It is read from the caller and never written
+#              back. The anchor is the function that decodes it.
+#   state      A record persisted and read back by the plugin itself, whose published response is
+#              built from other values. The anchor is the function that reads it.
+#   substrate  A record rendered only by one of substrate's own endpoints (/v1/…), where the
+#              account and Region are the point of the endpoint rather than a leak. The anchor is
+#              the route.
+#
+# A line is refused unless the named type has at least one line in the baseline, the kind is one of
+# the three above, and the anchor occurs in a non-test file under emulator/. The anchor check is what
+# keeps the fourth column a reference rather than a comment: renaming the function or removing the
+# route fails the check, and the line has to be looked at again.
+#
+# What does NOT belong here. A record that reaches an AWS response *in any form* belongs in the
+# projected file with a test, even when the form makes a leak unlikely:
+#
+#   - A record rendered through a projection struct. STSSessionCredentials is rendered through
+#     xmlCreds by AssumeRole and GetSessionToken, and CFNStackState through cfnStackItem by
+#     DescribeStacks, whose CreationTime is fed by the record's CreatedAt.
+#   - A record encoded into an opaque token. DynamoDBStreamCursor and kinesisIterator are marshalled
+#     and base64-encoded into the ShardIterator that GetShardIterator and GetRecords answer. A walk
+#     of those bodies is not vacuous: it fails the day the cursor is rendered as an object rather
+#     than as a token.
+#
+# Adding a line: confirm by reading every reader of the record that no AWS response is built from it
+# whole, and say in the commit which readers were read.
+emulator/account_plugin.go	accountRegionOpt	state	loadRegionOpt
+emulator/account_plugin.go	accountRegionRequest	request	regionInput
+emulator/debug_ui.go	debugEventSummary	substrate	/v1/debug/events
+emulator/eventstore.go	Event	substrate	/v1/debug/export
+emulator/organizations_account.go	orgPendingAccountOutcome	state	pendingCreateOutcome
+emulator/sesv2_types.go	SESv2CapturedEmail	substrate	/v1/emails
