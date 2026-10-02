@@ -19946,7 +19946,7 @@ associated with a regional Web ACL.
 | Operation | Notes |
 |-----------|-------|
 | CreateWebACL | `Name`, `Scope` and `DefaultAction` are read; `Rules` and `VisibilityConfig` are stored as opaque objects |
-| GetWebACL | `Scope` defaults to `REGIONAL`; resolvable by `ARN` or by the `Name`+`Id`+`Scope` triple |
+| GetWebACL | `Scope` defaults to `REGIONAL`; resolvable by `ARN` or by the `Name`+`Id`+`Scope` triple. Seven of `API_WebACL`'s members and nothing it does not publish; the lock token is answered once, at the top level |
 | UpdateWebACL | Requires a matching `LockToken`; [merges rather than replaces](#updatewebacl-merges-so-a-member-can-never-be-cleared) |
 | DeleteWebACL | Requires a matching `LockToken` |
 | ListWebACLs | [Does not paginate](#neither-list-operation-paginates) |
@@ -19954,7 +19954,7 @@ associated with a regional Web ACL.
 | DisassociateWebACL | |
 | GetWebACLForResource | [Reports an ARN where a WebACL is published](#getwebaclforresource-reports-an-arn-not-a-web-acl) |
 | CreateIPSet | `Name`, `Scope`, `IPAddressVersion` and `Addresses` are read; a CIDR is not validated |
-| GetIPSet | |
+| GetIPSet | All six members `API_IPSet` publishes and nothing it does not; the lock token is answered once, at the top level |
 | UpdateIPSet | Requires a matching `LockToken`; merges |
 | DeleteIPSet | Requires a matching `LockToken` |
 | ListIPSets | [Does not paginate](#neither-list-operation-paginates) |
@@ -20012,6 +20012,27 @@ The one 404 that remains is not WAFv2's: an operation the plugin does not route 
 `WAFDuplicateItemException`, `WAFLimitsExceededException`, `WAFInvalidResourceException`,
 `WAFUnavailableEntityException` and `WAFInternalErrorException` are published and have no site:
 Substrate enforces no capacity ceiling, validates no rule statement, and checks no association target.
+
+### The account and Region a record carries reach no response
+
+`WAFv2WebACL` and `WAFv2IPSet` declare `AccountID` and `Region` under wire-visible `json` tags,
+because the record is what `MemoryStateManager` snapshots and a replay reads back. The web ACL also
+declares `CreatedAt`. Until [#756](https://github.com/scttfrdmn/substrate/issues/756), `GetWebACL`
+and `GetIPSet` answered each record whole. That put these members on the wire, together with `Scope`
+and `LockToken` inside the object:
+
+- No WAFv2 shape publishes the bookkeeping members.
+- `API_WebACL` and `API_IPSet` publish neither `Scope` nor `LockToken`. `Scope` is a request
+  parameter. `LockToken` is published once, at the top level of each get's response, where it is
+  still answered, so the response used to carry the token twice.
+
+Both gets now answer through `wafv2WebACLOut` and `wafv2IPSetOut` (`emulator/wafv2_wire.go`). The
+stored record is unchanged, so a run recorded before the fix replays identically.
+
+All thirteen routed operations are driven by `TestWAFv2Wire_WebACLResponsesCarryNoBookkeepingMember`
+and `TestWAFv2Wire_IPSetResponsesCarryNoBookkeepingMember` in `emulator/wafv2_wire_test.go`. They walk
+each decoded document and fail on a bookkeeping member at any depth. They also require that the
+object carries no `Scope` or `LockToken` while the top-level `LockToken` survives.
 
 ### CloudFormation resource types
 
