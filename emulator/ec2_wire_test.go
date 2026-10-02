@@ -422,3 +422,112 @@ func TestEC2Wire_ElasticIPResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "ReleaseAddress", params: map[string]string{"AllocationId": allocationID}, anchor: ec2WireReturn},
 	})
 }
+
+// ec2WireInstance launches one instance and returns its id, for the tests whose resource has to be
+// attached to, or built from, a running one.
+func ec2WireInstance(t *testing.T, p *emulator.EC2Plugin, ctx *emulator.RequestContext) string {
+	t.Helper()
+	body := ec2Wire(t, p, ctx, "RunInstances", map[string]string{
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	return ec2WireElement(t, "RunInstances", body, "instanceId")
+}
+
+// ec2WireVolume creates an 8 GiB gp3 volume in the test Region's first zone and returns the body
+// and the id.
+func ec2WireVolume(t *testing.T, p *emulator.EC2Plugin, ctx *emulator.RequestContext) ([]byte, string) {
+	t.Helper()
+	body := ec2Wire(t, p, ctx, "CreateVolume", map[string]string{
+		"AvailabilityZone": ec2WireRegion + "a", "Size": "8", "VolumeType": "gp3",
+	})
+	return body, ec2WireElement(t, "CreateVolume", body, "volumeId")
+}
+
+func TestEC2Wire_VolumeResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+	instanceID := ec2WireInstance(t, p, ctx)
+
+	created, volumeID := ec2WireVolume(t, p, ctx)
+	ec2WireRequireScoped(t, state, ec2WireKey("volume", volumeID), "account_id")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateVolume", held: created, anchor: "<volumeId>" + volumeID + "</volumeId>"},
+		{action: "AttachVolume", params: map[string]string{"VolumeId": volumeID, "InstanceId": instanceID, "Device": "/dev/sdf"},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		// While attached, so the describe renders the attachment set.
+		{action: "DescribeVolumes", params: map[string]string{"VolumeId.1": volumeID},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "DetachVolume", params: map[string]string{"VolumeId": volumeID},
+			anchor: "<volumeId>" + volumeID + "</volumeId>"},
+		{action: "DeleteVolume", params: map[string]string{"VolumeId": volumeID}, anchor: ec2WireReturn},
+	})
+}
+
+func TestEC2Wire_SnapshotResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+	instanceID := ec2WireInstance(t, p, ctx)
+	_, volumeID := ec2WireVolume(t, p, ctx)
+
+	created := ec2Wire(t, p, ctx, "CreateSnapshot", map[string]string{"VolumeId": volumeID, "Description": "ec2 wire"})
+	snapshotID := ec2WireElement(t, "CreateSnapshot", created, "snapshotId")
+	ec2WireRequireScoped(t, state, ec2WireKey("snapshot", snapshotID), "account_id")
+
+	// CreateSnapshots and CopySnapshot each write a record of their own; both are driven because each
+	// answers one.
+	multi := ec2Wire(t, p, ctx, "CreateSnapshots", map[string]string{"InstanceSpecification.InstanceId": instanceID})
+	multiID := ec2WireElement(t, "CreateSnapshots", multi, "snapshotId")
+	ec2WireRequireScoped(t, state, ec2WireKey("snapshot", multiID), "account_id")
+
+	copied := ec2Wire(t, p, ctx, "CopySnapshot", map[string]string{"SourceRegion": ec2WireRegion, "SourceSnapshotId": snapshotID})
+	copyID := ec2WireElement(t, "CopySnapshot", copied, "snapshotId")
+	ec2WireRequireScoped(t, state, ec2WireKey("snapshot", copyID), "account_id")
+
+	attribute := map[string]string{"SnapshotId": snapshotID, "Attribute": "createVolumePermission"}
+	grant := map[string]string{
+		"SnapshotId":                          snapshotID,
+		"Attribute":                           "createVolumePermission",
+		"OperationType":                       "add",
+		"CreateVolumePermission.Add.1.UserId": "210987654321",
+	}
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateSnapshot", held: created, anchor: "<snapshotId>" + snapshotID + "</snapshotId>"},
+		{action: "CreateSnapshots", held: multi, anchor: "<snapshotId>" + multiID + "</snapshotId>"},
+		{action: "CopySnapshot", held: copied, anchor: "<snapshotId>" + copyID + "</snapshotId>"},
+		{action: "DescribeSnapshots", params: map[string]string{"SnapshotId.1": snapshotID, "SnapshotId.2": multiID, "SnapshotId.3": copyID},
+			anchor: "<snapshotId>" + copyID + "</snapshotId>"},
+		{action: "ModifySnapshotAttribute", params: grant, anchor: ec2WireReturn},
+		// After the grant, so the describe renders a permission entry rather than an empty set.
+		{action: "DescribeSnapshotAttribute", params: attribute, anchor: "<userId>210987654321</userId>"},
+		{action: "ResetSnapshotAttribute", params: attribute, anchor: ec2WireReturn},
+		{action: "DeleteSnapshot", params: map[string]string{"SnapshotId": snapshotID}, anchor: ec2WireReturn},
+	})
+}
+
+func TestEC2Wire_ImageResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+	instanceID := ec2WireInstance(t, p, ctx)
+
+	// A created image rather than a bundled one: a bundled catalog entry is not a record this account
+	// wrote, so it is not where the scope members are proved to exist.
+	created := ec2Wire(t, p, ctx, "CreateImage", map[string]string{"InstanceId": instanceID, "Name": "wire-image"})
+	imageID := ec2WireElement(t, "CreateImage", created, "imageId")
+	ec2WireRequireScoped(t, state, ec2WireKey("image", imageID), "account_id")
+
+	registered := ec2Wire(t, p, ctx, "RegisterImage", map[string]string{
+		"Name": "wire-registered", "Architecture": "x86_64", "RootDeviceName": "/dev/xvda",
+		"VirtualizationType": "hvm",
+	})
+	registeredID := ec2WireElement(t, "RegisterImage", registered, "imageId")
+	ec2WireRequireScoped(t, state, ec2WireKey("image", registeredID), "account_id")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateImage", held: created, anchor: "<imageId>" + imageID + "</imageId>"},
+		{action: "RegisterImage", held: registered, anchor: "<imageId>" + registeredID + "</imageId>"},
+		{action: "DescribeImages", params: map[string]string{"ImageId.1": imageID, "ImageId.2": registeredID},
+			anchor: "<imageId>" + registeredID + "</imageId>"},
+		{action: "DeregisterImage", params: map[string]string{"ImageId": imageID}, anchor: ec2WireReturn},
+	})
+}

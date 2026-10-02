@@ -10858,13 +10858,19 @@ marshaled from a struct declared for its operation, no XML-tagged field anywhere
 and no record is embedded in a response or held behind an interface. So the projection already exists
 in code, and what each record needs is a test that proves it.
 
-Seven records have one so far: the networking set, `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`,
-`EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway` and `EC2ElasticIP`. Their **thirty-seven**
-routed operations are driven by `TestEC2Wire_VPCResponsesCarryNoBookkeepingMember` and its six
+Ten records have one so far. Seven form the networking set: `EC2VPC`, `EC2Subnet`,
+`EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway` and `EC2ElasticIP`. Three
+form the storage and image set: `EC2Volume`, `EC2Snapshot` and `EC2Image`. Their **fifty-four**
+routed operations are driven by `TestEC2Wire_VPCResponsesCarryNoBookkeepingMember` and its nine
 siblings in `emulator/ec2_wire_test.go`. Each test walks the raw XML and fails on an element named for
-a bookkeeping member at any depth. As a result, the fourteen entries this discharges in
+a bookkeeping member at any depth. As a result, the twenty entries this discharges in
 `scripts/wire-bookkeeping-baseline.txt` stay listed as declarations rather than as leaks
-([#756](https://github.com/scttfrdmn/substrate/issues/756)). The storage, image and compute records
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+Three operations each write a record of their own beside the one a test starts from:
+`CreateSnapshots`, `CopySnapshot` and `RegisterImage`. Each such record is read back from state too,
+so a body built from it is anchored as well. The image test starts from `CreateImage` rather than a
+bundled catalog AMI, because a catalog entry is not a record the account wrote. The compute records
 are not yet cited.
 
 The account member is spelled three ways across the records: `account_id` on most, `accountId` on
@@ -10876,7 +10882,7 @@ because the account also appears in published values such as `ownerId`.
 Each case asserts a published element is *present* before asserting a bookkeeping one is absent. This
 means a response that failed to render the record fails as a missing anchor rather than passing as an
 absence. The stored record is also read back as raw JSON, which proves it held both members in the
-first place. Neither member carries `,omitempty` on any of these seven records, so neither can be
+first place. Neither member carries `,omitempty` on any of these ten records, so neither can be
 absent for free.
 
 ### CloudFormation resource types
