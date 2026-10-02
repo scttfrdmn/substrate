@@ -126,7 +126,7 @@ func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"Server": server,
+		"Server": transferServerToWire(*server),
 	})
 }
 
@@ -300,7 +300,7 @@ func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
 		"ServerId": input.ServerID,
-		"User":     user,
+		"User":     transferUserToWire(*user),
 	})
 }
 

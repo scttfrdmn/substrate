@@ -22006,12 +22006,12 @@ that deleting it takes its users with it.
 | Operation | Notes |
 |-----------|-------|
 | CreateServer | Reads `Domain`, `EndpointType`, `IdentityProviderType` and `Tags`; every other published member is dropped |
-| DescribeServer | Eight of the members `DescribedServer` publishes, plus three it does not |
+| DescribeServer | Eight of the members `DescribedServer` publishes, [and nothing it does not](#describeserver-counts-zero-users-and-omits-most-published-members) |
 | UpdateServer | Reads `EndpointType` and `Tags` only |
 | DeleteServer | Cascade-deletes the server's users and their index |
 | ListServers | One page; body not decoded, so `MaxResults` and `NextToken` are unread |
 | CreateUser | Requires `ServerId` and `UserName`; `Role` is not checked |
-| DescribeUser | Five of the members `DescribedUser` publishes, plus three it does not |
+| DescribeUser | Five of the members `DescribedUser` publishes, [and nothing it does not](#describeserver-counts-zero-users-and-omits-most-published-members) |
 | UpdateUser | Reads `HomeDirectory` and `Role` only |
 | DeleteUser | Answers an empty JSON object |
 | ListUsers | One page; requires `ServerId` |
@@ -22121,16 +22121,33 @@ the member as the number of users assigned to the server. The same response send
 eight published members (`ServerId`, `Arn`, `Domain`, `EndpointType`,
 `IdentityProviderType`, `State`, `Tags`, `UserCount`) and omits the rest,
 including `Protocols`, `EndpointDetails`, `LoggingRole`, `HostKeyFingerprint`,
-`IdentityProviderDetails`, `SecurityPolicyName` and `IpAddressType`; and it adds
-`CreatedAt`, `AccountID` and `Region`, none of which `DescribedServer` publishes.
-`DescribeUser` has the matching shape: five published members plus `ServerId`,
-`AccountID` and `Region` inside the user object, with
+`IdentityProviderDetails`, `SecurityPolicyName` and `IpAddressType`.
+`DescribeUser` has the matching shape: five published members, with
 `HomeDirectoryMappings`, `HomeDirectoryType`, `Policy`, `PosixProfile` and
 `SshPublicKeys` absent. The two list shapes are thinner still — `ListedServer`
 publishes eight members and substrate sends four, `ListedUser` publishes six and
 substrate sends four — so a consumer that lists to filter on `EndpointType` or
 `SshPublicKeyCount` reads a missing member as a zero value
 ([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
+
+### The account and Region a record carries reach no response
+
+`TransferServer` and `TransferUser` declare `AccountID` and `Region` under wire-visible
+`json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. The server also declares `CreatedAt`. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), `DescribeServer` and
+`DescribeUser` answered each record whole. That put all of these members on the wire, plus
+`ServerId` inside the user object. None of them is published: `API_DescribedUser` has no
+`ServerId`, and the response carries the server's ID at the top level instead. Both now
+answer through `transferServerOut` and `transferUserOut` (`emulator/transfer_wire.go`). The
+stored record is unchanged, so a run recorded before the fix replays identically.
+
+All ten routed operations are driven by
+`TestTransferWire_ServerResponsesCarryNoBookkeepingMember` and its sibling in
+`emulator/transfer_wire_test.go`. They walk each decoded document and fail on a member named
+for a bookkeeping field at any depth. The user test also requires that `User` carries no
+`ServerId`. No bookkeeping member carries `,omitempty`, so a record that exists holds every
+one of them, and each test reads them back before asserting their absence.
 
 ### UpdateServer reads two members and publishes neither of them as one it accepts
 
