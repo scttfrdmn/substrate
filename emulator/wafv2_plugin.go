@@ -232,7 +232,7 @@ func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
-		"WebACL":    acl,
+		"WebACL":    wafv2WebACLToWire(*acl),
 		"LockToken": acl.LockToken,
 	})
 }
@@ -545,7 +545,7 @@ func (p *WAFv2Plugin) getIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
-		"IPSet":     ipset,
+		"IPSet":     wafv2IPSetToWire(*ipset),
 		"LockToken": ipset.LockToken,
 	})
 }

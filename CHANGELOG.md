@@ -524,6 +524,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **WAFv2's GetWebACL and GetIPSet no longer answer the stored record whole** (#756). Each handed its
+  persisted record to the caller. A consumer therefore read `AccountID` and `Region` on both
+  objects, `CreatedAt` on the web ACL, and `Scope` and `LockToken` inside each. `API_WebACL` and
+  `API_IPSet` publish none of these. `LockToken`'s published home is the top level of the response,
+  which already answered it, so every get carried the token twice. Both now answer through
+  `wafv2WebACLOut` and `wafv2IPSetOut` in the new `emulator/wafv2_wire.go`, and the stored record is
+  unchanged.
+  - Unlike Transfer's leak, this one was recorded nowhere.
+  - The new `emulator/wafv2_wire_test.go` drives all thirteen routed operations and is cited in
+    `scripts/wire-bookkeeping-projected.txt`. That takes the inventory from **211 projected across
+    86 records to 216 across 88**, and the still-reachable count from **108 to 103**.
+
 - **Transfer's DescribeServer and DescribeUser no longer answer the stored record whole** (#756,
   #1199). Each handed its persisted record straight to the caller. A consumer therefore read
   `AccountID` and `Region` on both, `CreatedAt` on the server, and `ServerId` inside the user object.
