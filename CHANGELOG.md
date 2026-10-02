@@ -244,6 +244,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **EC2's storage and image records are recorded as projected, with a test cited for each** (#756).
+  `EC2Volume`, `EC2Snapshot` and `EC2Image` extend `emulator/ec2_wire_test.go` with three tests
+  driving **seventeen** routed operations. `CreateSnapshots`, `CopySnapshot` and `RegisterImage`
+  each write a record of their own, and each of those records is read back from state as well as the
+  one the test starts from. Each describe runs where its record is richest: a volume while attached,
+  a snapshot attribute after a grant. That takes the projected inventory from **185 across 75
+  records to 191 across 78**, and the still-reachable count from **134 to 128**.
+
 - **EC2's seven networking records are recorded as projected, with a test cited for each** (#756).
   `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway`
   and `EC2ElasticIP` each declare `AccountID` and `Region` under wire-visible `json` tags. Neither
