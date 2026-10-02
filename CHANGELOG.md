@@ -244,6 +244,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **CodeDeploy's three records are recorded as projected, with a test cited for each** (#756).
+  `CodeDeployApp`, `CodeDeployGroup` and `CodeDeployDeployment` each declare `AccountID` and `Region`
+  under wire-visible `json` tags — tagged `accountID`/`region`, the lowercase-initial spelling, since
+  CodeDeploy's own members are lowerCamelCase. Unlike every earlier block in this inventory all six
+  declarations were a live leak until #1327, which projected the three records through
+  `emulator/codedeploy_wire.go`; the remaining six routed operations build a map of one or two
+  published members and render no record at all. The new `emulator/codedeploy_wire_test.go` holds one
+  test per record, together driving all **nine** routed operations and walking each decoded document
+  for a member named for either at any depth, reporting the `$.a.b[0].c` path. That takes
+  `scripts/wire-bookkeeping-projected.txt` from **165 projected across 65 records to 171 across 68**,
+  and the still-reachable count from **154 to 148** of the same 319 declared. Absence rather than
+  exact membership, because `GetApplication` answers 4 of 6 published members, `GetDeploymentGroup` 4
+  of 23 and `GetDeployment` 6 of 31 (#1199), and an exact expectation would have to be rewritten by
+  the PR closing that gap. The comparison folds case, so one entry covers both the record's spelling
+  and the `AccountID` a projection in the house style of the other services might introduce, and it is
+  an equality rather than a substring test, so the account inside a `serviceRoleArn` is not a
+  collision. Nothing here is vacuous for free: neither member carries `,omitempty` on any of the three
+  records, and CodeDeploy routes none of the three tag operations, so no record declares `EverTagged`
+  and the trap #1304 fell into on EFS cannot arise.
+
 - **Backup's three records are recorded as projected, with a test cited for each** (#756). `BackupVault`,
   `BackupPlan` and `BackupSelection` each declare `AccountID` and `Region` under wire-visible `json`
   tags, and neither reaches a response: the vault answers through `backupVaultOut` since #1325, and
