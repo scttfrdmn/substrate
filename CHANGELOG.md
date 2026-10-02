@@ -524,6 +524,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SESv2 reads and answers `Tags` as the published array, so a tagged CreateEmailIdentity is no
+  longer refused** (#1335). `CreateEmailIdentity` decoded `Tags` into a map. Every SDK sends the
+  array of `{Key, Value}` objects that `API_CreateEmailIdentity` publishes, so the decode failed and a
+  valid request was answered 400. `GetEmailIdentity` answered a tagged identity's `Tags` as an
+  object, which no typed SDK can decode. Both sides now use the array, and the response sorts it by
+  key so one identity always answers the same bytes. The stored record keeps the map it has always
+  held, so a recorded run replays identically.
+
+- **SESv2's GetEmailIdentity no longer answers the stored record as its whole body** (#756). A
+  consumer read `AccountId`, `Region`, `CreatedAt` and `IdentityName`, none of which
+  `API_GetEmailIdentity` publishes; the caller names the identity in the request path. It now answers
+  through `sesv2IdentityOut` in the new `emulator/sesv2_wire.go`, and this leak was recorded nowhere.
+  - `TestSESv2Plugin/GetEmailIdentity` asserted `IdentityName`, so it pinned the leak. It decoded the
+    body into the stored record type, a step that cannot see this class of defect. It now decodes the
+    published members and requires that `IdentityName` is absent.
+  - The new `emulator/sesv2_wire_test.go` is cited in `scripts/wire-bookkeeping-projected.txt`. That
+    takes the inventory from **216 projected across 88 records to 219 across 89**, and the
+    still-reachable count from **103 to 100**.
+  - `SESv2CapturedEmail`'s two lines stay. Only Substrate's own `GET /v1/emails` renders that record.
+
 - **WAFv2's GetWebACL and GetIPSet no longer answer the stored record whole** (#756). Each handed its
   persisted record to the caller. A consumer therefore read `AccountID` and `Region` on both
   objects, `CreatedAt` on the web ACL, and `Scope` and `LockToken` inside each. `API_WebACL` and
