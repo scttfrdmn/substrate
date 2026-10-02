@@ -20577,22 +20577,23 @@ groups, and a deployment. Every record is keyed by account and Region, so two ac
 in two Regions, never see each other's applications. Nothing is ever deployed — the revision, the
 lifecycle hooks, the traffic-shifting configuration and the alarms are not read at all, and a
 deployment is [`Succeeded` before `CreateDeployment` returns](#a-deployment-is-succeeded-before-createdeployment-returns).
-Before writing any test against this service, know that
-[`GetApplication` and `GetDeployment` cannot be deserialized by an AWS SDK](#codedeploy-timestamps-are-rfc3339-strings-where-the-pages-publish-numbers).
+Each of the three records is projected onto its published shape before it is answered, so no response
+carries a field of Substrate's own and [every date is epoch
+seconds](#every-published-date-is-epoch-seconds) rather than an RFC3339 string.
 
 ### Supported operations
 
 | Operation | Notes |
 |-----------|-------|
 | CreateApplication | `applicationName` is the one checked member; `computePlatform` defaults to `Server` and is [otherwise unvalidated](#no-codedeploy-name-role-or-compute-platform-is-checked). `tags` are not read. Answers the published `applicationId` |
-| GetApplication | Four of the six published `ApplicationInfo` members, [plus two of Substrate's own](#the-three-codedeploy-record-shapes-are-truncated); `createTime` is [the wrong JSON type](#codedeploy-timestamps-are-rfc3339-strings-where-the-pages-publish-numbers) |
+| GetApplication | Four of the six published `ApplicationInfo` members, [and no more](#the-three-codedeploy-record-shapes-are-truncated). `createTime` is [epoch seconds](#every-published-date-is-epoch-seconds) |
 | DeleteApplication | Answers `{}` where the page publishes an empty body, and [refuses an absent application under an unpublished code](#three-codedeploy-refusals-answer-codes-their-own-page-does-not-publish) |
 | ListApplications | Names only. [`nextToken` is neither read nor emitted](#listapplications-never-paginates) |
 | CreateDeploymentGroup | Verifies the application exists; `serviceRoleArn` is `Required: Yes` and [stored without a check](#no-codedeploy-name-role-or-compute-platform-is-checked). The other nineteen published members — `ec2TagFilters`, `deploymentStyle`, `blueGreenDeploymentConfiguration`, `alarmConfiguration`, `triggerConfigurations` and the rest — are not read |
-| GetDeploymentGroup | Four of the twenty-three published `deploymentGroupInfo` members, [plus two of Substrate's own](#the-three-codedeploy-record-shapes-are-truncated) |
+| GetDeploymentGroup | Four of the twenty-three published `deploymentGroupInfo` members, [and no more](#the-three-codedeploy-record-shapes-are-truncated). The shape publishes no top-level date, so this is the one get that answers none |
 | DeleteDeploymentGroup | Answers the published `hooksNotCleanedUp` as an empty array, which is what AWS's own sample response shows, and [refuses an absent group under an unpublished code](#three-codedeploy-refusals-answer-codes-their-own-page-does-not-publish) |
 | CreateDeployment | Verifies the application, and the deployment group when one is named. `revision` is `Required: No` and unread, so a deployment with no artifact at all succeeds. Answers the published `deploymentId` in the `d-XXXXXXXXX` shape AWS's own sample response shows — the page publishes no pattern for it — derived from the request ID (#856) |
-| GetDeployment | Six of the thirty-one published `deploymentInfo` members. [An absent `deploymentId` is reported as an absent deployment](#an-absent-deploymentid-is-reported-as-an-absent-deployment) |
+| GetDeployment | Six of the thirty-one published `deploymentInfo` members; `createTime` and `completeTime` are [epoch seconds](#every-published-date-is-epoch-seconds). [An absent `deploymentId` is reported as an absent deployment](#an-absent-deploymentid-is-reported-as-an-absent-deployment) |
 
 The thirty-nine unrouted operations include everything that would let a consumer observe a deployment
 in progress or intervene in one: `ListDeployments`, `StopDeployment`, `ContinueDeployment`,
@@ -20605,18 +20606,36 @@ deployment-configuration surface (`CreateDeploymentConfig`, `GetDeploymentConfig
 `ListDeploymentConfigs`, `DeleteDeploymentConfig`), the on-premises-instance surface, the GitHub-token
 operations and the three tag operations. Each answers `UnknownOperationException` / 404.
 
-### CodeDeploy timestamps are RFC3339 strings where the pages publish numbers
+### Every published date is epoch seconds
 
-`CodeDeployApp.CreateTime` and `CodeDeployDeployment.CreateTime` and `CompleteTime` are Go
-`time.Time` values marshalled by `encoding/json`, which emits RFC3339: `"createTime":
-"2024-01-01T00:00:00Z"`. `API_GetApplication` publishes `"createTime": number`, `API_GetDeployment`
-publishes `"completeTime": number` and `"createTime": number`, and `API_DeploymentInfo` types both as
-`Timestamp`; AWS's own sample responses show `"createTime": 1446229001.211` and `"completeTime":
-1446232681.319`. An `awsJson1_1` timestamp deserializer expects a JSON number, so this is not a wrong
-value but a refusal to decode: `GetApplication` and `GetDeployment` fail in the SDK before a consumer's
-assertion runs. The three records are marshalled whole, which is also how `accountID` and `region`
-reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
-[#1207](https://github.com/scttfrdmn/substrate/issues/1207).
+CodeDeploy speaks `awsJson1_1`, where a `Timestamp` is published as epoch seconds with fractional
+precision rather than an RFC3339 string. `API_ApplicationInfo` types `createTime` as `Timestamp`,
+`API_GetApplication` renders it `"createTime": number` and its own sample response carries
+`"createTime": 1446229001.211`; `API_GetDeployment` renders `"createTime": number` and
+`"completeTime": number` and samples them as `1446232639.487` and `1446232681.319`.
+
+`CodeDeployApp.CreateTime` and `CodeDeployDeployment.CreateTime`/`CompleteTime` stay Go `time.Time`
+in the persisted record and are converted where the response is built, by `codedeployAppOut` and
+`codedeployDeploymentOut` in `emulator/codedeploy_wire.go`. Converting on projection rather than
+retyping the field is what leaves every recorded run byte-identical, since `MemoryStateManager`
+snapshots the record and a replay reads it back.
+
+`GetDeploymentGroup` answers no date, and that is the published shape rather than an omission:
+`API_GetDeploymentGroup` has no top-level timestamp, its only dates being nested inside
+`lastAttemptedDeployment` and `lastSuccessfulDeployment`, neither of which Substrate models.
+
+Until [#1207](https://github.com/scttfrdmn/substrate/issues/1207) both dates were RFC3339 strings,
+which was the service's hardest divergence to work around: an `awsJson1_1` timestamp deserializer
+expects a number, so `GetApplication` and `GetDeployment` did not return a wrong value but failed to
+decode at all, inside the SDK, before any assertion of the caller's own ran. A hand-rolled client
+reading raw JSON was unaffected, which is why it survived — Substrate's own tests read raw JSON.
+`emulator/codedeploy_dates_test.go` now asserts on the raw bytes that each member is a bare number and
+that no response anywhere renders an RFC3339 date.
+
+`GetDeployment` answers `completeTime` equal to `createTime`, because both are written from one clock
+read. That is a separate defect and belongs to
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196): the fractional precision is preserved, so
+two genuinely distinct instants would be orderable.
 
 ### A deployment is Succeeded before CreateDeployment returns
 

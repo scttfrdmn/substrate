@@ -450,6 +450,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CodeDeploy's `GetApplication` and `GetDeployment` could not be decoded by a typed SDK at all**
+  (#1207). Both answered their dates as RFC3339 strings where CodeDeploy, an `awsJson1_1` service,
+  publishes every `Timestamp` as epoch seconds: `API_ApplicationInfo` types `createTime` as
+  `Timestamp`, `API_GetApplication` renders it `"createTime": number` and samples it as
+  `1446229001.211`, and `API_GetDeployment` renders and samples `createTime` and `completeTime` the
+  same way. Because an `awsJson1_1` timestamp deserializer expects a number, this did not give a
+  caller a wrong value — it denied the whole response, failing inside the SDK before any assertion of
+  the caller's own ran. A hand-rolled client reading raw JSON was unaffected, which is why it
+  survived. All three members now answer `EpochSeconds`, the three-decimal form #1090 introduced for
+  ECR, so the fractional precision AWS's own samples carry is preserved and two distinct instants stay
+  orderable.
+- **CodeDeploy's three records reached the wire whole** (#756). `GetApplication`, `GetDeploymentGroup`
+  and `GetDeployment` marshalled the persisted `CodeDeployApp`, `CodeDeployGroup` and
+  `CodeDeployDeployment` under their published envelope members, so all three answered `accountID` and
+  `region`, which no CodeDeploy shape publishes. New `emulator/codedeploy_wire.go` projects each onto
+  the members its own page publishes. Fixing the dates required this first, since the record was what
+  each site marshalled. The conversion happens on projection and the records keep their `time.Time`
+  fields, so the persisted bytes are unchanged and a run recorded before this replays identically —
+  which is why no RFC3339 fallback was needed for the event log. `GetDeploymentGroup` answers no date,
+  because `API_GetDeploymentGroup` publishes no top-level timestamp; its only dates are nested in
+  `lastAttemptedDeployment` and `lastSuccessfulDeployment`, which Substrate does not model.
 - **Every date AWS Backup answered was an RFC3339 string where every page publishes a Unix
   timestamp** (#1324). Eight response sites across the three resources rendered a `time.Time`, so
   `CreationDate` came back as `"2018-01-26T00:11:30.087Z"` where `API_DescribeBackupVault`,
