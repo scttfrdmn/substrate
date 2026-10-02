@@ -531,3 +531,147 @@ func TestEC2Wire_ImageResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "DeregisterImage", params: map[string]string{"ImageId": imageID}, anchor: ec2WireReturn},
 	})
 }
+
+// ec2WireLaunchTemplate creates a launch template naming the test image and returns the body and
+// the id.
+func ec2WireLaunchTemplate(t *testing.T, p *emulator.EC2Plugin, ctx *emulator.RequestContext, name string) ([]byte, string) {
+	t.Helper()
+	body := ec2Wire(t, p, ctx, "CreateLaunchTemplate", map[string]string{
+		"LaunchTemplateName":              name,
+		"LaunchTemplateData.ImageId":      ec2TestImage,
+		"LaunchTemplateData.InstanceType": "t3.micro",
+	})
+	return body, ec2WireElement(t, "CreateLaunchTemplate", body, "launchTemplateId")
+}
+
+func TestEC2Wire_InstanceResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	launched := ec2Wire(t, p, ctx, "RunInstances", map[string]string{
+		"ImageId": ec2TestImage, "InstanceType": "t3.micro", "MinCount": "1", "MaxCount": "1",
+	})
+	instanceID := ec2WireElement(t, "RunInstances", launched, "instanceId")
+	key := ec2WireKey("instance", instanceID)
+	ec2WireRequireScoped(t, state, key, "account_id")
+
+	// EC2Instance's third bookkeeping member is `ever_tagged,omitempty`, set only by a tag write and
+	// never by create-with-tags (#938). Until it is set, every response is missing it for free, which
+	// is the vacuous assertion #1304 shipped on EFS. So the instance is tagged, the flag is read back
+	// from the record, and only then is any response walked.
+	ec2Wire(t, p, ctx, "CreateTags", map[string]string{
+		"ResourceId.1": instanceID, "Tag.1.Key": "team", "Tag.1.Value": "wire",
+	})
+	require.JSONEqf(t, "true", string(ec2WireRecord(t, state, key)["ever_tagged"]),
+		"%s must persist ever_tagged before an absence assertion on it means anything", key)
+
+	// CreateFleet launches through the same path, so a fleet's instances are EC2Instance records
+	// too, and its response is one more body that answers them.
+	_, ltID := ec2WireLaunchTemplate(t, p, ctx, "wire-instance-fleet")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "RunInstances", held: launched, anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "DescribeInstances", params: map[string]string{"InstanceId.1": instanceID},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "DescribeInstanceStatus", params: map[string]string{"InstanceId.1": instanceID, "IncludeAllInstances": "true"},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "DescribeInstanceAttribute", params: map[string]string{"InstanceId": instanceID, "Attribute": "instanceType"},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "ModifyInstanceAttribute", params: map[string]string{"InstanceId": instanceID, "DisableApiTermination.Value": "false"},
+			anchor: ec2WireReturn},
+		{action: "RebootInstances", params: map[string]string{"InstanceId.1": instanceID}, anchor: ec2WireReturn},
+		{action: "StopInstances", params: map[string]string{"InstanceId.1": instanceID},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "StartInstances", params: map[string]string{"InstanceId.1": instanceID},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+		{action: "CreateFleet", params: map[string]string{
+			"Type": "instant",
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+			"LaunchTemplateConfigs.1.LaunchTemplateSpecification.Version":          "$Default",
+			"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+			"TargetCapacitySpecification.DefaultTargetCapacityType":                "on-demand",
+		}, anchor: "<instanceIds>"},
+		// Last: it moves the record every case above reads to terminated.
+		{action: "TerminateInstances", params: map[string]string{"InstanceId.1": instanceID},
+			anchor: "<instanceId>" + instanceID + "</instanceId>"},
+	})
+}
+
+func TestEC2Wire_KeyPairResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	created := ec2Wire(t, p, ctx, "CreateKeyPair", map[string]string{"KeyName": "wire-created"})
+	createdID := ec2WireElement(t, "CreateKeyPair", created, "keyPairId")
+	// The one record that spells the account `accountId`.
+	key := ec2WireKey("keypair", "wire-created")
+	ec2WireRequireScoped(t, state, key, "accountId")
+
+	// EC2KeyPair's third bookkeeping member is `createdAt,omitempty`. It is written on both create
+	// paths, so it is never absent for free once a pair exists, and it is read back here to prove
+	// that rather than assume it. Its published counterpart is createTime, which DescribeKeyPairs
+	// answers from it, so that response anchors on createTime too.
+	require.NotEmptyf(t, string(ec2WireRecord(t, state, key)["createdAt"]),
+		"%s must persist createdAt before an absence assertion on it means anything", key)
+
+	// The handler does not parse the material, so the short value TestEC2_KeyPair_Import uses will
+	// do: this asserts on the response, not on import validation.
+	imported := ec2Wire(t, p, ctx, "ImportKeyPair", map[string]string{
+		"KeyName":           "wire-imported",
+		"PublicKeyMaterial": "c3NoLWVkMjU1MTkgQUFBQUM=",
+	})
+	importedID := ec2WireElement(t, "ImportKeyPair", imported, "keyPairId")
+	ec2WireRequireScoped(t, state, ec2WireKey("keypair", "wire-imported"), "accountId")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateKeyPair", held: created, anchor: "<keyPairId>" + createdID + "</keyPairId>"},
+		{action: "ImportKeyPair", held: imported, anchor: "<keyPairId>" + importedID + "</keyPairId>"},
+		{action: "DescribeKeyPairs", params: map[string]string{"KeyName.1": "wire-created", "KeyName.2": "wire-imported"},
+			anchor: "<createTime>"},
+		{action: "DeleteKeyPair", params: map[string]string{"KeyName": "wire-created"}, anchor: ec2WireReturn},
+	})
+}
+
+func TestEC2Wire_LaunchTemplateResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	created, ltID := ec2WireLaunchTemplate(t, p, ctx, "wire-template")
+	// The one record that spells the account `accountID`.
+	ec2WireRequireScoped(t, state, ec2WireKey("lt", ltID), "accountID")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateLaunchTemplate", held: created, anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},
+		{action: "CreateLaunchTemplateVersion", params: map[string]string{
+			"LaunchTemplateId":                ltID,
+			"LaunchTemplateData.ImageId":      ec2TestImage,
+			"LaunchTemplateData.InstanceType": "t3.small",
+		}, anchor: "<versionNumber>2</versionNumber>"},
+		{action: "ModifyLaunchTemplate", params: map[string]string{"LaunchTemplateId": ltID, "SetDefaultVersion": "2"},
+			anchor: "<defaultVersionNumber>2</defaultVersionNumber>"},
+		{action: "DescribeLaunchTemplates", params: map[string]string{"LaunchTemplateId.1": ltID},
+			anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},
+		{action: "DescribeLaunchTemplateVersions", params: map[string]string{"LaunchTemplateId": ltID},
+			anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},
+		// Version 1 is no longer the default, so it can be deleted.
+		{action: "DeleteLaunchTemplateVersions", params: map[string]string{"LaunchTemplateId": ltID, "LaunchTemplateVersion.1": "1"},
+			anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},
+		{action: "DeleteLaunchTemplate", params: map[string]string{"LaunchTemplateId": ltID},
+			anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},
+	})
+}
+
+func TestEC2Wire_PlacementGroupResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	created := ec2Wire(t, p, ctx, "CreatePlacementGroup", map[string]string{"GroupName": "wire-pg", "Strategy": "cluster"})
+	ec2WireRequireScoped(t, state, ec2WireKey("placement_group", "wire-pg"), "account_id")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreatePlacementGroup", held: created, anchor: "<groupName>wire-pg</groupName>"},
+		{action: "DescribePlacementGroups", params: map[string]string{"GroupName.1": "wire-pg"},
+			anchor: "<groupName>wire-pg</groupName>"},
+		{action: "DeletePlacementGroup", params: map[string]string{"GroupName": "wire-pg"}, anchor: ec2WireReturn},
+	})
+}

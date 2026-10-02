@@ -10858,20 +10858,19 @@ marshaled from a struct declared for its operation, no XML-tagged field anywhere
 and no record is embedded in a response or held behind an interface. So the projection already exists
 in code, and what each record needs is a test that proves it.
 
-Ten records have one so far. Seven form the networking set: `EC2VPC`, `EC2Subnet`,
-`EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`, `EC2NATGateway` and `EC2ElasticIP`. Three
-form the storage and image set: `EC2Volume`, `EC2Snapshot` and `EC2Image`. Their **fifty-four**
-routed operations are driven by `TestEC2Wire_VPCResponsesCarryNoBookkeepingMember` and its nine
-siblings in `emulator/ec2_wire_test.go`. Each test walks the raw XML and fails on an element named for
-a bookkeeping member at any depth. As a result, the twenty entries this discharges in
-`scripts/wire-bookkeeping-baseline.txt` stay listed as declarations rather than as leaks
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+All fourteen records have one, across **seventy-eight** subtests in `emulator/ec2_wire_test.go`, one
+test per record:
 
-Three operations each write a record of their own beside the one a test starts from:
-`CreateSnapshots`, `CopySnapshot` and `RegisterImage`. Each such record is read back from state too,
-so a body built from it is anchored as well. The image test starts from `CreateImage` rather than a
-bundled catalog AMI, because a catalog entry is not a record the account wrote. The compute records
-are not yet cited.
+- **Networking:** `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`,
+  `EC2NATGateway` and `EC2ElasticIP`.
+- **Storage and images:** `EC2Volume`, `EC2Snapshot` and `EC2Image`.
+- **Compute:** `EC2Instance`, `EC2KeyPair`, `EC2LaunchTemplate` and `EC2PlacementGroup`.
+
+Each test walks the raw XML and fails on an element named for a bookkeeping member at any depth. As
+a result, all thirty of EC2's entries in `scripts/wire-bookkeeping-baseline.txt` stay listed as
+declarations rather than as leaks ([#756](https://github.com/scttfrdmn/substrate/issues/756)). Each
+describe runs where its record is richest: a security group after its rules are authorized, a gateway
+while attached, an address while associated, a volume while attached.
 
 The account member is spelled three ways across the records: `account_id` on most, `accountId` on
 `EC2KeyPair` and `accountID` on `EC2LaunchTemplate`. A case fold reconciles the last two with the Go
@@ -10881,9 +10880,20 @@ because the account also appears in published values such as `ownerId`.
 
 Each case asserts a published element is *present* before asserting a bookkeeping one is absent. This
 means a response that failed to render the record fails as a missing anchor rather than passing as an
-absence. The stored record is also read back as raw JSON, which proves it held both members in the
-first place. Neither member carries `,omitempty` on any of these ten records, so neither can be
-absent for free.
+absence. The stored record is also read back as raw JSON, which proves it held each member in the
+first place. That read-back matters most for the two records with a third member under `,omitempty`,
+which a response could otherwise be missing for free:
+
+- `EC2Instance.EverTagged` is set only by a tag write (#938). The instance test therefore calls
+  `CreateTags` and reads `ever_tagged: true` back before walking any response. A control without the
+  tag write fails at that read-back, so the vacuous assertion #1304 shipped on EFS cannot recur here.
+- `EC2KeyPair.CreatedAt` is written on both create paths and read into the published `createTime`.
+  The key-pair test reads it back and anchors `DescribeKeyPairs` on `<createTime>`.
+
+Several operations write a record of their own beside the one a test starts from: `CreateSnapshots`,
+`CopySnapshot`, `RegisterImage`, `ImportKeyPair` and the instances `CreateFleet` launches. Each record
+a test reads back is proved scoped. The image test starts from `CreateImage` rather than a bundled
+catalog AMI, because a catalog entry is not a record the account wrote.
 
 ### CloudFormation resource types
 

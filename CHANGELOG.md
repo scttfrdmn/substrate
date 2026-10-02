@@ -244,6 +244,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **EC2's compute records are recorded as projected, which completes EC2** (#756). `EC2Instance`,
+  `EC2KeyPair`, `EC2LaunchTemplate` and `EC2PlacementGroup` extend `emulator/ec2_wire_test.go` with
+  four tests driving **twenty-four** routed operations, `CreateFleet` among them since a fleet's
+  instances are `EC2Instance` records too. That takes the projected inventory from **191 across 78
+  records to 201 across 82**, and the still-reachable count from **128 to 118**. All thirty of EC2's
+  baseline lines are now cited. Two of the four records carry a third bookkeeping member under
+  `,omitempty`, and each is read back before any absence is asserted:
+  - `EverTagged` is set only by a tag write (#938), so the instance test calls `CreateTags` first. A
+    control without it fails at the read-back, so the vacuous assertion #1304 shipped on EFS cannot
+    recur.
+  - `CreatedAt` is written on both key-pair create paths, and `DescribeKeyPairs` is anchored on the
+    published `createTime` it feeds.
+
 - **EC2's storage and image records are recorded as projected, with a test cited for each** (#756).
   `EC2Volume`, `EC2Snapshot` and `EC2Image` extend `emulator/ec2_wire_test.go` with three tests
   driving **seventeen** routed operations. `CreateSnapshots`, `CopySnapshot` and `RegisterImage`
