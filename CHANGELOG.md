@@ -524,6 +524,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Transfer's DescribeServer and DescribeUser no longer answer the stored record whole** (#756,
+  #1199). Each handed its persisted record straight to the caller. A consumer therefore read
+  `AccountID` and `Region` on both, `CreatedAt` on the server, and `ServerId` inside the user object.
+  None of these is published by `API_DescribedServer` or `API_DescribedUser`; the latter's server ID
+  lives at the top level of the response, which already answers it. Both now answer through
+  `transferServerOut` and `transferUserOut` in the new `emulator/transfer_wire.go`. The stored
+  record is unchanged, so a recorded run replays identically.
+  - The new `emulator/transfer_wire_test.go` drives all ten routed operations and is cited in
+    `scripts/wire-bookkeeping-projected.txt`. That takes the inventory from **206 projected across
+    84 records to 211 across 86**, and the still-reachable count from **113 to 108**.
+  - A control that reverts each site to the record fails exactly that record's test.
+  - `UserCount` is still never assigned, which is #1199's to fix.
+
 - **CodeDeploy's `GetApplication` and `GetDeployment` could not be decoded by a typed SDK at all**
   (#1207). Both answered their dates as RFC3339 strings where CodeDeploy, an `awsJson1_1` service,
   publishes every `Timestamp` as epoch seconds: `API_ApplicationInfo` types `createTime` as
