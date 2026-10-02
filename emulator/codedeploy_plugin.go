@@ -128,7 +128,7 @@ func (p *CodeDeployPlugin) getApplication(reqCtx *RequestContext, req *AWSReques
 	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"application": app,
+		"application": codedeployAppToWire(*app),
 	})
 }
 
@@ -241,7 +241,7 @@ func (p *CodeDeployPlugin) getDeploymentGroup(reqCtx *RequestContext, req *AWSRe
 	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"deploymentGroupInfo": group,
+		"deploymentGroupInfo": codedeployGroupToWire(*group),
 	})
 }
 
@@ -351,7 +351,7 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"deploymentInfo": deployment,
+		"deploymentInfo": codedeployDeploymentToWire(deployment),
 	})
 }
 
