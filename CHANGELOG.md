@@ -244,6 +244,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SNS's two records are recorded as projected, with a test cited for each** (#756). `SNSTopic` and
+  `SNSSubscription` declare `AccountID` and `Region` under wire-visible `json` tags, and the topic
+  also declares `EverTagged`. None reaches a response: `emulator/sns_types.go` carries no `xml` tag,
+  and every response is built from a struct declared for its operation. The new
+  `emulator/sns_wire_test.go` drives all **eighteen** routed operations. That takes the projected
+  inventory from **201 across 82 records to 206 across 84**, and the still-reachable count from
+  **118 to 113**.
+  - The walk also reads `<key>` text. The attribute maps render as `<entry><key>…</key>`, so a
+    leaked attribute arrives as text rather than as an element name. A control that adds an
+    `AccountID` attribute passes an element-only walk.
+  - The topic is tagged and `ever_tagged` is read back before any response is walked (#938, #1304).
+  - The XML walk is now a shared helper in `emulator/wire_members_test.go`, so a service's wire
+    test names its members rather than copying a walker. The existing per-service copies are
+    unchanged.
+
 - **EC2's compute records are recorded as projected, which completes EC2** (#756). `EC2Instance`,
   `EC2KeyPair`, `EC2LaunchTemplate` and `EC2PlacementGroup` extend `emulator/ec2_wire_test.go` with
   four tests driving **twenty-four** routed operations, `CreateFleet` among them since a fleet's
