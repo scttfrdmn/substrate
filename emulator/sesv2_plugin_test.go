@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -102,12 +103,17 @@ func TestSESv2Plugin(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("want 200, got %d", resp.StatusCode)
 		}
-		var identity emulator.SESv2Identity
+		// Decoded into the published members rather than into emulator.SESv2Identity, which is the
+		// stored record: this test used to assert IdentityName, a member API_GetEmailIdentity does not
+		// publish, and so pinned the leak #756 removed.
+		var identity struct {
+			IdentityType string `json:"IdentityType"`
+		}
 		if err := json.Unmarshal(resp.Body, &identity); err != nil {
 			t.Fatalf("unmarshal identity: %v", err)
 		}
-		if identity.IdentityName != "sender@example.com" {
-			t.Errorf("want IdentityName=sender@example.com, got %q", identity.IdentityName)
+		if strings.Contains(string(resp.Body), `"IdentityName"`) {
+			t.Errorf("GetEmailIdentity answered IdentityName, which the page does not publish: %s", resp.Body)
 		}
 		if identity.IdentityType != "EMAIL_ADDRESS" {
 			t.Errorf("want IdentityType=EMAIL_ADDRESS, got %q", identity.IdentityType)

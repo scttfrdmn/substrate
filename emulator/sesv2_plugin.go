@@ -96,9 +96,11 @@ func parseSESv2Operation(method, path string) (op, identityName string) {
 }
 
 func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Tags is the published array of Tag objects (#1335). The record keeps the map it has always
+	// stored, so the array is folded into one here and unfolded again by sesv2IdentityToWire.
 	var input struct {
-		EmailIdentity string            `json:"EmailIdentity"`
-		Tags          map[string]string `json:"Tags"`
+		EmailIdentity string        `json:"EmailIdentity"`
+		Tags          []sesv2TagOut `json:"Tags"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -129,7 +131,7 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 		IdentityType: identityType,
 		AccountID:    reqCtx.AccountID,
 		Region:       reqCtx.Region,
-		Tags:         input.Tags,
+		Tags:         sesv2TagMap(input.Tags),
 		CreatedAt:    p.tc.Now(),
 	}
 
@@ -233,7 +235,7 @@ func (p *SESv2Plugin) getEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, id
 	if err := json.Unmarshal(data, &identity); err != nil {
 		return nil, fmt.Errorf("sesv2 getEmailIdentity unmarshal: %w", err)
 	}
-	return sesv2JSONResponse(http.StatusOK, identity)
+	return sesv2JSONResponse(http.StatusOK, sesv2IdentityToWire(identity))
 }
 
 func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest, identityName string) (*AWSResponse, error) {
