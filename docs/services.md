@@ -20606,6 +20606,43 @@ deployment-configuration surface (`CreateDeploymentConfig`, `GetDeploymentConfig
 `ListDeploymentConfigs`, `DeleteDeploymentConfig`), the on-premises-instance surface, the GitHub-token
 operations and the three tag operations. Each answers `UnknownOperationException` / 404.
 
+### The account and Region a record carries reach no response
+
+Each of the three persisted records — `CodeDeployApp`, `CodeDeployGroup` and `CodeDeployDeployment` —
+declares `AccountID` and `Region` under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. The tags are the lowercase-initial
+`accountID`/`region` rather than the capitalized spelling the other services in this family use,
+CodeDeploy's own members being lowerCamelCase; only the `ID` gives them away. No CodeDeploy shape
+publishes either.
+
+CodeDeploy is the one service in this family where all three records genuinely reached a body.
+`GetApplication` answered the stored `CodeDeployApp` whole under `application`, `GetDeploymentGroup`
+the `CodeDeployGroup` under `deploymentGroupInfo`, and `GetDeployment` the `CodeDeployDeployment`
+under `deploymentInfo`, so each of the six declarations was a live leak until
+[#1327](https://github.com/scttfrdmn/substrate/pull/1327) introduced `codedeployAppOut`,
+`codedeployGroupOut` and `codedeployDeploymentOut` (`emulator/codedeploy_wire.go`). The other six
+routed operations build a map of one or two published members and render no record at all.
+
+All **nine** routed operations are driven by
+`TestCodeDeployWire_ApplicationResponsesCarryNoBookkeepingMember` and its two siblings in
+`emulator/codedeploy_wire_test.go`, which walk the decoded document and fail on a member named for
+either at any depth — so the six entries this discharges in
+`scripts/wire-bookkeeping-baseline.txt` stay listed as declarations rather than as leaks
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). The comparison is a case-insensitive
+equality on the member *name*: a fold covers both the record's spelling and the `AccountID` a
+projection written in the house style of the other services might introduce, and an equality rather
+than a substring test means the account appearing inside a `serviceRoleArn` value is not a collision.
+Each case asserts a published member is *present* before asserting a bookkeeping one is absent, so a
+response that failed to render the record at all fails as a missing anchor rather than passing as an
+absence, and the stored record is read back as raw JSON to prove it held both members in the first
+place.
+
+Neither member carries `,omitempty` on any of the three records and no CodeDeploy record declares
+`EverTagged` — the three tag operations are unrouted — so the vacuous-absence trap that governs the
+taggable services (#1304, #938) does not arise here. The six operations that never rendered a record
+are driven anyway, because the set of nine should read as complete rather than as a sample, and a
+control confirms the walk catches a member added to any of their hand-built maps.
+
 ### Every published date is epoch seconds
 
 CodeDeploy speaks `awsJson1_1`, where a `Timestamp` is published as epoch seconds with fractional
