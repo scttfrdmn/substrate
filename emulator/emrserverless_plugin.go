@@ -211,7 +211,7 @@ func (p *EMRServerlessPlugin) getApplication(ctx *RequestContext, _ *AWSRequest,
 	if err := json.Unmarshal(data, &app); err != nil {
 		return nil, fmt.Errorf("getApplication: unmarshal: %w", err)
 	}
-	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"application": app})
+	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"application": emrServerlessAppToWire(app)})
 }
 
 func (p *EMRServerlessPlugin) deleteApplication(ctx *RequestContext, _ *AWSRequest, appID string) (*AWSResponse, error) {
@@ -277,7 +277,7 @@ func (p *EMRServerlessPlugin) getJobRun(ctx *RequestContext, _ *AWSRequest, appI
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("getJobRun: unmarshal: %w", err)
 	}
-	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRun": run})
+	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRun": emrServerlessJobRunToWire(run)})
 }
 
 func (p *EMRServerlessPlugin) cancelJobRun(ctx *RequestContext, _ *AWSRequest, appID, runID string) (*AWSResponse, error) {

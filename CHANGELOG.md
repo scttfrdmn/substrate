@@ -553,6 +553,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **EMR Serverless's GetApplication and GetJobRun no longer answer the stored record whole** (#756,
+  #1199). Both handed the persisted record to the caller, so a consumer read `accountID` and `region`,
+  which neither `API_Application` nor `API_JobRun` publishes. They now answer `emrServerlessAppOut` and
+  `emrServerlessJobRunOut` from the new `emulator/emrserverless_wire.go`, and the stored records are
+  unchanged. The new `emulator/emrserverless_wire_test.go` drives all seven routed operations and is
+  cited for both records. That takes the inventory from **231 projected across 94 records to 235 across
+  96**, and the still-reachable count from **79 to 75**.
+
 - **CodePipeline answers its dates as epoch seconds, and GetPipelineExecution no longer answers the
   stored record whole** (#1338, #756). `created` and `updated` rendered as RFC3339 strings in
   `CreatePipeline`'s and `GetPipeline`'s `metadata`, in `ListPipelines`' summaries and in
