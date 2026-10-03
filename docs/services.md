@@ -3529,6 +3529,13 @@ different `PhysicalResourceId` values and a different `state_hash_after` for
 ID, in the order a deploy already uses — type priority, then logical ID — so a
 replayed `CreateStack` re-runs the deployment and arrives at the same IDs.
 
+### The account, Region and dates a stack carries reach no response
+
+`CFNStackState` declares its account and Region under wire-visible `,omitempty` `json` tags and its `CreatedAt` and `UpdatedAt` as times, and `CFNChangeSet` its `CreatedAt`, because the records are what
+`MemoryStateManager` snapshots and a replay reads back. None reaches a body: CloudFormation speaks the query protocol, and every response is marshaled from an XML struct declared for its operation, which publishes `CreationTime` and `LastUpdatedTime` instead.
+`TestCFNWire_StackResponsesCarryNoBookkeepingMember` and `TestCFNWire_ChangeSetResponsesCarryNoBookkeepingMember` in `emulator/cfn_wire_test.go` read each member back from the stored record first, then drive every routed stack and change-set operation and walk each response's element names
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). `ListImports` is not driven: it answers importing-stack names, not a stack.
+
 ### Cost
 
 CloudFormation operations are free. The resources a template deploys are costed
@@ -5062,6 +5069,13 @@ exercises the update-in-place shape IaC emits: assume, tighten, and be refused o
 the same role. The replacement takes effect on the **next** `AssumeRole`; sessions
 already minted under the old policy stay valid, as on AWS. `GetRole` reports the
 stored document, so a test can assert what it set.
+
+### The account a session credential carries reaches no response
+
+`STSSessionCredentials` declares its account under a wire-visible `json` tag, because the record is what
+`MemoryStateManager` snapshots and a replay reads back, and what a request signed with the session's key is resolved from. It does not reach a body: `AssumeRole` and `GetSessionToken` answer an XML struct declared for their operation, copying the four published `Credentials` members out of the record, and `GetCallerIdentity` publishes the account as `Account`.
+`TestSTSWire_SessionCredentialResponsesCarryNoBookkeepingMember` in `emulator/sts_wire_test.go` drives all three routed operations, `GetCallerIdentity` signed with an assumed-role session's key, and walks each response's element names for the member
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### Cost
 
@@ -7071,6 +7085,12 @@ the twenty-ninth, which is why `AccountID` and `Region` were never at risk of ap
 Members substrate does not model are absent from the projection rather than present and empty,
 which is the honest-empty reading #827 established, applied to a shape: nothing reports
 `TableId`, `SSEDescription`, `Replicas` or the twelve others AWS publishes as optional.
+
+### A stream iterator carries its account and Region only inside the token
+
+`DynamoDBStreamCursor` holds the table, account, Region and position a shard iterator reads from, and it does reach a body: `GetShardIterator` and `GetRecords` answer it base64-encoded as the opaque `ShardIterator` and `NextShardIterator` strings. A real iterator is opaque too, so carrying the account and Region inside it is faithful, and it is what keeps an iterator from being redeemed against another account's or Region's table ([#943](https://github.com/scttfrdmn/substrate/issues/943)).
+`TestDynamoDBStreamsWire_CursorReachesResponsesOnlyAsAToken` in `emulator/dynamodb_stream_cursor_wire_test.go` decodes each token first, requiring both members inside it, then walks each document for either member at any depth, so it fails the day the cursor is rendered as an object
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### Cost
 
@@ -17487,6 +17507,12 @@ millisecond. The stored record keeps its `time.Time`, so a recorded run replays 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::Kinesis::Stream | StreamName | |
+
+### A shard iterator carries its account and Region only inside the token
+
+`kinesisIterator` holds the stream, shard, position, account (`a`) and Region (`r`) a shard iterator reads from, and it reaches a body only base64-encoded, as `GetShardIterator`'s `ShardIterator` and `GetRecords`' `NextShardIterator`. A real iterator is opaque too, so carrying both inside it is faithful.
+`TestKinesisWire_IteratorReachesResponsesOnlyAsAToken` in `emulator/kinesis_wire_test.go` decodes each token first, requiring both members inside it, then walks each document for every spelling at any depth
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### Cost
 

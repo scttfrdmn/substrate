@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -25,7 +26,8 @@ import (
 //
 // The shard iterator is the one place a record is marshaled into a response: kinesisIterator is
 // base64-encoded into the ShardIterator and NextShardIterator strings, which the walk sees as string
-// values, not members. That is kinesisIterator's own citation, not this file's.
+// values, not members. TestKinesisWire_IteratorReachesResponsesOnlyAsAToken below is kinesisIterator's
+// own citation.
 
 // kinesisWireClock is the instant every fixture below starts the simulated clock at.
 var kinesisWireClock = time.Unix(1700000000, 0).UTC()
@@ -225,4 +227,56 @@ func TestKinesisWire_ShardOperationsCarryNoBookkeepingMember(t *testing.T) {
 
 	split := kinesisWire(t, p, ctx, "SplitShard", map[string]any{"StreamName": name, "ShardToSplit": child, "NewStartingHashKey": "1"})
 	t.Run("SplitShard", func(t *testing.T) { wireAssertNoMemberJSON(t, "SplitShard", split, kinesisBookkeepingMembers) })
+}
+
+// TestKinesisWire_IteratorReachesResponsesOnlyAsAToken is the raw-bytes assertion
+// scripts/wire-bookkeeping-projected.txt cites for kinesisIterator (#756).
+//
+// kinesisIterator reaches an AWS body, as GetShardIterator's ShardIterator and GetRecords'
+// NextShardIterator: base64-encoded JSON, with the account and Region under the one-letter names `a`
+// and `r`. A real shard iterator is opaque, so carrying both inside the token is faithful. What must
+// hold is that the iterator is never rendered as an object. Each token is decoded first, proving both
+// members are in it, then each document is walked for every spelling at any depth.
+func TestKinesisWire_IteratorReachesResponsesOnlyAsAToken(t *testing.T) {
+	t.Parallel()
+	p, ctx, _ := setupKinesisWirePlugin(t)
+
+	const name = "wire-iter"
+	kinesisWire(t, p, ctx, "CreateStream", map[string]any{"StreamName": name, "ShardCount": 1})
+	put := kinesisWire(t, p, ctx, "PutRecord", map[string]any{"StreamName": name, "PartitionKey": "k", "Data": "d2lyZQ=="})
+	var putOut struct {
+		ShardID string `json:"ShardId"`
+	}
+	require.NoError(t, json.Unmarshal(put, &putOut), "decode PutRecord: %s", put)
+
+	iterBody := kinesisWire(t, p, ctx, "GetShardIterator", map[string]any{
+		"StreamName": name, "ShardId": putOut.ShardID, "ShardIteratorType": "TRIM_HORIZON",
+	})
+	iterator := kinesisWireToken(t, "GetShardIterator", iterBody, "ShardIterator")
+	records := kinesisWire(t, p, ctx, "GetRecords", map[string]any{"ShardIterator": iterator})
+	kinesisWireToken(t, "GetRecords", records, "NextShardIterator")
+
+	members := []string{"AccountID", "Region", "a", "r"}
+	for op, body := range map[string][]byte{"GetShardIterator": iterBody, "GetRecords": records} {
+		t.Run(op, func(t *testing.T) {
+			wireAssertNoMemberJSON(t, op, body, members)
+		})
+	}
+}
+
+// kinesisWireToken requires that member is a JSON string in body, decodes it as an iterator, and
+// requires the iterator to carry the account and Region. It returns the token.
+func kinesisWireToken(t *testing.T, op string, body []byte, member string) string {
+	t.Helper()
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(body, &doc), "decode %s: %s", op, body)
+	var token string
+	require.NoErrorf(t, json.Unmarshal(doc[member], &token), "%s must answer %s as an opaque string: %s", op, member, body)
+	raw, err := base64.StdEncoding.DecodeString(token)
+	require.NoError(t, err, "%s's %s is base64", op, member)
+	var iter map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &iter), "decode %s's iterator: %s", op, raw)
+	require.JSONEqf(t, `"`+kinesisWireAccount+`"`, string(iter["a"]), "%s's iterator must carry the account: %s", op, raw)
+	require.JSONEqf(t, `"`+kinesisWireRegion+`"`, string(iter["r"]), "%s's iterator must carry the Region: %s", op, raw)
+	return token
 }
