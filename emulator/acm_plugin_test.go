@@ -80,8 +80,16 @@ func TestACMPlugin_RequestAndDescribe(t *testing.T) {
 		t.Fatalf("DescribeCertificate: %v", err)
 	}
 
+	// The published members this test reads, with CreatedAt typed as the API publishes it. This used
+	// to decode into emulator.ACMCertificate, the stored record, whose time.Time dates accepted the
+	// RFC3339 strings DescribeCertificate answered where awsJson1_1 publishes numbers (#1305).
 	var descOut struct {
-		Certificate emulator.ACMCertificate `json:"Certificate"`
+		Certificate struct {
+			CertificateArn string  `json:"CertificateArn"`
+			Status         string  `json:"Status"`
+			DomainName     string  `json:"DomainName"`
+			CreatedAt      float64 `json:"CreatedAt"`
+		} `json:"Certificate"`
 	}
 	if err := json.Unmarshal(descResp.Body, &descOut); err != nil {
 		t.Fatalf("unmarshal describe response: %v", err)

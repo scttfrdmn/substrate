@@ -101,7 +101,7 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #
 # Recording a published member in the baseline files it as a defect owed a
 # deletion, and deleting it would drop a member AWS does publish — so the entry is
-# worse than useless, it points at the wrong fix. Thirteen are excluded:
+# worse than useless, it points at the wrong fix. Fourteen are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
@@ -122,6 +122,9 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     fix as part of the defect.
 #   - acm_types.go ACMCertificate.CreatedAt — `API_CertificateDetail` publishes
 #     `CreatedAt`, Timestamp, Required: No.
+#   - acm_wire.go acmCertificateOut.CreatedAt — the same member on the wire struct that
+#     discharges that record (#756), the ecs_wire.go case again: a projection carries
+#     every published member, so building one adds a line of this kind.
 #   - ecs_types.go ECSService.CreatedAt — `API_Service` publishes `createdAt`.
 #   - ecs_wire.go ecsServiceOut.CreatedAt — the same member on the wire struct that
 #     discharges that record, the ecr_wire.go case over again. A projection has to carry
@@ -146,12 +149,14 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
 #
-# Three of the thirteen publish the *name* and diverge on the *type*: ACM's, Redshift
-# Data's and Firehose's are `time.Time`, so they render RFC3339 where all three
-# services' JSON protocol publishes a Timestamp as epoch seconds (ECS already uses
-# EpochSeconds, which is what right looks like). That is a wrong-type divergence
-# rather than a bookkeeping leak — #1305 — and it is named here rather than left
-# implied, because "excluded from this check" must not read as "correct".
+# Three of the fourteen are declared `time.Time` on the record while the name is
+# published: ACM's, Redshift Data's and Firehose's. A record's type does not reach the
+# wire on its own; what matters is what the response renders. ACM's now renders through
+# acmCertificateOut as EpochSeconds, which is what right looks like (ECS too). Redshift
+# Data's and Firehose's still render RFC3339 where their JSON protocol publishes epoch
+# seconds. That is a wrong-type divergence rather than a bookkeeping leak — #1305 — and
+# it is named here rather than left implied, because "excluded from this check" must not
+# read as "correct".
 #
 # Test files are skipped. A bookkeeping-named field in a _test.go file is a decode
 # target — a test reading a member off a response — not wire surface, and one
@@ -194,6 +199,7 @@ extract() {
       published["emulator/batch_plugin.go\tBatchJob\tCreatedAt"] = 1
       published["emulator/ecr_wire.go\tecrRepositoryOut\tCreatedAt"] = 1
       published["emulator/acm_types.go\tACMCertificate\tCreatedAt"] = 1
+      published["emulator/acm_wire.go\tacmCertificateOut\tCreatedAt"] = 1
       published["emulator/ecs_types.go\tECSService\tCreatedAt"] = 1
       published["emulator/ecs_wire.go\tecsServiceOut\tCreatedAt"] = 1
       published["emulator/redshiftdata_types.go\tRedshiftDataStatement\tCreatedAt"] = 1

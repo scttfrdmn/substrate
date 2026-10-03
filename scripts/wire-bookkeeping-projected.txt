@@ -37,6 +37,7 @@
 # TagResource, never by create-with-tags (see [taggingEverTagged], #938). #1304 shipped
 # exactly that vacuous assertion on EFS before it was caught. So a record declaring
 # EverTagged is cited to the test that sets the flag first and proves it is set.
+emulator/acm_types.go	ACMCertificate	TestACMWire_CertificateResponsesCarryNoBookkeepingMember
 emulator/apigateway_types.go	APIKeyState	TestAPIGatewayWire_APIKey
 emulator/apigateway_types.go	AuthorizerState	TestAPIGatewayWire_Authorizer
 emulator/apigateway_types.go	DeploymentState	TestAPIGatewayWire_Deployment

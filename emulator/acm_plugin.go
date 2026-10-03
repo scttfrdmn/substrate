@@ -162,9 +162,9 @@ func (p *ACMPlugin) describeCertificate(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	type response struct {
-		Certificate ACMCertificate `json:"Certificate"`
+		Certificate acmCertificateOut `json:"Certificate"`
 	}
-	return acmJSONResponse(http.StatusOK, response{Certificate: cert})
+	return acmJSONResponse(http.StatusOK, response{Certificate: acmCertificateToWire(cert)})
 }
 
 func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

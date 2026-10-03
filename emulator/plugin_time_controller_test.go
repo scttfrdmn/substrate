@@ -166,7 +166,11 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 		want    string
 	}{
 		{
-			// ACM's create answers only the ARN, so the certificate is described back.
+			// ACM's create answers only the ARN, so the certificate is described back. Epoch
+			// seconds to three decimals, like ECR below and for the same reason: ACM speaks
+			// application/x-amz-json-1.1, whose timestamps are numbers. It answered a quoted
+			// RFC3339 string until #1305, because DescribeCertificate marshaled the persisted
+			// record's time.Time directly — so this case now also pins the unit.
 			name: "acm DescribeCertificate reports Certificate.CreatedAt",
 			observe: func(t *testing.T, ts *emulator.TestServer) string {
 				t.Helper()
@@ -185,7 +189,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 					"CertificateManager.DescribeCertificate", string(body))
 				return pluginClockJSONField(t, described, "Certificate", "CreatedAt")
 			},
-			want: rfc3339,
+			want: strconv.FormatFloat(float64(pluginClockFrozen.UnixNano())/1e9, 'f', 3, 64),
 		},
 		{
 			name: "apigateway CreateRestApi reports createdDate",
