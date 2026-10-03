@@ -660,6 +660,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CloudFront invalidations keep and answer the batch they were sent** (#1360).
+  `createInvalidation` never read its body, so `CreateInvalidation` and `GetInvalidation` answered an
+  `Invalidation` without the `InvalidationBatch` that `API_Invalidation` marks Required, and stored
+  no path or `CallerReference`. Both now answer the batch as sent.
+  - `CreateInvalidation` refuses the bodies its page publishes codes for: `MissingBody`,
+    `InvalidArgument` (undecodable, or no `CallerReference` or paths) and `InconsistentQuantities`.
+  - A resubmitted batch, with the same `CallerReference` and paths, returns the first invalidation,
+    as `API_InvalidationBatch` states. The different-paths case's `InvalidationBatchAlreadyExists` is
+    unpublished in the operation's Errors list and not modeled; see `docs/services.md`.
+  - The marshal and `state.Put` errors `createInvalidation` discarded, and `ListInvalidations`'
+    ignored index error, are returned wrapped.
+
 - **HealthOmics, Bedrock, RAM and Batch answer their records through projections** (#756). Each
   answered a stored record whole at one or more sites, `accountID` and `region` included, which no
   published shape carries.

@@ -66,7 +66,7 @@ func TestCloudFrontWire_DistributionResponsesCarryNoBookkeepingMember(t *testing
 			return call(http.MethodGet, "/2020-05-31/tagging", map[string]string{"Resource": arn}, "")
 		}, "<Key>team</Key>"},
 		{"UpdateDistribution", func() []byte { return call(http.MethodPut, dist+"/config", nil, config) }, "<Id>" + id + "</Id>"},
-		{"CreateInvalidation", func() []byte { return call(http.MethodPost, dist+"/invalidation", nil, invalidation) }, "<Status>Completed</Status>"},
+		{"CreateInvalidation", func() []byte { return call(http.MethodPost, dist+"/invalidation", nil, invalidation) }, "<Path>/*</Path>"},
 		{"ListInvalidations", func() []byte { return call(http.MethodGet, dist+"/invalidation", nil, "") }, "<Id>"},
 	} {
 		t.Run(tc.op, func(t *testing.T) {

@@ -17536,7 +17536,7 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb |
 | DeleteDistribution | |
 | ListDistributions | |
-| CreateInvalidation | |
+| CreateInvalidation | Keeps and answers the `InvalidationBatch`; a resubmitted batch returns the first invalidation (#1360) |
 | GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
 | ListInvalidations | Refuses a distribution that does not exist rather than answering an empty list (#1091) |
 | TagResource | Body is a `<Tags>` document; a body of another shape is refused rather than read as an empty tag set (#883) |
@@ -17660,6 +17660,27 @@ state and answered 200 with an empty list for any ID at all, and `GetInvalidatio
 `NoSuchInvalidation` — telling a caller a batch was missing from a distribution that does not
 exist. Both load the distribution first, so each published code reports the thing that is actually
 absent.
+
+### An invalidation keeps the batch it was sent
+
+`API_Invalidation` marks `CreateTime`, `Id`, `InvalidationBatch` and `Status` all Required: Yes.
+Until #1360 `CreateInvalidation` and `GetInvalidation` answered three of them, because
+`createInvalidation` never read its body: no path and no `CallerReference` was stored, and there
+was no batch to answer. Both now answer the batch as it was sent. `CreateInvalidation` refuses the
+bodies its page publishes codes for, all 400:
+
+| Body | Code |
+|------|------|
+| None | `MissingBody` |
+| Does not parse, or omits `CallerReference` or every path (both Required: Yes) | `InvalidArgument` |
+| `Paths.Quantity` disagrees with the number of `Items` | `InconsistentQuantities` |
+
+`API_InvalidationBatch` says a resubmitted batch, with the same `CallerReference` and the same
+paths, does not create an invalidation, and returns the one created before. That is modeled, and
+answered 201, the operation's only success status. The same page says a reused `CallerReference`
+with *different* paths returns `InvalidationBatchAlreadyExists`, but `API_CreateInvalidation`'s
+Errors list does not publish that code and nothing gives its status, so it is not modeled: such a
+request creates a new invalidation.
 
 ### A tagging ARN addresses the distribution it names
 

@@ -464,7 +464,7 @@ func TestReplay_ACloudFrontCreateReplaysWithTheIdentifiersItMinted(t *testing.T)
 
 	// An invalidation inside the distribution the previous request minted.
 	cfReplayCall(t, ts, http.MethodPost,
-		"/2020-05-31/distribution/"+dist.ID+"/invalidation", "")
+		"/2020-05-31/distribution/"+dist.ID+"/invalidation", `<InvalidationBatch><Paths><Quantity>1</Quantity><Items><Path>/*</Path></Items></Paths><CallerReference>replay</CallerReference></InvalidationBatch>`)
 
 	// And a delete that names the version the create handed out.
 	cfReplayDelete(t, ts, cfOACPath+"/"+created.ID, etag)
