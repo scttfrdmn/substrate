@@ -19700,6 +19700,27 @@ sees `true`, so nothing distinguishes the hardcode from a working implementation
 that its own `StopLogging` took effect passes on a no-op.
 [#1157](https://github.com/scttfrdmn/substrate/issues/1157).
 
+### The account, Region and creation time a record carries reach no response
+
+`CloudTrailTrail` declares `AccountID`, `Region` and `CreatedAt` under wire-visible `json` tags,
+because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), four sites answered the record whole:
+
+- `CreateTrail` and `UpdateTrail` returned it as the body.
+- `GetTrail` returned it under `Trail`, and `DescribeTrails` in `trailList`.
+
+That put all three members on the wire, plus `IsLogging`, which only `GetTrailStatus` publishes. The
+two writes also answered `HomeRegion` and `HasCustomEventSelectors`, which `Trail` publishes and
+`CreateTrailResponse`/`UpdateTrailResponse` do not.
+
+The reads now answer `cloudtrailTrailOut` and the writes `cloudtrailTrailWriteOut`
+(`emulator/cloudtrail_wire.go`), and the stored record is unchanged.
+`TestCloudTrailWire_TrailResponsesCarryNoBookkeepingMember` drives all eight routed operations.
+
+With the leak gone, a stopped trail reports `IsLogging: false` through no published response:
+`GetTrailStatus` still hardcodes `true`. That was already the case for every published shape, and it
+is #1157's to fix.
+
 ### A trail's ARN is always in the aws partition
 
 `CreateTrail` builds the trail ARN with a literal `aws` partition, so a Region in `aws-us-gov` or
