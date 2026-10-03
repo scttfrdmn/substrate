@@ -636,6 +636,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Firehose's `DescribeDeliveryStream` answers a projection, with `CreateTimestamp` as epoch seconds**
+  (#756, #1305). It answered `FirehoseDeliveryStream` whole: `AccountId` and `Region`, which
+  `API_DeliveryStreamDescription` does not publish, and `Tags`, which it does not publish either. It
+  also answered `CreateTimestamp` as an RFC3339 string, which an awsJson1_1 SDK cannot decode. The new
+  `emulator/firehose_wire.go` answers the five published members the record models, with the date as
+  `EpochSeconds`. The stored record is unchanged.
+  - `emulator/firehose_wire_test.go` walks all six routed operations and pins `CreateTimestamp` as a
+    number. `firehose_plugin_test.go` now decodes the published shape rather than the record.
+  - That leaves no #1305 row open: ACM was fixed by #1354, and Redshift Data already rendered numbers.
+
+  check-wire-bookkeeping goes from **290 projected across 124 records to 292 across 125**, and from
+  **20 still reachable to 18**.
+
 - **IAM Identity Center answers its permission set through a projection, and its dates as epoch
   seconds** (#756, #1345). `CreatePermissionSet` and `DescribePermissionSet` handed the persisted
   `SSOPermissionSet` to the caller. A consumer therefore read the owning `AccountID`, plus
