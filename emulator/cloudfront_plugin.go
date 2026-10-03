@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -520,39 +521,153 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest)
 
 // --- Invalidation -----------------------------------------------------------
 
-func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, _ *AWSRequest, distID string) (*AWSResponse, error) {
+// cfInvalidationBatchBody is CreateInvalidation's InvalidationBatch request body.
+type cfInvalidationBatchBody struct {
+	XMLName         xml.Name `xml:"InvalidationBatch"`
+	CallerReference string   `xml:"CallerReference"`
+	Paths           *struct {
+		Quantity int      `xml:"Quantity"`
+		Items    []string `xml:"Items>Path"`
+	} `xml:"Paths"`
+}
+
+// cfInvalidationXML is the Invalidation element CreateInvalidation and GetInvalidation answer.
+//
+// API_Invalidation marks all four members Required: Yes. Until #1360 both operations answered three,
+// leaving out InvalidationBatch, because createInvalidation never read the batch it was sent.
+type cfInvalidationXML struct {
+	XMLName           xml.Name `xml:"Invalidation"`
+	CreateTime        string   `xml:"CreateTime"`
+	ID                string   `xml:"Id"`
+	InvalidationBatch struct {
+		CallerReference string `xml:"CallerReference"`
+		Paths           struct {
+			Items    []string `xml:"Items>Path"`
+			Quantity int      `xml:"Quantity"`
+		} `xml:"Paths"`
+	} `xml:"InvalidationBatch"`
+	Status string `xml:"Status"`
+}
+
+// cfInvalidationToXML projects a persisted invalidation onto the published Invalidation shape.
+func cfInvalidationToXML(inv CloudFrontInvalidation) cfInvalidationXML {
+	out := cfInvalidationXML{
+		CreateTime: inv.CreateTime.Format(time.RFC3339),
+		ID:         inv.ID,
+		Status:     inv.Status,
+	}
+	out.InvalidationBatch.CallerReference = inv.CallerReference
+	out.InvalidationBatch.Paths.Items = inv.Paths
+	out.InvalidationBatch.Paths.Quantity = len(inv.Paths)
+	return out
+}
+
+// parseInvalidationBatch decodes and checks CreateInvalidation's body, answering the refusals
+// API_CreateInvalidation publishes: MissingBody for no body, InconsistentQuantities when Quantity
+// disagrees with Items, and InvalidArgument for a body that does not decode or omits CallerReference
+// or Paths, both of which API_InvalidationBatch marks Required: Yes.
+func parseInvalidationBatch(body []byte) (cfInvalidationBatchBody, error) {
+	var batch cfInvalidationBatchBody
+	if len(bytes.TrimSpace(body)) == 0 {
+		return batch, &AWSError{
+			Code:       "MissingBody",
+			Message:    "This operation requires a body. Ensure that the body is present and the Content-Type header is set.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	invalid := func(msg string) error {
+		return &AWSError{Code: "InvalidArgument", Message: msg, HTTPStatus: http.StatusBadRequest}
+	}
+	if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&batch); err != nil {
+		return batch, invalid("The InvalidationBatch document could not be parsed: " + err.Error())
+	}
+	if batch.CallerReference == "" {
+		return batch, invalid("CallerReference is required")
+	}
+	if batch.Paths == nil || len(batch.Paths.Items) == 0 {
+		return batch, invalid("Paths must name at least one path")
+	}
+	if batch.Paths.Quantity != len(batch.Paths.Items) {
+		return batch, &AWSError{
+			Code:       "InconsistentQuantities",
+			Message:    fmt.Sprintf("Quantity %d does not match the %d Items given", batch.Paths.Quantity, len(batch.Paths.Items)),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return batch, nil
+}
+
+// createInvalidation handles CreateInvalidation.
+//
+// # CallerReference
+//
+// API_InvalidationBatch: a second request with the same CallerReference "and if the rest of the
+// request is the same" does not create an invalidation; CloudFront "returns information about the
+// invalidation request that you previously created". That is modeled, and answered with the
+// operation's one success status, 201. The same page says a reused CallerReference with different
+// paths returns InvalidationBatchAlreadyExists, but API_CreateInvalidation's Errors list does not
+// publish that code and nothing gives its status, so it is not modeled (#671's rule: only what the
+// API model states); such a request creates a new invalidation.
+func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, req *AWSRequest, distID string) (*AWSResponse, error) {
 	if _, err := p.loadDistribution(ctx, distID); err != nil {
 		return nil, err
+	}
+	batch, err := parseInvalidationBatch(req.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	goCtx := context.Background()
+	idsKey := cfInvalIDsKey(ctx.AccountID, distID)
+	ids, err := loadStringIndex(goCtx, p.state, cloudfrontNamespace, idsKey)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront createInvalidation load index: %w", err)
+	}
+	for _, id := range ids {
+		prior, err := p.loadInvalidation(ctx, distID, id)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil && prior.CallerReference == batch.CallerReference && slices.Equal(prior.Paths, batch.Paths.Items) {
+			return cloudfrontXMLResponse(http.StatusCreated, cfInvalidationToXML(*prior))
+		}
 	}
 
 	// Use I prefix for invalidation IDs per CloudFront API convention.
 	invID := "I" + generateCloudFrontID(ctx.IDs)[1:]
-
-	now := p.tc.Now().UTC()
 	inv := CloudFrontInvalidation{
-		ID:         invID,
-		Status:     "Completed",
-		CreateTime: now,
+		ID:              invID,
+		Status:          "Completed",
+		CreateTime:      p.tc.Now().UTC(),
+		Paths:           batch.Paths.Items,
+		CallerReference: batch.CallerReference,
 	}
-
-	// Persist invalidation.
-	goCtx := context.Background()
-	invData, _ := json.Marshal(inv)
-	invKey := cfInvalKey(ctx.AccountID, distID, invID)
-	_ = p.state.Put(goCtx, cloudfrontNamespace, invKey, invData)
-	updateStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID), invID)
-
-	type xmlInvalidation struct {
-		XMLName    xml.Name `xml:"Invalidation"`
-		ID         string   `xml:"Id"`
-		Status     string   `xml:"Status"`
-		CreateTime string   `xml:"CreateTime"`
+	invData, err := json.Marshal(inv)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront createInvalidation marshal: %w", err)
 	}
-	return cloudfrontXMLResponse(http.StatusCreated, xmlInvalidation{
-		ID:         inv.ID,
-		Status:     inv.Status,
-		CreateTime: now.Format(time.RFC3339),
-	})
+	if err := p.state.Put(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID), invData); err != nil {
+		return nil, fmt.Errorf("cloudfront createInvalidation state.Put: %w", err)
+	}
+	updateStringIndex(goCtx, p.state, cloudfrontNamespace, idsKey, invID)
+
+	return cloudfrontXMLResponse(http.StatusCreated, cfInvalidationToXML(inv))
+}
+
+// loadInvalidation reads one invalidation, returning nil when it does not exist.
+func (p *CloudFrontPlugin) loadInvalidation(ctx *RequestContext, distID, invID string) (*CloudFrontInvalidation, error) {
+	data, err := p.state.Get(context.Background(), cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID))
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront loadInvalidation state.Get: %w", err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var inv CloudFrontInvalidation
+	if err := json.Unmarshal(data, &inv); err != nil {
+		return nil, fmt.Errorf("cloudfront loadInvalidation unmarshal: %w", err)
+	}
+	return &inv, nil
 }
 
 // getInvalidation answers one invalidation batch of one distribution.
@@ -566,32 +681,18 @@ func (p *CloudFrontPlugin) getInvalidation(ctx *RequestContext, distID, invID st
 	if _, err := p.loadDistribution(ctx, distID); err != nil {
 		return nil, err
 	}
-
-	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID))
+	inv, err := p.loadInvalidation(ctx, distID, invID)
 	if err != nil {
-		return nil, fmt.Errorf("cloudfront getInvalidation state.Get: %w", err)
+		return nil, err
 	}
-	if data == nil {
+	if inv == nil {
 		return nil, &AWSError{
 			Code:       "NoSuchInvalidation",
 			Message:    "The specified invalidation does not exist.",
 			HTTPStatus: http.StatusNotFound,
 		}
 	}
-	var inv CloudFrontInvalidation
-	if err := json.Unmarshal(data, &inv); err != nil {
-		return nil, fmt.Errorf("cloudfront getInvalidation unmarshal: %w", err)
-	}
-	type xmlInvalidation struct {
-		XMLName    xml.Name `xml:"Invalidation"`
-		ID         string   `xml:"Id"`
-		Status     string   `xml:"Status"`
-		CreateTime string   `xml:"CreateTime"`
-	}
-	return cloudfrontXMLResponse(http.StatusOK, xmlInvalidation{
-		ID: inv.ID, Status: inv.Status, CreateTime: inv.CreateTime.Format(time.RFC3339),
-	})
+	return cloudfrontXMLResponse(http.StatusOK, cfInvalidationToXML(*inv))
 }
 
 // listInvalidations answers a distribution's invalidation batches.
@@ -608,7 +709,10 @@ func (p *CloudFrontPlugin) listInvalidations(ctx *RequestContext, distID string)
 	}
 
 	goCtx := context.Background()
-	ids, _ := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID))
+	ids, err := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfInvalIDsKey(ctx.AccountID, distID))
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront listInvalidations load index: %w", err)
+	}
 
 	type invSummary struct {
 		ID         string `xml:"Id"`

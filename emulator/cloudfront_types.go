@@ -61,6 +61,10 @@ type CloudFrontInvalidation struct {
 
 	// Paths is the list of paths included in the invalidation.
 	Paths []string `json:"Paths,omitempty"`
+
+	// CallerReference is the batch's caller reference, which makes a resubmitted batch return the
+	// invalidation it first created.
+	CallerReference string `json:"CallerReference,omitempty"`
 }
 
 // cfDistKey returns the state key for a CloudFront distribution.

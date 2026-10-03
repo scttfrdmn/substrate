@@ -342,7 +342,7 @@ func TestCloudFront_Invalidation_GetAndList(t *testing.T) {
 	distID := createResp.ID
 
 	// Create invalidation.
-	invResp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution/"+distID+"/invalidation", nil, ""))
+	invResp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution/"+distID+"/invalidation", nil, `<InvalidationBatch><Paths><Quantity>1</Quantity><Items><Path>/*</Path></Items></Paths><CallerReference>get-and-list</CallerReference></InvalidationBatch>`))
 	if err != nil {
 		t.Fatalf("CreateInvalidation: %v", err)
 	}
