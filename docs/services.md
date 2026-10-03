@@ -21115,10 +21115,19 @@ assertion rather than as an ignored filter. `GetJobRun`'s `attempt` and `CancelJ
 stored record supplies four — `applicationId`, `arn`, `jobRunId` and `state` — and omits `createdAt`,
 `updatedAt`, `createdBy`, `executionRole`, `jobDriver`, `releaseLabel` and `stateDetails`. `jobDriver`
 is the member that says what was submitted, so a consumer cannot confirm from any response that the
-right entry point, jar or SQL was even sent. Both records also carry `accountID` and `region`, which
-are Substrate's own and appear on neither published shape
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+right entry point, jar or SQL was even sent.
 [#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+
+### The account and Region a record carries reach no response
+
+`EMRServerlessApp` and `EMRServerlessJobRun` declare `accountID` and `region` under wire-visible
+`json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), `GetApplication` and `GetJobRun` answered
+each record whole, so both members reached the wire, and neither published shape has them. They now
+answer through `emrServerlessAppOut` and `emrServerlessJobRunOut`
+(`emulator/emrserverless_wire.go`). The stored records are unchanged.
+`TestEMRServerlessWire_ResponsesCarryNoBookkeepingMember` drives all seven routed operations and walks
+each decoded document for either member at any depth.
 
 ### The EMR Serverless required inputs are neither read nor refused
 
