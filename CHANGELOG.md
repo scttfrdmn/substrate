@@ -244,6 +244,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Lambda, SQS and Route 53 are recorded as projected, with a test cited for each** (#756).
+  `LambdaFunction` and `SQSQueue` declare only `ever_tagged`, and `Route53HostedZone` only its
+  `AccountID`; none reaches a response. The Lambda and SQS tests tag first and read the flag back,
+  because an unset `omitempty` member is absent for free (#1304). The Route 53 test walks XML element
+  names.
+  - `wireRecordByPrefix` joins `emulator/wire_members_test.go`, for SQS, which keys a queue by its
+    URL.
+
+  That takes the projected inventory from **281 across 118 records to 284 across 121**, and the
+  still-reachable count from **29 to 26**.
+
 - **Athena, Redshift Data, Scheduler and FSx are recorded as projected, with a test cited for each**
   (#756). `AthenaQuery`, `RedshiftDataStatement`, `SchedulerRecord` and `FSxFileSystem` each declare an
   account and a Region, and neither reaches a response: each is rendered through maps or an existing

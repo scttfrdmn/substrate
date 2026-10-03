@@ -209,3 +209,18 @@ func wireRunJSON(t *testing.T, members []string, cases []wireCase) {
 		})
 	}
 }
+
+// wireRecordByPrefix returns the single record in namespace whose key starts with prefix, as raw JSON.
+// It is for the services that key a record by something a test does not otherwise hold, such as a
+// queue URL.
+func wireRecordByPrefix(t *testing.T, state emulator.StateManager, namespace, prefix string) map[string]json.RawMessage {
+	t.Helper()
+	keys, err := state.List(t.Context(), namespace, prefix)
+	require.NoError(t, err, "state.List %s", prefix)
+	require.Lenf(t, keys, 1, "want exactly one %s record, have %v", prefix, keys)
+	data, err := state.Get(t.Context(), namespace, keys[0])
+	require.NoError(t, err, "state.Get %s", keys[0])
+	var record map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &record), "decode %s: %s", keys[0], data)
+	return record
+}
