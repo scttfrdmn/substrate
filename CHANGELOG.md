@@ -553,6 +553,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CodeBuild no longer answers its stored records whole, and its dates are epoch seconds** (#756,
+  #1338). `CreateProject`, `UpdateProject`, `BatchGetProjects`, `StartBuild` and `BatchGetBuilds`
+  handed the persisted `CodeBuildProject` or `CodeBuildBuild` to the caller. Every project and build
+  therefore carried `accountID` and `region`, which no CodeBuild shape publishes. The same five sites
+  rendered `created`, `lastModified`, `startTime` and `endTime` as RFC3339 strings, where
+  `awsJson1_1` publishes numbers, so a typed SDK could not decode any project or build response. All
+  five now answer `codebuildProjectOut`/`codebuildBuildOut` from the new
+  `emulator/codebuild_wire.go`, with `EpochSeconds` dates. The stored records are unchanged.
+  - `emulator/codebuild_plugin_test.go` decoded these responses into the stored record types. Those
+    typed the dates as `time.Time`, so the tests accepted the RFC3339 strings, which is how the
+    decode failure survived. They now decode the published members, with dates as numbers.
+  - The new `emulator/codebuild_wire_test.go` drives all seven routed operations, pins the four dates
+    on a frozen clock, and is cited in `scripts/wire-bookkeeping-projected.txt`. That takes the
+    inventory from **223 projected across 90 records to 227 across 92**, and the still-reachable count
+    from **87 to 83**.
+
 - **Kinesis GetRecords answers `ApproximateArrivalTimestamp` as epoch seconds** (#1338). The response
   record struct declared the member as `time.Time`, so it rendered an RFC3339 string where
   `API_GetRecords` publishes a number with millisecond precision. A typed SDK could not decode the

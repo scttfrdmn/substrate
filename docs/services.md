@@ -19688,10 +19688,28 @@ All four are 400, which is what every CodeBuild page publishes — `StartBuild`'
 CodePipeline share. `AccountLimitExceededException` and `OAuthProviderException` are published and
 have no site.
 
-Two bookkeeping members reach the wire: `CodeBuildProject` and `CodeBuildBuild` are marshalled whole
-into their responses, so every project and build carries `accountID` and `region`, which are
-Substrate's own and appear on neither published shape
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+### The account and Region a record carries reach no response
+
+`CodeBuildProject` and `CodeBuildBuild` declare `accountID` and `region` under wire-visible `json`
+tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), five sites answered the records whole:
+`CreateProject`, `UpdateProject`, `BatchGetProjects`, `StartBuild` and `BatchGetBuilds`. So every
+project and build carried both members, which neither published shape has. All five now answer
+through `codebuildProjectOut` and `codebuildBuildOut` (`emulator/codebuild_wire.go`). All seven
+routed operations are driven by `TestCodeBuildWire_ProjectResponsesCarryNoBookkeepingMember` and its
+sibling in `emulator/codebuild_wire_test.go`, which walk each decoded document for either member at
+any depth.
+
+The same five sites rendered `created`, `lastModified`, `startTime` and `endTime` as RFC3339 strings.
+CodeBuild speaks `awsJson1_1`, where `API_BatchGetProjects` and `API_BatchGetBuilds` publish each as
+a number, so a typed SDK could not decode any project or build response
+([#1338](https://github.com/scttfrdmn/substrate/issues/1338)). They are now epoch seconds. The stored
+records keep their `time.Time`, so a recorded run replays identically.
+
+`emulator/codebuild_plugin_test.go` used to decode these responses into the stored record types,
+which typed the dates as `time.Time`. It therefore read the RFC3339 strings without complaint, which
+is how the decode failure survived. It now decodes the published members, typed as the API publishes
+them.
 
 ### CloudFormation resource types
 
