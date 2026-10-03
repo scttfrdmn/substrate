@@ -553,6 +553,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SageMaker no longer answers its stored records whole** (#756). `DescribeApp` and
+  `DescribeTrainingJob` answered the persisted record as the whole body, and `ListApps` answered each
+  element as a record. A consumer therefore read `AccountID` and `Region`, which no SageMaker shape
+  publishes. `ListApps` elements also carried `AppArn`, which `API_AppDetails` does not publish,
+  although `DescribeApp` does. The three sites now answer `sagemakerAppOut`, `sagemakerAppDetailsOut`
+  and `sagemakerTrainingJobOut` from the new `emulator/sagemaker_wire.go`, and the stored records are
+  unchanged.
+  - The new `emulator/sagemaker_wire_test.go` drives all ten routed operations. That takes the
+    inventory from **239 projected across 98 records to 243 across 100**, and the still-reachable
+    count from **71 to 67**.
+
 - **QuickSight's DescribeDataSource no longer answers the stored record whole** (#756). It handed the
   persisted `QuickSightDataSource` to the caller, so a consumer read `AccountID` and `Region`, which
   `API_DataSource` does not publish. It now answers `quicksightDataSourceOut` from the new
