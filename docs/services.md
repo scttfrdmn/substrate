@@ -10922,23 +10922,25 @@ re-executed — see [How a seed survives a replay](#how-a-seed-survives-a-replay
 
 ### The account and Region a record carries reach no response
 
-Every EC2 record in `emulator/ec2_types.go` declares `AccountID` and `Region` under wire-visible
+Every EC2 record in `emulator/ec2_types.go`, `emulator/ec2_capacity_reservations.go` and
+`emulator/ec2_fleet.go` declares `AccountID` and `Region` under wire-visible
 `json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. No EC2
 shape publishes either, and neither reaches a body. The records carry no `xml` tag. Every response is
 marshaled from a struct declared for its operation, no XML-tagged field anywhere is typed as a record,
 and no record is embedded in a response or held behind an interface. So the projection already exists
 in code, and what each record needs is a test that proves it.
 
-All fourteen records have one, across **seventy-eight** subtests in `emulator/ec2_wire_test.go`, one
+All sixteen records have one, across **eighty-four** subtests in `emulator/ec2_wire_test.go`, one
 test per record:
 
 - **Networking:** `EC2VPC`, `EC2Subnet`, `EC2SecurityGroup`, `EC2InternetGateway`, `EC2RouteTable`,
   `EC2NATGateway` and `EC2ElasticIP`.
+- **Capacity:** `EC2CapacityReservation` and `EC2Fleet`.
 - **Storage and images:** `EC2Volume`, `EC2Snapshot` and `EC2Image`.
 - **Compute:** `EC2Instance`, `EC2KeyPair`, `EC2LaunchTemplate` and `EC2PlacementGroup`.
 
 Each test walks the raw XML and fails on an element named for a bookkeeping member at any depth. As
-a result, all thirty of EC2's entries in `scripts/wire-bookkeeping-baseline.txt` stay listed as
+a result, all thirty-four of EC2's entries in `scripts/wire-bookkeeping-baseline.txt` stay listed as
 declarations rather than as leaks ([#756](https://github.com/scttfrdmn/substrate/issues/756)). Each
 describe runs where its record is richest: a security group after its rules are authorized, a gateway
 while attached, an address while associated, a volume while attached.
@@ -17686,6 +17688,12 @@ published code instead.
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::CloudFront::Distribution | DistributionId | |
+
+### The account and tag bookkeeping a distribution carries reach no response
+
+`CloudFrontDistribution` declares `AccountID` and `ever_tagged`, the flag that records a distribution was once tagged (#938), because the record is what `MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: CloudFront speaks REST-XML, and every response is marshaled from an XML struct declared for its operation.
+`TestCloudFrontWire_DistributionResponsesCarryNoBookkeepingMember` in `emulator/cloudfront_wire_test.go` tags the distribution and reads both members back first, since an unset `omitempty` member is absent for free, then drives every operation that answers the distribution and walks each response's element names
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). `TagResource` and `UntagResource` answer 204 with no body, so they have nothing to walk.
 
 ### Cost
 

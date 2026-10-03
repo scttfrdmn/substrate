@@ -244,6 +244,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **EC2's capacity reservation and fleet, and CloudFront's distribution, are recorded as projected,
+  with a test cited for each** (#756). `EC2CapacityReservation` and `EC2Fleet` declare an account and
+  a Region, and `CloudFrontDistribution` its `AccountID` and `ever_tagged`; none reaches a response,
+  each being rendered through XML structs declared per operation. Two tests join
+  `emulator/ec2_wire_test.go`, and the new `emulator/cloudfront_wire_test.go` tags first and reads
+  the flag back (#1304).
+  - Writing the CloudFront test found that `CreateInvalidation` answers an `Invalidation` without its
+    required `InvalidationBatch`. That is filed as #1360, and the test anchors on what does render.
+
+  That takes the projected inventory from **284 across 121 records to 290 across 124**, and the
+  still-reachable count from **26 to 20**.
+
 - **Lambda, SQS and Route 53 are recorded as projected, with a test cited for each** (#756).
   `LambdaFunction` and `SQSQueue` declare only `ever_tagged`, and `Route53HostedZone` only its
   `AccountID`; none reaches a response. The Lambda and SQS tests tag first and read the flag back,
