@@ -6143,6 +6143,29 @@ reproducible from a seeded rule, not from the event log. And
 ceiling, because a recorded event carries no object key unless bodies were recorded; it
 therefore warns earlier than the gate would refuse.
 
+### An unrouted sub-resource is refused, not reinterpreted
+
+Every published S3 sub-resource that substrate does not implement is named for the operation it is,
+and refused with `NotImplemented`/501. That is the code S3 publishes for functionality a server does
+not implement. It covers `?cors`, `?encryption`, `?website`, `?location`, `?logging`,
+`?ownershipControls`, `?replication`, the four id-keyed configuration families (analytics, inventory,
+metrics, intelligent-tiering), object lock, the metadata-table configurations and `CreateSession` at
+bucket level. At object level it covers `?retention`, `?legal-hold`, `?attributes`, `?torrent` and
+`?restore`. The tables are in `emulator/s3_subresources.go`.
+
+Until [#1349](https://github.com/scttfrdmn/substrate/issues/1349), the router reached each method's
+default by *absence*, so an unrouted sub-resource became a different, routed operation:
+
+- `DeleteBucketCors`, `DeleteBucketEncryption`, `DeleteBucketWebsite`, `DeleteBucketOwnershipControls`
+  and `DeleteBucketReplication` each **deleted the bucket**. That is the failure #446 and #656 fixed
+  one sub-resource at a time.
+- `PutObjectRetention` and `PutObjectLegalHold` overwrote the object with their XML body.
+- `GetBucketLocation` answered a listing.
+
+The name the router resolves is also the name the request is authorized under, so these calls were
+authorized as `s3:DeleteBucket`, `s3:PutObject` and `s3:ListBucket`. They are now authorized as
+themselves.
+
 ### The bookkeeping a bucket record carries reaches no response
 
 `S3Bucket` declares its account as `account_id` and its Region as `region`, plus `EverTagged` as
@@ -6156,8 +6179,7 @@ so neither collides.
 operations that answer the bucket record: `CreateBucket`, `HeadBucket`, `ListBuckets` and
 `DeleteBucket`, plus the three tagging operations. It tags the bucket and reads `ever_tagged` back
 first ([#756](https://github.com/scttfrdmn/substrate/issues/756), #938). `GetBucketLocation` is not
-driven because `?location` is not routed: it falls through to `ListObjects`
-([#1349](https://github.com/scttfrdmn/substrate/issues/1349)).
+driven because `?location` is not routed: it is refused, as the next section describes.
 
 ### CloudFormation resource types
 
