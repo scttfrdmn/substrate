@@ -244,6 +244,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Secrets Manager's secret record is recorded as projected, with a test cited for it** (#756).
+  `SecretState` declares `AccountID`, `Region` and `ever_tagged`, and none reaches a response.
+  `DescribeSecret` answers `smDescribeSecretBody`, which emits published members only. The new
+  `emulator/secretsmanager_wire_test.go` drives all twelve routed operations. It tags the secret and
+  reads `ever_tagged` back first (#938, #1304). That takes the projected inventory from **255 across
+  106 records to 258 across 107**, and the still-reachable count from **55 to 52**.
+
 - **S3's bucket record is recorded as projected, with a test cited for it** (#756). `S3Bucket`
   declares `account_id`, `region` and `ever_tagged`, and none reaches a response, since every bucket
   response is an XML struct declared for its operation. The new `emulator/s3_wire_test.go` drives the
