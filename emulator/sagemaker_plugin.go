@@ -160,7 +160,7 @@ func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 		apps = append(apps, app)
 	}
-	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{"Apps": apps})
+	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{"Apps": sagemakerAppsToDetails(apps)})
 }
 
 func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -249,7 +249,7 @@ func (p *SageMakerPlugin) describeApp(ctx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(data, &app); err != nil {
 		return nil, fmt.Errorf("describeApp: unmarshal: %w", err)
 	}
-	return sagemakerJSONResponse(http.StatusOK, app)
+	return sagemakerJSONResponse(http.StatusOK, sagemakerAppToWire(app))
 }
 
 func (p *SageMakerPlugin) createPresignedDomainURL() (*AWSResponse, error) {
@@ -315,7 +315,7 @@ func (p *SageMakerPlugin) describeTrainingJob(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("describeTrainingJob: unmarshal: %w", err)
 	}
 	p.applySeededTrainingJobStatus(goCtx, job.TrainingJobName, &job)
-	return sagemakerJSONResponse(http.StatusOK, job)
+	return sagemakerJSONResponse(http.StatusOK, sagemakerTrainingJobToWire(job))
 }
 
 // applySeededTrainingJobStatus overrides a training job's terminal status and

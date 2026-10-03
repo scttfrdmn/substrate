@@ -19994,9 +19994,20 @@ identity implies.
 it, and at 400, which is the status its pages publish. SageMaker's `ResourceInUse`,
 `ResourceLimitExceeded` and `ConflictException` are published and have no site.
 
-`DescribeApp` and `DescribeTrainingJob` marshal the persisted record whole, so both carry `AccountID`
-and `Region` — Substrate's own bookkeeping, on neither published shape
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+### The account and Region a record carries reach no response
+
+`SageMakerApp` and `SageMakerTrainingJob` declare `AccountID` and `Region` under wire-visible `json`
+tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), three sites answered the records whole:
+
+- `DescribeApp` and `DescribeTrainingJob` answered the record as the whole body.
+- `ListApps` answered every element as a record. That also carried `AppArn`, which `API_AppDetails`,
+  the element's shape, does not publish. `DescribeApp` does publish it.
+
+They now answer `sagemakerAppOut`, `sagemakerAppDetailsOut` and `sagemakerTrainingJobOut`
+(`emulator/sagemaker_wire.go`), and the stored records are unchanged. All ten routed operations are
+driven by `TestSageMakerWire_AppResponsesCarryNoBookkeepingMember` and its training-job sibling in
+`emulator/sagemaker_wire_test.go`.
 
 ### CloudFormation resource types
 
