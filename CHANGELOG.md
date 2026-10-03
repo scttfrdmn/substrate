@@ -553,6 +553,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CodePipeline answers its dates as epoch seconds, and GetPipelineExecution no longer answers the
+  stored record whole** (#1338, #756). `created` and `updated` rendered as RFC3339 strings in
+  `CreatePipeline`'s and `GetPipeline`'s `metadata`, in `ListPipelines`' summaries and in
+  `GetPipelineState`. `awsJson1_1` publishes them as numbers, so a typed SDK could not decode any
+  pipeline response. They are now `EpochSeconds`.
+  - `GetPipelineExecution` answered the persisted execution. That carried `accountID` and `region`,
+    plus a `startTime` that `API_PipelineExecution` does not publish, since the shape has no date
+    member at all. It now answers `codepipelineExecutionOut` from the new
+    `emulator/codepipeline_wire.go`. Stored records are unchanged.
+  - The new `emulator/codepipeline_wire_test.go` drives all eight routed operations, pins both dates
+    on a frozen clock, and is cited in `scripts/wire-bookkeeping-projected.txt`. That takes the
+    inventory from **227 projected across 92 records to 231 across 94**, and the still-reachable count
+    from **83 to 79**.
+  - This completes #1338: Kinesis's member shipped in #1339 and CodeBuild's four in #1340.
+
 - **CodeBuild no longer answers its stored records whole, and its dates are epoch seconds** (#756,
   #1338). `CreateProject`, `UpdateProject`, `BatchGetProjects`, `StartBuild` and `BatchGetBuilds`
   handed the persisted `CodeBuildProject` or `CodeBuildBuild` to the caller. Every project and build
