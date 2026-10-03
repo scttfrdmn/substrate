@@ -14887,6 +14887,19 @@ once was (#938). AWS says you may not *tag* such a key, but a listing is a read 
 the key exists until its waiting period elapses; refusing the write is a separate
 unmodelled behaviour recorded on #922.
 
+### The account and Region a record carries reach no response
+
+`KMSKey` declares `AccountID` and `Region` under wire-visible `json` tags, plus `EverTagged` as
+`ever_tagged,omitempty`, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. None of them reaches a body. `CreateKey` and `DescribeKey` answer `KeyMetadata`, which is built
+member by member (`emulator/kms_key_metadata.go`). Its published `AWSAccountId` is fed from the
+record's account, which is the service's own data rather than a leak. Every other operation answers a
+map of published members.
+
+All twenty-four routed operations are driven by `TestKMSWire_KeyResponsesCarryNoBookkeepingMember` in
+`emulator/kms_wire_test.go` ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The key is
+tagged first and `ever_tagged` is read back, since only a tag write sets it (#938).
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

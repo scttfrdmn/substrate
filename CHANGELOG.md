@@ -244,6 +244,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **KMS's key record is recorded as projected, with a test cited for it** (#756). `KMSKey` declares
+  `AccountID`, `Region` and `ever_tagged`, and none reaches a response. `KeyMetadata` is built member
+  by member, and its published `AWSAccountId` is the service's own data. The new
+  `emulator/kms_wire_test.go` drives all twenty-four routed operations. It tags the key and reads
+  `ever_tagged` back first (#938, #1304). That takes the projected inventory from **246 across 103
+  records to 249 across 104**, and the still-reachable count from **64 to 61**.
+
 - **IAM's three records are recorded as projected, with a test cited for each** (#756). `IAMRole` and
   `IAMUser` declare `ever_tagged`, and `IAMAccessKey` declares `AccountId`. All three are
   `,omitempty`, and none reaches a response: every IAM response is marshaled from an XML struct
