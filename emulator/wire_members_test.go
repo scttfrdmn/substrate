@@ -7,11 +7,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // The member walks the raw-bytes assertions in scripts/wire-bookkeeping-projected.txt are made with
@@ -99,5 +103,109 @@ func wireAssertNoMemberXML(t *testing.T, site string, body []byte, members []str
 				path = path[:len(path)-1]
 			}
 		}
+	}
+}
+
+// wireSetup initializes p over a fresh state store with a clock seeded at a fixed instant, and returns
+// a request context and the store. The store is handed back because a record is the only place its
+// bookkeeping members can be read from.
+func wireSetup(t *testing.T, p emulator.Plugin, requestID string) (*emulator.RequestContext, emulator.StateManager) {
+	t.Helper()
+	state := emulator.NewMemoryStateManager()
+	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{
+		State:   state,
+		Logger:  emulator.NewDefaultLogger(slog.LevelError, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Unix(1700000000, 0).UTC())},
+	}), "Initialize")
+	return &emulator.RequestContext{
+		AccountID: "123456789012",
+		Region:    "us-east-1",
+		RequestID: requestID,
+		IDs:       emulator.NewIDMint(requestID),
+	}, state
+}
+
+// wireJSONTarget issues one awsJson operation through its X-Amz-Target and returns the raw body,
+// failing on anything but a 2xx.
+func wireJSONTarget(t *testing.T, p emulator.Plugin, ctx *emulator.RequestContext, service, target, op string, body map[string]any) []byte {
+	t.Helper()
+	if body == nil {
+		body = map[string]any{}
+	}
+	raw, err := json.Marshal(body)
+	require.NoError(t, err, "marshal %s", op)
+	resp, err := p.HandleRequest(ctx, &emulator.AWSRequest{
+		Service:   service,
+		Operation: op,
+		Path:      "/",
+		Body:      raw,
+		Headers:   map[string]string{"X-Amz-Target": target + "." + op, "Content-Type": "application/x-amz-json-1.1"},
+		Params:    map[string]string{},
+	})
+	require.NoError(t, err, "%s", op)
+	require.Truef(t, resp.StatusCode >= 200 && resp.StatusCode < 300, "%s answered %d: %s", op, resp.StatusCode, resp.Body)
+	return resp.Body
+}
+
+// wireREST issues one REST request and returns the raw body, failing on anything but a 2xx.
+func wireREST(t *testing.T, p emulator.Plugin, ctx *emulator.RequestContext, service, method, path string, body map[string]any) []byte {
+	t.Helper()
+	var raw []byte
+	if body != nil {
+		var err error
+		raw, err = json.Marshal(body)
+		require.NoError(t, err, "marshal %s %s", method, path)
+	}
+	resp, err := p.HandleRequest(ctx, &emulator.AWSRequest{
+		Service:    service,
+		HTTPMethod: method,
+		Path:       path,
+		Body:       raw,
+		Headers:    map[string]string{"Content-Type": "application/json"},
+		Params:     map[string]string{},
+	})
+	require.NoError(t, err, "%s %s", method, path)
+	require.Truef(t, resp.StatusCode >= 200 && resp.StatusCode < 300, "%s %s answered %d: %s", method, path, resp.StatusCode, resp.Body)
+	return resp.Body
+}
+
+// wireRequireHeld requires that the record at key in namespace carries each named member with a
+// non-empty value — the presence anchor without which an absence assertion would pass without testing
+// anything.
+func wireRequireHeld(t *testing.T, state emulator.StateManager, namespace, key string, members ...string) map[string]json.RawMessage {
+	t.Helper()
+	data, err := state.Get(t.Context(), namespace, key)
+	require.NoError(t, err, "state.Get %s", key)
+	require.NotNil(t, data, "no record stored at %s/%s", namespace, key)
+	var record map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &record), "decode %s: %s", key, data)
+	for _, member := range members {
+		require.NotEmptyf(t, record[member], "%s must persist %s before an absence assertion on it means anything", key, member)
+		require.NotEqualf(t, `""`, string(record[member]), "%s persists an empty %s", key, member)
+	}
+	return record
+}
+
+// wireCase is one operation driven by wireRunJSON. A non-nil call issues it; a nil call reuses held.
+type wireCase struct {
+	op     string
+	call   func() []byte
+	held   []byte
+	anchor string
+}
+
+// wireRunJSON drives each case as a subtest: the presence anchor first, then the walk.
+func wireRunJSON(t *testing.T, members []string, cases []wireCase) {
+	t.Helper()
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			body := tc.held
+			if tc.call != nil {
+				body = tc.call()
+			}
+			require.Containsf(t, string(body), tc.anchor,
+				"presence anchor: %s has to render %s for an absence to mean anything", tc.op, tc.anchor)
+			wireAssertNoMemberJSON(t, tc.op, body, members)
+		})
 	}
 }

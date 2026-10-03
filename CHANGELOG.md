@@ -244,6 +244,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Athena, Redshift Data, Scheduler and FSx are recorded as projected, with a test cited for each**
+  (#756). `AthenaQuery`, `RedshiftDataStatement`, `SchedulerRecord` and `FSxFileSystem` each declare an
+  account and a Region, and neither reaches a response: each is rendered through maps or an existing
+  projection (`schedRecordToWire`, `fsxToWire`). Four new tests walk every routed operation.
+  - The Redshift Data test also pins `CreatedAt`/`UpdatedAt` as numbers. They already render that
+    way, so #1305's Redshift Data row describes behavior that no longer exists.
+  - Shared request and read-back helpers join `emulator/wire_members_test.go`.
+
+  That takes the projected inventory from **273 across 114 records to 281 across 118**, and the
+  still-reachable count from **37 to 29**.
+
 - **SSM's parameter record is recorded as projected, with a test cited for it** (#756).
   `SSMParameter` declares `AccountID`, `Region` and `ever_tagged`, and none reaches a response: the
   reads answer items built member by member. The new `emulator/ssm_wire_test.go` drives every
