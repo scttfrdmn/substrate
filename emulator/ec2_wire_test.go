@@ -22,22 +22,23 @@ import (
 
 // The raw-bytes assertions scripts/wire-bookkeeping-projected.txt cites for EC2's records (#756).
 //
-// Every EC2 record in emulator/ec2_types.go declares AccountID and Region under wire-visible `json`
-// tags, because the record is what MemoryStateManager snapshots and a replay reads back. None of
-// them carries an `xml` tag, and none reaches a body: each of the plugin's ec2XMLResponse sites is
-// handed a response struct declared for that operation, no XML-tagged field anywhere is typed as a
-// record, and no record is embedded in a response or held behind an interface. So the projection
-// already exists in code, as it did for Redshift, and what was missing was this file, the citation
-// the projected inventory requires before it will accept a record.
+// Every EC2 record in emulator/ec2_types.go, ec2_capacity_reservations.go and ec2_fleet.go declares
+// AccountID and Region under wire-visible `json` tags, because the record is what
+// MemoryStateManager snapshots and a replay reads back. None of them carries an `xml` tag, and none
+// reaches a body: each of the plugin's ec2XMLResponse sites is handed a response struct declared
+// for that operation, no XML-tagged field anywhere is typed as a record, and no record is embedded
+// in a response or held behind an interface. So the projection already exists in code, as it did
+// for Redshift, and what was missing was this file, the citation the projected inventory requires
+// before it will accept a record.
 //
 // # Why the member list is longer than the other services'
 //
-// The account member is spelled three ways across the records: `account_id` on most, `accountId`
-// on EC2KeyPair and `accountID` on EC2LaunchTemplate. A case fold reconciles the last two with the
-// Go name but not the snake_case one, so that spelling is listed in its own right, and so is
-// `ever_tagged`. The Go names are listed because they are what encoding/xml would emit for a record
-// handed to it whole, the records declaring no `xml` tag; the `json` names are what a member copied
-// out of the stored document would be called.
+// The account member is spelled three ways across the records: `account_id` on most, `accountId` on
+// EC2KeyPair, EC2CapacityReservation and EC2Fleet and `accountID` on EC2LaunchTemplate. A case fold
+// reconciles the last two with the Go name but not the snake_case one, so that spelling is listed
+// in its own right, and so is `ever_tagged`. The Go names are listed because they are what
+// encoding/xml would emit for a record handed to it whole, the records declaring no `xml` tag; the
+// `json` names are what a member copied out of the stored document would be called.
 //
 // # Why this asserts absence rather than exact membership
 //
@@ -673,5 +674,53 @@ func TestEC2Wire_PlacementGroupResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "DescribePlacementGroups", params: map[string]string{"GroupName.1": "wire-pg"},
 			anchor: "<groupName>wire-pg</groupName>"},
 		{action: "DeletePlacementGroup", params: map[string]string{"GroupName": "wire-pg"}, anchor: ec2WireReturn},
+	})
+}
+
+func TestEC2Wire_CapacityReservationResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	created := ec2Wire(t, p, ctx, "CreateCapacityReservation", map[string]string{
+		"InstanceType": "m5.large", "InstancePlatform": "Linux/UNIX", "InstanceCount": "1",
+		"AvailabilityZone": ec2WireRegion + "a",
+	})
+	id := ec2WireElement(t, "CreateCapacityReservation", created, "capacityReservationId")
+	ec2WireRequireScoped(t, state, ec2WireKey("cr", id), "accountId")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateCapacityReservation", held: created, anchor: "<capacityReservationId>" + id + "</capacityReservationId>"},
+		{action: "DescribeCapacityReservations", params: map[string]string{"CapacityReservationId.1": id},
+			anchor: "<capacityReservationId>" + id + "</capacityReservationId>"},
+		// Last: it cancels the reservation every case above reads as active.
+		{action: "CancelCapacityReservation", params: map[string]string{"CapacityReservationId": id}, anchor: ec2WireReturn},
+	})
+}
+
+func TestEC2Wire_FleetResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	lt := ec2Wire(t, p, ctx, "CreateLaunchTemplate", map[string]string{
+		"LaunchTemplateName": "wire-fleet", "LaunchTemplateData.ImageId": emulator.BundledImageID(ec2WireRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"),
+		"LaunchTemplateData.InstanceType": "t3.micro",
+	})
+	ltID := ec2WireElement(t, "CreateLaunchTemplate", lt, "launchTemplateId")
+
+	created := ec2Wire(t, p, ctx, "CreateFleet", map[string]string{
+		"Type": "maintain",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.Version":          "1",
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+		"TargetCapacitySpecification.DefaultTargetCapacityType":                "on-demand",
+	})
+	id := ec2WireElement(t, "CreateFleet", created, "fleetId")
+	ec2WireRequireScoped(t, state, ec2WireKey("fleet", id), "accountId")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "CreateFleet", held: created, anchor: "<fleetId>" + id + "</fleetId>"},
+		{action: "DescribeFleets", params: map[string]string{"FleetId.1": id}, anchor: "<fleetId>" + id + "</fleetId>"},
+		// Last: it moves the record to deleted.
+		{action: "DeleteFleets", params: map[string]string{"FleetId.1": id, "TerminateInstances": "true"}, anchor: id},
 	})
 }
