@@ -613,19 +613,23 @@ func (p *KinesisPlugin) getRecords(_ *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	nextIterB64 := base64.StdEncoding.EncodeToString(nextIterJSON)
 
-	// Build response records (without ShardId field per API spec).
+	// Build response records (without ShardId field per API spec). ApproximateArrivalTimestamp is
+	// EpochSeconds because Kinesis speaks awsJson1_1, where API_GetRecords publishes it as a number
+	// with millisecond precision — its own sample is 1.441215410867E9 — and a time.Time renders the
+	// RFC3339 string a typed SDK refuses to decode (#1338). The stored record keeps its time.Time,
+	// so a recorded run replays identically.
 	type respRecord struct {
-		SequenceNumber              string    `json:"SequenceNumber"`
-		ApproximateArrivalTimestamp time.Time `json:"ApproximateArrivalTimestamp"`
-		Data                        string    `json:"Data"`
-		PartitionKey                string    `json:"PartitionKey"`
-		EncryptionType              string    `json:"EncryptionType"`
+		SequenceNumber              string       `json:"SequenceNumber"`
+		ApproximateArrivalTimestamp EpochSeconds `json:"ApproximateArrivalTimestamp"`
+		Data                        string       `json:"Data"`
+		PartitionKey                string       `json:"PartitionKey"`
+		EncryptionType              string       `json:"EncryptionType"`
 	}
 	respRecords := make([]respRecord, 0, len(filtered))
 	for _, r := range filtered {
 		respRecords = append(respRecords, respRecord{
 			SequenceNumber:              r.SequenceNumber,
-			ApproximateArrivalTimestamp: r.ApproximateArrivalTimestamp,
+			ApproximateArrivalTimestamp: EpochSeconds(r.ApproximateArrivalTimestamp),
 			Data:                        r.Data,
 			PartitionKey:                r.PartitionKey,
 			EncryptionType:              "NONE",

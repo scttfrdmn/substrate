@@ -244,6 +244,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Kinesis's stream record is recorded as projected, with a test cited for it** (#756).
+  `KinesisStream` declares `AccountID`, `Region`, `CreatedAt` and `EverTagged`, and none reaches a
+  response: both describes answer maps built member by member. The new
+  `emulator/kinesis_wire_test.go` drives all seventeen routed operations. It tags the stream and reads
+  `ever_tagged` back before walking any response (#938, #1304). That takes the projected inventory
+  from **219 across 89 records to 223 across 90**, and the still-reachable count from **91 to 87**.
+
 - **`check-wire-bookkeeping` discharges records that no AWS response renders, through a third
   inventory** (#756). Some records declare a bookkeeping field but never reach an AWS response at
   all, so no raw-bytes test can say anything about them. A test that an unrelated response omits
@@ -545,6 +552,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   back into the resource record.
 
 ### Fixed
+
+- **Kinesis GetRecords answers `ApproximateArrivalTimestamp` as epoch seconds** (#1338). The response
+  record struct declared the member as `time.Time`, so it rendered an RFC3339 string where
+  `API_GetRecords` publishes a number with millisecond precision. A typed SDK could not decode the
+  response. It is now `EpochSeconds`, and the stored record is unchanged.
 
 - **SESv2 reads and answers `Tags` as the published array, so a tagged CreateEmailIdentity is no
   longer refused** (#1335). `CreateEmailIdentity` decoded `Tags` into a map. Every SDK sends the
