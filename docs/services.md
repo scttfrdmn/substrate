@@ -15525,6 +15525,21 @@ substrate answers it at **403**, from the central authorization check every serv
 it for one service would have the emulator answer two statuses for one decision, so it is recorded
 here rather than changed.
 
+### DescribeCertificate answers the published shape, with dates as epoch seconds
+
+`ACMCertificate` declares `AccountID` and `Region` under wire-visible `json` tags, plus `EverTagged` as
+`ever_tagged,omitempty`, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. Until [#756](https://github.com/scttfrdmn/substrate/issues/756), `DescribeCertificate` answered
+the record whole. That put all three members on the wire, plus `Tags`, which `CertificateDetail` does
+not publish: a certificate's tags are read through `ListTagsForCertificate`.
+
+The same response rendered `CreatedAt`, `IssuedAt`, `NotAfter` and `NotBefore` as RFC3339 strings.
+ACM speaks `awsJson1_1`, where `CertificateDetail`'s `Timestamp` members are numbers, so a typed SDK
+could not decode it ([#1305](https://github.com/scttfrdmn/substrate/issues/1305)). The response now
+answers `acmCertificateOut` (`emulator/acm_wire.go`), with the four dates as epoch seconds. The stored
+record is unchanged. `TestACMWire_CertificateResponsesCarryNoBookkeepingMember` drives all eight
+routed operations, tagging the certificate first, and pins the dates on a frozen clock.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

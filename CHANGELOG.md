@@ -602,6 +602,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ACM's DescribeCertificate answers the published shape, with its dates as epoch seconds** (#756,
+  #1305). It handed the persisted `ACMCertificate` to the caller, so a consumer read `AccountID`,
+  `Region` and `ever_tagged`, plus `Tags`, which `API_CertificateDetail` does not publish. It also
+  rendered `CreatedAt`, `IssuedAt`, `NotAfter` and `NotBefore` as RFC3339 strings where `awsJson1_1`
+  publishes numbers, so a typed SDK could not decode it. It now answers `acmCertificateOut` from the
+  new `emulator/acm_wire.go`. The stored record is unchanged.
+  - Two tests pinned the RFC3339 form. `emulator/acm_plugin_test.go` decoded the response into the
+    stored record type, whose `time.Time` dates accepted the strings; it now decodes the published
+    members. `TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock` expected a
+    quoted RFC3339 `CreatedAt`; it now expects epoch seconds, like its ECR and ECS cases.
+  - The new `emulator/acm_wire_test.go` drives all eight routed operations and is cited in
+    `scripts/wire-bookkeeping-projected.txt`. That takes the inventory from **261 projected across 108
+    records to 264 across 109**, and the still-reachable count from **49 to 46**.
+  - The projection's published `CreatedAt` joins the check's exclusion list beside the record's, the
+    `ecs_wire.go` case again.
+
 - **S3 no longer deletes a bucket for an unrouted sub-resource, or overwrites an object for one**
   (#1349). The bucket and object routers reached each method's default by absence: any published
   sub-resource missing from their lists became `DeleteBucket`, `CreateBucket`, `ListObjects`,
