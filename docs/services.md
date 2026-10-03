@@ -20577,7 +20577,7 @@ count the moment it is asked about.
 | Operation | Notes |
 |-----------|-------|
 | CreateDataSource | `POST /accounts/{AwsAccountId}/data-sources`. Answers HTTP 201 with the four published members and `CreationStatus: CREATION_SUCCESSFUL`, so `CREATION_IN_PROGRESS` is never observable. `Name` and `Type` are `Required: Yes` and unchecked, so a data source can have neither |
-| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Returns the stored record whole, so `AccountID` and `Region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
+| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Answers five of `API_DataSource`'s members and none it does not publish, and adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
 | CreateDataSet | `POST /accounts/{AwsAccountId}/data-sets`. Answers HTTP 201 with `DataSetId`, `Arn`, `IngestionId` and `RequestId`; `PhysicalTableMap`, `ImportMode` and the rest of the definition are not read |
 | DescribeIngestion | `GET /accounts/{AwsAccountId}/data-sets/{DataSetId}/ingestions/{IngestionId}`. [Reports any ingestion ID as `COMPLETED`](#any-ingestion-id-is-reported-completed) |
 
@@ -20628,6 +20628,19 @@ required"* also serves an unparseable body, which is a different failure
 `AccessDeniedException`/**401**, `ConflictException`/409, `LimitExceededException`/409,
 `ResourceExistsException`/409 and `ThrottlingException`/429 are published and have no site, so
 creating the same data source twice succeeds. QuickSight publishes no `ValidationException` anywhere.
+
+### The account and Region a record carries reach no response
+
+`QuickSightDataSource` and `QuickSightDataSet` declare `AccountID` and `Region` under wire-visible
+`json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), `DescribeDataSource` answered the data
+source whole, so both members reached the wire, and `API_DataSource` publishes neither. It now answers
+`quicksightDataSourceOut` (`emulator/quicksight_wire.go`), and the stored record is unchanged.
+
+The data set has never been rendered. `CreateDataSet` answers a map of published members, and
+`DescribeIngestion` reads the record only to confirm the dataset exists. All four routed operations
+are driven by `TestQuickSightWire_DataSourceResponsesCarryNoBookkeepingMember` and its data-set
+sibling in `emulator/quicksight_wire_test.go`.
 
 ### CloudFormation resource types
 

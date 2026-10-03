@@ -213,7 +213,7 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 		return nil, fmt.Errorf("describeDataSource: unmarshal: %w", err)
 	}
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
-		"DataSource": ds,
+		"DataSource": quicksightDataSourceToWire(ds),
 		"RequestId":  generateQuickSightRequestID(ctx.IDs),
 		"Status":     http.StatusOK,
 	})
