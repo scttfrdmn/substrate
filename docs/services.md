@@ -15348,6 +15348,13 @@ and `/schedules/` reaches `GetSchedule`, `CreateSchedule`, `UpdateSchedule` or `
 own verb and is refused there naming `'name'`. See *A request body that will not parse* above for the
 whole-tree inventory of that fold.
 
+### The account and Region a record carries reach no response
+
+`SchedulerRecord` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `GetSchedule` answers `schedRecordToWire`, and the rest answer an ARN or a summary list.
+`TestSchedulerWire_ScheduleResponsesCarryNoBookkeepingMember` in `emulator/scheduler_wire_test.go` drives all five routed operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The record spells the account `account_id`, which a case fold does not reach, so the walk names that spelling too.
+
 ### Cost
 
 Not modelled.
@@ -19651,6 +19658,13 @@ and what the refusal takes as its own reading are set out under
 above. Neither operation enforces the published `MaxResults` range, which is a separate defect: a value
 above the maximum of 50 is honored and one at or below zero is silently rewritten to 50.
 
+### The account and Region a record carries reach no response
+
+`AthenaQuery` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: every response is a map built member by member.
+`TestAthenaWire_QueryResponsesCarryNoBookkeepingMember` in `emulator/athena_wire_test.go` drives all nine routed operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
@@ -20069,6 +20083,13 @@ Both codes and both statuses are what `API_DescribeStatement` publishes.
 `BatchExecuteStatementException`, `ExecuteStatementException`, `DatabaseConnectionException` and
 `InternalServerException` are published and have no site: Substrate holds no connection, enforces no
 concurrency ceiling, and has no internal failure to report.
+
+### The account and Region a record carries reach no response
+
+`RedshiftDataStatement` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `DescribeStatement` answers a map built member by member.
+`TestRedshiftDataWire_StatementResponsesCarryNoBookkeepingMember` in `emulator/redshiftdata_wire_test.go` drives all three routed operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The same test pins `CreatedAt` and `UpdatedAt` as the numbers `API_DescribeStatement` publishes.
 
 ### CloudFormation resource types
 
@@ -21530,6 +21551,13 @@ Published and with no site: `ActiveDirectoryError`/400, `IncompatibleParameterEr
 `ServiceLimitExceeded`/400 on `DeleteFileSystem`; and `InternalServerError`/500 on all three. No
 client token is tracked, no network setting is validated, no configuration block is required and no
 file-system quota is enforced, so none of these conditions can arise.
+
+### The account and Region a record carries reach no response
+
+`FSxFileSystem` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: every file-system response goes through `fsxToWire`.
+`TestFSxWire_FileSystemResponsesCarryNoBookkeepingMember` in `emulator/fsx_wire_test.go` drives all three routed operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The record spells the account `account_id`, which a case fold does not reach, so the walk names that spelling too.
 
 ### CloudFormation resource types
 
