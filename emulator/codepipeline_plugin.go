@@ -116,8 +116,8 @@ func (p *CodePipelinePlugin) createPipeline(reqCtx *RequestContext, req *AWSRequ
 		},
 		"metadata": map[string]interface{}{
 			"pipelineArn": fmt.Sprintf("arn:aws:codepipeline:%s:%s:%s", reqCtx.Region, reqCtx.AccountID, pipeline.Name),
-			"created":     pipeline.Created,
-			"updated":     pipeline.Updated,
+			"created":     EpochSeconds(pipeline.Created),
+			"updated":     EpochSeconds(pipeline.Updated),
 		},
 	})
 }
@@ -147,8 +147,8 @@ func (p *CodePipelinePlugin) getPipeline(reqCtx *RequestContext, req *AWSRequest
 		},
 		"metadata": map[string]interface{}{
 			"pipelineArn": fmt.Sprintf("arn:aws:codepipeline:%s:%s:%s", reqCtx.Region, reqCtx.AccountID, pipeline.Name),
-			"created":     pipeline.Created,
-			"updated":     pipeline.Updated,
+			"created":     EpochSeconds(pipeline.Created),
+			"updated":     EpochSeconds(pipeline.Updated),
 		},
 	})
 }
@@ -242,8 +242,8 @@ func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, _ *AWSRequest
 		summaries = append(summaries, map[string]interface{}{
 			"name":    pl.Name,
 			"version": pl.Version,
-			"created": pl.Created,
-			"updated": pl.Updated,
+			"created": EpochSeconds(pl.Created),
+			"updated": EpochSeconds(pl.Updated),
 		})
 	}
 
@@ -329,8 +329,8 @@ func (p *CodePipelinePlugin) getPipelineState(reqCtx *RequestContext, req *AWSRe
 		"pipelineName":    pipeline.Name,
 		"pipelineVersion": pipeline.Version,
 		"stageStates":     stageStates,
-		"created":         pipeline.Created,
-		"updated":         pipeline.Updated,
+		"created":         EpochSeconds(pipeline.Created),
+		"updated":         EpochSeconds(pipeline.Updated),
 	})
 }
 
@@ -361,7 +361,7 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 	}
 
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
-		"pipelineExecution": exec,
+		"pipelineExecution": codepipelineExecutionToWire(exec),
 	})
 }
 

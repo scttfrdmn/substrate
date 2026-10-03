@@ -19765,9 +19765,29 @@ part of the contract: *"…or an execution ID does not belong to the specified p
 pipeline updated three times answers version 4 at HTTP 200 rather than the published
 `PipelineVersionNotFoundException`. [#1160](https://github.com/scttfrdmn/substrate/issues/1160).
 
-`GetPipelineExecution`'s response is the persisted record marshalled whole, so it carries `accountID`
-and `region`, which are Substrate's own bookkeeping and appear on no published shape
-([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+### The account and Region a record carries reach no response
+
+`CodePipelineState` and `CodePipelineExecution` declare `accountID` and `region` under wire-visible
+`json` tags, because the record is what `MemoryStateManager` snapshots and a replay reads back.
+
+- **The pipeline's responses** have always been built member by member, so neither member reached
+  them.
+- **`GetPipelineExecution`** answered the execution record whole until
+  [#756](https://github.com/scttfrdmn/substrate/issues/756). That put both members on the wire, plus
+  `startTime`. `API_PipelineExecution` publishes no date member at all, so `startTime` is dropped
+  rather than converted. The response now answers `codepipelineExecutionOut`
+  (`emulator/codepipeline_wire.go`).
+
+All eight routed operations are driven by
+`TestCodePipelineWire_PipelineResponsesCarryNoBookkeepingMember` and its sibling in
+`emulator/codepipeline_wire_test.go`.
+
+`created` and `updated` rendered as RFC3339 strings everywhere they appear: `CreatePipeline`'s and
+`GetPipeline`'s `metadata`, `ListPipelines`' summaries, and `GetPipelineState`. CodePipeline speaks
+`awsJson1_1`, where `API_GetPipeline` publishes both as numbers and its own sample is
+`"created": 1501626591.112`. A typed SDK therefore could not decode a pipeline response
+([#1338](https://github.com/scttfrdmn/substrate/issues/1338)). They are now epoch seconds, and the
+stored record keeps its `time.Time`.
 
 ### GetPipelineState reports a shape no execution produced
 
