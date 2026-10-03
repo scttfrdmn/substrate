@@ -16999,7 +16999,7 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 | PutRecord | |
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
-| GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName` |
+| GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName`. `ApproximateArrivalTimestamp` is epoch seconds to the millisecond, as the page publishes (#1338) |
 | EnableEnhancedMonitoring | `ShardLevelMetrics` is checked against its published 1–7 range and enum; `ALL` is expanded — see [Shard-level metrics, and the ALL wildcard](#shard-level-metrics-and-the-all-wildcard) |
 | DisableEnhancedMonitoring | Same shape and the same checks as its sibling |
 | AddTagsToStream | `Tags` is a JSON object of key/value pairs, not a list |
@@ -17319,6 +17319,31 @@ states share one mechanism rather than inventing a second. Capacity mode is unmo
 which is why `ValidationException` has no site at all today;
 [#1118](https://github.com/scttfrdmn/substrate/issues/1118) carries it, together with the
 `StreamModeDetails` member both describe shapes publish `Required: No`.
+
+### The account and Region a record carries reach no response
+
+`KinesisStream` declares `AccountID`, `Region` and `CreatedAt` under wire-visible `json` tags, plus
+`EverTagged` as `ever_tagged`, because the record is what `MemoryStateManager` snapshots and a replay
+reads back. None of them reaches a body:
+
+- `DescribeStream` and `DescribeStreamSummary` answer `buildStreamDescription` and
+  `buildStreamDescriptionSummary` (`emulator/kinesis_stream_shapes.go`). Both build their maps member
+  by member.
+- Every other operation answers a map or a list of names.
+- `CreatedAt` reaches the wire only as the published `StreamCreationTimestamp`.
+
+All seventeen routed operations are driven by
+`TestKinesisWire_StreamResponsesCarryNoBookkeepingMember` and its shard-topology sibling in
+`emulator/kinesis_wire_test.go`. Each walks the decoded document and fails on a bookkeeping member at
+any depth. `ever_tagged` carries `,omitempty` and is set only by a tag write (#938). So the test
+calls `AddTagsToStream` and reads the flag back from the record before walking any response, which
+keeps the absence from passing for free (#1304).
+
+`GetRecords` used to render each record's `ApproximateArrivalTimestamp` as an RFC3339 string.
+`API_GetRecords` publishes it as a number, and its own sample is `1.441215410867E9`, so a typed SDK
+could not decode the response
+([#1338](https://github.com/scttfrdmn/substrate/issues/1338)). It is now epoch seconds to the
+millisecond. The stored record keeps its `time.Time`, so a recorded run replays identically.
 
 ### CloudFormation resource types
 
