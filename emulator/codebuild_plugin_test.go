@@ -75,7 +75,7 @@ func TestCodeBuildPlugin_CreateBatchGetDeleteProject(t *testing.T) {
 	}
 
 	var createResult struct {
-		Project emulator.CodeBuildProject `json:"project"`
+		Project codebuildPublishedProject `json:"project"`
 	}
 	if err := json.Unmarshal(resp.Body, &createResult); err != nil {
 		t.Fatalf("unmarshal create: %v", err)
@@ -107,7 +107,7 @@ func TestCodeBuildPlugin_CreateBatchGetDeleteProject(t *testing.T) {
 		t.Fatalf("BatchGetProjects: %v", err)
 	}
 	var batchResult struct {
-		Projects         []emulator.CodeBuildProject `json:"projects"`
+		Projects         []codebuildPublishedProject `json:"projects"`
 		ProjectsNotFound []string                    `json:"projectsNotFound"`
 	}
 	if err := json.Unmarshal(resp.Body, &batchResult); err != nil {
@@ -165,7 +165,7 @@ func TestCodeBuildPlugin_UpdateProject(t *testing.T) {
 	}
 
 	var result struct {
-		Project emulator.CodeBuildProject `json:"project"`
+		Project codebuildPublishedProject `json:"project"`
 	}
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal: %v", err)
@@ -220,7 +220,7 @@ func TestCodeBuildPlugin_StartBuildBatchGetBuilds(t *testing.T) {
 	}
 
 	var buildResult struct {
-		Build emulator.CodeBuildBuild `json:"build"`
+		Build codebuildPublishedBuild `json:"build"`
 	}
 	if err := json.Unmarshal(resp.Body, &buildResult); err != nil {
 		t.Fatalf("unmarshal build: %v", err)
@@ -243,7 +243,7 @@ func TestCodeBuildPlugin_StartBuildBatchGetBuilds(t *testing.T) {
 		t.Fatalf("BatchGetBuilds: %v", err)
 	}
 	var batchResult struct {
-		Builds         []emulator.CodeBuildBuild `json:"builds"`
+		Builds         []codebuildPublishedBuild `json:"builds"`
 		BuildsNotFound []string                  `json:"buildsNotFound"`
 	}
 	if err := json.Unmarshal(resp.Body, &batchResult); err != nil {
@@ -291,4 +291,28 @@ func TestCodeBuildPlugin_UnsupportedOperation(t *testing.T) {
 	if !strings.Contains(awsErr.Message, "ListBuildsForProject") {
 		t.Errorf("message %q does not name the operation", awsErr.Message)
 	}
+}
+
+// codebuildPublishedProject and codebuildPublishedBuild decode the members of API_Project and API_Build
+// these tests read, typed as the API publishes them.
+//
+// They used to decode into emulator.CodeBuildProject and emulator.CodeBuildBuild, the stored records.
+// That step cannot see a member the record carries and the shape does not (#756), and it hid a decode
+// failure too: the records type their dates as time.Time, so these tests read the RFC3339 strings
+// that CodeBuild answered where awsJson1_1 publishes epoch seconds, and a typed SDK could not decode
+// at all (#1338). Here the dates are numbers, which is what a consumer's SDK reads.
+type codebuildPublishedProject struct {
+	Name         string  `json:"name"`
+	ARN          string  `json:"arn"`
+	Description  string  `json:"description"`
+	Created      float64 `json:"created"`
+	LastModified float64 `json:"lastModified"`
+}
+
+type codebuildPublishedBuild struct {
+	ID          string  `json:"id"`
+	ProjectName string  `json:"projectName"`
+	BuildStatus string  `json:"buildStatus"`
+	StartTime   float64 `json:"startTime"`
+	EndTime     float64 `json:"endTime"`
 }

@@ -110,7 +110,7 @@ func (p *CodeBuildPlugin) createProject(reqCtx *RequestContext, req *AWSRequest)
 	updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"project": project,
+		"project": codebuildProjectToWire(project),
 	})
 }
 
@@ -136,7 +136,7 @@ func (p *CodeBuildPlugin) batchGetProjects(reqCtx *RequestContext, req *AWSReque
 	}
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"projects":         projects,
+		"projects":         codebuildProjectsToWire(projects),
 		"projectsNotFound": notFound,
 	})
 }
@@ -192,7 +192,7 @@ func (p *CodeBuildPlugin) updateProject(reqCtx *RequestContext, req *AWSRequest)
 	}
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"project": proj,
+		"project": codebuildProjectToWire(*proj),
 	})
 }
 
@@ -280,7 +280,7 @@ func (p *CodeBuildPlugin) startBuild(reqCtx *RequestContext, req *AWSRequest) (*
 	updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildBuildIDsKey(reqCtx.AccountID, reqCtx.Region), buildID)
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"build": build,
+		"build": codebuildBuildToWire(build),
 	})
 }
 
@@ -313,7 +313,7 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 	}
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"builds":         builds,
+		"builds":         codebuildBuildsToWire(builds),
 		"buildsNotFound": notFound,
 	})
 }
