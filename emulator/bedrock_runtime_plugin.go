@@ -420,7 +420,7 @@ func (p *BedrockRuntimePlugin) getModelInvocationJob(ctx *RequestContext, _ *AWS
 	if err != nil {
 		return nil, err
 	}
-	return bedrockRuntimeJSONResponse(http.StatusOK, job)
+	return bedrockRuntimeJSONResponse(http.StatusOK, bedrockInvocationJobToWire(*job))
 }
 
 // stopModelInvocationJob handles StopModelInvocationJob, transitioning the job to Stopped.
@@ -448,26 +448,13 @@ func (p *BedrockRuntimePlugin) listModelInvocationJobs(ctx *RequestContext, _ *A
 	goCtx := context.Background()
 	ids, _ := loadStringIndex(goCtx, p.state, bedrockRuntimeNamespace, bedrockModelInvocationJobIDsKey(ctx.AccountID, ctx.Region))
 
-	type summary struct {
-		JobArn     string  `json:"jobArn"`
-		JobName    string  `json:"jobName"`
-		ModelID    string  `json:"modelId"`
-		Status     string  `json:"status"`
-		SubmitTime float64 `json:"submitTime"`
-	}
-	summaries := make([]summary, 0, len(ids))
+	summaries := make([]bedrockInvocationJobOut, 0, len(ids))
 	for _, id := range ids {
 		job, err := p.loadModelInvocationJob(ctx, id)
 		if err != nil {
 			continue
 		}
-		summaries = append(summaries, summary{
-			JobArn:     job.JobArn,
-			JobName:    job.JobName,
-			ModelID:    job.ModelID,
-			Status:     job.Status,
-			SubmitTime: job.SubmitTime,
-		})
+		summaries = append(summaries, bedrockInvocationJobToWire(*job))
 	}
 	return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{"invocationJobSummaries": summaries})
 }

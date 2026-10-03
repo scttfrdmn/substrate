@@ -101,14 +101,14 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #
 # Recording a published member in the baseline files it as a defect owed a
 # deletion, and deleting it would drop a member AWS does publish — so the entry is
-# worse than useless, it points at the wrong fix. Fourteen are excluded:
+# worse than useless, it points at the wrong fix. Fifteen are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
 #     the wire struct this check recommends building (#1090's pattern), carrying
 #     only published members.
 #   - batch_plugin.go BatchJob.CreatedAt — the same member on the other shape.
-#     DescribeJobs marshals the persisted BatchJob straight into `{"jobs": […]}`,
+#     DescribeJobs used to marshal the persisted BatchJob straight into `{"jobs": […]}`,
 #     which is JobDetail, and `API_JobDetail` publishes `createdAt`, Type: Long,
 #     "the Unix timestamp (in milliseconds) for when the job was created" — which
 #     is exactly what the field is (int64, epoch milliseconds). This line was kept
@@ -116,6 +116,10 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     that is the wrong unit of analysis: the exclusion is per field, and a sibling
 #     leaking says nothing about this one. AccountID and Region stay in the
 #     baseline, where JobDetail publishing neither is what puts them.
+#   - batch_wire.go batchJobDetailOut.CreatedAt — the same member on the wire struct
+#     DescribeJobs answers now, the projection that discharges BatchJob (#756): a
+#     projection carries every published member, so building one adds a line of
+#     this kind.
 #   - ecr_wire.go ecrRepositoryOut.CreatedAt — `API_Repository` publishes
 #     `createdAt`. This one is the sharpest illustration of the mistake: the struct
 #     is the wire struct #1090 *added* to fix ECR, so the baseline was filing the
@@ -149,7 +153,7 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
 #
-# Three of the fourteen are declared `time.Time` on the record while the name is
+# Three of the fifteen are declared `time.Time` on the record while the name is
 # published: ACM's, Redshift Data's and Firehose's. A record's type does not reach the
 # wire on its own; what matters is what the response renders. All three render epoch
 # seconds now, which their JSON protocol publishes: ACM's through acmCertificateOut and
@@ -197,6 +201,7 @@ extract() {
       # header. Keyed file, type, field — tab-separated, as the output is.
       published["emulator/batch_list_jobs.go\tbatchJobSummary\tCreatedAt"] = 1
       published["emulator/batch_plugin.go\tBatchJob\tCreatedAt"] = 1
+      published["emulator/batch_wire.go\tbatchJobDetailOut\tCreatedAt"] = 1
       published["emulator/ecr_wire.go\tecrRepositoryOut\tCreatedAt"] = 1
       published["emulator/acm_types.go\tACMCertificate\tCreatedAt"] = 1
       published["emulator/acm_wire.go\tacmCertificateOut\tCreatedAt"] = 1

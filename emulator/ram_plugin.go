@@ -113,7 +113,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn)
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
-		"resourceShare": share,
+		"resourceShare": ramResourceShareToWire(share),
 	})
 }
 
@@ -135,7 +135,7 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("ram getResourceShares load index: %w", err)
 	}
 
-	shares := make([]RAMResourceShare, 0)
+	shares := make([]ramResourceShareOut, 0)
 	arnSet := make(map[string]bool, len(input.ResourceShareArns))
 	for _, a := range input.ResourceShareArns {
 		arnSet[a] = true
@@ -156,7 +156,7 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 		if input.Name != "" && share.Name != input.Name {
 			continue
 		}
-		shares = append(shares, share)
+		shares = append(shares, ramResourceShareToWire(share))
 	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
@@ -198,7 +198,7 @@ func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("ram updateResourceShare put: %w", err)
 	}
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
-		"resourceShare": share,
+		"resourceShare": ramResourceShareToWire(*share),
 	})
 }
 

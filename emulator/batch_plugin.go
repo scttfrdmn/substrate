@@ -618,7 +618,7 @@ func (p *BatchPlugin) describeJobs(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	goCtx := context.Background()
-	var jobs []BatchJob
+	jobs := []batchJobDetailOut{}
 	for _, id := range body.Jobs {
 		key := "job:" + ctx.AccountID + "/" + ctx.Region + "/" + id
 		data, err := p.state.Get(goCtx, batchNamespace, key)
@@ -627,11 +627,8 @@ func (p *BatchPlugin) describeJobs(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 		var job BatchJob
 		if json.Unmarshal(data, &job) == nil {
-			jobs = append(jobs, job)
+			jobs = append(jobs, batchJobToWire(job))
 		}
-	}
-	if jobs == nil {
-		jobs = []BatchJob{}
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{"jobs": jobs})
 }
