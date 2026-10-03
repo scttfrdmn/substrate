@@ -19657,6 +19657,24 @@ above the maximum of 50 is honored and one at or below zero is silently rewritte
 |------|-----|-------|
 | AWS::Athena::WorkGroup | Name | A stub: properties are recorded in the CloudFormation stub store, which the Athena plugin does not read, so a workgroup deployed from a template is invisible to `GetWorkGroup` and `ListWorkGroups` |
 
+### The owning account a record carries reaches no response, and dates are epoch seconds
+
+`SSOInstance`, `SSOPermissionSet` and `SSOAccountAssignment` each declare the owning account as
+`AccountID`, because the record is what `MemoryStateManager` snapshots and a replay reads back. Until
+[#756](https://github.com/scttfrdmn/substrate/issues/756), `CreatePermissionSet` and
+`DescribePermissionSet` answered the permission set whole. That put `AccountID` on the wire, plus
+`InstanceArn`, which `API_PermissionSet` does not publish: the request names the instance. They now
+answer `ssoPermissionSetOut` (`emulator/sso_wire.go`), which carries all six published members.
+
+`CreatedDate` rendered as an RFC3339 string on the permission set and in `ListInstances`. The service
+speaks `awsJson1_1`, where both pages publish `"CreatedDate": number`, so a typed SDK could decode
+neither response ([#1345](https://github.com/scttfrdmn/substrate/issues/1345)). Both are now epoch
+seconds. The stored records are unchanged.
+
+`TestSSOWire_ResponsesCarryNoBookkeepingMember` drives all twelve routed operations. It compares
+member names **exactly**, not folded: the assignment operations publish `AccountId`, the target
+account, which differs from the bookkeeping `AccountID` only in case.
+
 ### Cost
 
 `StartQueryExecution` is attributed $0.000005 per call, standing in for Athena's $5.00 per TB scanned.

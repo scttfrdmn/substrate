@@ -602,6 +602,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **IAM Identity Center answers its permission set through a projection, and its dates as epoch
+  seconds** (#756, #1345). `CreatePermissionSet` and `DescribePermissionSet` handed the persisted
+  `SSOPermissionSet` to the caller. A consumer therefore read the owning `AccountID`, plus
+  `InstanceArn`, which `API_PermissionSet` does not publish. `CreatedDate` rendered as an RFC3339
+  string there and in `ListInstances`, where `awsJson1_1` publishes a number, so a typed SDK could
+  decode neither. The permission set now answers `ssoPermissionSetOut` from the new
+  `emulator/sso_wire.go`, and both dates are `EpochSeconds`. The stored records are unchanged.
+  - #1345 named the permission set's date. `ListInstances`' `CreatedDate` had the same defect, which I
+    verified against `API_ListInstances`, and it is fixed here too.
+  - The new `emulator/sso_wire_test.go` drives all twelve routed operations and is cited for all three
+    records. It compares member names exactly, because the assignment operations publish `AccountId`
+    (the target), which a case fold would mistake for the bookkeeping `AccountID`. That takes the
+    inventory from **270 projected across 111 records to 273 across 114**, and the still-reachable
+    count from **40 to 37**.
+
 - **CloudTrail no longer answers its stored trail record whole** (#756). `CreateTrail` and
   `UpdateTrail` answered the persisted `CloudTrailTrail` as the body, and `GetTrail` and
   `DescribeTrails` answered it under `Trail` and in `trailList`. A consumer therefore read `AccountID`,
