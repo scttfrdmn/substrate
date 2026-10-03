@@ -553,6 +553,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **QuickSight's DescribeDataSource no longer answers the stored record whole** (#756). It handed the
+  persisted `QuickSightDataSource` to the caller, so a consumer read `AccountID` and `Region`, which
+  `API_DataSource` does not publish. It now answers `quicksightDataSourceOut` from the new
+  `emulator/quicksight_wire.go`, and the stored record is unchanged. `QuickSightDataSet` was never
+  rendered and is cited as already projected. The new `emulator/quicksight_wire_test.go` drives all
+  four routed operations. That takes the inventory from **235 projected across 96 records to 239
+  across 98**, and the still-reachable count from **75 to 71**.
+
 - **EMR Serverless's GetApplication and GetJobRun no longer answer the stored record whole** (#756,
   #1199). Both handed the persisted record to the caller, so a consumer read `accountID` and `region`,
   which neither `API_Application` nor `API_JobRun` publishes. They now answer `emrServerlessAppOut` and
