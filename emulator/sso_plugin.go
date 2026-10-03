@@ -115,7 +115,7 @@ func (p *SSOPlugin) listInstances(reqCtx *RequestContext, _ *AWSRequest) (*AWSRe
 				"InstanceArn":     inst.InstanceArn,
 				"IdentityStoreId": inst.IdentityStoreID,
 				"Status":          inst.Status,
-				"CreatedDate":     inst.CreatedDate,
+				"CreatedDate":     EpochSeconds(inst.CreatedDate),
 			},
 		},
 		"NextToken": "",
@@ -171,7 +171,7 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 	updateStringIndex(goCtx, p.state, ssoNamespace, ssoPermSetArnsKey(reqCtx.AccountID), permSetArn)
 
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
-		"PermissionSet": ps,
+		"PermissionSet": ssoPermissionSetToWire(ps),
 	})
 }
 
@@ -189,7 +189,7 @@ func (p *SSOPlugin) describePermissionSet(reqCtx *RequestContext, req *AWSReques
 		return nil, err
 	}
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
-		"PermissionSet": ps,
+		"PermissionSet": ssoPermissionSetToWire(*ps),
 	})
 }
 
