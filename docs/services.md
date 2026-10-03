@@ -6450,6 +6450,12 @@ documented as inert or completed is
 [#1079](https://github.com/scttfrdmn/substrate/issues/1079). The invalidation above is
 about container *identity*, which is observable either way.
 
+### The tag bookkeeping a function carries reaches no response
+
+`LambdaFunction` declares `ever_tagged`, the flag that records a function was once tagged (#938), because the record is what `MemoryStateManager` snapshots and a replay reads back. It does not reach a body: every response is a configuration built member by member.
+`TestLambdaWire_FunctionResponsesCarryNoBookkeepingMember` in `emulator/lambda_wire_test.go` tags the function and reads the flag back first, since an unset `omitempty` member is absent for free, then drives every operation that answers the function and walks each decoded document for it at any depth
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). `TagResource` answers 204 with no body, so it has nothing to walk.
+
 ### Cost
 
 Lambda invocations: $0.0000002 per request.
@@ -6974,6 +6980,12 @@ preceded it.
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::SQS::Queue | QueueUrl | FifoQueue attribute supported |
+
+### The tag bookkeeping a queue carries reaches no response
+
+`SQSQueue` declares `ever_tagged`, the flag that records a queue was once tagged (#938), because the record is what `MemoryStateManager` snapshots and a replay reads back. It does not reach a body: every response is built member by member.
+`TestSQSWire_QueueResponsesCarryNoBookkeepingMember` in `emulator/sqs_wire_test.go` tags the queue and reads the flag back first, since an unset `omitempty` member is absent for free, then drives every queue operation and walks each decoded document for it at any depth
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### Cost
 
@@ -11658,6 +11670,13 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 |------|-----|-------|
 | AWS::Route53::HostedZone | HostedZoneId | |
 | AWS::Route53::RecordSet | — | |
+
+### The account a hosted zone carries reaches no response
+
+`Route53HostedZone` declares its account under a wire-visible `json` tag, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. It does not reach a body: Route 53 speaks REST-XML, and every response is marshaled from an XML struct declared for its operation.
+`TestRoute53Wire_HostedZoneResponsesCarryNoBookkeepingMember` in `emulator/route53_wire_test.go` drives all six routed operations and walks each response's element names for the member
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### Cost
 
