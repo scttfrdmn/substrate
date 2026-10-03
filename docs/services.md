@@ -6143,6 +6143,22 @@ reproducible from a seeded rule, not from the event log. And
 ceiling, because a recorded event carries no object key unless bodies were recorded; it
 therefore warns earlier than the gate would refuse.
 
+### The bookkeeping a bucket record carries reaches no response
+
+`S3Bucket` declares its account as `account_id` and its Region as `region`, plus `EverTagged` as
+`ever_tagged,omitempty`, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. None of them reaches a body. Every bucket response is marshaled from an XML struct declared for
+its operation. The published members that sound alike are different names (`ListBuckets`'
+`BucketRegion`, `GetBucketLocation`'s `LocationConstraint`), and the walk is a case-folded equality,
+so neither collides.
+
+`TestS3Wire_BucketResponsesCarryNoBookkeepingMember` in `emulator/s3_wire_test.go` drives the
+operations that answer the bucket record: `CreateBucket`, `HeadBucket`, `ListBuckets` and
+`DeleteBucket`, plus the three tagging operations. It tags the bucket and reads `ever_tagged` back
+first ([#756](https://github.com/scttfrdmn/substrate/issues/756), #938). `GetBucketLocation` is not
+driven because `?location` is not routed: it falls through to `ListObjects`
+([#1349](https://github.com/scttfrdmn/substrate/issues/1349)).
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
