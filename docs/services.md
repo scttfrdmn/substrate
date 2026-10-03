@@ -13286,6 +13286,17 @@ hosted rotation lambda is a function CloudFormation creates through a nested sta
 substrate does not do, so nothing exists at that ARN. What the pass-through buys is a
 deployable template instead of a failed resource.
 
+### The account and Region a record carries reach no response
+
+`SecretState` declares `AccountID` and `Region` under wire-visible `json` tags, plus `EverTagged` as
+`ever_tagged,omitempty`, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. None of them reaches a body. `DescribeSecret` answers `smDescribeSecretBody`, which emits only
+the members the page publishes, and every other operation answers a map of published members.
+`TestSecretsManagerWire_SecretResponsesCarryNoBookkeepingMember` in
+`emulator/secretsmanager_wire_test.go` drives all twelve routed operations
+([#756](https://github.com/scttfrdmn/substrate/issues/756)). The secret is tagged first and
+`ever_tagged` is read back, since only a tag write sets it (#938).
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
