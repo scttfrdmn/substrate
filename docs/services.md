@@ -19517,6 +19517,13 @@ caller's own account and Region, and is an identifier that caller's `SubmitJob` 
 same way, so two accounts each registering one definition of the same name both see
 revision 1.
 
+### The account and Region a job carries reach no response
+
+`BatchJob` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `DescribeJobs` used to answer the record whole, and answers `batchJobToWire`'s projection onto `API_JobDetail` now, with the published `jobArn` added. `ListJobs` answers `batchJobSummary`, and the rest answer maps.
+`TestBatchWire_JobResponsesCarryNoBookkeepingMember` in `emulator/batch_wire_test.go` drives all four job operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `createdAt` stays epoch milliseconds, the published Long. `startedAt` is published as required and absent, because the record does not hold it.
+
 ### Cost
 
 Batch itself is free; the compute it launches is not, and substrate launches none.
@@ -20683,6 +20690,13 @@ every invocation succeeds. `ConflictException`/400 is published on the batch cre
 and is answered by neither — a duplicate `jobName` is accepted, and so is stopping a finished job.
 `ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
 
+### The account and Region a model invocation job carries reach no response
+
+`BedrockModelInvocationJob` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `GetModelInvocationJob` used to answer the record whole, and it and `ListModelInvocationJobs` answer `bedrockInvocationJobToWire` now. The other two answer an ARN or an empty object.
+`TestBedrockWire_InvocationJobResponsesCarryNoBookkeepingMember` in `emulator/bedrock_wire_test.go` drives all four routed job operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `submitTime` is answered as the date-time string the reference publishes, not the record's epoch number, and each summary now carries the `roleArn` and data configurations `API_ModelInvocationJobSummary` marks Required.
+
 ### CloudFormation resource types
 
 None. `AWS::Bedrock::Guardrail` and the other `AWS::Bedrock::*` types are not deployed, so a
@@ -20771,6 +20785,13 @@ A run ID is a ten-digit number drawn from a per-process pseudo-random source tha
 rewinds, so a recorded run replays with the same run IDs it was recorded with. Nothing checks that a
 freshly minted ID is unused; the sequence makes a collision vanishingly unlikely rather than
 impossible.
+
+### The account and Region a run carries reach no response
+
+`OmicsRun` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `GetRun` used to answer the record whole, and answers `omicsRunToWire` now. `StartRun` and `ListRuns` answer members built one by one.
+`TestOmicsWire_RunResponsesCarryNoBookkeepingMember` in `emulator/omics_wire_test.go` drives the three routed operations that answer a body and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `CancelRun` answers 204 with no body, so it has nothing to walk.
 
 ### CloudFormation resource types
 
@@ -20973,6 +20994,13 @@ condition is `ValidationError` ([#1169](https://github.com/scttfrdmn/substrate/i
 `OperationNotPermittedException`, `ResourceShareLimitExceededException` and
 `ServerInternalException`/500 are published and have no site: no ARN is validated for shape, no
 token is tracked, and no share quota is enforced.
+
+### The account and Region a resource share carries reach no response
+
+`RAMResourceShare` declares its account and Region under wire-visible `json` tags, because the record is what
+`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `CreateResourceShare`, `UpdateResourceShare` and `GetResourceShares` used to answer the record whole, along with its `principals` and `resourceArns`, which `API_ResourceShare` does not publish. They answer `ramResourceShareToWire` now, with `creationTime` and `lastUpdatedTime` as epoch seconds rather than RFC3339 strings.
+`TestRAMWire_ResourceShareResponsesCarryNoBookkeepingMember` in `emulator/ram_wire_test.go` drives all eight routed operations and walks each decoded document for either member at any
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
 ### CloudFormation resource types
 

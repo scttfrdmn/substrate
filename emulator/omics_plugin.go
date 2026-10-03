@@ -196,7 +196,7 @@ func (p *OmicsPlugin) getRun(ctx *RequestContext, _ *AWSRequest, runID string) (
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("getRun: unmarshal: %w", err)
 	}
-	return omicsJSONResponse(http.StatusOK, run)
+	return omicsJSONResponse(http.StatusOK, omicsRunToWire(run))
 }
 
 func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {

@@ -636,6 +636,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **HealthOmics, Bedrock, RAM and Batch answer their records through projections** (#756). Each
+  answered a stored record whole at one or more sites, `accountID` and `region` included, which no
+  published shape carries.
+  - HealthOmics' `GetRun` answers `emulator/omics_wire.go`'s projection, the eight published members
+    the record models.
+  - Bedrock's `GetModelInvocationJob` and `ListModelInvocationJobs` answer
+    `emulator/bedrock_wire.go`'s projection. `submitTime` is a date-time string
+    (`2023-11-14T22:13:20.000Z`), as the reference publishes it, rather than an epoch number a typed
+    SDK could not decode. Each summary gains its Required `roleArn`, `inputDataConfig` and
+    `outputDataConfig`.
+  - RAM's `CreateResourceShare`, `UpdateResourceShare` and `GetResourceShares` also answered
+    `principals` and `resourceArns`, which `API_ResourceShare` does not publish, and rendered
+    `creationTime`/`lastUpdatedTime` as RFC3339 strings where restJson1 publishes numbers. They answer
+    `emulator/ram_wire.go`'s projection, with both dates as `EpochSeconds`.
+  - Batch's `DescribeJobs` answers `emulator/batch_wire.go`'s projection onto `API_JobDetail`, adding
+    the published `jobArn` and keeping `createdAt` as epoch milliseconds. Its `createdAt` joins the
+    check's exclusions, now fifteen.
+
+  Each service has a new `<svc>_wire_test.go` citing the record. check-wire-bookkeeping goes from
+  **292 projected across 125 records to 300 across 129**, and from **18 still reachable to 10**.
 - **Firehose's `DescribeDeliveryStream` answers a projection, with `CreateTimestamp` as epoch seconds**
   (#756, #1305). It answered `FirehoseDeliveryStream` whole: `AccountId` and `Region`, which
   `API_DeliveryStreamDescription` does not publish, and `Tags`, which it does not publish either. It
