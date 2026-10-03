@@ -69,7 +69,8 @@
 # member appears. That file is where an entry argues for itself. A record no AWS
 # response renders records itself in scripts/wire-bookkeeping-internal.txt, and
 # the number #756's AC3 drives to zero is what the baseline declares less what
-# those two files discharge — reported below as "still reachable".
+# those two files discharge — reported below as "still reachable". It reached zero,
+# and the check now fails on any record neither file discharges.
 #
 # Note that json:"-" is used on zero of the declared fields. The exclusion is available
 # and has never been reached for, and for a field already written to state it is
@@ -182,8 +183,8 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 # DynamoDBStreamCursor is the case that looks internal and is not. Its JSON is
 # base64-encoded into the opaque ShardIterator that GetShardIterator and GetRecords
 # answer, so it does reach an AWS body, as a token, and kinesisIterator is the same.
-# Both belong in the projected file with a raw-bytes test, which fails the day either
-# is rendered as an object rather than as a token. A real shard iterator is opaque too,
+# Both are in the projected file, each citing a raw-bytes test that decodes the token
+# first and fails the day either is rendered as an object rather than as a token. A real shard iterator is opaque too,
 # so carrying the account and Region inside it is faithful rather than a divergence.
 #
 # The awk is written for the POSIX subset because CI's awk is mawk, not gawk:
@@ -378,6 +379,22 @@ stale line is as much a failure as a new one.
 
 Regenerate with:  ./scripts/check-wire-bookkeeping.sh --write
 EOF
+fi
+
+# #756's AC3 reached zero, so zero is now the floor: a record the baseline declares and
+# neither file discharges is a failure, not a figure. Without this, --write would
+# admit a new record's fields to the baseline and the count would quietly read one.
+undischarged="$(comm -23 \
+  <(cut -f1,2 "$current" | LC_ALL=C sort -u) \
+  <({ grep -v '^#' "$PROJECTED" | cut -f1,2; grep -v '^#' "$INTERNAL" | cut -f1,2; } | LC_ALL=C sort -u))"
+if [[ -n "$undischarged" ]]; then
+  status=1
+  echo "check-wire-bookkeeping: these records declare bookkeeping fields that neither"
+  echo "$PROJECTED nor $INTERNAL discharges:"
+  echo "$undischarged" | sed 's/^/    /'
+  echo "Render the record's responses through a wire struct and cite a raw-bytes test in the"
+  echo "projected file, or, if no AWS response renders it, record it in the internal file (#756)."
+  echo
 fi
 
 if [[ "$status" -eq 0 ]]; then

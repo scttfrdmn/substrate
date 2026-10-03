@@ -244,6 +244,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **STS, CloudFormation, and the DynamoDB Streams and Kinesis shard iterators are recorded as
+  projected, with a test cited for each** (#756, #1337). These are the five records #1337 set aside
+  as reaching an AWS body only through a projection or a token. Every one was confirmed to:
+  - `STSSessionCredentials`' `AccountId` reaches none of `AssumeRole`, `GetSessionToken` or a
+    session-signed `GetCallerIdentity`, which publishes the account as `Account`
+    (`emulator/sts_wire_test.go`).
+  - `CFNStackState` (`AccountID`, `Region`, `CreatedAt`, `UpdatedAt`) and `CFNChangeSet`
+    (`CreatedAt`) reach no response. `emulator/cfn_wire_test.go` reads the members back first, because
+    the account and Region are `omitempty` (#1304), and walks every routed stack and change-set
+    operation.
+  - `DynamoDBStreamCursor` and `kinesisIterator` reach a body only base64-encoded inside the opaque
+    `ShardIterator`/`NextShardIterator`, which is faithful. Each test decodes the token first,
+    requiring the account and Region inside it, and fails the day the cursor is rendered as an object.
+  - Writing the CloudFormation test found that stack and change-set state keys carry no account or
+    Region. That is filed as #1366.
+
+  That takes the projected inventory from **300 across 129 records to 310 across 134**, and the
+  still-reachable count from **10 to 0**. Every declared bookkeeping field is now either cited by a
+  raw-bytes test or recorded as internal.
+
+  `scripts/check-wire-bookkeeping.sh` now fails on any record that declares a bookkeeping field and
+  that neither file discharges, naming it. Zero is the floor rather than a figure, so a new record
+  cannot be admitted to the baseline by `--write` alone.
+
 - **EC2's capacity reservation and fleet, and CloudFront's distribution, are recorded as projected,
   with a test cited for each** (#756). `EC2CapacityReservation` and `EC2Fleet` declare an account and
   a Region, and `CloudFrontDistribution` its `AccountID` and `ever_tagged`; none reaches a response,
