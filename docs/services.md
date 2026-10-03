@@ -4941,6 +4941,27 @@ document. A `VersionId` that is not version-shaped at all is `InvalidInput` (400
 The seeded documents are also readable in process through `emulator.GetManagedPolicy`, and
 are what the IAM policy evaluator reads.
 
+### The bookkeeping a record carries reaches no response
+
+Three IAM records declare bookkeeping members under wire-visible `json` tags:
+
+- `IAMRole` and `IAMUser` each declare `EverTagged` as `ever_tagged,omitempty`.
+- `IAMAccessKey` declares its owning account as `AccountId,omitempty`. An access key's ID is what
+  determines the account, so the account cannot be in its state key (#737).
+
+None of these members reaches a body: every response is marshaled from an XML struct declared for its
+operation, and no XML-tagged field is typed as one of these records. Every operation that answers one
+of the records is driven by `TestIAMWire_RoleResponsesCarryNoBookkeepingMember` and its siblings in
+`emulator/iam_wire_test.go`. That includes the ones that render it nested: `GetGroup`, the two
+instance-profile reads and `GetAccountAuthorizationDetails`. Each test walks the raw XML for a
+bookkeeping element at any depth
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
+Every member here is `,omitempty`, so each would be absent for free from a record that did not hold
+it. The role and the user are therefore tagged first, and `ever_tagged` is read back; it is set only
+by a tag write (#938). The access key's account is read back too, since `CreateAccessKey` writes it on
+every key.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
