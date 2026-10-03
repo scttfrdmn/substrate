@@ -244,6 +244,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **IAM's three records are recorded as projected, with a test cited for each** (#756). `IAMRole` and
+  `IAMUser` declare `ever_tagged`, and `IAMAccessKey` declares `AccountId`. All three are
+  `,omitempty`, and none reaches a response: every IAM response is marshaled from an XML struct
+  declared for its operation. The new `emulator/iam_wire_test.go` drives every operation that answers
+  one of the records, including the ones that render it nested (`GetGroup`, the instance-profile reads
+  and `GetAccountAuthorizationDetails`). Each test reads its member back from the stored record before
+  asserting absence; the role and user are tagged first, since only a tag write sets `ever_tagged`
+  (#938, #1304). That takes the projected inventory from **243 across 100 records to 246 across 103**,
+  and the still-reachable count from **67 to 64**.
+
 - **Kinesis's stream record is recorded as projected, with a test cited for it** (#756).
   `KinesisStream` declares `AccountID`, `Region`, `CreatedAt` and `EverTagged`, and none reaches a
   response: both describes answer maps built member by member. The new
