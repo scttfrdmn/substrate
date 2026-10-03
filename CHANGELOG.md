@@ -588,6 +588,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **S3 no longer deletes a bucket for an unrouted sub-resource, or overwrites an object for one**
+  (#1349). The bucket and object routers reached each method's default by absence: any published
+  sub-resource missing from their lists became `DeleteBucket`, `CreateBucket`, `ListObjects`,
+  `PutObject` or `GetObject`.
+  - `DeleteBucketCors`, `DeleteBucketEncryption`, `DeleteBucketWebsite`,
+    `DeleteBucketOwnershipControls` and `DeleteBucketReplication` each answered 204 and **deleted the
+    bucket**. A teardown that clears a bucket's encryption before deleting it lost the bucket early.
+  - `PutObjectRetention` and `PutObjectLegalHold` overwrote the object with their XML body.
+  - `GetBucketLocation` answered a `ListBucketResult`, so an SDK resolving a bucket's Region read
+    none.
+  - The misresolved name was also the name the request was authorized under, so these calls needed
+    `s3:DeleteBucket` and not their own action.
+
+  #446 and #656 had fixed this one sub-resource at a time. The new `emulator/s3_subresources.go` names
+  every published bucket and object sub-resource substrate does not route, and `parseS3Operation`
+  consults it just before each default. Each one now resolves to its real name (for example
+  `DeleteBucketEncryption`) and is refused with `NotImplemented`/501. No routed operation changed
+  name.
+  - `emulator/s3_subresource_routing_test.go` drives every unrouted bucket `DELETE` and requires that
+    the bucket survives. It also requires the object to survive both object `PUT`s, and pins the
+    resolved names through `ParseAWSRequest` beside twenty routed ones.
+
 - **SageMaker no longer answers its stored records whole** (#756). `DescribeApp` and
   `DescribeTrainingJob` answered the persisted record as the whole body, and `ListApps` answered each
   element as a record. A consumer therefore read `AccountID` and `Region`, which no SageMaker shape

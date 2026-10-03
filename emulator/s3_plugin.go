@@ -358,6 +358,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "PutPublicAccessBlock"
 			}
+			// Before the CreateBucket fall-through: an unrouted sub-resource is named for what it is
+			// and refused, rather than answered as a create (#1349).
+			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
+				return bucket, "", op
+			}
 			return bucket, "", "CreateBucket"
 		case "HEAD":
 			return bucket, "", "HeadBucket"
@@ -375,6 +380,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			// reached it and destroyed the bucket (#446).
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "DeletePublicAccessBlock"
+			}
+			// Before the DeleteBucket fall-through, for every sub-resource #446 did not name: each of
+			// them used to delete the bucket (#1349).
+			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
+				return bucket, "", op
 			}
 			return bucket, "", "DeleteBucket"
 		case "GET":
@@ -405,6 +415,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "GetPublicAccessBlock"
 			}
+			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
+			// for what it is and refused, rather than answered as a listing (#1349).
+			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
+				return bucket, "", op
+			}
 			if req.Params["list-type"] == "2" {
 				return bucket, "", "ListObjectsV2"
 			}
@@ -412,6 +427,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 		case "POST":
 			if _, ok := req.Params["delete"]; ok {
 				return bucket, "", "DeleteObjects"
+			}
+			// No POST default, but a named operation rather than the bare verb, so the pipeline
+			// authorizes and records what the request is (#1349).
+			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
+				return bucket, "", op
 			}
 		}
 	} else {
@@ -445,6 +465,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if req.Headers["X-Amz-Copy-Source"] != "" {
 				return bucket, key, "CopyObject"
 			}
+			// Before the PutObject fall-through: PutObjectRetention and PutObjectLegalHold used to
+			// overwrite the object with their XML body (#1349).
+			if op := s3UnroutedObjectOperation(method, req.Params); op != "" {
+				return bucket, key, op
+			}
 			return bucket, key, "PutObject"
 		case "GET":
 			if _, ok := req.Params["acl"]; ok {
@@ -455,6 +480,11 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if req.Params["uploadId"] != "" {
 				return bucket, key, "ListParts"
+			}
+			// Before the GetObject fall-through: an unrouted sub-resource is refused rather than
+			// answered with the object's bytes (#1349).
+			if op := s3UnroutedObjectOperation(method, req.Params); op != "" {
+				return bucket, key, op
 			}
 			return bucket, key, "GetObject"
 		case "HEAD":
@@ -476,6 +506,10 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["select"]; ok {
 				return bucket, key, "SelectObjectContent"
+			}
+			// RestoreObject is unrouted: named, so it is authorized and recorded as itself (#1349).
+			if op := s3UnroutedObjectOperation(method, req.Params); op != "" {
+				return bucket, key, op
 			}
 		}
 	}
