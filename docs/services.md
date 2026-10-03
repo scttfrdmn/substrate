@@ -18055,6 +18055,16 @@ not in the dispatch. Budget *actions* — the IAM/SCP/target policies a budget c
 threshold is breached — are a separate resource substrate holds no state for, so the operation
 would have nothing to enumerate. `AWS::Budgets::BudgetsAction` is likewise unmodelled.
 
+### The account, Region and creation time a record carries reach no response
+
+`Budget` declares `AccountId`, `Region` and `CreatedAt` under wire-visible `json` tags, because the
+record is what `MemoryStateManager` snapshots and a replay reads back. None of them is a member of
+`API_budgets_Budget`. Until [#756](https://github.com/scttfrdmn/substrate/issues/756),
+`DescribeBudget` and `DescribeBudgets` answered the record whole, so all three reached the wire. They
+now answer `budgetOut` (`emulator/budgets_wire.go`), which has five published members, and the stored
+record is unchanged. `TestBudgetsWire_BudgetResponsesCarryNoBookkeepingMember` drives all five routed
+operations.
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
