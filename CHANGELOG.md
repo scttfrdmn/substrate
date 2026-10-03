@@ -244,6 +244,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **S3's bucket record is recorded as projected, with a test cited for it** (#756). `S3Bucket`
+  declares `account_id`, `region` and `ever_tagged`, and none reaches a response, since every bucket
+  response is an XML struct declared for its operation. The new `emulator/s3_wire_test.go` drives the
+  operations that answer the bucket. It tags the bucket and reads `ever_tagged` back first (#938,
+  #1304). That takes the projected inventory from **252 across 105 records to 255 across 106**, and
+  the still-reachable count from **58 to 55**.
+  - `GetBucketLocation` is not driven: `?location` is unrouted and falls through to `ListObjects`.
+    Writing this test is how #1349 was found. Five delete sub-resources fall through to
+    `DeleteBucket` the same way.
+
 - **MSK's cluster record is recorded as projected, with a test cited for it** (#756). `MSKCluster`
   declares `AccountID`, `Region` and `CreatedAt`, and none reaches a response. Every cluster response
   goes through `mskClusterInfoWire` or its V2 counterpart, and `CreatedAt` surfaces only as the
