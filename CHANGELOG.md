@@ -244,6 +244,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **SSM's parameter record is recorded as projected, with a test cited for it** (#756).
+  `SSMParameter` declares `AccountID`, `Region` and `ever_tagged`, and none reaches a response: the
+  reads answer items built member by member. The new `emulator/ssm_wire_test.go` drives every
+  operation that answers a parameter. It tags the parameter and reads `ever_tagged` back first (#938,
+  #1304). That takes the projected inventory from **258 across 107 records to 261 across 108**, and
+  the still-reachable count from **52 to 49**.
+
 - **Secrets Manager's secret record is recorded as projected, with a test cited for it** (#756).
   `SecretState` declares `AccountID`, `Region` and `ever_tagged`, and none reaches a response.
   `DescribeSecret` answers `smDescribeSecretBody`, which emits published members only. The new

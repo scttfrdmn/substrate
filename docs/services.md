@@ -13393,6 +13393,17 @@ one table, so `GetParameter` cannot hand out an AMI the launch then refuses. See
 A parameter the caller wrote wins over a managed one at the same path, so
 `PutParameter` can override any of these.
 
+### The account and Region a record carries reach no response
+
+`SSMParameter` declares `AccountID` and `Region` under wire-visible `json` tags, plus `EverTagged` as
+`ever_tagged,omitempty`, because the record is what `MemoryStateManager` snapshots and a replay reads
+back. None of them reaches a body. The parameter reads answer items built member by member, and the
+writes answer maps of published members.
+`TestSSMWire_ParameterResponsesCarryNoBookkeepingMember` in `emulator/ssm_wire_test.go` drives every
+operation that answers a parameter: the reads, the history, labels, the tag operations and both
+deletes ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The parameter is tagged first
+and `ever_tagged` is read back, since only a tag write sets it (#938).
+
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
