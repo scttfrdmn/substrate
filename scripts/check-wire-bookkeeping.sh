@@ -151,11 +151,11 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #
 # Three of the fourteen are declared `time.Time` on the record while the name is
 # published: ACM's, Redshift Data's and Firehose's. A record's type does not reach the
-# wire on its own; what matters is what the response renders. ACM's now renders through
-# acmCertificateOut as EpochSeconds, which is what right looks like (ECS too). Redshift
-# Data's and Firehose's still render RFC3339 where their JSON protocol publishes epoch
-# seconds. That is a wrong-type divergence rather than a bookkeeping leak — #1305 — and
-# it is named here rather than left implied, because "excluded from this check" must not
+# wire on its own; what matters is what the response renders. All three render epoch
+# seconds now, which their JSON protocol publishes: ACM's through acmCertificateOut and
+# Firehose's through firehoseDeliveryStreamOut, both as EpochSeconds, and Redshift Data's
+# through maps built with Unix(). #1305 was that wrong-type divergence, and it is fixed.
+# It is named here rather than left implied, because "excluded from this check" must not
 # read as "correct".
 #
 # Test files are skipped. A bookkeeping-named field in a _test.go file is a decode

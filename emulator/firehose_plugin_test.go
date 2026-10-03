@@ -97,7 +97,12 @@ func TestFirehosePlugin(t *testing.T) {
 			t.Fatalf("want 200, got %d", resp.StatusCode)
 		}
 		var result struct {
-			DeliveryStreamDescription emulator.FirehoseDeliveryStream `json:"DeliveryStreamDescription"`
+			// The published shape, not the stored record: the record's CreateTimestamp is RFC3339 and the
+			// response's is epoch seconds (#1305), so decoding into the record would fail.
+			DeliveryStreamDescription struct {
+				DeliveryStreamName   string `json:"DeliveryStreamName"`
+				DeliveryStreamStatus string `json:"DeliveryStreamStatus"`
+			} `json:"DeliveryStreamDescription"`
 		}
 		if err := json.Unmarshal(resp.Body, &result); err != nil {
 			t.Fatalf("unmarshal describe response: %v", err)

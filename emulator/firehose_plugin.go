@@ -137,7 +137,7 @@ func (p *FirehosePlugin) describeDeliveryStream(reqCtx *RequestContext, req *AWS
 		return nil, fmt.Errorf("firehose describeDeliveryStream unmarshal: %w", err)
 	}
 	return firehoseJSONResponse(http.StatusOK, map[string]interface{}{
-		"DeliveryStreamDescription": stream,
+		"DeliveryStreamDescription": firehoseDeliveryStreamToWire(stream),
 	})
 }
 
