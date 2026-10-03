@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/scttfrdmn/substrate/emulator"
 )
@@ -479,5 +482,95 @@ func TestMSKWire_StateEncodingUnchanged(t *testing.T) {
 	// And the wire spelling must NOT appear in state, or the two have been conflated.
 	if _, ok := stored["clusterArn"]; ok {
 		t.Error("stored cluster: wire spelling clusterArn found in the persisted format")
+	}
+}
+
+// mskBookkeepingMembers are the members MSKCluster declares and no MSK shape publishes. CreatedAt
+// reaches the wire only as the published creationTime, which is not a member the walk looks for, and
+// the fold in wireAssertNoMemberJSON covers any capitalization of the other two.
+var mskBookkeepingMembers = []string{"AccountID", "Region", "CreatedAt"}
+
+// setupMSKBookkeepingPlugin is setupMSKPlugin with the state manager handed back, because a record is
+// the only place its bookkeeping members can be read from.
+func setupMSKBookkeepingPlugin(t *testing.T) (*emulator.MSKPlugin, *emulator.RequestContext, emulator.StateManager) {
+	t.Helper()
+	state := emulator.NewMemoryStateManager()
+	p := &emulator.MSKPlugin{}
+	if err := p.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  emulator.NewDefaultLogger(0, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Unix(1700000000, 0).UTC())},
+	}); err != nil {
+		t.Fatalf("MSKPlugin.Initialize: %v", err)
+	}
+	return p, &emulator.RequestContext{
+		AccountID: "123456789012",
+		Region:    "us-east-1",
+		RequestID: "req-msk-bookkeeping",
+		IDs:       emulator.NewIDMint("req-msk-bookkeeping"),
+	}, state
+}
+
+// TestMSKWire_ClusterResponsesCarryNoBookkeepingMember is the raw-bytes assertion
+// scripts/wire-bookkeeping-projected.txt cites for MSKCluster (#756).
+//
+// MSKCluster declares AccountID, Region and CreatedAt under wire-visible `json` tags, none under
+// omitempty, so a record that exists holds all three and no absence below is vacuous. None reaches a
+// body: every cluster response is rendered through mskClusterInfoWire and its V2 counterpart, which
+// copy published members only, and the others answer maps. All nine routed operations are driven,
+// both API generations included.
+func TestMSKWire_ClusterResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupMSKBookkeepingPlugin(t)
+
+	created, createdRaw := mskWireCreate(t, p, ctx, "wire-bookkeeping")
+	arn, _ := created["clusterArn"].(string)
+	if arn == "" {
+		t.Fatalf("create: want a clusterArn, got %v", created)
+	}
+
+	data, err := state.Get(t.Context(), "msk", "cluster:123456789012/us-east-1/wire-bookkeeping")
+	require.NoError(t, err, "state.Get cluster")
+	require.NotNil(t, data, "no cluster record stored")
+	var record map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(data, &record), "decode cluster: %s", data)
+	for _, member := range mskBookkeepingMembers {
+		require.NotEmptyf(t, record[member], "the cluster must persist %s before an absence assertion on it means anything", member)
+		require.NotEqualf(t, `""`, string(record[member]), "the cluster persists an empty %s", member)
+	}
+
+	_, v2Raw := mskWireBody(t, p, ctx, "POST", "/api/v2/clusters", map[string]any{
+		"clusterName": "wire-bookkeeping-v2",
+		"provisioned": map[string]any{
+			"kafkaVersion":        "3.6.0",
+			"numberOfBrokerNodes": 2,
+			"brokerNodeGroupInfo": map[string]any{"instanceType": "kafka.m5.large", "clientSubnets": []string{"subnet-1", "subnet-2"}},
+		},
+	})
+
+	for _, tc := range []struct {
+		op, method, path string
+		held             []byte
+	}{
+		{op: "CreateCluster", held: createdRaw},
+		{op: "DescribeCluster", method: "GET", path: "/v1/clusters/" + arn},
+		{op: "ListClusters", method: "GET", path: "/v1/clusters"},
+		{op: "GetBootstrapBrokers", method: "GET", path: "/v1/clusters/" + arn + "/bootstrap-brokers"},
+		{op: "ListNodes", method: "GET", path: "/v1/clusters/" + arn + "/nodes"},
+		{op: "CreateClusterV2", held: v2Raw},
+		{op: "DescribeClusterV2", method: "GET", path: "/api/v2/clusters/" + arn},
+		{op: "ListClustersV2", method: "GET", path: "/api/v2/clusters"},
+		// Last: it removes the record every case above reads.
+		{op: "DeleteCluster", method: "DELETE", path: "/v1/clusters/" + arn},
+	} {
+		t.Run(tc.op, func(t *testing.T) {
+			body := tc.held
+			if body == nil {
+				_, body = mskWireBody(t, p, ctx, tc.method, tc.path, nil)
+			}
+			require.Containsf(t, string(body), "wire-bookkeeping",
+				"presence anchor: %s has to name the cluster for an absence to mean anything", tc.op)
+			wireAssertNoMemberJSON(t, tc.op, body, mskBookkeepingMembers)
+		})
 	}
 }

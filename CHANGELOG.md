@@ -244,6 +244,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **MSK's cluster record is recorded as projected, with a test cited for it** (#756). `MSKCluster`
+  declares `AccountID`, `Region` and `CreatedAt`, and none reaches a response. Every cluster response
+  goes through `mskClusterInfoWire` or its V2 counterpart, and `CreatedAt` surfaces only as the
+  published `creationTime`, an ISO-8601 string, as MSK's reference documents. A new test in
+  `emulator/msk_wire_test.go` drives all nine routed operations across both API generations. That
+  takes the projected inventory from **249 across 104 records to 252 across 105**, and the
+  still-reachable count from **61 to 58**.
+
 - **KMS's key record is recorded as projected, with a test cited for it** (#756). `KMSKey` declares
   `AccountID`, `Region` and `ever_tagged`, and none reaches a response. `KeyMetadata` is built member
   by member, and its published `AWSAccountId` is the service's own data. The new

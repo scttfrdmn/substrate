@@ -21625,6 +21625,17 @@ member at fault, is never set on any of the eleven refusal sites. The remaining 
 401, 403, 429, 500 and 503 — have no site: no credential is validated inside the plugin, no request is
 throttled, and nothing fails internally.
 
+### The account and Region a record carries reach no response
+
+`MSKCluster` declares `AccountID`, `Region` and `CreatedAt` under wire-visible `json` tags, because the
+record is what `MemoryStateManager` snapshots and a replay reads back. None of them reaches a body.
+Every cluster response is rendered through `mskClusterInfoWire` or its V2 counterpart, which copy
+published members only, and `CreatedAt` reaches the wire only as the published `creationTime`. That
+member is an ISO-8601 string, which is the form the MSK reference documents.
+`TestMSKWire_ClusterResponsesCarryNoBookkeepingMember` in `emulator/msk_wire_test.go` drives all nine
+routed operations across both API generations
+([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+
 ### CloudFormation resource types
 
 `AWS::MSK::Cluster` deploys through `POST /v1/clusters` and deletes by path. Four template properties
