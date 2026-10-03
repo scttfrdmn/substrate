@@ -602,6 +602,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CloudTrail no longer answers its stored trail record whole** (#756). `CreateTrail` and
+  `UpdateTrail` answered the persisted `CloudTrailTrail` as the body, and `GetTrail` and
+  `DescribeTrails` answered it under `Trail` and in `trailList`. A consumer therefore read `AccountID`,
+  `Region` and `CreatedAt`, which no CloudTrail shape publishes. It also read `IsLogging`, which only
+  `GetTrailStatus` publishes. The two writes also answered `HomeRegion` and `HasCustomEventSelectors`,
+  which `Trail` publishes and their responses do not. The reads now answer `cloudtrailTrailOut` and the
+  writes `cloudtrailTrailWriteOut`, from the new `emulator/cloudtrail_wire.go`. The stored record is
+  unchanged.
+  - Two tests pinned `IsLogging` on shapes that do not publish it. `TestCloudTrailPlugin_StartStopLogging`
+    observed `StopLogging` through `GetTrail`, and since `GetTrailStatus` hardcodes `true` (#1157), it
+    now reads the persisted flag.
+  - The new `emulator/cloudtrail_wire_test.go` drives all eight routed operations and is cited in
+    `scripts/wire-bookkeeping-projected.txt`. That takes the inventory from **267 projected across 110
+    records to 270 across 111**, and the still-reachable count from **43 to 40**.
+
 - **Budgets' DescribeBudget and DescribeBudgets no longer answer the stored record whole** (#756).
   Both handed the persisted `Budget` to the caller, so a consumer read `AccountId`, `Region` and
   `CreatedAt`, none of which `API_budgets_Budget` publishes. They now answer `budgetOut` from the new

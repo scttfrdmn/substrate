@@ -63,7 +63,15 @@ func TestCloudTrailPlugin_CreateGetDeleteTrail(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", resp.StatusCode, resp.Body)
 	}
 
-	var trail emulator.CloudTrailTrail
+	// The published members of CreateTrailResponse this test reads. It used to decode into
+	// emulator.CloudTrailTrail, the stored record, and so asserted IsLogging, which
+	// CreateTrailResponse does not publish (#756). Whether a new trail logs is GetTrailStatus's to
+	// say, and #1157 owns that it is born logging at all.
+	var trail struct {
+		Name         string `json:"Name"`
+		TrailARN     string `json:"TrailARN"`
+		S3BucketName string `json:"S3BucketName"`
+	}
 	if err := json.Unmarshal(resp.Body, &trail); err != nil {
 		t.Fatalf("unmarshal create: %v", err)
 	}
@@ -75,9 +83,6 @@ func TestCloudTrailPlugin_CreateGetDeleteTrail(t *testing.T) {
 	}
 	if trail.S3BucketName != "my-cloudtrail-bucket" {
 		t.Errorf("want S3BucketName=my-cloudtrail-bucket, got %q", trail.S3BucketName)
-	}
-	if !trail.IsLogging {
-		t.Error("want IsLogging=true after create")
 	}
 
 	// Duplicate create should fail.
@@ -104,7 +109,9 @@ func TestCloudTrailPlugin_CreateGetDeleteTrail(t *testing.T) {
 		t.Fatalf("GetTrail: %v", err)
 	}
 	var getResult struct {
-		Trail emulator.CloudTrailTrail `json:"Trail"`
+		Trail struct {
+			Name string `json:"Name"`
+		} `json:"Trail"`
 	}
 	if err := json.Unmarshal(resp.Body, &getResult); err != nil {
 		t.Fatalf("unmarshal get: %v", err)
@@ -159,7 +166,9 @@ func TestCloudTrailPlugin_UpdateTrail(t *testing.T) {
 		t.Fatalf("UpdateTrail: %v", err)
 	}
 
-	var trail emulator.CloudTrailTrail
+	var trail struct {
+		S3BucketName string `json:"S3BucketName"`
+	}
 	if err := json.Unmarshal(resp.Body, &trail); err != nil {
 		t.Fatalf("unmarshal update: %v", err)
 	}
@@ -187,7 +196,9 @@ func TestCloudTrailPlugin_DescribeTrails(t *testing.T) {
 	}
 
 	var result struct {
-		TrailList []emulator.CloudTrailTrail `json:"trailList"`
+		TrailList []struct {
+			Name string `json:"Name"`
+		} `json:"trailList"`
 	}
 	if err := json.Unmarshal(resp.Body, &result); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
@@ -198,63 +209,58 @@ func TestCloudTrailPlugin_DescribeTrails(t *testing.T) {
 }
 
 func TestCloudTrailPlugin_StartStopLogging(t *testing.T) {
-	p, ctx := setupCloudTrailPlugin(t)
+	// The persisted flag is what StartLogging and StopLogging change, and it is read from state here
+	// because no published response reports it yet. This test used to read it through GetTrail's
+	// IsLogging, a member API_Trail does not publish (#756). The member GetTrailStatus publishes is
+	// hardcoded true (#1157), so until that is fixed the stored record is the only honest observation.
+	state := emulator.NewMemoryStateManager()
+	p := &emulator.CloudTrailPlugin{}
+	if err := p.Initialize(t.Context(), emulator.PluginConfig{
+		State:   state,
+		Logger:  emulator.NewDefaultLogger(0, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Now())},
+	}); err != nil {
+		t.Fatalf("CloudTrailPlugin.Initialize: %v", err)
+	}
+	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-ct-logging"}
 
-	_, err := p.HandleRequest(ctx, cloudtrailRequest(t, "CreateTrail", map[string]any{
+	isLogging := func(t *testing.T) bool {
+		t.Helper()
+		data, err := state.Get(t.Context(), "cloudtrail", "trail:123456789012/us-east-1/logging-trail")
+		if err != nil || data == nil {
+			t.Fatalf("read trail record: %v", err)
+		}
+		var record struct {
+			IsLogging bool `json:"IsLogging"`
+		}
+		if err := json.Unmarshal(data, &record); err != nil {
+			t.Fatalf("decode trail record: %v", err)
+		}
+		return record.IsLogging
+	}
+
+	if _, err := p.HandleRequest(ctx, cloudtrailRequest(t, "CreateTrail", map[string]any{
 		"Name":         "logging-trail",
 		"S3BucketName": "logging-bucket",
-	}))
-	if err != nil {
+	})); err != nil {
 		t.Fatalf("CreateTrail: %v", err)
 	}
 
-	// Stop logging.
-	resp, err := p.HandleRequest(ctx, cloudtrailRequest(t, "StopLogging", map[string]any{
-		"Name": "logging-trail",
-	}))
+	resp, err := p.HandleRequest(ctx, cloudtrailRequest(t, "StopLogging", map[string]any{"Name": "logging-trail"}))
 	if err != nil {
 		t.Fatalf("StopLogging: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
-
-	// Verify IsLogging=false.
-	resp, err = p.HandleRequest(ctx, cloudtrailRequest(t, "GetTrail", map[string]any{
-		"Name": "logging-trail",
-	}))
-	if err != nil {
-		t.Fatalf("GetTrail after stop: %v", err)
-	}
-	var getResult struct {
-		Trail emulator.CloudTrailTrail `json:"Trail"`
-	}
-	if err := json.Unmarshal(resp.Body, &getResult); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if getResult.Trail.IsLogging {
+	if isLogging(t) {
 		t.Error("want IsLogging=false after StopLogging")
 	}
 
-	// Start logging.
-	_, err = p.HandleRequest(ctx, cloudtrailRequest(t, "StartLogging", map[string]any{
-		"Name": "logging-trail",
-	}))
-	if err != nil {
+	if _, err := p.HandleRequest(ctx, cloudtrailRequest(t, "StartLogging", map[string]any{"Name": "logging-trail"})); err != nil {
 		t.Fatalf("StartLogging: %v", err)
 	}
-
-	// Verify IsLogging=true.
-	resp, err = p.HandleRequest(ctx, cloudtrailRequest(t, "GetTrail", map[string]any{
-		"Name": "logging-trail",
-	}))
-	if err != nil {
-		t.Fatalf("GetTrail after start: %v", err)
-	}
-	if err := json.Unmarshal(resp.Body, &getResult); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if !getResult.Trail.IsLogging {
+	if !isLogging(t) {
 		t.Error("want IsLogging=true after StartLogging")
 	}
 }

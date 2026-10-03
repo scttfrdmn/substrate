@@ -129,7 +129,7 @@ func (p *CloudTrailPlugin) createTrail(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	updateStringIndex(goCtx, p.state, cloudtrailNamespace, cloudtrailTrailNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
 
-	return cloudtrailJSONResponse(http.StatusOK, trail)
+	return cloudtrailJSONResponse(http.StatusOK, cloudtrailTrailWriteToWire(trail))
 }
 
 func (p *CloudTrailPlugin) getTrail(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -148,7 +148,7 @@ func (p *CloudTrailPlugin) getTrail(reqCtx *RequestContext, req *AWSRequest) (*A
 	}
 
 	return cloudtrailJSONResponse(http.StatusOK, map[string]interface{}{
-		"Trail": trail,
+		"Trail": cloudtrailTrailToWire(*trail),
 	})
 }
 
@@ -239,7 +239,7 @@ func (p *CloudTrailPlugin) updateTrail(reqCtx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("cloudtrail updateTrail put: %w", err)
 	}
 
-	return cloudtrailJSONResponse(http.StatusOK, trail)
+	return cloudtrailJSONResponse(http.StatusOK, cloudtrailTrailWriteToWire(*trail))
 }
 
 func (p *CloudTrailPlugin) deleteTrail(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -290,7 +290,7 @@ func (p *CloudTrailPlugin) describeTrails(reqCtx *RequestContext, req *AWSReques
 		nameSet[n] = true
 	}
 
-	trails := make([]CloudTrailTrail, 0, len(names))
+	trails := make([]cloudtrailTrailOut, 0, len(names))
 	for _, name := range names {
 		if len(nameSet) > 0 && !nameSet[name] {
 			continue
@@ -299,7 +299,7 @@ func (p *CloudTrailPlugin) describeTrails(reqCtx *RequestContext, req *AWSReques
 		if err != nil {
 			continue
 		}
-		trails = append(trails, *trail)
+		trails = append(trails, cloudtrailTrailToWire(*trail))
 	}
 
 	return cloudtrailJSONResponse(http.StatusOK, map[string]interface{}{
