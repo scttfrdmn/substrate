@@ -602,6 +602,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Budgets' DescribeBudget and DescribeBudgets no longer answer the stored record whole** (#756).
+  Both handed the persisted `Budget` to the caller, so a consumer read `AccountId`, `Region` and
+  `CreatedAt`, none of which `API_budgets_Budget` publishes. They now answer `budgetOut` from the new
+  `emulator/budgets_wire.go`, and the stored record is unchanged. The new
+  `emulator/budgets_wire_test.go` drives all five routed operations. That takes the inventory from
+  **264 projected across 109 records to 267 across 110**, and the still-reachable count from **46 to
+  43**.
+
 - **ACM's DescribeCertificate answers the published shape, with its dates as epoch seconds** (#756,
   #1305). It handed the persisted `ACMCertificate` to the caller, so a consumer read `AccountID`,
   `Region` and `ever_tagged`, plus `Tags`, which `API_CertificateDetail` does not publish. It also

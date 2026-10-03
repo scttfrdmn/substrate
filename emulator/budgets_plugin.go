@@ -202,13 +202,13 @@ func (p *BudgetsPlugin) describeBudgets(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("describeBudgets names: %w", err)
 	}
 
-	budgets := make([]Budget, 0, len(names))
+	budgets := make([]budgetOut, 0, len(names))
 	for _, name := range names {
 		b, loadErr := p.loadBudget(context.Background(), acct, name)
 		if loadErr != nil || b == nil {
 			continue
 		}
-		budgets = append(budgets, *b)
+		budgets = append(budgets, budgetToWire(*b))
 	}
 
 	out := map[string]interface{}{
@@ -246,7 +246,7 @@ func (p *BudgetsPlugin) describeBudget(reqCtx *RequestContext, req *AWSRequest) 
 		}
 	}
 
-	out := map[string]interface{}{"Budget": b}
+	out := map[string]interface{}{"Budget": budgetToWire(*b)}
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, fmt.Errorf("describeBudget marshal: %w", err)
