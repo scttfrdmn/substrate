@@ -141,3 +141,56 @@ func TestCloudFrontInvalidation_AResubmittedBatchReturnsTheFirstInvalidation(t *
 	_, third := h.call(http.MethodPost, h.invalidationPath(), cfInvalidationBatch("other-ref", 1, "/*"))
 	require.NotEqual(t, id.FindStringSubmatch(first)[1], id.FindStringSubmatch(third)[1], "%s", third)
 }
+
+// A store fault at any read or write the invalidation handlers make is returned as an error, never
+// answered as a published refusal or as a 2xx over a record that was not written.
+func TestCloudFrontInvalidation_AStoreFaultIsAnError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		suffix string
+		body   string
+	}{
+		{"CreateInvalidation, index read", func(m *cfFaultStateManager) { m.failGet = cfInvalIDsPrefix }, http.MethodPost, "", cfInvalidationBatch("new", 1, "/*")},
+		{"CreateInvalidation, prior record read", func(m *cfFaultStateManager) { m.failGet = cfInvalPrefix }, http.MethodPost, "", cfInvalidationBatch("new", 1, "/*")},
+		{"CreateInvalidation, prior record corrupt", func(m *cfFaultStateManager) { m.corruptGet = cfInvalPrefix }, http.MethodPost, "", cfInvalidationBatch("new", 1, "/*")},
+		{"CreateInvalidation, record write", func(m *cfFaultStateManager) { m.failPut = cfInvalPrefix }, http.MethodPost, "", cfInvalidationBatch("new", 1, "/*")},
+		{"GetInvalidation, record read", func(m *cfFaultStateManager) { m.failGet = cfInvalPrefix }, http.MethodGet, "/{id}", ""},
+		{"ListInvalidations, index read", func(m *cfFaultStateManager) { m.failGet = cfInvalIDsPrefix }, http.MethodGet, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			p := cfOACPluginOn(t, fault)
+			h := &cfInvalidationHarness{t: t, p: p, ctx: &emulator.RequestContext{
+				AccountID: "123456789012", Region: "us-east-1", RequestID: "req-cf-fault", IDs: emulator.NewIDMint("req-cf-fault"),
+			}}
+			status, body := h.call(http.MethodPost, "/2020-05-31/distribution",
+				`<DistributionConfig><CallerReference>f</CallerReference><Comment>f</Comment><Enabled>true</Enabled></DistributionConfig>`)
+			require.Equal(t, http.StatusCreated, status, "CreateDistribution: %s", body)
+			h.distID = regexp.MustCompile(`<Id>([^<]+)</Id>`).FindStringSubmatch(body)[1]
+			status, body = h.call(http.MethodPost, h.invalidationPath(), cfInvalidationBatch("first", 1, "/a"))
+			require.Equal(t, http.StatusCreated, status, "the healthy CreateInvalidation: %s", body)
+			id := regexp.MustCompile(`<Id>([^<]+)</Id>`).FindStringSubmatch(body)[1]
+
+			tc.arm(fault)
+			_, err := p.HandleRequest(h.ctx, &emulator.AWSRequest{
+				Service: "cloudfront", HTTPMethod: tc.method,
+				Path: h.invalidationPath() + strings.ReplaceAll(tc.suffix, "{id}", id), Body: []byte(tc.body),
+				Headers: map[string]string{"Content-Type": "application/xml"}, Params: map[string]string{},
+			})
+			require.Error(t, err, "%s must fail on a store fault", tc.name)
+			var awsErr *emulator.AWSError
+			require.Falsef(t, errors.As(err, &awsErr), "%s answered a store fault as the published %v", tc.name, awsErr)
+		})
+	}
+}
+
+// The key prefixes the fault cases arm on. "cfinval:" is not a substring of "cfinval_ids:", so each
+// faults one key kind only.
+const (
+	cfInvalPrefix    = "cfinval:"
+	cfInvalIDsPrefix = "cfinval_ids:"
+)
