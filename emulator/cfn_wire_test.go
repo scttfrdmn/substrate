@@ -34,6 +34,16 @@ func cfnWire(t *testing.T, ts *cfnTestServer, action string, params map[string]s
 	return []byte(body)
 }
 
+// cfnWireScope returns the "<account>/<region>" segment a stack's state keys carry (#1366), read
+// from the StackId ARN the create answered, so the test does not restate how an unsigned request
+// is attributed.
+func cfnWireScope(t *testing.T, created []byte) string {
+	t.Helper()
+	m := regexp.MustCompile(`<StackId>arn:aws:cloudformation:([^:]+):(\d+):stack/`).FindSubmatch(created)
+	require.NotNil(t, m, "CreateStack must answer a StackId ARN: %s", created)
+	return string(m[2]) + "/" + string(m[1])
+}
+
 // cfnWireRecord returns the record at key in the cfn namespace as raw JSON.
 func cfnWireRecord(t *testing.T, ts *cfnTestServer, key string) map[string]json.RawMessage {
 	t.Helper()
@@ -87,7 +97,8 @@ func TestCFNWire_StackResponsesCarryNoBookkeepingMember(t *testing.T) {
 	stack := map[string]string{"StackName": name}
 	created := cfnWire(t, ts, "CreateStack", map[string]string{"StackName": name, "TemplateBody": cfnEmptyTemplate})
 	updated := cfnWire(t, ts, "UpdateStack", map[string]string{"StackName": name, "TemplateBody": cfnBucketTemplate})
-	cfnWireRequireSet(t, cfnWireRecord(t, ts, "stack:"+name), "stack:"+name, cfnBookkeepingMembers...)
+	stackKey := "stack:" + cfnWireScope(t, created) + "/" + name
+	cfnWireRequireSet(t, cfnWireRecord(t, ts, stackKey), stackKey, cfnBookkeepingMembers...)
 
 	drift := cfnWire(t, ts, "DetectStackDrift", stack)
 	m := regexp.MustCompile(`<StackDriftDetectionId>([^<]+)</StackDriftDetectionId>`).FindSubmatch(drift)
@@ -115,11 +126,11 @@ func TestCFNWire_ChangeSetResponsesCarryNoBookkeepingMember(t *testing.T) {
 	ts := newCFNTestServer(t)
 
 	const stackName, csName = "wire-cs-stack", "wire-change-set"
-	cfnWire(t, ts, "CreateStack", map[string]string{"StackName": stackName, "TemplateBody": cfnEmptyTemplate})
+	stackCreated := cfnWire(t, ts, "CreateStack", map[string]string{"StackName": stackName, "TemplateBody": cfnEmptyTemplate})
 	created := cfnWire(t, ts, "CreateChangeSet", map[string]string{
 		"StackName": stackName, "ChangeSetName": csName, "ChangeSetType": "UPDATE", "TemplateBody": cfnBucketTemplate,
 	})
-	key := "changeset:" + stackName + "/" + csName
+	key := "changeset:" + cfnWireScope(t, stackCreated) + "/" + stackName + "/" + csName
 	cfnWireRequireSet(t, cfnWireRecord(t, ts, key), key, "CreatedAt")
 
 	cs := map[string]string{"StackName": stackName, "ChangeSetName": csName}

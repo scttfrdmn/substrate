@@ -27,7 +27,10 @@ func setupCloudFrontPlugin(t *testing.T) (*emulator.CloudFrontPlugin, *emulator.
 	return p, &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
 }
 
-const cfDistributionConfigXML = `<DistributionConfig><Comment>test distribution</Comment><Enabled>true</Enabled></DistributionConfig>`
+const cfDistributionConfigXML = `<DistributionConfig><Comment>` + cfTestComment + `</Comment><Enabled>true</Enabled></DistributionConfig>`
+
+// cfTestComment is the comment cfDistributionConfigXML creates a distribution with.
+const cfTestComment = "test distribution"
 
 func cfRequest(method, path string, params map[string]string, body string) *emulator.AWSRequest {
 	if params == nil {
@@ -207,8 +210,11 @@ func TestCloudFrontPlugin_DeleteDistribution(t *testing.T) {
 
 	distID := createTestDistribution(t, p, ctx)
 
-	// Delete distribution.
-	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodDelete, "/2020-05-31/distribution/"+distID, nil, ""))
+	// Delete distribution: API_DeleteDistribution requires it disabled first, and the If-Match is
+	// the ETag the disable answered (#1271).
+	del := cfRequest(http.MethodDelete, "/2020-05-31/distribution/"+distID, nil, "")
+	del.Headers["If-Match"] = cfDisableDistribution(t, p, ctx, distID)
+	resp, err := p.HandleRequest(ctx, del)
 	if err != nil {
 		t.Fatalf("DeleteDistribution: %v", err)
 	}
@@ -235,14 +241,50 @@ func TestCloudFrontPlugin_UpdateDistribution(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 	distID := createTestDistribution(t, p, ctx)
 
-	updatedConfig := `<DistributionConfig><Comment>updated distribution</Comment><Enabled>false</Enabled></DistributionConfig>`
-	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodPut, "/2020-05-31/distribution/"+distID+"/config", nil, updatedConfig))
+	// Read-modify-write, the procedure API_UpdateDistribution publishes: the configuration and its
+	// ETag from GetDistributionConfig, one member changed, the rest sent back as read (#1271).
+	config, etag := cfGetDistributionConfig(t, p, ctx, distID)
+	updated := strings.Replace(config, "<Comment>"+cfTestComment+"</Comment>", "<Comment>updated distribution</Comment>", 1)
+	req := cfRequest(http.MethodPut, "/2020-05-31/distribution/"+distID+"/config", nil, updated)
+	req.Headers["If-Match"] = etag
+	resp, err := p.HandleRequest(ctx, req)
 	if err != nil {
 		t.Fatalf("UpdateDistribution: %v", err)
 	}
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("UpdateDistribution: want 200, got %d; body=%s", resp.StatusCode, resp.Body)
 	}
+	if !strings.Contains(string(resp.Body), "<Comment>updated distribution</Comment>") {
+		t.Errorf("UpdateDistribution must answer the updated comment: %s", resp.Body)
+	}
+}
+
+// cfGetDistributionConfig answers a distribution's configuration document and its ETag.
+func cfGetDistributionConfig(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emulator.RequestContext, distID string) (string, string) {
+	t.Helper()
+	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodGet, "/2020-05-31/distribution/"+distID+"/config", nil, ""))
+	if err != nil {
+		t.Fatalf("GetDistributionConfig: %v", err)
+	}
+	if resp.Headers["ETag"] == "" {
+		t.Fatalf("GetDistributionConfig answered no ETag: %v", resp.Headers)
+	}
+	return strings.TrimPrefix(string(resp.Body), xml.Header), resp.Headers["ETag"]
+}
+
+// cfDisableDistribution disables a distribution by read-modify-write and returns the ETag the
+// update answered, which is the version a delete must then echo.
+func cfDisableDistribution(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emulator.RequestContext, distID string) string {
+	t.Helper()
+	config, etag := cfGetDistributionConfig(t, p, ctx, distID)
+	req := cfRequest(http.MethodPut, "/2020-05-31/distribution/"+distID+"/config", nil,
+		strings.Replace(config, "<Enabled>true</Enabled>", "<Enabled>false</Enabled>", 1))
+	req.Headers["If-Match"] = etag
+	resp, err := p.HandleRequest(ctx, req)
+	if err != nil {
+		t.Fatalf("disable distribution %s: %v", distID, err)
+	}
+	return resp.Headers["ETag"]
 }
 
 func TestCloudFrontPlugin_TagAndListTags(t *testing.T) {

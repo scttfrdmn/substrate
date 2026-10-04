@@ -203,7 +203,7 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 		return nil, cfnMissingParameter("TemplateBody")
 	}
 
-	existing, err := p.findStack(name)
+	existing, err := p.findStack(reqCtx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -285,7 +285,7 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		return nil, cfnTemplateURLUnsupported()
 	}
 
-	stack, err := p.findStack(name)
+	stack, err := p.findStack(reqCtx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -367,7 +367,7 @@ func (p *CloudFormationPlugin) deleteStack(reqCtx *RequestContext, req *AWSReque
 	// contributes no attribution and still succeeds, since deleting an absent stack
 	// is a success.
 	att := cfnAttribution{}
-	if stack, findErr := p.findStack(name); findErr == nil && stack != nil {
+	if stack, findErr := p.findStack(reqCtx, name); findErr == nil && stack != nil {
 		att = stack.attribution()
 	}
 	if roleARN := req.Params["RoleARN"]; roleARN != "" {
@@ -464,13 +464,13 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 
 	var stacks []CFNStackState
 	if name == "" {
-		all, err := p.listAllStacks()
+		all, err := p.listAllStacks(reqCtx)
 		if err != nil {
 			return nil, err
 		}
 		stacks = all
 	} else {
-		stack, err := p.findStack(name)
+		stack, err := p.findStack(reqCtx, name)
 		if err != nil {
 			return nil, err
 		}
@@ -510,7 +510,7 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 
 func (p *CloudFormationPlugin) listStacks(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	filters := extractIndexedParams(req.Params, "StackStatusFilter.member")
-	stacks, err := p.listAllStacks()
+	stacks, err := p.listAllStacks(reqCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -565,7 +565,7 @@ func (p *CloudFormationPlugin) describeStackEvents(reqCtx *RequestContext, req *
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	stack, err := p.findStack(name)
+	stack, err := p.findStack(reqCtx, name)
 	if err != nil {
 		return nil, err
 	}
@@ -624,7 +624,7 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 
 	var stacks []CFNStackState
 	if name != "" {
-		stack, err := p.findStack(name)
+		stack, err := p.findStack(reqCtx, name)
 		if err != nil {
 			return nil, err
 		}
@@ -633,7 +633,7 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 		}
 		stacks = []CFNStackState{*stack}
 	} else {
-		all, err := p.listAllStacks()
+		all, err := p.listAllStacks(reqCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -701,7 +701,7 @@ func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSReque
 	var body string
 	switch {
 	case changeSetName != "":
-		cs, err := p.findChangeSet(stackName, changeSetName)
+		cs, err := p.findChangeSet(reqCtx, stackName, changeSetName)
 		if err != nil {
 			return nil, err
 		}
@@ -710,7 +710,7 @@ func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSReque
 		}
 		body = cs.TemplateBody
 	case stackName != "":
-		stack, err := p.findStack(stackName)
+		stack, err := p.findStack(reqCtx, stackName)
 		if err != nil {
 			return nil, err
 		}
@@ -772,14 +772,14 @@ func (p *CloudFormationPlugin) createChangeSet(reqCtx *RequestContext, req *AWSR
 		}
 	}
 
-	stack, err := p.findStack(stackName)
+	stack, err := p.findStack(reqCtx, stackName)
 	if err != nil {
 		return nil, err
 	}
 	if stack == nil {
 		return nil, cfnStackNotFound(stackName)
 	}
-	if existing, err := p.findChangeSet(stackName, changeSetName); err != nil {
+	if existing, err := p.findChangeSet(reqCtx, stackName, changeSetName); err != nil {
 		return nil, err
 	} else if existing != nil {
 		return nil, &AWSError{
@@ -797,7 +797,7 @@ func (p *CloudFormationPlugin) createChangeSet(reqCtx *RequestContext, req *AWSR
 	// tags to resources in the stack." The same decoder createStack and updateStack use, so
 	// an omitted Tags, an empty list and a populated one mean here what they mean there; the
 	// deployer validates them, which is why nothing is checked at this layer (#824).
-	if _, err := p.deployer.CreateChangeSet(context.Background(), stackName, changeSetName, body,
+	if _, err := p.scopedDeployer(reqCtx).CreateChangeSet(context.Background(), stackName, changeSetName, body,
 		cfnRequestParameters(req.Params, stack.Parameters), cfnStackTags(req.Params)); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -834,7 +834,7 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 	if arnErr != nil {
 		return nil, arnErr
 	}
-	cs, err := p.findChangeSet(stackName, changeSetName)
+	cs, err := p.findChangeSet(reqCtx, stackName, changeSetName)
 	if err != nil {
 		return nil, err
 	}
@@ -923,7 +923,7 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	if arnErr != nil {
 		return nil, arnErr
 	}
-	cs, err := p.findChangeSet(stackName, changeSetName)
+	cs, err := p.findChangeSet(reqCtx, stackName, changeSetName)
 	if err != nil {
 		return nil, err
 	}
@@ -939,7 +939,7 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	// exist has none to inherit, so its resource calls are attributed to the caller
 	// executing it — which is CloudFormation's no-service-role case.
 	att := cfnAttribution{creator: reqCtx.Principal}
-	if stack, findErr := p.findStack(cs.StackName); findErr == nil && stack != nil {
+	if stack, findErr := p.findStack(reqCtx, cs.StackName); findErr == nil && stack != nil {
 		att = stack.attribution()
 	}
 	if _, err := p.deployerFor(reqCtx, att).ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
@@ -965,14 +965,14 @@ func (p *CloudFormationPlugin) listChangeSets(reqCtx *RequestContext, req *AWSRe
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	stack, err := p.findStack(stackName)
+	stack, err := p.findStack(reqCtx, stackName)
 	if err != nil {
 		return nil, err
 	}
 	if stack == nil {
 		return nil, cfnStackNotFound(stackName)
 	}
-	sets, err := p.deployer.ListChangeSets(context.Background(), stackName)
+	sets, err := p.scopedDeployer(reqCtx).ListChangeSets(context.Background(), stackName)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1022,10 +1022,10 @@ func (p *CloudFormationPlugin) deleteChangeSet(reqCtx *RequestContext, req *AWSR
 	// DeleteChangeSet documents no not-found error, so deleting an absent change
 	// set succeeds; only a wrong-status change set is refused, and substrate has
 	// no in-progress status to refuse.
-	if cs, err := p.findChangeSet(stackName, changeSetName); err != nil {
+	if cs, err := p.findChangeSet(reqCtx, stackName, changeSetName); err != nil {
 		return nil, err
 	} else if cs != nil {
-		if err := p.deployer.DeleteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
+		if err := p.scopedDeployer(reqCtx).DeleteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
 			return nil, cfnMapDeployerError(err)
 		}
 	}
@@ -1224,7 +1224,7 @@ func (p *CloudFormationPlugin) describeStackDriftDetectionStatus(reqCtx *Request
 	if detectionID == "" {
 		return nil, cfnMissingParameter("StackDriftDetectionId")
 	}
-	status, err := p.deployer.DescribeStackDriftDetectionStatus(context.Background(), detectionID)
+	status, err := p.scopedDeployer(reqCtx).DescribeStackDriftDetectionStatus(context.Background(), detectionID)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1259,9 +1259,16 @@ func (p *CloudFormationPlugin) describeStackDriftDetectionStatus(reqCtx *Request
 
 // --- Lookups ---
 
-// listAllStacks returns every persisted stack.
-func (p *CloudFormationPlugin) listAllStacks() ([]CFNStackState, error) {
-	stacks, err := p.deployer.ListStacks(context.Background())
+// scopedDeployer returns a deployer that reads and writes in the caller's account and Region and
+// dispatches unauthorized. Stack state is keyed by both (#1366), so a lookup through the plugin's
+// own identity-less deployer would see only substrate's default account and Region.
+func (p *CloudFormationPlugin) scopedDeployer(reqCtx *RequestContext) *StackDeployer {
+	return p.deployerFor(reqCtx, cfnAttribution{})
+}
+
+// listAllStacks returns every stack in the caller's account and Region (#1366).
+func (p *CloudFormationPlugin) listAllStacks(reqCtx *RequestContext) ([]CFNStackState, error) {
+	stacks, err := p.scopedDeployer(reqCtx).ListStacks(context.Background())
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
@@ -1272,8 +1279,8 @@ func (p *CloudFormationPlugin) listAllStacks() ([]CFNStackState, error) {
 //
 // The lookup goes through StackDeployer.ListStacks rather than reading the
 // cfn namespace directly so the state key layout stays cfn_deployer.go's business.
-func (p *CloudFormationPlugin) findStack(name string) (*CFNStackState, error) {
-	stacks, err := p.listAllStacks()
+func (p *CloudFormationPlugin) findStack(reqCtx *RequestContext, name string) (*CFNStackState, error) {
+	stacks, err := p.listAllStacks(reqCtx)
 	if err != nil {
 		return nil, err
 	}
@@ -1288,10 +1295,10 @@ func (p *CloudFormationPlugin) findStack(name string) (*CFNStackState, error) {
 // findChangeSet resolves a change set by name. An empty stackName searches every
 // stack, which is what lets DescribeChangeSet and ExecuteChangeSet accept a
 // change-set ARN with no StackName the way the API documents.
-func (p *CloudFormationPlugin) findChangeSet(stackName, changeSetName string) (*CFNChangeSet, error) {
+func (p *CloudFormationPlugin) findChangeSet(reqCtx *RequestContext, stackName, changeSetName string) (*CFNChangeSet, error) {
 	stackNames := []string{stackName}
 	if stackName == "" {
-		stacks, err := p.listAllStacks()
+		stacks, err := p.listAllStacks(reqCtx)
 		if err != nil {
 			return nil, err
 		}
@@ -1301,7 +1308,7 @@ func (p *CloudFormationPlugin) findChangeSet(stackName, changeSetName string) (*
 		}
 	}
 	for _, sn := range stackNames {
-		sets, err := p.deployer.ListChangeSets(context.Background(), sn)
+		sets, err := p.scopedDeployer(reqCtx).ListChangeSets(context.Background(), sn)
 		if err != nil {
 			return nil, cfnMapDeployerError(err)
 		}

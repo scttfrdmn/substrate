@@ -521,7 +521,11 @@ func (d *StackDeployer) setStackStatus(ctx context.Context, stackName, status, r
 // and the disagreement would be a stack that is gone from one listing and present in
 // the other.
 func (d *StackDeployer) removeStackRecord(ctx context.Context, stackName string) error {
-	if err := d.state.Delete(ctx, cfnNamespace, "stack:"+stackName); err != nil {
+	// A stack recorded before #1366 moves to its scoped keys first, so one delete removes it.
+	if err := d.migrateLegacyStack(ctx, stackName); err != nil {
+		return fmt.Errorf("delete stack %s: %w", stackName, err)
+	}
+	if err := d.state.Delete(ctx, cfnNamespace, d.stackKey(stackName)); err != nil {
 		return fmt.Errorf("delete stack %s: %w", stackName, err)
 	}
 	names, err := d.loadStackNames(ctx)

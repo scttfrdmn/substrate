@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1023 operations**. This
+Substrate ships **67 built-in service plugins** routing **1032 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -56,7 +56,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 35 | IAM | `iam` | Query | 74 |
 | 36 | Kinesis Data Streams | `kinesis` | JSON | 17 |
 | 37 | KMS | `kms` | JSON | 24 |
-| 38 | Lambda | `lambda` | REST/JSON | 20 |
+| 38 | Lambda | `lambda` | REST/JSON | 29 |
 | 39 | CloudWatch Logs | `logs` | JSON | 14 |
 | 40 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
 | 41 | MSK | `msk` | REST/JSON | 9 |
@@ -2432,6 +2432,27 @@ identifier substrate would have issued — and is refused with the same
 deliberate: a stack outside the caller's account and Region is one the caller
 cannot observe, so a distinct error would disclose whether some other scope holds a
 stack by that name.
+
+### A stack name is unique per account per Region
+
+A stack, its change sets and its drift detections are stored under keys that carry the
+caller's account and Region (`stack:<account>/<region>/<name>`, and likewise for
+`changeset:`, `changeset_names:`, `stack_names:` and `drift_detection:`), so two accounts,
+or two Regions of one account, can each create a stack named `app` and each reads back
+only its own. Until [#1366](https://github.com/scttfrdmn/substrate/issues/1366) the keys
+carried neither: the second `CreateStack` was refused `AlreadyExistsException`, and a
+`DescribeStacks` in one Region answered the other Region's stack. Every operation reads in
+the request's scope, the reads the plugin makes on its own behalf included.
+
+A state snapshot taken before #1366 (the file and sqlite event stores keep them) holds the
+unscoped keys. A read falls back to such a key when the scoped one is absent, for a record
+whose own `AccountID` and `Region` place it in the reader's scope (an empty field matches,
+as a stack recorded before those fields existed has neither). The first write to such a
+stack moves it, with its change sets and drift detections, to its scoped keys, so a
+restored snapshot keeps every stack and is migrated by use. A replay of a recorded event
+stream needs neither: it re-executes the requests against fresh state, and they write
+scoped keys. `TestCFNScope_*` in `emulator/cfn_scope_test.go` asserts the isolation, the
+fallback, the migration, and that a store fault on any of them is an error.
 
 ### Stacks share state with every other plugin
 
@@ -6270,6 +6291,15 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | TagResource | `204` with no body. Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
 | UntagResource | Takes `tagKeys` as repeated query parameters; `204` with no body |
 | ListTags | Reports `Tags` as a map, empty for an untagged function |
+| PublishLayerVersion | `201` with the published shape; `Content` is a `ZipFile` or an `S3Bucket`/`S3Key`, sized and hashed like a function package. Version numbers start at 1 and are never reused after a delete. Published under `2018-10-31`, as every layer operation is |
+| ListLayerVersions | Newest first; filters on `CompatibleRuntime`/`CompatibleArchitecture`; `MaxItems` 1–50 and a `Marker` substrate issued. **Another account's layer is always `AccessDeniedException`**, since no layer policy can grant this action — see [Another account's layer](#another-accounts-layer) |
+| ListLayers | The caller's own layers in its Region, each with its latest version matching the filters; a layer with none matching is not listed |
+| GetLayerVersion | The owner gets `ResourceNotFoundException`/404 for a version that does not exist. Another account gets the version only when its policy grants it, and **`AccessDeniedException` otherwise, including for a version that does not exist** |
+| GetLayerVersionByArn | `GET /2018-10-31/layers?find=LayerVersion&Arn=…`; the same rules as `GetLayerVersion` |
+| DeleteLayerVersion | `204`, also for a version that does not exist: the page publishes no not-found refusal |
+| AddLayerVersionPermission | `Action` must be `lambda:GetLayerVersion`, the one value its pattern allows; `Principal` an account ID, a root ARN or `*`. A duplicate `StatementId` is `ResourceConflictException`/409 and a stale `RevisionId` `PreconditionFailedException`/412. `Statement` is a JSON document in a string |
+| GetLayerVersionPolicy | The policy document as a string, with its `RevisionId`; a version with no statement is `ResourceNotFoundException`/404 |
+| RemoveLayerVersionPermission | `204`; an unmatched `StatementId` is `ResourceNotFoundException`/404, and a stale `RevisionId` is `PreconditionFailedException`/412 |
 
 The row that used to sit here read `InvokeFunction`, which **is not a Lambda API
 operation** — the operation is `Invoke`, and `InvokeFunction` is the IAM action name. So
@@ -6277,6 +6307,50 @@ the one `Invoke`-shaped row in the table named something no caller can call, whi
 eight operations the plugin actually routes had no row at all (#1015). Rows are now
 listed in the router's own order, which is the order a reader checking one against the
 other needs.
+
+### Another account's layer
+
+A layer belongs to one account in one Region: the account in the layer ARN when the request names
+the layer by ARN, and the caller's own when it names it by name. The owner can do everything.
+Another account can do only what the layer version's resource policy grants it, and
+`API_AddLayerVersionPermission` constrains `Action` to the single value `lambda:GetLayerVersion`, so
+that is all any policy can grant ([#1272](https://github.com/scttfrdmn/substrate/issues/1272)):
+
+| Another account's request | Answer |
+|---|---|
+| `ListLayerVersions` | Always `AccessDeniedException`/403, even for a public layer |
+| `GetLayerVersion`, `GetLayerVersionByArn` on a version the policy grants (to `*`, the caller's account, or its root ARN) | The version |
+| The same, on a version the policy does not grant, **or that does not exist** | `AccessDeniedException`/403, not `ResourceNotFoundException` |
+| `PublishLayerVersion`, `DeleteLayerVersion`, `GetLayerVersionPolicy` and both permission operations | `AccessDeniedException`/403 |
+
+The refusal reads *"User: {caller} is not authorized to perform: {action} on resource: {ARN} because
+no resource-based policy allows the {action} action"*. The caller is the request's principal ARN, or
+the account's root ARN when none is resolved.
+
+**Provenance: observed.** Neither `AccessDeniedException` answer is in the operations' published
+Errors lists. Both were observed against a real account (#1272): a cross-account `ListLayerVersions`
+of `arn:aws:lambda:us-west-2:753240598075:layer:LambdaAdapterLayerArm64` was refused with that
+sentence, and `GetLayerVersion` answered versions 1–30 and `AccessDeniedException` for 31–50, a range
+that was never published. That is what lets a consumer probe for the newest version, doubling upward
+and then binary-searching the boundary, since absent and forbidden are one answer. The code and the
+403 are the JSON protocol's authorization answer, the same ones an identity-policy denial gives
+(#595). The rule is a resource-policy decision, so it holds whether or not IAM enforcement is on.
+
+A statement scoped to an organization (`OrganizationId`) grants nothing here. Substrate does not
+resolve which organization a caller's account belongs to, and refusing is the reading that cannot
+over-grant.
+
+#### Seeding another account's public layer
+
+`POST /v1/lambda/layer-versions` with `{"layerArn": "arn:aws:lambda:us-west-2:753240598075:layer:LambdaAdapterLayerArm64", "publishedVersions": 30}`
+makes versions 1 through 30 of that layer readable, each with a statement granting
+`lambda:GetLayerVersion` to `*`, the way a public layer is published. So a consumer's search loop
+runs deterministically, without substrate asserting facts about a real account that may age. The
+seed is applied at read time, like every other seed. A version the layer's own account published
+takes precedence over a seeded one of the same number, and a publish continues the numbering past
+the seeded count. `DELETE /v1/lambda/layer-versions?layerArn=…` removes one seed; without the
+parameter it removes all of them. The write is recorded, so a replay re-applies it in position
+(#1140).
 
 ### Each operation is published under its own API version date
 
@@ -17719,10 +17793,10 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 |-----------|-------|
 | CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277) |
 | CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`. A body substrate cannot decode is refused rather than creating an untagged distribution |
-| GetDistribution | |
-| GetDistributionConfig | Answers `DistributionConfig` members only, and two of its five required ones — see [A configuration is not a distribution](#a-configuration-is-not-a-distribution) |
-| UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb |
-| DeleteDistribution | |
+| GetDistribution | Answers the `ETag` header (#1271) |
+| GetDistributionConfig | Answers the configuration the create or last update sent, with what `CreateDistribution` defaults filled in, and the `ETag` header — see [An update replaces the configuration](#an-update-replaces-the-configuration) |
+| UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb. Replaces the configuration; requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412); refuses `MissingBody`, `IllegalUpdate` and `InvalidArgument`/400 one member per call (#1271) |
+| DeleteDistribution | Requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412) and a disabled distribution (`DistributionNotDisabled`/409) (#1271) |
 | ListDistributions | |
 | CreateInvalidation | Keeps and answers the `InvalidationBatch`; a resubmitted batch returns the first invalidation (#1360) |
 | GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
@@ -17790,10 +17864,10 @@ and `NextMarker` are published members and are not rendered, for the reason `Lis
 omits them: substrate holds no value for a page boundary it never draws.
 
 Two published behaviours are deliberately absent. **`OriginAccessControlInUse`/409** on delete needs
-to know that some distribution names the control, and substrate records no origins — that is the gap
-[A configuration is not a distribution](#a-configuration-is-not-a-distribution) describes, and
-[#1271](https://github.com/scttfrdmn/substrate/issues/1271) is where a distribution starts recording
-its configuration and the check becomes answerable. **`OriginAccessControlAlreadyExists`/409** on
+to know that some distribution names the control. Since
+[#1271](https://github.com/scttfrdmn/substrate/issues/1271) a distribution records the configuration
+it was sent, its origins' `OriginAccessControlId` included, so the check is answerable, but it is not
+made yet. **`OriginAccessControlAlreadyExists`/409** on
 create is published for a control "with the specified parameters", which parameters is not published,
 and a control carries no `CallerReference` to key a duplicate on the way a distribution does; a
 repeated create mints a second control, so a consumer converging by name should list first.
@@ -17808,24 +17882,17 @@ answered the same fields for both until #1091: the configuration carried `Id` an
 caller reading a distribution's identity out of a configuration found it here and finds nothing
 there against CloudFront itself.
 
-The configuration now carries `Comment` and `Enabled` and nothing else, and `Comment` is answered
-even when empty because `API_DistributionConfig` marks it `Required: Yes` and the Response Syntax
-renders it unconditionally.
+Since #1271 the configuration is the document the create or the last update sent (see the next
+section), and `Comment` and `Enabled` are always among its members: both are `Required: Yes` and
+rendered unconditionally by the Response Syntax.
 
 **Two divergences remain, and are deliberate.**
 
 `DistributionConfig` marks five members `Required: Yes` — `CallerReference`, `Comment`,
-`DefaultCacheBehavior`, `Enabled` and `Origins` — and substrate can answer two.
-`CreateDistribution` decodes only `Comment` and `Enabled` from its body, so there is no recorded
-value for the other three, and neither page publishes an example of a configuration to copy a
-shape from. An `Origins` needs `Items` and a `Quantity`; a `DefaultCacheBehavior` needs a whole
-subtree. Omitting a member substrate holds no value for is the honest answer; inventing one would
-assert a shape AWS has not published.
-
-The unrecorded `Origins` is also what defers `OriginAccessControlInUse`/409: an origin access
-control is referenced *from* an origin, so until a distribution records the origins it was created
-with, a delete cannot tell an unused control from one a live distribution depends on. Both halves
-land together in [#1271](https://github.com/scttfrdmn/substrate/issues/1271).
+`DefaultCacheBehavior`, `Enabled` and `Origins` — and `CreateDistribution` does not require them, as
+it never has (#1197's class). A distribution created without `Origins`, `DefaultCacheBehavior` or a
+`CallerReference` answers a configuration without them: substrate holds no value for them, and
+inventing one would assert a shape AWS has not published.
 
 `API_GetDistributionConfig` publishes, on its `Id` parameter: *"The distribution's ID. If the ID is
 empty, an empty distribution configuration is returned."* An empty ID is reachable — the path
@@ -17838,6 +17905,62 @@ true; it is simply not what AWS says for this one input.
 A path ending in a bare slash is *not* that case. `/2020-05-31/distribution/` has its trailing
 slash trimmed before routing, so it is `ListDistributions` — not a `GetDistribution` with an empty
 ID, which is the natural reading of the routing arithmetic and is wrong.
+
+### An update replaces the configuration
+
+`API_UpdateDistribution`: *"The new configuration replaces the existing configuration. The values that
+you specify in an `UpdateDistribution` request are not merged into your existing configuration. Make
+sure to include all fields."* The procedure it publishes is read-modify-write: `GetDistributionConfig`
+for the configuration and its `ETag`, change your own fields, `UpdateDistribution` with the `ETag` as
+`If-Match`. Until [#1271](https://github.com/scttfrdmn/substrate/issues/1271) substrate recorded two
+members and merged an update into them, so a configuration written from scratch updated cleanly here
+and failed against CloudFront, one field per round trip.
+
+A distribution now keeps the configuration it was sent, every member and in order, as a document
+substrate echoes rather than interprets. `CreateDistribution` fills in the three members a real
+account was observed to default on create and then require on update. Those members are refused on
+update, one per call, in this order:
+
+| Missing from the update | Code (400) | Message |
+|---|---|---|
+| `Aliases` | `IllegalUpdate` | Aliases are missing for the resource |
+| an origin's `CustomHeaders` | `IllegalUpdate` | The 'OriginCustomHeaders' field is missing |
+| a cache behavior's `SmoothStreaming` (default or path) | `InvalidArgument` | The parameter SmoothStreaming flag is missing |
+
+The codes are on `API_UpdateDistribution`'s Errors list. The messages and the order are **observed**
+(#1271's report), not published; the reference marks all three members `Required: No`. The
+reporter suspected more of the same family (`OriginPath`, `TrustedSigners`, `Compress`, the
+connection timeouts…), and none of those is enforced, because none was observed.
+
+Then, in substrate's own wording:
+- an update without `Comment` or `Enabled`, or with an `Enabled` that is not `true`/`false`, is
+  `InvalidArgument`/400, because the update must have both to replace the record's values;
+- an update that changes or drops the `CallerReference` the distribution was created with is
+  `IllegalUpdate`/400 (*"You can't change the value of `CallerReference`"*).
+
+The three other `Required: Yes` members (`Origins`, `DefaultCacheBehavior`, `CallerReference`) are
+not required on update, because `CreateDistribution` does not require them. Requiring them on update
+alone would make a distribution substrate itself created un-updatable.
+
+**Versions.** A create mints the distribution's `ETag`, and each update mints a new one. `CreateDistribution`,
+`GetDistribution`, `GetDistributionConfig` and `UpdateDistribution` answer it as the `ETag` header.
+`UpdateDistribution` and `DeleteDistribution` require it as `If-Match`:
+- a missing one, or one substrate could not have issued, is `InvalidIfMatchVersion`/400;
+- a well-formed stale one is `PreconditionFailed`/412.
+
+A record written before #1271 has no `ETag`; its version is its own ID until the first update mints
+one. The order of checks on an update is: the distribution exists, there is a body (`MissingBody`),
+it parses (`InvalidArgument`), the version is current, then the configuration's checks.
+
+**Deleting.** `API_DeleteDistribution`: *"Before you can delete a distribution, you must disable
+it"*, under the `ETag` the disable answered. An enabled distribution is
+`DistributionNotDisabled`/409, after the version check.
+
+A distribution's `Status` is `Deployed` from creation, so the "wait for `Deployed`" step passes at
+once. An observable `InProgress` window is a progression of its own, not modeled.
+
+A CloudFormation stack delete performs the same sequence: read, disable under the version read,
+delete under the version the disable answered.
 
 ### Both invalidation codes name something
 

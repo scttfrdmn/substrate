@@ -58,7 +58,7 @@ var operationResolvers = map[string]func(req *AWSRequest) string{
 		return op
 	},
 	"lambda": func(req *AWSRequest) string {
-		op, _, _ := parseLambdaOperation(requestMethod(req), req.Path)
+		op, _, _ := lambdaRequestOperation(req)
 		return op
 	},
 	"apigateway": func(req *AWSRequest) string {

@@ -24,18 +24,26 @@ func TestCloudFrontWire_DistributionResponsesCarryNoBookkeepingMember(t *testing
 	t.Parallel()
 	p := &emulator.CloudFrontPlugin{}
 	ctx, state := wireSetup(t, p, "req-cloudfront-wire")
-	call := func(method, path string, params map[string]string, body string) []byte {
+	send := func(method, path, ifMatch string, params map[string]string, body string) *emulator.AWSResponse {
 		t.Helper()
 		if params == nil {
 			params = map[string]string{}
 		}
+		headers := map[string]string{"Content-Type": "application/xml"}
+		if ifMatch != "" {
+			headers["If-Match"] = ifMatch
+		}
 		resp, err := p.HandleRequest(ctx, &emulator.AWSRequest{
 			Service: "cloudfront", HTTPMethod: method, Path: path, Body: []byte(body),
-			Headers: map[string]string{"Content-Type": "application/xml"}, Params: params,
+			Headers: headers, Params: params,
 		})
 		require.NoError(t, err, "%s %s", method, path)
 		require.Truef(t, resp.StatusCode >= 200 && resp.StatusCode < 300, "%s %s answered %d: %s", method, path, resp.StatusCode, resp.Body)
-		return resp.Body
+		return resp
+	}
+	call := func(method, path string, params map[string]string, body string) []byte {
+		t.Helper()
+		return send(method, path, "", params, body).Body
 	}
 
 	const config = `<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/"><CallerReference>wire-1</CallerReference><Comment>wire</Comment><Enabled>true</Enabled></DistributionConfig>`
@@ -65,7 +73,12 @@ func TestCloudFrontWire_DistributionResponsesCarryNoBookkeepingMember(t *testing
 		{"ListTagsForResource", func() []byte {
 			return call(http.MethodGet, "/2020-05-31/tagging", map[string]string{"Resource": arn}, "")
 		}, "<Key>team</Key>"},
-		{"UpdateDistribution", func() []byte { return call(http.MethodPut, dist+"/config", nil, config) }, "<Id>" + id + "</Id>"},
+		// Read-modify-write, as API_UpdateDistribution publishes it: the configuration sent back is
+		// the one read, under the ETag it was read with (#1271).
+		{"UpdateDistribution", func() []byte {
+			read := send(http.MethodGet, dist+"/config", "", nil, "")
+			return send(http.MethodPut, dist+"/config", read.Headers["ETag"], nil, string(read.Body)).Body
+		}, "<Id>" + id + "</Id>"},
 		{"CreateInvalidation", func() []byte { return call(http.MethodPost, dist+"/invalidation", nil, invalidation) }, "<Path>/*</Path>"},
 		{"ListInvalidations", func() []byte { return call(http.MethodGet, dist+"/invalidation", nil, "") }, "<Id>"},
 	} {

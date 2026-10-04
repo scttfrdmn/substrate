@@ -147,7 +147,7 @@ func (p *LambdaPlugin) stopAllPollers() {
 
 // HandleRequest dispatches a Lambda REST API request to the appropriate handler.
 func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	op, name, subResource := parseLambdaOperation(requestMethod(req), req.Path)
+	op, name, subResource := lambdaRequestOperation(req)
 	switch op {
 	case "CreateFunction":
 		return p.createFunction(ctx, req)
@@ -189,6 +189,13 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 		return p.updateEventSourceMapping(ctx, req, name)
 	case "DeleteEventSourceMapping":
 		return p.deleteEventSourceMapping(ctx, name)
+	case "ListLayers":
+		return p.listLayers(ctx, req)
+	case "GetLayerVersionByArn":
+		return p.getLayerVersionByArn(ctx, req)
+	case "PublishLayerVersion", "ListLayerVersions", "GetLayerVersion", "DeleteLayerVersion",
+		"AddLayerVersionPermission", "GetLayerVersionPolicy", "RemoveLayerVersionPermission":
+		return p.handleLayer(ctx, req, op, name, subResource)
 	default:
 		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}

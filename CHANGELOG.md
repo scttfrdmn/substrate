@@ -7,7 +7,55 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Lambda routes the layer family, and another account's public layer answers as AWS does**
+  (#1272). No layer operation was routed. Nine are now, under `2018-10-31`: `PublishLayerVersion`,
+  `GetLayerVersion`, `GetLayerVersionByArn`, `ListLayerVersions`, `ListLayers`, `DeleteLayerVersion`,
+  `AddLayerVersionPermission`, `GetLayerVersionPolicy` and `RemoveLayerVersionPermission`.
+  - Another account sees only what a version's resource policy grants, and a policy can grant only
+    `lambda:GetLayerVersion`. So `ListLayerVersions` on another account's layer is always
+    `AccessDeniedException`, and a version that is ungranted **or absent** is `AccessDeniedException`
+    rather than `ResourceNotFoundException`. Both are observed behaviour, quoted from #1272, and are
+    what make a consumer's version probe work.
+  - `POST /v1/lambda/layer-versions` seeds another account's public layer with N published versions,
+    applied at read time, so the probe runs deterministically. Organization-scoped grants grant
+    nothing, since substrate does not know a caller's organization. The operation catalog goes from
+    1023 to 1032.
+
 ### Fixed
+
+- **A CloudFormation stack name is unique per account per Region** (#1366). Stack, change-set and
+  drift-detection state was keyed by name alone (`stack:<name>`, `changeset:<stack>/<name>`). So two
+  accounts, or two Regions of one account, that each created `app` addressed one record: the second
+  `CreateStack` was refused `AlreadyExistsException`, and a `DescribeStacks` in one Region answered
+  the other's stack. Every key now carries `<account>/<region>/`, and the plugin's own lookups read
+  in the request's scope rather than substrate's default one.
+  - A record stored before the fix is still read when its own `AccountID`/`Region` place it in the
+    reader's scope, so a restored snapshot keeps its stacks. The first write to such a stack moves
+    it, with its change sets and drift detections, to the scoped keys.
+  - A replayed event stream is unaffected: it re-executes the requests, which write scoped keys.
+
+- **CloudFront's `UpdateDistribution` replaces the configuration and refuses what CloudFront refuses,
+  and `DeleteDistribution` requires a disabled distribution and the current version** (#1271).
+  A distribution recorded only `Comment` and `Enabled`, and an update merged into them. So a
+  configuration written from scratch updated here and failed against CloudFront, one field per round
+  trip. A distribution now keeps the whole configuration it was sent, and an update replaces it.
+  - `CreateDistribution` fills in the three members CloudFront defaults on create: `Aliases`, each
+    origin's `CustomHeaders`, and each cache behavior's `SmoothStreaming`. An update omitting one is
+    refused in the observed order and wording:
+    - `IllegalUpdate` "Aliases are missing for the resource";
+    - `IllegalUpdate` "The 'OriginCustomHeaders' field is missing";
+    - `InvalidArgument` "The parameter SmoothStreaming flag is missing".
+  - A changed or dropped `CallerReference` is `IllegalUpdate`, and a missing body is `MissingBody`.
+    `GetDistributionConfig` answers what was sent, so a read-modify-write round-trips.
+  - A distribution has an `ETag`, minted at create and at each update, and answered by the create,
+    `GetDistribution`, `GetDistributionConfig` and the update. Update and delete require it as
+    `If-Match`: `InvalidIfMatchVersion`/400 when missing, `PreconditionFailed`/412 when stale.
+  - Deleting an enabled distribution is `DistributionNotDisabled`/409. A CloudFormation stack delete
+    now reads, disables and deletes in that order.
+  - The three messages and their order are observed, not published. An observable
+    `InProgress → Deployed` window is #1381.
 
 - **An ECR image digest is the SHA-256 of its manifest** (#1283). `PutImage` minted a digest
   unrelated to the manifest, so every push stored a new image, a caller could not verify a push by

@@ -241,29 +241,21 @@ func cfHasWithTags(params map[string]string) bool {
 
 // --- Distribution operations ------------------------------------------------
 
-// cfDistributionConfigBody is the part of a DistributionConfig substrate records: the two members
-// CreateDistribution has always decoded. docs/services.md's "A configuration is not a
-// distribution" section is the standing note on the three required members that are not here and
-// on what that costs; #1271 is where the rest of the configuration starts being recorded.
+// createDistribution handles POST /2020-05-31/distribution.
 //
-// It is a named type rather than an anonymous struct because CreateDistributionWithTags decodes
-// the same document one level down, inside DistributionConfigWithTags, and the two must decode it
-// identically — a member the tagged create reads from a different element name would make the two
-// creates record different distributions from the same body.
-type cfDistributionConfigBody struct {
-	XMLName xml.Name `xml:"DistributionConfig"`
-	Comment string   `xml:"Comment"`
-	Enabled string   `xml:"Enabled"`
-}
-
+// The configuration is recorded whole (#1271; see cloudfront_distribution_config.go). Both creates
+// read it through [cfParseDistributionConfig], so the tagged create, which carries the same
+// document one level down, cannot record a different distribution from the same configuration.
+//
+// A body that does not parse still creates a distribution from an empty configuration, as it
+// always has: CreateDistribution's leniency about its own body is #1197's class, and changing it is
+// not this function's business.
 func (p *CloudFrontPlugin) createDistribution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	// Parse optional comment and enabled flag from XML body.
-	var xmlBody cfDistributionConfigBody
-	if len(req.Body) > 0 {
-		// Tolerate wrapper element names (CreateDistributionRequest, DistributionConfig).
-		_ = xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlBody)
+	cfg, err := cfParseDistributionConfig(req.Body)
+	if err != nil {
+		cfg = cfConfigNode{}
 	}
-	return p.createDistributionFrom(ctx, xmlBody, nil)
+	return p.createDistributionFrom(ctx, cfg, nil)
 }
 
 // createDistributionWithTags handles POST /2020-05-31/distribution?WithTags.
@@ -280,8 +272,7 @@ func (p *CloudFrontPlugin) createDistribution(ctx *RequestContext, req *AWSReque
 // is InvalidArgument/400, which the operation publishes alongside InvalidTagging/400.
 func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		XMLName xml.Name                 `xml:"DistributionConfigWithTags"`
-		Config  cfDistributionConfigBody `xml:"DistributionConfig"`
+		XMLName xml.Name `xml:"DistributionConfigWithTags"`
 		Tags    struct {
 			Items []struct {
 				Key   string `xml:"Key"`
@@ -292,12 +283,17 @@ func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *
 	if err := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&body); err != nil {
 		return nil, cfInvalidTagBody("DistributionConfigWithTags", err)
 	}
+	// The root already decoded, so a missing DistributionConfig child is the one failure left.
+	cfg, err := cfParseDistributionConfig(req.Body)
+	if err != nil {
+		cfg = cfConfigNode{}
+	}
 
 	tags := make(map[string]string, len(body.Tags.Items))
 	for _, tag := range body.Tags.Items {
 		tags[tag.Key] = tag.Value
 	}
-	return p.createDistributionFrom(ctx, body.Config, tags)
+	return p.createDistributionFrom(ctx, cfg, tags)
 }
 
 // createDistributionFrom records a distribution and answers the Distribution document both creates
@@ -308,10 +304,24 @@ func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *
 // create: writing the record and then tagging it would make a distribution observable untagged
 // between the two writes, and would answer the create's 201 with the tagging's own errors still
 // ahead of it.
-func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, xmlBody cfDistributionConfigBody, tags map[string]string) (*AWSResponse, error) {
+func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfConfigNode, tags map[string]string) (*AWSResponse, error) {
 	distID := generateCloudFrontID(ctx.IDs)
+	// Minted after the ID, from the same request's mint, so a replayed create reproduces both.
+	etag := cfMintETag(ctx.IDs)
 
-	enabled := !strings.EqualFold(xmlBody.Enabled, "false")
+	comment := ""
+	if c := cfg.child("Comment"); c != nil {
+		comment = c.Text
+	}
+	enabled := true
+	if c := cfg.child("Enabled"); c != nil {
+		enabled = !strings.EqualFold(strings.TrimSpace(c.Text), "false")
+	}
+	cfDefaultCreatedConfig(&cfg, comment, enabled)
+	config, err := cfMarshalConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront createDistribution marshal config: %w", err)
+	}
 	arn := fmt.Sprintf("arn:aws:cloudfront::%s:distribution/%s", ctx.AccountID, distID)
 	domainName := distID + ".cloudfront.net"
 	now := p.tc.Now()
@@ -324,8 +334,10 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, xmlBody c
 		ARN:        arn,
 		Status:     "Deployed",
 		DomainName: domainName,
-		Comment:    xmlBody.Comment,
+		Comment:    comment,
 		Enabled:    enabled,
+		Config:     config,
+		ETag:       etag,
 		Tags:       tags,
 		// EverTagged is set from the create's own tags, so that a distribution created with
 		// tags and then untagged to empty is still distinguishable from one that was never
@@ -358,12 +370,17 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, xmlBody c
 		Status     string   `xml:"Status"`
 		DomainName string   `xml:"DomainName"`
 	}
-	return cloudfrontXMLResponse(http.StatusCreated, xmlDist{
+	resp, err := cloudfrontXMLResponse(http.StatusCreated, xmlDist{
 		ID:         distID,
 		ARN:        arn,
 		Status:     "Deployed",
 		DomainName: domainName,
 	})
+	if err != nil {
+		return nil, err
+	}
+	resp.Headers["ETag"] = etag
+	return resp, nil
 }
 
 func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, distID string) (*AWSResponse, error) {
@@ -382,15 +399,14 @@ func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, d
 // AWS publishes one level up, and `GetDistributionConfig`'s own Response Syntax does not carry
 // it (#1013).
 //
-// Two divergences from the published contract remain, recorded rather than papered over:
+// Since #1271 the configuration is the one the create or the last update sent, with what
+// CreateDistribution defaults filled in, and the response carries the distribution's ETag, so a
+// read-modify-write round-trips (see cloudfront_distribution_config.go). A required member the
+// caller never sent — `Origins`, `DefaultCacheBehavior`, `CallerReference` — is still absent:
+// CreateDistribution does not require them (#1197's class), and substrate will not invent one.
 //
-//   - `API_DistributionConfig` marks five members `Required: Yes` — `CallerReference`,
-//     `Comment`, `DefaultCacheBehavior`, `Enabled` and `Origins` — and substrate can answer
-//     two. `CreateDistribution` decodes only `Comment` and `Enabled` from its body, so there is
-//     no recorded value for the other three; rendering them would mean inventing a shape (an
-//     `Origins` needs `Items` and a `Quantity`, a `DefaultCacheBehavior` a whole subtree) and
-//     neither this page nor `API_CreateDistribution` publishes an example of a configuration to
-//     copy one from. Omitting a member substrate has no value for is the honest answer.
+// One divergence from the published contract remains, recorded rather than papered over:
+//
 //   - `Id` is published as "The distribution's ID. If the ID is empty, an empty distribution
 //     configuration is returned." An empty ID is reachable here — the path
 //     `/2020-05-31/distribution//config` routes to this operation with distID "" — and
@@ -405,40 +421,69 @@ func (p *CloudFrontPlugin) getDistributionConfig(ctx *RequestContext, _ *AWSRequ
 		return nil, err
 	}
 
-	// Comment carries no omitempty: it is Required: Yes and the Response Syntax renders it
-	// unconditionally, so a distribution created without one answers an empty element rather
-	// than dropping a member a caller is entitled to find.
-	type xmlConfig struct {
-		XMLName xml.Name `xml:"DistributionConfig"`
-		Comment string   `xml:"Comment"`
-		Enabled bool     `xml:"Enabled"`
+	// Comment and Enabled are always present: a create records both (cfDefaultCreatedConfig), and
+	// an update that omits either is refused, so the Required: Yes members a Response Syntax renders
+	// unconditionally are never dropped.
+	cfg, err := cfStoredConfig(dist)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront getDistributionConfig decode stored config: %w", err)
 	}
-	return cloudfrontXMLResponse(http.StatusOK, xmlConfig{
-		Comment: dist.Comment,
-		Enabled: dist.Enabled,
-	})
+	resp, err := cloudfrontXMLResponse(http.StatusOK, cfg)
+	if err != nil {
+		return nil, err
+	}
+	resp.Headers["ETag"] = cfDistributionETag(dist)
+	return resp, nil
 }
 
+// updateDistribution handles PUT /2020-05-31/distribution/{Id}/config.
+//
+// The configuration sent replaces the one recorded — API_UpdateDistribution: "not merged into your
+// existing configuration" — and is refused, one member per call, where CloudFront refuses it (#1271;
+// see [cfCheckUpdatedConfig] and cloudfront_distribution_config.go). Until #1271 the update merged a
+// non-empty Comment and Enabled into the record and ignored the rest, so a from-scratch
+// configuration that real CloudFront refuses succeeded here.
+//
+// The order is: the distribution exists (NoSuchDistribution/404); there is a body (MissingBody/400)
+// that parses (InvalidArgument/400); the If-Match names the current version
+// (InvalidIfMatchVersion/400, PreconditionFailed/412); then the configuration's own checks. Only the
+// order of those last checks among themselves was observed; the rest is substrate's reading, chosen
+// so that each refusal reports the first thing actually wrong — a caller with a stale version is not
+// asked to fix a configuration it will have to re-read anyway, and a caller with no body is not
+// asked for a version.
 func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSRequest, distID string) (*AWSResponse, error) {
 	dist, err := p.loadDistribution(ctx, distID)
 	if err != nil {
 		return nil, err
 	}
+	if len(bytes.TrimSpace(req.Body)) == 0 {
+		return nil, cfConfigError("MissingBody",
+			"This operation requires a body. Ensure that the body is present and the Content-Type header is set.")
+	}
+	cfg, err := cfParseDistributionConfig(req.Body)
+	if err != nil {
+		return nil, cfConfigError("InvalidArgument", "The DistributionConfig document could not be parsed: "+err.Error())
+	}
+	if err := cfCheckIfMatch(req, dist); err != nil {
+		return nil, err
+	}
+	prior, err := cfStoredConfig(dist)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront updateDistribution decode stored config: %w", err)
+	}
+	if err := cfCheckUpdatedConfig(&cfg, cfConfigCallerReference(&prior)); err != nil {
+		return nil, err
+	}
 
-	var xmlBody struct {
-		XMLName xml.Name `xml:"DistributionConfig"`
-		Comment string   `xml:"Comment"`
-		Enabled string   `xml:"Enabled"`
+	cfg.XMLName = xml.Name{Local: "DistributionConfig"}
+	config, err := cfMarshalConfig(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cloudfront updateDistribution marshal config: %w", err)
 	}
-	if len(req.Body) > 0 {
-		_ = xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlBody)
-	}
-	if xmlBody.Comment != "" {
-		dist.Comment = xmlBody.Comment
-	}
-	if xmlBody.Enabled != "" {
-		dist.Enabled = !strings.EqualFold(xmlBody.Enabled, "false")
-	}
+	dist.Config = config
+	dist.Comment = cfg.child("Comment").Text
+	dist.Enabled = strings.TrimSpace(cfg.child("Enabled").Text) == "true"
+	dist.ETag = cfMintETag(ctx.IDs)
 	dist.LastModifiedTime = p.tc.Now()
 
 	data, err := json.Marshal(dist)
@@ -452,9 +497,32 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 	return p.marshalDistributionXML(dist)
 }
 
-func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, _ *AWSRequest, distID string) (*AWSResponse, error) {
-	if _, err := p.loadDistribution(ctx, distID); err != nil {
+// deleteDistribution handles DELETE /2020-05-31/distribution/{Id}.
+//
+// API_DeleteDistribution: "Before you can delete a distribution, you must disable it", and the
+// If-Match is "the value of the ETag header that you received when you disabled the distribution".
+// So an absent distribution is NoSuchDistribution/404, a missing or stale If-Match is
+// InvalidIfMatchVersion/400 or PreconditionFailed/412, and an enabled one is
+// DistributionNotDisabled/409, with the page's sentence (#1271). The version is checked before the
+// state so a caller holding a stale version re-reads before it is told anything about a
+// distribution it may no longer be looking at. Until #1271 the delete checked none of this.
+//
+// A distribution's Status is Deployed from its creation, so the "wait for Deployed" step of the
+// disable-wait-delete loop passes at once; an observable InProgress is a progression of its own.
+func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSRequest, distID string) (*AWSResponse, error) {
+	dist, err := p.loadDistribution(ctx, distID)
+	if err != nil {
 		return nil, err
+	}
+	if err := cfCheckIfMatch(req, dist); err != nil {
+		return nil, err
+	}
+	if dist.Enabled {
+		return nil, &AWSError{
+			Code:       "DistributionNotDisabled",
+			Message:    "The specified CloudFront distribution is not disabled. You must disable the distribution before you can delete it.",
+			HTTPStatus: http.StatusConflict,
+		}
 	}
 
 	goCtx := context.Background()
@@ -1034,7 +1102,7 @@ func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (
 		Enabled          bool     `xml:"Enabled"`
 		LastModifiedTime string   `xml:"LastModifiedTime"`
 	}
-	return cloudfrontXMLResponse(http.StatusOK, xmlDist{
+	resp, err := cloudfrontXMLResponse(http.StatusOK, xmlDist{
 		ID:               dist.ID,
 		ARN:              dist.ARN,
 		Status:           dist.Status,
@@ -1043,6 +1111,13 @@ func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (
 		Enabled:          dist.Enabled,
 		LastModifiedTime: dist.LastModifiedTime.UTC().Format(time.RFC3339),
 	})
+	if err != nil {
+		return nil, err
+	}
+	// GetDistribution and UpdateDistribution both publish the ETag header (#1271): it is the
+	// version the next update or delete must echo.
+	resp.Headers["ETag"] = cfDistributionETag(dist)
+	return resp, nil
 }
 
 // cfIDAlphabet is the alphabet every CloudFront identifier substrate mints draws from: the

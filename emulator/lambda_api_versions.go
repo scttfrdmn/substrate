@@ -26,6 +26,7 @@ import "strings"
 //   - `2014-11-13` — `InvokeAsync`, which AWS marks deprecated and still serializes;
 //   - `2015-03-31` — the function CRUD, `Invoke`, the resource policy, and event source mappings;
 //   - `2017-03-31` — `TagResource`, `UntagResource` and `ListTags`;
+//   - `2018-10-31` — the nine layer operations (#1272), dated in lambda_layers.go;
 //   - `2019-09-25` — `PutFunctionEventInvokeConfig`.
 //
 // `aws-sdk-go-v2/service/lambda`'s serializer is the mechanical check on that list: its
@@ -115,6 +116,8 @@ func parseLambdaOperation(method, path string) (op, name, subResource string) {
 		return lambdaEventSourceMappingOperation(method, p)
 	case strings.HasPrefix(p, "/functions"):
 		return lambdaFunctionOperation(version, method, p)
+	case version == lambdaLayersAPIVersion && (p == "/layers" || strings.HasPrefix(p, "/layers/")):
+		return lambdaLayerOperation(method, p)
 	}
 	return lambdaUnknownOperation, "", ""
 }
@@ -279,6 +282,10 @@ func lambdaAuthzResourceARN(path, region, accountID string) string {
 			return arn
 		}
 		return "*"
+	}
+	if version, p, ok := lambdaSplitAPIVersion(path); ok &&
+		version == lambdaLayersAPIVersion && strings.HasPrefix(p, "/layers/") {
+		return lambdaLayerAuthzResourceARN(p, region, accountID)
 	}
 	if name := lambdaNameFromPath(path); name != "" {
 		return "arn:aws:lambda:" + region + ":" + accountID + ":function:" + name
