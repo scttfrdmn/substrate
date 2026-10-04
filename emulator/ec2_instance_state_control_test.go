@@ -528,9 +528,10 @@ func ec2ReplaySoleRecordedState(t *testing.T, ts *emulator.TestServer) string {
 
 // The state namespace and the two key prefixes the control plane writes, spelled here because
 // [ec2InstStateFaultState] must fault one prefix without faulting the other. They are
-// `ec2InstStateNamespace`, `ec2InstStateKeyPrefix` and `ec2InstObservedPrefix` in
-// `ec2_instance_state_control.go`; a rename there fails the tests below rather than passing them
-// vacuously, because every one of them asserts an observable consequence of the fault.
+// `ec2InstStateNamespace` in `ec2_instance_state_control.go` and `progressionSeedPrefix` and
+// `progressionObservedPrefix` in `progression.go`; a rename there fails the tests below rather
+// than passing them vacuously, because every one of them asserts an observable consequence of the
+// fault.
 const (
 	ec2InstStateNS       = "ec2-inst-state-ctrl"
 	ec2InstStateSeedKeys = "status:"

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 )
@@ -72,11 +71,12 @@ import (
 // snapshot ones — it lists by prefix within a namespace, and both progressions use "status:".
 const ec2InstStateNamespace = "ec2-inst-state-ctrl"
 
-// ec2InstStateKeyPrefix is the key prefix for every progression seed, used to clear all.
-const ec2InstStateKeyPrefix = "status:"
-
-// ec2InstObservedPrefix is the key prefix for the per-instance observation counters.
-const ec2InstObservedPrefix = "observed:"
+// ec2InstanceProgressions is the instance kind's seeded countdown, in [ec2InstStateNamespace].
+//
+// The counters are keyed per instance even under the "*" wildcard, which is what keeps one
+// DescribeInstances call over five instances from burning five observations off a single shared
+// countdown — the hazard #582 records for the SQS seed. See [progression].
+var ec2InstanceProgressions = newProgression[ec2InstanceProgression](ec2InstStateNamespace, "instanceId", "transientObservations")
 
 // ec2InstanceProgression is a seeded transient → settled instance-state progression.
 //
@@ -98,11 +98,16 @@ type ec2InstanceProgression struct {
 	TransientObservations int `json:"transientObservations"`
 }
 
-// ec2InstanceObserved is the per-instance countdown position.
-type ec2InstanceObserved struct {
-	// Observations is how many observations the instance has had since its last state change.
-	Observations int `json:"observations"`
-}
+// progressionID implements [progressionSeed].
+func (seed ec2InstanceProgression) progressionID() string { return seed.InstanceID }
+
+// progressionObservations implements [progressionSeed].
+func (seed ec2InstanceProgression) progressionObservations() int { return seed.TransientObservations }
+
+// validateProgression implements [progressionSeed]. An instance seed names no state — the
+// transient state is derived from the record by [ec2TransientStateFor] — so there is nothing to
+// refuse beyond the negative count the handler already refuses.
+func (seed ec2InstanceProgression) validateProgression() error { return nil }
 
 // ec2TransientStateFor returns the state AWS publishes on the way to a settled one, and false
 // for a settled state no published transition leads through.
@@ -147,47 +152,6 @@ func ec2ReportedTransition(settled EC2InstanceState) EC2InstanceState {
 	return settled
 }
 
-// ec2InstStateKey returns the state key for a progression seed. Instance-scoped seeds use
-// "status:{id}"; the wildcard uses "status:*".
-func ec2InstStateKey(instanceID string) string {
-	if instanceID == "" {
-		instanceID = "*"
-	}
-	return ec2InstStateKeyPrefix + instanceID
-}
-
-// ec2InstObservedKey returns the state key holding how many observations one instance has had
-// since its last state change.
-//
-// Keyed by instance ID even when the seed governing it is the "*" wildcard, which is what keeps
-// one DescribeInstances call over five instances from burning five observations off a single
-// shared countdown — the hazard #582 records for the SQS seed, met here as [ec2SnapObservedKey]
-// meets it: the specification is shared and read-only, the progress through it is per resource.
-func ec2InstObservedKey(instanceID string) string {
-	return ec2InstObservedPrefix + instanceID
-}
-
-// resolveInstanceProgression returns the seeded progression for one instance, matching the exact
-// ID first and then the "*" wildcard, or (nil, nil) when none applies.
-func (p *EC2Plugin) resolveInstanceProgression(instanceID string) (*ec2InstanceProgression, error) {
-	goCtx := context.Background()
-	for _, key := range []string{ec2InstStateKey(instanceID), ec2InstStateKey("*")} {
-		data, err := p.state.Get(goCtx, ec2InstStateNamespace, key)
-		if err != nil {
-			return nil, fmt.Errorf("ec2 resolveInstanceProgression get: %w", err)
-		}
-		if data == nil {
-			continue
-		}
-		var seed ec2InstanceProgression
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, fmt.Errorf("ec2 resolveInstanceProgression unmarshal: %w", err)
-		}
-		return &seed, nil
-	}
-	return nil, nil //nolint:nilnil // (nil, nil) = "no seed applies", handled by caller.
-}
-
 // observeInstanceState reports the state this observation of the instance sees and advances its
 // countdown by one.
 //
@@ -207,7 +171,8 @@ func (p *EC2Plugin) observeInstanceState(inst EC2Instance) EC2InstanceState {
 	p.seedMu.Lock()
 	defer p.seedMu.Unlock()
 
-	seed, err := p.resolveInstanceProgression(inst.InstanceID)
+	ctx := context.Background()
+	seed, err := ec2InstanceProgressions.resolve(ctx, p.state, inst.InstanceID)
 	if err != nil || seed == nil || seed.TransientObservations <= 0 {
 		return inst.State
 	}
@@ -215,7 +180,7 @@ func (p *EC2Plugin) observeInstanceState(inst EC2Instance) EC2InstanceState {
 	if !ok {
 		return inst.State
 	}
-	seen, err := p.instanceObservations(inst.InstanceID)
+	seen, err := ec2InstanceProgressions.observations(ctx, p.state, inst.InstanceID)
 	if err != nil {
 		return inst.State
 	}
@@ -223,36 +188,14 @@ func (p *EC2Plugin) observeInstanceState(inst EC2Instance) EC2InstanceState {
 		return inst.State
 	}
 
-	// Advanced only while it can still change an answer, per [EC2Plugin.observeSnapshotStatus]:
-	// past the end of the countdown a further Put would rewrite state on every describe of a
-	// settled instance for no observable difference, and every one of those writes lands in the
-	// event log a replay has to walk.
-	data, marshalErr := json.Marshal(ec2InstanceObserved{Observations: seen + 1})
-	if marshalErr != nil {
-		return inst.State
-	}
-	if putErr := p.state.Put(context.Background(), ec2InstStateNamespace,
-		ec2InstObservedKey(inst.InstanceID), data); putErr != nil {
+	// Advanced only while it can still change an answer, per [progression]: past the end of the
+	// countdown a further Put would rewrite state on every describe of a settled instance for no
+	// observable difference, and every one of those writes lands in the event log a replay has to
+	// walk.
+	if err := ec2InstanceProgressions.advance(ctx, p.state, inst.InstanceID, seen); err != nil {
 		return inst.State
 	}
 	return transient
-}
-
-// instanceObservations returns how many observations one instance has had since its last state
-// change, zero when it has had none.
-func (p *EC2Plugin) instanceObservations(instanceID string) (int, error) {
-	data, err := p.state.Get(context.Background(), ec2InstStateNamespace, ec2InstObservedKey(instanceID))
-	if err != nil {
-		return 0, fmt.Errorf("ec2 instanceObservations get: %w", err)
-	}
-	if data == nil {
-		return 0, nil
-	}
-	var observed ec2InstanceObserved
-	if err := json.Unmarshal(data, &observed); err != nil {
-		return 0, fmt.Errorf("ec2 instanceObservations unmarshal: %w", err)
-	}
-	return observed.Observations, nil
 }
 
 // resetInstanceObservations restarts one instance's countdown, and is called by every operation
@@ -267,9 +210,8 @@ func (p *EC2Plugin) instanceObservations(instanceID string) (int, error) {
 // The error is returned rather than swallowed because its callers already handle one; a failure
 // here would silently report a settled state for a transition the caller asked to be observable.
 func (p *EC2Plugin) resetInstanceObservations(instanceID string) error {
-	if err := p.state.Delete(context.Background(), ec2InstStateNamespace,
-		ec2InstObservedKey(instanceID)); err != nil {
-		return fmt.Errorf("ec2 resetInstanceObservations %s: %w", instanceID, err)
+	if err := ec2InstanceProgressions.reset(context.Background(), p.state, instanceID); err != nil {
+		return fmt.Errorf("ec2 resetInstanceObservations: %w", err)
 	}
 	return nil
 }
@@ -303,85 +245,12 @@ func ec2CannotTransitionTerminated(verb string) *AWSError {
 // Seeding resets the countdown for every instance the seed governs, so a test that seeds twice
 // gets two full progressions rather than the remainder of the first.
 func (s *Server) handleEC2SeedInstanceState(w http.ResponseWriter, r *http.Request) {
-	var seed ec2InstanceProgression
-	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-		return
-	}
-	if seed.TransientObservations < 0 {
-		http.Error(w, `{"error":"transientObservations must be >= 0"}`, http.StatusBadRequest)
-		return
-	}
-	data, err := json.Marshal(seed)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	if err := s.state.Put(r.Context(), ec2InstStateNamespace, ec2InstStateKey(seed.InstanceID), data); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	if err := s.clearInstanceObservations(r, seed.InstanceID); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	writeJSONDebug(w, s.logger, map[string]any{"ok": true, "instanceId": ec2InstStateKey(seed.InstanceID)})
+	ec2InstanceProgressions.serveSeed(w, r, s.state, s.logger)
 }
 
 // handleEC2ClearInstanceState handles DELETE /v1/ec2/instance-state. With ?instanceId=... it
 // removes that seed; without it removes all. Either way it also clears the countdown position of
 // the instances the seed governed, so a later seed starts from the beginning.
 func (s *Server) handleEC2ClearInstanceState(w http.ResponseWriter, r *http.Request) {
-	if id := r.URL.Query().Get("instanceId"); id != "" {
-		if err := s.state.Delete(r.Context(), ec2InstStateNamespace, ec2InstStateKey(id)); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		if err := s.clearInstanceObservations(r, id); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
-		return
-	}
-	for _, prefix := range []string{ec2InstStateKeyPrefix, ec2InstObservedPrefix} {
-		keys, err := s.state.List(r.Context(), ec2InstStateNamespace, prefix)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		for _, k := range keys {
-			if err := s.state.Delete(r.Context(), ec2InstStateNamespace, k); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-	writeJSONDebug(w, s.logger, map[string]any{"ok": true})
-}
-
-// clearInstanceObservations resets the countdown position of the instances a seed governs: one
-// instance for an ID-scoped seed, every instance for the "*" wildcard.
-//
-// The wildcard case sweeps the prefix rather than deleting one key, because the counters are per
-// instance by design — see [ec2InstObservedKey] — so no single key holds a wildcard seed's
-// progress.
-func (s *Server) clearInstanceObservations(r *http.Request, instanceID string) error {
-	if instanceID != "" && instanceID != "*" {
-		if err := s.state.Delete(r.Context(), ec2InstStateNamespace,
-			ec2InstObservedKey(instanceID)); err != nil {
-			return fmt.Errorf("ec2 clear instance observations %s: %w", instanceID, err)
-		}
-		return nil
-	}
-	keys, err := s.state.List(r.Context(), ec2InstStateNamespace, ec2InstObservedPrefix)
-	if err != nil {
-		return fmt.Errorf("ec2 list instance observations: %w", err)
-	}
-	for _, k := range keys {
-		if err := s.state.Delete(r.Context(), ec2InstStateNamespace, k); err != nil {
-			return fmt.Errorf("ec2 clear instance observations %s: %w", k, err)
-		}
-	}
-	return nil
+	ec2InstanceProgressions.serveClear(w, r, s.state, s.logger)
 }

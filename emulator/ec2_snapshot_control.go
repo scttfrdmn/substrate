@@ -2,10 +2,8 @@ package emulator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"slices"
 )
 
 // ec2SnapCtrlNamespace is the state namespace for EC2 snapshot control-plane (seed) data.
@@ -83,37 +81,23 @@ type ec2SnapshotProgression struct {
 // member's enumeration is the one followed, per #671: what the API model states.
 var ec2SnapshotStates = []string{"pending", "completed", "error", "recoverable", "recovering"}
 
-// ec2SnapCtrlKeyPrefix is the key prefix for every progression seed, used to clear all.
-const ec2SnapCtrlKeyPrefix = "status:"
-
-// ec2SnapObservedPrefix is the key prefix for the per-snapshot observation counters.
-const ec2SnapObservedPrefix = "observed:"
-
-// ec2SnapCtrlKey returns the state key for a progression seed. Snapshot-scoped seeds use
-// "status:{id}"; the wildcard uses "status:*".
-func ec2SnapCtrlKey(snapshotID string) string {
-	if snapshotID == "" {
-		snapshotID = "*"
-	}
-	return ec2SnapCtrlKeyPrefix + snapshotID
-}
-
-// ec2SnapObservedKey returns the state key holding how many observations one snapshot has
-// already had.
+// ec2SnapshotProgressions is the snapshot kind's seeded countdown, in [ec2SnapCtrlNamespace].
 //
-// The count is keyed by snapshot ID even when the seed that governs it is the "*" wildcard,
-// which is what keeps one DescribeSnapshots call over five snapshots from burning five
-// observations off a single shared countdown. That is the hazard #582 records for the SQS
-// seed, met here by separating the specification (shared, read-only) from the progress
-// through it (per snapshot).
-func ec2SnapObservedKey(snapshotID string) string {
-	return ec2SnapObservedPrefix + snapshotID
-}
+// The counters are keyed per snapshot even under the "*" wildcard, which is what keeps one
+// DescribeSnapshots call over five snapshots from burning five observations off a single shared
+// countdown — the hazard #582 records for the SQS seed. See [progression].
+var ec2SnapshotProgressions = newProgression[ec2SnapshotProgression](ec2SnapCtrlNamespace, "snapshotId", "pendingObservations")
 
-// ec2SnapshotObserved is the per-snapshot countdown position.
-type ec2SnapshotObserved struct {
-	// Observations is how many observations the snapshot has already had.
-	Observations int `json:"observations"`
+// progressionID implements [progressionSeed].
+func (seed ec2SnapshotProgression) progressionID() string { return seed.SnapshotID }
+
+// progressionObservations implements [progressionSeed].
+func (seed ec2SnapshotProgression) progressionObservations() int { return seed.PendingObservations }
+
+// validateProgression implements [progressionSeed]: both named states must be in
+// [ec2SnapshotStates].
+func (seed ec2SnapshotProgression) validateProgression() error {
+	return progressionStates("snapshot", ec2SnapshotStates, seed.State, seed.FinalState)
 }
 
 // ec2SnapshotObservation is what one observation of a snapshot reports: the state and
@@ -135,27 +119,6 @@ func ec2UnseededObservation(snap EC2Snapshot) ec2SnapshotObservation {
 	return ec2SnapshotObservation{State: snap.State, Progress: "100%"}
 }
 
-// resolveSnapshotProgression returns the seeded progression for one snapshot, matching the
-// exact ID first and then the "*" wildcard, or (nil, nil) when none applies.
-func (p *EC2Plugin) resolveSnapshotProgression(snapshotID string) (*ec2SnapshotProgression, error) {
-	goCtx := context.Background()
-	for _, key := range []string{ec2SnapCtrlKey(snapshotID), ec2SnapCtrlKey("*")} {
-		data, err := p.state.Get(goCtx, ec2SnapCtrlNamespace, key)
-		if err != nil {
-			return nil, fmt.Errorf("ec2 resolveSnapshotProgression get: %w", err)
-		}
-		if data == nil {
-			continue
-		}
-		var seed ec2SnapshotProgression
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, fmt.Errorf("ec2 resolveSnapshotProgression unmarshal: %w", err)
-		}
-		return &seed, nil
-	}
-	return nil, nil //nolint:nilnil // (nil, nil) = "no seed applies", handled by caller.
-}
-
 // peekSnapshotStatus reports what the snapshot would observe right now, without advancing its
 // countdown.
 //
@@ -171,16 +134,12 @@ func (p *EC2Plugin) resolveSnapshotProgression(snapshotID string) (*ec2SnapshotP
 // DeleteSnapshot needs neither peek nor observation: AWS permits deleting a snapshot in
 // progress, so its answer does not depend on the state at all — see [EC2Plugin.deleteSnapshot].
 func (p *EC2Plugin) peekSnapshotStatus(snap EC2Snapshot) (ec2SnapshotObservation, error) {
-	seed, err := p.resolveSnapshotProgression(snap.SnapshotID)
+	seed, seen, err := ec2SnapshotProgressions.peek(context.Background(), p.state, snap.SnapshotID)
 	if err != nil {
-		return ec2SnapshotObservation{}, err
+		return ec2SnapshotObservation{}, fmt.Errorf("ec2 peekSnapshotStatus: %w", err)
 	}
 	if seed == nil {
 		return ec2UnseededObservation(snap), nil
-	}
-	seen, err := p.snapshotObservations(snap.SnapshotID)
-	if err != nil {
-		return ec2SnapshotObservation{}, err
 	}
 	return seed.observation(seen), nil
 }
@@ -200,54 +159,14 @@ func (p *EC2Plugin) peekSnapshotStatus(snap EC2Snapshot) (ec2SnapshotObservation
 // single-process topology and would not hold across two emulator processes sharing one state
 // backend.
 func (p *EC2Plugin) observeSnapshotStatus(snap EC2Snapshot) (ec2SnapshotObservation, error) {
-	p.seedMu.Lock()
-	defer p.seedMu.Unlock()
-
-	seed, err := p.resolveSnapshotProgression(snap.SnapshotID)
+	seed, seen, err := ec2SnapshotProgressions.observe(context.Background(), p.state, &p.seedMu, snap.SnapshotID)
 	if err != nil {
-		return ec2SnapshotObservation{}, err
+		return ec2SnapshotObservation{}, fmt.Errorf("ec2 observeSnapshotStatus: %w", err)
 	}
 	if seed == nil {
 		return ec2UnseededObservation(snap), nil
 	}
-	seen, err := p.snapshotObservations(snap.SnapshotID)
-	if err != nil {
-		return ec2SnapshotObservation{}, err
-	}
-	observation := seed.observation(seen)
-
-	// The counter is advanced only while it can still change an answer. Past the end of the
-	// countdown the snapshot is terminal, so a further Put would rewrite state on every
-	// describe of a completed snapshot for no observable difference — and every one of those
-	// writes lands in the event log a replay has to walk.
-	if seen < seed.PendingObservations {
-		data, marshalErr := json.Marshal(ec2SnapshotObserved{Observations: seen + 1})
-		if marshalErr != nil {
-			return ec2SnapshotObservation{}, fmt.Errorf("ec2 observeSnapshotStatus marshal: %w", marshalErr)
-		}
-		if putErr := p.state.Put(context.Background(), ec2SnapCtrlNamespace,
-			ec2SnapObservedKey(snap.SnapshotID), data); putErr != nil {
-			return ec2SnapshotObservation{}, fmt.Errorf("ec2 observeSnapshotStatus put: %w", putErr)
-		}
-	}
-	return observation, nil
-}
-
-// snapshotObservations returns how many observations one snapshot has already had, zero when
-// it has had none.
-func (p *EC2Plugin) snapshotObservations(snapshotID string) (int, error) {
-	data, err := p.state.Get(context.Background(), ec2SnapCtrlNamespace, ec2SnapObservedKey(snapshotID))
-	if err != nil {
-		return 0, fmt.Errorf("ec2 snapshotObservations get: %w", err)
-	}
-	if data == nil {
-		return 0, nil
-	}
-	var observed ec2SnapshotObserved
-	if err := json.Unmarshal(data, &observed); err != nil {
-		return 0, fmt.Errorf("ec2 snapshotObservations unmarshal: %w", err)
-	}
-	return observed.Observations, nil
+	return seed.observation(seen), nil
 }
 
 // observation returns what the seen-th observation of a seeded snapshot reports, counting from
@@ -274,26 +193,12 @@ func (p *EC2Plugin) snapshotObservations(snapshotID string) (int, error) {
 // whether it succeeded — which is exactly the distinction a consumer that polls progress
 // instead of status gets wrong, and now a test can catch that.
 func (seed ec2SnapshotProgression) observation(seen int) ec2SnapshotObservation {
-	pendingState := seed.State
-	if pendingState == "" {
-		pendingState = "pending"
+	total := seed.PendingObservations
+	state, terminal := countdownState(seen, total, seed.State, seed.FinalState, "pending", "completed")
+	if !terminal {
+		return ec2SnapshotObservation{State: state, Progress: fmt.Sprintf("%d%%", seen*100/total)}
 	}
-	finalState := seed.FinalState
-	if finalState == "" {
-		finalState = "completed"
-	}
-
-	if total := seed.PendingObservations; seen < total {
-		return ec2SnapshotObservation{
-			State:    pendingState,
-			Progress: fmt.Sprintf("%d%%", seen*100/total),
-		}
-	}
-	return ec2SnapshotObservation{
-		State:        finalState,
-		Progress:     "100%",
-		StateMessage: seed.StateMessage,
-	}
+	return ec2SnapshotObservation{State: state, Progress: "100%", StateMessage: seed.StateMessage}
 }
 
 // handleEC2SeedSnapshotStatus handles POST /v1/ec2/snapshot-status. It seeds how many
@@ -304,91 +209,12 @@ func (seed ec2SnapshotProgression) observation(seen int) ec2SnapshotObservation 
 // Seeding resets the countdown for every snapshot the seed governs, so a test that seeds twice
 // gets two full progressions rather than the remainder of the first.
 func (s *Server) handleEC2SeedSnapshotStatus(w http.ResponseWriter, r *http.Request) {
-	var seed ec2SnapshotProgression
-	if err := json.NewDecoder(r.Body).Decode(&seed); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-		return
-	}
-	if seed.PendingObservations < 0 {
-		http.Error(w, `{"error":"pendingObservations must be >= 0"}`, http.StatusBadRequest)
-		return
-	}
-	for _, state := range []string{seed.State, seed.FinalState} {
-		if state != "" && !slices.Contains(ec2SnapshotStates, state) {
-			http.Error(w, fmt.Sprintf(`{"error":"unknown snapshot state %q, want one of %v"}`,
-				state, ec2SnapshotStates), http.StatusBadRequest)
-			return
-		}
-	}
-	data, err := json.Marshal(seed)
-	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	if err := s.state.Put(r.Context(), ec2SnapCtrlNamespace, ec2SnapCtrlKey(seed.SnapshotID), data); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	if err := s.clearSnapshotObservations(r, seed.SnapshotID); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	writeJSONDebug(w, s.logger, map[string]any{"ok": true, "snapshotId": ec2SnapCtrlKey(seed.SnapshotID)})
+	ec2SnapshotProgressions.serveSeed(w, r, s.state, s.logger)
 }
 
 // handleEC2ClearSnapshotStatus handles DELETE /v1/ec2/snapshot-status. With ?snapshotId=... it
 // removes that seed; without it removes all. Either way it also clears the countdown position
 // of the snapshots the seed governed, so a later seed starts from the beginning.
 func (s *Server) handleEC2ClearSnapshotStatus(w http.ResponseWriter, r *http.Request) {
-	if id := r.URL.Query().Get("snapshotId"); id != "" {
-		if err := s.state.Delete(r.Context(), ec2SnapCtrlNamespace, ec2SnapCtrlKey(id)); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		if err := s.clearSnapshotObservations(r, id); err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
-		return
-	}
-	for _, prefix := range []string{ec2SnapCtrlKeyPrefix, ec2SnapObservedPrefix} {
-		keys, err := s.state.List(r.Context(), ec2SnapCtrlNamespace, prefix)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		for _, k := range keys {
-			if err := s.state.Delete(r.Context(), ec2SnapCtrlNamespace, k); err != nil {
-				http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-				return
-			}
-		}
-	}
-	writeJSONDebug(w, s.logger, map[string]any{"ok": true})
-}
-
-// clearSnapshotObservations resets the countdown position of the snapshots a seed governs: one
-// snapshot for an ID-scoped seed, every snapshot for the "*" wildcard.
-//
-// The wildcard case has to sweep the prefix rather than delete one key, because the counters
-// are per snapshot by design — see [ec2SnapObservedKey] — so there is no single key holding a
-// wildcard seed's progress.
-func (s *Server) clearSnapshotObservations(r *http.Request, snapshotID string) error {
-	if snapshotID != "" && snapshotID != "*" {
-		if err := s.state.Delete(r.Context(), ec2SnapCtrlNamespace, ec2SnapObservedKey(snapshotID)); err != nil {
-			return fmt.Errorf("ec2 clear snapshot observations %s: %w", snapshotID, err)
-		}
-		return nil
-	}
-	keys, err := s.state.List(r.Context(), ec2SnapCtrlNamespace, ec2SnapObservedPrefix)
-	if err != nil {
-		return fmt.Errorf("ec2 list snapshot observations: %w", err)
-	}
-	for _, k := range keys {
-		if err := s.state.Delete(r.Context(), ec2SnapCtrlNamespace, k); err != nil {
-			return fmt.Errorf("ec2 clear snapshot observations %s: %w", k, err)
-		}
-	}
-	return nil
+	ec2SnapshotProgressions.serveClear(w, r, s.state, s.logger)
 }

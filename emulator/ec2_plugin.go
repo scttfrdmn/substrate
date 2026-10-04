@@ -1210,7 +1210,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 		// at render time, so `instance-state-name` selects on the state the body reports; a filter
 		// matching `stopped` while the item rendered `stopping` would be an answer no caller could
 		// act on. After the ID filter, so a describe of one instance cannot burn another's
-		// countdown — see [ec2InstObservedKey]. An unseeded instance is returned unchanged.
+		// countdown — see [progressionObservedKey]. An unseeded instance is returned unchanged.
 		inst.State = p.observeInstanceState(inst)
 		// Apply all DescribeInstances filters, AND-combined.
 		if !ec2InstanceMatchesFilters(inst, filters) {
