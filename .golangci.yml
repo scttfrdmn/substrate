@@ -37,6 +37,10 @@ linters:
       period: true
     misspell:
       locale: US
+      # AWS spells its CANCELLED status values with two L's (Omics RunStatus, Athena
+      # QueryExecutionState, …), and a published enum value must be emitted verbatim (#1364).
+      ignore-rules:
+        - cancelled
   exclusions:
     rules:
       # Allow TODO comments that reference issue numbers.

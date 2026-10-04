@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1018 operations**. This
+Substrate ships **67 built-in service plugins** routing **1021 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -70,7 +70,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 49 | Redshift | `redshift` | Query | 10 |
 | 50 | Redshift Data API | `redshift-data` | JSON | 3 |
 | 51 | Route 53 | `route53` | REST/XML | 6 |
-| 52 | S3 | `s3` | REST/XML | 44 |
+| 52 | S3 | `s3` | REST/XML | 47 |
 | 53 | SageMaker | `sagemaker` | JSON | 10 |
 | 54 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
 | 55 | Secrets Manager | `secretsmanager` | JSON | 12 |
@@ -5135,6 +5135,9 @@ STS operations are free.
 | PutBucketLifecycleConfiguration | `PUT /{bucket}?lifecycle`; the configuration round-trips verbatim (an `aws-chunked` body is decoded first — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked)), and an empty body stores an empty `<LifecycleConfiguration/>`. No rule is ever applied: nothing expires, transitions storage class or aborts an upload on a schedule, because that is resource-internal rather than an API observation |
 | GetBucketLifecycleConfiguration | `GET /{bucket}?lifecycle`; replies with the stored bytes unchanged, so what a caller reads back is what it wrote. A bucket with no configuration — including one that does not exist — is `404 NoSuchLifecycleConfiguration` |
 | DeleteBucketLifecycle | `DELETE /{bucket}?lifecycle`; `204`, and idempotent: removing a configuration that is not there still succeeds |
+| PutBucketCors | `PUT /{bucket}?cors`; records the `CORSConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse, has no `CORSRule`, or has a rule without `AllowedMethod` or `AllowedOrigin` — see [CORS configuration](#cors-configuration) |
+| GetBucketCors | `GET /{bucket}?cors`; answers the recorded rules, every `CORSRule` member round-tripping; `404 NoSuchCORSConfiguration` when none is set, which is not an empty configuration — see [CORS configuration](#cors-configuration) |
+| DeleteBucketCors | `DELETE /{bucket}?cors`; `204`, idempotent, and removes only the configuration, never the bucket — see [CORS configuration](#cors-configuration) |
 | SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
 
 ### Listing buckets
@@ -6161,7 +6164,7 @@ therefore warns earlier than the gate would refuse.
 
 Every published S3 sub-resource that substrate does not implement is named for the operation it is,
 and refused with `NotImplemented`/501. That is the code S3 publishes for functionality a server does
-not implement. It covers `?cors`, `?encryption`, `?website`, `?location`, `?logging`,
+not implement. It covers `?encryption`, `?website`, `?location`, `?logging`,
 `?ownershipControls`, `?replication`, the four id-keyed configuration families (analytics, inventory,
 metrics, intelligent-tiering), object lock, the metadata-table configurations and `CreateSession` at
 bucket level. At object level it covers `?retention`, `?legal-hold`, `?attributes`, `?torrent` and
@@ -6179,6 +6182,35 @@ default by *absence*, so an unrouted sub-resource became a different, routed ope
 The name the router resolves is also the name the request is authorized under, so these calls were
 authorized as `s3:DeleteBucket`, `s3:PutObject` and `s3:ListBucket`. They are now authorized as
 themselves.
+
+### CORS configuration
+
+`PutBucketCors`, `GetBucketCors` and `DeleteBucketCors` record a bucket's CORS configuration and
+answer it back ([#1278](https://github.com/scttfrdmn/substrate/issues/1278)); until then `?cors` was
+unrouted, and its `DELETE` deleted the bucket (#1349). The rules are never *evaluated*: no
+cross-origin request is checked against them and no preflight `OPTIONS` is answered, because that is
+the bucket's request-path behaviour rather than an observation an API call makes.
+
+Every `API_CORSRule` member round-trips: `AllowedMethod`, `AllowedOrigin`, `AllowedHeader` and
+`ExposeHeader` in the order sent, `ID`, and `MaxAgeSeconds`, where an explicit `0` is kept distinct
+from an absent value. `GetBucketCors` answers them in the published element names, whatever
+namespace or element order the put used.
+
+**Absent is not empty.** A bucket with no configuration answers `404 NoSuchCORSConfiguration`, and
+a stored configuration always holds at least one rule, because `CORSRule` is Required: Yes. So a
+caller can tell "never configured" (or "deleted") from "configured", and neither is flattened into
+an empty `CORSConfiguration`.
+
+| Case | Answer |
+|------|--------|
+| The bucket does not exist (any of the three) | `404 NoSuchBucket` |
+| A body that does not parse, no `CORSRule`, or a rule missing `AllowedMethod` or `AllowedOrigin` | `400 MalformedXML` |
+| `DeleteBucketCors` with no configuration set | `204`, as with one set |
+
+`DeleteBucket` removes the configuration with the bucket, so a bucket re-created under the name does
+not inherit it. Not enforced, because no page names the code a breach answers: at most 100 rules, a
+64 KB document, an `ID` of at most 255 characters, and `AllowedMethod`'s valid values (`GET`, `PUT`,
+`HEAD`, `POST`, `DELETE`).
 
 ### The bookkeeping a bucket record carries reaches no response
 
@@ -11024,18 +11056,18 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
 | DescribeTargetGroups | Same target-group shape as CreateTargetGroup |
 | DeleteTargetGroup | |
-| ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing still answers the empty list rather than `TargetGroupNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
-| RegisterTargets | |
-| DeregisterTargets | |
-| DescribeTargetHealth | |
+| ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
+| RegisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
+| DeregisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
+| DescribeTargetHealth | An ARN naming nothing is refused `TargetGroupNotFound`/400 rather than answered an empty list ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
 | DescribeListeners | Same listener shape as CreateListener |
-| DeleteListener | |
-| ModifyListener | Answers the modified listener. An ARN naming nothing answers an empty `Listeners` list rather than `ListenerNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
+| DeleteListener | An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
+| ModifyListener | Answers the modified listener. An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
 | DescribeRules | Same rule shape as CreateRule |
-| DeleteRule | |
-| SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is skipped rather than refused with `RuleNotFound` — [#1313](https://github.com/scttfrdmn/substrate/issues/1313) |
+| DeleteRule | An ARN naming nothing is refused `RuleNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
+| SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is refused `RuleNotFound`/400, and every pair is resolved before any is written, so a refused call reprices nothing ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
@@ -11051,6 +11083,29 @@ success. `DeleteLoadBalancer`, `DeleteTargetGroup`, `DeleteListener`, `DeleteRul
 `RegisterTargets` and `DeregisterTargets` answered that way and were unusable from a real
 client while substrate's own tests passed, because those tests read the XML directly instead
 of through an SDK's parser.
+
+### An ARN naming nothing is refused
+
+Eight operations address one resource by ARN, scanned the caller's records for it, and on finding
+none fell through to a 200: an empty result list, or an empty success. Each now answers the
+not-found code its page publishes, at HTTP 400 with the page's sentence as the message
+([#1313](https://github.com/scttfrdmn/substrate/issues/1313)):
+
+| Code | Operations | Message |
+|------|------------|---------|
+| `TargetGroupNotFound` | `ModifyTargetGroup`, `RegisterTargets`, `DeregisterTargets`, `DescribeTargetHealth` | The specified target group does not exist. |
+| `ListenerNotFound` | `ModifyListener`, `DeleteListener` | The specified listener does not exist. |
+| `RuleNotFound` | `SetRulePriorities`, `DeleteRule` | The specified rule does not exist. |
+
+Some operations are deliberately left alone. `API_DeleteTargetGroup` publishes no not-found code;
+its Errors list is `ResourceInUse` alone. `API_DeleteLoadBalancer` does list
+`LoadBalancerNotFound`, but its description says *"If the load balancer does not exist or has
+already been deleted, the call succeeds"*. That sentence addresses exactly this case and the Errors
+list does not, so the delete still succeeds. `DescribeTargetGroups`,
+`DescribeListeners` and `DescribeRules` filter by an ARN *list*, where an ARN naming nothing is a
+filter that matches nothing. Those pages do publish the not-found codes for an ARN in the list, and
+refusing one there is a separate change, still open. `Describe`/`ModifyLoadBalancerAttributes` read
+no ARN at all.
 
 ### The response envelope, and which plugins still lack it
 
@@ -20829,17 +20884,24 @@ not read at all, so the same request twice creates two runs.
 No HealthOmics response carries an ARN anywhere in the plugin, though `API_StartRun` and `API_GetRun`
 both publish `arn`.
 
-### CancelRun answers the wrong status and spells the state with one L
+### CancelRun answers the wrong status
 
 `API_CancelRun` publishes HTTP **202** with an empty body; Substrate answers **204**. An SDK treats
 both as success, so the divergence is invisible through a client and visible in a recorded event log
-or a fixture diff.
+or a fixture diff ([#1165](https://github.com/scttfrdmn/substrate/issues/1165)).
 
-The state written is `CANCELED`. The published `RunStatus` enum is
-`PENDING | STARTING | RUNNING | STOPPING | COMPLETED | DELETED | CANCELLED | FAILED` — two L's — so a
-consumer matching the published spelling never sees a cancelled run, and `STOPPING` is never
-observable because the cancel is immediate.
-[#1165](https://github.com/scttfrdmn/substrate/issues/1165).
+The state written is `CANCELLED`, as the published `RunStatus` enum
+(`PENDING | STARTING | RUNNING | STOPPING | COMPLETED | DELETED | CANCELLED | FAILED`) spells it on
+both `API_GetRun` and `API_RunListItem`. Until
+[#1364](https://github.com/scttfrdmn/substrate/issues/1364) it was `CANCELED`, with one L, so a
+consumer matching the published spelling never saw a cancelled run.
+`TestOmicsWire_ACancelledRunReportsThePublishedStatus` pins the spelling on the raw bytes of `GetRun`
+and `ListRuns`.
+
+`STOPPING` is never observable, because the cancel is immediate. That is deliberate rather than
+missing: a run is born `COMPLETED` and the plugin moves no run through any intermediate status, so
+there is no progression a `STOPPING` observation could belong to. Modeling one would mean the plugin's
+first run-status progression, which is a feature of its own rather than a spelling fix.
 
 `DELETE /run/{id}` is also accepted for `CancelRun`. AWS publishes that path for `DeleteRun`, which
 is a different operation; the arm exists because an older SDK generation used it.

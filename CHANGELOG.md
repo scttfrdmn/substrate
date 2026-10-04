@@ -54,6 +54,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exact `createdAt` assertion (#1363) failed under a parallel `make test`. Every wire test now runs on
   a frozen clock, as CLAUDE.md requires of a test.
 
+- **ELBv2 refuses an ARN naming nothing with the published not-found code** (#1313). Eight
+  operations scanned the caller's records for the ARN they address and, finding none, answered 200:
+  an empty result list or an empty success. Each now answers its page's code at HTTP 400 with the
+  page's sentence.
+  - `TargetGroupNotFound` for `ModifyTargetGroup`, `RegisterTargets`, `DeregisterTargets` and
+    `DescribeTargetHealth`.
+  - `ListenerNotFound` for `ModifyListener` and `DeleteListener`.
+  - `RuleNotFound` for `SetRulePriorities` and `DeleteRule`.
+  - `SetRulePriorities` resolves every pair before writing any, so a refused call reprices nothing.
+  - `DeleteLoadBalancer` still succeeds for a missing load balancer, as its page's description says,
+    and `DeleteTargetGroup` publishes no not-found code. The three describes' ARN-list filters still
+    match nothing silently; that is #1370, and `docs/services.md` records it.
+  - The marshal and `state.Put` errors four of these handlers discarded are returned wrapped.
+
+- **S3's CORS sub-resource is routed** (#1278). `PutBucketCors`, `GetBucketCors` and
+  `DeleteBucketCors` were refused `NotImplemented` (and before #1349, `DeleteBucketCors` deleted the
+  bucket). They now record a bucket's `CORSConfiguration` and answer it back, with every `CORSRule`
+  member round-tripping under its published element name.
+  - A bucket with none answers `NoSuchCORSConfiguration`/404, kept distinct from a configuration.
+  - `DeleteBucketCors` is idempotent, and all three answer `NoSuchBucket` for a missing bucket.
+  - A body without a member `API_CORSRule` marks Required (`AllowedMethods`, `AllowedOrigins`) is
+    `MalformedXML`/400. `DeleteBucket` removes the configuration with the bucket.
+  - The rules are recorded, never evaluated against a cross-origin request.
+  - `NoSuchCORSConfiguration` is the S3 error-code list's code. That page could not be fetched to
+    confirm its row, and neither operation page names it, so it follows the `NoSuch…Configuration`
+    family the plugin already answers.
+
+- **HealthOmics' `CancelRun` leaves a run `CANCELLED`, the spelling the API publishes** (#1364).
+  It wrote `CANCELED`, with one L, which neither `API_GetRun` nor `API_RunListItem` lists, so a wait
+  loop or a typed SDK enum matching the published value never saw the run's terminal state. A
+  raw-bytes test pins the spelling on `GetRun` and `ListRuns`, and `cancelRun` returns the marshal
+  error it discarded. misspell now ignores `cancelled`, AWS's enum spelling.
+  - `STOPPING` is not modeled. The plugin moves no run through any intermediate status, so there is
+    no progression for it to belong to; that is split out as #1371.
+
 ## [v0.121.0] - 2026-10-03
 
 ### Added

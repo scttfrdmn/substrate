@@ -257,6 +257,12 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getPublicAccessBlock(ctx, req, bucket)
 	case "DeletePublicAccessBlock":
 		return p.deletePublicAccessBlock(ctx, req, bucket)
+	case "PutBucketCors":
+		return p.putBucketCors(ctx, req, bucket)
+	case "GetBucketCors":
+		return p.getBucketCors(ctx, req, bucket)
+	case "DeleteBucketCors":
+		return p.deleteBucketCors(ctx, req, bucket)
 	case "SelectObjectContent":
 		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
@@ -358,6 +364,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "PutPublicAccessBlock"
 			}
+			if _, ok := req.Params["cors"]; ok {
+				return bucket, "", "PutBucketCors"
+			}
 			// Before the CreateBucket fall-through: an unrouted sub-resource is named for what it is
 			// and refused, rather than answered as a create (#1349).
 			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
@@ -380,6 +389,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			// reached it and destroyed the bucket (#446).
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "DeletePublicAccessBlock"
+			}
+			if _, ok := req.Params["cors"]; ok {
+				return bucket, "", "DeleteBucketCors"
 			}
 			// Before the DeleteBucket fall-through, for every sub-resource #446 did not name: each of
 			// them used to delete the bucket (#1349).
@@ -414,6 +426,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["publicAccessBlock"]; ok {
 				return bucket, "", "GetPublicAccessBlock"
+			}
+			if _, ok := req.Params["cors"]; ok {
+				return bucket, "", "GetBucketCors"
 			}
 			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
 			// for what it is and refused, rather than answered as a listing (#1349).
@@ -714,6 +729,7 @@ var s3BucketSubresourcePrefixes = []string{
 	"bucket_versioning:",
 	"notification:",
 	"bucket_public_access_block:",
+	s3CORSKeyPrefix,
 }
 
 // deleteBucket handles DELETE /<bucket>.

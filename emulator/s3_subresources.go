@@ -23,7 +23,7 @@ import "slices"
 //
 // Every entry is the operation's own Request Syntax line in the S3 API reference: the method and the
 // query key. Keys are tested for presence only, never for a value, for the reason parseS3Operation's
-// own comment gives (#656): an SDK sends "?cors=" where the reference writes "?cors".
+// own comment gives (#656): an SDK sends "?encryption=" where the reference writes "?encryption".
 
 // s3BucketSubresource names one unrouted bucket-level operation. When listName is set, the operation
 // is a List…Configurations without an `id` parameter and the named Get…Configuration with one, which
@@ -39,7 +39,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	"GET": {
 		"accelerate":            {name: "GetBucketAccelerateConfiguration"},
 		"analytics":             {name: "GetBucketAnalyticsConfiguration", listName: "ListBucketAnalyticsConfigurations"},
-		"cors":                  {name: "GetBucketCors"},
 		"encryption":            {name: "GetBucketEncryption"},
 		"intelligent-tiering":   {name: "GetBucketIntelligentTieringConfiguration", listName: "ListBucketIntelligentTieringConfigurations"},
 		"inventory":             {name: "GetBucketInventoryConfiguration", listName: "ListBucketInventoryConfigurations"},
@@ -59,7 +58,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	"PUT": {
 		"accelerate":             {name: "PutBucketAccelerateConfiguration"},
 		"analytics":              {name: "PutBucketAnalyticsConfiguration"},
-		"cors":                   {name: "PutBucketCors"},
 		"encryption":             {name: "PutBucketEncryption"},
 		"intelligent-tiering":    {name: "PutBucketIntelligentTieringConfiguration"},
 		"inventory":              {name: "PutBucketInventoryConfiguration"},
@@ -75,7 +73,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	},
 	"DELETE": {
 		"analytics":             {name: "DeleteBucketAnalyticsConfiguration"},
-		"cors":                  {name: "DeleteBucketCors"},
 		"encryption":            {name: "DeleteBucketEncryption"},
 		"intelligent-tiering":   {name: "DeleteBucketIntelligentTieringConfiguration"},
 		"inventory":             {name: "DeleteBucketInventoryConfiguration"},
