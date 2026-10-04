@@ -547,7 +547,10 @@ func (p *CognitoIDPPlugin) createUserPoolDomain(ctx *RequestContext, req *AWSReq
 
 	goCtx := context.Background()
 	domainKey := cognitoUserPoolClientKey(ctx.AccountID, ctx.Region, body.UserPoolID, "domain")
-	domainData, _ := json.Marshal(map[string]string{"Domain": body.Domain, "UserPoolId": body.UserPoolID})
+	domainData, err := json.Marshal(map[string]string{"Domain": body.Domain, "UserPoolId": body.UserPoolID})
+	if err != nil {
+		return nil, fmt.Errorf("cognito createUserPoolDomain marshal: %w", err)
+	}
 	_ = p.state.Put(goCtx, cognitoIDPNamespace, domainKey, domainData)
 
 	type response struct {

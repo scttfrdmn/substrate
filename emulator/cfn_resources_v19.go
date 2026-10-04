@@ -142,7 +142,10 @@ func (d *StackDeployer) deployAPIGatewayAuthorizer(
 	if uri, ok := props["AuthorizerUri"]; ok {
 		body["authorizerUri"] = resolveValue(uri, cctx)
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayAuthorizer marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -183,7 +186,10 @@ func (d *StackDeployer) deployAPIGatewayResource(
 	body := map[string]interface{}{
 		"pathPart": pathPart,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayResource marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -246,7 +252,10 @@ func (d *StackDeployer) deployAPIGatewayMethod(
 	body := map[string]interface{}{
 		"authorizationType": resolveStringProp(props, "AuthorizationType", "NONE", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayMethod marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -288,7 +297,10 @@ func (d *StackDeployer) deployAPIGatewayDeployment(
 	body := map[string]interface{}{
 		"description": resolveStringProp(props, "Description", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayDeployment marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -330,7 +342,10 @@ func (d *StackDeployer) deployAPIGatewayStage(
 		"deploymentId": resolveStringProp(props, "DeploymentId", "", cctx),
 		"description":  resolveStringProp(props, "Description", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayStage marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -370,7 +385,10 @@ func (d *StackDeployer) deployAPIGatewayAPIKey(
 		"name":    name,
 		"enabled": true,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayAPIKey marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -410,7 +428,10 @@ func (d *StackDeployer) deployAPIGatewayUsagePlan(
 		"name":        name,
 		"description": resolveStringProp(props, "Description", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayUsagePlan marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -451,7 +472,10 @@ func (d *StackDeployer) deployAPIGatewayUsagePlanKey(
 		"keyId":   keyID,
 		"keyType": "API_KEY",
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayUsagePlanKey marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigateway",
@@ -494,7 +518,10 @@ func (d *StackDeployer) deployAPIGatewayV2Api(
 		"ProtocolType": resolveStringProp(props, "ProtocolType", "HTTP", cctx),
 		"Description":  resolveStringProp(props, "Description", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayV2Api marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigatewayv2",
@@ -536,7 +563,10 @@ func (d *StackDeployer) deployAPIGatewayV2Route(
 		"RouteKey": routeKey,
 		"Target":   resolveStringProp(props, "Target", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayV2Route marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigatewayv2",
@@ -576,7 +606,10 @@ func (d *StackDeployer) deployAPIGatewayV2Integration(
 		"IntegrationType": resolveStringProp(props, "IntegrationType", "AWS_PROXY", cctx),
 		"IntegrationUri":  resolveStringProp(props, "IntegrationUri", "", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayV2Integration marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigatewayv2",
@@ -616,7 +649,10 @@ func (d *StackDeployer) deployAPIGatewayV2Stage(
 	body := map[string]interface{}{
 		"StageName": stageName,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayV2Stage marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigatewayv2",
@@ -650,7 +686,10 @@ func (d *StackDeployer) deployAPIGatewayV2Authorizer(
 		"Name":           name,
 		"AuthorizerType": resolveStringProp(props, "AuthorizerType", "JWT", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAPIGatewayV2Authorizer marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "apigatewayv2",

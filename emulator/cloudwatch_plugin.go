@@ -324,7 +324,10 @@ func (p *CloudWatchPlugin) setActionsEnabled(ctx *RequestContext, req *AWSReques
 			continue
 		}
 		alarm.ActionsEnabled = enabled
-		updated, _ := json.Marshal(alarm)
+		updated, err := json.Marshal(alarm)
+		if err != nil {
+			return nil, fmt.Errorf("cloudwatch setActionsEnabled marshal: %w", err)
+		}
 		_ = p.state.Put(goCtx, monitoringNamespace, stateKey, updated)
 	}
 

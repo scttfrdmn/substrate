@@ -921,7 +921,10 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			ResponseCode:          exitCode,
 			DocumentName:          input.DocumentName,
 		}
-		invData, _ := json.Marshal(inv)
+		invData, err := json.Marshal(inv)
+		if err != nil {
+			return nil, fmt.Errorf("ssm sendCommand marshal: %w", err)
+		}
 		_ = p.state.Put(goCtx, ssmNamespace, ssmInvocationKey(ctx.AccountID, ctx.Region, commandID, instID), invData)
 	}
 

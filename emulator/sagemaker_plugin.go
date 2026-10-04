@@ -365,7 +365,10 @@ func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("stopTrainingJob: unmarshal: %w", err)
 	}
 	job.TrainingJobStatus = "Stopped"
-	updated, _ := json.Marshal(job)
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return nil, fmt.Errorf("sagemaker stopTrainingJob marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, sagemakerNamespace, jobKey, updated); err != nil {
 		return nil, fmt.Errorf("stopTrainingJob: put: %w", err)
 	}

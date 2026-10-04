@@ -237,7 +237,10 @@ func (p *GluePlugin) updateDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 	if len(input.DatabaseInput.Parameters) > 0 {
 		db.Parameters = input.DatabaseInput.Parameters
 	}
-	updated, _ := json.Marshal(db)
+	updated, err := json.Marshal(db)
+	if err != nil {
+		return nil, fmt.Errorf("glue updateDatabase marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("glue updateDatabase put: %w", err)
 	}
@@ -293,7 +296,10 @@ func (p *GluePlugin) createTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	goCtx := context.Background()
-	data, _ := json.Marshal(tbl)
+	data, err := json.Marshal(tbl)
+	if err != nil {
+		return nil, fmt.Errorf("glue createTable marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, "table:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName+"/"+input.TableInput.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createTable put: %w", err)
 	}
@@ -403,7 +409,10 @@ func (p *GluePlugin) updateTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if len(input.TableInput.Parameters) > 0 {
 		tbl.Parameters = input.TableInput.Parameters
 	}
-	updated, _ := json.Marshal(tbl)
+	updated, err := json.Marshal(tbl)
+	if err != nil {
+		return nil, fmt.Errorf("glue updateTable marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("glue updateTable put: %w", err)
 	}
@@ -456,7 +465,10 @@ func (p *GluePlugin) createConnection(reqCtx *RequestContext, req *AWSRequest) (
 	}
 
 	goCtx := context.Background()
-	data, _ := json.Marshal(conn)
+	data, err := json.Marshal(conn)
+	if err != nil {
+		return nil, fmt.Errorf("glue createConnection marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, "connection:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+conn.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createConnection put: %w", err)
 	}
@@ -545,7 +557,10 @@ func (p *GluePlugin) updateConnection(reqCtx *RequestContext, req *AWSRequest) (
 	if len(input.ConnectionInput.ConnectionProperties) > 0 {
 		conn.ConnectionProperties = input.ConnectionInput.ConnectionProperties
 	}
-	updated, _ := json.Marshal(conn)
+	updated, err := json.Marshal(conn)
+	if err != nil {
+		return nil, fmt.Errorf("glue updateConnection marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("glue updateConnection put: %w", err)
 	}
@@ -598,7 +613,10 @@ func (p *GluePlugin) createCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	goCtx := context.Background()
-	data, _ := json.Marshal(crawler)
+	data, err := json.Marshal(crawler)
+	if err != nil {
+		return nil, fmt.Errorf("glue createCrawler marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, "crawler:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createCrawler put: %w", err)
 	}
@@ -691,7 +709,10 @@ func (p *GluePlugin) updateCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if len(input.Targets) > 0 {
 		crawler.Targets = input.Targets
 	}
-	updated, _ := json.Marshal(crawler)
+	updated, err := json.Marshal(crawler)
+	if err != nil {
+		return nil, fmt.Errorf("glue updateCrawler marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("glue updateCrawler put: %w", err)
 	}
@@ -741,7 +762,10 @@ func (p *GluePlugin) createJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	}
 
 	goCtx := context.Background()
-	data, _ := json.Marshal(job)
+	data, err := json.Marshal(job)
+	if err != nil {
+		return nil, fmt.Errorf("glue createJob marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, "job:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createJob put: %w", err)
 	}
@@ -826,7 +850,10 @@ func (p *GluePlugin) updateJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if input.JobUpdate.Command != nil {
 		job.Command = *input.JobUpdate.Command
 	}
-	updated, _ := json.Marshal(job)
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return nil, fmt.Errorf("glue updateJob marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("glue updateJob put: %w", err)
 	}
@@ -877,7 +904,10 @@ func (p *GluePlugin) startJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		Region:      reqCtx.Region,
 	}
 
-	data, _ := json.Marshal(run)
+	data, err := json.Marshal(run)
+	if err != nil {
+		return nil, fmt.Errorf("glue startJobRun marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, glueNamespace, "jobrun:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName+"/"+runID, data); err != nil {
 		return nil, fmt.Errorf("glue startJobRun put: %w", err)
 	}

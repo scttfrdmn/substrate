@@ -177,7 +177,10 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 	data, err := p.state.Get(goCtx, bedrockRuntimeNamespace, blocklistKey)
 	if err != nil || data == nil {
 		// Auto-register with empty blocklist.
-		empty, _ := json.Marshal([]string{})
+		empty, err := json.Marshal([]string{})
+		if err != nil {
+			return nil, fmt.Errorf("bedrock applyGuardrail marshal: %w", err)
+		}
 		if putErr := p.state.Put(goCtx, bedrockRuntimeNamespace, blocklistKey, empty); putErr != nil {
 			return nil, fmt.Errorf("applyGuardrail: put blocklist: %w", putErr)
 		}
@@ -435,7 +438,10 @@ func (p *BedrockRuntimePlugin) stopModelInvocationJob(ctx *RequestContext, _ *AW
 		return nil, fmt.Errorf("stopModelInvocationJob: unmarshal: %w", err)
 	}
 	job.Status = "Stopped"
-	updated, _ := json.Marshal(job)
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock stopModelInvocationJob marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID), updated); err != nil {
 		return nil, fmt.Errorf("stopModelInvocationJob: put: %w", err)
 	}

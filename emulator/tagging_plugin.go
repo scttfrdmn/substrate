@@ -2133,7 +2133,10 @@ func mergeResourceTags(
 		}
 		b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(addTags))
 		b.Tags = mergeStringMap(b.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(b)
+		updated, err := json.Marshal(b)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case lambdaNamespace:
@@ -2143,7 +2146,10 @@ func mergeResourceTags(
 		}
 		fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), len(addTags))
 		fn.Tags = mergeStringMap(fn.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(fn)
+		updated, err := json.Marshal(fn)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case sqsNamespace:
@@ -2153,7 +2159,10 @@ func mergeResourceTags(
 		}
 		q.EverTagged = taggingEverTagged(q.EverTagged, len(q.Tags), len(addTags))
 		q.Tags = mergeStringMap(q.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(q)
+		updated, err := json.Marshal(q)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case dynamodbNamespace:
@@ -2163,7 +2172,10 @@ func mergeResourceTags(
 		}
 		t.EverTagged = taggingEverTagged(t.EverTagged, len(t.Tags), len(addTags))
 		t.Tags = mergeStringMap(t.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(t)
+		updated, err := json.Marshal(t)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case ec2Namespace:
@@ -2173,7 +2185,10 @@ func mergeResourceTags(
 		}
 		inst.EverTagged = taggingEverTagged(inst.EverTagged, len(inst.Tags), len(addTags))
 		inst.Tags = mergeEC2Tags(inst.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(inst)
+		updated, err := json.Marshal(inst)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case iamNamespace:
@@ -2184,7 +2199,10 @@ func mergeResourceTags(
 			}
 			u.EverTagged = taggingEverTagged(u.EverTagged, len(u.Tags), len(addTags))
 			u.Tags = mergeIAMTags(u.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(u)
+			updated, err := json.Marshal(u)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "role:") {
@@ -2194,7 +2212,10 @@ func mergeResourceTags(
 			}
 			r.EverTagged = taggingEverTagged(r.EverTagged, len(r.Tags), len(addTags))
 			r.Tags = mergeIAMTags(r.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(r)
+			updated, err := json.Marshal(r)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported IAM resource key: %s", key)
@@ -2206,7 +2227,10 @@ func mergeResourceTags(
 		}
 		api.EverTagged = taggingEverTagged(api.EverTagged, len(api.Tags), len(addTags))
 		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(api)
+		updated, err := json.Marshal(api)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case cloudwatchLogsNamespace:
@@ -2259,7 +2283,10 @@ func mergeResourceTags(
 		}
 		repo.EverTagged = taggingEverTagged(repo.EverTagged, len(repo.Tags), len(addTags))
 		repo.Tags = mergeStringMap(repo.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(repo)
+		updated, err := json.Marshal(repo)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case ecsNamespace:
@@ -2280,7 +2307,10 @@ func mergeResourceTags(
 		}
 		pool.EverTagged = taggingEverTagged(pool.EverTagged, len(pool.Tags), len(addTags))
 		pool.Tags = mergeStringMap(pool.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(pool)
+		updated, err := json.Marshal(pool)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case kinesisNamespace:
@@ -2290,7 +2320,10 @@ func mergeResourceTags(
 		}
 		stream.EverTagged = taggingEverTagged(stream.EverTagged, len(stream.Tags), len(addTags))
 		stream.Tags = mergeStringMap(stream.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(stream)
+		updated, err := json.Marshal(stream)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case rdsNamespace:
@@ -2404,7 +2437,10 @@ func mergeResourceTags(
 		}
 		cluster.EverTagged = taggingEverTagged(cluster.EverTagged, len(cluster.Tags), len(addTags))
 		cluster.Tags = mergeStringMap(cluster.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(cluster)
+		updated, err := json.Marshal(cluster)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
 		return state.Put(goCtx, ns, key, updated)
 
 	case efsNamespace:
@@ -2415,7 +2451,10 @@ func mergeResourceTags(
 			}
 			fs.EverTagged = taggingEverTagged(fs.EverTagged, len(fs.Tags), len(addTags))
 			fs.Tags = mergeEFSTags(fs.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(fs)
+			updated, err := json.Marshal(fs)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "accesspoint:") {
@@ -2425,7 +2464,10 @@ func mergeResourceTags(
 			}
 			ap.EverTagged = taggingEverTagged(ap.EverTagged, len(ap.Tags), len(addTags))
 			ap.Tags = mergeEFSTags(ap.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(ap)
+			updated, err := json.Marshal(ap)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported EFS resource key: %s", key)
@@ -2438,7 +2480,10 @@ func mergeResourceTags(
 			}
 			db.EverTagged = taggingEverTagged(db.EverTagged, len(db.Tags), len(addTags))
 			db.Tags = mergeStringMap(db.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(db)
+			updated, err := json.Marshal(db)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "job:") {
@@ -2448,7 +2493,10 @@ func mergeResourceTags(
 			}
 			job.EverTagged = taggingEverTagged(job.EverTagged, len(job.Tags), len(addTags))
 			job.Tags = mergeStringMap(job.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(job)
+			updated, err := json.Marshal(job)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "crawler:") {
@@ -2458,7 +2506,10 @@ func mergeResourceTags(
 			}
 			crawler.EverTagged = taggingEverTagged(crawler.EverTagged, len(crawler.Tags), len(addTags))
 			crawler.Tags = mergeStringMap(crawler.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(crawler)
+			updated, err := json.Marshal(crawler)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		if strings.HasPrefix(key, "connection:") {
@@ -2468,7 +2519,10 @@ func mergeResourceTags(
 			}
 			conn.EverTagged = taggingEverTagged(conn.EverTagged, len(conn.Tags), len(addTags))
 			conn.Tags = mergeStringMap(conn.Tags, addTags, removeKeys)
-			updated, _ := json.Marshal(conn)
+			updated, err := json.Marshal(conn)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
 			return state.Put(goCtx, ns, key, updated)
 		}
 		return fmt.Errorf("unsupported Glue resource key: %s", key)

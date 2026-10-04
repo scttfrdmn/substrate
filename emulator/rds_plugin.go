@@ -190,7 +190,10 @@ func (p *RDSPlugin) createDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 		} else {
 			inst.Endpoint = RDSEndpoint{Address: "localhost", Port: handle.HostPort}
 			// Persist the container handle for deletion.
-			handleData, _ := json.Marshal(handle)
+			handleData, err := json.Marshal(handle)
+			if err != nil {
+				return nil, fmt.Errorf("rds createDBInstance marshal: %w", err)
+			}
 			scope := reqCtx.AccountID + "/" + reqCtx.Region
 			_ = p.state.Put(context.Background(), rdsNamespace, "dbinstance_container:"+scope+"/"+id, handleData)
 		}
@@ -318,7 +321,10 @@ func (p *RDSPlugin) modifyDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 		inst.MultiAZ = v == "true"
 	}
 
-	updated, _ := json.Marshal(inst)
+	updated, err := json.Marshal(inst)
+	if err != nil {
+		return nil, fmt.Errorf("rds modifyDBInstance marshal: %w", err)
+	}
 	if err := p.state.Put(context.Background(), rdsNamespace, stateKey, updated); err != nil {
 		return nil, fmt.Errorf("rds modifyDBInstance put: %w", err)
 	}
@@ -419,7 +425,10 @@ func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest,
 	}
 	inst.DBInstanceStatus = status
 
-	updated, _ := json.Marshal(inst)
+	updated, err := json.Marshal(inst)
+	if err != nil {
+		return nil, fmt.Errorf("rds setDBInstanceStatus marshal: %w", err)
+	}
 	if err := p.state.Put(context.Background(), rdsNamespace, stateKey, updated); err != nil {
 		return nil, fmt.Errorf("rds setDBInstanceStatus put: %w", err)
 	}
@@ -1138,7 +1147,10 @@ func (p *RDSPlugin) appendToIndex(scope, indexName, id string) error {
 		_ = json.Unmarshal(data, &ids)
 	}
 	ids = append(ids, id)
-	newData, _ := json.Marshal(ids)
+	newData, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("rds appendToIndex marshal: %w", err)
+	}
 	return p.state.Put(context.Background(), rdsNamespace, key, newData)
 }
 

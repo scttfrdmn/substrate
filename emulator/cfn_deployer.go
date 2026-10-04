@@ -5190,8 +5190,15 @@ func resolveValue(v interface{}, cctx *cfnContext) string {
 			}
 		}
 	}
-	// Fallback: JSON-encode.
-	b, _ := json.Marshal(v)
+	// Fallback: JSON-encode. This can fail: a YAML template mapping with a non-string key
+	// decodes to map[interface{}]interface{}, which encoding/json refuses. The result was
+	// then silently "" (#1365). resolveValue has nowhere to return an error, and its 58
+	// callers put the string straight into a request, so it falls back to the value's Go
+	// rendering instead: the value stays visible in what reaches the plugin.
+	b, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Sprint(v)
+	}
 	return string(b)
 }
 
