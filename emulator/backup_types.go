@@ -20,6 +20,10 @@ type BackupVault struct {
 	CreationDate time.Time `json:"CreationDate"`
 	// NumberOfRecoveryPoints is the number of recovery points in the vault.
 	NumberOfRecoveryPoints int64 `json:"NumberOfRecoveryPoints"`
+	// CreatorRequestID is the CreateBackupVault request's own CreatorRequestId, recorded so
+	// DescribeBackupVault and ListBackupVaults can report it (#1199). Absent from a vault created
+	// without one, and from any vault recorded before #1199.
+	CreatorRequestID string `json:"CreatorRequestId,omitempty"`
 	// AccountID is the AWS account that owns this vault.
 	AccountID string `json:"AccountID"`
 	// Region is the AWS region where the vault exists.

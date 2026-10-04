@@ -53,9 +53,10 @@ package emulator
 //
 // #1072 then corrected the statuses the plugin itself answered: createStateMachine's 409 became the
 // published 400 ([sfnStateMachineAlreadyExists]) and createActivity's 409 went away entirely, because
-// modeling CreateActivity's published idempotency leaves ActivityAlreadyExists with no reachable
-// condition. Every constructor in this file is still 400, and the two 409s it now has a replacement
-// for were both outside it.
+// modeling CreateActivity's published idempotency left ActivityAlreadyExists with no reachable
+// condition. #1199 made it reachable again, at the published 400 and for the published condition — a
+// repeat that changes encryptionConfiguration ([sfnActivityAlreadyExists]). Every constructor in this
+// file is still 400, and the two 409s it now has a replacement for were both outside it.
 //
 // Messages are substrate's throughout, except where a helper quotes AWS's own gloss because it is
 // already the whole of what the refusal has to say.
@@ -227,6 +228,17 @@ func sfnStateMachineAlreadyExists(name string) *AWSError {
 		Code: "StateMachineAlreadyExists",
 		Message: "A state machine with the same name but a different definition or role ARN " +
 			"already exists: " + name,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnActivityAlreadyExists reports a CreateActivity repeat that changes the activity's
+// encryptionConfiguration, the one condition API_CreateActivity publishes the code for: "Activity
+// already exists. EncryptionConfiguration may not be updated." At the published 400 (#1199).
+func sfnActivityAlreadyExists(name string) *AWSError {
+	return &AWSError{
+		Code:       "ActivityAlreadyExists",
+		Message:    "Activity already exists. EncryptionConfiguration may not be updated: " + name,
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

@@ -437,6 +437,14 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 		return false, nil
 	}
 
+	// A recorded dispatch of clock-driven work is reproduced by replaying the request that
+	// triggered it, which runs the same work at the same clock reading. Executing the
+	// recorded copy as well would apply each dispatch twice (#1292).
+	if isClockDrivenDispatchEvent(event) {
+		replay.Results.SkippedEvents++
+		return false, nil
+	}
+
 	// The clock is frozen *and then* set, in that order, and restored when the event
 	// is done. SetTime alone sets a baseline that advances with wall time, so a
 	// handler rendering from Now() saw event.Timestamp plus however long the replay
@@ -516,6 +524,14 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	if gate := r.pipeline.gates().check(reqCtx, event.Request); gate.err != nil {
 		r.recordErrorDifference(replay, event, gate.err)
 		return true, gate.err
+	}
+
+	// The clock-driven work the live path ran at this step, before this request (#1292).
+	// The clock is pinned to the recorded timestamp, so the same work is due, and it derives
+	// the same request IDs from this request's. It is not recorded: a replay writes no events.
+	if err := r.registry.RunClockDriven(reqCtx, r.registry.RouteRequest); err != nil {
+		r.recordErrorDifference(replay, event, err)
+		return true, err
 	}
 
 	resp, err := r.registry.RouteRequest(reqCtx, event.Request)

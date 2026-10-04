@@ -200,10 +200,10 @@ func NewLambdaExecutorForTest(cfg LambdaExecCfg, logger Logger, dockerAvail bool
 // state manager. It is used to test replay-cache helpers without a full server.
 func NewLambdaPluginForTest(state StateManager, tc *TimeController) *LambdaPlugin {
 	return &LambdaPlugin{
-		state:   state,
-		logger:  NewDefaultLogger(-4, false),
-		tc:      tc,
-		esmStop: make(map[string]chan struct{}),
+		state:     state,
+		logger:    NewDefaultLogger(-4, false),
+		tc:        tc,
+		esmActive: make(map[string]struct{}),
 	}
 }
 
@@ -1447,18 +1447,12 @@ func (p *S3Plugin) PayloadPathsForTest() ([]string, error) {
 // [S3Plugin.ResetForRun] empties it on.
 func (p *S3Plugin) OwnsFilesystemForTest() bool { return p.ownsFS }
 
-// ESMPollerCountForTest returns the number of event-source-mapping pollers the Lambda
-// plugin is holding a stop channel for.
-//
-// Exported because a poller is otherwise unobservable: it acts only on a one-second
-// wall-clock ticker, so asserting that a stopped poller stops polling would make the
-// test depend on real elapsed time, which the house rules forbid. The count is the
-// deterministic form of the same assertion — the channel is closed and forgotten, and
-// [LambdaPlugin.sqsPollerLoop] returns on that channel unconditionally.
+// ESMPollerCountForTest returns the number of event-source mappings [LambdaPlugin.RunDue]
+// polls: the enabled SQS mappings it has been told about and not yet told to forget.
 func (p *LambdaPlugin) ESMPollerCountForTest() int {
 	p.esmMu.Lock()
 	defer p.esmMu.Unlock()
-	return len(p.esmStop)
+	return len(p.esmActive)
 }
 
 // EvictionStoppedForTest reports whether the executor's idle-eviction goroutine has

@@ -1,6 +1,9 @@
 package emulator
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
 
 // statesNamespace is the state namespace for Step Functions.
 const statesNamespace = "states"
@@ -256,6 +259,20 @@ type StateMachineState struct {
 
 	// EverTagged records that this state machine has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
+
+	// LoggingConfiguration, TracingConfiguration and EncryptionConfiguration are the request's own
+	// configuration objects, as sent to CreateStateMachine or the last UpdateStateMachine that named
+	// each, and nil when none was. DescribeStateMachine answers each verbatim, or its published default
+	// when nil; see [sfnStateMachineConfig] (#1199). Absent from a record written before #1199.
+	LoggingConfiguration    json.RawMessage `json:"LoggingConfiguration,omitempty"`
+	TracingConfiguration    json.RawMessage `json:"TracingConfiguration,omitempty"`
+	EncryptionConfiguration json.RawMessage `json:"EncryptionConfiguration,omitempty"`
+
+	// RevisionID is the state machine's revisionId, minted from the request's IDMint at create and
+	// at every UpdateStateMachine, so two describes report the same value exactly when no update came
+	// between them (#1199). Empty on a record written before #1199, which then answers no revisionId
+	// until its next update.
+	RevisionID string `json:"RevisionId,omitempty"`
 }
 
 // ExecutionState holds the persisted state of a Step Functions execution.
@@ -325,6 +342,10 @@ type ActivityState struct {
 
 	// CreatedDate is when the activity was created.
 	CreatedDate time.Time `json:"CreatedDate"`
+
+	// EncryptionConfiguration is CreateActivity's own encryptionConfiguration, nil when none was
+	// sent; DescribeActivity answers it verbatim or the published default (#1199).
+	EncryptionConfiguration json.RawMessage `json:"EncryptionConfiguration,omitempty"`
 
 	// AccountID is the owning AWS account.
 	AccountID string `json:"AccountID"`

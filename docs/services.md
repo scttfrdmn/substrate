@@ -2373,9 +2373,10 @@ Removing substrate's internal request ID from that path also removed it from an 
 `DetectStackDrift` answered a `StackDriftDetectionId` that was literally substrate's `req-…` string,
 which no AWS reference describes; it is now UUID-shaped within the published maximum length of 36.
 The same dispatch fix applies to an API Gateway proxy integration, which invokes a Lambda through an
-internal request. A Lambda event-source-mapping poll is deliberately left random: its dispatches come
-from a wall-clock ticker and are recorded nowhere, so there is no recorded ID to derive from and a
-seed there would be no more reproducible than the fallback ([#1292](https://github.com/scttfrdmn/substrate/issues/1292)).
+internal request. A Lambda event-source-mapping poll derives its request IDs from the request it ran
+before, so its identifiers reproduce too; see
+[An event-source mapping polls on the simulated clock](#an-event-source-mapping-polls-on-the-simulated-clock)
+([#1292](https://github.com/scttfrdmn/substrate/issues/1292)).
 
 An ECR image digest is not minted at all: it is the SHA-256 of the manifest bytes, so it is
 reproducible across a replay because it is content-derived, and it names the image it is the digest
@@ -6309,7 +6310,7 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
 | CreateEventSourceMapping | |
 | GetEventSourceMapping | By UUID |
-| UpdateEventSourceMapping | `BatchSize` and `Enabled` only; both optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops the SQS poller |
+| UpdateEventSourceMapping | `BatchSize` and `Enabled` only; both optional, so an **absent** body is a no-op update rather than a refusal and only a present-but-unparseable body is refused. Toggling `Enabled` starts or stops polling; re-enabling restarts the cadence from now (#1292) |
 | DeleteEventSourceMapping | |
 | ListEventSourceMappings | Paginates on `MaxItems`/`Marker`; an absent `MaxItems` answers the published per-response cap of 100, a value outside 1–10000 is refused, and a `Marker` substrate did not issue is refused with `InvalidParameterValueException` — see [Two more cursors published and unread](#two-more-cursors-published-and-unread-outside-ec2) |
 | TagResource | `204` with no body. Published under [`2017-03-31`](#each-operation-is-published-under-its-own-api-version-date), as the other two tag operations are |
@@ -6463,6 +6464,47 @@ request need not state — real Lambda rejects an `ImageUri` alongside
 `ImageUri` and `ResolvedImageUri`, and no `Location` — `RepositoryType` is "the
 service that's hosting the file", and reporting a presigned S3 URL for an image is a
 claim a caller can act on and be wrong about.
+
+### An event-source mapping polls on the simulated clock
+
+An enabled SQS event-source mapping consumes its queue: it receives a batch, invokes the function
+with it, and deletes the batch if the invocation succeeded. A failed invocation leaves the batch on
+the queue until its visibility timeout passes, which is how a real mapping retries it. Substrate does
+not run the function's code (see [Docker execution](#docker-execution-runs-an-image-never-a-zip)); the
+observable effect is the queue's.
+
+Until #1292 a goroutine drove each mapping from a one-second **wall-clock** ticker. A frozen or scaled
+clock did not affect it, an ESM's effect depended on how long a test happened to run, and nothing it
+did was recorded, so a replay of a stream in which a mapping consumed a queue replayed with the queue
+still full.
+
+Polling is now evaluated at observation, on the simulated clock:
+
+- **When a poll runs.** A mapping's first poll is due one simulated second after it is created or
+  enabled, then one per simulated second. A poll that is due runs before the next top-level request
+  reaches its plugin, whatever that request is. A test observes the queue, and the poll that came
+  due ran first. AWS publishes no polling cadence; one second is the interval the old poller used.
+- **A frozen clock polls never.** Nothing comes due, however many requests arrive. A test that
+  freezes the clock moves it with `AdvanceTime` to let a poll run, and the cadence follows `SetScale`,
+  because it is measured in simulated time.
+- **A gap runs its due polls in order** at the one clock reading the request carries, until one
+  receives nothing. Every later poll in the gap would see the same queue at the same instant. At most
+  100 polls of one mapping run per request; any beyond that stay due for the next.
+- **Disabling or deleting a mapping stops it.** Re-enabling restarts the cadence from now, so time
+  that passed while it was disabled does not count.
+
+**The decision on replay: the dispatches are recorded, and a replay re-derives them.** Each poll's
+receive, invoke and deletes are recorded as events with request IDs prefixed `req-clock-`, so the event
+log shows what a mapping consumed and invoked. Each ID is derived from the triggering request's ID,
+the mapping and the poll's index. A replay pins the clock to each recorded event's timestamp and runs
+the same step before routing it, so the same polls come due at the same request, under the same IDs,
+and leave the same state. The recorded copies are then skipped (`SkippedEvents`), because executing
+them as well would apply every dispatch twice. Exact reproduction requires what every recorded
+timestamp requires: a frozen clock during the recording.
+
+The polls run on the server's request path and on replay, not on internal dispatch paths (the
+CloudFormation deployer's and an API Gateway proxy integration's). Those are nested inside a
+top-level request that already ran them.
 
 ### CloudFormation resource types
 
@@ -16266,7 +16308,7 @@ routes both.
 | CreateStateMachine | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; the definition must be a JSON object and a structurally valid state machine — see below (#996, #1073); `name`, `roleArn` and `type` are checked against their published constraints, and a repeat is **idempotent** — see below (#1072) |
 | DescribeStateMachine | Addressed by ARN — see below |
 | UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996, #1073) |
-| DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995) |
+| DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995). Answers `{}`; the page publishes an empty body (#1206) |
 | ListStateMachines | Scoped to the caller's own account and Region |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
 | StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it; twelve of the fourteen published response members are answered — see below (#1071) |
@@ -16277,9 +16319,9 @@ routes both.
 | CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; `name` is checked against the same published constraints as `CreateStateMachine`'s, and a repeat is **idempotent** on the name alone — see below (#1072) |
 | DescribeActivity | Addressed by ARN — see below |
 | ListActivities | Scoped to the caller's own account and Region |
-| DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995) |
-| TagResource | State machine or activity — see below |
-| UntagResource | State machine or activity — see below |
+| DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995). Answers `{}`; the page publishes an empty body (#1206) |
+| TagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
+| UntagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
 | ListTagsForResource | `tags` sorted by key — see below |
 
 ### An ARN addresses the resource it names, at every operation
@@ -16391,8 +16433,8 @@ code saw something AWS never sends.
 **And not 409 either.** Two create handlers survived those sweeps at 409 rather
 than 404 and were corrected in #1072: `CreateStateMachine`'s
 `StateMachineAlreadyExists`, which `API_CreateStateMachine` publishes at 400, and
-`CreateActivity`'s `ActivityAlreadyExists`, which is no longer answered at all
-(see below). Both handlers also answered `InvalidParameterException` for an
+`CreateActivity`'s `ActivityAlreadyExists`, which is now answered only for its
+published condition (see below). Both handlers also answered `InvalidParameterException` for an
 absent `name` — a code on neither page's Errors list, where
 `API_CreateStateMachine` publishes fifteen and `API_CreateActivity` seven.
 
@@ -16457,16 +16499,20 @@ different definition **or role ARN** already exists"*, which would make a differ
 says outright that it "will not be updated, even if [it is] different". The Note is
 the more specific statement, so substrate treats a repeat differing only in
 `roleArn` or `tags` as the idempotent success and refuses only a differing
-`definition` or `type`. That choice is substrate's reading of a page that states
+`definition`, `type`, `loggingConfiguration`, `tracingConfiguration` or
+`encryptionConfiguration` — the last three since #1199, which made them recorded
+rather than discarded. They are compared as JSON values, so reordered keys are not
+a difference. That choice is substrate's reading of a page that states
 both things.
 
-**`ActivityAlreadyExists` is consequently unreachable, and that is the page's
-doing rather than a gap.** Its only published condition is its own gloss —
-*"Activity already exists. `EncryptionConfiguration` may not be updated."* — and
-`encryptionConfiguration` is a request member substrate does not decode and
-`ActivityState` does not hold. With the name-keyed idempotency modelled, no input
-reaches the refusal. Substrate previously answered it at 409 for a plain duplicate
-name, which was neither the published status nor the published condition.
+**`ActivityAlreadyExists` answers only its published condition.** That condition
+is its own gloss — *"Activity already exists. `EncryptionConfiguration` may not be
+updated."* — so a repeat `CreateActivity` that keeps the activity's
+`encryptionConfiguration` is the idempotent success, and one that changes it is
+`ActivityAlreadyExists`/400. Until [#1199](https://github.com/scttfrdmn/substrate/issues/1199) `encryptionConfiguration` was a
+request member substrate did not decode, so no input reached the refusal at all.
+Substrate earlier still answered it at 409 for a plain duplicate name, which was
+neither the published status nor the published condition.
 
 Three published constraints are now checked, each answering a code its own page
 publishes:
@@ -16588,6 +16634,32 @@ than from this page; **substrate does not model it** and serves
 `StartSyncExecution` on the same `states.{region}.amazonaws.com` endpoint as every
 other operation. A consumer whose client is configured against the AWS `sync-`
 host will not reach substrate.
+
+### DescribeStateMachine and DescribeActivity answer their configurations
+
+`DescribeStateMachine` answered seven of the fourteen members `API_DescribeStateMachine`
+publishes, and `DescribeActivity` three of `API_DescribeActivity`'s four. Since
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199) `CreateStateMachine`, `UpdateStateMachine` and `CreateActivity` record the
+configuration objects they are sent, and the describes answer them:
+
+| Member | Answered |
+|--------|----------|
+| `loggingConfiguration` | As sent, or the published default `{"level":"OFF","includeExecutionData":false}` ("By default, the `level` is set to `OFF`") |
+| `tracingConfiguration` | As sent, or `{"enabled":false}` |
+| `encryptionConfiguration` | As sent, or `{"type":"AWS_OWNED_KEY"}`, the AWS-owned key a resource created with none is encrypted with. On `DescribeActivity` too |
+| `revisionId` | A new value at every create and every `UpdateStateMachine`, which also answers it, as its page publishes. Two describes with no update between them answer the same one, so a caller can compare configurations "without performing a diff", which is what the page says the member is for. A state machine recorded before #1199 has none until its next update |
+
+A configuration that is not a JSON object is refused with its own published code at 400:
+`InvalidLoggingConfiguration`, `InvalidTracingConfiguration` or
+`InvalidEncryptionConfiguration`. The objects' members are not validated further: nothing logs,
+traces or encrypts, so the configuration is recorded intent, reported back verbatim.
+
+Three members stay absent, because no state machine substrate holds has a value for them:
+- **`description`:** "the description of the state machine version", and versions are not modeled.
+- **`label`:** identifies a Distributed Map state named by a qualified ARN, which is not modeled
+  either.
+- **`variableReferences`:** maps each state to the variables it references. Substrate does not
+  derive it, and a definition with no `Assign` or JSONata variables has none.
 
 ### A failed execution reports why it failed
 
@@ -19809,7 +19881,7 @@ Firehose data ingestion: $0.029 per GB.
 | SubmitJob | Returns `jobId`; the job is immediately `SUCCEEDED` |
 | DescribeJobs | |
 | ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
-| TerminateJob | Reports the job `FAILED` with the supplied `reason` |
+| TerminateJob | Reports the job `FAILED` with the supplied `reason`. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
 
 Every operation reports a bad request as **`ClientException`** at HTTP 400. The API
 reference declares exactly two errors for each Batch operation, `ClientException` and
@@ -20803,13 +20875,13 @@ The published path is given for every operation because one of them cannot be re
 | Operation | Published path | Notes |
 |-----------|----------------|-------|
 | CreateBackupVault | `PUT /backup-vaults/{backupVaultName}` | Routed on the published verb. Answers exactly the three published members. `BackupVaultTags` and `CreatorRequestId` are not read, so a create-time tag set is dropped, and `EncryptionKeyArn` is echoed without the KMS key having to exist |
-| DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Five of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), and nothing Substrate does not publish |
+| DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Nine of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), including `VaultState`, `VaultType` and `Locked`, and nothing Substrate does not publish |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
-| ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [five of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault; `maxResults`, `nextToken`, `shared` and `vaultType` are all ignored and no `NextToken` is emitted |
+| ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [nine of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault. [Pages by `maxResults` and `nextToken`, and applies `vaultType` and `shared`](#listbackupvaults-pages-and-filters); a bad value is `InvalidParameterValueException`/400 |
 | CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated, `AdvancedBackupSettings` is not read, and `CreatorRequestId` is ignored, so the published idempotency — *"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is returned"* — does not hold. The plan ARN [uses the wrong resource segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Reachable over that path since #1176](#getbackupplan-is-reachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
-| DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers `{}` where [four members are published](#two-backup-plan-responses-carry-the-wrong-members), and ignores [the plan's selections](#which-backup-preconditions-are-enforced) |
+| DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId` — and ignores [the plan's selections](#which-backup-preconditions-are-enforced) |
 | ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; `includeDeleted`, `maxResults` and `nextToken` are ignored |
 | CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
 | GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`; `CreatorRequestId` is not recorded |
@@ -20853,11 +20925,13 @@ each other. [#1172](https://github.com/scttfrdmn/substrate/issues/1172).
 
 `UpdateBackupPlan` answers `BackupPlanId`, `BackupPlanArn`, `VersionId` and an `UpdatedAt` that is on
 no AWS Backup page, while `CreationDate` — published, and already held on the stored record — is
-absent. `DeleteBackupPlan` answers `{}` where the page publishes `BackupPlanArn`, `BackupPlanId`,
-`DeletionDate` and `VersionId`; `VersionId` is the only handle on the version that was deleted, so
-the member identifying what happened is the one missing. `DeleteBackupVault` and
-`DeleteBackupSelection` publish *"an HTTP 200 response with an empty HTTP body"*, so their `{}` is
-faithful. [#1177](https://github.com/scttfrdmn/substrate/issues/1177).
+absent. `DeleteBackupPlan` answered `{}` where the page publishes `BackupPlanArn`, `BackupPlanId`,
+`DeletionDate` and `VersionId`. `VersionId` is the only handle on the version that was deleted, so the
+member identifying what happened was the one missing. It answers all four now, from the plan it
+deletes, with `DeletionDate` as Unix seconds like every Backup date. #1206's survey found it, and it
+is #1177's other half. `DeleteBackupVault` and `DeleteBackupSelection` publish *"an HTTP 200 response
+with an empty HTTP body"*, so their `{}` is faithful.
+[#1177](https://github.com/scttfrdmn/substrate/issues/1177).
 
 `UpdateBackupPlan` also merges where AWS replaces. `BackupPlan` is `Required: Yes` and describes the
 plan in full, but an omitted `BackupPlanName` or `Rules` leaves the stored value in place, and an
@@ -20886,15 +20960,56 @@ Substrate's own bookkeeping — reach no response
 `json:"-"` would change the format of every run already recorded, because the state snapshot holds
 those bytes and a replay reads them back.
 
-One wire type serves both sites, because the five members Substrate models — `BackupVaultName`,
-`BackupVaultArn`, `EncryptionKeyArn`, `CreationDate` and `NumberOfRecoveryPoints` — are a subset of
-`API_DescribeBackupVault`'s seventeen and of `API_BackupVaultListMember`'s thirteen alike. The twelve
-it does not model are absent rather than present and empty, `VaultState`, `Locked`,
-`MinRetentionDays` and `CreatorRequestId` among them
-([#1199](https://github.com/scttfrdmn/substrate/issues/1199)). `CreateBackupVault` is deliberately
-not projected through that type: `API_CreateBackupVault` publishes three members and no more, so it
-keeps its own map. The plan and selection handlers build their responses member by member, so no
-Backup record now reaches the wire whole.
+One wire type serves both sites, because every member it answers is in both
+`API_DescribeBackupVault`'s seventeen and `API_BackupVaultListMember`'s thirteen. Until
+[#1199](https://github.com/scttfrdmn/substrate/issues/1199) it answered five of them. It answers nine now:
+
+| Member | Answered |
+|--------|----------|
+| `BackupVaultName`, `BackupVaultArn`, `CreationDate`, `NumberOfRecoveryPoints` | Always |
+| `EncryptionKeyArn` | When the create named one |
+| `CreatorRequestId` | When the create sent one. `CreateBackupVault` now reads it, refusing a value outside the published "1 to 50 alphanumeric or '-_.' characters" with `InvalidParameterValueException`/400 |
+| `VaultState` | Always `AVAILABLE`: a vault is usable the moment the create returns, and is never `CREATING` or `FAILED` |
+| `VaultType` | Always `BACKUP_VAULT`: `CreateLogicallyAirGappedBackupVault` and `CreateRestoreAccessBackupVault` are unrouted |
+| `Locked` | Always `false`: `PutBackupVaultLockConfiguration` is unrouted, so no vault is ever locked |
+
+`VaultState` is the only published signal that a vault is anything but available, and `Locked` the
+one a consumer checking Vault Lock reads, so both are worth answering as the truths they are rather
+than leaving a consumer to read an absent member as `false` by accident. The rest are absent because
+no vault ever has a value for them:
+- **`LockDate`, `MinRetentionDays`, `MaxRetentionDays`:** the Vault Lock settings, which are unset
+  when no lock is configured, and none can be.
+- **`EncryptionKeyType`:** whether a key is customer-managed or AWS-owned depends on the key, which
+  the record does not hold. A vault created with no key would report AWS's default backup key, which
+  Substrate does not mint. Either value would be a guess.
+- **`SourceBackupVaultArn` and the four multi-party-approval members:** they belong to restore-access
+  vaults and to MPA, neither of which is routed.
+
+`CreatorRequestId`'s retry semantics are not modeled: a second create of the same name answers
+`AlreadyExistsException` whatever it carries. `CreateBackupVault` is deliberately not projected
+through `backupVaultOut`: `API_CreateBackupVault` publishes three members and no more, so it keeps
+its own map. The plan and selection handlers build their responses member by member, so no Backup
+record reaches the wire whole.
+
+### ListBackupVaults pages and filters
+
+`API_ListBackupVaults` publishes four query parameters. Until #1199's audit none was read: the list
+was one page with no `NextToken`, and both filters matched every vault.
+
+- **`maxResults`** (Valid Range 1–1000) bounds the page, and with none the page size is the published
+  maximum of 1000. A value outside the range, or one that is not an integer, is
+  `InvalidParameterValueException`/400, which the page glosses "the value is out of range".
+- **`nextToken`** is an opaque offset over the vault index, which is kept sorted by name, so a walk
+  sees every vault once. It is omitted, not emitted empty, on the last page. A token Substrate did not
+  issue is `InvalidParameterValueException`, rather than read as page one (#915).
+- **`vaultType`** must be one of its published Valid Values. Every vault is a `BACKUP_VAULT`, so that
+  value matches every vault and the other two match none.
+- **`shared`** must be a boolean. The page glosses it as sorting "the list of vaults by shared
+  vaults"; the CLI and SDKs use it to list the vaults shared with the caller. Substrate shares no vault
+  across accounts, so `true` answers an empty list and `false` the full one.
+
+A vault whose record cannot be read is an error rather than skipped, since a skipped vault would
+shorten the list and shift every later offset.
 
 ### The account and Region a record carries reach no response
 
@@ -21984,8 +22099,8 @@ Substrate has never seen reports an empty `VpcId`.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFileSystem | Answers `{"FileSystem"}` as published. [Neither `Required: Yes` member is checked and no member is validated](#createfilesystem-validates-none-of-its-members); [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` makes a retry answer the file system it first created](#clientrequesttoken-makes-create-and-delete-idempotent) |
-| DescribeFileSystems | Describes the IDs given, or every non-deleted file system when `FileSystemIds` is absent, which is what the page publishes. [`MaxResults` and `NextToken` are ignored and no token is emitted](#describefilesystems-answers-every-file-system-in-one-page) |
+| CreateFileSystem | Answers `{"FileSystem"}` as published. [Both `Required: Yes` members are required, and `FileSystemType` and `StorageType` must be published values](#createfilesystem-requires-filesystemtype-and-subnetids), each refused `BadRequest`/400; [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` makes a retry answer the file system it first created](#clientrequesttoken-makes-create-and-delete-idempotent) |
+| DescribeFileSystems | Describes the IDs given, or every non-deleted file system when `FileSystemIds` is absent, which is what the page publishes. [Pages by `MaxResults` and `NextToken`, at most 50 per page, and refuses an unissued token](#describefilesystems-pages-by-maxresults-and-nexttoken) `BadRequest`/400 |
 | DeleteFileSystem | [Answers the published flat shape with `Lifecycle` `DELETING`, and removes the file system](#deletefilesystem-answers-the-published-flat-shape-and-reports-deleting); [`ClientRequestToken` makes a retry answer the first delete](#clientrequesttoken-makes-create-and-delete-idempotent) |
 
 Everything else on the FSx API is unrouted: `CreateFileSystemFromBackup` and `UpdateFileSystem`, the
@@ -22036,19 +22151,35 @@ job-status surfaces already use, would let a test assert the `CREATING` path wit
 wall-clock time.
 [#1196](https://github.com/scttfrdmn/substrate/issues/1196).
 
-### CreateFileSystem validates none of its members
+### CreateFileSystem requires FileSystemType and SubnetIds
 
 `FileSystemType` is `Required: Yes` with `Valid Values: WINDOWS | LUSTRE | ONTAP | OPENZFS`, and
-`SubnetIds` is `Required: Yes`. Substrate defaults the first to `LUSTRE` and accepts an absent second,
-so a template or SDK call missing a required member deploys clean here and is refused by AWS.
-`StorageType` publishes `Valid Values: SSD | HDD | INTELLIGENT_TIERING`, and only `FileSystemType` is
-upper-cased before storage, so a lowercase `ssd` is stored and echoed verbatim — an off-enum value in
-a response, which is worse than a refusal because it looks like a real observation. `StorageCapacity`
-is accepted unchecked and reported as `0` when absent, where the page publishes per-deployment-type
-values such as "1200 GiB, 2400 GiB, and increments of 2400 GiB" for `SCRATCH_2`. Each of these lands
-on `BadRequest`/400, "A generic error indicating a failure with a client request.", which is the first
-entry in the operation's own Errors section and already has a constructor in the plugin.
-[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+`SubnetIds` is `Required: Yes`. Until [#1197](https://github.com/scttfrdmn/substrate/issues/1197) Substrate defaulted the first to `LUSTRE` and
+accepted an absent second, so a template or SDK call missing a required member deployed clean here and
+was refused by AWS. Each is checked now, before any other member is used, and refused with
+`BadRequest`/400, "A generic error indicating a failure with a client request.", the first entry in
+the operation's own Errors section:
+
+| Request | Message |
+|---------|---------|
+| No `FileSystemType` | `FileSystemType is required.` |
+| A `FileSystemType` outside the enum, including a lower-case `lustre` (the handler used to upper-case it) | `FileSystemType "…" is not one of WINDOWS, LUSTRE, ONTAP or OPENZFS.` |
+| A `StorageType` outside `SSD \| HDD \| INTELLIGENT_TIERING` | `StorageType "…" is not one of SSD, HDD or INTELLIGENT_TIERING.` |
+| No `SubnetIds`, or an empty list | `SubnetIds is required.` |
+| More than the published 50 `SubnetIds` | `SubnetIds may name at most 50 subnets.` |
+
+`StorageType` is `Required: No` and still defaults to `SSD`, as the page says. A CloudFormation
+template omitting `SubnetIds` now fails its `AWS::FSx::FileSystem` resource with that message.
+
+Two published constraints are deliberately **not** enforced, recorded in `fsxValidateCreate`'s doc
+comment:
+- **The `SubnetIds` pattern** `^(subnet-[0-9a-f]{8,})$`. Substrate does not require a subnet to exist
+  in EC2 state (the VPC lookup is best effort), and fixtures and templates name symbolic subnets such
+  as `subnet-a`. Refusing those would not make the subnet any more real; the presence check is what
+  catches the omission a generated template makes.
+- **`StorageCapacity`'s per-type values**, such as "1200 GiB, 2400 GiB, and increments of 2400 GiB"
+  for `SCRATCH_2`. They depend on the deployment type and storage type in ways the page states only
+  in prose. The member is `Required: No`, and is reported as `0` when absent.
 
 ### ClientRequestToken makes create and delete idempotent
 
@@ -22073,19 +22204,33 @@ The tokens are state, so they replay with everything else. An SDK fills the toke
 so a consumer's retry-on-timeout path, the case the token exists for, now observes the published
 replay.
 
-### DescribeFileSystems answers every file system in one page
+### DescribeFileSystems pages by MaxResults and NextToken
 
-`MaxResults` and `NextToken` are both published request members, `NextToken` is a published response
+`MaxResults` and `NextToken` are published request members, `NextToken` is a published response
 member, and the page describes the loop in full: "`DescribeFileSystems` is called first without a
 `NextToken` value. Then the operation continues to be called with the `NextToken` parameter set to the
-value of the last `NextToken` value until a response has no `NextToken`." Substrate decodes only
-`FileSystemIds` and emits only `FileSystems`, so a paginator stops after one page and a consumer's
-paging code is never exercised. The page also warns that an implementation "might return fewer than
-`MaxResults` file system descriptions while still including a `NextToken` value", which is exactly the
-case a test wants to reach and cannot.
-[#1195](https://github.com/scttfrdmn/substrate/issues/1195).
+value of the last `NextToken` value until a response has no `NextToken`." Until
+[#1195](https://github.com/scttfrdmn/substrate/issues/1195) Substrate decoded only `FileSystemIds` and answered every file system in one page, so
+a paginator's loop ran once. Both members are read now:
 
-### The file system record carries twelve of the published members
+- **The page size** is the smaller of `MaxResults` and 50. The page says FSx returns "the minimum of
+  the `MaxResults` parameter … and the service's internal maximum number of items per page", and the
+  response's `FileSystems` publishes "Maximum number of 50 items", which is that maximum. A
+  `MaxResults` below 1 ("This parameter value must be greater than 0") is `BadRequest`/400.
+- **The token** is an opaque base64 offset that satisfies the published pattern. It is **omitted**, not
+  answered empty, on the last page; an empty string is outside its published minimum length of 1.
+- **A token Substrate did not issue** is `BadRequest`/400, rather than read as page one (#915).
+  `BadRequest` is the page's own generic client-error code; it publishes no more specific one.
+- **The order** is the account's ID index, sorted by ID, so a walk sees every file system exactly once.
+  The page calls the order "unspecified".
+- **`FileSystemIds`** is a lookup, and the page scopes `MaxResults` and `NextToken` to "retrieving all
+  file system descriptions", so neither applies when IDs are named. More than the published 50 IDs is
+  `BadRequest`/400. An ID that names nothing answers `FileSystemNotFound`.
+
+The operation publishes no filter member, so there is none to apply or refuse. A store read error while
+listing is returned rather than skipped, since a skipped record would shift every later offset.
+
+### The file system record carries thirteen of the published members
 
 `API_FileSystem` is a large shape and Substrate reports `FileSystemId`, `FileSystemType`,
 `StorageCapacity`, `StorageType`, `VpcId`, `SubnetIds`, `DNSName`, `ResourceARN`, `Lifecycle`,
@@ -22097,9 +22242,13 @@ blocks. Every name Substrate does emit is a published one. `CreationTime` is a J
 seconds to three decimals, as `awsJson1_1` publishes a `Timestamp`. Until
 [#1373](https://github.com/scttfrdmn/substrate/issues/1373) it was whole seconds, so two file systems
 created in one second could not be ordered. The record holds the fraction in the same field, so one
-written before the fix still decodes, and renders `.000`. The absences bite hardest through CloudFormation, where two of the four published
-`Fn::GetAtt` attributes have no stored value.
-[#1199](https://github.com/scttfrdmn/substrate/issues/1199).
+written before the fix still decodes, and renders `.000`. Every absent member is absent because the record holds no value for it, and `fsxToWire`'s doc comment
+says why for each ([#1199](https://github.com/scttfrdmn/substrate/issues/1199)). Of
+`AWS::FSx::FileSystem`'s four published `Fn::GetAtt` attributes, `DNSName`, `ResourceARN` and
+`LustreMountName` resolve. `LustreMountName` resolved empty until #1199's audit, though the plugin
+always held it. `RootVolumeId`, "the root volume ID of the FSx for OpenZFS file system", resolves
+empty, because OpenZFS volumes are not modeled and an ID for a volume that does not exist would be
+invented.
 
 ### What a refusal reports
 

@@ -914,6 +914,14 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Step 4.9: work that came due because simulated time passed — an event-source
+	// mapping's polls — runs before the request it was due by, at the same step a replay
+	// runs it (#1292). Its failure is logged rather than answered: the caller's request
+	// did not ask for it.
+	if err := s.registry.RunClockDriven(reqCtx, s.dispatchClockDriven(ctx)); err != nil {
+		s.logger.Warn("clock-driven work failed", "err", err)
+	}
+
 	// Step 5: route to plugin.
 	resp, routeErr := s.registry.RouteRequest(reqCtx, req)
 
@@ -1084,4 +1092,19 @@ func checkPresignedExpiry(q url.Values, now time.Time) bool {
 		return false
 	}
 	return now.After(t.Add(time.Duration(secs) * time.Second))
+}
+
+// dispatchClockDriven returns the [InternalDispatch] the live path gives clock-driven work:
+// it routes the request and records it, so the event log shows what the work did. A replay
+// skips the recorded copy, because replaying the triggering request re-derives it; see
+// [isClockDrivenDispatchEvent].
+func (s *Server) dispatchClockDriven(ctx context.Context) InternalDispatch {
+	return func(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+		start := s.tc.Now()
+		resp, err := s.registry.RouteRequest(reqCtx, req)
+		if recordErr := s.store.RecordRequest(ctx, reqCtx, req, resp, s.tc.Now().Sub(start), 0, err); recordErr != nil {
+			s.logger.Warn("failed to record clock-driven dispatch", "err", recordErr)
+		}
+		return resp, err
+	}
 }

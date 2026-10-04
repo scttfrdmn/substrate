@@ -87,16 +87,26 @@ func (d *StackDeployer) deployFSxFileSystem(
 	if resp != nil {
 		var out struct {
 			FileSystem struct {
-				FileSystemID string `json:"FileSystemId"`
-				ResourceARN  string `json:"ResourceARN"`
-				DNSName      string `json:"DNSName"`
+				FileSystemID        string `json:"FileSystemId"`
+				ResourceARN         string `json:"ResourceARN"`
+				DNSName             string `json:"DNSName"`
+				LustreConfiguration struct {
+					MountName string `json:"MountName"`
+				} `json:"LustreConfiguration"`
 			} `json:"FileSystem"`
 		}
 		if jsonErr := json.Unmarshal(resp.Body, &out); jsonErr == nil {
 			dr.PhysicalID = out.FileSystem.FileSystemID
 			dr.ARN = out.FileSystem.ResourceARN
+			// LustreMountName is one of AWS::FSx::FileSystem's four published Fn::GetAtt attributes,
+			// and the plugin always held it; it simply was not recorded here, so the attribute
+			// resolved empty (#1199). RootVolumeId, the fourth, has no value to record: OpenZFS
+			// volumes are not modeled.
 			dr.Metadata = map[string]interface{}{
 				"DNSName": out.FileSystem.DNSName,
+			}
+			if out.FileSystem.LustreConfiguration.MountName != "" {
+				dr.Metadata["LustreMountName"] = out.FileSystem.LustreConfiguration.MountName
 			}
 		}
 	}

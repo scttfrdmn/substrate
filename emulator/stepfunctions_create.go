@@ -14,7 +14,10 @@ package emulator
 // breaks it is recorded on [sfnInvalidName].
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"reflect"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -142,10 +145,12 @@ func sfnValidateStateMachineType(smType string) *AWSError {
 //	idempotent request of the previous. In this case, roleArn and tags will not be updated, even if
 //	they are different.
 //
-// Of the eight inputs to that check, substrate models three — `name` (the lookup itself),
-// `definition` and `type`. The other five are request members no handler in this plugin decodes, so
-// they cannot differ between two requests substrate has seen and comparing them would compare
-// nothing. That is why this takes two arguments rather than a whole request.
+// Of the eight inputs to that check, substrate models six — `name` (the lookup itself),
+// `definition`, `type`, and since #1199 the three configuration objects, which are now decoded and
+// stored. They are compared as JSON values, so key order and whitespace do not make two equal
+// configurations differ, and an absent one equals an absent one. `publish` and `versionDescription`
+// are still not decoded — versions are not modeled — so they cannot differ between two requests
+// substrate has seen.
 //
 // **The page contradicts itself here, and substrate follows the Note.** `StateMachineAlreadyExists`
 // is glossed "A state machine with the same name but a different definition **or role ARN** already
@@ -154,6 +159,79 @@ func sfnValidateStateMachineType(smType string) *AWSError {
 // specific statement: it enumerates the check's inputs and names `roleArn` as excluded twice. So a
 // repeat that differs only in `roleArn` or `tags` answers the existing state machine's ARN, and
 // neither value is updated — which returning the stored record unchanged achieves exactly.
-func sfnStateMachineIsIdempotentCreate(existing *StateMachineState, definition, smType string) bool {
-	return existing.Definition == definition && existing.Type == smType
+func sfnStateMachineIsIdempotentCreate(existing *StateMachineState, definition, smType string, cfg sfnConfigs) bool {
+	return existing.Definition == definition && existing.Type == smType &&
+		sfnSameJSON(existing.LoggingConfiguration, cfg.Logging) &&
+		sfnSameJSON(existing.TracingConfiguration, cfg.Tracing) &&
+		sfnSameJSON(existing.EncryptionConfiguration, cfg.Encryption)
+}
+
+// sfnConfigs is the three configuration objects CreateStateMachine and UpdateStateMachine take.
+type sfnConfigs struct {
+	Logging    json.RawMessage `json:"loggingConfiguration"`
+	Tracing    json.RawMessage `json:"tracingConfiguration"`
+	Encryption json.RawMessage `json:"encryptionConfiguration"`
+}
+
+// normalize drops an explicit JSON null, so it is stored and compared as absent, and refuses a
+// configuration that is not a JSON object with the published code for that member:
+// InvalidLoggingConfiguration, InvalidTracingConfiguration and InvalidEncryptionConfiguration, each
+// 400 on both API_CreateStateMachine and API_UpdateStateMachine.
+//
+// The objects' members are not validated beyond that — a logging level outside ALL | ERROR | FATAL |
+// OFF, or a CUSTOMER_MANAGED_KMS_KEY with no kmsKeyId, is recorded as sent. Nothing executes logging,
+// tracing or encryption, so the configuration is recorded intent, which DescribeStateMachine reports
+// back verbatim.
+func (c *sfnConfigs) normalize() error {
+	check := func(raw *json.RawMessage, code string) error {
+		if len(*raw) == 0 || string(*raw) == "null" {
+			*raw = nil
+			return nil
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(*raw, &obj); err != nil {
+			return &AWSError{Code: code, Message: "The configuration is not a JSON object.", HTTPStatus: http.StatusBadRequest}
+		}
+		return nil
+	}
+	if err := check(&c.Logging, "InvalidLoggingConfiguration"); err != nil {
+		return err
+	}
+	if err := check(&c.Tracing, "InvalidTracingConfiguration"); err != nil {
+		return err
+	}
+	return check(&c.Encryption, "InvalidEncryptionConfiguration")
+}
+
+// sfnSameJSON reports whether two stored configurations are the same JSON value. Two absent
+// configurations are the same; an absent one and a present one are not, even when the present one
+// spells out the default, because the published check compares the requests.
+func sfnSameJSON(a, b json.RawMessage) bool {
+	if len(a) == 0 || len(b) == 0 {
+		return len(a) == len(b)
+	}
+	var va, vb interface{}
+	if json.Unmarshal(a, &va) != nil || json.Unmarshal(b, &vb) != nil {
+		return false
+	}
+	return reflect.DeepEqual(va, vb)
+}
+
+// sfnDefault* are the configurations DescribeStateMachine and DescribeActivity answer when the request
+// named none. API_CreateStateMachine: "By default, the level is set to OFF"; tracing is X-Ray
+// "enabled" or not, and off unless enabled; and a state machine or activity created with no
+// encryptionConfiguration is encrypted with an AWS-owned key, the AWS_OWNED_KEY type in
+// API_EncryptionConfiguration's Valid Values.
+var (
+	sfnDefaultLogging    = json.RawMessage(`{"includeExecutionData":false,"level":"OFF"}`)
+	sfnDefaultTracing    = json.RawMessage(`{"enabled":false}`)
+	sfnDefaultEncryption = json.RawMessage(`{"type":"AWS_OWNED_KEY"}`)
+)
+
+// sfnOrDefault answers a stored configuration, or the published default when none was sent.
+func sfnOrDefault(raw, def json.RawMessage) json.RawMessage {
+	if len(raw) == 0 {
+		return def
+	}
+	return raw
 }
