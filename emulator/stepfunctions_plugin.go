@@ -984,12 +984,8 @@ func (p *StepFunctionsPlugin) getExecutionHistory(_ *RequestContext, req *AWSReq
 		return nil, err
 	}
 
-	history := exec.History
-	if history == nil {
-		history = []HistoryEvent{}
-	}
 	out := map[string]interface{}{
-		"events": history,
+		"events": sfnHistoryToWire(exec.History),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }

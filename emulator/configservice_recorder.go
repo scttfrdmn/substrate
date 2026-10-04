@@ -437,6 +437,12 @@ func (p *ConfigServicePlugin) startConfigurationRecorder(ctx *RequestContext, re
 		// Success. A consumer that needs to exercise a failing recorder seeds it; see
 		// configservice_control.go.
 		status.LastStatus = cfgsvcRecorderStatusSuccess
+		// lastErrorCode and lastErrorMessage are "from when the recorder last failed", and
+		// a Success status carrying them is the combination the recorder-status seed
+		// refuses: a consumer reads them only on Failure, so they would be silently
+		// dropped. A status persisted before #1320 may still hold a seeded pair.
+		status.LastErrorCode = ""
+		status.LastErrorMessage = ""
 		if err := p.cfgsvcPutJSON(goCtx, cfgsvcRecorderStatusKey(ctx.AccountID, ctx.Region), *status); err != nil {
 			return nil, err
 		}
@@ -524,15 +530,44 @@ func (p *ConfigServicePlugin) cfgsvcNamedRecorderStatus(ctx *RequestContext, req
 	if !found || recorder.Name != in.ConfigurationRecorderName {
 		return nil, cfgsvcNoSuchRecorder()
 	}
-	return p.cfgsvcRecorderStatus(ctx)
+	// The stored status, never the seeded view: both callers persist what this returns,
+	// and persisting the view would bake a seed into the record (#1320).
+	return p.cfgsvcStoredRecorderStatus(ctx)
 }
 
-// cfgsvcRecorderStatus loads the recorder's status with any seeded values applied.
+// cfgsvcRecorderStatus is the recorder's status as DescribeConfigurationRecorderStatus
+// reports it: the stored status with any seeded values applied.
 //
 // The seed is applied at read time rather than written into state, so clearing it
 // restores the real status rather than leaving a seeded value behind — the same
-// reasoning as the account Region-opt seed.
+// reasoning as the account Region-opt seed. What this returns is a *view*, and nothing
+// may persist it: until #1320 StartConfigurationRecorder and StopConfigurationRecorder
+// read it and wrote it back, so a seeded Failure and its error code outlived the seed.
+// A writer reads [ConfigServicePlugin.cfgsvcStoredRecorderStatus] instead, the
+// separation cfgsvcPackStateView and cfgsvcResolvePackState keep for conformance packs.
 func (p *ConfigServicePlugin) cfgsvcRecorderStatus(ctx *RequestContext) (*ConfigRecorderStatus, error) {
+	status, err := p.cfgsvcStoredRecorderStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	seed, seeded, err := p.seededRecorderStatus(context.Background(), ctx.AccountID, ctx.Region)
+	if err != nil {
+		return nil, err
+	}
+	if seeded {
+		status.LastStatus = seed.LastStatus
+		status.LastErrorCode = seed.LastErrorCode
+		status.LastErrorMessage = seed.LastErrorMessage
+		if status.LastStatusChangeTime.IsZero() {
+			status.LastStatusChangeTime = EpochSeconds(p.tc.Now())
+		}
+	}
+	return status, nil
+}
+
+// cfgsvcStoredRecorderStatus loads the recorder's real status, with no seed applied. It
+// is the only status a writer may read before persisting.
+func (p *ConfigServicePlugin) cfgsvcStoredRecorderStatus(ctx *RequestContext) (*ConfigRecorderStatus, error) {
 	goCtx := context.Background()
 	var status ConfigRecorderStatus
 	found, err := p.cfgsvcGetJSON(goCtx, cfgsvcRecorderStatusKey(ctx.AccountID, ctx.Region), &status)
@@ -548,19 +583,6 @@ func (p *ConfigServicePlugin) cfgsvcRecorderStatus(ctx *RequestContext) (*Config
 			return nil, err
 		}
 		status = ConfigRecorderStatus{ARN: recorder.ARN, Name: recorder.Name}
-	}
-
-	seed, seeded, err := p.seededRecorderStatus(goCtx, ctx.AccountID, ctx.Region)
-	if err != nil {
-		return nil, err
-	}
-	if seeded {
-		status.LastStatus = seed.LastStatus
-		status.LastErrorCode = seed.LastErrorCode
-		status.LastErrorMessage = seed.LastErrorMessage
-		if status.LastStatusChangeTime.IsZero() {
-			status.LastStatusChangeTime = EpochSeconds(p.tc.Now())
-		}
 	}
 	return &status, nil
 }

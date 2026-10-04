@@ -1,6 +1,9 @@
 package emulator
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 // timestreamNamespace is the state namespace for all Timestream resources.
 const timestreamNamespace = "timestream"
@@ -16,10 +19,11 @@ type TimestreamDatabase struct {
 	Arn string `json:"Arn"`
 	// TableCount is the number of tables in the database.
 	TableCount int64 `json:"TableCount"`
-	// CreationTime is the ISO-8601 timestamp when the database was created.
-	CreationTime string `json:"CreationTime"`
-	// LastUpdatedTime is the ISO-8601 timestamp of the last modification.
-	LastUpdatedTime string `json:"LastUpdatedTime"`
+	// CreationTime is when the database was created. A record written before #1207 holds the
+	// whole-second RFC3339 string the field was then declared as, which time.Time decodes as-is.
+	CreationTime time.Time `json:"CreationTime"`
+	// LastUpdatedTime is when the database was last modified.
+	LastUpdatedTime time.Time `json:"LastUpdatedTime"`
 }
 
 // TimestreamTable represents an Amazon Timestream table.
@@ -32,10 +36,11 @@ type TimestreamTable struct {
 	Arn string `json:"Arn"`
 	// TableStatus is the current status (always "ACTIVE" in the emulator).
 	TableStatus string `json:"TableStatus"`
-	// CreationTime is the ISO-8601 timestamp when the table was created.
-	CreationTime string `json:"CreationTime"`
-	// LastUpdatedTime is the ISO-8601 timestamp of the last modification.
-	LastUpdatedTime string `json:"LastUpdatedTime"`
+	// CreationTime is when the table was created. A record written before #1207 holds the
+	// whole-second RFC3339 string the field was then declared as, which time.Time decodes as-is.
+	CreationTime time.Time `json:"CreationTime"`
+	// LastUpdatedTime is when the table was last modified.
+	LastUpdatedTime time.Time `json:"LastUpdatedTime"`
 	// RetentionProperties holds data-retention settings.
 	RetentionProperties TimestreamRetentionProperties `json:"RetentionProperties"`
 }

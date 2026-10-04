@@ -16018,7 +16018,7 @@ routes both.
 | DescribeExecution | Addressed by ARN. The execution runs to a terminal status at `StartExecution`, so this reports rather than advances it; `error` and `cause` are answered on a failed execution — see below (#1071) |
 | StopExecution | Addressed by ARN |
 | ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
-| GetExecutionHistory | Addressed by ARN |
+| GetExecutionHistory | Addressed by ARN. Each event's `timestamp` is epoch seconds and its `type` a published per-state value (#1323) |
 | CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; `name` is checked against the same published constraints as `CreateStateMachine`'s, and a repeat is **idempotent** on the name alone — see below (#1072) |
 | DescribeActivity | Addressed by ARN — see below |
 | ListActivities | Scoped to the caller's own account and Region |
@@ -16566,6 +16566,23 @@ Six of the eighteen carry nothing a projection could leak and are driven anyway:
 and `DeleteStateMachine`, `DeleteActivity`, `TagResource` and `UntagResource` an
 empty object — none reads a member off the record it addresses. They are listed so
 the set reads as complete rather than as a sample.
+
+### Every date is epoch seconds, history events included
+
+Step Functions speaks `awsJson1_0`, where a `Timestamp` is a JSON number of epoch seconds, and the sfn
+client's decoder expects a number. `creationDate`, `startDate`, `stopDate` and `updateDate` have
+always answered that way, through `sfnEpoch`. `GetExecutionHistory`'s per-event `timestamp`, which
+`API_HistoryEvent` publishes as a `Timestamp`, Required: Yes, did not until #1323: it answered the
+stored `time.Time` as an RFC3339 string, so the whole response failed to decode. It now answers
+through `sfnHistoryToWire` (`emulator/stepfunctions_wire.go`), and the stored history keeps its
+encoding, so an execution recorded before the fix reads back and answers the number too.
+
+Each event's `type` is a value of `API_HistoryEvent`'s closed Valid Values list, derived from the ASL
+state's own type: `PassStateEntered`/`PassStateExited`, and likewise for `Task`, `Choice`, `Wait`,
+`Succeed`, `Parallel` and `Map`. A `Fail` state answers `FailStateEntered` and no exited event, because
+the page publishes none. Until #1323 every state answered the generic `StateEntered`/`StateExited`,
+which the list does not contain. `TestSFNHistory_EventsAnswerPublishedTypesAndEpochTimestamps` in
+`emulator/stepfunctions_history_test.go` asserts both on the raw bytes.
 
 ### CloudFormation resource types
 
@@ -19000,6 +19017,19 @@ Every seed is applied at **read** time rather than written into the resource, so
 clearing one restores the real state instead of leaving the seeded value behind.
 Seeds live in their own `config-ctrl` namespace so a seeded status is never mistaken
 for a real one in a state dump or during replay.
+
+Until [#1320](https://github.com/scttfrdmn/substrate/issues/1320) that was not true of
+the recorder. `StartConfigurationRecorder` and `StopConfigurationRecorder` read the
+*seeded* status and wrote it back, so a seeded `Failure` and its error code survived
+the seed being cleared, and a Start stored `Success` alongside the seeded
+`lastErrorCode` — the combination the seed endpoint itself refuses. Both now read the
+stored status, and only `DescribeConfigurationRecorderStatus` applies the seed. A
+Start also clears `lastErrorCode` and `lastErrorMessage`, which `ConfigurationRecorderStatus`
+describes as "from when the recorder last failed", so a status stored before the fix
+does not carry them forward under `Success`.
+`TestConfigSeeds_AreAppliedAtReadTimeNotWrittenIntoTheResource` runs every sequence of
+recorder writes with and without the seed, and requires the stored records to be
+byte-identical once it is cleared.
 
 A seed that would be **silently ignored is refused**, which is the rule the whole
 family follows: a `lastErrorCode` on a non-`Failure` status, a `statusReason` on a
@@ -22263,18 +22293,22 @@ the store's own error — `if err != nil || raw == nil { continue }`
 indistinguishable from an absent seed
 ([#1200](https://github.com/scttfrdmn/substrate/issues/1200)).
 
-### Every Timestream timestamp is a string where the model publishes a number
+### Every Timestream timestamp is epoch seconds
 
-`TimestreamDatabase` and `TimestreamTable` declare `CreationTime` and
-`LastUpdatedTime` as `string` (`emulator/timestream_types.go:20`, `:22`, `:36`,
-`:38`), and both create paths fill them with
-`p.tc.Now().UTC().Format(time.RFC3339)` (`emulator/timestream_plugin.go:106`,
-`:202`). The reference publishes all four as `Type: Timestamp`, rendering them in
-every JSON sample as `"CreationTime": number`. An SDK deserialising the member
-into a timestamp field fails on a string, so the call errors inside the client
-rather than returning a record, which makes the divergence fatal to an
-SDK-driven test rather than merely cosmetic
-([#1207](https://github.com/scttfrdmn/substrate/issues/1207)).
+`API_Database` and `API_Table` publish `CreationTime` and `LastUpdatedTime` as `Type: Timestamp`,
+which Timestream Write's JSON protocol renders as a number of epoch seconds with a fraction. Every
+database and table response (`CreateDatabase`, `DescribeDatabase`, `ListDatabases`, `CreateTable`,
+`DescribeTable`, `ListTables`) answers both that way, to three decimals, through
+`emulator/timestream_wire.go`.
+
+Until [#1207](https://github.com/scttfrdmn/substrate/issues/1207) the records declared both as
+strings and wrote whole-second RFC3339, which an SDK deserializing a timestamp refuses, so every one
+of those calls failed inside the client. The records hold `time.Time` now, so a create keeps its
+sub-second instant and two in one second are orderable. A record written before the fix holds the
+old RFC3339 string, which still decodes and answers the same instant as epoch seconds
+(`TestTimestreamWire_ARecordWrittenBeforeTheFixStillDecodes`). A run recorded before the fix and
+replayed after it diverges on a create made at a sub-second instant, because the record now keeps
+the fraction the old one dropped.
 
 ### A conflict answers 409 and a missing resource 404
 
