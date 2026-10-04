@@ -25,6 +25,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`docs/services.md` names each service once again, and a gate keeps it that way.** #1384 shipped
+  41 duplicated service sections: an edit to the Timestream section for #1209 reinserted a
+  6,680-line copy of every section from Step Functions onward, so the file held two Timestream
+  sections that disagreed. One of them also ended in AppSync's text. `docs-reference-check` compares
+  the generated matrix, not the prose, and passed.
+  - The file is rebuilt from its last correct state with only the intended Redshift (#1208),
+    Timestream (#1209) and MSK/EMR Serverless (#1204, #1205) edits re-applied. The other 40
+    duplicated pairs were byte-identical copies.
+  - The new `make docs-headings-check`, run in CI beside `docs-reference-check`, fails on any `##`
+    heading that appears twice.
+
 - **A CloudFormation stack name is unique per account per Region** (#1366). Stack, change-set and
   drift-detection state was keyed by name alone (`stack:<name>`, `changeset:<stack>/<name>`). So two
   accounts, or two Regions of one account, that each created `app` addressed one record: the second
