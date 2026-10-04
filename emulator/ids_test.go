@@ -1664,12 +1664,18 @@ func idsRecordGlue(t *testing.T, ts *emulator.TestServer) {
 func idsRecordTimestream(t *testing.T, ts *emulator.TestServer) {
 	t.Helper()
 
+	// An unseeded Query answers only SELECT * of a table that exists (#1209), so the table is made
+	// first, through the Write API's cell host.
+	idsJSONTargetCall(t, ts, idsTimestreamWriteHost, "Timestream_20181101.CreateDatabase",
+		map[string]any{"DatabaseName": "idsdb"})
+	idsJSONTargetCall(t, ts, idsTimestreamWriteHost, "Timestream_20181101.CreateTable",
+		map[string]any{"DatabaseName": "idsdb", "TableName": "idst"})
 	var queried struct {
 		QueryID string `json:"QueryId"`
 	}
 	require.NoError(t, json.Unmarshal(idsJSONTargetCall(t, ts, idsTimestreamQueryHost,
 		"Timestream_20181101.Query",
-		map[string]any{"QueryString": "SELECT 1"}), &queried))
+		map[string]any{"QueryString": "SELECT * FROM idsdb.idst"}), &queried))
 	require.Len(t, queried.QueryID, 32,
 		"a Timestream QueryId is 32 hex characters, the alphabet [a-zA-Z0-9]+ admits")
 	require.NotContains(t, queried.QueryID, "-",
@@ -1766,13 +1772,15 @@ func idsRequireHexUUID(t *testing.T, id, what string) {
 	}
 }
 
-// The hosts the tier-5 services are addressed at. Timestream is two endpoints and this is the query
-// one, because Query is the operation that mints.
+// The hosts the tier-5 services are addressed at. Timestream is two endpoints, and both are the cell
+// hosts DescribeEndpoints hands out, since a regional host recognizes only DescribeEndpoints (#1209):
+// the query one because Query is the operation that mints, and the ingest one to make its table.
 const (
 	idsAthenaHost          = "athena.us-east-1.amazonaws.com"
 	idsRedshiftDataHost    = "redshift-data.us-east-1.amazonaws.com"
 	idsGlueHost            = "glue.us-east-1.amazonaws.com"
-	idsTimestreamQueryHost = "query.timestream.us-east-1.amazonaws.com"
+	idsTimestreamQueryHost = "query-cell1.timestream.us-east-1.amazonaws.com"
+	idsTimestreamWriteHost = "ingest-cell1.timestream.us-east-1.amazonaws.com"
 	idsOpenSearchHost      = "search-ids-tier5.us-east-1.es.amazonaws.com"
 	idsQuickSightHost      = "quicksight.us-east-1.amazonaws.com"
 )

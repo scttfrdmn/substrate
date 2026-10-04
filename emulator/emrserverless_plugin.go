@@ -64,46 +64,64 @@ func (p *EMRServerlessPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 
 // parseEMRServerlessOperation maps an HTTP method and path to an EMR Serverless
 // operation name plus optional appID and runID.
+//
+// The path is matched segment by segment against the published URIs (#1205):
+//
+//	POST   /applications
+//	GET    /applications/{applicationId}
+//	DELETE /applications/{applicationId}
+//	POST   /applications/{applicationId}/jobruns
+//	GET    /applications/{applicationId}/jobruns
+//	GET    /applications/{applicationId}/jobruns/{jobRunId}
+//	DELETE /applications/{applicationId}/jobruns/{jobRunId}
+//
+// It used to search for the substring "/jobruns", so /applications/ab/jobrunsbad routed as
+// ListJobRuns, /applications/jobruns routed with an empty application ID, and
+// /applications/ab/cd/jobruns read the application ID as "ab/cd". Each ID is now one segment and
+// each literal is a whole segment at its published position, so any other shape answers the
+// unknown-operation refusal. An empty ID segment (/applications/) is not a match either: the
+// pages publish a minimum length of 1 for both IDs.
 func parseEMRServerlessOperation(method, path string) (op, appID, runID string) {
-	rest := strings.TrimPrefix(path, "/")
-	// /applications
-	if rest == "applications" {
-		if method == "POST" {
-			return "CreateApplication", "", ""
+	segs := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if segs[0] != "applications" {
+		return "", "", ""
+	}
+	for _, seg := range segs[1:] {
+		if seg == "" {
+			return "", "", ""
 		}
 	}
-	// /applications/{appId}
-	if strings.HasPrefix(rest, "applications/") {
-		after := strings.TrimPrefix(rest, "applications/")
-		// /applications/{appId}/jobruns[/{runId}]
-		if idx := strings.Index(after, "/jobruns"); idx >= 0 {
-			aid := after[:idx]
-			jobrunsRest := after[idx+len("/jobruns"):]
-			jobrunsRest = strings.TrimPrefix(jobrunsRest, "/")
-			if jobrunsRest == "" {
-				if method == "POST" {
-					return "StartJobRun", aid, ""
-				}
-				if method == "GET" {
-					return "ListJobRuns", aid, ""
-				}
-			} else {
-				// /applications/{appId}/jobruns/{runId}
-				if method == "GET" {
-					return "GetJobRun", aid, jobrunsRest
-				}
-				if method == "DELETE" {
-					return "CancelJobRun", aid, jobrunsRest
-				}
-			}
-		} else {
-			// /applications/{appId}
-			if method == "GET" {
-				return "GetApplication", after, ""
-			}
-			if method == "DELETE" {
-				return "DeleteApplication", after, ""
-			}
+	switch len(segs) {
+	case 1:
+		if method == http.MethodPost {
+			return "CreateApplication", "", ""
+		}
+	case 2:
+		switch method {
+		case http.MethodGet:
+			return "GetApplication", segs[1], ""
+		case http.MethodDelete:
+			return "DeleteApplication", segs[1], ""
+		}
+	case 3:
+		if segs[2] != "jobruns" {
+			return "", "", ""
+		}
+		switch method {
+		case http.MethodPost:
+			return "StartJobRun", segs[1], ""
+		case http.MethodGet:
+			return "ListJobRuns", segs[1], ""
+		}
+	case 4:
+		if segs[2] != "jobruns" {
+			return "", "", ""
+		}
+		switch method {
+		case http.MethodGet:
+			return "GetJobRun", segs[1], segs[3]
+		case http.MethodDelete:
+			return "CancelJobRun", segs[1], segs[3]
 		}
 	}
 	return "", "", ""
@@ -307,9 +325,16 @@ func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, _ *AWSRequest, ap
 	runIDsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
 	ids, _ := loadStringIndex(goCtx, p.state, emrServerlessNamespace, runIDsKey)
 
+	// runSummary is API_JobRunSummary, as far as the record models it. The ID member is `id`, as
+	// ListJobRuns publishes it. It used to be `jobRunId`, which is a member of JobRun and not of
+	// JobRunSummary, so an SDK decoding the list read an empty ID on every element (#1204). The
+	// old name is not also emitted: an unpublished member is a defect by #1013's rule, and no
+	// caller decoding the published shape reads it.
 	type runSummary struct {
 		ApplicationID string `json:"applicationId"`
-		JobRunID      string `json:"jobRunId"`
+		Arn           string `json:"arn"`
+		ID            string `json:"id"`
+		Name          string `json:"name,omitempty"`
 		State         string `json:"state"`
 	}
 	summaries := make([]runSummary, 0, len(ids))
@@ -321,7 +346,9 @@ func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, _ *AWSRequest, ap
 		}
 		var run EMRServerlessJobRun
 		if json.Unmarshal(data, &run) == nil {
-			summaries = append(summaries, runSummary{ApplicationID: run.ApplicationID, JobRunID: run.JobRunID, State: run.State})
+			summaries = append(summaries, runSummary{
+				ApplicationID: run.ApplicationID, Arn: run.Arn, ID: run.JobRunID, Name: run.Name, State: run.State,
+			})
 		}
 	}
 	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRuns": summaries})
@@ -333,9 +360,16 @@ func generateEMRServerlessAppID(m *IDMint) string {
 	return "00" + m.Hex(4)
 }
 
-// generateEMRServerlessRunID mints a UUID-shaped job run ID from m.
+// generateEMRServerlessRunID mints a job run ID from m: "00" and fourteen lowercase hex digits,
+// sixteen characters, the form the application ID takes.
+//
+// API_JobRun, API_StartJobRun, API_GetJobRun and API_CancelJobRun all publish `Pattern: [0-9a-z]+`,
+// length 1–64, for the job run ID, and API_StartJobRun's ARN pattern ends `/jobruns/[0-9a-zA-Z]+`.
+// The dashed UUID this used to mint violated both, so a consumer validating the ID, or a typed SDK
+// building a URI from it, rejected every ID substrate minted (#1204). The value is still derived
+// from the request id, so a replay mints what its recording minted (#856).
 func generateEMRServerlessRunID(m *IDMint) string {
-	return m.HexUUID()
+	return "00" + m.Hex(7)
 }
 
 // emrServerlessJSONResponse serializes v to JSON and returns an AWSResponse.

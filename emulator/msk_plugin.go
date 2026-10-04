@@ -75,32 +75,69 @@ func (p *MSKPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 // operation is substrate's reading. It follows [parseEFSOperation], which never trimmed and whose nine
 // empty-parameter guards are all reachable, on the ground that a refusal a caller can act on beats a
 // different operation's success.
+//
+// # Anchoring (#1205)
+//
+// A cluster ARN contains slashes (`…:cluster/{name}/{uuid}`), and the router hands this function
+// the decoded path, so the ARN cannot be taken as one slash-delimited segment. Each arm is anchored
+// at both ends instead: the published prefix, the ARN, then the published suffix if there is one.
+// The two sub-resource arms used to test only the suffix, so GET /anything/at/all/nodes was taken
+// for ListNodes and refused 400 for a malformed ARN, telling the caller its input was wrong rather
+// than that the path does not exist. MSK publishes /nodes and /bootstrap-brokers under /v1 only, so
+// the same suffixes under /api/v2/clusters/ are refused as unrouted rather than read as part of a
+// DescribeClusterV2 ARN.
 func parseKafkaOperation(method, path string) (op, clusterARN string) {
+	const (
+		v1Prefix = "/v1/clusters/"
+		v2Prefix = "/api/v2/clusters/"
+	)
+	subResource := func(prefix, suffix string) (string, bool) {
+		if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) || len(path) < len(prefix)+len(suffix) {
+			return "", false
+		}
+		return path[len(prefix) : len(path)-len(suffix)], true
+	}
 
 	switch {
-	case path == "/v1/clusters" && method == "POST":
+	case path == "/v1/clusters" && method == http.MethodPost:
 		return "CreateCluster", ""
-	case path == "/v1/clusters" && method == "GET":
+	case path == "/v1/clusters" && method == http.MethodGet:
 		return "ListClusters", ""
-	case strings.HasSuffix(path, "/bootstrap-brokers") && method == "GET":
-		arn := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/clusters/"), "/bootstrap-brokers")
-		return "GetBootstrapBrokers", arn
-	case strings.HasSuffix(path, "/nodes") && method == "GET":
-		arn := strings.TrimSuffix(strings.TrimPrefix(path, "/v1/clusters/"), "/nodes")
-		return "ListNodes", arn
-	case strings.HasPrefix(path, "/v1/clusters/") && method == "GET":
-		arn := strings.TrimPrefix(path, "/v1/clusters/")
-		return "DescribeCluster", arn
-	case strings.HasPrefix(path, "/v1/clusters/") && method == "DELETE":
-		arn := strings.TrimPrefix(path, "/v1/clusters/")
-		return "DeleteCluster", arn
-	case path == "/api/v2/clusters" && method == "POST":
+	case path == "/api/v2/clusters" && method == http.MethodPost:
 		return "CreateClusterV2", ""
-	case path == "/api/v2/clusters" && method == "GET":
+	case path == "/api/v2/clusters" && method == http.MethodGet:
 		return "ListClustersV2", ""
-	case strings.HasPrefix(path, "/api/v2/clusters/") && method == "GET":
-		arn := strings.TrimPrefix(path, "/api/v2/clusters/")
-		return "DescribeClusterV2", arn
+	}
+
+	if arn, ok := subResource(v1Prefix, "/bootstrap-brokers"); ok {
+		if method == http.MethodGet {
+			return "GetBootstrapBrokers", arn
+		}
+		return "", ""
+	}
+	if arn, ok := subResource(v1Prefix, "/nodes"); ok {
+		if method == http.MethodGet {
+			return "ListNodes", arn
+		}
+		return "", ""
+	}
+	if strings.HasPrefix(path, v1Prefix) {
+		arn := strings.TrimPrefix(path, v1Prefix)
+		switch method {
+		case http.MethodGet:
+			return "DescribeCluster", arn
+		case http.MethodDelete:
+			return "DeleteCluster", arn
+		}
+		return "", ""
+	}
+	if strings.HasPrefix(path, v2Prefix) {
+		if strings.HasSuffix(path, "/nodes") || strings.HasSuffix(path, "/bootstrap-brokers") {
+			return "", ""
+		}
+		if method == http.MethodGet {
+			return "DescribeClusterV2", strings.TrimPrefix(path, v2Prefix)
+		}
 	}
 	return "", ""
 }
@@ -140,8 +177,7 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		input.NumberOfBrokerNodes = 2
 	}
 
-	// Generate a deterministic UUID-like suffix from name + timestamp.
-	uuid := mskGenerateUUID(input.ClusterName, p.tc.Now().UnixNano())
+	uuid := mskClusterUUID(reqCtx.IDs)
 	clusterARN := "arn:aws:kafka:" + reqCtx.Region + ":" + reqCtx.AccountID + ":cluster/" + input.ClusterName + "/" + uuid
 
 	cluster := MSKCluster{
@@ -278,12 +314,24 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 
 	scope := acct + "/" + region
 	data, err := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "NotFoundException", Message: "Cluster not found: " + clusterARN, HTTPStatus: http.StatusNotFound}
+	if err != nil {
+		return nil, fmt.Errorf("msk loadClusterByARN get: %w", err)
+	}
+	notFound := &AWSError{Code: "NotFoundException", Message: "Cluster not found: " + clusterARN, HTTPStatus: http.StatusNotFound}
+	if data == nil {
+		return nil, notFound
 	}
 	var cluster MSKCluster
 	if err := json.Unmarshal(data, &cluster); err != nil {
 		return nil, fmt.Errorf("msk loadClusterByARN unmarshal: %w", err)
+	}
+	// The record is found by name, and the ARN must then be the record's own, UUID included. The UUID
+	// is what distinguishes a cluster from a later one reusing its name, so an ARN naming a deleted
+	// cluster used to resolve to its replacement: a wrong-resource answer reported as success
+	// (#1204). MSK publishes no error codes, so NotFoundException/404 is substrate's reading (#671),
+	// the same answer a name that was never created gets.
+	if cluster.ClusterARN != clusterARN {
+		return nil, notFound
 	}
 	return &cluster, nil
 }
@@ -441,14 +489,17 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN strin
 	})
 }
 
-// mskGenerateUUID produces a short deterministic hex string for cluster ARNs.
-func mskGenerateUUID(name string, nano int64) string {
-	h := fmt.Sprintf("%x", nano)
-	if len(h) > 8 {
-		h = h[:8]
-	}
-	nh := fmt.Sprintf("%x", len(name))
-	return nh + h + "-0001-0001-0001-000000000001"
+// mskClusterUUID mints the UUID a cluster ARN ends in: a version-4 UUID and a one-digit suffix,
+// `…:cluster/{name}/{uuid}-{n}`, the form every ARN on MSK's pages takes (for example
+// `…/6357e0b2-0e6a-4b86-a0b4-70df934c2e31-5`). MSK publishes no pattern for it.
+//
+// It used to be built from the name's length and the clock's nanoseconds, padded with
+// `-0001-0001-0001-000000000001`, so on a frozen clock a deleted-then-recreated cluster reused its
+// predecessor's ARN, and resolution ignored the UUID anyway (#1204). Derived from the request id
+// now, as every minted identifier is (#856), so a replay mints the ARN its recording minted and two
+// creates of one name mint two ARNs.
+func mskClusterUUID(m *IDMint) string {
+	return m.UUID() + "-" + m.Chars(1, "123456789")
 }
 
 // mskJSONResponse serializes v to JSON and returns an AWSResponse.

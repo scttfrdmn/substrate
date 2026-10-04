@@ -222,9 +222,11 @@ func TestEMRServerlessPlugin_ListJobRuns(t *testing.T) {
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("listJobRuns: expected 200, got %d", resp2.StatusCode)
 	}
+	// JobRunSummary publishes the ID as `id` (#1204). The old decode named `jobRunId` and never read
+	// the value, which is how an empty ID on every element went unnoticed.
 	var result struct {
 		JobRuns []struct {
-			JobRunId string `json:"jobRunId"`
+			ID string `json:"id"`
 		} `json:"jobRuns"`
 	}
 	if err := json.Unmarshal(emrBody(t, resp2), &result); err != nil {
@@ -232,5 +234,10 @@ func TestEMRServerlessPlugin_ListJobRuns(t *testing.T) {
 	}
 	if len(result.JobRuns) != 3 {
 		t.Fatalf("expected 3 job runs, got %d", len(result.JobRuns))
+	}
+	for i, run := range result.JobRuns {
+		if run.ID == "" {
+			t.Errorf("jobRuns[%d].id is empty", i)
+		}
 	}
 }

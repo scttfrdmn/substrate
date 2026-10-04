@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -359,12 +360,16 @@ func TestTimestream_WriteAndQuery(t *testing.T) {
 		t.Fatalf("DELETE results: got %d", delResp.StatusCode)
 	}
 
-	// Query after clear → empty rows.
+	// Query after clear → refused. An unseeded query other than SELECT * FROM db.table is a
+	// ValidationException naming the seed endpoint, not an empty result a test could assert against
+	// (#1209).
 	resp6 := tsRequest(t, ts, "Query", map[string]any{"QueryString": "SELECT 1"})
 	body6 := tsBody(t, resp6)
-	rows6, _ := body6["Rows"].([]interface{})
-	if len(rows6) != 0 {
-		t.Errorf("want 0 rows after clear, got %d", len(rows6))
+	if resp6.StatusCode != http.StatusBadRequest {
+		t.Errorf("unseeded SELECT 1 after clear: want 400, got %d: %v", resp6.StatusCode, body6)
+	}
+	if code, _ := body6["__type"].(string); !strings.HasSuffix(code, "ValidationException") {
+		t.Errorf("unseeded SELECT 1 after clear: want ValidationException, got %v", body6)
 	}
 
 	// CancelQuery → 200.

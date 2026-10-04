@@ -185,17 +185,22 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	// Determine Lustre-specific fields.
+	// API_CreateFileSystemLustreConfiguration: "(Default = SCRATCH_1)". API_LustreFileSystemConfiguration:
+	// "For the SCRATCH_1 deployment type, this value is always "fsx". For SCRATCH_2, PERSISTENT_1, and
+	// PERSISTENT_2 deployment types, this value is a string that is unique within an AWS Region",
+	// with `Pattern: ^([A-Za-z0-9_-]{1,8})$`. Substrate defaulted to SCRATCH_2, gave *that* type
+	// "fsx", and minted sixteen hex characters for the others, twice the published maximum (#1204's
+	// audit). The minted name is now eight, still derived from the request id (#856).
 	lustreDeploymentType := input.LustreConfiguration.DeploymentType
 	if strings.ToUpper(input.FileSystemType) == "LUSTRE" && lustreDeploymentType == "" {
-		lustreDeploymentType = "SCRATCH_2"
+		lustreDeploymentType = "SCRATCH_1"
 	}
-	// MountName for SCRATCH_2 is always "fsx"; other Lustre types use a random value.
 	lustreMountName := ""
 	if strings.ToUpper(input.FileSystemType) == "LUSTRE" {
-		if lustreDeploymentType == "SCRATCH_2" || lustreDeploymentType == "" {
+		if lustreDeploymentType == "SCRATCH_1" {
 			lustreMountName = "fsx"
 		} else {
-			lustreMountName = ctx.IDs.Hex(8)
+			lustreMountName = ctx.IDs.Hex(4)
 		}
 	}
 

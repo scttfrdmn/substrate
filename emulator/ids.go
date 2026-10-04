@@ -211,9 +211,10 @@ func (m *IDMint) Base64URL(n int) string {
 //
 // The callers are Lambda revision and code ids, ECS task ids, Step Functions execution names,
 // SQS message ids, EventBridge event ids, CloudWatch Logs upload sequence tokens, Service Quotas
-// request ids, Batch job ids, EMR Serverless job-run ids, CodeBuild build and CodeDeploy
-// application and deployment-group ids, SSM command ids, RAM resource-share ids and AWS Backup
-// plan, version and selection ids. Until this method existed the first seven of those reached a
+// request ids, Batch job ids, CodeBuild build and CodeDeploy application and deployment-group
+// ids, SSM command ids, RAM resource-share ids and AWS Backup plan, version and selection ids.
+// (EMR Serverless job-run ids were one until #1204: their pages publish `[0-9a-z]+`, which a
+// dash violates.) Until this method existed the first seven of those reached a
 // helper declared in lambda_plugin.go, which is how a Batch job id came to be minted by a
 // function named for a Lambda revision.
 func (m *IDMint) HexUUID() string {

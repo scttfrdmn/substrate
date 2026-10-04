@@ -14,7 +14,11 @@ import (
 func setupRedshiftPlugin(t *testing.T) (*emulator.RedshiftPlugin, *emulator.RequestContext) {
 	t.Helper()
 	state := emulator.NewMemoryStateManager()
-	tc := emulator.NewTimeController(time.Now())
+	// A fixed, frozen instant: CLAUDE.md forbids a test that depends on the wall clock.
+	clock := time.Unix(1700000000, 0).UTC()
+	tc := emulator.NewTimeController(clock)
+	tc.Freeze()
+	tc.SetTime(clock)
 	p := &emulator.RedshiftPlugin{}
 	if err := p.Initialize(context.Background(), emulator.PluginConfig{
 		State:   state,
@@ -65,7 +69,7 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 
 	// Parse XML response.
 	var createResp struct {
-		XMLName xml.Name `xml:"CreateClusterResult"`
+		XMLName xml.Name `xml:"CreateClusterResponse"`
 		Cluster struct {
 			ClusterIdentifier string `xml:"ClusterIdentifier"`
 			ClusterStatus     string `xml:"ClusterStatus"`
@@ -74,7 +78,7 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 				Address string `xml:"Address"`
 				Port    int    `xml:"Port"`
 			} `xml:"Endpoint"`
-		} `xml:"Cluster>member"`
+		} `xml:"CreateClusterResult>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &createResp); err != nil {
 		t.Fatalf("unmarshal create: %v", err)
@@ -102,8 +106,8 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 		t.Fatal("want error for duplicate cluster, got nil")
 	}
 	awsErr, ok := err.(*emulator.AWSError)
-	if !ok || awsErr.Code != "ClusterAlreadyExistsFault" {
-		t.Errorf("want ClusterAlreadyExistsFault, got %v", err)
+	if !ok || awsErr.Code != "ClusterAlreadyExists" {
+		t.Errorf("want ClusterAlreadyExists, got %v", err)
 	}
 
 	// DescribeClusters.
@@ -114,10 +118,10 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 		t.Fatalf("DescribeClusters: %v", err)
 	}
 	var descResp struct {
-		XMLName  xml.Name `xml:"DescribeClustersResult"`
+		XMLName  xml.Name `xml:"DescribeClustersResponse"`
 		Clusters []struct {
 			ClusterIdentifier string `xml:"ClusterIdentifier"`
-		} `xml:"Clusters>member"`
+		} `xml:"DescribeClustersResult>Clusters>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &descResp); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
@@ -135,10 +139,10 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 		t.Fatalf("ModifyCluster: %v", err)
 	}
 	var modResp struct {
-		XMLName xml.Name `xml:"ModifyClusterResult"`
+		XMLName xml.Name `xml:"ModifyClusterResponse"`
 		Cluster struct {
 			NodeType string `xml:"NodeType"`
-		} `xml:"Cluster>member"`
+		} `xml:"ModifyClusterResult>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &modResp); err != nil {
 		t.Fatalf("unmarshal modify: %v", err)
@@ -163,8 +167,8 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 		t.Fatal("want error after delete, got nil")
 	}
 	awsErr, ok = err.(*emulator.AWSError)
-	if !ok || awsErr.Code != "ClusterNotFoundFault" {
-		t.Errorf("want ClusterNotFoundFault, got %v", err)
+	if !ok || awsErr.Code != "ClusterNotFound" {
+		t.Errorf("want ClusterNotFound, got %v", err)
 	}
 }
 
@@ -188,10 +192,10 @@ func TestRedshiftPlugin_DescribeClusters_Filter(t *testing.T) {
 		t.Fatalf("DescribeClusters (all): %v", err)
 	}
 	var allResp struct {
-		XMLName  xml.Name `xml:"DescribeClustersResult"`
+		XMLName  xml.Name `xml:"DescribeClustersResponse"`
 		Clusters []struct {
 			ClusterIdentifier string `xml:"ClusterIdentifier"`
-		} `xml:"Clusters>member"`
+		} `xml:"DescribeClustersResult>Clusters>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &allResp); err != nil {
 		t.Fatalf("unmarshal all: %v", err)
@@ -208,10 +212,10 @@ func TestRedshiftPlugin_DescribeClusters_Filter(t *testing.T) {
 		t.Fatalf("DescribeClusters (filtered): %v", err)
 	}
 	var filteredResp struct {
-		XMLName  xml.Name `xml:"DescribeClustersResult"`
+		XMLName  xml.Name `xml:"DescribeClustersResponse"`
 		Clusters []struct {
 			ClusterIdentifier string `xml:"ClusterIdentifier"`
-		} `xml:"Clusters>member"`
+		} `xml:"DescribeClustersResult>Clusters>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &filteredResp); err != nil {
 		t.Fatalf("unmarshal filtered: %v", err)
@@ -246,10 +250,10 @@ func TestRedshiftPlugin_ParameterGroup_SubnetGroup(t *testing.T) {
 		t.Fatalf("DescribeClusterParameterGroups: %v", err)
 	}
 	var pgResp struct {
-		XMLName         xml.Name `xml:"DescribeClusterParameterGroupsResult"`
+		XMLName         xml.Name `xml:"DescribeClusterParameterGroupsResponse"`
 		ParameterGroups []struct {
 			ParameterGroupName string `xml:"ParameterGroupName"`
-		} `xml:"ParameterGroups>member"`
+		} `xml:"DescribeClusterParameterGroupsResult>ParameterGroups>ClusterParameterGroup"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &pgResp); err != nil {
 		t.Fatalf("unmarshal param groups: %v", err)
@@ -280,10 +284,10 @@ func TestRedshiftPlugin_ParameterGroup_SubnetGroup(t *testing.T) {
 		t.Fatalf("DescribeClusterSubnetGroups: %v", err)
 	}
 	var sgResp struct {
-		XMLName      xml.Name `xml:"DescribeClusterSubnetGroupsResult"`
+		XMLName      xml.Name `xml:"DescribeClusterSubnetGroupsResponse"`
 		SubnetGroups []struct {
 			ClusterSubnetGroupName string `xml:"ClusterSubnetGroupName"`
-		} `xml:"ClusterSubnetGroups>member"`
+		} `xml:"DescribeClusterSubnetGroupsResult>ClusterSubnetGroups>ClusterSubnetGroup"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &sgResp); err != nil {
 		t.Fatalf("unmarshal subnet groups: %v", err)
@@ -321,12 +325,12 @@ func TestRedshiftPlugin_CreateDescribeSnapshot(t *testing.T) {
 		t.Fatalf("want 200, got %d: %s", resp.StatusCode, resp.Body)
 	}
 	var snapResp struct {
-		XMLName  xml.Name `xml:"CreateClusterSnapshotResult"`
+		XMLName  xml.Name `xml:"CreateClusterSnapshotResponse"`
 		Snapshot struct {
 			SnapshotIdentifier string `xml:"SnapshotIdentifier"`
 			ClusterIdentifier  string `xml:"ClusterIdentifier"`
 			Status             string `xml:"Status"`
-		} `xml:"Snapshot"`
+		} `xml:"CreateClusterSnapshotResult>Snapshot"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &snapResp); err != nil {
 		t.Fatalf("unmarshal snapshot: %v", err)
@@ -344,10 +348,10 @@ func TestRedshiftPlugin_CreateDescribeSnapshot(t *testing.T) {
 		t.Fatalf("DescribeClusterSnapshots: %v", err)
 	}
 	var listResp struct {
-		XMLName   xml.Name `xml:"DescribeClusterSnapshotsResult"`
+		XMLName   xml.Name `xml:"DescribeClusterSnapshotsResponse"`
 		Snapshots []struct {
 			SnapshotIdentifier string `xml:"SnapshotIdentifier"`
-		} `xml:"Snapshots>member"`
+		} `xml:"DescribeClusterSnapshotsResult>Snapshots>Snapshot"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &listResp); err != nil {
 		t.Fatalf("unmarshal list snapshots: %v", err)
@@ -369,8 +373,8 @@ func TestRedshiftPlugin_Errors(t *testing.T) {
 		t.Fatal("want error for nonexistent cluster")
 	}
 	awsErr, ok := err.(*emulator.AWSError)
-	if !ok || awsErr.Code != "ClusterNotFoundFault" {
-		t.Errorf("want ClusterNotFoundFault, got %v", err)
+	if !ok || awsErr.Code != "ClusterNotFound" {
+		t.Errorf("want ClusterNotFound, got %v", err)
 	}
 
 	// DeleteCluster not found.
@@ -426,10 +430,10 @@ func TestRedshiftPlugin_Errors(t *testing.T) {
 		t.Fatalf("ModifyCluster NumberOfNodes: %v", err)
 	}
 	var modResp struct {
-		XMLName xml.Name `xml:"ModifyClusterResult"`
+		XMLName xml.Name `xml:"ModifyClusterResponse"`
 		Cluster struct {
 			NumberOfNodes int `xml:"NumberOfNodes"`
-		} `xml:"Cluster>member"`
+		} `xml:"ModifyClusterResult>Cluster"`
 	}
 	if err := xml.Unmarshal(stripXMLHeader(resp.Body), &modResp); err != nil {
 		t.Fatalf("unmarshal: %v", err)

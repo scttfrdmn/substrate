@@ -71,62 +71,85 @@ type BackupSelection struct {
 // parseBackupOperation maps an HTTP method and URL path to an AWS Backup
 // operation name and optional resource identifiers. It follows the same
 // pattern as parseEFSOperation in efs_types.go.
+//
+// The path is matched by whole segments, each literal at its published position (#1205's sweep).
+// It used to test prefixes and search for "/selections" as a substring, so /backup-vaultsX routed as
+// a vault operation, /backup/plansX as a plan operation, and /backup/plans/a/b/selections read the
+// plan ID as "a/b". A single trailing slash is accepted, because several of the published URIs carry
+// one (ListBackupVaults' /backup-vaults/, ListBackupPlans' /backup/plans/, GetBackupPlan's
+// /backup/plans/{backupPlanId}/). Before, that slash was kept in GetBackupPlan's plan ID, so the
+// published URI looked up a plan that could not exist.
+//
+// An empty identifier is still routed to its single-resource operation, as it was, so each
+// handler's "… is required" refusal stays reachable. That is the #1009 reasoning: a refusal a
+// caller can act on beats another operation's success.
 func parseBackupOperation(method, path string) (op, vaultName, planID, selectionID string) {
+	segs := strings.Split(strings.TrimSuffix(strings.TrimPrefix(path, "/"), "/"), "/")
+
 	// /backup-vaults[/{name}]
-	if strings.HasPrefix(path, "/backup-vaults") {
-		rest := strings.TrimPrefix(path, "/backup-vaults")
-		rest = strings.TrimPrefix(rest, "/")
+	if segs[0] == "backup-vaults" && len(segs) <= 2 {
+		name := ""
+		if len(segs) == 2 {
+			name = segs[1]
+		}
 		switch method {
 		case "PUT":
-			return "CreateBackupVault", rest, "", ""
+			return "CreateBackupVault", name, "", ""
 		case "GET":
-			if rest == "" {
+			if len(segs) == 1 {
 				return "ListBackupVaults", "", "", ""
 			}
-			return "DescribeBackupVault", rest, "", ""
+			return "DescribeBackupVault", name, "", ""
 		case "DELETE":
-			return "DeleteBackupVault", rest, "", ""
+			return "DeleteBackupVault", name, "", ""
 		}
+		return "", "", "", ""
 	}
 
 	// /backup/plans[/{planId}[/selections[/{selectionId}]]]
-	if strings.HasPrefix(path, "/backup/plans") {
-		rest := strings.TrimPrefix(path, "/backup/plans")
-		rest = strings.TrimPrefix(rest, "/")
-
-		// /backup/plans/{planId}/selections[/{selectionId}]
-		if idx := strings.Index(rest, "/selections"); idx >= 0 {
-			pid := rest[:idx]
-			selRest := strings.TrimPrefix(rest[idx:], "/selections")
-			selRest = strings.TrimPrefix(selRest, "/")
-			switch method {
-			case "POST":
-				return "CreateBackupSelection", "", pid, ""
-			case "GET":
-				return "GetBackupSelection", "", pid, selRest
-			case "DELETE":
-				return "DeleteBackupSelection", "", pid, selRest
-			}
+	if len(segs) < 2 || segs[0] != "backup" || segs[1] != "plans" {
+		return "", "", "", ""
+	}
+	switch len(segs) {
+	case 2, 3:
+		pid := ""
+		if len(segs) == 3 {
+			pid = segs[2]
 		}
-
-		// /backup/plans[/{planId}]
 		switch method {
 		case "POST":
-			if rest == "" {
+			if len(segs) == 2 {
 				return "CreateBackupPlan", "", "", ""
 			}
-			return "UpdateBackupPlan", "", rest, ""
+			return "UpdateBackupPlan", "", pid, ""
 		case "GET":
-			if rest == "" {
+			if len(segs) == 2 {
 				return "ListBackupPlans", "", "", ""
 			}
-			return "GetBackupPlan", "", rest, ""
+			return "GetBackupPlan", "", pid, ""
 		case "DELETE":
-			return "DeleteBackupPlan", "", rest, ""
+			return "DeleteBackupPlan", "", pid, ""
+		}
+	case 4, 5:
+		if segs[3] != "selections" {
+			return "", "", "", ""
+		}
+		sel := ""
+		if len(segs) == 5 {
+			sel = segs[4]
+		}
+		switch method {
+		case "POST":
+			if len(segs) == 4 {
+				return "CreateBackupSelection", "", segs[2], ""
+			}
+		case "GET":
+			return "GetBackupSelection", "", segs[2], sel
+		case "DELETE":
+			return "DeleteBackupSelection", "", segs[2], sel
 		}
 	}
-
-	return method, "", "", ""
+	return "", "", "", ""
 }
 
 // State key helpers.

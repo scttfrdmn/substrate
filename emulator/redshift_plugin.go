@@ -60,7 +60,7 @@ func (p *RedshiftPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) 
 	case "DescribeClusterSnapshots":
 		return p.describeClusterSnapshots(reqCtx, req)
 	default:
-		return nil, unknownActionError(p.Name(), req.Operation)
+		return nil, redshiftUnroutedAction(req.Operation)
 	}
 }
 
@@ -73,8 +73,12 @@ type redshiftEndpointXML struct {
 }
 
 // redshiftClusterXML represents a Redshift cluster in XML responses.
+//
+// It carries no `XMLName`: the element name belongs to the field that holds the value, which is
+// `<Cluster>` for a single cluster and `<Clusters><Cluster>` for a list, both as API_CreateCluster and
+// API_DescribeClusters publish. Until #1208 the type forced `<member>`, so a single cluster rendered
+// `<Cluster><member>` and a list rendered `<Clusters><member>`, neither of which an SDK reads.
 type redshiftClusterXML struct {
-	XMLName             xml.Name            `xml:"member"`
 	ClusterIdentifier   string              `xml:"ClusterIdentifier"`
 	ClusterStatus       string              `xml:"ClusterStatus"`
 	NodeType            string              `xml:"NodeType"`
@@ -88,28 +92,15 @@ type redshiftClusterXML struct {
 	Endpoint            redshiftEndpointXML `xml:"Endpoint"`
 }
 
-// redshiftClusterListXML wraps a list of clusters for DescribeClusters.
+// redshiftClusterListXML is DescribeClusters' result: `Clusters.Cluster.N`.
 type redshiftClusterListXML struct {
-	XMLName  xml.Name             `xml:"DescribeClustersResult"`
-	Clusters []redshiftClusterXML `xml:"Clusters>member"`
+	Clusters []redshiftClusterXML `xml:"Clusters>Cluster"`
 }
 
-// redshiftCreateClusterResultXML wraps the CreateCluster result.
-type redshiftCreateClusterResultXML struct {
-	XMLName xml.Name           `xml:"CreateClusterResult"`
-	Cluster redshiftClusterXML `xml:"Cluster>member"`
-}
-
-// redshiftModifyClusterResultXML wraps the ModifyCluster result.
-type redshiftModifyClusterResultXML struct {
-	XMLName xml.Name           `xml:"ModifyClusterResult"`
-	Cluster redshiftClusterXML `xml:"Cluster>member"`
-}
-
-// redshiftDeleteClusterResultXML wraps the DeleteCluster result.
-type redshiftDeleteClusterResultXML struct {
-	XMLName xml.Name           `xml:"DeleteClusterResult"`
-	Cluster redshiftClusterXML `xml:"Cluster>member"`
+// redshiftClusterResultXML is the result of CreateCluster, ModifyCluster and DeleteCluster, each of
+// which publishes one `Cluster` element.
+type redshiftClusterResultXML struct {
+	Cluster redshiftClusterXML `xml:"Cluster"`
 }
 
 func clusterToXML(c RedshiftCluster) redshiftClusterXML {
@@ -140,7 +131,7 @@ func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) 
 	goCtx := context.Background()
 	existing, _ := p.state.Get(goCtx, redshiftNamespace, redshiftClusterKey(reqCtx.AccountID, reqCtx.Region, id))
 	if existing != nil {
-		return nil, &AWSError{Code: "ClusterAlreadyExistsFault", Message: "Cluster " + id + " already exists.", HTTPStatus: http.StatusBadRequest}
+		return nil, &AWSError{Code: "ClusterAlreadyExists", Message: "Cluster " + id + " already exists.", HTTPStatus: http.StatusBadRequest}
 	}
 
 	nodeType := req.Params["NodeType"]
@@ -182,9 +173,7 @@ func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id)
 
-	return redshiftXMLResponse(http.StatusOK, redshiftCreateClusterResultXML{
-		Cluster: clusterToXML(cluster),
-	}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "CreateCluster", redshiftClusterResultXML{Cluster: clusterToXML(cluster)})
 }
 
 func (p *RedshiftPlugin) describeClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -213,10 +202,10 @@ func (p *RedshiftPlugin) describeClusters(reqCtx *RequestContext, req *AWSReques
 	}
 
 	if filterID != "" && len(clusters) == 0 {
-		return nil, &AWSError{Code: "ClusterNotFoundFault", Message: "Cluster " + filterID + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, redshiftClusterNotFound(filterID)
 	}
 
-	return redshiftXMLResponse(http.StatusOK, redshiftClusterListXML{Clusters: clusters}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "DescribeClusters", redshiftClusterListXML{Clusters: clusters})
 }
 
 func (p *RedshiftPlugin) modifyCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -244,9 +233,7 @@ func (p *RedshiftPlugin) modifyCluster(reqCtx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, redshiftNamespace, redshiftClusterKey(reqCtx.AccountID, reqCtx.Region, id), d); err != nil {
 		return nil, fmt.Errorf("redshift modifyCluster put: %w", err)
 	}
-	return redshiftXMLResponse(http.StatusOK, redshiftModifyClusterResultXML{
-		Cluster: clusterToXML(*cluster),
-	}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "ModifyCluster", redshiftClusterResultXML{Cluster: clusterToXML(*cluster)})
 }
 
 func (p *RedshiftPlugin) deleteCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -262,9 +249,7 @@ func (p *RedshiftPlugin) deleteCluster(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	removeFromStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id)
 
-	return redshiftXMLResponse(http.StatusOK, redshiftDeleteClusterResultXML{
-		Cluster: clusterToXML(*cluster),
-	}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "DeleteCluster", redshiftClusterResultXML{Cluster: clusterToXML(*cluster)})
 }
 
 // --- Parameter group operations ----------------------------------------------
@@ -276,15 +261,14 @@ type redshiftParamGroupData struct {
 	Description          string `xml:"Description,omitempty"`
 }
 
-// redshiftParamGroupListXML wraps a list of parameter groups.
+// redshiftParamGroupListXML is DescribeClusterParameterGroups' result:
+// `ParameterGroups.ClusterParameterGroup.N`.
 type redshiftParamGroupListXML struct {
-	XMLName         xml.Name                 `xml:"DescribeClusterParameterGroupsResult"`
-	ParameterGroups []redshiftParamGroupData `xml:"ParameterGroups>member"`
+	ParameterGroups []redshiftParamGroupData `xml:"ParameterGroups>ClusterParameterGroup"`
 }
 
-// redshiftCreateParamGroupResultXML wraps the CreateClusterParameterGroup result.
+// redshiftCreateParamGroupResultXML is CreateClusterParameterGroup's result.
 type redshiftCreateParamGroupResultXML struct {
-	XMLName        xml.Name               `xml:"CreateClusterParameterGroupResult"`
 	ParameterGroup redshiftParamGroupData `xml:"ClusterParameterGroup"`
 }
 
@@ -313,13 +297,13 @@ func (p *RedshiftPlugin) createClusterParameterGroup(reqCtx *RequestContext, req
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftParamGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name)
 
-	return redshiftXMLResponse(http.StatusOK, redshiftCreateParamGroupResultXML{
+	return redshiftOKResponse(reqCtx, "CreateClusterParameterGroup", redshiftCreateParamGroupResultXML{
 		ParameterGroup: redshiftParamGroupData{
 			ParameterGroupName:   pg.ParameterGroupName,
 			ParameterGroupFamily: pg.ParameterGroupFamily,
 			Description:          pg.Description,
 		},
-	}, reqCtx.RequestID)
+	})
 }
 
 func (p *RedshiftPlugin) describeClusterParameterGroups(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -345,7 +329,7 @@ func (p *RedshiftPlugin) describeClusterParameterGroups(reqCtx *RequestContext, 
 			Description:          pg.Description,
 		})
 	}
-	return redshiftXMLResponse(http.StatusOK, redshiftParamGroupListXML{ParameterGroups: groups}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "DescribeClusterParameterGroups", redshiftParamGroupListXML{ParameterGroups: groups})
 }
 
 // --- Subnet group operations -------------------------------------------------
@@ -357,15 +341,14 @@ type redshiftSubnetGroupData struct {
 	VpcID                  string `xml:"VpcId,omitempty"`
 }
 
-// redshiftSubnetGroupListXML wraps a list of subnet groups.
+// redshiftSubnetGroupListXML is DescribeClusterSubnetGroups' result:
+// `ClusterSubnetGroups.ClusterSubnetGroup.N`.
 type redshiftSubnetGroupListXML struct {
-	XMLName      xml.Name                  `xml:"DescribeClusterSubnetGroupsResult"`
-	SubnetGroups []redshiftSubnetGroupData `xml:"ClusterSubnetGroups>member"`
+	SubnetGroups []redshiftSubnetGroupData `xml:"ClusterSubnetGroups>ClusterSubnetGroup"`
 }
 
-// redshiftCreateSubnetGroupResultXML wraps the CreateClusterSubnetGroup result.
+// redshiftCreateSubnetGroupResultXML is CreateClusterSubnetGroup's result.
 type redshiftCreateSubnetGroupResultXML struct {
-	XMLName     xml.Name                `xml:"CreateClusterSubnetGroupResult"`
 	SubnetGroup redshiftSubnetGroupData `xml:"ClusterSubnetGroup"`
 }
 
@@ -394,13 +377,13 @@ func (p *RedshiftPlugin) createClusterSubnetGroup(reqCtx *RequestContext, req *A
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSubnetGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name)
 
-	return redshiftXMLResponse(http.StatusOK, redshiftCreateSubnetGroupResultXML{
+	return redshiftOKResponse(reqCtx, "CreateClusterSubnetGroup", redshiftCreateSubnetGroupResultXML{
 		SubnetGroup: redshiftSubnetGroupData{
 			ClusterSubnetGroupName: sg.ClusterSubnetGroupName,
 			Description:            sg.Description,
 			VpcID:                  sg.VpcID,
 		},
-	}, reqCtx.RequestID)
+	})
 }
 
 func (p *RedshiftPlugin) describeClusterSubnetGroups(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -426,7 +409,7 @@ func (p *RedshiftPlugin) describeClusterSubnetGroups(reqCtx *RequestContext, _ *
 			VpcID:                  sg.VpcID,
 		})
 	}
-	return redshiftXMLResponse(http.StatusOK, redshiftSubnetGroupListXML{SubnetGroups: groups}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "DescribeClusterSubnetGroups", redshiftSubnetGroupListXML{SubnetGroups: groups})
 }
 
 // --- Snapshot operations -----------------------------------------------------
@@ -440,15 +423,13 @@ type redshiftSnapshotData struct {
 	SnapshotCreateTime time.Time `xml:"SnapshotCreateTime"`
 }
 
-// redshiftSnapshotListXML wraps a list of snapshots.
+// redshiftSnapshotListXML is DescribeClusterSnapshots' result: `Snapshots.Snapshot.N`.
 type redshiftSnapshotListXML struct {
-	XMLName   xml.Name               `xml:"DescribeClusterSnapshotsResult"`
-	Snapshots []redshiftSnapshotData `xml:"Snapshots>member"`
+	Snapshots []redshiftSnapshotData `xml:"Snapshots>Snapshot"`
 }
 
-// redshiftCreateSnapshotResultXML wraps the CreateClusterSnapshot result.
+// redshiftCreateSnapshotResultXML is CreateClusterSnapshot's result.
 type redshiftCreateSnapshotResultXML struct {
-	XMLName  xml.Name             `xml:"CreateClusterSnapshotResult"`
 	Snapshot redshiftSnapshotData `xml:"Snapshot"`
 }
 
@@ -481,7 +462,7 @@ func (p *RedshiftPlugin) createClusterSnapshot(reqCtx *RequestContext, req *AWSR
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), snapshotID)
 
-	return redshiftXMLResponse(http.StatusOK, redshiftCreateSnapshotResultXML{
+	return redshiftOKResponse(reqCtx, "CreateClusterSnapshot", redshiftCreateSnapshotResultXML{
 		Snapshot: redshiftSnapshotData{
 			SnapshotIdentifier: snapshot.SnapshotIdentifier,
 			ClusterIdentifier:  snapshot.ClusterIdentifier,
@@ -489,7 +470,7 @@ func (p *RedshiftPlugin) createClusterSnapshot(reqCtx *RequestContext, req *AWSR
 			Status:             snapshot.Status,
 			SnapshotCreateTime: snapshot.SnapshotCreateTime,
 		},
-	}, reqCtx.RequestID)
+	})
 }
 
 func (p *RedshiftPlugin) describeClusterSnapshots(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -517,7 +498,7 @@ func (p *RedshiftPlugin) describeClusterSnapshots(reqCtx *RequestContext, _ *AWS
 			SnapshotCreateTime: snap.SnapshotCreateTime,
 		})
 	}
-	return redshiftXMLResponse(http.StatusOK, redshiftSnapshotListXML{Snapshots: snapshots}, reqCtx.RequestID)
+	return redshiftOKResponse(reqCtx, "DescribeClusterSnapshots", redshiftSnapshotListXML{Snapshots: snapshots})
 }
 
 // --- Helpers -----------------------------------------------------------------
@@ -533,7 +514,7 @@ func (p *RedshiftPlugin) loadCluster(acct, region, id string) (*RedshiftCluster,
 		return nil, fmt.Errorf("redshift loadCluster get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ClusterNotFoundFault", Message: "Cluster " + id + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, redshiftClusterNotFound(id)
 	}
 	var c RedshiftCluster
 	if err := json.Unmarshal(data, &c); err != nil {
@@ -542,10 +523,69 @@ func (p *RedshiftPlugin) loadCluster(acct, region, id string) (*RedshiftCluster,
 	return &c, nil
 }
 
-// redshiftXMLResponse marshals result to XML and returns an AWSResponse with
+// redshiftXMLNS is the namespace every Redshift response document is in, as each operation page's
+// sample response shows.
+const redshiftXMLNS = "http://redshift.amazonaws.com/doc/2012-12-01/"
+
+// redshiftOKResponse answers a Redshift operation in the Query protocol's three-level document,
+// `<{Operation}Response xmlns=…><{Operation}Result>…</…Result><ResponseMetadata><RequestId>`, which
+// every Redshift operation page's sample response shows.
+//
+// Until #1208 the result was marshaled as the document root, with no namespace and the request ID
+// accepted and discarded, so an SDK looking for `{Operation}Response` found nothing and every routed
+// Redshift operation was undecodable. The envelope is ELB's (#1149): [elbResponseEnvelope] and
+// [elbResultElement] are protocol-generic, deriving both element names from the operation, and a
+// second copy of them would be a second place for the shape to drift. The request ID is the
+// context's, as [elbOKResponse] explains, so a replayed body is byte-identical to the recorded one.
+func redshiftOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
+	return redshiftXMLResponse(http.StatusOK, elbResponseEnvelope{
+		XMLName:          xml.Name{Local: operation + "Response"},
+		XMLNS:            redshiftXMLNS,
+		Result:           &elbResultElement{name: operation + "Result", value: result},
+		ResponseMetadata: responseMetadata{RequestID: reqCtx.RequestID},
+	})
+}
+
+// redshiftClusterNotFound is the refusal for a cluster identifier that names no cluster.
+//
+// API_DescribeClusters and API_DescribeClusterSnapshots publish `ClusterNotFound` at HTTP 404, and the
+// cluster operations that take an identifier publish the same code. Until #1208 substrate answered
+// `ClusterNotFoundFault`, the shape's name in the service model rather than its wire code, which a
+// consumer matching on the published code never matched. #1208's text gives the status as 400; the
+// pages give 404, which is what this answers.
+func redshiftClusterNotFound(id string) *AWSError {
+	return &AWSError{Code: "ClusterNotFound", Message: "Cluster " + id + " not found.", HTTPStatus: http.StatusNotFound}
+}
+
+// redshiftUnroutedAction refuses an action substrate does not route, with a code from Redshift's own
+// Common Errors page.
+//
+// [unknownActionError] answers the Query family's `InvalidAction`, which Redshift's page does not
+// publish: its consolidated list carries no unknown-action code (#1208). SQS keeps `InvalidAction`
+// correctly, because SQS's Common Errors page is the one Query-family list AWS has not regenerated and
+// still publishes it (#1064); the two pages are different generations and the divergence between them
+// is real. So Redshift reads its answer off its own list:
+//
+//   - no Action at all is `MissingAction`/400, "The request is missing the Action parameter";
+//   - an Action naming no operation is `InvalidParameterValue`/400, "A value that you provided for a
+//     parameter isn't valid". `Action` is one of the page's Common Parameters, so an unrecognized one
+//     is a parameter value that isn't valid. `ValidationError` was the other candidate; it describes
+//     input that fails a format or constraint, which a well-formed but unknown name does not.
+func redshiftUnroutedAction(action string) *AWSError {
+	if action == "" {
+		return &AWSError{Code: "MissingAction", Message: "The request is missing the Action parameter.", HTTPStatus: http.StatusBadRequest}
+	}
+	return &AWSError{
+		Code:       "InvalidParameterValue",
+		Message:    fmt.Sprintf("The action %s is not valid for this endpoint.", action),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// redshiftXMLResponse marshals a response document to XML and returns an AWSResponse with
 // Content-Type text/xml as required by the Redshift query protocol.
-func redshiftXMLResponse(status int, result interface{}, _ string) (*AWSResponse, error) {
-	body, err := xml.Marshal(result)
+func redshiftXMLResponse(status int, document any) (*AWSResponse, error) {
+	body, err := xml.Marshal(document)
 	if err != nil {
 		return nil, fmt.Errorf("redshift xml.Marshal: %w", err)
 	}

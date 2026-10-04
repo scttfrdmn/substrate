@@ -59,6 +59,19 @@ type TimestreamQueryResult struct {
 	Rows []TimestreamRow `json:"Rows"`
 	// ColumnInfo describes the result columns.
 	ColumnInfo []TimestreamColumnInfo `json:"ColumnInfo"`
+	// QueryStatus, when seeded, is answered as the Query's QueryStatus in place of the one substrate
+	// derives from the rows (#1209).
+	QueryStatus *TimestreamQueryStatus `json:"QueryStatus,omitempty"`
+}
+
+// TimestreamQueryStatus is a Query response's QueryStatus, as API_query_QueryStatus publishes it.
+type TimestreamQueryStatus struct {
+	// ProgressPercentage is how far the query has run, as a percentage.
+	ProgressPercentage float64 `json:"ProgressPercentage"`
+	// CumulativeBytesScanned is the bytes the query has scanned.
+	CumulativeBytesScanned int64 `json:"CumulativeBytesScanned"`
+	// CumulativeBytesMetered is the bytes the query is billed for.
+	CumulativeBytesMetered int64 `json:"CumulativeBytesMetered"`
 }
 
 // TimestreamRow holds one row of Timestream query data.
@@ -71,6 +84,8 @@ type TimestreamRow struct {
 type TimestreamDatum struct {
 	// ScalarValue is the string representation of the datum.
 	ScalarValue string `json:"ScalarValue,omitempty"`
+	// NullValue reports that the datum is null, as API_query_Datum publishes it (#1209).
+	NullValue bool `json:"NullValue,omitempty"`
 }
 
 // TimestreamColumnInfo describes a column returned by a Timestream query.
