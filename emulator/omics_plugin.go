@@ -199,6 +199,15 @@ func (p *OmicsPlugin) getRun(ctx *RequestContext, _ *AWSRequest, runID string) (
 	return omicsJSONResponse(http.StatusOK, omicsRunToWire(run))
 }
 
+// omicsRunStatusCancelled is the status CancelRun leaves a run in, spelled as API_GetRun and
+// API_RunListItem publish it. Until #1364 it was CANCELED, one L, which neither page lists, so a wait
+// loop matching the published value never saw its terminal state.
+//
+// The run goes straight to it. The enum also publishes STOPPING, but a run here is born COMPLETED and
+// nothing in this plugin moves a run through any intermediate status, so there is no progression a
+// STOPPING observation could be part of; modeling one would be the plugin's first.
+const omicsRunStatusCancelled = "CANCELLED"
+
 func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {
 	goCtx := context.Background()
 	runKey := "run:" + ctx.AccountID + "/" + ctx.Region + "/" + runID
@@ -210,8 +219,11 @@ func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string
 	if err := json.Unmarshal(data, &run); err != nil {
 		return nil, fmt.Errorf("cancelRun: unmarshal: %w", err)
 	}
-	run.Status = "CANCELED"
-	updated, _ := json.Marshal(run)
+	run.Status = omicsRunStatusCancelled
+	updated, err := json.Marshal(run)
+	if err != nil {
+		return nil, fmt.Errorf("cancelRun: marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, omicsNamespace, runKey, updated); err != nil {
 		return nil, fmt.Errorf("cancelRun: put: %w", err)
 	}

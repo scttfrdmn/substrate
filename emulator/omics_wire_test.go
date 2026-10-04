@@ -51,3 +51,33 @@ func TestOmicsWire_RunResponsesCarryNoBookkeepingMember(t *testing.T) {
 	require.Equal(t, []string{"id", "name", "outputUri", "roleArn", "status", "workflowId", "workflowType"},
 		slices.Sorted(maps.Keys(out)), "GetRun: %s", got)
 }
+
+// TestOmicsWire_ACancelledRunReportsThePublishedStatus pins the status CancelRun leaves a run in to
+// the spelling API_GetRun and API_RunListItem publish, CANCELLED, on the raw bytes of both reads
+// (#1364). A typed SDK's enum would read the old CANCELED as an unknown value.
+func TestOmicsWire_ACancelledRunReportsThePublishedStatus(t *testing.T) {
+	t.Parallel()
+	p := &emulator.OmicsPlugin{}
+	ctx, _ := wireSetup(t, p, "req-omics-cancel")
+	call := func(method, path string, body map[string]any) []byte {
+		return wireREST(t, p, ctx, "omics", method, path, body)
+	}
+
+	started := call(http.MethodPost, "/run", map[string]any{
+		"workflowId": "1234567", "workflowType": "PRIVATE", "name": "cancel-run",
+		"roleArn": "arn:aws:iam::123456789012:role/wire", "outputUri": "s3://wire-bucket/out",
+	})
+	var run struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(started, &run), "decode StartRun: %s", started)
+	call(http.MethodDelete, "/run/"+run.ID, nil)
+
+	for op, body := range map[string][]byte{
+		"GetRun":   call(http.MethodGet, "/run/"+run.ID, nil),
+		"ListRuns": call(http.MethodGet, "/run", nil),
+	} {
+		require.Containsf(t, string(body), `"status":"CANCELLED"`, "%s must answer the published CANCELLED: %s", op, body)
+		require.NotContainsf(t, string(body), `"CANCELED"`, "%s answered CANCELED, which no Omics page publishes: %s", op, body)
+	}
+}

@@ -20,7 +20,6 @@ import (
 // route. Each one used to reach DeleteBucket.
 var s3UnroutedBucketDeletes = map[string]string{
 	"analytics":             "DeleteBucketAnalyticsConfiguration",
-	"cors":                  "DeleteBucketCors",
 	"encryption":            "DeleteBucketEncryption",
 	"intelligent-tiering":   "DeleteBucketIntelligentTieringConfiguration",
 	"inventory":             "DeleteBucketInventoryConfiguration",
@@ -101,12 +100,10 @@ func TestS3Subresource_UnroutedRequestsAreRefused(t *testing.T) {
 		op, method, path string
 	}{
 		{"GetBucketLocation", http.MethodGet, "/" + bucket + "?location"},
-		{"GetBucketCors", http.MethodGet, "/" + bucket + "?cors"},
 		{"GetBucketEncryption", http.MethodGet, "/" + bucket + "?encryption"},
 		{"ListBucketInventoryConfigurations", http.MethodGet, "/" + bucket + "?inventory"},
 		{"GetBucketInventoryConfiguration", http.MethodGet, "/" + bucket + "?inventory&id=one"},
 		{"CreateSession", http.MethodGet, "/" + bucket + "?session"},
-		{"PutBucketCors", http.MethodPut, "/" + bucket + "?cors"},
 		{"PutBucketEncryption", http.MethodPut, "/" + bucket + "?encryption"},
 		{"PutBucketWebsite", http.MethodPut, "/" + bucket + "?website"},
 		{"CreateBucketMetadataTableConfiguration", http.MethodPost, "/" + bucket + "?metadataTable"},
@@ -135,13 +132,15 @@ func TestS3Subresource_ResolvesTheRealOperationName(t *testing.T) {
 	}{
 		// Unrouted: named for what they are.
 		{http.MethodDelete, "/b?encryption", "DeleteBucketEncryption"},
-		{http.MethodDelete, "/b?cors=", "DeleteBucketCors"},
 		{http.MethodGet, "/b?location", "GetBucketLocation"},
 		{http.MethodGet, "/b?metrics", "ListBucketMetricsConfigurations"},
 		{http.MethodGet, "/b?metrics&id=m1", "GetBucketMetricsConfiguration"},
 		{http.MethodPut, "/b/k?retention", "PutObjectRetention"},
 		{http.MethodPost, "/b/k?restore", "RestoreObject"},
-		// Routed: unchanged.
+		// Routed: unchanged. ?cors is routed since #1278, and an SDK's "?cors=" resolves the same.
+		{http.MethodDelete, "/b?cors=", "DeleteBucketCors"},
+		{http.MethodGet, "/b?cors", "GetBucketCors"},
+		{http.MethodPut, "/b?cors", "PutBucketCors"},
 		{http.MethodDelete, "/b", "DeleteBucket"},
 		{http.MethodDelete, "/b?policy", "DeleteBucketPolicy"},
 		{http.MethodDelete, "/b?publicAccessBlock", "DeletePublicAccessBlock"},

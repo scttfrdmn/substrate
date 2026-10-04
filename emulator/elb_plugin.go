@@ -397,10 +397,9 @@ func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 // "Information about the modified target group", and its sample response carries a full member, so a
 // consumer reading the modified group off the response got nothing.
 //
-// An ARN naming no target group still answers the empty list rather than `TargetGroupNotFound`, as
-// [ELBPlugin.modifyListener] does for `ListenerNotFound`. Both refusals are published and neither is
-// here, because adding them is a behavior change separate from reporting the record that was found;
-// see #1313.
+// An ARN naming no target group is refused `TargetGroupNotFound`, which the page publishes. Until
+// #1313 it fell through to the empty list, so a modify of a deleted or mistyped group reported
+// success.
 func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	arn := req.Params["TargetGroupArn"]
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
@@ -433,7 +432,7 @@ func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		return elbOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS,
 			tgResult{TargetGroups: []elbTGItem{tgToItem(tg)}})
 	}
-	return elbOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS, tgResult{})
+	return nil, elbPublishedNotFound(elbKindTargetGroup)
 }
 
 // --- Target operations ---
@@ -471,12 +470,16 @@ func (p *ELBPlugin) registerTargets(reqCtx *RequestContext, req *AWSRequest) (*A
 				tg.Targets = append(tg.Targets, nt)
 			}
 		}
-		newData, _ := json.Marshal(tg)
-		_ = p.state.Put(context.Background(), elbNamespace, k, newData)
-		break
+		newData, err := json.Marshal(tg)
+		if err != nil {
+			return nil, fmt.Errorf("elb registerTargets marshal: %w", err)
+		}
+		if err := p.state.Put(context.Background(), elbNamespace, k, newData); err != nil {
+			return nil, fmt.Errorf("elb registerTargets state.Put: %w", err)
+		}
+		return elbEmptyOKResponse(reqCtx, "RegisterTargets")
 	}
-
-	return elbEmptyOKResponse(reqCtx, "RegisterTargets")
+	return nil, elbPublishedNotFound(elbKindTargetGroup)
 }
 
 func (p *ELBPlugin) deregisterTargets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -513,12 +516,16 @@ func (p *ELBPlugin) deregisterTargets(reqCtx *RequestContext, req *AWSRequest) (
 			}
 		}
 		tg.Targets = filtered
-		newData, _ := json.Marshal(tg)
-		_ = p.state.Put(context.Background(), elbNamespace, k, newData)
-		break
+		newData, err := json.Marshal(tg)
+		if err != nil {
+			return nil, fmt.Errorf("elb deregisterTargets marshal: %w", err)
+		}
+		if err := p.state.Put(context.Background(), elbNamespace, k, newData); err != nil {
+			return nil, fmt.Errorf("elb deregisterTargets state.Put: %w", err)
+		}
+		return elbEmptyOKResponse(reqCtx, "DeregisterTargets")
 	}
-
-	return elbEmptyOKResponse(reqCtx, "DeregisterTargets")
+	return nil, elbPublishedNotFound(elbKindTargetGroup)
 }
 
 func (p *ELBPlugin) describeTargetHealth(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -556,9 +563,9 @@ func (p *ELBPlugin) describeTargetHealth(reqCtx *RequestContext, req *AWSRequest
 			desc.TargetHealth.State = "healthy"
 			result.Descriptions = append(result.Descriptions, desc)
 		}
-		break
+		return elbOKResponse(reqCtx, "DescribeTargetHealth", elbXMLNS, result)
 	}
-	return elbOKResponse(reqCtx, "DescribeTargetHealth", elbXMLNS, result)
+	return nil, elbPublishedNotFound(elbKindTargetGroup)
 }
 
 // --- Listener operations ---
@@ -685,9 +692,9 @@ func (p *ELBPlugin) deleteListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if err := p.state.Delete(context.Background(), elbNamespace, k); err != nil {
 			return nil, fmt.Errorf("elb deleteListener delete: %w", err)
 		}
-		break
+		return elbEmptyOKResponse(reqCtx, "DeleteListener")
 	}
-	return elbEmptyOKResponse(reqCtx, "DeleteListener")
+	return nil, elbPublishedNotFound(elbKindListener)
 }
 
 func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -709,8 +716,13 @@ func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if v := req.Params["Port"]; v != "" {
 			l.Port, _ = strconv.Atoi(v)
 		}
-		newData, _ := json.Marshal(l)
-		_ = p.state.Put(context.Background(), elbNamespace, k, newData)
+		newData, err := json.Marshal(l)
+		if err != nil {
+			return nil, fmt.Errorf("elb modifyListener marshal: %w", err)
+		}
+		if err := p.state.Put(context.Background(), elbNamespace, k, newData); err != nil {
+			return nil, fmt.Errorf("elb modifyListener state.Put: %w", err)
+		}
 
 		type listenerResult struct {
 			Listeners []elbListenerItem `xml:"Listeners>member"`
@@ -718,10 +730,8 @@ func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return elbOKResponse(reqCtx, "ModifyListener", elbXMLNS,
 			listenerResult{Listeners: []elbListenerItem{listenerToItem(l)}})
 	}
-	type listenerResult struct {
-		Listeners []elbListenerItem `xml:"Listeners>member"`
-	}
-	return elbOKResponse(reqCtx, "ModifyListener", elbXMLNS, listenerResult{})
+	// API_ModifyListener publishes ListenerNotFound; until #1313 this fell through to an empty list.
+	return nil, elbPublishedNotFound(elbKindListener)
 }
 
 // --- Rule operations ---
@@ -863,9 +873,9 @@ func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 		if err := p.state.Delete(context.Background(), elbNamespace, k); err != nil {
 			return nil, fmt.Errorf("elb deleteRule delete: %w", err)
 		}
-		break
+		return elbEmptyOKResponse(reqCtx, "DeleteRule")
 	}
-	return elbEmptyOKResponse(reqCtx, "DeleteRule")
+	return nil, elbPublishedNotFound(elbKindRule)
 }
 
 // setRulePriorities answers `SetRulePriorities`, reporting the rules it repriced.
@@ -876,47 +886,82 @@ func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 // its sample response carries the repriced rule with its new `Priority`.
 //
 // The rules are reported in request order rather than priority order, which is the order AWS's own
-// sample shows for the one-member case and the only order this operation's input defines. A rule ARN
-// naming nothing is skipped rather than refused with the published `RuleNotFound`, as #1313 records
-// for the two modify operations.
+// sample shows for the one-member case and the only order this operation's input defines.
+//
+// A rule ARN naming nothing is refused with the published `RuleNotFound` (#1313); until then it was
+// skipped and the call reported success. Every pair is resolved before any is written, so a refused
+// call reprices nothing rather than the rules that happened to precede the missing one.
 func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	type ruleResult struct {
 		Rules []elbRuleItem `xml:"Rules>member"`
 	}
-	var result ruleResult
+	allKeys, err := p.state.List(context.Background(), elbNamespace, "rule:"+scope+"/")
+	if err != nil {
+		return nil, fmt.Errorf("elb setRulePriorities list: %w", err)
+	}
+	type repriced struct {
+		key  string
+		rule ELBRule
+	}
+	var pending []repriced
 	for i := 1; ; i++ {
 		ruleARN := req.Params[fmt.Sprintf("RulePriorities.member.%d.RuleArn", i)]
 		if ruleARN == "" {
 			break
 		}
-		priority := req.Params[fmt.Sprintf("RulePriorities.member.%d.Priority", i)]
-		allKeys, _ := p.state.List(context.Background(), elbNamespace, "rule:"+scope+"/")
+		found := false
 		for _, k := range allKeys {
-			data, err := p.state.Get(context.Background(), elbNamespace, k)
-			if err != nil || data == nil {
+			data, getErr := p.state.Get(context.Background(), elbNamespace, k)
+			if getErr != nil || data == nil {
 				continue
 			}
 			var r ELBRule
 			if json.Unmarshal(data, &r) != nil || r.ARN != ruleARN {
 				continue
 			}
-			r.Priority = priority
-			newData, marshalErr := json.Marshal(r)
-			if marshalErr != nil {
-				return nil, fmt.Errorf("elb setRulePriorities marshal: %w", marshalErr)
-			}
-			if putErr := p.state.Put(context.Background(), elbNamespace, k, newData); putErr != nil {
-				return nil, fmt.Errorf("elb setRulePriorities state.Put: %w", putErr)
-			}
-			result.Rules = append(result.Rules, ruleToItem(r))
+			r.Priority = req.Params[fmt.Sprintf("RulePriorities.member.%d.Priority", i)]
+			pending = append(pending, repriced{key: k, rule: r})
+			found = true
 			break
 		}
+		if !found {
+			return nil, elbPublishedNotFound(elbKindRule)
+		}
+	}
+	var result ruleResult
+	for _, rp := range pending {
+		newData, marshalErr := json.Marshal(rp.rule)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("elb setRulePriorities marshal: %w", marshalErr)
+		}
+		if putErr := p.state.Put(context.Background(), elbNamespace, rp.key, newData); putErr != nil {
+			return nil, fmt.Errorf("elb setRulePriorities state.Put: %w", putErr)
+		}
+		result.Rules = append(result.Rules, ruleToItem(rp.rule))
 	}
 	return elbOKResponse(reqCtx, "SetRulePriorities", elbXMLNS, result)
 }
 
 // --- Helpers ---
+
+// elbPublishedNotFound is the refusal an ELBv2 operation answers when the ARN it addresses names no
+// resource of the kind it takes (#1313).
+//
+// Every operation it serves publishes the code at HTTP 400 — the ELB API's choice, not a 404 — with
+// the one-line description below as its text: API_ModifyTargetGroup, API_RegisterTargets,
+// API_DeregisterTargets and API_DescribeTargetHealth for TargetGroupNotFound; API_ModifyListener and
+// API_DeleteListener for ListenerNotFound; API_SetRulePriorities and API_DeleteRule for RuleNotFound.
+// Unlike [elbNotFoundError], which the tagging operations answer naming the ARN, these carry the
+// published sentence verbatim.
+func elbPublishedNotFound(kind string) *AWSError {
+	msg := map[string]string{
+		elbKindTargetGroup: "The specified target group does not exist.",
+		elbKindListener:    "The specified listener does not exist.",
+		elbKindRule:        "The specified rule does not exist.",
+	}[kind]
+	return &AWSError{Code: elbNotFoundCodes[kind], Message: msg, HTTPStatus: http.StatusBadRequest}
+}
 
 // elbXMLNS is the XML namespace ELBv2 (2015-12-01) responses carry.
 //

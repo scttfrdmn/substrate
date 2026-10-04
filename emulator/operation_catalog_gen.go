@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 67 plugins, 1018 routed operations.
+// 67 plugins, 1021 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -945,6 +945,7 @@ var routedOperations = map[string][]string{
 		"CreateBucket",
 		"CreateMultipartUpload",
 		"DeleteBucket",
+		"DeleteBucketCors",
 		"DeleteBucketLifecycle",
 		"DeleteBucketPolicy",
 		"DeleteBucketTagging",
@@ -953,6 +954,7 @@ var routedOperations = map[string][]string{
 		"DeleteObjects",
 		"DeletePublicAccessBlock",
 		"GetBucketAcl",
+		"GetBucketCors",
 		"GetBucketLifecycleConfiguration",
 		"GetBucketNotificationConfiguration",
 		"GetBucketPolicy",
@@ -971,6 +973,7 @@ var routedOperations = map[string][]string{
 		"ListObjectsV2",
 		"ListParts",
 		"PutBucketAcl",
+		"PutBucketCors",
 		"PutBucketLifecycleConfiguration",
 		"PutBucketNotificationConfiguration",
 		"PutBucketPolicy",
