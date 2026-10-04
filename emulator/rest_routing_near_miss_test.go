@@ -51,7 +51,7 @@ func TestEMRServerlessRouting_ANearMissPathIsUnknown(t *testing.T) {
 	p := &emulator.EMRServerlessPlugin{}
 	ctx, _ := wireSetup(t, p, "req-emr-nearmiss")
 	appID := mintedIDMember(t, wireREST(t, p, ctx, "emr-serverless", http.MethodPost, "/applications",
-		map[string]any{"name": "nm", "type": "SPARK", "releaseLabel": "emr-6.9.0"}), "applicationId")
+		map[string]any{"name": "nm", "type": "SPARK", "releaseLabel": "emr-6.9.0", "clientToken": "nm"}), "applicationId")
 
 	requireRefusal(t, p, ctx, "emr-serverless", []nearMissCase{
 		// jobruns is a whole segment: these used to route as ListJobRuns and GetJobRun.

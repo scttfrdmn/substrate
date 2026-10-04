@@ -94,7 +94,7 @@ func TestEMRServerlessWire_ResponsesCarryNoBookkeepingMember(t *testing.T) {
 	p, ctx, state := setupEMRServerlessWirePlugin(t)
 
 	created := emrServerlessWire(t, p, ctx, "POST", "/applications", map[string]any{
-		"name": "wire-app", "type": "SPARK", "releaseLabel": "emr-7.0.0",
+		"name": "wire-app", "type": "SPARK", "releaseLabel": "emr-7.0.0", "clientToken": "wire-app",
 	})
 	var app struct {
 		ApplicationID string `json:"applicationId"`
@@ -104,7 +104,9 @@ func TestEMRServerlessWire_ResponsesCarryNoBookkeepingMember(t *testing.T) {
 	emrServerlessWireRequireScoped(t, state, "app:"+emrServerlessWireAccount+"/"+emrServerlessWireRegion+"/"+app.ApplicationID)
 
 	appPath := "/applications/" + app.ApplicationID
-	started := emrServerlessWire(t, p, ctx, "POST", appPath+"/jobruns", map[string]any{"name": "wire-run"})
+	started := emrServerlessWire(t, p, ctx, "POST", appPath+"/jobruns", map[string]any{
+		"name": "wire-run", "clientToken": "wire-run", "executionRoleArn": "arn:aws:iam::123456789012:role/emr-run",
+	})
 	var run struct {
 		JobRunID string `json:"jobRunId"`
 	}

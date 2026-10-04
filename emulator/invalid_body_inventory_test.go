@@ -20,6 +20,7 @@ package emulator_test
 import (
 	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"strings"
@@ -1158,6 +1159,9 @@ type memberCase struct {
 	// wantMessage is a substring of the message the site reports, which is what distinguishes these
 	// sites from each other once they all answer one code per service.
 	wantMessage string
+	// query, when set, sends the case through the Query protocol instead: a form-encoded POST to "/"
+	// carrying these parameters, answered by an XML error document. Redshift is the first such row.
+	query string
 }
 
 // memberService is one service's non-parse-guard sites, under the code they all answer.
@@ -1193,6 +1197,22 @@ type memberService struct {
 const wafv2ScopedBody = `{"Scope":"REGIONAL"}`
 
 var memberComplaintServices = []memberService{
+	{
+		// #1197: CreateApplication's clientToken, releaseLabel and type and StartJobRun's clientToken
+		// and executionRoleArn are Required: Yes, and every EMR Serverless page publishes
+		// ValidationException/400 for input that fails a constraint. The checks run before any state
+		// lookup, so "{}" against an application that does not exist still reaches them.
+		name: "emrserverless",
+		host: "emr-serverless.us-east-1.amazonaws.com",
+		code: "ValidationException",
+		cases: []memberCase{
+			{name: "createApplicationClientToken", path: "/applications", method: http.MethodPost, body: "{}", wantMessage: "clientToken is required"},
+			{name: "createApplicationReleaseLabel", path: "/applications", method: http.MethodPost, body: `{"clientToken":"t"}`, wantMessage: "releaseLabel is required"},
+			{name: "createApplicationType", path: "/applications", method: http.MethodPost, body: `{"clientToken":"t","releaseLabel":"emr-7.0.0"}`, wantMessage: "type is required"},
+			{name: "startJobRunClientToken", path: "/applications/my-app/jobruns", method: http.MethodPost, body: "{}", wantMessage: "clientToken is required"},
+			{name: "startJobRunExecutionRoleArn", path: "/applications/my-app/jobruns", method: http.MethodPost, body: `{"clientToken":"t"}`, wantMessage: "executionRoleArn is required"},
+		},
+	},
 	{
 		name: "eventbridge",
 		host: "events.us-east-1.amazonaws.com",
@@ -1531,6 +1551,39 @@ var memberComplaintServices = []memberService{
 			{name: "cancelQuery", target: "Timestream_20181101.CancelQuery", body: "{}", wantMessage: "QueryId is required"},
 		},
 	},
+	{
+		// #1197's Transfer Family site. API_CreateUser marks Role, ServerId and UserName Required: Yes,
+		// and Role used to go unchecked, so a user with no access role was created. The code is the
+		// one every Transfer page publishes for a malformed request — the same code the plugin's
+		// parse guards answer — and each required member is checked before the server is looked up,
+		// which is why the createUser/role case can name a server that does not exist.
+		name: "transfer",
+		host: "transfer.us-east-1.amazonaws.com",
+		code: "InvalidRequestException",
+		cases: []memberCase{
+			{name: "createUser", target: "TransferService.CreateUser", body: "{}", wantMessage: "ServerId and UserName are required"},
+			{name: "createUser/role", target: "TransferService.CreateUser", body: `{"ServerId":"s-0123456789abcdef0","UserName":"alice"}`, wantMessage: "Role is required"},
+			{name: "describeServer", target: "TransferService.DescribeServer", body: "{}", wantMessage: "ServerId is required"},
+			{name: "listUsers", target: "TransferService.ListUsers", body: "{}", wantMessage: "ServerId is required"},
+			{name: "listServers/maxResults", target: "TransferService.ListServers", body: `{"MaxResults":0}`, wantMessage: "MaxResults must be between 1 and 1000"},
+		},
+	},
+	{
+		// #1197's Redshift sites: every member the three create pages mark `Required: Yes`. The code is
+		// MissingParameter/400 from Redshift's own Common Errors page, which each create page links to.
+		// None of the three pages publishes a code of its own for the condition.
+		name: "redshift",
+		host: "redshift.us-east-1.amazonaws.com",
+		code: "MissingParameter",
+		cases: []memberCase{
+			{name: "createCluster/NodeType", query: "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=inv&MasterUsername=admin", wantMessage: "NodeType"},
+			{name: "createCluster/MasterUsername", query: "Action=CreateCluster&Version=2012-12-01&ClusterIdentifier=inv&NodeType=ra3.xlplus", wantMessage: "MasterUsername"},
+			{name: "createClusterParameterGroup/ParameterGroupFamily", query: "Action=CreateClusterParameterGroup&Version=2012-12-01&ParameterGroupName=inv&Description=d", wantMessage: "ParameterGroupFamily"},
+			{name: "createClusterParameterGroup/Description", query: "Action=CreateClusterParameterGroup&Version=2012-12-01&ParameterGroupName=inv&ParameterGroupFamily=redshift-1.0", wantMessage: "Description"},
+			{name: "createClusterSubnetGroup/Description", query: "Action=CreateClusterSubnetGroup&Version=2012-12-01&ClusterSubnetGroupName=inv&SubnetIds.SubnetIdentifier.1=subnet-1", wantMessage: "Description"},
+			{name: "createClusterSubnetGroup/SubnetIds", query: "Action=CreateClusterSubnetGroup&Version=2012-12-01&ClusterSubnetGroupName=inv&Description=d", wantMessage: "SubnetIds"},
+		},
+	},
 }
 
 // TestMemberComplaintAnswersThePublishedCode asserts the non-parse-guard half of the inventory answers
@@ -1550,8 +1603,14 @@ func TestMemberComplaintAnswersThePublishedCode(t *testing.T) {
 			ts := emulator.StartTestServer(t)
 			for _, tc := range svc.cases {
 				t.Run(tc.name, func(t *testing.T) {
-					status, code, message := rawUnsignedMethodCall(t, ts, svc.host, tc.target, tc.path,
-						tc.method, []byte(tc.body))
+					var status int
+					var code, message string
+					if tc.query != "" {
+						status, code, message = rawUnsignedQueryCall(t, ts, svc.host, tc.query)
+					} else {
+						status, code, message = rawUnsignedMethodCall(t, ts, svc.host, tc.target, tc.path,
+							tc.method, []byte(tc.body))
+					}
 					assert.Equalf(t, svc.code, code, "%s answers its service's one code", tc.name)
 					assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.name)
 					assert.Containsf(t, message, tc.wantMessage, "%s names what it wants", tc.name)
@@ -1670,6 +1729,40 @@ func rawUnsignedMethodCall(t *testing.T, ts *emulator.TestServer, host, target, 
 		code = code[i+1:]
 	}
 	return resp.StatusCode, code, errShape.Message
+}
+
+// rawUnsignedQueryCall issues one unsigned Query-protocol request, a form-encoded POST carrying form,
+// and returns the status and the code and message of the XML error document it answers.
+func rawUnsignedQueryCall(t *testing.T, ts *emulator.TestServer, host, form string) (status int, code, message string) {
+	t.Helper()
+
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, ts.URL+"/", strings.NewReader(form))
+	if err != nil {
+		t.Fatalf("build the Query request: %v", err)
+	}
+	req.Host = host
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded; charset=utf-8")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("post the Query request: %v", err)
+	}
+	defer resp.Body.Close() //nolint:errcheck
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read the Query response: %v", err)
+	}
+	var doc struct {
+		Error struct {
+			Code    string `xml:"Code"`
+			Message string `xml:"Message"`
+		} `xml:"Error"`
+	}
+	if unmarshalErr := xml.Unmarshal(raw, &doc); unmarshalErr != nil {
+		t.Fatalf("decode the Query error document %s: %v", raw, unmarshalErr)
+	}
+	return resp.StatusCode, doc.Error.Code, doc.Error.Message
 }
 
 // TestOpenSearchInvalidBodyIsNotAnAWSError covers the three sites in #1007's tail that are not an AWS

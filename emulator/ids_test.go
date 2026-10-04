@@ -939,7 +939,7 @@ func idsRecordBatchAndEMRServerless(t *testing.T, ts *emulator.TestServer) {
 	}
 	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodPost,
 		"/applications", map[string]any{
-			"name": "ids-tier3", "type": "SPARK", "releaseLabel": "emr-6.9.0",
+			"name": "ids-tier3", "type": "SPARK", "releaseLabel": "emr-6.9.0", "clientToken": "ids-tier3",
 		}), &app))
 	require.NotEmpty(t, app.ApplicationID)
 
@@ -947,7 +947,9 @@ func idsRecordBatchAndEMRServerless(t *testing.T, ts *emulator.TestServer) {
 		JobRunID string `json:"jobRunId"`
 	}
 	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodPost,
-		"/applications/"+app.ApplicationID+"/jobruns", map[string]any{"name": "ids-run"}), &run))
+		"/applications/"+app.ApplicationID+"/jobruns", map[string]any{
+			"name": "ids-run", "clientToken": "ids-run", "executionRoleArn": "arn:aws:iam::123456789012:role/ids-run",
+		}), &run))
 	require.NotEmpty(t, run.JobRunID)
 	idsRESTCall(t, ts, idsEMRServerlessHost, http.MethodGet,
 		"/applications/"+app.ApplicationID+"/jobruns/"+run.JobRunID, nil)

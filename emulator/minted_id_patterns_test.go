@@ -58,10 +58,10 @@ func TestMintedIDs_SatisfyTheirPublishedPatterns(t *testing.T) {
 		p := &emulator.EMRServerlessPlugin{}
 		ctx, _ := wireSetup(t, p, "req-minted-emr")
 		app := wireREST(t, p, ctx, "emr-serverless", http.MethodPost, "/applications",
-			map[string]any{"name": "minted", "type": "SPARK", "releaseLabel": "emr-6.9.0"})
+			map[string]any{"name": "minted", "type": "SPARK", "releaseLabel": "emr-6.9.0", "clientToken": "minted"})
 		appID := mintedIDMember(t, app, "applicationId")
 		run := wireREST(t, p, ctx, "emr-serverless", http.MethodPost, "/applications/"+appID+"/jobruns",
-			map[string]any{"name": "minted-run"})
+			map[string]any{"name": "minted-run", "clientToken": "minted-run", "executionRoleArn": "arn:aws:iam::123456789012:role/emr-run"})
 		return p, ctx, appID, run
 	}
 	jsonTarget := func(t *testing.T, p emulator.Plugin, service, target, op string, body map[string]any) []byte {

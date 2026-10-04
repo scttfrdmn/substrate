@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -124,12 +125,13 @@ func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	region := extractRegion(host, authHeader)
 
 	req := &AWSRequest{
-		Service:    service,
-		Operation:  operation,
-		HTTPMethod: r.Method,
-		Headers:    headers,
-		Params:     params,
-		Path:       effectivePath,
+		Service:          service,
+		Operation:        operation,
+		HTTPMethod:       r.Method,
+		Headers:          headers,
+		Params:           params,
+		MultiValueParams: repeatedQueryParams(r.URL.Query()),
+		Path:             effectivePath,
 		// Classified here rather than at response time so every step of the pipeline
 		// — authorization, fault injection, the plugin, and the error serializer —
 		// agrees about what the caller sent. Both are pure reads of r's headers and
@@ -843,4 +845,20 @@ func extractServiceFromAuth(authHeader string) string {
 // re-derived.
 func generateRequestID() string {
 	return fmt.Sprintf("req-%d-%s", time.Now().UnixNano(), NewIDMint("").Hex(4))
+}
+
+// repeatedQueryParams returns the query-string keys q carries more than once, with every value in
+// the order sent, or nil when no key repeats. See [AWSRequest.MultiValueParams].
+func repeatedQueryParams(q url.Values) map[string][]string {
+	var out map[string][]string
+	for k, vs := range q {
+		if len(vs) < 2 {
+			continue
+		}
+		if out == nil {
+			out = make(map[string][]string)
+		}
+		out[k] = vs
+	}
+	return out
 }

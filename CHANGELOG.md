@@ -94,6 +94,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   named. `GetBootstrapBrokers` answers in the page's host form on the published ports. The default
   encryption is TLS, so a default cluster answers `bootstrapBrokerStringTls`, not
   `bootstrapBrokerString`. `ListNodes` reports each broker's endpoint.
+- **Transfer Family's two collections page, and refuse a token substrate did not issue** (#1195).
+  `ListServers` read no body and `ListUsers` read no pagination member. So both answered every record
+  in one page with `"NextToken": ""`, an illegal value under the published 1–6144 length, on which a
+  `while "NextToken" in response` paginator never stopped. Both now page by `MaxResults` (1–1000,
+  default 1000) and `NextToken`, and omit `NextToken` on the last page. An out-of-range `MaxResults`
+  is `InvalidRequestException`, and an unissued token is the published `InvalidNextTokenException`/400.
+- **Transfer Family's `CreateUser` requires `Role`, and every member a routed operation reads is held
+  to its published constraints** (#1197). `Role` is `Required: Yes` and went unchecked, so a user with
+  no access role was created. All three required members are checked before the server is looked up,
+  and an absent one is `InvalidRequestException`/400. So is a member outside its published Valid
+  Values, Length Constraints or Pattern on `CreateServer`, `UpdateServer` and `CreateUser`.
+- **Transfer Family answers the codes, status and defaults its pages publish** (#1198). A missing
+  server or user is `ResourceNotFoundException` at 400, not 404. A duplicate user is
+  `ResourceExistsException`/400, not the `ConflictException`/409 `CreateUser` does not publish.
+  `Domain` defaults to `S3`, as the page states, where it defaulted to the `Protocols` value `SFTP`;
+  a value outside `S3 | EFS` is refused.
+- **Transfer Family's server and user records carry their published members, and `UpdateServer`
+  applies what it is sent** (#1199). `DescribeServer`, `DescribeUser` and the two lists answer every
+  modeled published member, with `SshPublicKeys` in epoch seconds. `UserCount` is counted from the
+  user index, where it was declared, never assigned, and always 0. `UpdateServer` reads every
+  published member with patch semantics and no longer reads `Tags`, which its page does not publish.
+- **Transfer Family's two deletes answer `{}` by recorded decision** (#1206), as the pages' Example
+  shows, matching Timestream's two deletes. Both refuse an identifier naming nothing with
+  `ResourceNotFoundException`/400.
+- **Redshift's four describes paginate and apply the filters they publish** (#1195). Three of them
+  took `_ *AWSRequest`, and none paginated. All four now page through the cursor RDS and ElastiCache
+  use: `MaxRecords` 20–100 (default 100), with `Marker` omitted on the last page.
+  - A bad `Marker` or `MaxRecords` is `InvalidParameterValue`/400. `ClusterIdentifier` with a `Marker`
+    is `InvalidParameterCombination`/400. Both codes come from Redshift's Common Errors page.
+  - Every published filter substrate holds a value for is applied, and one naming nothing answers its
+    page's fault. `TagKeys`, `TagValues` and `SortingEntities` are named as unapplied.
+- **Redshift refuses a create missing a required member instead of defaulting it** (#1197).
+  `CreateCluster` defaulted `NodeType` to `dc2.large` and stored an empty `MasterUsername`. Every
+  `Required: Yes` member is now `MissingParameter`/400, naming it.
+  - `NodeType`'s Valid Values and the name constraints are enforced, and group names are stored
+    lower-case.
+  - `CreateClusterSubnetGroup` reads `SubnetIds` instead of a `VpcId` the request never carries.
+  - A name in use is `ClusterParameterGroupAlreadyExists` or `ClusterSubnetGroupAlreadyExists`, where
+    a second create overwrote the first.
+- **Redshift's refusal table names every published code it answers** (#1198), on top of #1208.
+- **Redshift no longer answers a cluster ARN as the cluster's namespace ARN** (#1199).
+  `ClusterNamespaceArn` is omitted, and the cluster type names the 53 of `API_Cluster`'s 63 members it
+  does not send, with reasons.
+- **EMR Serverless's ListJobRuns pages and filters** (#1195). It discarded its request, so every list
+  was one page and every filter matched everything. It now reads:
+  - `maxResults` (1–50);
+  - `nextToken`, omitted on the last page; an unissued one is `ValidationException`/400, as the page
+    publishes no `InvalidNextTokenException`;
+  - `states`, `mode`, `createdAtAfter` and `createdAtBefore`.
+
+  A repeated query key now reaches a handler, through the new `AWSRequest.MultiValueParams`, set only
+  when a key repeats.
+- **EMR Serverless checks the members its creates require, and `clientToken` is idempotent** (#1197).
+  `CreateApplication`'s `clientToken`, `releaseLabel` and `type`, and `StartJobRun`'s `clientToken` and
+  `executionRoleArn`, are refused `ValidationException`/400 when absent or outside their patterns.
+  - A resubmitted token answers the resource it created. With different parameters it is
+    `ConflictException`/409; the pages say only "must be unique", so that is substrate's reading.
+  - `StartJobRun` on a missing application is `ResourceNotFoundException`/404.
+- **EMR Serverless's CancelJobRun leaves a run `CANCELLED`** (#1198), the published spelling.
+- **EMR Serverless answers every required member** (#1199). `Application` gains `createdAt`/`updatedAt`.
+  `JobRun` and `JobRunSummary` gain `createdAt`, `updatedAt`, `createdBy`, `executionRole`,
+  `releaseLabel` and `stateDetails`, and `JobRun` its `jobDriver`, with the dates as epoch seconds.
 
 - **`docs/services.md` names each service once again, and a gate keeps it that way.** #1384 shipped
   41 duplicated service sections: an edit to the Timestream section for #1209 reinserted a

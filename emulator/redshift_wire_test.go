@@ -200,12 +200,12 @@ func TestRedshiftWire_ClusterResponsesCarryNoBookkeepingMember(t *testing.T) {
 	})
 	redshiftWireRequireScoped(t, state, redshiftWireKey("cluster", "wire-cluster"))
 
-	// The cluster ARN is built from the account and the Region, so both values are in every
-	// body below as substrings. That is why the assertion is on the element name: the values
-	// are published, under ClusterNamespaceArn and inside the endpoint address, and only the
-	// names are not.
-	require.Contains(t, string(created), "arn:aws:redshift:"+redshiftWireRegion+":"+redshiftWireAccount+":cluster:wire-cluster",
-		"CreateCluster must report the cluster ARN, so the absence assertion is about the member name")
+	// The endpoint address is built from the account and the Region, so both values are in every
+	// body below as substrings. That is why the assertion is on the element name: the values are
+	// published, inside the endpoint address, and only the names are not. (ClusterNamespaceArn
+	// used to carry them too, as a cluster ARN; it is omitted since #1199.)
+	require.Contains(t, string(created), "wire-cluster."+redshiftWireAccount+"."+redshiftWireRegion+".redshift.amazonaws.com",
+		"CreateCluster must report the endpoint address, so the absence assertion is about the member name")
 
 	for _, tc := range []struct {
 		action string
@@ -264,14 +264,12 @@ func TestRedshiftWire_ClusterSubnetGroupResponsesCarryNoBookkeepingMember(t *tes
 	t.Parallel()
 	p, ctx, state := setupRedshiftWirePlugin(t)
 
-	// VpcId is read off the request even though ClusterSubnetGroup publishes it as a response
-	// member rather than taking it as a parameter (#1197). Supplied here so the projected
-	// shape renders all three of its members, which is the document the absence is asserted
-	// over — not an endorsement of the parameter.
+	// The three members API_CreateClusterSubnetGroup marks Required. VpcId is not one of them; it is a
+	// response member, and #1197 stopped reading it off the request.
 	created := redshiftWire(t, p, ctx, "CreateClusterSubnetGroup", map[string]string{
-		"ClusterSubnetGroupName": "wire-subnets",
-		"Description":            "subnets for the wire test",
-		"VpcId":                  "vpc-0wire",
+		"ClusterSubnetGroupName":       "wire-subnets",
+		"Description":                  "subnets for the wire test",
+		"SubnetIds.SubnetIdentifier.1": "subnet-0wire",
 	})
 	redshiftWireRequireScoped(t, state, redshiftWireKey("subnetgroup", "wire-subnets"))
 
@@ -298,7 +296,9 @@ func TestRedshiftWire_SnapshotResponsesCarryNoBookkeepingMember(t *testing.T) {
 	t.Parallel()
 	p, ctx, state := setupRedshiftWirePlugin(t)
 
-	redshiftWire(t, p, ctx, "CreateCluster", map[string]string{"ClusterIdentifier": "wire-cluster"})
+	redshiftWire(t, p, ctx, "CreateCluster", map[string]string{
+		"ClusterIdentifier": "wire-cluster", "NodeType": "ra3.xlplus", "MasterUsername": "admin",
+	})
 
 	created := redshiftWire(t, p, ctx, "CreateClusterSnapshot", map[string]string{
 		"ClusterIdentifier":  "wire-cluster",

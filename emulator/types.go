@@ -42,6 +42,15 @@ type AWSRequest struct {
 	// Params contains parsed query-string or form parameters.
 	Params map[string]string
 
+	// MultiValueParams holds every value of a query-string parameter the request repeated, keyed by
+	// name. Params keeps only a key's first value, which is right for every scalar member but drops
+	// a list: a restJson1 list bound to the query string is sent as a repeated key
+	// (`states=FAILED&states=CANCELLED`), so a handler reading one reads it here.
+	//
+	// It is set only for a key that repeats, and is omitted from a recorded event when no key does,
+	// so a request without a repeated key records exactly the bytes it did before the field existed.
+	MultiValueParams map[string][]string `json:"MultiValueParams,omitempty"`
+
 	// Path is the effective URL path of the HTTP request. For S3 virtual-hosted
 	// requests the bucket is prepended so the plugin always sees /bucket[/key].
 	//

@@ -57,8 +57,11 @@ type RedshiftClusterSubnetGroup struct {
 	ClusterSubnetGroupName string `json:"clusterSubnetGroupName"`
 	// Description is the description of the subnet group.
 	Description string `json:"description,omitempty"`
-	// VpcID is the VPC identifier for the subnet group.
+	// VpcID is the VPC identifier a group stored before #1197 carries. It was read off the request,
+	// where it is not a parameter; a group created since holds none.
 	VpcID string `json:"vpcId,omitempty"`
+	// SubnetIDs are the subnets the group was created with, `SubnetIds.SubnetIdentifier.N` in order.
+	SubnetIDs []string `json:"subnetIds,omitempty"`
 	// AccountID is the AWS account that owns this subnet group.
 	AccountID string `json:"accountID"`
 	// Region is the AWS region where the subnet group exists.

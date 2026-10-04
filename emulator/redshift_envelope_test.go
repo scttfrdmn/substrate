@@ -100,7 +100,7 @@ func TestRedshiftEnvelope_EveryOperationAnswersThePublishedDocument(t *testing.T
 		{"ModifyCluster", map[string]string{"ClusterIdentifier": "env-cluster", "NodeType": "ra3.xlplus"}, "Cluster"},
 		{"CreateClusterParameterGroup", map[string]string{"ParameterGroupName": "env-pg", "ParameterGroupFamily": "redshift-1.0", "Description": "d"}, "ClusterParameterGroup"},
 		{"DescribeClusterParameterGroups", nil, "ParameterGroups/ClusterParameterGroup"},
-		{"CreateClusterSubnetGroup", map[string]string{"ClusterSubnetGroupName": "env-sg", "Description": "d"}, "ClusterSubnetGroup"},
+		{"CreateClusterSubnetGroup", map[string]string{"ClusterSubnetGroupName": "env-sg", "Description": "d", "SubnetIds.SubnetIdentifier.1": "subnet-env"}, "ClusterSubnetGroup"},
 		{"DescribeClusterSubnetGroups", nil, "ClusterSubnetGroups/ClusterSubnetGroup"},
 		{"CreateClusterSnapshot", map[string]string{"ClusterIdentifier": "env-cluster", "SnapshotIdentifier": "env-snap"}, "Snapshot"},
 		{"DescribeClusterSnapshots", nil, "Snapshots/Snapshot"},
