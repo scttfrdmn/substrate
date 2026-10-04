@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 )
 
 // handleRedshiftDataSeedResult handles POST /v1/redshift-data/results.
@@ -66,35 +65,4 @@ func (s *Server) handleRedshiftDataClearResults(w http.ResponseWriter, r *http.R
 		}
 	}
 	writeJSONDebug(w, s.logger, map[string]interface{}{"ok": true})
-}
-
-// handleRedshiftDataSetStatus handles POST /v1/redshift-data/status.
-// It sets the default Status (and optional ErrorMessage) applied to new ExecuteStatement calls.
-// Body: {"status": "FAILED", "errorMessage": "query timed out"}
-// Valid statuses: FINISHED, FAILED, ABORTED, STARTED.
-func (s *Server) handleRedshiftDataSetStatus(w http.ResponseWriter, r *http.Request) {
-	var body struct {
-		Status       string `json:"status"`
-		ErrorMessage string `json:"errorMessage"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusBadRequest)
-		return
-	}
-	status := strings.ToUpper(strings.TrimSpace(body.Status))
-	switch status {
-	case "FINISHED", "FAILED", "ABORTED", "STARTED":
-	default:
-		http.Error(w, `{"error":"status must be one of FINISHED, FAILED, ABORTED, STARTED"}`, http.StatusBadRequest)
-		return
-	}
-	if err := s.state.Put(r.Context(), redshiftDataCtrlNamespace, redshiftDataCtrlStatusKey, []byte(status)); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	if err := s.state.Put(r.Context(), redshiftDataCtrlNamespace, redshiftDataCtrlErrorKey, []byte(body.ErrorMessage)); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-		return
-	}
-	writeJSONDebug(w, s.logger, map[string]interface{}{"status": status, "errorMessage": body.ErrorMessage})
 }

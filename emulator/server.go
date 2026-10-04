@@ -376,16 +376,43 @@ func (s *Server) buildRouter() *chi.Mux {
 
 		cp.Post("/v1/redshift-data/results", s.handleRedshiftDataSeedResult)
 		cp.Delete("/v1/redshift-data/results", s.handleRedshiftDataClearResults)
-		cp.Post("/v1/redshift-data/status", s.handleRedshiftDataSetStatus)
+		cp.Post("/v1/quicksight/ingestion-status", func(w http.ResponseWriter, r *http.Request) {
+			quicksightIngestionProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/quicksight/ingestion-status", func(w http.ResponseWriter, r *http.Request) {
+			quicksightIngestionProgressions.serveClear(w, r, s.state, s.logger)
+		})
+		cp.Post("/v1/quicksight/data-source-status", func(w http.ResponseWriter, r *http.Request) {
+			quicksightDataSourceProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/quicksight/data-source-status", func(w http.ResponseWriter, r *http.Request) {
+			quicksightDataSourceProgressions.serveClear(w, r, s.state, s.logger)
+		})
+		cp.Post("/v1/redshift-data/status", func(w http.ResponseWriter, r *http.Request) {
+			redshiftDataStatementProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/redshift-data/status", func(w http.ResponseWriter, r *http.Request) {
+			redshiftDataStatementProgressions.serveClear(w, r, s.state, s.logger)
+		})
 
 		cp.Post("/v1/athena/results", s.handleAthenaSeedResult)
 		cp.Delete("/v1/athena/results", s.handleAthenaClearResults)
+		cp.Post("/v1/athena/query-status", s.handleAthenaSeedQueryStatus)
+		cp.Delete("/v1/athena/query-status", s.handleAthenaClearQueryStatus)
+		cp.Post("/v1/codebuild/build-status", s.handleCodeBuildSeedBuildStatus)
+		cp.Delete("/v1/codebuild/build-status", s.handleCodeBuildClearBuildStatus)
+		cp.Post("/v1/codepipeline/execution-status", s.handleCodePipelineSeedExecutionStatus)
+		cp.Delete("/v1/codepipeline/execution-status", s.handleCodePipelineClearExecutionStatus)
 
 		cp.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
 		cp.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
 
-		cp.Post("/v1/sagemaker/training-job-status", s.handleSageMakerSeedTrainingJobStatus)
-		cp.Delete("/v1/sagemaker/training-job-status", s.handleSageMakerClearTrainingJobStatus)
+		cp.Post("/v1/sagemaker/training-job-status", func(w http.ResponseWriter, r *http.Request) {
+			sagemakerTrainingJobProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/sagemaker/training-job-status", func(w http.ResponseWriter, r *http.Request) {
+			sagemakerTrainingJobProgressions.serveClear(w, r, s.state, s.logger)
+		})
 
 		cp.Post("/v1/ssm/command-invocation", s.handleSSMSeedCommandInvocation)
 		cp.Delete("/v1/ssm/command-invocation", s.handleSSMClearCommandInvocation)
@@ -450,6 +477,8 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Kinesis stream-status progression control-plane endpoints (#1119).
 		cp.Post("/v1/kinesis/stream-status", s.handleKinesisSeedStreamStatus)
 		cp.Delete("/v1/kinesis/stream-status", s.handleKinesisClearStreamStatus)
+		cp.Post("/v1/ec2/nat-gateway-state", s.handleEC2SeedNatGatewayState)
+		cp.Delete("/v1/ec2/nat-gateway-state", s.handleEC2ClearNatGatewayState)
 
 		// EC2 spot-placement-score control-plane endpoints (#892).
 		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)

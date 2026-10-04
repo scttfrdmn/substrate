@@ -9,12 +9,6 @@ const redshiftDataNamespace = "redshift-data"
 // (seeded results and status overrides set via /v1/redshift-data/* endpoints).
 const redshiftDataCtrlNamespace = "redshift-data-ctrl"
 
-// redshiftDataCtrlStatusKey is the state key for the default statement status override.
-const redshiftDataCtrlStatusKey = "status"
-
-// redshiftDataCtrlErrorKey is the state key for the error message on FAILED statements.
-const redshiftDataCtrlErrorKey = "error_message"
-
 // redshiftDataCtrlResultKey returns the state key for a seeded result by SQL pattern.
 func redshiftDataCtrlResultKey(sql string) string { return "result:" + sql }
 

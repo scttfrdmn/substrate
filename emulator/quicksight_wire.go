@@ -23,6 +23,8 @@ type quicksightDataSourceOut struct {
 	Name         string `json:"Name"`
 	Status       string `json:"Status"`
 	Type         string `json:"Type"`
+	// ErrorInfo is DataSourceErrorInfo, reported only for a seeded CREATION_FAILED (#1155).
+	ErrorInfo *quicksightErrorInfoOut `json:"ErrorInfo,omitempty"`
 }
 
 // quicksightDataSourceToWire projects a persisted data source onto the published shape.

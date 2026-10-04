@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type CodePipelinePlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes advancing a seeded execution progression; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "codepipeline".
@@ -360,8 +363,12 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 		return nil, fmt.Errorf("codepipeline getPipelineExecution unmarshal: %w", err)
 	}
 
+	out, err := p.observedExecution(goCtx, exec)
+	if err != nil {
+		return nil, err
+	}
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
-		"pipelineExecution": codepipelineExecutionToWire(exec),
+		"pipelineExecution": out,
 	})
 }
 

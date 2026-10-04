@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type CodeBuildPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes advancing a seeded build progression; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "codebuild".
@@ -279,8 +282,13 @@ func (p *CodeBuildPlugin) startBuild(reqCtx *RequestContext, req *AWSRequest) (*
 	}
 	updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildBuildIDsKey(reqCtx.AccountID, reqCtx.Region), buildID)
 
+	// A create-time read: it reports a seeded build's first state without spending an observation.
+	out, err := p.observedBuild(goCtx, build, false)
+	if err != nil {
+		return nil, err
+	}
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"build": codebuildBuildToWire(build),
+		"build": out,
 	})
 }
 
@@ -294,7 +302,7 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 		}
 	}
 
-	builds := make([]CodeBuildBuild, 0)
+	builds := make([]codebuildBuildOut, 0)
 	notFound := make([]string, 0)
 	goCtx := context.Background()
 	for _, id := range input.IDs {
@@ -309,11 +317,17 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 			notFound = append(notFound, id)
 			continue
 		}
-		builds = append(builds, b)
+		// Each build is one observation of its own countdown, so one call over several builds
+		// spends one from each, never several from a shared wildcard (#582).
+		out, err := p.observedBuild(goCtx, b, true)
+		if err != nil {
+			return nil, err
+		}
+		builds = append(builds, out)
 	}
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
-		"builds":         codebuildBuildsToWire(builds),
+		"builds":         builds,
 		"buildsNotFound": notFound,
 	})
 }

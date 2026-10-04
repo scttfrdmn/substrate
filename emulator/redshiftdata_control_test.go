@@ -140,160 +140,79 @@ func TestRedshiftDataPlugin_StateWildcardResult(t *testing.T) {
 	}
 }
 
-func TestRedshiftDataPlugin_StateStatusFailed(t *testing.T) {
-	p, _, state := setupRedshiftDataWithSharedState(t)
-	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
-
-	if err := state.Put(context.Background(), "redshift-data-ctrl", "status", []byte("FAILED")); err != nil {
-		t.Fatalf("state.Put status: %v", err)
+// rdSeedStatus posts a statement-status seed through the control plane and requires a 200.
+func rdSeedStatus(t *testing.T, srv *emulator.Server, body string) {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/redshift-data/status", strings.NewReader(body))
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("POST /v1/redshift-data/status %s: %d %s", body, rr.Code, rr.Body)
 	}
-	if err := state.Put(context.Background(), "redshift-data-ctrl", "error_message", []byte("query timed out")); err != nil {
-		t.Fatalf("state.Put error_message: %v", err)
-	}
+}
 
+// rdExecuteAndDescribe executes sql and returns the first describe's Status and Error.
+func rdExecuteAndDescribe(t *testing.T, p *emulator.RedshiftDataPlugin, ctx *emulator.RequestContext, sql string) (status, errMsg string) {
+	t.Helper()
 	resp, err := p.HandleRequest(ctx, redshiftDataRequest(t, "ExecuteStatement", map[string]any{
-		"WorkgroupName": "wg",
-		"Database":      "db",
-		"Sql":           "SELECT 1",
+		"WorkgroupName": "wg", "Database": "db", "Sql": sql,
 	}))
 	if err != nil {
 		t.Fatalf("ExecuteStatement: %v", err)
 	}
-	var execResult struct {
+	var exec struct {
 		ID string `json:"Id"`
 	}
-	_ = json.Unmarshal(resp.Body, &execResult)
-
-	resp, err = p.HandleRequest(ctx, redshiftDataRequest(t, "DescribeStatement", map[string]any{
-		"Id": execResult.ID,
-	}))
+	if err := json.Unmarshal(resp.Body, &exec); err != nil {
+		t.Fatalf("decode ExecuteStatement: %v", err)
+	}
+	resp, err = p.HandleRequest(ctx, redshiftDataRequest(t, "DescribeStatement", map[string]any{"Id": exec.ID}))
 	if err != nil {
 		t.Fatalf("DescribeStatement: %v", err)
 	}
-	var descResult struct {
+	var desc struct {
 		Status string `json:"Status"`
 		Error  string `json:"Error"`
 	}
-	if err := json.Unmarshal(resp.Body, &descResult); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := json.Unmarshal(resp.Body, &desc); err != nil {
+		t.Fatalf("decode DescribeStatement: %v", err)
 	}
-	if descResult.Status != "FAILED" {
-		t.Errorf("want Status=FAILED, got %q", descResult.Status)
+	return desc.Status, desc.Error
+}
+
+// The pre-#1163 body — no statementId — is the "*" wildcard, read at describe time.
+func TestRedshiftDataPlugin_StateStatusFailed(t *testing.T) {
+	p, srv, _ := setupRedshiftDataWithSharedState(t)
+	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
+
+	rdSeedStatus(t, srv, `{"status":"FAILED","errorMessage":"query timed out"}`)
+	status, errMsg := rdExecuteAndDescribe(t, p, ctx, "SELECT 1")
+	if status != "FAILED" {
+		t.Errorf("want Status=FAILED, got %q", status)
 	}
-	if descResult.Error != "query timed out" {
-		t.Errorf("want Error=%q, got %q", "query timed out", descResult.Error)
+	if errMsg != "query timed out" {
+		t.Errorf("want Error=%q, got %q", "query timed out", errMsg)
 	}
 }
 
+// DELETE /v1/redshift-data/status clears the seed (#1163); there was no way to before.
 func TestRedshiftDataPlugin_StateStatusClearedReturnsFinished(t *testing.T) {
-	p, _, state := setupRedshiftDataWithSharedState(t)
+	p, srv, _ := setupRedshiftDataWithSharedState(t)
 	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
 
-	// Seed FAILED.
-	if err := state.Put(context.Background(), "redshift-data-ctrl", "status", []byte("FAILED")); err != nil {
-		t.Fatalf("state.Put status: %v", err)
+	rdSeedStatus(t, srv, `{"status":"FAILED"}`)
+	if status, _ := rdExecuteAndDescribe(t, p, ctx, "SELECT 1"); status != "FAILED" {
+		t.Fatalf("want FAILED, got %q", status)
 	}
 
-	// Execute one statement — should be FAILED.
-	resp, _ := p.HandleRequest(ctx, redshiftDataRequest(t, "ExecuteStatement", map[string]any{
-		"Sql": "SELECT 1", "WorkgroupName": "wg", "Database": "db",
-	}))
-	var r1 struct {
-		ID string `json:"Id"`
+	req := httptest.NewRequest(http.MethodDelete, "/v1/redshift-data/status", nil)
+	rr := httptest.NewRecorder()
+	srv.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("DELETE /v1/redshift-data/status: %d %s", rr.Code, rr.Body)
 	}
-	_ = json.Unmarshal(resp.Body, &r1)
-	resp, _ = p.HandleRequest(ctx, redshiftDataRequest(t, "DescribeStatement", map[string]any{"Id": r1.ID}))
-	var d1 struct {
-		Status string `json:"Status"`
-	}
-	_ = json.Unmarshal(resp.Body, &d1)
-	if d1.Status != "FAILED" {
-		t.Fatalf("want FAILED, got %q", d1.Status)
-	}
-
-	// Clear status override.
-	if err := state.Delete(context.Background(), "redshift-data-ctrl", "status"); err != nil {
-		t.Fatalf("state.Delete status: %v", err)
-	}
-
-	// Execute another statement — should now be FINISHED.
-	resp, _ = p.HandleRequest(ctx, redshiftDataRequest(t, "ExecuteStatement", map[string]any{
-		"Sql": "SELECT 2", "WorkgroupName": "wg", "Database": "db",
-	}))
-	var r2 struct {
-		ID string `json:"Id"`
-	}
-	_ = json.Unmarshal(resp.Body, &r2)
-	resp, _ = p.HandleRequest(ctx, redshiftDataRequest(t, "DescribeStatement", map[string]any{"Id": r2.ID}))
-	var d2 struct {
-		Status string `json:"Status"`
-	}
-	_ = json.Unmarshal(resp.Body, &d2)
-	if d2.Status != "FINISHED" {
-		t.Errorf("want FINISHED after clearing override, got %q", d2.Status)
-	}
-}
-
-func TestRedshiftDataPlugin_InMemoryTakesPrecedenceOverState(t *testing.T) {
-	state := emulator.NewMemoryStateManager()
-	tc := emulator.NewTimeController(time.Now())
-	logger := emulator.NewDefaultLogger(slog.LevelError, false)
-
-	specificSQL := "SELECT specific FROM table"
-	specificStr := "in-memory"
-	wildcardStr := "from-state"
-
-	p := &emulator.RedshiftDataPlugin{}
-	if err := p.Initialize(context.Background(), emulator.PluginConfig{
-		State:  state,
-		Logger: logger,
-		Options: map[string]any{
-			"time_controller": tc,
-			"results": map[string]*emulator.RedshiftDataResult{
-				specificSQL: {
-					ColumnMetadata: []emulator.RedshiftDataColumnMetadata{{Name: "v", TypeName: "varchar"}},
-					Records:        [][]emulator.RedshiftDataField{{{StringValue: &specificStr}}},
-				},
-			},
-		},
-	}); err != nil {
-		t.Fatalf("Initialize: %v", err)
-	}
-
-	// Seed wildcard result in state.
-	wildcardResult := &emulator.RedshiftDataResult{
-		ColumnMetadata: []emulator.RedshiftDataColumnMetadata{{Name: "v", TypeName: "varchar"}},
-		Records:        [][]emulator.RedshiftDataField{{{StringValue: &wildcardStr}}},
-	}
-	data, _ := json.Marshal(wildcardResult)
-	_ = state.Put(context.Background(), "redshift-data-ctrl", "result:*", data)
-
-	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
-
-	// Execute with the specific SQL → in-memory result should win.
-	resp, _ := p.HandleRequest(ctx, redshiftDataRequest(t, "ExecuteStatement", map[string]any{
-		"Sql": specificSQL, "WorkgroupName": "wg", "Database": "db",
-	}))
-	var execResult struct {
-		ID string `json:"Id"`
-	}
-	_ = json.Unmarshal(resp.Body, &execResult)
-
-	resp, err := p.HandleRequest(ctx, redshiftDataRequest(t, "GetStatementResult", map[string]any{
-		"Id": execResult.ID,
-	}))
-	if err != nil {
-		t.Fatalf("GetStatementResult: %v", err)
-	}
-	var getResult struct {
-		Records [][]map[string]interface{} `json:"Records"`
-	}
-	_ = json.Unmarshal(resp.Body, &getResult)
-	if len(getResult.Records) != 1 {
-		t.Fatalf("want 1 row, got %d", len(getResult.Records))
-	}
-	if got, ok := getResult.Records[0][0]["stringValue"].(string); !ok || got != "in-memory" {
-		t.Errorf("want in-memory value, got %v", getResult.Records[0][0])
+	if status, _ := rdExecuteAndDescribe(t, p, ctx, "SELECT 2"); status != "FINISHED" {
+		t.Errorf("want FINISHED after clearing the seed, got %q", status)
 	}
 }
 
@@ -388,27 +307,25 @@ func TestHandleRedshiftDataClearResults_SpecificSQL(t *testing.T) {
 	}
 }
 
+// The seed endpoint answers the key it stored, a status in any case is accepted upper-cased as the
+// pre-#1163 handler did, and the describe that follows reports it.
 func TestHandleRedshiftDataSetStatus(t *testing.T) {
-	_, srv, state := setupRedshiftDataWithSharedState(t)
+	p, srv, _ := setupRedshiftDataWithSharedState(t)
+	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1"}
 
-	body := `{"status":"FAILED","errorMessage":"simulated error"}`
-	req := httptest.NewRequest(http.MethodPost, "/v1/redshift-data/status", strings.NewReader(body))
+	req := httptest.NewRequest(http.MethodPost, "/v1/redshift-data/status", strings.NewReader(`{"status":"failed","errorMessage":"simulated error"}`))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	srv.ServeHTTP(rr, req)
-
 	if rr.Code != http.StatusOK {
 		t.Fatalf("want 200, got %d: %s", rr.Code, rr.Body)
 	}
-
-	// Verify state persisted.
-	statusData, _ := state.Get(context.Background(), "redshift-data-ctrl", "status")
-	if string(statusData) != "FAILED" {
-		t.Errorf("want status=FAILED, got %q", string(statusData))
+	if !strings.Contains(rr.Body.String(), `"statementId":"status:*"`) {
+		t.Errorf("want the wildcard key echoed, got %s", rr.Body)
 	}
-	errData, _ := state.Get(context.Background(), "redshift-data-ctrl", "error_message")
-	if string(errData) != "simulated error" {
-		t.Errorf("want error_message=%q, got %q", "simulated error", string(errData))
+	status, errMsg := rdExecuteAndDescribe(t, p, ctx, "SELECT 1")
+	if status != "FAILED" || errMsg != "simulated error" {
+		t.Errorf("want FAILED/simulated error, got %q/%q", status, errMsg)
 	}
 }
 

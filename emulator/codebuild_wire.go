@@ -67,13 +67,16 @@ func codebuildProjectsToWire(projects []CodeBuildProject) []codebuildProjectOut 
 //
 // Seven of API_Build's members — the ones the record models.
 type codebuildBuildOut struct {
-	ARN          string       `json:"arn"`
-	BuildStatus  string       `json:"buildStatus"`
-	CurrentPhase string       `json:"currentPhase"`
-	EndTime      EpochSeconds `json:"endTime"`
-	ID           string       `json:"id"`
-	ProjectName  string       `json:"projectName"`
-	StartTime    EpochSeconds `json:"startTime"`
+	ARN          string `json:"arn"`
+	BuildStatus  string `json:"buildStatus"`
+	CurrentPhase string `json:"currentPhase"`
+	// EndTime is omitted while a seeded build is IN_PROGRESS (#1155); every unseeded build has one.
+	EndTime     EpochSeconds `json:"endTime,omitzero"`
+	ID          string       `json:"id"`
+	ProjectName string       `json:"projectName"`
+	// Phases carries only a seeded failure's phase and diagnostic (#1155); otherwise it is absent.
+	Phases    []codebuildBuildPhaseOut `json:"phases,omitempty"`
+	StartTime EpochSeconds             `json:"startTime"`
 }
 
 // codebuildBuildToWire projects a persisted build onto the published shape.
@@ -87,13 +90,4 @@ func codebuildBuildToWire(build CodeBuildBuild) codebuildBuildOut {
 		ProjectName:  build.ProjectName,
 		StartTime:    EpochSeconds(build.StartTime),
 	}
-}
-
-// codebuildBuildsToWire projects a list of persisted builds, preserving its order.
-func codebuildBuildsToWire(builds []CodeBuildBuild) []codebuildBuildOut {
-	out := make([]codebuildBuildOut, 0, len(builds))
-	for _, build := range builds {
-		out = append(out, codebuildBuildToWire(build))
-	}
-	return out
 }

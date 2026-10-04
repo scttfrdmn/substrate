@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,9 @@ type SageMakerPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// seedMu serializes the training-job progression's observation counter (#1155).
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "sagemaker".
@@ -219,6 +223,15 @@ func (p *SageMakerPlugin) deleteApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 	goCtx := context.Background()
 	appKey := fmt.Sprintf("app:%s/%s/%s/%s/%s/%s",
 		ctx.AccountID, ctx.Region, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
+	// API_DeleteApp publishes ResourceNotFound/400 for an app that does not exist, the refusal
+	// DescribeApp already answers (#1162); a delete used to answer 200 for any name.
+	existing, err := p.state.Get(goCtx, sagemakerNamespace, appKey)
+	if err != nil {
+		return nil, fmt.Errorf("deleteApp: get: %w", err)
+	}
+	if existing == nil {
+		return nil, &AWSError{Code: "ResourceNotFound", Message: "app " + body.AppName + " not found", HTTPStatus: http.StatusBadRequest}
+	}
 	if err := p.state.Delete(goCtx, sagemakerNamespace, appKey); err != nil {
 		return nil, fmt.Errorf("deleteApp: %w", err)
 	}
@@ -314,33 +327,10 @@ func (p *SageMakerPlugin) describeTrainingJob(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(data, &job); err != nil {
 		return nil, fmt.Errorf("describeTrainingJob: unmarshal: %w", err)
 	}
-	p.applySeededTrainingJobStatus(goCtx, job.TrainingJobName, &job)
-	return sagemakerJSONResponse(http.StatusOK, sagemakerTrainingJobToWire(job))
-}
-
-// applySeededTrainingJobStatus overrides a training job's terminal status and
-// FailureReason from a control-plane seed, if any (exact name match first, then
-// the "*" wildcard). This lets tests exercise capacity-retry paths by forcing a
-// job to report Failed with a CapacityError FailureReason.
-func (p *SageMakerPlugin) applySeededTrainingJobStatus(goCtx context.Context, name string, job *SageMakerTrainingJob) {
-	for _, key := range []string{
-		sagemakerCtrlTrainingJobStatusKey(name),
-		sagemakerCtrlTrainingJobStatusKey("*"),
-	} {
-		data, err := p.state.Get(goCtx, sagemakerCtrlNamespace, key)
-		if err != nil || data == nil {
-			continue
-		}
-		var seed struct {
-			Status        string `json:"status"`
-			FailureReason string `json:"failureReason"`
-		}
-		if json.Unmarshal(data, &seed) == nil && seed.Status != "" {
-			job.TrainingJobStatus = seed.Status
-			job.FailureReason = seed.FailureReason
-		}
-		return
+	if err := p.observeTrainingJob(&job); err != nil {
+		return nil, err
 	}
+	return sagemakerJSONResponse(http.StatusOK, sagemakerTrainingJobToWire(job))
 }
 
 func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -372,6 +362,10 @@ func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, sagemakerNamespace, jobKey, updated); err != nil {
 		return nil, fmt.Errorf("stopTrainingJob: put: %w", err)
 	}
+	// A stop starts a new transition, Stopping then Stopped, so the job's countdown restarts (#1155).
+	if err := sagemakerTrainingJobProgressions.reset(goCtx, p.state, job.TrainingJobName); err != nil {
+		return nil, fmt.Errorf("stopTrainingJob: %w", err)
+	}
 	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -395,6 +389,10 @@ func (p *SageMakerPlugin) listTrainingJobs(ctx *RequestContext, _ *AWSRequest) (
 		}
 		var job SageMakerTrainingJob
 		if json.Unmarshal(data, &job) == nil {
+			// The same observation Describe makes, so the two agree on one job (#1162).
+			if err := p.observeTrainingJob(&job); err != nil {
+				return nil, err
+			}
 			summaries = append(summaries, summary{
 				TrainingJobName:   job.TrainingJobName,
 				TrainingJobArn:    job.TrainingJobArn,

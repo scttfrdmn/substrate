@@ -30,6 +30,8 @@ type codepipelineExecutionOut struct {
 	PipelineName        string `json:"pipelineName"`
 	PipelineVersion     int    `json:"pipelineVersion"`
 	Status              string `json:"status"`
+	// StatusSummary is reported only on a seeded final observation (#1155).
+	StatusSummary string `json:"statusSummary,omitempty"`
 }
 
 // codepipelineExecutionToWire projects a persisted execution onto the published shape.

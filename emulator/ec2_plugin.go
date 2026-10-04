@@ -2,18 +2,16 @@ package emulator
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
-	"encoding/pem"
 	"encoding/xml"
 	"fmt"
 	"hash/fnv"
+	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -3504,30 +3502,28 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Generate an EC P-256 key pair — fast and produces a compact PEM.
-	privKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 createKeyPair generate: %w", err)
-	}
-	privDER, err := x509.MarshalPKCS8PrivateKey(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 createKeyPair marshal private key: %w", err)
-	}
-	keyMaterial := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}))
-
-	pubDER, err := x509.MarshalPKIXPublicKey(&privKey.PublicKey)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 createKeyPair marshal public key: %w", err)
-	}
-	fp := ec2KeyFingerprint(pubDER)
-
 	keyType := req.Params["KeyType"]
 	if keyType == "" {
 		keyType = "rsa"
 	}
+	if !slices.Contains(ec2KeyTypes, keyType) {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Value (" + keyType + ") for parameter KeyType is invalid. Valid values are rsa and ed25519.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+
+	// The key pair ID is minted first and the key's seed second, so a request mints the same
+	// keyPairId it did before #1296 made the material derived.
+	keyPairID := generateKeyPairID(reqCtx.IDs)
+	keyMaterial, fp, err := ec2KeyPairMaterial(keyType, reqCtx.IDs)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair: %w", err)
+	}
 
 	kp := EC2KeyPair{
-		KeyPairID:   generateKeyPairID(reqCtx.IDs),
+		KeyPairID:   keyPairID,
 		KeyName:     name,
 		Fingerprint: fp,
 		KeyType:     keyType,
@@ -5705,12 +5701,101 @@ func (p *EC2Plugin) describeAddresses(reqCtx *RequestContext, req *AWSRequest) (
 
 // --- NAT Gateway operations ---
 
+// ec2NatAddrItem is one natGatewayAddressSet item. networkInterfaceId, which both published
+// samples carry, is not modeled: substrate creates no network interface for a NAT gateway.
+type ec2NatAddrItem struct {
+	AllocationID string `xml:"allocationId,omitempty"`
+	PublicIP     string `xml:"publicIp,omitempty"`
+	PrivateIP    string `xml:"privateIp"`
+}
+
+// ec2NatItem is the NatGateway element CreateNatGateway and DescribeNatGateways answer.
+type ec2NatItem struct {
+	NatGatewayID     string           `xml:"natGatewayId"`
+	SubnetID         string           `xml:"subnetId"`
+	VpcID            string           `xml:"vpcId"`
+	State            string           `xml:"state"`
+	FailureCode      string           `xml:"failureCode,omitempty"`
+	FailureMessage   string           `xml:"failureMessage,omitempty"`
+	ConnectivityType string           `xml:"connectivityType"`
+	CreateTime       string           `xml:"createTime"`
+	Addresses        []ec2NatAddrItem `xml:"natGatewayAddressSet>item"`
+}
+
+// ec2NatItemFor renders gw as the published NatGateway element, with the state an observation
+// reported rather than the record's own.
+func ec2NatItemFor(gw EC2NATGateway, observed ec2NatObservation) ec2NatItem {
+	return ec2NatItem{
+		NatGatewayID:     gw.NatGatewayID,
+		SubnetID:         gw.SubnetID,
+		VpcID:            gw.VPCID,
+		State:            observed.State,
+		FailureCode:      observed.FailureCode,
+		FailureMessage:   observed.FailureMessage,
+		ConnectivityType: gw.ConnectivityType,
+		CreateTime:       gw.CreateTime,
+		Addresses: []ec2NatAddrItem{{
+			AllocationID: gw.AllocationID,
+			PublicIP:     gw.PublicIP,
+			PrivateIP:    gw.PrivateIP,
+		}},
+	}
+}
+
+// ec2NatClientTokenRecord is what a CreateNatGateway carrying a ClientToken records, so a retry
+// with the same token answers the gateway it created rather than creating a second.
+type ec2NatClientTokenRecord struct {
+	NatGatewayID string `json:"natGatewayId"`
+	Fingerprint  string `json:"fingerprint"`
+}
+
+// ec2NatClientTokenKey is the state key of a CreateNatGateway client token. Tokens are regional,
+// as EC2's idempotency guide states ("Requests are idempotent in each Region").
+func ec2NatClientTokenKey(accountID, region, token string) string {
+	return "nat_token:" + accountID + "/" + region + "/" + token
+}
+
+// createNatGateway handles CreateNatGateway.
+//
+// # ClientToken
+//
+// CreateNatGateway is on EC2's list of actions that are "idempotent using a client token". A
+// retry with the same token and the same parameters "succeeds without performing any further
+// actions" and answers the gateway first created — with its current state, since "the result
+// might contain updated information, such as the current creation status" — and a retry whose
+// parameters differ is IdempotentParameterMismatch. The token is echoed as clientToken, which the
+// page publishes as "only returned if a client token was provided in the request". A token over
+// the published 64 ASCII characters is InvalidParameterValue, substrate's reading of the Common
+// Error Types list: the page publishes no code for it.
+//
+// # AllocationId and PrivateIpAddress
+//
+// A named AllocationId that resolves to no Elastic IP is InvalidAllocationID.NotFound, from the
+// Common Error Types list the page links to (#1188; substrate's reading, #671). It used to be
+// dropped, building a public gateway with no public IP. PrivateIpAddress is honored when given
+// and must be an IPv4 address inside the subnet's CIDR block, else InvalidParameterValue, also
+// substrate's reading; when absent the address is derived from the gateway ID as before.
 func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subnetID := req.Params["SubnetId"]
 	allocationID := req.Params["AllocationId"]
 	connectivityType := req.Params["ConnectivityType"]
 	if connectivityType == "" {
 		connectivityType = "public"
+	}
+	clientToken := req.Params["ClientToken"]
+	if !ec2ValidClientToken(clientToken) {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Value (" + clientToken + ") for parameter ClientToken is invalid. A client token is at most 64 ASCII characters.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	fingerprint := ec2RequestFingerprint(req.Params)
+	if clientToken != "" {
+		resp, found, err := p.natGatewayForClientToken(reqCtx, clientToken, fingerprint)
+		if err != nil || found {
+			return resp, err
+		}
 	}
 
 	// Look up subnet to get VPCID.
@@ -5727,13 +5812,38 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		return nil, fmt.Errorf("ec2 createNatGateway unmarshal subnet: %w", unmarshalErr)
 	}
 
-	natID := generateNATGatewayID(reqCtx.IDs)
+	// For public NAT gateways, resolve the Elastic IP the request names.
+	var eip *EC2ElasticIP
+	if connectivityType == "public" && allocationID != "" {
+		eipKey := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
+		eipData, eipErr := p.state.Get(context.Background(), ec2Namespace, eipKey)
+		if eipErr != nil {
+			return nil, fmt.Errorf("ec2 createNatGateway get elastic IP: %w", eipErr)
+		}
+		if reqErr := ec2RequireNamedResource(ec2AllocationIDKind, "AllocationId", allocationID, eipData != nil); reqErr != nil {
+			return nil, reqErr
+		}
+		eip = &EC2ElasticIP{}
+		if unmarshalErr := json.Unmarshal(eipData, eip); unmarshalErr != nil {
+			return nil, fmt.Errorf("ec2 createNatGateway unmarshal elastic IP: %w", unmarshalErr)
+		}
+	}
 
-	// Compute a stable private IP using FNV hash on the NAT gateway ID.
-	h := fnv.New32a()
-	h.Write([]byte(natID))
-	n := h.Sum32()
-	privateIP := fmt.Sprintf("10.0.%d.%d", (n>>8)&0xFF, n&0xFF)
+	privateIP := req.Params["PrivateIpAddress"]
+	if privateIP != "" {
+		if awsErr := ec2CheckAddressInSubnet(privateIP, subnet.CIDRBlock); awsErr != nil {
+			return nil, awsErr
+		}
+	}
+
+	natID := generateNATGatewayID(reqCtx.IDs)
+	if privateIP == "" {
+		// Compute a stable private IP using FNV hash on the NAT gateway ID.
+		h := fnv.New32a()
+		h.Write([]byte(natID))
+		n := h.Sum32()
+		privateIP = fmt.Sprintf("10.0.%d.%d", (n>>8)&0xFF, n&0xFF)
+	}
 
 	gw := EC2NATGateway{
 		NatGatewayID:     natID,
@@ -5746,18 +5856,9 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
 	}
-
-	// For public NAT gateways, look up the EIP.
-	if connectivityType == "public" && allocationID != "" {
-		eipKey := "eip:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + allocationID
-		eipData, eipErr := p.state.Get(context.Background(), ec2Namespace, eipKey)
-		if eipErr == nil && eipData != nil {
-			var eip EC2ElasticIP
-			if json.Unmarshal(eipData, &eip) == nil {
-				gw.AllocationID = allocationID
-				gw.PublicIP = eip.PublicIP
-			}
-		}
+	if eip != nil {
+		gw.AllocationID = allocationID
+		gw.PublicIP = eip.PublicIP
 	}
 
 	gw.Tags = ec2LaunchTagsForResource(req.Params, "natgateway")
@@ -5779,43 +5880,132 @@ func (p *EC2Plugin) createNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "nat_ids", natID); err != nil {
 		return nil, err
 	}
-
-	type natAddrItem struct {
-		AllocationID string `xml:"allocationId,omitempty"`
-		PublicIP     string `xml:"publicIp,omitempty"`
-		PrivateIP    string `xml:"privateIp"`
+	if clientToken != "" {
+		tokenData, err := json.Marshal(ec2NatClientTokenRecord{NatGatewayID: natID, Fingerprint: fingerprint})
+		if err != nil {
+			return nil, fmt.Errorf("ec2 createNatGateway marshal client token: %w", err)
+		}
+		if err := p.state.Put(context.Background(), ec2Namespace, ec2NatClientTokenKey(reqCtx.AccountID, reqCtx.Region, clientToken), tokenData); err != nil {
+			return nil, fmt.Errorf("ec2 createNatGateway put client token: %w", err)
+		}
 	}
-	type natItem struct {
-		NatGatewayID     string        `xml:"natGatewayId"`
-		SubnetID         string        `xml:"subnetId"`
-		VpcID            string        `xml:"vpcId"`
-		State            string        `xml:"state"`
-		ConnectivityType string        `xml:"connectivityType"`
-		CreateTime       string        `xml:"createTime"`
-		Addresses        []natAddrItem `xml:"natGatewayAddressSet>item"`
+	return p.natGatewayCreateResponse(gw, clientToken)
+}
+
+// natGatewayCreateResponse answers CreateNatGateway for gw. The state it reports is the one an
+// observation would see now, peeked so the create spends nothing a describe was meant to.
+func (p *EC2Plugin) natGatewayCreateResponse(gw EC2NATGateway, clientToken string) (*AWSResponse, error) {
+	observed, err := p.peekNatGatewayState(gw)
+	if err != nil {
+		return nil, err
 	}
 	type response struct {
-		XMLName    xml.Name `xml:"CreateNatGatewayResponse"`
-		XMLNS      string   `xml:"xmlns,attr"`
-		NatGateway natItem  `xml:"natGateway"`
-	}
-	item := natItem{
-		NatGatewayID:     natID,
-		SubnetID:         subnetID,
-		VpcID:            subnet.VPCID,
-		State:            "available",
-		ConnectivityType: connectivityType,
-		CreateTime:       gw.CreateTime,
-		Addresses: []natAddrItem{{
-			AllocationID: gw.AllocationID,
-			PublicIP:     gw.PublicIP,
-			PrivateIP:    privateIP,
-		}},
+		XMLName     xml.Name   `xml:"CreateNatGatewayResponse"`
+		XMLNS       string     `xml:"xmlns,attr"`
+		ClientToken string     `xml:"clientToken,omitempty"`
+		NatGateway  ec2NatItem `xml:"natGateway"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
-		XMLNS:      "http://ec2.amazonaws.com/doc/2016-11-15/",
-		NatGateway: item,
+		XMLNS:       "http://ec2.amazonaws.com/doc/2016-11-15/",
+		ClientToken: clientToken,
+		NatGateway:  ec2NatItemFor(gw, observed),
 	})
+}
+
+// natGatewayForClientToken answers a CreateNatGateway retry: the original gateway when the token
+// was seen with the same parameters, IdempotentParameterMismatch when it was seen with others, and
+// found false when the token is new.
+func (p *EC2Plugin) natGatewayForClientToken(reqCtx *RequestContext, token, fingerprint string) (resp *AWSResponse, found bool, err error) {
+	data, err := p.state.Get(context.Background(), ec2Namespace, ec2NatClientTokenKey(reqCtx.AccountID, reqCtx.Region, token))
+	if err != nil {
+		return nil, false, fmt.Errorf("ec2 createNatGateway get client token: %w", err)
+	}
+	if data == nil {
+		return nil, false, nil
+	}
+	var rec ec2NatClientTokenRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, false, fmt.Errorf("ec2 createNatGateway unmarshal client token: %w", err)
+	}
+	if rec.Fingerprint != fingerprint {
+		return nil, true, &AWSError{
+			Code:       "IdempotentParameterMismatch",
+			Message:    "The client token " + token + " was used with different parameters.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	gwData, err := p.state.Get(context.Background(), ec2Namespace, "nat:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+rec.NatGatewayID)
+	if err != nil {
+		return nil, false, fmt.Errorf("ec2 createNatGateway get gateway for client token: %w", err)
+	}
+	if gwData == nil {
+		return nil, false, fmt.Errorf("ec2 createNatGateway: client token %s names gateway %s, which is not stored", token, rec.NatGatewayID)
+	}
+	var gw EC2NATGateway
+	if err := json.Unmarshal(gwData, &gw); err != nil {
+		return nil, false, fmt.Errorf("ec2 createNatGateway unmarshal gateway for client token: %w", err)
+	}
+	resp, err = p.natGatewayCreateResponse(gw, token)
+	return resp, true, err
+}
+
+// ec2ValidClientToken reports whether token is within the published ClientToken constraint,
+// "Maximum 64 ASCII characters". An absent token is valid.
+func ec2ValidClientToken(token string) bool {
+	if len(token) > 64 {
+		return false
+	}
+	for i := 0; i < len(token); i++ {
+		if token[i] > 0x7e || token[i] < 0x20 {
+			return false
+		}
+	}
+	return true
+}
+
+// ec2RequestFingerprint is a digest of the request's parameters, less the ones an idempotent retry
+// may vary: the action and version, the token itself, DryRun, and query-string signing parameters.
+// Two requests with the same fingerprint have "the same parameters" in EC2's idempotency rule.
+func ec2RequestFingerprint(params map[string]string) string {
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		switch {
+		case k == "Action", k == "Version", k == "ClientToken", k == "DryRun",
+			k == "AWSAccessKeyId", k == "Signature", k == "SignatureMethod", k == "SignatureVersion",
+			k == "Timestamp", k == "Expires", strings.HasPrefix(k, "X-Amz-"):
+			continue
+		}
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	h := sha256.New()
+	for _, k := range keys {
+		_, _ = fmt.Fprintf(h, "%d:%s=%d:%s;", len(k), k, len(params[k]), params[k]) // hash.Hash.Write never returns an error.
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// ec2CheckAddressInSubnet refuses a PrivateIpAddress that is not an IPv4 address inside the
+// subnet's CIDR block. The page publishes no code, so InvalidParameterValue is substrate's reading
+// of the Common Error Types list.
+func ec2CheckAddressInSubnet(address, cidr string) *AWSError {
+	invalid := func(why string) *AWSError {
+		return &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Value (" + address + ") for parameter PrivateIpAddress is invalid. " + why,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	ip := net.ParseIP(address)
+	if ip == nil || ip.To4() == nil {
+		return invalid("It is not an IPv4 address.")
+	}
+	// A subnet with no parseable CIDR block constrains nothing substrate can check, so only a
+	// parsed block can refuse.
+	if _, network, err := net.ParseCIDR(cidr); err == nil && !network.Contains(ip) {
+		return invalid("It is not in the subnet's CIDR block " + cidr + ".")
+	}
+	return nil
 }
 
 // describeNatGateways reports the NAT gateways the account holds in the region, narrowed by
@@ -5852,25 +6042,11 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("ec2 describeNatGateways list: %w", err)
 	}
 
-	type natAddrItem struct {
-		AllocationID string `xml:"allocationId,omitempty"`
-		PublicIP     string `xml:"publicIp,omitempty"`
-		PrivateIP    string `xml:"privateIp"`
-	}
-	type natItem struct {
-		NatGatewayID     string        `xml:"natGatewayId"`
-		SubnetID         string        `xml:"subnetId"`
-		VpcID            string        `xml:"vpcId"`
-		State            string        `xml:"state"`
-		ConnectivityType string        `xml:"connectivityType"`
-		CreateTime       string        `xml:"createTime"`
-		Addresses        []natAddrItem `xml:"natGatewayAddressSet>item"`
-	}
 	type response struct {
-		XMLName     xml.Name  `xml:"DescribeNatGatewaysResponse"`
-		XMLNS       string    `xml:"xmlns,attr"`
-		NatGateways []natItem `xml:"natGatewaySet>item"`
-		NextToken   string    `xml:"nextToken,omitempty"`
+		XMLName     xml.Name     `xml:"DescribeNatGatewaysResponse"`
+		XMLNS       string       `xml:"xmlns,attr"`
+		NatGateways []ec2NatItem `xml:"natGatewaySet>item"`
+		NextToken   string       `xml:"nextToken,omitempty"`
 	}
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
 	for _, k := range allKeys {
@@ -5885,26 +6061,21 @@ func (p *EC2Plugin) describeNatGateways(reqCtx *RequestContext, req *AWSRequest)
 		if !filterIDs.match(gw.NatGatewayID) {
 			continue
 		}
-		// Apply filters.
-		if stateVals, ok := filters["state"]; ok && !ec2FilterAccepts(stateVals, gw.State) {
+		// The observation is taken — and a seeded countdown advanced — before the filters run,
+		// for the reason [EC2Plugin.describeSnapshots] records: a waiter that polls with a
+		// `state` filter for `available` would otherwise never advance the countdown of a
+		// gateway the filter excludes while it is pending (#1188).
+		observed, obsErr := p.observeNatGatewayState(gw)
+		if obsErr != nil {
+			return nil, obsErr
+		}
+		if stateVals, ok := filters["state"]; ok && !ec2FilterAccepts(stateVals, observed.State) {
 			continue
 		}
 		if vpcVals, ok := filters["vpc-id"]; ok && !ec2FilterAccepts(vpcVals, gw.VPCID) {
 			continue
 		}
-		resp.NatGateways = append(resp.NatGateways, natItem{
-			NatGatewayID:     gw.NatGatewayID,
-			SubnetID:         gw.SubnetID,
-			VpcID:            gw.VPCID,
-			State:            gw.State,
-			ConnectivityType: gw.ConnectivityType,
-			CreateTime:       gw.CreateTime,
-			Addresses: []natAddrItem{{
-				AllocationID: gw.AllocationID,
-				PublicIP:     gw.PublicIP,
-				PrivateIP:    gw.PrivateIP,
-			}},
-		})
+		resp.NatGateways = append(resp.NatGateways, ec2NatItemFor(gw, observed))
 	}
 	if err := filterIDs.unresolved(); err != nil {
 		return nil, err
@@ -5935,16 +6106,21 @@ func (p *EC2Plugin) deleteNatGateway(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
 		return nil, fmt.Errorf("ec2 deleteNatGateway put: %w", err)
 	}
+	// The record settles `deleted`; a seed's pendingObservations then report `deleting` first,
+	// restarted here as the instance progression restarts on a state change (#1188).
+	if err := ec2NatGatewayProgressions.reset(context.Background(), p.state, natID); err != nil {
+		return nil, fmt.Errorf("ec2 deleteNatGateway reset progression: %w", err)
+	}
+	// API_DeleteNatGateway publishes natGatewayId alone (with requestId). The `state` element
+	// substrate used to add is on no page, so it is no longer answered.
 	type response struct {
 		XMLName      xml.Name `xml:"DeleteNatGatewayResponse"`
 		XMLNS        string   `xml:"xmlns,attr"`
 		NatGatewayID string   `xml:"natGatewayId"`
-		State        string   `xml:"state"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
 		XMLNS:        "http://ec2.amazonaws.com/doc/2016-11-15/",
 		NatGatewayID: natID,
-		State:        "deleted",
 	})
 }
 

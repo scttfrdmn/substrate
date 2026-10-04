@@ -179,7 +179,9 @@ func TestQuickSightPlugin_CreateDataSet(t *testing.T) {
 	}
 }
 
-// TestQuickSightPlugin_DescribeIngestion_Existing returns COMPLETED status.
+// TestQuickSightPlugin_DescribeIngestion_Existing returns COMPLETED status, and no RowInfo: substrate
+// ingests no rows, so an unseeded ingestion has no row count to report. It used to report a
+// fabricated 1000 (#1168); a seed through POST /v1/quicksight/ingestion-status supplies one.
 func TestQuickSightPlugin_DescribeIngestion_Existing(t *testing.T) {
 	ts := newQuickSightTestServer(t)
 
@@ -201,11 +203,9 @@ func TestQuickSightPlugin_DescribeIngestion_Existing(t *testing.T) {
 	}
 	var result struct {
 		Ingestion struct {
-			IngestionId     string `json:"IngestionId"`
-			IngestionStatus string `json:"IngestionStatus"`
-			RowInfo         struct {
-				RowsIngested int `json:"RowsIngested"`
-			} `json:"RowInfo"`
+			IngestionId     string          `json:"IngestionId"`
+			IngestionStatus string          `json:"IngestionStatus"`
+			RowInfo         json.RawMessage `json:"RowInfo"`
 		} `json:"Ingestion"`
 	}
 	if err := json.Unmarshal(qsBody(t, resp), &result); err != nil {
@@ -214,8 +214,8 @@ func TestQuickSightPlugin_DescribeIngestion_Existing(t *testing.T) {
 	if result.Ingestion.IngestionStatus != "COMPLETED" {
 		t.Errorf("expected COMPLETED, got %q", result.Ingestion.IngestionStatus)
 	}
-	if result.Ingestion.RowInfo.RowsIngested != 1000 {
-		t.Errorf("expected 1000 rows, got %d", result.Ingestion.RowInfo.RowsIngested)
+	if result.Ingestion.RowInfo != nil {
+		t.Errorf("expected no RowInfo for an unseeded ingestion, got %s", result.Ingestion.RowInfo)
 	}
 }
 
