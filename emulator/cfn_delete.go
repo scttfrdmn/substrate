@@ -862,6 +862,14 @@ func (d *StackDeployer) deleteViaTable(
 		return result
 	}
 
+	if seq, ok := cfnSequencedDeleters[dr.Type]; ok {
+		if failure := seq(ctx, d, dr, streamID); failure != nil {
+			return *failure
+		}
+		result.Status = cfnDeleteComplete
+		return result
+	}
+
 	deleter, ok := cfnResourceDeleters[dr.Type]
 	if !ok {
 		// A type the deployer does not recognize at all went through

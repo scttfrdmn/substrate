@@ -1411,7 +1411,7 @@ func (d *StackDeployer) UpdateStack(
 
 	// Overwrite the persisted status.
 	if d.state != nil {
-		data, getErr := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+		data, getErr := d.stackData(ctx, stackName)
 		if getErr == nil && data != nil {
 			var s CFNStackState
 			if unmarshalErr := json.Unmarshal(data, &s); unmarshalErr == nil {
@@ -1478,7 +1478,7 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 // ListStacks already does with one, and a delete that cannot be completed because
 // the record is unreadable would leave a stack nothing can remove.
 func (d *StackDeployer) loadStack(ctx context.Context, stackName string) (*CFNStackState, error) {
-	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	data, err := d.stackData(ctx, stackName)
 	if err != nil {
 		return nil, fmt.Errorf("load stack %s: %w", stackName, err)
 	}
@@ -1512,13 +1512,13 @@ func (d *StackDeployer) ListStacks(ctx context.Context) ([]CFNStackState, error)
 	if d.state == nil {
 		return nil, nil
 	}
-	names, err := d.loadStackNames(ctx)
+	names, err := d.stackNames(ctx)
 	if err != nil {
 		return nil, err
 	}
 	stacks := make([]CFNStackState, 0, len(names))
 	for _, name := range names {
-		data, getErr := d.state.Get(ctx, cfnNamespace, "stack:"+name)
+		data, getErr := d.stackData(ctx, name)
 		if getErr != nil || data == nil {
 			continue
 		}
@@ -1537,22 +1537,22 @@ func (d *StackDeployer) persistStack(ctx context.Context, s CFNStackState) {
 		d.logger.Warn("cfn: failed to marshal stack state", "err", err)
 		return
 	}
-	if err := d.state.Put(ctx, cfnNamespace, "stack:"+s.StackName, data); err != nil {
+	// A stack recorded before #1366 moves to its scoped keys before it is written (cfn_scope.go).
+	if err := d.migrateLegacyStack(ctx, s.StackName); err != nil {
+		d.logger.Warn("cfn: failed to migrate legacy stack state", "stack", s.StackName, "err", err)
+		return
+	}
+	if err := d.state.Put(ctx, cfnNamespace, d.stackKey(s.StackName), data); err != nil {
 		d.logger.Warn("cfn: failed to persist stack state", "err", err)
 		return
 	}
-	names, _ := d.loadStackNames(ctx)
-	for _, n := range names {
-		if n == s.StackName {
-			return
-		}
+	if err := d.addStackName(ctx, s.StackName); err != nil {
+		d.logger.Warn("cfn: failed to index stack", "stack", s.StackName, "err", err)
 	}
-	names = append(names, s.StackName)
-	_ = d.saveStackNames(ctx, names)
 }
 
 func (d *StackDeployer) loadStackNames(ctx context.Context) ([]string, error) {
-	data, err := d.state.Get(ctx, cfnNamespace, "stack_names")
+	data, err := d.state.Get(ctx, cfnNamespace, d.stackNamesKey())
 	if err != nil {
 		return nil, fmt.Errorf("cfn loadStackNames: %w", err)
 	}
@@ -1572,7 +1572,7 @@ func (d *StackDeployer) saveStackNames(ctx context.Context, names []string) erro
 	if err != nil {
 		return fmt.Errorf("cfn saveStackNames marshal: %w", err)
 	}
-	return d.state.Put(ctx, cfnNamespace, "stack_names", data)
+	return d.state.Put(ctx, cfnNamespace, d.stackNamesKey(), data)
 }
 
 // CFNExport is one exported output value as [StackDeployer.Exports] reports it.
@@ -1766,7 +1766,7 @@ func sortedStringKeys(m map[string]string) []string {
 // them", and a refusal that withheld the answer would send them to ListImports for
 // something substrate already knows.
 func (d *StackDeployer) checkExportsNotImported(ctx context.Context, stackName string) error {
-	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
+	data, err := d.stackData(ctx, stackName)
 	if err != nil {
 		return fmt.Errorf("cfn DeleteStack: read stack %q: %w", stackName, err)
 	}
@@ -1830,8 +1830,11 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	}
 
 	// Load existing stack.
-	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
-	if err != nil || data == nil {
+	data, err := d.stackData(ctx, stackName)
+	if err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: %w", err)
+	}
+	if data == nil {
 		return nil, cfnErrf(ErrCFNStackNotFound, "cfn CreateChangeSet: stack %q not found", stackName)
 	}
 	var stack CFNStackState
@@ -1868,15 +1871,22 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	if err != nil {
 		return nil, fmt.Errorf("cfn CreateChangeSet: marshal: %w", err)
 	}
-	csKey := "changeset:" + stackName + "/" + changeSetName
-	if err := d.state.Put(ctx, cfnNamespace, csKey, csData); err != nil {
+	if err := d.migrateLegacyStack(ctx, stackName); err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: %w", err)
+	}
+	if err := d.state.Put(ctx, cfnNamespace, d.changeSetKey(stackName, changeSetName), csData); err != nil {
 		return nil, fmt.Errorf("cfn CreateChangeSet: put: %w", err)
 	}
 
 	// Update index.
-	names, _ := d.loadChangeSetNames(ctx, stackName)
+	names, err := d.loadChangeSetNames(ctx, stackName)
+	if err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: %w", err)
+	}
 	names = append(names, changeSetName)
-	_ = d.saveChangeSetNames(ctx, stackName, names)
+	if err := d.saveChangeSetNames(ctx, stackName, names); err != nil {
+		return nil, fmt.Errorf("cfn CreateChangeSet: %w", err)
+	}
 
 	return cs, nil
 }
@@ -1886,8 +1896,11 @@ func (d *StackDeployer) DescribeChangeSet(ctx context.Context, stackName, change
 	if d.state == nil {
 		return nil, cfnErrf(ErrCFNStateRequired, "cfn DescribeChangeSet: state manager required")
 	}
-	data, err := d.state.Get(ctx, cfnNamespace, "changeset:"+stackName+"/"+changeSetName)
-	if err != nil || data == nil {
+	data, err := d.changeSetData(ctx, stackName, changeSetName)
+	if err != nil {
+		return nil, fmt.Errorf("cfn DescribeChangeSet: %w", err)
+	}
+	if data == nil {
 		return nil, cfnErrf(ErrCFNChangeSetNotFound, "cfn DescribeChangeSet: change set %q not found", changeSetName)
 	}
 	var cs CFNChangeSet
@@ -1931,7 +1944,7 @@ func (d *StackDeployer) ListChangeSets(ctx context.Context, stackName string) ([
 	}
 	sets := make([]CFNChangeSet, 0, len(names))
 	for _, name := range names {
-		data, getErr := d.state.Get(ctx, cfnNamespace, "changeset:"+stackName+"/"+name)
+		data, getErr := d.changeSetData(ctx, stackName, name)
 		if getErr != nil || data == nil {
 			continue
 		}
@@ -1949,10 +1962,16 @@ func (d *StackDeployer) DeleteChangeSet(ctx context.Context, stackName, changeSe
 	if d.state == nil {
 		return nil
 	}
-	if err := d.state.Delete(ctx, cfnNamespace, "changeset:"+stackName+"/"+changeSetName); err != nil {
+	if err := d.migrateLegacyStack(ctx, stackName); err != nil {
 		return fmt.Errorf("cfn DeleteChangeSet: %w", err)
 	}
-	names, _ := d.loadChangeSetNames(ctx, stackName)
+	if err := d.state.Delete(ctx, cfnNamespace, d.changeSetKey(stackName, changeSetName)); err != nil {
+		return fmt.Errorf("cfn DeleteChangeSet: %w", err)
+	}
+	names, err := d.loadChangeSetNames(ctx, stackName)
+	if err != nil {
+		return fmt.Errorf("cfn DeleteChangeSet: %w", err)
+	}
 	newNames := make([]string, 0, len(names))
 	for _, n := range names {
 		if n != changeSetName {
@@ -1969,8 +1988,11 @@ func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) 
 	if d.state == nil {
 		return nil, cfnErrf(ErrCFNStateRequired, "cfn DetectStackDrift: state manager required")
 	}
-	data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName)
-	if err != nil || data == nil {
+	data, err := d.stackData(ctx, stackName)
+	if err != nil {
+		return nil, fmt.Errorf("cfn DetectStackDrift: %w", err)
+	}
+	if data == nil {
 		return nil, cfnErrf(ErrCFNStackNotFound, "cfn DetectStackDrift: stack %q not found", stackName)
 	}
 	var stack CFNStackState
@@ -2054,7 +2076,11 @@ func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName 
 	if d.state == nil {
 		return "", cfnErrf(ErrCFNStateRequired, "cfn StartStackDriftDetection: state manager required")
 	}
-	if data, err := d.state.Get(ctx, cfnNamespace, "stack:"+stackName); err != nil || data == nil {
+	data, err := d.stackData(ctx, stackName)
+	if err != nil {
+		return "", fmt.Errorf("cfn StartStackDriftDetection: %w", err)
+	}
+	if data == nil {
 		return "", cfnErrf(ErrCFNStackNotFound, "cfn StartStackDriftDetection: stack %q not found", stackName)
 	}
 
@@ -2111,8 +2137,11 @@ func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName 
 // DescribeStackDriftDetectionStatus returns the status of a previously started
 // drift-detection operation.
 func (d *StackDeployer) DescribeStackDriftDetectionStatus(ctx context.Context, detectionID string) (*CFNDriftDetectionStatus, error) {
-	data, err := d.state.Get(ctx, cfnNamespace, "drift_detection:"+detectionID)
-	if err != nil || data == nil {
+	data, err := d.driftDetectionData(ctx, detectionID)
+	if err != nil {
+		return nil, fmt.Errorf("cfn DescribeStackDriftDetectionStatus: %w", err)
+	}
+	if data == nil {
 		return nil, cfnErrf(ErrCFNDriftDetectionNotFound, "cfn DescribeStackDriftDetectionStatus: detection %q not found", detectionID)
 	}
 	var status CFNDriftDetectionStatus
@@ -2128,16 +2157,28 @@ func (d *StackDeployer) saveDriftDetection(ctx context.Context, status *CFNDrift
 	if err != nil {
 		return fmt.Errorf("cfn saveDriftDetection: marshal: %w", err)
 	}
-	if err := d.state.Put(ctx, cfnNamespace, "drift_detection:"+status.StackDriftDetectionID, data); err != nil {
+	if err := d.migrateLegacyStack(ctx, status.StackName); err != nil {
+		return fmt.Errorf("cfn saveDriftDetection: %w", err)
+	}
+	if err := d.state.Put(ctx, cfnNamespace, d.driftDetectionKey(status.StackDriftDetectionID), data); err != nil {
 		return fmt.Errorf("cfn saveDriftDetection: put: %w", err)
 	}
 	return nil
 }
 
+// loadChangeSetNames returns a stack's change-set index: the scoped one, or an unmigrated in-scope
+// legacy stack's.
 func (d *StackDeployer) loadChangeSetNames(ctx context.Context, stackName string) ([]string, error) {
-	data, err := d.state.Get(ctx, cfnNamespace, "changeset_names:"+stackName)
-	if err != nil || data == nil {
-		return nil, nil //nolint:nilerr
+	data, err := d.state.Get(ctx, cfnNamespace, d.changeSetNamesKey(stackName))
+	if err != nil {
+		return nil, fmt.Errorf("cfn loadChangeSetNames: %w", err)
+	}
+	if data == nil {
+		_, found, legacyErr := d.legacyStack(ctx, stackName)
+		if legacyErr != nil || !found {
+			return nil, legacyErr
+		}
+		return d.loadNameList(ctx, cfnLegacyChangeSetNamesKey(stackName))
 	}
 	var names []string
 	if err := json.Unmarshal(data, &names); err != nil {
@@ -2151,7 +2192,7 @@ func (d *StackDeployer) saveChangeSetNames(ctx context.Context, stackName string
 	if err != nil {
 		return fmt.Errorf("cfn saveChangeSetNames: %w", err)
 	}
-	return d.state.Put(ctx, cfnNamespace, "changeset_names:"+stackName, data)
+	return d.state.Put(ctx, cfnNamespace, d.changeSetNamesKey(stackName), data)
 }
 
 // diffCFNResources compares old and new template resource maps and returns

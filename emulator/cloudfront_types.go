@@ -46,6 +46,16 @@ type CloudFrontDistribution struct {
 
 	// EverTagged records that this distribution has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
+
+	// Config is the distribution's DistributionConfig document as GetDistributionConfig answers it:
+	// the configuration the create or the last update sent, with what CreateDistribution defaults
+	// filled in (#1271; see cloudfront_distribution_config.go). Empty on a record written before
+	// #1271, which answers a configuration built from Comment and Enabled.
+	Config string `json:"Config,omitempty"`
+
+	// ETag is the version an UpdateDistribution or DeleteDistribution must echo in If-Match. Minted
+	// at create and at every update; see [cfDistributionETag] for a record that predates it.
+	ETag string `json:"ETag,omitempty"`
 }
 
 // CloudFrontInvalidation holds state for a CloudFront invalidation request.

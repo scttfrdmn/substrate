@@ -498,14 +498,16 @@ func TestCFN_ASweepWhoseTemplateNoLongerParsesStillDeletes(t *testing.T) {
 
 	// Rewrite the persisted record with a template body that parses as neither JSON
 	// nor YAML, leaving the deployed resource list intact.
-	data, err := state.Get(ctx, "cfn", "stack:corrupt")
+	// Scoped by account and Region (#1366); this deployer is built with substrate's defaults.
+	const key = "stack:123456789012/us-east-1/corrupt"
+	data, err := state.Get(ctx, "cfn", key)
 	require.NoError(t, err)
 	var stack emulator.CFNStackState
 	require.NoError(t, json.Unmarshal(data, &stack))
 	stack.TemplateBody = "{\"Resources\": [this is not a template"
 	rewritten, err := json.Marshal(stack)
 	require.NoError(t, err)
-	require.NoError(t, state.Put(ctx, "cfn", "stack:corrupt", rewritten))
+	require.NoError(t, state.Put(ctx, "cfn", key, rewritten))
 
 	require.NoError(t, d.DeleteStack(ctx, "corrupt"))
 	assert.Equal(t, http.StatusNotFound, headBucket(t, d, "sweep-data"),

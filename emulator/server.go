@@ -424,6 +424,8 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Lambda control-plane endpoints (#393).
 		cp.Post("/v1/lambda/invoke-error", s.handleLambdaSeedInvokeError)
 		cp.Delete("/v1/lambda/invoke-error", s.handleLambdaClearInvokeError)
+		cp.Post("/v1/lambda/layer-versions", s.handleLambdaSeedLayerVersions)
+		cp.Delete("/v1/lambda/layer-versions", s.handleLambdaClearLayerVersions)
 
 		// SQS control-plane endpoints (#413).
 		cp.Post("/v1/sqs/consistency", s.handleSQSSeedConsistency)
