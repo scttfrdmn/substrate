@@ -58,6 +58,8 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 		return p.getRoutes(ctx, params["apiId"])
 	case "DeleteRoute":
 		return p.deleteRoute(ctx, params["apiId"], params["routeId"])
+	case "UpdateRoute":
+		return p.updateRoute(ctx, req, params["apiId"], params["routeId"])
 	case "CreateIntegration":
 		return p.createIntegration(ctx, req, params["apiId"])
 	case "GetIntegration":
@@ -74,6 +76,8 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 		return p.getStagesV2(ctx, params["apiId"])
 	case "DeleteStage":
 		return p.deleteStageV2(ctx, params["apiId"], params["stageName"])
+	case "UpdateStage":
+		return p.updateStageV2(ctx, req, params["apiId"], params["stageName"])
 	case "CreateAuthorizer":
 		return p.createAuthorizerV2(ctx, req, params["apiId"])
 	case "GetAuthorizer":
@@ -150,6 +154,8 @@ func parseAPIGatewayV2Operation(method, path string) (string, map[string]string)
 			return "GetRoute", params
 		case "DELETE":
 			return "DeleteRoute", params
+		case "PATCH":
+			return "UpdateRoute", params
 		}
 
 	// /apis/{id}/integrations
@@ -192,6 +198,8 @@ func parseAPIGatewayV2Operation(method, path string) (string, map[string]string)
 			return "GetStage", params
 		case "DELETE":
 			return "DeleteStage", params
+		case "PATCH":
+			return "UpdateStage", params
 		}
 
 	// /apis/{id}/authorizers

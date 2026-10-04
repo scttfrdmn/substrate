@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -68,6 +69,23 @@ func newTaggingTestServer(t *testing.T) (*httptest.Server, emulator.StateManager
 		Options: map[string]any{"time_controller": tc, "registry": registry},
 	}))
 	registry.Register(s3Plugin)
+
+	// API Gateway and CloudWatch Logs are registered so a test can create the resource through the
+	// owning service's own route rather than seeding a state key by hand — the seeding is what let
+	// #1307's resolver key and the plugin's key disagree with every test green.
+	apigwPlugin := &emulator.APIGatewayPlugin{}
+	require.NoError(t, apigwPlugin.Initialize(initCtx, emulator.PluginConfig{
+		State: state, Logger: logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(apigwPlugin)
+
+	logsPlugin := &emulator.CloudWatchLogsPlugin{}
+	require.NoError(t, logsPlugin.Initialize(initCtx, emulator.PluginConfig{
+		State: state, Logger: logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(logsPlugin)
 
 	taggingPlugin := &emulator.TaggingPlugin{}
 	require.NoError(t, taggingPlugin.Initialize(initCtx, emulator.PluginConfig{State: state, Logger: logger}))
@@ -724,21 +742,43 @@ func putTestStateMachine(t *testing.T, state emulator.StateManager, name string,
 	require.NoError(t, state.Put(context.Background(), "states", "statemachine:"+taggingTestAccountID+"/us-east-1/"+name, raw))
 }
 
-// putTestRestAPI pre-populates state with an API Gateway REST API.
-// Note: APIGateway ARNs use an empty account-ID field (arn:aws:apigateway:{region}::/restapis/{id}),
-// so the state key also uses an empty account segment to match resolveARN/scanAPIGatewayAPIs.
-func putTestRestAPI(t *testing.T, state emulator.StateManager, apiID string, tags map[string]string) {
+// taggingCreateRestAPI creates a REST API through API Gateway's own `POST /restapis` route and returns
+// its ID, so the record a tagging test addresses is the one the plugin itself wrote.
+//
+// It replaces a helper that wrote the record by hand. That one happened to use the plugin's key, but
+// its sibling in TestTagging_TagResources_APIGateway wrote `api:/us-east-1/{id}` to match the
+// resolver, so the resolver and the plugin disagreed about every REST API a caller created and both
+// tests passed (#1307). A record only the plugin writes cannot be keyed two ways.
+func taggingCreateRestAPI(t *testing.T, ts *httptest.Server, name string, tags map[string]string) string {
 	t.Helper()
-	api := emulator.RestAPIState{
-		ID:        apiID,
-		Name:      "test-api-" + apiID,
-		Tags:      tags,
-		AccountID: taggingTestAccountID,
-		Region:    "us-east-1",
+	body := map[string]any{"name": name}
+	if tags != nil {
+		body["tags"] = tags
 	}
-	raw, _ := json.Marshal(api)
-	// APIGateway state key uses taggingTestAccountID to match reqCtx.AccountID in the scanner.
-	require.NoError(t, state.Put(context.Background(), "apigateway", "api:"+taggingTestAccountID+"/us-east-1/"+apiID, raw))
+	b, err := json.Marshal(body)
+	require.NoError(t, err)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/restapis", bytes.NewReader(b))
+	require.NoError(t, err)
+	req.Host = "apigateway.us-east-1.amazonaws.com"
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusCreated, resp.StatusCode, "CreateRestApi: %s", raw)
+	var out struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &out), "decode CreateRestApi: %s", raw)
+	require.NotEmpty(t, out.ID, "CreateRestApi must report an id: %s", raw)
+	return out.ID
+}
+
+// taggingRestAPIARN is the ARN of a REST API in the test Region. Its account segment is empty, which
+// is the published format rather than an omission.
+func taggingRestAPIARN(apiID string) string {
+	return "arn:aws:apigateway:us-east-1::/restapis/" + apiID
 }
 
 // putTestKinesisStream pre-populates state with a Kinesis data stream.
@@ -899,65 +939,118 @@ func TestTagging_TagResources_StateMachine(t *testing.T) {
 }
 
 func TestTagging_GetResources_APIGateway(t *testing.T) {
-	ts, state := newTaggingTestServer(t)
-	putTestRestAPI(t, state, "abc123", map[string]string{"Env": "prod"})
+	ts, _ := newTaggingTestServer(t)
+	apiID := taggingCreateRestAPI(t, ts, "listed", map[string]string{"Env": "prod"})
 
 	// The filter is asserted rather than worked around: API Gateway's ARN resource portion begins
 	// with a slash ("/restapis/{id}"), which the unanchored prefix match could not see past until
 	// #936 made the type the ARN's own segment.
-	resp := taggingRequest(t, ts, "GetResources", map[string]any{
-		"ResourceTypeFilters": []string{"apigateway:restapis"},
-	})
-	defer resp.Body.Close() //nolint:errcheck
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var out map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
-	list, _ := out["ResourceTagMappingList"].([]any)
-
-	// Find the APIGateway entry.
-	found := false
-	for _, item := range list {
-		rm := item.(map[string]any)
-		arn, _ := rm["ResourceARN"].(string)
-		if strings.Contains(arn, "apigateway") && strings.Contains(arn, "abc123") {
-			found = true
-		}
-	}
-	assert.True(t, found, "expected APIGateway REST API abc123 in resource list")
+	got := taggingGetResourceTags(t, ts, []string{"apigateway:restapis"})
+	tags, found := got[taggingRestAPIARN(apiID)]
+	require.True(t, found, "expected REST API %s in the resource list: %v", apiID, got)
+	assert.Equal(t, map[string]string{"Env": "prod"}, tags)
 }
 
+// TestTagging_TagResources_APIGateway is #1307's gate: the tagging API reaches a REST API a caller
+// created through API Gateway's own route, whose ARN carries no account.
+//
+// Until #1307 the resolver read the ARN's empty account segment into the key and looked up
+// api:/us-east-1/{id}, which no plugin writes, so TagResources answered InvalidParameterException
+// for every real API. This test used to write that key by hand and so passed against it.
 func TestTagging_TagResources_APIGateway(t *testing.T) {
-	// APIGateway ARNs have an empty account-ID field (arn:aws:apigateway:{region}::/restapis/{id}).
-	// resolveARN resolves these using the empty account segment, so the state key must also
-	// use an empty account to match. This test verifies the current behavior.
-	ts, state := newTaggingTestServer(t)
-	// Store with empty account segment to match resolveARN behavior for apigateway ARNs.
-	api := emulator.RestAPIState{
-		ID:        "def456",
-		Name:      "test-api-def456",
-		AccountID: taggingTestAccountID,
-		Region:    "us-east-1",
-	}
-	raw, _ := json.Marshal(api)
-	require.NoError(t, state.Put(context.Background(), "apigateway", "api:/us-east-1/def456", raw))
+	ts, _ := newTaggingTestServer(t)
+	apiID := taggingCreateRestAPI(t, ts, "tagged", nil)
+	arn := taggingRestAPIARN(apiID)
 
-	resp := taggingRequest(t, ts, "TagResources", map[string]any{
-		"ResourceARNList": []string{"arn:aws:apigateway:us-east-1::/restapis/def456"},
+	taggingRequireNoFailures(t, ts, "TagResources", map[string]any{
+		"ResourceARNList": []string{arn},
 		"Tags":            map[string]string{"Tier": "frontend"},
 	})
+	assert.Equal(t, map[string]string{"Tier": "frontend"}, taggingRestAPITags(t, ts, apiID),
+		"GetRestApi must answer the tag TagResources wrote")
+
+	taggingRequireNoFailures(t, ts, "UntagResources", map[string]any{
+		"ResourceARNList": []string{arn},
+		"TagKeys":         []string{"Tier"},
+	})
+	assert.Empty(t, taggingRestAPITags(t, ts, apiID), "UntagResources must remove the tag again")
+
+	// The API now holds no tag and has held one, so GetResources reports it with "Tags": [] — the
+	// everTagged half of #938's rule, which RestAPIState.EverTagged could not reach while the
+	// resolver missed the record.
+	got := taggingGetResourceTags(t, ts, []string{"apigateway:restapis"})
+	tags, found := got[arn]
+	require.True(t, found, "a REST API tagged and untagged through the tagging API is still reported: %v", got)
+	assert.Empty(t, tags)
+}
+
+// taggingRequireNoFailures sends a TagResources or UntagResources request and requires a 200 with no
+// FailedResourcesMap entry.
+func taggingRequireNoFailures(t *testing.T, ts *httptest.Server, op string, body map[string]any) {
+	t.Helper()
+	resp := taggingRequest(t, ts, op, body)
 	defer resp.Body.Close() //nolint:errcheck
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-
-	var out map[string]any
-	require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
-	assert.Empty(t, out["FailedResourcesMap"])
-
-	updated, err := state.Get(context.Background(), "apigateway", "api:/us-east-1/def456")
+	raw, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	var updatedAPI emulator.RestAPIState
-	require.NoError(t, json.Unmarshal(updated, &updatedAPI))
-	assert.Equal(t, "frontend", updatedAPI.Tags["Tier"])
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s: %s", op, raw)
+	var out struct {
+		FailedResourcesMap map[string]any `json:"FailedResourcesMap"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &out), "decode %s: %s", op, raw)
+	require.Empty(t, out.FailedResourcesMap, "%s: %s", op, raw)
+}
+
+// taggingGetResourceTags runs GetResources with the given type filters and returns each reported
+// ARN's tags.
+func taggingGetResourceTags(t *testing.T, ts *httptest.Server, filters []string) map[string]map[string]string {
+	t.Helper()
+	body := map[string]any{}
+	if filters != nil {
+		body["ResourceTypeFilters"] = filters
+	}
+	resp := taggingRequest(t, ts, "GetResources", body)
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetResources: %s", raw)
+	var out struct {
+		ResourceTagMappingList []struct {
+			ResourceARN string `json:"ResourceARN"`
+			Tags        []struct {
+				Key   string `json:"Key"`
+				Value string `json:"Value"`
+			} `json:"Tags"`
+		} `json:"ResourceTagMappingList"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &out), "decode GetResources: %s", raw)
+	got := make(map[string]map[string]string, len(out.ResourceTagMappingList))
+	for _, rm := range out.ResourceTagMappingList {
+		tags := map[string]string{}
+		for _, tag := range rm.Tags {
+			tags[tag.Key] = tag.Value
+		}
+		got[rm.ResourceARN] = tags
+	}
+	return got
+}
+
+// taggingRestAPITags reads a REST API's tags back through API Gateway's own GetRestApi.
+func taggingRestAPITags(t *testing.T, ts *httptest.Server, apiID string) map[string]string {
+	t.Helper()
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, ts.URL+"/restapis/"+apiID, nil)
+	require.NoError(t, err)
+	req.Host = "apigateway.us-east-1.amazonaws.com"
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode, "GetRestApi: %s", raw)
+	var out struct {
+		Tags map[string]string `json:"tags"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &out), "decode GetRestApi: %s", raw)
+	return out.Tags
 }
 
 func TestTagging_GetResources_KinesisStream(t *testing.T) {

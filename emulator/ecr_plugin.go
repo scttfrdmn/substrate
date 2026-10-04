@@ -2,7 +2,9 @@ package emulator
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -398,9 +400,36 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, ecrRepositoryNotFound(body.RepositoryName)
 	}
 
-	digest := body.ImageDigest
-	if digest == "" {
-		digest = generateECRDigest(ctx.IDs)
+	// API_PutImage marks imageManifest Required with a minimum length of 1, so a push with no
+	// manifest is refused rather than given a digest. That is also the rule that keeps manifest-less
+	// pushes from colliding: there is no empty manifest to hash (#1283).
+	if body.ImageManifest == "" {
+		return nil, &AWSError{Code: "InvalidParameterException", Message: "imageManifest is required", HTTPStatus: http.StatusBadRequest}
+	}
+	digest := ecrManifestDigest(body.ImageManifest)
+	if body.ImageDigest != "" && body.ImageDigest != digest {
+		return nil, ecrImageDigestDoesNotMatch(body.ImageDigest, digest)
+	}
+
+	imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
+	existing, err := p.state.Get(goCtx, ecrNamespace, imgKey)
+	if err != nil {
+		return nil, fmt.Errorf("ecr putImage state.Get image: %w", err)
+	}
+	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
+	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
+
+	// The same manifest is the same image. ImageAlreadyExistsException is published for "the
+	// specified image has already been pushed, and there were no changes to the manifest or image
+	// tag after the last push": a repeat with no tag, or with a tag that already names this image.
+	// A repeat under a new tag is a change, and adds the tag to the one image.
+	if existing != nil {
+		if body.ImageTag == "" || tagsMap[body.ImageTag] == digest {
+			return nil, ecrImageAlreadyExists(body.RepositoryName, digest, body.ImageTag)
+		}
+		tagsMap[body.ImageTag] = digest
+		p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
+		return ecrPutImageResponse(body.RepositoryName, digest, body.ImageTag, body.ImageManifest)
 	}
 
 	img := ECRImage{
@@ -417,19 +446,22 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, fmt.Errorf("ecr putImage marshal: %w", err)
 	}
 
-	imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
 	if err := p.state.Put(goCtx, ecrNamespace, imgKey, imgData); err != nil {
 		return nil, fmt.Errorf("ecr putImage state.Put: %w", err)
 	}
 
-	// Update tag→digest index if a tag was provided.
+	// Update tag→digest index if a tag was provided. A tag that named another image moves to this
+	// one, which is what a push to a mutable repository does.
 	if body.ImageTag != "" {
-		tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
-		tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
 		tagsMap[body.ImageTag] = digest
 		p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
 	}
 
+	return ecrPutImageResponse(body.RepositoryName, digest, body.ImageTag, body.ImageManifest)
+}
+
+// ecrPutImageResponse renders PutImage's published Image element for one push.
+func ecrPutImageResponse(repo, digest, tag, manifest string) (*AWSResponse, error) {
 	type imageID struct {
 		ImageDigest string `json:"imageDigest"`
 		ImageTag    string `json:"imageTag,omitempty"`
@@ -443,9 +475,9 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		Image imageResult `json:"image"`
 	}
 	return ecrJSONResponse(http.StatusOK, response{Image: imageResult{
-		RepositoryName: body.RepositoryName,
-		ImageID:        imageID{ImageDigest: digest, ImageTag: body.ImageTag},
-		ImageManifest:  body.ImageManifest,
+		RepositoryName: repo,
+		ImageID:        imageID{ImageDigest: digest, ImageTag: tag},
+		ImageManifest:  manifest,
 	}})
 }
 
@@ -523,9 +555,15 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		if err := json.Unmarshal(data, &img); err != nil {
 			return nil, fmt.Errorf("ecr batchGetImage unmarshal: %w", err)
 		}
+		// An image carries every tag that names it, so the imageId answered is the one asked for:
+		// the requested tag, or for a request by digest the tag the image was first pushed under.
+		tag := id.ImageTag
+		if tag == "" {
+			tag = img.ImageTag
+		}
 		images = append(images, imageResult{
 			RepositoryName: body.RepositoryName,
-			ImageID:        imageID{ImageDigest: img.ImageDigest, ImageTag: img.ImageTag},
+			ImageID:        imageID{ImageDigest: img.ImageDigest, ImageTag: tag},
 			ImageManifest:  img.ImageManifest,
 		})
 	}
@@ -737,20 +775,56 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 			}
 		}
 		imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
-		if err := p.state.Delete(goCtx, ecrNamespace, imgKey); err != nil {
-			return nil, fmt.Errorf("ecr batchDeleteImage state.Delete: %w", err)
+		data, err := p.state.Get(goCtx, ecrNamespace, imgKey)
+		if err != nil {
+			return nil, fmt.Errorf("ecr batchDeleteImage state.Get: %w", err)
 		}
-		// Remove from tags map.
+		if data == nil {
+			failures = append(failures, failure{
+				ImageID:       imageID{ImageDigest: digest, ImageTag: tag},
+				FailureCode:   "ImageNotFoundException",
+				FailureReason: "Image not found",
+			})
+			continue
+		}
+
+		// API_BatchDeleteImage: "You can remove a tag from an image by specifying the image's tag in
+		// your request. When you remove the last tag from an image, the image is deleted from your
+		// repository. You can completely delete an image (and all of its tags) by specifying the
+		// image's digest." An image can carry several tags now that one manifest is one image
+		// (#1283), so a delete by tag removes only that tag; and the published sample for a delete by
+		// digest answers one imageId per tag the image carried.
+		var removed []string
 		if tag != "" {
 			delete(tagsMap, tag)
+			removed = []string{tag}
 		} else {
 			for t, d := range tagsMap {
 				if d == digest {
 					delete(tagsMap, t)
+					removed = append(removed, t)
 				}
 			}
+			sort.Strings(removed)
 		}
-		deleted = append(deleted, imageID{ImageDigest: digest, ImageTag: tag})
+		stillTagged := false
+		for _, d := range tagsMap {
+			if d == digest {
+				stillTagged = true
+				break
+			}
+		}
+		if !stillTagged {
+			if err := p.state.Delete(goCtx, ecrNamespace, imgKey); err != nil {
+				return nil, fmt.Errorf("ecr batchDeleteImage state.Delete: %w", err)
+			}
+		}
+		if len(removed) == 0 {
+			deleted = append(deleted, imageID{ImageDigest: digest})
+		}
+		for _, t := range removed {
+			deleted = append(deleted, imageID{ImageDigest: digest, ImageTag: t})
+		}
 	}
 	p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
 
@@ -1212,16 +1286,15 @@ func (p *ECRPlugin) saveImageTagsMap(goCtx context.Context, tagsKey string, m ma
 	_ = p.state.Put(goCtx, ecrNamespace, tagsKey, b)
 }
 
-// generateECRDigest mints a sha256-shaped image digest from m, for a PutImage that supplied no
-// `imageDigest` of its own.
+// ecrManifestDigest is an image's digest: "sha256:" and the hex SHA-256 of its manifest bytes,
+// exactly as pushed (#1283).
 //
-// A real digest is the SHA-256 of the image manifest, so ECR computes the same one for two pushes
-// of identical manifest bytes and treats the second as the same image. Substrate mints an
-// unrelated value instead, which is why every image it stores is distinct even when the manifests
-// are byte-identical; #1283 tracks deriving it from the manifest, which is a change to what the
-// digest *means* rather than to where its bytes come from and so is not #856's to make.
-func generateECRDigest(m *IDMint) string {
-	return "sha256:" + m.Hex(32)
+// A digest names content, which is why two pushes of byte-identical manifests address one image and
+// why a caller can verify a push by hashing the manifest it sent. Substrate used to mint an
+// unrelated value from the request's ID mint, which replayed as itself but named nothing.
+func ecrManifestDigest(manifest string) string {
+	sum := sha256.Sum256([]byte(manifest))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 // ecrJSONResponse marshals v as JSON and returns an AWSResponse with

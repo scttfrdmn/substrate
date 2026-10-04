@@ -106,6 +106,19 @@ type V2StageState struct {
 	// CreatedDate is the time the stage was created.
 	CreatedDate time.Time `json:"CreatedDate"`
 
+	// AutoDeploy reports whether updates to the API trigger a deployment. Recorded intent only:
+	// substrate deploys nothing on its own.
+	AutoDeploy bool `json:"AutoDeploy,omitempty"`
+
+	// AccessLogSettings is the stage's access-log destination and format, recorded as sent.
+	AccessLogSettings *V2AccessLogSettings `json:"AccessLogSettings,omitempty"`
+
+	// DefaultRouteSettings is the stage's default route settings, recorded as sent.
+	DefaultRouteSettings *V2RouteSettings `json:"DefaultRouteSettings,omitempty"`
+
+	// LastUpdatedDate is the time UpdateStage last changed the stage, nil until it has.
+	LastUpdatedDate *time.Time `json:"LastUpdatedDate,omitempty"`
+
 	// APIID is the API that owns this stage.
 	APIID string `json:"ApiId"`
 
@@ -114,6 +127,35 @@ type V2StageState struct {
 
 	// Region is the AWS region where this stage lives.
 	Region string `json:"Region"`
+}
+
+// V2AccessLogSettings is a stage's AccessLogSettings: the two members the published shape declares.
+type V2AccessLogSettings struct {
+	// DestinationArn is the ARN of the log group that receives access logs.
+	DestinationArn string `json:"destinationArn,omitempty"`
+
+	// Format is the single-line access-log format.
+	Format string `json:"format,omitempty"`
+}
+
+// V2RouteSettings is a stage's DefaultRouteSettings: the five members the published RouteSettings
+// shape declares. The flags and limits are pointers, so a member never set is absent rather than
+// rendered as false or zero.
+type V2RouteSettings struct {
+	// DataTraceEnabled reports whether data trace logging is enabled.
+	DataTraceEnabled *bool `json:"dataTraceEnabled,omitempty"`
+
+	// DetailedMetricsEnabled reports whether detailed metrics are enabled.
+	DetailedMetricsEnabled *bool `json:"detailedMetricsEnabled,omitempty"`
+
+	// LoggingLevel is the logging level: ERROR, INFO or OFF.
+	LoggingLevel string `json:"loggingLevel,omitempty"`
+
+	// ThrottlingBurstLimit is the throttling burst limit.
+	ThrottlingBurstLimit *int32 `json:"throttlingBurstLimit,omitempty"`
+
+	// ThrottlingRateLimit is the throttling rate limit.
+	ThrottlingRateLimit *float64 `json:"throttlingRateLimit,omitempty"`
 }
 
 // V2AuthorizerState holds the state of an API Gateway v2 authorizer.

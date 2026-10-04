@@ -1199,9 +1199,15 @@ func ResourceTypeMatchesForTest(arn string, filters []string) bool {
 // enough to call the resolver (#863). Passing nil is safe for every other arm and for an ELB ARN
 // refused before the lookup, which is what the guard table exercises; a row that needs the lookup
 // passes a real state manager.
+//
+// The caller's account is fixed at [TaggingResolveTestAccount]. Only an arm whose ARN format carries
+// no account reads it (API Gateway, #1307), so a row exercising any other arm cannot depend on it.
 func TaggingResolveARNForTest(state StateManager, arn string) (ns, key string, err error) {
-	return (&TaggingPlugin{state: state}).resolveARN(arn)
+	return (&TaggingPlugin{state: state}).resolveARN(arn, TaggingResolveTestAccount)
 }
+
+// TaggingResolveTestAccount is the caller's account [TaggingResolveARNForTest] resolves with.
+const TaggingResolveTestAccount = "123456789012"
 
 // MergeResourceTagsForTest wraps mergeResourceTags with the quota mode chosen by the caller, the
 // tagging API's and the CloudFormation deployer's shared tag writer.

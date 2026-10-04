@@ -104,6 +104,36 @@ func ecrImageNotFound(repositoryName string) *AWSError {
 	}
 }
 
+// ecrImageAlreadyExists reports a push that changes nothing.
+//
+// API_PutImage publishes ImageAlreadyExistsException at 400: "The specified image has already been
+// pushed, and there were no changes to the manifest or image tag after the last push." It was
+// unreachable while digests were minted, because no two pushes ever named one image (#1283).
+func ecrImageAlreadyExists(repositoryName, digest, tag string) *AWSError {
+	msg := "Image with digest '" + digest + "'"
+	if tag != "" {
+		msg += " and tag '" + tag + "'"
+	}
+	return &AWSError{
+		Code:       "ImageAlreadyExistsException",
+		Message:    msg + " already exists in the repository with name '" + repositoryName + "'",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecrImageDigestDoesNotMatch reports a supplied imageDigest that is not the manifest's.
+//
+// API_PutImage publishes ImageDigestDoesNotMatchException at 400: "The specified image digest does
+// not match the digest that Amazon ECR calculated for the image." Substrate stored whatever digest
+// the caller supplied, so a push could name a manifest by another manifest's digest (#1283).
+func ecrImageDigestDoesNotMatch(supplied, calculated string) *AWSError {
+	return &AWSError{
+		Code:       "ImageDigestDoesNotMatchException",
+		Message:    "The specified image digest '" + supplied + "' does not match the digest '" + calculated + "' calculated for the image",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // requireRepository reports the published refusal when name addresses no repository in the
 // caller's registry, and nil when it does.
 //
