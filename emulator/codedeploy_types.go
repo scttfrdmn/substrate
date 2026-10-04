@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -33,6 +34,23 @@ type CodeDeployGroup struct {
 	ApplicationName string `json:"applicationName"`
 	// ServiceRoleArn is the IAM role ARN used for deployments.
 	ServiceRoleArn string `json:"serviceRoleArn,omitempty"`
+	// ComputePlatform is the owning application's platform, which DeploymentGroupInfo reports.
+	ComputePlatform string `json:"computePlatform,omitempty"`
+	// DeploymentConfigName is the group's deployment configuration, the published default when the
+	// create named none.
+	DeploymentConfigName string `json:"deploymentConfigName,omitempty"`
+	// AutoScalingGroups are the Auto Scaling group names the create named.
+	AutoScalingGroups []string `json:"autoScalingGroups,omitempty"`
+	// Config holds the published members CreateDeploymentGroup takes and DeploymentGroupInfo answers
+	// back unchanged, keyed by their published names. They are recorded intent: substrate targets no
+	// instance and installs no hook, so it stores what was sent rather than modeling each one.
+	Config map[string]json.RawMessage `json:"config,omitempty"`
+	// LastAttemptedDeployment is the most recent deployment created in the group.
+	LastAttemptedDeployment *CodeDeployDeploymentRef `json:"lastAttemptedDeployment,omitempty"`
+	// LastSuccessfulDeployment is the most recent deployment in the group that succeeded.
+	LastSuccessfulDeployment *CodeDeployDeploymentRef `json:"lastSuccessfulDeployment,omitempty"`
+	// TargetRevision is the revision of the group's last successful deployment.
+	TargetRevision json.RawMessage `json:"targetRevision,omitempty"`
 	// AccountID is the AWS account that owns this deployment group.
 	AccountID string `json:"accountID"`
 	// Region is the AWS region where the deployment group exists.
@@ -53,6 +71,20 @@ type CodeDeployDeployment struct {
 	CreateTime time.Time `json:"createTime"`
 	// CompleteTime is when the deployment completed.
 	CompleteTime time.Time `json:"completeTime"`
+	// StartTime is when the deployment was deployed to the group. Zero on a record written before
+	// it was modeled.
+	StartTime time.Time `json:"startTime,omitzero"`
+	// Creator is how the deployment was created; every deployment substrate creates is a caller's.
+	Creator string `json:"creator,omitempty"`
+	// ComputePlatform is the application's platform.
+	ComputePlatform string `json:"computePlatform,omitempty"`
+	// DeploymentConfigName is the configuration the deployment ran under: the request's, else the
+	// group's, else the published default.
+	DeploymentConfigName string `json:"deploymentConfigName,omitempty"`
+	// Config holds the published members CreateDeployment takes and DeploymentInfo answers back
+	// unchanged, keyed by their published names, plus the group's deploymentStyle and
+	// loadBalancerInfo, which DeploymentInfo also reports.
+	Config map[string]json.RawMessage `json:"config,omitempty"`
 	// AccountID is the AWS account that owns this deployment.
 	AccountID string `json:"accountID"`
 	// Region is the AWS region where the deployment ran.
@@ -83,4 +115,17 @@ const codedeployDeploymentIDChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 // mapping byte for byte.
 func generateCodeDeployDeploymentID(m *IDMint) string {
 	return "d-" + m.Chars(9, codedeployDeploymentIDChars)
+}
+
+// CodeDeployDeploymentRef is a deployment as DeploymentGroupInfo's lastAttemptedDeployment and
+// lastSuccessfulDeployment report it (API_LastDeploymentInfo).
+type CodeDeployDeploymentRef struct {
+	// DeploymentID is the deployment's ID.
+	DeploymentID string `json:"deploymentId"`
+	// Status is the deployment's status.
+	Status string `json:"status"`
+	// CreateTime is when the deployment was created.
+	CreateTime time.Time `json:"createTime"`
+	// EndTime is when the deployment ended.
+	EndTime time.Time `json:"endTime"`
 }

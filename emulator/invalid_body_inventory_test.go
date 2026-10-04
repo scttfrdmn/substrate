@@ -304,8 +304,8 @@ var invalidBodyServices = []invalidBodyService{
 	{
 		name:       "msk",
 		host:       "kafka.us-east-1.amazonaws.com",
-		code:       "BadRequest",
-		provenance: "nothing published; substrate's reading, recorded in msk_errors.go",
+		code:       "BadRequestException",
+		provenance: "no code string published; the 400 status's model shape name, substrate's reading recorded in msk_errors.go (#1211)",
 		cases: []invalidBodyCase{
 			{op: "CreateCluster", path: "/v1/clusters"},
 			{op: "CreateClusterV2", path: "/api/v2/clusters"},
@@ -1271,9 +1271,9 @@ var memberComplaintServices = []memberService{
 	{
 		name: "msk",
 		host: "kafka.us-east-1.amazonaws.com",
-		code: "BadRequest",
+		code: "BadRequestException",
 		cases: []memberCase{
-			{name: "createClusterV2", path: "/api/v2/clusters", body: "{}", wantMessage: "ClusterName is required"},
+			{name: "createClusterV2", path: "/api/v2/clusters", body: "{}", wantMessage: "clusterName is required"},
 			// Every empty-ARN guard is reachable since #1009 dropped parseKafkaOperation's
 			// trailing-slash trim; before it, only the two with a literal segment after the ARN were.
 			{name: "describeCluster", path: "/v1/clusters/", method: http.MethodGet, body: "{}", wantMessage: "cluster ARN is required"},
@@ -1443,6 +1443,54 @@ var memberComplaintServices = []memberService{
 			{name: "listUserPoolClients", target: "AWSCognitoIdentityProviderService.ListUserPoolClients", body: "{}", wantMessage: "UserPoolId is required"},
 		},
 	},
+	// CodeDeploy's required members (#1197, #1198), one row per member rather than one per service.
+	// CodeDeploy is the service in this table that publishes a distinct refusal for each required
+	// member — ApplicationNameRequiredException, DeploymentGroupNameRequiredException,
+	// RoleRequiredException, DeploymentIdRequiredException — and every page that takes the member lists
+	// its code. So the one decision this table forces is made per member, the way dynamodb-streams makes
+	// it per API: one code for one class of caller error, the class being "this member is absent".
+	// Before #1198 all four answered InvalidInputException, which is on only two of these pages and not
+	// on CodeDeploy's Common Errors list.
+	{
+		name: "codedeploy-applicationName",
+		host: "codedeploy.us-east-1.amazonaws.com",
+		code: "ApplicationNameRequiredException",
+		cases: []memberCase{
+			{name: "createApplication", target: "CodeDeploy_20141006.CreateApplication", body: "{}", wantMessage: "required application names"},
+			{name: "getApplication", target: "CodeDeploy_20141006.GetApplication", body: "{}", wantMessage: "required application names"},
+			{name: "deleteApplication", target: "CodeDeploy_20141006.DeleteApplication", body: "{}", wantMessage: "required application names"},
+			{name: "createDeploymentGroup", target: "CodeDeploy_20141006.CreateDeploymentGroup", body: "{}", wantMessage: "required application names"},
+			{name: "getDeploymentGroup", target: "CodeDeploy_20141006.GetDeploymentGroup", body: "{}", wantMessage: "required application names"},
+			{name: "deleteDeploymentGroup", target: "CodeDeploy_20141006.DeleteDeploymentGroup", body: "{}", wantMessage: "required application names"},
+			{name: "createDeployment", target: "CodeDeploy_20141006.CreateDeployment", body: "{}", wantMessage: "required application names"},
+		},
+	},
+	{
+		name: "codedeploy-deploymentGroupName",
+		host: "codedeploy.us-east-1.amazonaws.com",
+		code: "DeploymentGroupNameRequiredException",
+		cases: []memberCase{
+			{name: "createDeploymentGroup", target: "CodeDeploy_20141006.CreateDeploymentGroup", body: `{"applicationName":"a"}`, wantMessage: "deployment group name was not specified"},
+			{name: "getDeploymentGroup", target: "CodeDeploy_20141006.GetDeploymentGroup", body: `{"applicationName":"a"}`, wantMessage: "deployment group name was not specified"},
+			{name: "deleteDeploymentGroup", target: "CodeDeploy_20141006.DeleteDeploymentGroup", body: `{"applicationName":"a"}`, wantMessage: "deployment group name was not specified"},
+		},
+	},
+	{
+		name: "codedeploy-serviceRoleArn",
+		host: "codedeploy.us-east-1.amazonaws.com",
+		code: "RoleRequiredException",
+		cases: []memberCase{
+			{name: "createDeploymentGroup", target: "CodeDeploy_20141006.CreateDeploymentGroup", body: `{"applicationName":"a","deploymentGroupName":"g"}`, wantMessage: "role ID was not specified"},
+		},
+	},
+	{
+		name: "codedeploy-deploymentId",
+		host: "codedeploy.us-east-1.amazonaws.com",
+		code: "DeploymentIdRequiredException",
+		cases: []memberCase{
+			{name: "getDeployment", target: "CodeDeploy_20141006.GetDeployment", body: "{}", wantMessage: "deployment ID must be specified"},
+		},
+	},
 	{
 		// #1062's DynamoDB Streams site, and the one row in this table whose service answers a code
 		// no operation page publishes. API_streams_GetRecords publishes no validation error of any
@@ -1458,6 +1506,29 @@ var memberComplaintServices = []memberService{
 		code: "ValidationError",
 		cases: []memberCase{
 			{name: "getRecords", target: "DynamoDB_20120810.GetRecords", body: "{}", wantMessage: "ShardIterator is a required parameter"},
+		},
+	},
+	// #1197: Timestream's required members. Two entries because Write and Query are two endpoints,
+	// as in the parse-guard table; both answer the ValidationException/400 every Timestream page
+	// publishes for a malformed request.
+	{
+		name: "timestream-write",
+		host: "ingest-cell1.timestream.us-east-1.amazonaws.com",
+		code: "ValidationException",
+		cases: []memberCase{
+			{name: "writeRecords", target: "Timestream_20181101.WriteRecords",
+				body: `{"DatabaseName":"dbx","TableName":"tbx"}`, wantMessage: "Records must contain 1 to 100 records"},
+			{name: "listDatabases", target: "Timestream_20181101.ListDatabases",
+				body: `{"MaxResults":21}`, wantMessage: "MaxResults must be between 1 and 20"},
+		},
+	},
+	{
+		name: "timestream-query",
+		host: "query-cell1.timestream.us-east-1.amazonaws.com",
+		code: "ValidationException",
+		cases: []memberCase{
+			{name: "query", target: "Timestream_20181101.Query", body: "{}", wantMessage: "QueryString is required"},
+			{name: "cancelQuery", target: "Timestream_20181101.CancelQuery", body: "{}", wantMessage: "QueryId is required"},
 		},
 	},
 }

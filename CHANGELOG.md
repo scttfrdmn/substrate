@@ -25,6 +25,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CodeDeploy's ListApplications pages by nextToken** (#1195). The handler took `_ *AWSRequest`,
+  so `nextToken` was never read and never emitted, and `InvalidNextTokenException`, the operation's
+  only published error, had no site. A page is now 100 names in creation order (the page states no
+  size, so 100 is substrate's reading). The last page omits `nextToken` rather than answering it
+  empty, and a token substrate did not issue is refused `InvalidNextTokenException`/400.
+- **CodeDeploy refuses a missing or malformed required member with that member's published code**
+  (#1197). `CreateDeploymentGroup` stored an absent `serviceRoleArn`, `computePlatform` accepted any
+  value, and neither name's published length or pattern was checked.
+  - An absent role is now `RoleRequiredException`, and a non-role ARN `InvalidRoleException`.
+  - An unpublished platform is `InvalidComputePlatformException`.
+  - A name outside 1–100 characters or `[A-Za-z0-9+=,.@_-]*` is
+    `InvalidApplicationNameException` / `InvalidDeploymentGroupNameException`.
+  - The published tag-form combinations and the Valid Values of `outdatedInstancesStrategy`,
+    `fileExistsBehavior` and `deploymentMode` are enforced too.
+- **CodeDeploy answers the codes its pages publish** (#1198). Every missing-name site answered
+  `InvalidInputException`, which is not on CodeDeploy's Common Errors list. Each now answers
+  `ApplicationNameRequiredException` or `DeploymentGroupNameRequiredException`, and `GetDeployment`
+  with no ID answers `DeploymentIdRequiredException`. `DeleteApplication` and
+  `DeleteDeploymentGroup` publish no not-found code, so deleting something absent now succeeds.
+  `GetDeploymentGroup` checks the application first, as its page publishes
+  `ApplicationDoesNotExistException`.
+- **CodeDeploy's three records answer their published members** (#1199). `application` gains
+  `linkedToGitHub` (always `false`). `deploymentGroupInfo` went from 4 of 23 members to all 23 once
+  each has a value, and `deploymentInfo` from 6 of 31 to 21. The ten still absent are named with
+  reasons; `deploymentOverview`, for example, counts targets substrate does not run on.
+- **Timestream pages its lists and its query results** (#1195). `ListDatabases` and `ListTables` read
+  `MaxResults` (1–20) and `NextToken`, refuse an out-of-range page size or an unissued token with
+  `ValidationException`, and omit `NextToken` on the last page. `ListTables`' `DatabaseName` narrows
+  the listing, and with none it lists every database's tables, where it listed none.
+  - `Query` reads `MaxRows` (1–1000) and `NextToken`. A first call whose result has at least `MaxRows`
+    rows answers only a `NextToken`, as `API_query_Query` states. Each page comes from a snapshot of
+    the result under one `QueryId`.
+- **Timestream checks the members its pages require** (#1197). An absent `QueryString` on `Query` or
+  `QueryId` on `CancelQuery`, and a `WriteRecords` batch outside 1–100 records, are
+  `ValidationException`/400.
+- **Timestream answers 400 for a conflict and a missing resource** (#1198). `ConflictException` was 409
+  and `ResourceNotFoundException` 404. Every published Timestream error but `InternalServerException`
+  is 400.
+- **Timestream's `CancelQuery` reads its `QueryId` and says what happened** (#1206). It read nothing
+  and answered `{}`. Every `Query` is now recorded.
+  - `CancelQuery` answers `CancellationMessage`: "Query cancelled successfully" for a paginated query
+    with pages unread, and "Cancellation message is posted" for one already cancelled or completed.
+    The page prints neither string, so both are substrate's reading.
+  - A cancelled query's next page is `ConflictException`/400. An unknown or malformed ID is
+    `ValidationException`, since the page publishes no not-found code.
+  - The two deletes keep `{}`, recorded as a decision.
+- **MSK's v2 surface is verified against its pages, and every MSK refusal names its parameter** (#1211).
+  The v2 pages exist (`v2-clusters.html`, `v2-clusters-clusterarn.html`), though the docs said none did.
+  - `CreateClusterV2` now models a serverless cluster, which it used to store as provisioned with no
+    brokers, and answers the published `clusterType`. Its provisioned members are optional, as the
+    page marks them, and nothing is defaulted.
+  - Every refusal carries `invalidParameter`, the one machine-readable field MSK's `Error` model has,
+    rendered through a new optional `AWSError.Members`. The code is the model's shape name
+    (`BadRequestException`, not `BadRequest`). MSK publishes no code string, so this is substrate's
+    reading.
+  - Four v2 members that are accepted and dropped are #1386.
+- **MSK's CreateCluster refuses what its page requires** (#1197). `kafkaVersion` defaulted to `3.5.1`,
+  `numberOfBrokerNodes` to `2`, and an absent `brokerNodeGroupInfo` was accepted. All four required
+  members are now checked, along with their published lengths and ranges, and each refusal names the
+  member.
+- **MSK's three lists page and filter** (#1195). `ListClusters`, `ListClustersV2` and `ListNodes` read
+  `maxResults` (1–100, substrate's reading of "default maximum 100") and `nextToken`, refuse an
+  unissued token, and omit `nextToken` on the last page. `clusterNameFilter` narrows by prefix, and
+  `clusterTypeFilter` by type.
+- **MSK reports twelve of `ClusterInfo`'s twenty-one members, and the broker strings its configuration
+  implies** (#1199, #1198). The configuration a create sent is echoed, and the absent members are
+  named. `GetBootstrapBrokers` answers in the page's host form on the published ports. The default
+  encryption is TLS, so a default cluster answers `bootstrapBrokerStringTls`, not
+  `bootstrapBrokerString`. `ListNodes` reports each broker's endpoint.
+
 - **`docs/services.md` names each service once again, and a gate keeps it that way.** #1384 shipped
   41 duplicated service sections: an edit to the Timestream section for #1209 reinserted a
   6,680-line copy of every section from Step Functions onward, so the file held two Timestream

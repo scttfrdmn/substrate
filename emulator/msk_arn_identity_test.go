@@ -39,7 +39,7 @@ func TestMSK_AnARNForADeletedClusterDoesNotResolveToItsReplacement(t *testing.T)
 	ctx, _ := wireSetup(t, p, "req-msk-identity")
 	create := func() string {
 		return mintedIDMember(t, wireREST(t, p, ctx, "kafka", http.MethodPost, "/v1/clusters",
-			map[string]any{"ClusterName": "reused"}), "clusterArn")
+			mskMinimalCluster("reused")), "clusterArn")
 	}
 
 	first := create()
@@ -80,7 +80,7 @@ func TestMSK_AStoreFaultResolvingAnARNIsAnError(t *testing.T) {
 	}))
 	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-msk-fault", IDs: emulator.NewIDMint("req-msk-fault")}
 	arn := mintedIDMember(t, wireREST(t, p, ctx, "kafka", http.MethodPost, "/v1/clusters",
-		map[string]any{"ClusterName": "faulty"}), "clusterArn")
+		mskMinimalCluster("faulty")), "clusterArn")
 
 	fault.failGet = "cluster:"
 	_, err := p.HandleRequest(ctx, &emulator.AWSRequest{

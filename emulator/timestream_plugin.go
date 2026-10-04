@@ -3,8 +3,10 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -102,9 +104,12 @@ func (p *TimestreamPlugin) createDatabase(reqCtx *RequestContext, req *AWSReques
 	acct, region := reqCtx.AccountID, reqCtx.Region
 	goCtx := context.Background()
 
-	existing, _ := p.state.Get(goCtx, timestreamNamespace, timestreamDBKey(acct, region, input.DatabaseName))
+	existing, err := p.state.Get(goCtx, timestreamNamespace, timestreamDBKey(acct, region, input.DatabaseName))
+	if err != nil {
+		return nil, fmt.Errorf("timestream createDatabase read: %w", err)
+	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ConflictException", Message: "Database already exists: " + input.DatabaseName, HTTPStatus: http.StatusConflict}
+		return nil, &AWSError{Code: "ConflictException", Message: "Database already exists: " + input.DatabaseName, HTTPStatus: http.StatusBadRequest}
 	}
 
 	now := p.tc.Now().UTC()
@@ -159,22 +164,47 @@ func (p *TimestreamPlugin) deleteDatabase(reqCtx *RequestContext, req *AWSReques
 	return timestreamJSONResponse(http.StatusOK, map[string]any{})
 }
 
+// listDatabases answers the account's databases in name order, paged by MaxResults and NextToken;
+// see emulator/timestream_pagination.go.
 func (p *TimestreamPlugin) listDatabases(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	acct, region := reqCtx.AccountID, reqCtx.Region
-	names, _ := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region))
-	dbs := make([]timestreamDatabaseOut, 0, len(names))
-	for _, name := range names {
-		raw, err := p.state.Get(goCtx, timestreamNamespace, timestreamDBKey(acct, region, name))
-		if err != nil || raw == nil {
-			continue
-		}
-		var db TimestreamDatabase
-		if err2 := json.Unmarshal(raw, &db); err2 == nil {
-			dbs = append(dbs, timestreamDatabaseToWire(db))
+	var input struct {
+		MaxResults *int   `json:"MaxResults"`
+		NextToken  string `json:"NextToken"`
+	}
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, timestreamInvalidBody()
 		}
 	}
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Databases": dbs})
+	offset, pageSize, err := timestreamListPage(input.MaxResults, input.NextToken)
+	if err != nil {
+		return nil, err
+	}
+	acct, region := reqCtx.AccountID, reqCtx.Region
+	names, err := loadStringIndex(context.Background(), p.state, timestreamNamespace, timestreamDBNamesKey(acct, region))
+	if err != nil {
+		return nil, fmt.Errorf("timestream listDatabases index: %w", err)
+	}
+	// The offset is meaningful only over a stable order, so the names are sorted first.
+	sort.Strings(names)
+	page, next := pageByOffsetToken(names, offset, pageSize)
+	dbs := make([]timestreamDatabaseOut, 0, len(page))
+	for _, name := range page {
+		db, err := p.loadDatabase(acct, region, name)
+		if err != nil {
+			var awsErr *AWSError
+			if errors.As(err, &awsErr) {
+				continue // indexed but deleted between the index read and this one
+			}
+			return nil, err
+		}
+		dbs = append(dbs, timestreamDatabaseToWire(db))
+	}
+	out := map[string]any{"Databases": dbs}
+	if next != "" {
+		out["NextToken"] = next
+	}
+	return timestreamJSONResponse(http.StatusOK, out)
 }
 
 // --- Table operations ---
@@ -194,9 +224,12 @@ func (p *TimestreamPlugin) createTable(reqCtx *RequestContext, req *AWSRequest) 
 	if _, err := p.loadDatabase(acct, region, input.DatabaseName); err != nil {
 		return nil, err
 	}
-	existing, _ := p.state.Get(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, input.TableName))
+	existing, err := p.state.Get(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, input.TableName))
+	if err != nil {
+		return nil, fmt.Errorf("timestream createTable read: %w", err)
+	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ConflictException", Message: "Table already exists: " + input.TableName, HTTPStatus: http.StatusConflict}
+		return nil, &AWSError{Code: "ConflictException", Message: "Table already exists: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
 	retention := input.RetentionProperties
@@ -262,30 +295,69 @@ func (p *TimestreamPlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) 
 	return timestreamJSONResponse(http.StatusOK, map[string]any{})
 }
 
+// listTables answers tables in (database, table) name order, paged by MaxResults and NextToken.
+//
+// `DatabaseName` is "Required: No" on API_ListTables. Given, it narrows the listing to that database,
+// and a database that does not exist is ResourceNotFoundException, which the page publishes. Absent,
+// every database's tables are listed; before #1195 an absent DatabaseName listed the tables of a
+// database named "", which is none.
 func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		DatabaseName string `json:"DatabaseName"`
+		MaxResults   *int   `json:"MaxResults"`
+		NextToken    string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, timestreamInvalidBody()
 		}
 	}
+	offset, pageSize, err := timestreamListPage(input.MaxResults, input.NextToken)
+	if err != nil {
+		return nil, err
+	}
 	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
-	names, _ := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName))
-	tables := make([]timestreamTableOut, 0, len(names))
-	for _, name := range names {
-		raw, err := p.state.Get(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, name))
-		if err != nil || raw == nil {
-			continue
+	var dbNames []string
+	if input.DatabaseName != "" {
+		if _, err := p.loadDatabase(acct, region, input.DatabaseName); err != nil {
+			return nil, err
 		}
-		var tbl TimestreamTable
-		if err2 := json.Unmarshal(raw, &tbl); err2 == nil {
-			tables = append(tables, timestreamTableToWire(tbl))
+		dbNames = []string{input.DatabaseName}
+	} else if dbNames, err = loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region)); err != nil {
+		return nil, fmt.Errorf("timestream listTables database index: %w", err)
+	}
+	sort.Strings(dbNames)
+	type tableRef struct{ db, table string }
+	var refs []tableRef
+	for _, db := range dbNames {
+		names, err := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, db))
+		if err != nil {
+			return nil, fmt.Errorf("timestream listTables table index: %w", err)
+		}
+		sort.Strings(names)
+		for _, n := range names {
+			refs = append(refs, tableRef{db, n})
 		}
 	}
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Tables": tables})
+	page, next := pageByOffsetToken(refs, offset, pageSize)
+	tables := make([]timestreamTableOut, 0, len(page))
+	for _, ref := range page {
+		tbl, err := p.loadTable(acct, region, ref.db, ref.table)
+		if err != nil {
+			var awsErr *AWSError
+			if errors.As(err, &awsErr) {
+				continue // indexed but deleted between the index read and this one
+			}
+			return nil, err
+		}
+		tables = append(tables, timestreamTableToWire(tbl))
+	}
+	out := map[string]any{"Tables": tables}
+	if next != "" {
+		out["NextToken"] = next
+	}
+	return timestreamJSONResponse(http.StatusOK, out)
 }
 
 // --- Record ingestion ---
@@ -299,6 +371,12 @@ func (p *TimestreamPlugin) writeRecords(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil || input.DatabaseName == "" || input.TableName == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "DatabaseName and TableName are required", HTTPStatus: http.StatusBadRequest}
+	}
+	// API_WriteRecords: Records is "Required: Yes", "Minimum number of 1 item. Maximum number of 100
+	// items". A batch outside that is a malformed request, ValidationException; RejectedRecordsException
+	// is the page's code for records rejected on their content, which substrate does not evaluate.
+	if n := len(input.Records); n < 1 || n > timestreamRecordsMax {
+		return nil, timestreamValidation(fmt.Sprintf("Records must contain 1 to %d records, got %d", timestreamRecordsMax, n))
 	}
 	if _, err := p.loadDatabase(reqCtx.AccountID, reqCtx.Region, input.DatabaseName); err != nil {
 		return nil, err
@@ -358,15 +436,38 @@ func (p *TimestreamPlugin) describeEndpoints(reqCtx *RequestContext, req *AWSReq
 }
 
 // query answers a seeded result, or `SELECT * FROM db.table` reconstructed from stored records, and
-// refuses any other unseeded query; see emulator/timestream_query.go.
+// refuses any other unseeded query (emulator/timestream_query.go). MaxRows and NextToken page the
+// result, and every query is recorded so CancelQuery can find it (emulator/timestream_pagination.go).
 func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		QueryString string `json:"QueryString"`
-	}
+	var input timestreamQueryInput
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, timestreamInvalidBody()
 		}
+	}
+	if err := input.validate(); err != nil {
+		return nil, err
+	}
+
+	if input.NextToken != "" {
+		id, offset, ok := decodeTimestreamQueryToken(input.NextToken)
+		if !ok {
+			return nil, timestreamValidation("Invalid pagination token")
+		}
+		q, err := p.loadIssuedQuery(reqCtx, id)
+		if err != nil {
+			return nil, err
+		}
+		if q == nil || q.QueryString != input.QueryString {
+			return nil, timestreamValidation("Invalid pagination token")
+		}
+		if q.Cancelled {
+			return nil, &AWSError{Code: "ConflictException", Message: "Unable to poll results for a cancelled query.", HTTPStatus: http.StatusBadRequest}
+		}
+		if q.Completed {
+			return nil, timestreamValidation("Invalid pagination token")
+		}
+		return p.queryPage(reqCtx, q, offset)
 	}
 
 	result, seeded, err := p.seededQueryResult(input.QueryString)
@@ -387,31 +488,20 @@ func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if rows == nil {
 		rows = []TimestreamRow{}
 	}
-	cols := result.ColumnInfo
-	if cols == nil {
-		cols = []TimestreamColumnInfo{}
+	q := &timestreamIssuedQuery{
+		QueryID:     timestreamQueryID(reqCtx.IDs),
+		QueryString: input.QueryString,
+		Status:      result.QueryStatus,
 	}
-	status := result.QueryStatus
-	if status == nil {
-		derived, err := timestreamQueryStatus(rows)
-		if err != nil {
-			return nil, err
-		}
-		status = &derived
+	// "The initial run of Query with a MaxRows value specified will return the result set of the query
+	// in two cases: … The number of rows in the result set is less than the value of maxRows. Otherwise,
+	// the initial invocation of Query only returns a NextToken" (API_query_Query).
+	if input.MaxRows != nil && len(rows) >= *input.MaxRows {
+		q.ColumnInfo, q.Rows, q.PageSize = result.ColumnInfo, rows, *input.MaxRows
+		return p.queryResponse(reqCtx, q, []TimestreamRow{}, result.ColumnInfo, encodeTimestreamQueryToken(q.QueryID, 0))
 	}
-
-	// NextToken is omitted: every result is answered whole, and API_query_Query's NextToken has a
-	// minimum length of 1, so the empty string answered before #1209 was never a value it publishes.
-	return timestreamJSONResponse(http.StatusOK, map[string]any{
-		"QueryId":     timestreamQueryID(reqCtx.IDs),
-		"Rows":        rows,
-		"ColumnInfo":  cols,
-		"QueryStatus": status,
-	})
-}
-
-func (p *TimestreamPlugin) cancelQuery(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	return timestreamJSONResponse(http.StatusOK, map[string]any{})
+	q.Completed = true
+	return p.queryResponse(reqCtx, q, rows, result.ColumnInfo, "")
 }
 
 // timestreamQueryID mints a `Query` response's QueryId from m — 32 lowercase hex characters, which is
@@ -419,11 +509,9 @@ func (p *TimestreamPlugin) cancelQuery(_ *RequestContext, _ *AWSRequest) (*AWSRe
 // permits: `QueryId` is 1–64 characters matching `[a-zA-Z0-9]+`, so hex is inside the published
 // alphabet where a UUID's hyphens would not be.
 //
-// It is the loosest case in this family, because substrate's Query is synchronous and its QueryId
-// reaches nothing: `CancelQuery` ignores the ID it is given and answers an empty body, and there is no
-// asynchronous read path to address. So deriving it does not repair a broken follow-on call the way
-// Athena's and Redshift Data's do — it removes the last fresh draw from the response body, which is
-// what makes a recorded Query replay with zero differences at all.
+// Deriving it is what makes a recorded Query replay with zero differences, and since #1206 the ID is
+// also what CancelQuery and a NextToken address, so a replayed cancellation finds the query its
+// recording ran.
 func timestreamQueryID(m *IDMint) string {
 	return m.Hex(16)
 }
@@ -460,7 +548,7 @@ func (p *TimestreamPlugin) loadDatabase(acct, region, name string) (TimestreamDa
 		return TimestreamDatabase{}, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    "Database not found: " + name,
-			HTTPStatus: http.StatusNotFound,
+			HTTPStatus: http.StatusBadRequest,
 		}
 	}
 	var db TimestreamDatabase
@@ -479,7 +567,7 @@ func (p *TimestreamPlugin) loadTable(acct, region, dbName, tableName string) (Ti
 		return TimestreamTable{}, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    fmt.Sprintf("Table not found: %s/%s", dbName, tableName),
-			HTTPStatus: http.StatusNotFound,
+			HTTPStatus: http.StatusBadRequest,
 		}
 	}
 	var tbl TimestreamTable

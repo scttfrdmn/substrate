@@ -97,13 +97,9 @@ func TestTimestream_DatabaseCRUD(t *testing.T) {
 		t.Error("want non-empty Arn")
 	}
 
-	// Duplicate create → 409.
+	// Duplicate create → ConflictException at 400, the status API_CreateDatabase publishes (#1198).
 	resp2 := tsRequest(t, ts, "CreateDatabase", map[string]any{"DatabaseName": "metrics"})
-	if resp2.StatusCode != http.StatusConflict {
-		t.Errorf("duplicate CreateDatabase: want 409, got %d", resp2.StatusCode)
-	}
-	_, _ = io.ReadAll(resp2.Body)
-	_ = resp2.Body.Close()
+	tsRequireRefusal(t, resp2, "duplicate CreateDatabase", "ConflictException")
 
 	// DescribeDatabase.
 	resp3 := tsRequest(t, ts, "DescribeDatabase", map[string]any{"DatabaseName": "metrics"})
@@ -135,13 +131,9 @@ func TestTimestream_DatabaseCRUD(t *testing.T) {
 	_, _ = io.ReadAll(resp5.Body)
 	_ = resp5.Body.Close()
 
-	// DescribeDatabase after delete → 404.
+	// DescribeDatabase after delete → ResourceNotFoundException at 400 (#1198).
 	resp6 := tsRequest(t, ts, "DescribeDatabase", map[string]any{"DatabaseName": "metrics"})
-	if resp6.StatusCode != http.StatusNotFound {
-		t.Errorf("want 404 after delete, got %d", resp6.StatusCode)
-	}
-	_, _ = io.ReadAll(resp6.Body)
-	_ = resp6.Body.Close()
+	tsRequireRefusal(t, resp6, "DescribeDatabase after delete", "ResourceNotFoundException")
 }
 
 // TestTimestream_TableCRUD covers the full table lifecycle.
@@ -176,13 +168,9 @@ func TestTimestream_TableCRUD(t *testing.T) {
 		t.Error("want non-empty Arn")
 	}
 
-	// Duplicate table → 409.
+	// Duplicate table → ConflictException at 400 (#1198).
 	resp3 := tsRequest(t, ts, "CreateTable", map[string]any{"DatabaseName": "mydb", "TableName": "events"})
-	if resp3.StatusCode != http.StatusConflict {
-		t.Errorf("duplicate CreateTable: want 409, got %d", resp3.StatusCode)
-	}
-	_, _ = io.ReadAll(resp3.Body)
-	_ = resp3.Body.Close()
+	tsRequireRefusal(t, resp3, "duplicate CreateTable", "ConflictException")
 
 	// DescribeTable.
 	resp4 := tsRequest(t, ts, "DescribeTable", map[string]any{"DatabaseName": "mydb", "TableName": "events"})
@@ -263,17 +251,13 @@ func TestTimestream_WriteAndQuery(t *testing.T) {
 		t.Errorf("want Total=3, got %v", ingested["Total"])
 	}
 
-	// WriteRecords to nonexistent table → 404.
+	// WriteRecords to nonexistent table → ResourceNotFoundException at 400 (#1198).
 	resp2 := tsRequest(t, ts, "WriteRecords", map[string]any{
 		"DatabaseName": "tsdb",
 		"TableName":    "no-such-table",
 		"Records":      records,
 	})
-	if resp2.StatusCode != http.StatusNotFound {
-		t.Errorf("WriteRecords missing table: want 404, got %d", resp2.StatusCode)
-	}
-	_, _ = io.ReadAll(resp2.Body)
-	_ = resp2.Body.Close()
+	tsRequireRefusal(t, resp2, "WriteRecords missing table", "ResourceNotFoundException")
 
 	// DescribeEndpoints.
 	resp3 := tsRequest(t, ts, "DescribeEndpoints", map[string]any{})
@@ -372,13 +356,10 @@ func TestTimestream_WriteAndQuery(t *testing.T) {
 		t.Errorf("unseeded SELECT 1 after clear: want ValidationException, got %v", body6)
 	}
 
-	// CancelQuery → 200.
+	// CancelQuery of "qid-1" → ValidationException: the hyphen is outside the published
+	// [a-zA-Z0-9]+ pattern (#1206). The cancellation paths are pinned in timestream_audit_test.go.
 	resp7 := tsRequest(t, ts, "CancelQuery", map[string]any{"QueryId": "qid-1"})
-	if resp7.StatusCode != http.StatusOK {
-		t.Errorf("CancelQuery: want 200, got %d", resp7.StatusCode)
-	}
-	_, _ = io.ReadAll(resp7.Body)
-	_ = resp7.Body.Close()
+	tsRequireRefusal(t, resp7, "CancelQuery with a malformed QueryId", "ValidationException")
 }
 
 // TestTimestream_WriteQueryRoundtrip verifies that records written via WriteRecords
@@ -433,5 +414,18 @@ func TestTimestream_WriteQueryRoundtrip(t *testing.T) {
 	cols, _ := body2["ColumnInfo"].([]interface{})
 	if len(cols) == 0 {
 		t.Error("want non-empty ColumnInfo")
+	}
+}
+
+// tsRequireRefusal requires resp to be a 400 carrying code, the status every published Timestream
+// error but InternalServerException has (#1198).
+func tsRequireRefusal(t *testing.T, resp *http.Response, what, code string) {
+	t.Helper()
+	body := tsBody(t, resp)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("%s: want 400, got %d: %v", what, resp.StatusCode, body)
+	}
+	if got, _ := body["__type"].(string); !strings.HasSuffix(got, code) {
+		t.Errorf("%s: want %s, got %v", what, code, body)
 	}
 }

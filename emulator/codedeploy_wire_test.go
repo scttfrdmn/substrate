@@ -232,11 +232,15 @@ func TestCodeDeployWire_ApplicationResponsesCarryNoBookkeepingMember(t *testing.
 		// Answers names only, so the anchor is the name rather than a member of the record — which is
 		// also the one place a leak could not hide, the element being a bare string.
 		{op: "ListApplications", anchor: `"` + name + `"`},
-		// Last, and answers an empty object: it removes the record every case above reads.
-		{op: "DeleteApplication", body: map[string]any{"applicationName": name}, anchor: "{}"},
 	} {
 		codedeployWireRunCase(t, p, ctx, tc)
 	}
+
+	// Last: it removes the record every case above reads. API_DeleteApplication answers "an HTTP 200
+	// response with an empty HTTP body" (#1198), so there is no document to walk, and no member can
+	// leak into one.
+	deleted := codedeployWireRaw(t, p, ctx, "DeleteApplication", map[string]any{"applicationName": name})
+	require.Empty(t, deleted, "DeleteApplication answers an empty body")
 }
 
 func TestCodeDeployWire_DeploymentGroupResponsesCarryNoBookkeepingMember(t *testing.T) {

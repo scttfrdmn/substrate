@@ -36,15 +36,17 @@ package emulator
 
 // codedeployAppOut is the application element of GetApplication's response.
 //
-// Four of API_ApplicationInfo's six members. gitHubAccountName and linkedToGitHub are not
-// modeled and are therefore simply absent from the type rather than present and empty, so
-// this reports nothing AWS would not (#1013's rule); every member of the shape is
-// Required: No. That gap is #1199's class and is recorded in docs/services.md.
+// Five of API_ApplicationInfo's six members, every one Required: No. linkedToGitHub is always false,
+// which is true of every application substrate holds: no GitHub connection is modeled, and AWS's own
+// GetApplication sample reports the member as false for an unlinked application rather than omitting
+// it. gitHubAccountName is absent for the same reason — there is no connection to name — and it is
+// absent rather than present and empty (#1013's rule, #1199).
 type codedeployAppOut struct {
 	ApplicationID   string       `json:"applicationId"`
 	ApplicationName string       `json:"applicationName"`
 	ComputePlatform string       `json:"computePlatform,omitempty"`
 	CreateTime      EpochSeconds `json:"createTime"`
+	LinkedToGitHub  bool         `json:"linkedToGitHub"`
 }
 
 // codedeployAppToWire projects a persisted application onto the published shape.
@@ -57,55 +59,134 @@ func codedeployAppToWire(app CodeDeployApp) codedeployAppOut {
 	}
 }
 
-// codedeployGroupOut is the deploymentGroupInfo element of GetDeploymentGroup's response.
+// codedeployGroupEchoMembers are the members CreateDeploymentGroup takes and API_DeploymentGroupInfo
+// answers under the same name and shape, so the group records them as sent and answers them back.
 //
-// Four of the twenty-three members API_GetDeploymentGroup publishes, the same #1199 gap.
-//
-// It carries no date, and the asymmetry with the other two types here is deliberate:
-// API_GetDeploymentGroup publishes no top-level timestamp at all. The only dates in the
-// shape are nested inside lastAttemptedDeployment and lastSuccessfulDeployment, which
-// substrate does not model, so CodeDeployGroup declares no time field and there is nothing
-// to convert. Adding one would invent a member rather than project one.
-type codedeployGroupOut struct {
-	DeploymentGroupID   string `json:"deploymentGroupId"`
-	DeploymentGroupName string `json:"deploymentGroupName"`
-	ApplicationName     string `json:"applicationName"`
-	ServiceRoleArn      string `json:"serviceRoleArn,omitempty"`
+// autoScalingGroups is not among them because its shape differs: the request sends names and the
+// response answers AutoScalingGroup objects, so it is converted (see [codedeployGroupToWire]).
+var codedeployGroupEchoMembers = []string{
+	"alarmConfiguration", "autoRollbackConfiguration", "blueGreenDeploymentConfiguration",
+	"deploymentStyle", "ec2TagFilters", "ec2TagSet", "ecsServices", "loadBalancerInfo",
+	"onPremisesInstanceTagFilters", "onPremisesTagSet", "outdatedInstancesStrategy",
+	"terminationHookEnabled", "triggerConfigurations",
 }
 
-// codedeployGroupToWire projects a persisted deployment group onto the published shape.
-func codedeployGroupToWire(group CodeDeployGroup) codedeployGroupOut {
-	return codedeployGroupOut{
-		DeploymentGroupID:   group.DeploymentGroupID,
-		DeploymentGroupName: group.DeploymentGroupName,
-		ApplicationName:     group.ApplicationName,
-		ServiceRoleArn:      group.ServiceRoleArn,
+// codedeployLastDeploymentOut is API_LastDeploymentInfo, the shape of lastAttemptedDeployment and
+// lastSuccessfulDeployment.
+type codedeployLastDeploymentOut struct {
+	CreateTime   EpochSeconds `json:"createTime"`
+	DeploymentID string       `json:"deploymentId"`
+	EndTime      EpochSeconds `json:"endTime"`
+	Status       string       `json:"status"`
+}
+
+// codedeployGroupToWire projects a persisted deployment group onto API_DeploymentGroupInfo.
+//
+// It can answer all twenty-three of the shape's members. The thirteen in [codedeployGroupEchoMembers]
+// appear only when the create sent them, since each is Required: No; lastAttemptedDeployment,
+// lastSuccessfulDeployment and targetRevision appear once a deployment has run in the group (#1199).
+//
+// A map rather than a struct, because thirteen of the members are the caller's own JSON answered
+// back verbatim; [encoding/json] sorts the keys, so the rendering is stable for a replay.
+func codedeployGroupToWire(group CodeDeployGroup) map[string]any {
+	out := map[string]any{
+		"applicationName":     group.ApplicationName,
+		"deploymentGroupId":   group.DeploymentGroupID,
+		"deploymentGroupName": group.DeploymentGroupName,
+	}
+	if group.ServiceRoleArn != "" {
+		out["serviceRoleArn"] = group.ServiceRoleArn
+	}
+	if group.ComputePlatform != "" {
+		out["computePlatform"] = group.ComputePlatform
+	}
+	if group.DeploymentConfigName != "" {
+		out["deploymentConfigName"] = group.DeploymentConfigName
+	}
+	// API_AutoScalingGroup publishes name, hook and terminationHook. Only the name is known: no hook is
+	// installed, because no Auto Scaling group is acted on, so the hook names are absent.
+	asgs := make([]map[string]string, 0, len(group.AutoScalingGroups))
+	for _, name := range group.AutoScalingGroups {
+		asgs = append(asgs, map[string]string{"name": name})
+	}
+	out["autoScalingGroups"] = asgs
+	for _, member := range codedeployGroupEchoMembers {
+		if raw, ok := group.Config[member]; ok {
+			out[member] = raw
+		}
+	}
+	if ref := group.LastAttemptedDeployment; ref != nil {
+		out["lastAttemptedDeployment"] = codedeployLastDeploymentToWire(*ref)
+	}
+	if ref := group.LastSuccessfulDeployment; ref != nil {
+		out["lastSuccessfulDeployment"] = codedeployLastDeploymentToWire(*ref)
+	}
+	if len(group.TargetRevision) > 0 {
+		out["targetRevision"] = group.TargetRevision
+	}
+	return out
+}
+
+// codedeployLastDeploymentToWire projects a deployment reference onto API_LastDeploymentInfo.
+func codedeployLastDeploymentToWire(ref CodeDeployDeploymentRef) codedeployLastDeploymentOut {
+	return codedeployLastDeploymentOut{
+		CreateTime:   EpochSeconds(ref.CreateTime),
+		DeploymentID: ref.DeploymentID,
+		EndTime:      EpochSeconds(ref.EndTime),
+		Status:       ref.Status,
 	}
 }
 
-// codedeployDeploymentOut is the deploymentInfo element of GetDeployment's response.
-//
-// Six of the thirty-one members API_GetDeployment publishes. startTime and
-// deploymentOverview are published and absent here on purpose: reporting either would mean
-// inventing a value for work substrate does not run, which is #1196's and #1199's scope
-// rather than this type's.
-type codedeployDeploymentOut struct {
-	DeploymentID        string       `json:"deploymentId"`
-	ApplicationName     string       `json:"applicationName"`
-	DeploymentGroupName string       `json:"deploymentGroupName"`
-	Status              string       `json:"status"`
-	CreateTime          EpochSeconds `json:"createTime"`
-	CompleteTime        EpochSeconds `json:"completeTime"`
+// codedeployDeploymentEchoMembers are the members CreateDeployment takes and API_DeploymentInfo
+// answers under the same name and shape. deploymentStyle and loadBalancerInfo are not request
+// members; they are copied from the group at create, which is where DeploymentInfo's come from.
+var codedeployDeploymentEchoMembers = []string{
+	"autoRollbackConfiguration", "deploymentMode", "deploymentStyle", "description",
+	"fileExistsBehavior", "ignoreApplicationStopFailures", "loadBalancerInfo",
+	"overrideAlarmConfiguration", "revision", "targetInstances", "updateOutdatedInstancesOnly",
 }
 
-// codedeployDeploymentToWire projects a persisted deployment onto the published shape.
-func codedeployDeploymentToWire(deployment CodeDeployDeployment) codedeployDeploymentOut {
-	return codedeployDeploymentOut{
-		DeploymentID:        deployment.DeploymentID,
-		ApplicationName:     deployment.ApplicationName,
-		DeploymentGroupName: deployment.DeploymentGroupName,
-		Status:              deployment.Status,
-		CreateTime:          EpochSeconds(deployment.CreateTime),
-		CompleteTime:        EpochSeconds(deployment.CompleteTime),
+// codedeployDeploymentToWire projects a persisted deployment onto API_DeploymentInfo.
+//
+// Of the shape's thirty-one members, this can answer the twenty-one substrate holds a value for; the
+// eleven in [codedeployDeploymentEchoMembers] appear only when sent. The ten others are absent, each for
+// a reason:
+//
+//   - deploymentOverview, deploymentStatusMessages and instanceTerminationWaitTimeStarted describe
+//     the targets a deployment ran on, and substrate runs on none, so any count would be invented.
+//     A consumer asserting a deployment landed reads status, which is Succeeded (#1196 owns making it
+//     progress).
+//   - errorInformation and rollbackInfo describe a failure or a rollback, and no deployment here
+//     fails or rolls back.
+//   - previousRevision, relatedDeployments, blueGreenDeploymentConfiguration and externalId are not
+//     modeled; additionalDeploymentStatusInfo is deprecated.
+//   - deploymentMode is answered only when the request sent RESTART: the page says the member "is
+//     absent … for STANDARD deployments", so a STANDARD one is not echoed (see createDeployment).
+func codedeployDeploymentToWire(deployment CodeDeployDeployment) map[string]any {
+	out := map[string]any{
+		"applicationName":     deployment.ApplicationName,
+		"completeTime":        EpochSeconds(deployment.CompleteTime),
+		"createTime":          EpochSeconds(deployment.CreateTime),
+		"deploymentGroupName": deployment.DeploymentGroupName,
+		"deploymentId":        deployment.DeploymentID,
+		"status":              deployment.Status,
 	}
+	if !deployment.StartTime.IsZero() {
+		out["startTime"] = EpochSeconds(deployment.StartTime)
+	}
+	if deployment.Creator != "" {
+		out["creator"] = deployment.Creator
+	}
+	if deployment.ComputePlatform != "" {
+		out["computePlatform"] = deployment.ComputePlatform
+	}
+	if deployment.DeploymentConfigName != "" {
+		out["deploymentConfigName"] = deployment.DeploymentConfigName
+	}
+	for _, member := range codedeployDeploymentEchoMembers {
+		if raw, ok := deployment.Config[member]; ok {
+			out[member] = raw
+		}
+	}
+	return out
 }

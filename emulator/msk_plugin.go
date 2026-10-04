@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -142,79 +143,205 @@ func parseKafkaOperation(method, path string) (op, clusterARN string) {
 	return "", ""
 }
 
+// mskBrokerNodeGroupInfoIn is brokerNodeGroupInfo as a create request carries it. ClientSubnets is
+// read through a nil check, which tells an absent member (refused, Required: True) from an empty
+// list (accepted: CloudFormation sends one, and the page's two-or-three-subnet rule is prose, not a
+// constraint the model states).
+type mskBrokerNodeGroupInfoIn struct {
+	InstanceType   string         `json:"InstanceType"`
+	ClientSubnets  []string       `json:"ClientSubnets"`
+	SecurityGroups []string       `json:"SecurityGroups"`
+	StorageInfo    MSKStorageInfo `json:"StorageInfo"`
+}
+
+// mskProvisionedIn holds the members CreateCluster takes at its top level and CreateClusterV2 takes
+// under provisioned. Decoding is case-insensitive, so the published lowerCamel spellings
+// (clusterName, brokerNodeGroupInfo, …) and the PascalCase ones CloudFormation sends both land.
+type mskProvisionedIn struct {
+	KafkaVersion         *string                   `json:"KafkaVersion"`
+	NumberOfBrokerNodes  *int                      `json:"NumberOfBrokerNodes"`
+	BrokerNodeGroupInfo  *mskBrokerNodeGroupInfoIn `json:"BrokerNodeGroupInfo"`
+	EncryptionInfo       *MSKEncryptionInfo        `json:"EncryptionInfo"`
+	ClientAuthentication *MSKClientAuthentication  `json:"ClientAuthentication"`
+	EnhancedMonitoring   string                    `json:"EnhancedMonitoring"`
+	StorageMode          string                    `json:"StorageMode"`
+	ConfigurationInfo    *MSKConfigurationInfo     `json:"ConfigurationInfo"`
+}
+
+// mskCheckClusterName enforces clusterName, Required: True with MinLength 1 and MaxLength 64 on both
+// create pages.
+func mskCheckClusterName(name string) error {
+	if name == "" {
+		return mskBadRequest("clusterName", "clusterName is required")
+	}
+	if len(name) > 64 {
+		return mskBadRequest("clusterName", "clusterName must be at most 64 characters")
+	}
+	return nil
+}
+
+// checkProvisioned validates a provisioned configuration. required says whether CreateCluster's
+// Required: True members must be present: v1 marks kafkaVersion, numberOfBrokerNodes and
+// brokerNodeGroupInfo required, and CreateClusterV2's ProvisionedRequest marks all three False, so a
+// v2 request may omit them (#1211). The constraints on a member that is present apply either way.
+func (in *mskProvisionedIn) check(required bool) error {
+	if in.KafkaVersion == nil {
+		if required {
+			return mskBadRequest("kafkaVersion", "kafkaVersion is required")
+		}
+	} else if l := len(*in.KafkaVersion); l < 1 || l > 128 {
+		return mskBadRequest("kafkaVersion", "kafkaVersion must be 1 to 128 characters")
+	}
+	if in.NumberOfBrokerNodes == nil {
+		if required {
+			return mskBadRequest("numberOfBrokerNodes", "numberOfBrokerNodes is required")
+		}
+	} else if *in.NumberOfBrokerNodes < 1 {
+		// The page states no minimum; a cluster of no brokers is substrate's reading of "incorrect
+		// input", refused rather than created.
+		return mskBadRequest("numberOfBrokerNodes", "numberOfBrokerNodes must be at least 1")
+	}
+	if in.BrokerNodeGroupInfo == nil {
+		if required {
+			return mskBadRequest("brokerNodeGroupInfo", "brokerNodeGroupInfo is required")
+		}
+	} else {
+		b := in.BrokerNodeGroupInfo
+		if b.ClientSubnets == nil {
+			return mskBadRequest("clientSubnets", "brokerNodeGroupInfo.clientSubnets is required")
+		}
+		if l := len(b.InstanceType); l == 0 {
+			return mskBadRequest("instanceType", "brokerNodeGroupInfo.instanceType is required")
+		} else if l < 5 || l > 32 {
+			return mskBadRequest("instanceType", "brokerNodeGroupInfo.instanceType must be 5 to 32 characters")
+		}
+		if v := b.StorageInfo.EbsStorageInfo.VolumeSize; v != 0 && (v < 1 || v > 16384) {
+			return mskBadRequest("volumeSize", "storageInfo.ebsStorageInfo.volumeSize must be 1 to 16384")
+		}
+	}
+	if in.EncryptionInfo != nil {
+		if at := in.EncryptionInfo.EncryptionAtRest; at != nil && at.DataVolumeKMSKeyID == "" {
+			return mskBadRequest("dataVolumeKMSKeyId", "encryptionAtRest.dataVolumeKMSKeyId is required")
+		}
+		if it := in.EncryptionInfo.EncryptionInTransit; it != nil && it.ClientBroker != "" {
+			switch it.ClientBroker {
+			case "TLS", "TLS_PLAINTEXT", "PLAINTEXT":
+			default:
+				return mskBadRequest("clientBroker", "encryptionInTransit.clientBroker must be TLS, TLS_PLAINTEXT or PLAINTEXT")
+			}
+		}
+	}
+	if c := in.ConfigurationInfo; c != nil {
+		if c.Arn == "" {
+			return mskBadRequest("arn", "configurationInfo.arn is required")
+		}
+		if c.Revision < 1 {
+			return mskBadRequest("revision", "configurationInfo.revision must be at least 1")
+		}
+	}
+	return nil
+}
+
+// apply copies a validated provisioned configuration onto a record.
+func (in *mskProvisionedIn) apply(c *MSKCluster) {
+	if in.KafkaVersion != nil {
+		c.KafkaVersion = *in.KafkaVersion
+	}
+	if in.NumberOfBrokerNodes != nil {
+		c.NumberOfBrokerNodes = *in.NumberOfBrokerNodes
+	}
+	if b := in.BrokerNodeGroupInfo; b != nil {
+		c.BrokerNodeGroupInfo = MSKBrokerNodeGroupInfo{
+			InstanceType:   b.InstanceType,
+			ClientSubnets:  b.ClientSubnets,
+			SecurityGroups: b.SecurityGroups,
+			StorageInfo:    b.StorageInfo,
+		}
+	}
+	c.EncryptionInfo = in.EncryptionInfo
+	c.ClientAuthentication = in.ClientAuthentication
+	c.EnhancedMonitoring = in.EnhancedMonitoring
+	c.StorageMode = in.StorageMode
+	c.ConfigurationInfo = in.ConfigurationInfo
+}
+
+// createCluster handles CreateCluster (POST /v1/clusters). Every member clusters.html marks Required:
+// True is checked before use and refused when absent, rather than defaulted (#1197): kafkaVersion
+// used to default to "3.5.1", numberOfBrokerNodes to 2, and an absent brokerNodeGroupInfo was
+// accepted, so a cluster was created from an empty body.
 func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ClusterName         string                 `json:"ClusterName"`
-		KafkaVersion        string                 `json:"KafkaVersion"`
-		NumberOfBrokerNodes int                    `json:"NumberOfBrokerNodes"`
-		BrokerNodeGroupInfo MSKBrokerNodeGroupInfo `json:"BrokerNodeGroupInfo"`
-		Tags                map[string]string      `json:"Tags"`
+		ClusterName string            `json:"ClusterName"`
+		Tags        map[string]string `json:"Tags"`
+		mskProvisionedIn
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, mskInvalidBody()
 		}
 	}
-	if input.ClusterName == "" {
-		return nil, mskBadRequest("ClusterName is required")
+	if err := mskCheckClusterName(input.ClusterName); err != nil {
+		return nil, err
 	}
-
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	indexKey := "cluster_ids:" + scope
-
-	// Check for duplicate by name.
-	names, _ := loadStringIndex(context.Background(), p.state, mskNamespace, indexKey)
-	for _, n := range names {
-		if n == input.ClusterName {
-			return nil, &AWSError{Code: "ConflictException", Message: "Cluster " + input.ClusterName + " already exists.", HTTPStatus: http.StatusConflict}
-		}
+	if err := input.check(true); err != nil {
+		return nil, err
 	}
-
-	if input.KafkaVersion == "" {
-		input.KafkaVersion = "3.5.1"
+	cluster := p.newCluster(reqCtx, input.ClusterName, input.Tags)
+	cluster.ClusterType = mskClusterTypeProvisioned
+	input.apply(&cluster)
+	if err := p.storeNewCluster(reqCtx, &cluster); err != nil {
+		return nil, err
 	}
-	if input.NumberOfBrokerNodes == 0 {
-		input.NumberOfBrokerNodes = 2
-	}
-
-	uuid := mskClusterUUID(reqCtx.IDs)
-	clusterARN := "arn:aws:kafka:" + reqCtx.Region + ":" + reqCtx.AccountID + ":cluster/" + input.ClusterName + "/" + uuid
-
-	cluster := MSKCluster{
-		ClusterName:         input.ClusterName,
-		ClusterARN:          clusterARN,
-		State:               "ACTIVE",
-		BrokerNodeGroupInfo: input.BrokerNodeGroupInfo,
-		NumberOfBrokerNodes: input.NumberOfBrokerNodes,
-		KafkaVersion:        input.KafkaVersion,
-		Tags:                input.Tags,
-		AccountID:           reqCtx.AccountID,
-		Region:              reqCtx.Region,
-		CreatedAt:           p.tc.Now(),
-	}
-
-	data, err := json.Marshal(cluster)
-	if err != nil {
-		return nil, fmt.Errorf("msk createCluster marshal: %w", err)
-	}
-	stateKey := "cluster:" + scope + "/" + input.ClusterName
-	if err := p.state.Put(context.Background(), mskNamespace, stateKey, data); err != nil {
-		return nil, fmt.Errorf("msk createCluster put: %w", err)
-	}
-	updateStringIndex(context.Background(), p.state, mskNamespace, indexKey, input.ClusterName)
-
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"clusterArn":  clusterARN,
+		"clusterArn":  cluster.ClusterARN,
 		"clusterName": cluster.ClusterName,
 		"state":       cluster.State,
 	})
+}
+
+// newCluster builds the record a create writes, minting its ARN.
+func (p *MSKPlugin) newCluster(reqCtx *RequestContext, name string, tags map[string]string) MSKCluster {
+	return MSKCluster{
+		ClusterName: name,
+		ClusterARN:  "arn:aws:kafka:" + reqCtx.Region + ":" + reqCtx.AccountID + ":cluster/" + name + "/" + mskClusterUUID(reqCtx.IDs),
+		State:       "ACTIVE",
+		Tags:        tags,
+		AccountID:   reqCtx.AccountID,
+		Region:      reqCtx.Region,
+		CreatedAt:   p.tc.Now(),
+	}
+}
+
+// storeNewCluster writes a new cluster and its index entry, refusing a name already in use with the
+// 409 both create pages publish for "This cluster name already exists".
+func (p *MSKPlugin) storeNewCluster(reqCtx *RequestContext, cluster *MSKCluster) error {
+	scope := reqCtx.AccountID + "/" + reqCtx.Region
+	indexKey := "cluster_ids:" + scope
+	names, err := loadStringIndex(context.Background(), p.state, mskNamespace, indexKey)
+	if err != nil {
+		return fmt.Errorf("msk create load index: %w", err)
+	}
+	for _, n := range names {
+		if n == cluster.ClusterName {
+			return mskConflict("clusterName", "Cluster "+cluster.ClusterName+" already exists.")
+		}
+	}
+	data, err := json.Marshal(cluster)
+	if err != nil {
+		return fmt.Errorf("msk create marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), mskNamespace, "cluster:"+scope+"/"+cluster.ClusterName, data); err != nil {
+		return fmt.Errorf("msk create put: %w", err)
+	}
+	updateStringIndex(context.Background(), p.state, mskNamespace, indexKey, cluster.ClusterName)
+	return nil
 }
 
 func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	// Reachable since #1009: GET /v1/clusters/ routes here with an empty ARN rather than onto
 	// ListClusters.
 	if clusterARN == "" {
-		return nil, mskBadRequest("cluster ARN is required")
+		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -225,55 +352,200 @@ func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN
 	})
 }
 
+// getBootstrapBrokers handles GetBootstrapBrokers. See [mskBootstrapBrokers] for which of the
+// page's fourteen strings a cluster answers and in what host form.
 func (p *MSKPlugin) getBootstrapBrokers(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, mskBadRequest("cluster ARN is required")
+		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
 		return nil, err
 	}
-	name := cluster.ClusterName
-	region := cluster.Region
-	brokers := fmt.Sprintf(
-		"broker1.%s.%s.kafka.amazonaws.com:9092,broker2.%s.%s.kafka.amazonaws.com:9092",
-		name, region, name, region,
-	)
-	return mskJSONResponse(http.StatusOK, map[string]string{
-		"bootstrapBrokerString": brokers,
-	})
+	return mskJSONResponse(http.StatusOK, mskBootstrapBrokers(cluster))
 }
 
-func (p *MSKPlugin) listClusters(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+// mskBrokerHosts answers each broker's host name, in the form GetBootstrapBrokers' page shows:
+// b-{n}.{clusterName}.{id}.c2.kafka.{region}.amazonaws.com. The id is the first six hex digits of
+// the ARN's UUID, so it is stable for a cluster and distinct between a cluster and a later one that
+// reuses its name (#1204). Until #1199 the hosts were broker{n}.{name}.{region}.kafka.amazonaws.com,
+// a form no MSK page uses.
+func mskBrokerHosts(c *MSKCluster) []string {
+	hosts := make([]string, 0, c.NumberOfBrokerNodes)
+	for i := 1; i <= c.NumberOfBrokerNodes; i++ {
+		hosts = append(hosts, fmt.Sprintf("b-%d.%s.%s.c2.kafka.%s.amazonaws.com", i, c.ClusterName, mskClusterHostID(c), c.Region))
+	}
+	return hosts
+}
+
+// mskClusterHostID is the per-cluster label in a broker host name.
+func mskClusterHostID(c *MSKCluster) string {
+	uuid := c.ClusterARN[strings.LastIndex(c.ClusterARN, "/")+1:]
+	id := strings.ReplaceAll(uuid, "-", "")
+	if len(id) > 6 {
+		id = id[:6]
+	}
+	return id
+}
+
+// mskBootstrapBrokers answers the GetBootstrapBrokers members a cluster's configuration implies, each
+// a comma-joined list of host:port pairs on the ports the developer guide's port-information page
+// gives: 9092 plaintext, 9094 TLS, 9096 SASL/SCRAM, 9098 SASL/IAM.
+//
+//   - bootstrapBrokerString: client-broker encryption PLAINTEXT or TLS_PLAINTEXT, and unauthenticated
+//     access.
+//   - bootstrapBrokerStringTls: encryption TLS or TLS_PLAINTEXT, and unauthenticated or TLS client
+//     authentication.
+//   - bootstrapBrokerStringSaslScram / bootstrapBrokerStringSaslIam: encryption TLS or TLS_PLAINTEXT
+//     (clusters.html: "To turn on SASL, you must also turn on EncryptionInTransit"), and that
+//     mechanism enabled.
+//
+// The encryption default is TLS (clusters.html: "The default value is TLS"), so a cluster created
+// with no encryptionInfo answers bootstrapBrokerStringTls, not bootstrapBrokerString. Absent client
+// authentication reads as unauthenticated. A serverless cluster answers bootstrapBrokerStringSaslIam
+// alone, at boot-{id}.c2.kafka-serverless.{region}.amazonaws.com:9098, since IAM is the only SASL
+// mechanism a serverless cluster publishes. The page's other eight members — the public, VPC
+// connectivity and IPv6 variants — are not answered: substrate models no connectivityInfo or network
+// type.
+func mskBootstrapBrokers(c *MSKCluster) map[string]string {
+	out := map[string]string{}
+	if mskClusterTypeOf(c) == mskClusterTypeServerless {
+		out["bootstrapBrokerStringSaslIam"] = fmt.Sprintf("boot-%s.c2.kafka-serverless.%s.amazonaws.com:9098", mskClusterHostID(c), c.Region)
+		return out
+	}
+	hosts := mskBrokerHosts(c)
+	if len(hosts) == 0 {
+		return out
+	}
+	join := func(port int) string {
+		pairs := make([]string, len(hosts))
+		for i, h := range hosts {
+			pairs[i] = fmt.Sprintf("%s:%d", h, port)
+		}
+		return strings.Join(pairs, ",")
+	}
+	clientBroker, _ := mskEffectiveInTransit(c.EncryptionInfo)
+	plaintext := clientBroker == "PLAINTEXT" || clientBroker == "TLS_PLAINTEXT"
+	tls := clientBroker == "TLS" || clientBroker == "TLS_PLAINTEXT"
+	a := c.ClientAuthentication
+	iam := a != nil && a.Sasl != nil && a.Sasl.IAM != nil && a.Sasl.IAM.Enabled
+	scram := a != nil && a.Sasl != nil && a.Sasl.Scram != nil && a.Sasl.Scram.Enabled
+	tlsAuth := a != nil && a.TLS != nil && a.TLS.Enabled
+	unauth := a == nil || (a.Unauthenticated != nil && a.Unauthenticated.Enabled) || (!iam && !scram && !tlsAuth)
+	if plaintext && unauth {
+		out["bootstrapBrokerString"] = join(9092)
+	}
+	if tls && (unauth || tlsAuth) {
+		out["bootstrapBrokerStringTls"] = join(9094)
+	}
+	if tls && scram {
+		out["bootstrapBrokerStringSaslScram"] = join(9096)
+	}
+	if tls && iam {
+		out["bootstrapBrokerStringSaslIam"] = join(9098)
+	}
+	return out
+}
+
+// listClusters handles ListClusters (GET /v1/clusters).
+//
+// It reads the three published query parameters (#1195): clusterNameFilter, "a prefix of the name of
+// the clusters", maxResults and nextToken (see [mskPage]). The v1 page describes ListClusters as
+// returning "all the MSK clusters" while ListClustersV2's says it lists "all serverless and
+// provisioned clusters", and v1's ClusterInfo has no member to describe a serverless one with, so a
+// serverless cluster is listed by ListClustersV2 only — substrate's reading of the contrast.
+func (p *MSKPlugin) listClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	clusters, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
+	if err != nil {
+		return nil, err
+	}
+	infos := make([]mskClusterInfoOut, 0, len(clusters))
+	for _, c := range clusters {
+		if mskClusterTypeOf(c) == mskClusterTypeServerless {
+			continue
+		}
+		infos = append(infos, mskClusterInfoWire(c))
+	}
+	page, next, err := mskPage(infos, req)
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]interface{}{"clusterInfoList": page}
+	if next != "" {
+		resp["nextToken"] = next
+	}
+	return mskJSONResponse(http.StatusOK, resp)
+}
+
+// listedClusters loads every cluster in the request's scope, in index order, keeping those whose name
+// starts with nameFilter. A record that will not load is an error rather than a silently shorter list.
+func (p *MSKPlugin) listedClusters(reqCtx *RequestContext, nameFilter string) ([]*MSKCluster, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names, err := loadStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope)
 	if err != nil {
-		return nil, fmt.Errorf("msk listClusters load index: %w", err)
+		return nil, fmt.Errorf("msk list load index: %w", err)
 	}
-
-	infos := make([]mskClusterInfoOut, 0, len(names))
+	out := make([]*MSKCluster, 0, len(names))
 	for _, name := range names {
-		data, getErr := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
-		if getErr != nil || data == nil {
+		if !strings.HasPrefix(name, nameFilter) {
+			continue
+		}
+		data, err := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
+		if err != nil {
+			return nil, fmt.Errorf("msk list get %s: %w", name, err)
+		}
+		if data == nil {
 			continue
 		}
 		var c MSKCluster
-		if json.Unmarshal(data, &c) != nil {
-			continue
+		if err := json.Unmarshal(data, &c); err != nil {
+			return nil, fmt.Errorf("msk list unmarshal %s: %w", name, err)
 		}
-		infos = append(infos, mskClusterInfoWire(&c))
+		out = append(out, &c)
 	}
+	return out, nil
+}
 
-	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"clusterInfoList": infos,
-	})
+// mskMaxResultsLimit is the largest page MSK's list operations answer. Each page gives maxResults as
+// "default maximum 100 results per API call" and states no range, so 1 to 100 is substrate's reading:
+// 100 is the ceiling the page names, and a page of no results is not a request anyone can mean.
+const mskMaxResultsLimit = 100
+
+// mskPage cuts one page out of a full listing, reading maxResults and nextToken from the query.
+// maxResults defaults to the 100 the page names and is refused outside 1 to 100. nextToken is an
+// offset token ([decodeOffsetPaginationToken]); one substrate did not issue is refused rather than
+// answered as page one (#915's rule). MSK publishes no code for either, so both are
+// BadRequestException/400, the status its pages give incorrect input, with invalidParameter naming
+// the parameter. The returned token is empty on the last page, and the caller omits the member then
+// rather than sending "" (#1195).
+func mskPage[T any](items []T, req *AWSRequest) ([]T, string, error) {
+	limit := mskMaxResultsLimit
+	if raw, ok := req.Params["maxResults"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > mskMaxResultsLimit {
+			return nil, "", mskBadRequest("maxResults", "maxResults must be an integer from 1 to 100")
+		}
+		limit = n
+	}
+	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
+	if !ok {
+		return nil, "", mskBadRequest("nextToken", "the nextToken is not one this operation issued")
+	}
+	if offset > len(items) {
+		offset = len(items)
+	}
+	end := offset + limit
+	if end >= len(items) {
+		return items[offset:], "", nil
+	}
+	return items[offset:end], encodeOffsetPaginationToken(end), nil
 }
 
 func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	// Reachable since #1009: DELETE /v1/clusters/ routes here rather than answering unknownRouteError,
 	// so a delete naming no cluster is refused for the reason it is wrong.
 	if clusterARN == "" {
-		return nil, mskBadRequest("cluster ARN is required")
+		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -301,14 +573,14 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 	// Parse region and account from ARN.
 	parts := strings.SplitN(clusterARN, ":", 7)
 	if len(parts) < 6 || parts[2] != "kafka" {
-		return nil, mskBadRequest("invalid MSK cluster ARN: " + clusterARN)
+		return nil, mskBadRequest("clusterArn", "invalid MSK cluster ARN: "+clusterARN)
 	}
 	region := parts[3]
 	acct := parts[4]
 	// parts[5] is "cluster/{name}/{uuid}"
 	resParts := strings.SplitN(parts[5], "/", 3)
 	if len(resParts) < 2 {
-		return nil, mskBadRequest("invalid MSK cluster ARN resource: " + clusterARN)
+		return nil, mskBadRequest("clusterArn", "invalid MSK cluster ARN resource: "+clusterARN)
 	}
 	name := resParts[1]
 
@@ -317,7 +589,7 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 	if err != nil {
 		return nil, fmt.Errorf("msk loadClusterByARN get: %w", err)
 	}
-	notFound := &AWSError{Code: "NotFoundException", Message: "Cluster not found: " + clusterARN, HTTPStatus: http.StatusNotFound}
+	notFound := mskNotFound("clusterArn", "Cluster not found: "+clusterARN)
 	if data == nil {
 		return nil, notFound
 	}
@@ -336,68 +608,87 @@ func (p *MSKPlugin) loadClusterByARN(clusterARN string) (*MSKCluster, error) {
 	return &cluster, nil
 }
 
-// createClusterV2 creates an MSK cluster using the V2 API path (/api/v2/clusters).
-// The request body may wrap broker configuration inside a "Provisioned" sub-object.
+// createClusterV2 handles CreateClusterV2 (POST /api/v2/clusters), checked against v2-clusters.html
+// (#1211).
+//
+// The page's CreateClusterV2Request publishes clusterName (Required: True, 1 to 64), provisioned,
+// serverless and tags, the last three Required: False. It publishes no rule for a request naming
+// neither cluster kind, or both; a request with neither describes no cluster, and one with both
+// describes two, so each is refused — substrate's reading, with invalidParameter naming the member.
+// Inside provisioned the page marks every member Required: False, unlike CreateCluster's top level,
+// so a v2 provisioned create may omit kafkaVersion, numberOfBrokerNodes and brokerNodeGroupInfo, and
+// nothing is defaulted in their place. Inside serverless, vpcConfigs (each with subnetIds) and
+// clientAuthentication are Required: True.
+//
+// Until #1211 serverless was decoded by nothing: a serverless create stored a provisioned cluster
+// with no brokers, and DescribeClusterV2 reported clusterType PROVISIONED. The response is the
+// page's CreateClusterV2Response, which carries clusterType beside the three members v1's has.
 func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ClusterName         string                 `json:"ClusterName"`
-		KafkaVersion        string                 `json:"KafkaVersion"`
-		NumberOfBrokerNodes int                    `json:"NumberOfBrokerNodes"`
-		BrokerNodeGroupInfo MSKBrokerNodeGroupInfo `json:"BrokerNodeGroupInfo"`
-		Tags                map[string]string      `json:"Tags"`
-		Provisioned         *struct {
-			KafkaVersion        string                 `json:"KafkaVersion"`
-			NumberOfBrokerNodes int                    `json:"NumberOfBrokerNodes"`
-			BrokerNodeGroupInfo MSKBrokerNodeGroupInfo `json:"BrokerNodeGroupInfo"`
-		} `json:"Provisioned"`
+		ClusterName string            `json:"ClusterName"`
+		Tags        map[string]string `json:"Tags"`
+		Provisioned *mskProvisionedIn `json:"Provisioned"`
+		Serverless  *struct {
+			VpcConfigs           []MSKVpcConfig                     `json:"VpcConfigs"`
+			ClientAuthentication *MSKServerlessClientAuthentication `json:"ClientAuthentication"`
+		} `json:"Serverless"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, mskInvalidBody()
 		}
 	}
-	if input.ClusterName == "" {
-		return nil, mskBadRequest("ClusterName is required")
+	if err := mskCheckClusterName(input.ClusterName); err != nil {
+		return nil, err
 	}
-	// Prefer fields from the Provisioned sub-object (V2 shape).
-	if input.Provisioned != nil {
-		if input.Provisioned.KafkaVersion != "" {
-			input.KafkaVersion = input.Provisioned.KafkaVersion
-		}
-		if input.Provisioned.NumberOfBrokerNodes != 0 {
-			input.NumberOfBrokerNodes = input.Provisioned.NumberOfBrokerNodes
-		}
-		if input.Provisioned.BrokerNodeGroupInfo.InstanceType != "" {
-			input.BrokerNodeGroupInfo = input.Provisioned.BrokerNodeGroupInfo
-		}
+	switch {
+	case input.Provisioned == nil && input.Serverless == nil:
+		return nil, mskBadRequest("provisioned", "one of provisioned or serverless is required")
+	case input.Provisioned != nil && input.Serverless != nil:
+		return nil, mskBadRequest("serverless", "only one of provisioned or serverless may be given")
 	}
 
-	// Delegate to the same state-write logic as CreateCluster by building a synthetic V1 request.
-	v1Body, err := json.Marshal(map[string]interface{}{
-		"ClusterName":         input.ClusterName,
-		"KafkaVersion":        input.KafkaVersion,
-		"NumberOfBrokerNodes": input.NumberOfBrokerNodes,
-		"BrokerNodeGroupInfo": input.BrokerNodeGroupInfo,
-		"Tags":                input.Tags,
+	cluster := p.newCluster(reqCtx, input.ClusterName, input.Tags)
+	if input.Provisioned != nil {
+		if err := input.Provisioned.check(false); err != nil {
+			return nil, err
+		}
+		cluster.ClusterType = mskClusterTypeProvisioned
+		input.Provisioned.apply(&cluster)
+	} else {
+		sv := input.Serverless
+		if sv.VpcConfigs == nil {
+			return nil, mskBadRequest("vpcConfigs", "serverless.vpcConfigs is required")
+		}
+		for _, v := range sv.VpcConfigs {
+			if v.SubnetIDs == nil {
+				return nil, mskBadRequest("subnetIds", "serverless.vpcConfigs[].subnetIds is required")
+			}
+		}
+		if sv.ClientAuthentication == nil {
+			return nil, mskBadRequest("clientAuthentication", "serverless.clientAuthentication is required")
+		}
+		cluster.ClusterType = mskClusterTypeServerless
+		cluster.Serverless = &MSKServerless{VpcConfigs: sv.VpcConfigs, ClientAuthentication: *sv.ClientAuthentication}
+	}
+	if err := p.storeNewCluster(reqCtx, &cluster); err != nil {
+		return nil, err
+	}
+	return mskJSONResponse(http.StatusOK, map[string]interface{}{
+		"clusterArn":  cluster.ClusterARN,
+		"clusterName": cluster.ClusterName,
+		"clusterType": cluster.ClusterType,
+		"state":       cluster.State,
 	})
-	if err != nil {
-		return nil, fmt.Errorf("msk createClusterV2 marshal: %w", err)
-	}
-	v1Req := &AWSRequest{
-		Service:   req.Service,
-		Operation: "POST",
-		Path:      "/v1/clusters",
-		Body:      v1Body,
-	}
-	return p.createCluster(reqCtx, v1Req)
 }
 
-// describeClusterV2 returns cluster details in the V2 ClusterInfo shape.
+// describeClusterV2 returns cluster details in the V2 Cluster shape, under clusterInfo, as
+// v2-clusters-clusterarn.html publishes.
 func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	// Reachable since #1009, as in describeCluster. getBootstrapBrokers and listNodes never had the
 	// problem, because a literal segment follows the ARN and the empty parameter is interior.
 	if clusterARN == "" {
-		return nil, mskBadRequest("cluster ARN is required")
+		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -408,38 +699,47 @@ func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterA
 	})
 }
 
-// listClustersV2 returns all clusters in the V2 ClusterInfo shape.
+// listClustersV2 handles ListClustersV2 (GET /api/v2/clusters). It reads the four query parameters
+// v2-clusters.html publishes: clusterNameFilter ("Returns clusters starting with given name"),
+// clusterTypeFilter ("Returns clusters with the given type", PROVISIONED or SERVERLESS; any other value
+// is refused naming the parameter), maxResults and nextToken (see [mskPage]).
 func (p *MSKPlugin) listClustersV2(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	names, err := loadStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope)
+	typeFilter := req.Params["clusterTypeFilter"]
+	switch typeFilter {
+	case "", mskClusterTypeProvisioned, mskClusterTypeServerless:
+	default:
+		return nil, mskBadRequest("clusterTypeFilter", "clusterTypeFilter must be PROVISIONED or SERVERLESS")
+	}
+	clusters, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
 	if err != nil {
-		return nil, fmt.Errorf("msk listClustersV2 load index: %w", err)
+		return nil, err
 	}
-
-	infos := make([]mskClusterOut, 0, len(names))
-	for _, name := range names {
-		data, getErr := p.state.Get(context.Background(), mskNamespace, "cluster:"+scope+"/"+name)
-		if getErr != nil || data == nil {
+	infos := make([]mskClusterOut, 0, len(clusters))
+	for _, c := range clusters {
+		if typeFilter != "" && mskClusterTypeOf(c) != typeFilter {
 			continue
 		}
-		var c MSKCluster
-		if json.Unmarshal(data, &c) != nil {
-			continue
-		}
-		infos = append(infos, mskClusterWire(&c))
+		infos = append(infos, mskClusterWire(c))
 	}
-	_ = req
-	// nextToken is omitted rather than sent empty: substrate returns every cluster
-	// in one page, and an empty token would invite a caller to page on it.
-	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"clusterInfoList": infos,
-	})
+	page, next, err := mskPage(infos, req)
+	if err != nil {
+		return nil, err
+	}
+	resp := map[string]interface{}{"clusterInfoList": page}
+	if next != "" {
+		resp["nextToken"] = next
+	}
+	return mskJSONResponse(http.StatusOK, resp)
 }
 
-// listNodes returns synthetic broker node information for an MSK cluster.
-func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
+// listNodes handles ListNodes: one node per broker, with each broker's endpoint the host
+// GetBootstrapBrokers names, and brokers spread over the client subnets in order, the even
+// distribution clusters.html describes. It pages with maxResults and nextToken (see [mskPage]). A
+// serverless cluster has no brokers a caller manages, so it lists none — substrate's reading; the page
+// does not address serverless clusters.
+func (p *MSKPlugin) listNodes(_ *RequestContext, req *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	if clusterARN == "" {
-		return nil, mskBadRequest("cluster ARN is required")
+		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
 	cluster, err := p.loadClusterByARN(clusterARN)
 	if err != nil {
@@ -453,40 +753,39 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, _ *AWSRequest, clusterARN strin
 		uuid = arnParts[2]
 	}
 
-	clientSubnet := ""
-	if len(cluster.BrokerNodeGroupInfo.ClientSubnets) > 0 {
-		clientSubnet = cluster.BrokerNodeGroupInfo.ClientSubnets[0]
-	}
-
-	n := cluster.NumberOfBrokerNodes
-	if n <= 0 {
-		n = 2
-	}
-	nodes := make([]MSKNodeInfo, n)
-	for i := 0; i < n; i++ {
-		brokerID := float64(i + 1)
-		nodeARN := fmt.Sprintf("arn:aws:kafka:%s:%s:broker/%s/%s/%d",
-			cluster.Region, cluster.AccountID, cluster.ClusterName, uuid, i+1)
-		nodes[i] = MSKNodeInfo{
-			BrokerNodeInfo: MSKBrokerNodeInfo{
-				BrokerID:     brokerID,
-				ClientSubnet: clientSubnet,
-				CurrentBrokerSoftwareInfo: MSKBrokerSoftwareInfo{
-					KafkaVersion: cluster.KafkaVersion,
+	out := []mskNodeInfoOut{}
+	if mskClusterTypeOf(cluster) == mskClusterTypeProvisioned {
+		subnets := cluster.BrokerNodeGroupInfo.ClientSubnets
+		for i, host := range mskBrokerHosts(cluster) {
+			clientSubnet := ""
+			if len(subnets) > 0 {
+				clientSubnet = subnets[i%len(subnets)]
+			}
+			out = append(out, mskNodeInfoWire(MSKNodeInfo{
+				BrokerNodeInfo: MSKBrokerNodeInfo{
+					BrokerID:     float64(i + 1),
+					ClientSubnet: clientSubnet,
+					CurrentBrokerSoftwareInfo: MSKBrokerSoftwareInfo{
+						KafkaVersion: cluster.KafkaVersion,
+					},
+					Endpoints: []string{host},
 				},
-			},
-			InstanceType: cluster.BrokerNodeGroupInfo.InstanceType,
-			NodeARN:      nodeARN,
-			NodeType:     "BROKER",
+				InstanceType: cluster.BrokerNodeGroupInfo.InstanceType,
+				NodeARN: fmt.Sprintf("arn:aws:kafka:%s:%s:broker/%s/%s/%d",
+					cluster.Region, cluster.AccountID, cluster.ClusterName, uuid, i+1),
+				NodeType: "BROKER",
+			}))
 		}
 	}
-	out := make([]mskNodeInfoOut, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, mskNodeInfoWire(n))
+	page, next, err := mskPage(out, req)
+	if err != nil {
+		return nil, err
 	}
-	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"nodeInfoList": out,
-	})
+	resp := map[string]interface{}{"nodeInfoList": page}
+	if next != "" {
+		resp["nextToken"] = next
+	}
+	return mskJSONResponse(http.StatusOK, resp)
 }
 
 // mskClusterUUID mints the UUID a cluster ARN ends in: a version-4 UUID and a one-digit suffix,

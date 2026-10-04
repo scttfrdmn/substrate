@@ -61,6 +61,13 @@ func (p *CodeDeployPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest
 	}
 }
 
+// codedeployListPageSize is how many application names one ListApplications page answers.
+//
+// API_ListApplications publishes nextToken and no page-size member, and states no page size. 100 is
+// substrate's reading, recorded here so it is not mistaken for a published figure: it is large enough
+// that an ordinary account fits on one page, and small enough that a test can force a second.
+const codedeployListPageSize = 100
+
 func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ApplicationName string `json:"applicationName"`
@@ -71,11 +78,15 @@ func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSReq
 			return nil, codedeployInvalidBody()
 		}
 	}
-	if input.ApplicationName == "" {
-		return nil, &AWSError{Code: "InvalidInputException", Message: "applicationName is required", HTTPStatus: http.StatusBadRequest}
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
 	}
+	// computePlatform is Required: No. An absent one is Server, the platform GetApplication reports
+	// for an application created without one; a present one must be a published value.
 	if input.ComputePlatform == "" {
 		input.ComputePlatform = "Server"
+	} else if !codedeployComputePlatforms[input.ComputePlatform] {
+		return nil, codedeployErr("InvalidComputePlatformException", "The computePlatform is invalid. The computePlatform should be Lambda, Server, or ECS.")
 	}
 
 	goCtx := context.Background()
@@ -85,7 +96,7 @@ func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("codedeploy createApplication get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ApplicationAlreadyExistsException", Message: "Application " + input.ApplicationName + " already exists.", HTTPStatus: http.StatusBadRequest}
+		return nil, codedeployErr("ApplicationAlreadyExistsException", "Application "+input.ApplicationName+" already exists.")
 	}
 
 	appID := generateCodeDeployAppID(reqCtx.IDs)
@@ -121,6 +132,9 @@ func (p *CodeDeployPlugin) getApplication(reqCtx *RequestContext, req *AWSReques
 			return nil, codedeployInvalidBody()
 		}
 	}
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
+	}
 
 	app, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName)
 	if err != nil {
@@ -132,6 +146,13 @@ func (p *CodeDeployPlugin) getApplication(reqCtx *RequestContext, req *AWSReques
 	})
 }
 
+// deleteApplication handles DeleteApplication.
+//
+// API_DeleteApplication publishes ApplicationNameRequiredException, InvalidApplicationNameException and
+// InvalidRoleException, and on success "an HTTP 200 response with an empty HTTP body". It publishes no
+// not-found code, so deleting an application that does not exist succeeds rather than answering
+// ApplicationDoesNotExistException, a code published on four other pages (#1198). The application's
+// deployment groups go with it, since a group is addressed only through its application.
 func (p *CodeDeployPlugin) deleteApplication(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ApplicationName string `json:"applicationName"`
@@ -141,52 +162,138 @@ func (p *CodeDeployPlugin) deleteApplication(reqCtx *RequestContext, req *AWSReq
 			return nil, codedeployInvalidBody()
 		}
 	}
-
-	if _, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName); err != nil {
-		return nil, err
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
 	}
 
 	goCtx := context.Background()
+	groupsKey := codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName)
+	groups, err := loadStringIndex(goCtx, p.state, codedeployNamespace, groupsKey)
+	if err != nil {
+		return nil, fmt.Errorf("codedeploy deleteApplication load groups: %w", err)
+	}
+	for _, group := range groups {
+		if err := p.state.Delete(goCtx, codedeployNamespace, codedeployGroupKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, group)); err != nil {
+			return nil, fmt.Errorf("codedeploy deleteApplication delete group: %w", err)
+		}
+	}
+	if len(groups) > 0 {
+		if err := p.state.Delete(goCtx, codedeployNamespace, groupsKey); err != nil {
+			return nil, fmt.Errorf("codedeploy deleteApplication delete group index: %w", err)
+		}
+	}
 	key := codedeployAppKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName)
 	if err := p.state.Delete(goCtx, codedeployNamespace, key); err != nil {
 		return nil, fmt.Errorf("codedeploy deleteApplication delete: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region), input.ApplicationName)
 
-	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{})
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+	}, nil
 }
 
-func (p *CodeDeployPlugin) listApplications(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	names, err := loadStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region))
-	if err != nil {
-		return nil, fmt.Errorf("codedeploy listApplications load index: %w", err)
-	}
-	if names == nil {
-		names = []string{}
-	}
-	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"applications": names,
-	})
-}
-
-func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// listApplications handles ListApplications.
+//
+// nextToken is the only request member API_ListApplications publishes, and InvalidNextTokenException is
+// its only published error (#1195). A page is [codedeployListPageSize] names in the index's insertion
+// order, which is stable; the token is the offset of the next page, issued only when one exists, so
+// the last page carries no nextToken rather than an empty one. A token substrate did not issue is
+// refused rather than read as page one.
+func (p *CodeDeployPlugin) listApplications(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ApplicationName     string `json:"applicationName"`
-		DeploymentGroupName string `json:"deploymentGroupName"`
-		ServiceRoleArn      string `json:"serviceRoleArn"`
+		NextToken string `json:"nextToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, codedeployInvalidBody()
 		}
 	}
-	if input.ApplicationName == "" || input.DeploymentGroupName == "" {
-		return nil, &AWSError{Code: "InvalidInputException", Message: "applicationName and deploymentGroupName are required", HTTPStatus: http.StatusBadRequest}
+	offset, ok := decodeOffsetPaginationToken(input.NextToken)
+	if !ok {
+		return nil, codedeployErr("InvalidNextTokenException", "The next token was specified in an invalid format.")
 	}
 
-	// Verify the application exists.
-	if _, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName); err != nil {
+	goCtx := context.Background()
+	names, err := loadStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region))
+	if err != nil {
+		return nil, fmt.Errorf("codedeploy listApplications load index: %w", err)
+	}
+	page, next := pageByOffsetToken(names, offset, codedeployListPageSize)
+	if page == nil {
+		page = []string{}
+	}
+	out := map[string]interface{}{"applications": page}
+	if next != "" {
+		out["nextToken"] = next
+	}
+	return codedeployJSONResponse(http.StatusOK, out)
+}
+
+// createDeploymentGroup handles CreateDeploymentGroup.
+//
+// serviceRoleArn is Required: Yes, and its absence is RoleRequiredException (#1197). The members
+// DeploymentGroupInfo answers back unchanged are recorded as sent; see [codedeployGroupEchoMembers].
+// The checks that need no state come first, so a malformed request is refused for what it is before
+// the application is looked up.
+//
+// Two published combinations are refused because they are decidable from the body alone:
+// ec2TagFilters with ec2TagSet (InvalidEC2TagCombinationException) and onPremisesInstanceTagFilters with
+// onPremisesTagSet (InvalidOnPremisesTagCombinationException). outdatedInstancesStrategy is checked
+// against its Valid Values, UPDATE | IGNORE, under InvalidInputException, the page's own code for "input
+// specified in an invalid format"; no narrower code is published for it.
+//
+// The rest of the page's codes have no site, each because what it checks is not modeled: the
+// configuration, Auto Scaling group, load balancer, ECS service and alarm a member names are not looked
+// up, and the limits are not counted.
+func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		ApplicationName           string   `json:"applicationName"`
+		DeploymentGroupName       string   `json:"deploymentGroupName"`
+		ServiceRoleArn            string   `json:"serviceRoleArn"`
+		DeploymentConfigName      string   `json:"deploymentConfigName"`
+		AutoScalingGroups         []string `json:"autoScalingGroups"`
+		OutdatedInstancesStrategy string   `json:"outdatedInstancesStrategy"`
+	}
+	var raw map[string]json.RawMessage
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return nil, codedeployInvalidBody()
+		}
+		if err := json.Unmarshal(req.Body, &raw); err != nil {
+			return nil, codedeployInvalidBody()
+		}
+	}
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := codedeployCheckGroupName(input.DeploymentGroupName); awsErr != nil {
+		return nil, awsErr
+	}
+	if input.ServiceRoleArn == "" {
+		return nil, codedeployErr("RoleRequiredException", "The role ID was not specified.")
+	}
+	if !codedeployRoleARNPattern.MatchString(input.ServiceRoleArn) {
+		return nil, codedeployErr("InvalidRoleException", "The service role ARN was specified in an invalid format.")
+	}
+	if awsErr := codedeployCheckConfigName(input.DeploymentConfigName); awsErr != nil {
+		return nil, awsErr
+	}
+	if codedeployPresent(raw, "ec2TagFilters") && codedeployPresent(raw, "ec2TagSet") {
+		return nil, codedeployErr("InvalidEC2TagCombinationException", "A call was submitted that specified both Ec2TagFilters and Ec2TagSet, but only one of these data types can be used in a single call.")
+	}
+	if codedeployPresent(raw, "onPremisesInstanceTagFilters") && codedeployPresent(raw, "onPremisesTagSet") {
+		return nil, codedeployErr("InvalidOnPremisesTagCombinationException", "A call was submitted that specified both OnPremisesTagFilters and OnPremisesTagSet, but only one of these data types can be used in a single call.")
+	}
+	switch input.OutdatedInstancesStrategy {
+	case "", "UPDATE", "IGNORE":
+	default:
+		return nil, codedeployErr("InvalidInputException", "outdatedInstancesStrategy must be UPDATE or IGNORE.")
+	}
+
+	app, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName)
+	if err != nil {
 		return nil, err
 	}
 
@@ -197,25 +304,24 @@ func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AW
 		return nil, fmt.Errorf("codedeploy createDeploymentGroup get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "DeploymentGroupAlreadyExistsException", Message: "Deployment group " + input.DeploymentGroupName + " already exists.", HTTPStatus: http.StatusBadRequest}
+		return nil, codedeployErr("DeploymentGroupAlreadyExistsException", "Deployment group "+input.DeploymentGroupName+" already exists.")
 	}
 
 	groupID := generateCodeDeployGroupID(reqCtx.IDs)
 	group := CodeDeployGroup{
-		DeploymentGroupID:   groupID,
-		DeploymentGroupName: input.DeploymentGroupName,
-		ApplicationName:     input.ApplicationName,
-		ServiceRoleArn:      input.ServiceRoleArn,
-		AccountID:           reqCtx.AccountID,
-		Region:              reqCtx.Region,
+		DeploymentGroupID:    groupID,
+		DeploymentGroupName:  input.DeploymentGroupName,
+		ApplicationName:      input.ApplicationName,
+		ServiceRoleArn:       input.ServiceRoleArn,
+		ComputePlatform:      app.ComputePlatform,
+		DeploymentConfigName: codedeployDefaultConfigFor(input.DeploymentConfigName, "", app.ComputePlatform),
+		AutoScalingGroups:    input.AutoScalingGroups,
+		Config:               codedeployEcho(raw, codedeployGroupEchoMembers),
+		AccountID:            reqCtx.AccountID,
+		Region:               reqCtx.Region,
 	}
-
-	data, err := json.Marshal(group)
-	if err != nil {
-		return nil, fmt.Errorf("codedeploy createDeploymentGroup marshal: %w", err)
-	}
-	if err := p.state.Put(goCtx, codedeployNamespace, key, data); err != nil {
-		return nil, fmt.Errorf("codedeploy createDeploymentGroup put: %w", err)
+	if err := p.putGroup(goCtx, key, group); err != nil {
+		return nil, err
 	}
 	updateStringIndex(goCtx, p.state, codedeployNamespace, codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName), input.DeploymentGroupName)
 
@@ -234,6 +340,17 @@ func (p *CodeDeployPlugin) getDeploymentGroup(reqCtx *RequestContext, req *AWSRe
 			return nil, codedeployInvalidBody()
 		}
 	}
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := codedeployCheckGroupName(input.DeploymentGroupName); awsErr != nil {
+		return nil, awsErr
+	}
+	// API_GetDeploymentGroup publishes ApplicationDoesNotExistException as well as the group's own
+	// not-found code, so the application is looked up first and each code reports the thing absent.
+	if _, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName); err != nil {
+		return nil, err
+	}
 
 	group, err := p.loadGroup(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, input.DeploymentGroupName)
 	if err != nil {
@@ -245,6 +362,13 @@ func (p *CodeDeployPlugin) getDeploymentGroup(reqCtx *RequestContext, req *AWSRe
 	})
 }
 
+// deleteDeploymentGroup handles DeleteDeploymentGroup.
+//
+// API_DeleteDeploymentGroup publishes the two name-required codes, the two invalid-name codes and
+// InvalidRoleException, and no not-found code. So deleting a group that does not exist succeeds with
+// the published body rather than answering DeploymentGroupDoesNotExistException (#1198).
+// hooksNotCleanedUp is always empty: no Auto Scaling lifecycle hook is installed, so none is left
+// behind.
 func (p *CodeDeployPlugin) deleteDeploymentGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ApplicationName     string `json:"applicationName"`
@@ -255,9 +379,11 @@ func (p *CodeDeployPlugin) deleteDeploymentGroup(reqCtx *RequestContext, req *AW
 			return nil, codedeployInvalidBody()
 		}
 	}
-
-	if _, err := p.loadGroup(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, input.DeploymentGroupName); err != nil {
-		return nil, err
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := codedeployCheckGroupName(input.DeploymentGroupName); awsErr != nil {
+		return nil, awsErr
 	}
 
 	goCtx := context.Background()
@@ -272,41 +398,102 @@ func (p *CodeDeployPlugin) deleteDeploymentGroup(reqCtx *RequestContext, req *AW
 	})
 }
 
+// createDeployment handles CreateDeployment.
+//
+// deploymentGroupName is Required: No on API_CreateDeployment, so a deployment may name none; when it
+// does, the group must exist. The request members DeploymentInfo answers back are recorded as sent
+// (see [codedeployDeploymentEchoMembers]), with two published Valid Values checked:
+// fileExistsBehavior (InvalidFileExistsBehaviorException) and deploymentMode (InvalidInputException,
+// the page's code for input in an invalid format; no narrower one is published). deploymentMode is
+// recorded only as RESTART: DeploymentInfo's page says the member "is absent … for STANDARD
+// deployments" and that an absent value "must not be interpreted as STANDARD".
+//
+// The deployment completes at once (#1196 owns making it progress), so startTime, createTime and
+// completeTime are the same instant, and the group's lastAttemptedDeployment, lastSuccessfulDeployment
+// and targetRevision are updated in the same request.
 func (p *CodeDeployPlugin) createDeployment(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ApplicationName     string `json:"applicationName"`
-		DeploymentGroupName string `json:"deploymentGroupName"`
+		ApplicationName      string `json:"applicationName"`
+		DeploymentGroupName  string `json:"deploymentGroupName"`
+		DeploymentConfigName string `json:"deploymentConfigName"`
+		FileExistsBehavior   string `json:"fileExistsBehavior"`
+		DeploymentMode       string `json:"deploymentMode"`
 	}
+	var raw map[string]json.RawMessage
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, codedeployInvalidBody()
 		}
+		if err := json.Unmarshal(req.Body, &raw); err != nil {
+			return nil, codedeployInvalidBody()
+		}
 	}
-	if input.ApplicationName == "" {
-		return nil, &AWSError{Code: "InvalidInputException", Message: "applicationName is required", HTTPStatus: http.StatusBadRequest}
-	}
-
-	// Verify both application and deployment group exist.
-	if _, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName); err != nil {
-		return nil, err
+	if awsErr := codedeployCheckApplicationName(input.ApplicationName); awsErr != nil {
+		return nil, awsErr
 	}
 	if input.DeploymentGroupName != "" {
-		if _, err := p.loadGroup(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, input.DeploymentGroupName); err != nil {
+		if awsErr := codedeployCheckGroupName(input.DeploymentGroupName); awsErr != nil {
+			return nil, awsErr
+		}
+	}
+	if awsErr := codedeployCheckConfigName(input.DeploymentConfigName); awsErr != nil {
+		return nil, awsErr
+	}
+	switch input.FileExistsBehavior {
+	case "", "DISALLOW", "OVERWRITE", "RETAIN":
+	default:
+		return nil, codedeployErr("InvalidFileExistsBehaviorException", `An invalid fileExistsBehavior option was specified. Valid values include "DISALLOW," "OVERWRITE," and "RETAIN."`)
+	}
+	switch input.DeploymentMode {
+	case "", "STANDARD", "RESTART":
+	default:
+		return nil, codedeployErr("InvalidInputException", "deploymentMode must be STANDARD or RESTART.")
+	}
+
+	app, err := p.loadApp(reqCtx.AccountID, reqCtx.Region, input.ApplicationName)
+	if err != nil {
+		return nil, err
+	}
+	var group *CodeDeployGroup
+	if input.DeploymentGroupName != "" {
+		if group, err = p.loadGroup(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, input.DeploymentGroupName); err != nil {
 			return nil, err
+		}
+	}
+
+	config := codedeployEcho(raw, codedeployDeploymentEchoMembers)
+	if input.DeploymentMode != "RESTART" {
+		delete(config, "deploymentMode")
+	}
+	groupConfig := ""
+	if group != nil {
+		groupConfig = group.DeploymentConfigName
+		for _, member := range []string{"deploymentStyle", "loadBalancerInfo"} {
+			if v, ok := group.Config[member]; ok {
+				if config == nil {
+					config = map[string]json.RawMessage{}
+				}
+				config[member] = v
+			}
 		}
 	}
 
 	deploymentID := generateCodeDeployDeploymentID(reqCtx.IDs)
 	now := p.tc.Now()
 	deployment := CodeDeployDeployment{
-		DeploymentID:        deploymentID,
-		ApplicationName:     input.ApplicationName,
-		DeploymentGroupName: input.DeploymentGroupName,
-		Status:              "Succeeded",
-		CreateTime:          now,
-		CompleteTime:        now,
-		AccountID:           reqCtx.AccountID,
-		Region:              reqCtx.Region,
+		DeploymentID:         deploymentID,
+		ApplicationName:      input.ApplicationName,
+		DeploymentGroupName:  input.DeploymentGroupName,
+		Status:               "Succeeded",
+		CreateTime:           now,
+		StartTime:            now,
+		CompleteTime:         now,
+		Creator:              "user",
+		ComputePlatform:      app.ComputePlatform,
+		DeploymentConfigName: codedeployDefaultConfigFor(input.DeploymentConfigName, groupConfig, app.ComputePlatform),
+		Config:               config,
+		AccountID:            reqCtx.AccountID,
+		Region:               reqCtx.Region,
 	}
 
 	data, err := json.Marshal(deployment)
@@ -320,11 +507,32 @@ func (p *CodeDeployPlugin) createDeployment(reqCtx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("codedeploy createDeployment put: %w", err)
 	}
 
+	if group != nil {
+		ref := &CodeDeployDeploymentRef{DeploymentID: deploymentID, Status: deployment.Status, CreateTime: now, EndTime: now}
+		group.LastAttemptedDeployment = ref
+		group.LastSuccessfulDeployment = ref
+		if revision, ok := raw["revision"]; ok {
+			group.TargetRevision = revision
+		}
+		groupKey := codedeployGroupKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName, input.DeploymentGroupName)
+		if err := p.putGroup(goCtx, groupKey, *group); err != nil {
+			return nil, err
+		}
+	}
+
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
 		"deploymentId": deploymentID,
 	})
 }
 
+// getDeployment handles GetDeployment.
+//
+// An absent deploymentId is DeploymentIdRequiredException, published on API_GetDeployment, rather
+// than a lookup of the empty ID answering DeploymentDoesNotExistException, which reported the caller's
+// own validation bug as a missing resource (#1198). InvalidDeploymentIdException is published too and
+// has no site: the page gives deploymentId no pattern, and the d- shape substrate mints is observed
+// rather than published (see [generateCodeDeployDeploymentID]), so no ID is malformed by any rule the
+// page states.
 func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		DeploymentID string `json:"deploymentId"`
@@ -334,6 +542,9 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 			return nil, codedeployInvalidBody()
 		}
 	}
+	if input.DeploymentID == "" {
+		return nil, codedeployErr("DeploymentIdRequiredException", "At least one deployment ID must be specified.")
+	}
 
 	goCtx := context.Background()
 	key := codedeployDeploymentKey(reqCtx.AccountID, reqCtx.Region, input.DeploymentID)
@@ -342,7 +553,7 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("codedeploy getDeployment get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "DeploymentDoesNotExistException", Message: "Deployment " + input.DeploymentID + " does not exist.", HTTPStatus: http.StatusBadRequest}
+		return nil, codedeployErr("DeploymentDoesNotExistException", "Deployment "+input.DeploymentID+" does not exist.")
 	}
 
 	var deployment CodeDeployDeployment
@@ -355,10 +566,11 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 	})
 }
 
-// loadApp loads a CodeDeployApp from state by name or returns a not-found error.
+// loadApp loads a CodeDeployApp from state by name or returns a not-found error. Callers check the
+// name first; the empty-name guard here is the backstop that keeps an empty key from being read.
 func (p *CodeDeployPlugin) loadApp(acct, region, name string) (*CodeDeployApp, error) {
-	if name == "" {
-		return nil, &AWSError{Code: "InvalidInputException", Message: "applicationName is required", HTTPStatus: http.StatusBadRequest}
+	if awsErr := codedeployCheckApplicationName(name); awsErr != nil {
+		return nil, awsErr
 	}
 	goCtx := context.Background()
 	key := codedeployAppKey(acct, region, name)
@@ -367,7 +579,7 @@ func (p *CodeDeployPlugin) loadApp(acct, region, name string) (*CodeDeployApp, e
 		return nil, fmt.Errorf("codedeploy loadApp get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ApplicationDoesNotExistException", Message: "Application " + name + " does not exist.", HTTPStatus: http.StatusBadRequest}
+		return nil, codedeployErr("ApplicationDoesNotExistException", "Application "+name+" does not exist.")
 	}
 	var app CodeDeployApp
 	if err := json.Unmarshal(data, &app); err != nil {
@@ -378,8 +590,8 @@ func (p *CodeDeployPlugin) loadApp(acct, region, name string) (*CodeDeployApp, e
 
 // loadGroup loads a CodeDeployGroup from state or returns a not-found error.
 func (p *CodeDeployPlugin) loadGroup(acct, region, appName, groupName string) (*CodeDeployGroup, error) {
-	if groupName == "" {
-		return nil, &AWSError{Code: "InvalidInputException", Message: "deploymentGroupName is required", HTTPStatus: http.StatusBadRequest}
+	if awsErr := codedeployCheckGroupName(groupName); awsErr != nil {
+		return nil, awsErr
 	}
 	goCtx := context.Background()
 	key := codedeployGroupKey(acct, region, appName, groupName)
@@ -388,13 +600,66 @@ func (p *CodeDeployPlugin) loadGroup(acct, region, appName, groupName string) (*
 		return nil, fmt.Errorf("codedeploy loadGroup get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "DeploymentGroupDoesNotExistException", Message: "Deployment group " + groupName + " does not exist.", HTTPStatus: http.StatusBadRequest}
+		return nil, codedeployErr("DeploymentGroupDoesNotExistException", "Deployment group "+groupName+" does not exist.")
 	}
 	var group CodeDeployGroup
 	if err := json.Unmarshal(data, &group); err != nil {
 		return nil, fmt.Errorf("codedeploy loadGroup unmarshal: %w", err)
 	}
 	return &group, nil
+}
+
+// putGroup persists a deployment group.
+func (p *CodeDeployPlugin) putGroup(ctx context.Context, key string, group CodeDeployGroup) error {
+	data, err := json.Marshal(group)
+	if err != nil {
+		return fmt.Errorf("codedeploy group marshal: %w", err)
+	}
+	if err := p.state.Put(ctx, codedeployNamespace, key, data); err != nil {
+		return fmt.Errorf("codedeploy group put: %w", err)
+	}
+	return nil
+}
+
+// codedeployPresent reports whether a request member was sent and is not JSON null.
+func codedeployPresent(raw map[string]json.RawMessage, member string) bool {
+	v, ok := raw[member]
+	return ok && string(v) != "null"
+}
+
+// codedeployEcho returns the sent members among names, as the caller sent them, or nil if none was.
+func codedeployEcho(raw map[string]json.RawMessage, names []string) map[string]json.RawMessage {
+	var out map[string]json.RawMessage
+	for _, name := range names {
+		if codedeployPresent(raw, name) {
+			if out == nil {
+				out = map[string]json.RawMessage{}
+			}
+			out[name] = raw[name]
+		}
+	}
+	return out
+}
+
+// codedeployDefaultConfigFor resolves a deployment configuration name: the request's, else the
+// group's, else CodeDeployDefault.OneAtATime, which API_CreateDeploymentGroup and API_CreateDeployment
+// both name as the default.
+//
+// The default is applied only to a Server application. OneAtATime is an EC2/on-premises configuration,
+// and both pages state it as the default without qualifying the platform; a Lambda or ECS deployment
+// group's default is a different predefined configuration that the API Reference does not name. So for
+// those platforms an unnamed configuration stays unnamed rather than reporting one that would be wrong.
+func codedeployDefaultConfigFor(requested, group, platform string) string {
+	switch {
+	case requested != "":
+		return requested
+	case group != "":
+		return group
+	case platform == "" || platform == "Server":
+		return codedeployDefaultDeploymentConfig
+	default:
+		return ""
+	}
 }
 
 // State key helpers.
