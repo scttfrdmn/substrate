@@ -11054,18 +11054,18 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | DescribeLoadBalancerAttributes | |
 | ModifyLoadBalancerAttributes | |
 | CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
-| DescribeTargetGroups | Same target-group shape as CreateTargetGroup |
+| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. An ARN in `TargetGroupArns` naming nothing is refused `TargetGroupNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
 | DeleteTargetGroup | |
 | ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | RegisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DeregisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DescribeTargetHealth | An ARN naming nothing is refused `TargetGroupNotFound`/400 rather than answered an empty list ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
-| DescribeListeners | Same listener shape as CreateListener |
+| DescribeListeners | Same listener shape as CreateListener. An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
 | DeleteListener | An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | ModifyListener | Answers the modified listener. An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
-| DescribeRules | Same rule shape as CreateRule |
+| DescribeRules | Same rule shape as CreateRule. An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
 | DeleteRule | An ARN naming nothing is refused `RuleNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is refused `RuleNotFound`/400, and every pair is resolved before any is written, so a refused call reprices nothing ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | AddTags | Up to 50 user tags per resource |
@@ -11089,23 +11089,30 @@ of through an SDK's parser.
 Eight operations address one resource by ARN, scanned the caller's records for it, and on finding
 none fell through to a 200: an empty result list, or an empty success. Each now answers the
 not-found code its page publishes, at HTTP 400 with the page's sentence as the message
-([#1313](https://github.com/scttfrdmn/substrate/issues/1313)):
+([#1313](https://github.com/scttfrdmn/substrate/issues/1313)). The three describes that filter by an ARN *list* do the same for any ARN in it
+that names nothing ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)):
 
 | Code | Operations | Message |
 |------|------------|---------|
-| `TargetGroupNotFound` | `ModifyTargetGroup`, `RegisterTargets`, `DeregisterTargets`, `DescribeTargetHealth` | The specified target group does not exist. |
-| `ListenerNotFound` | `ModifyListener`, `DeleteListener` | The specified listener does not exist. |
-| `RuleNotFound` | `SetRulePriorities`, `DeleteRule` | The specified rule does not exist. |
+| `TargetGroupNotFound` | `ModifyTargetGroup`, `RegisterTargets`, `DeregisterTargets`, `DescribeTargetHealth`, `DescribeTargetGroups` | The specified target group does not exist. |
+| `ListenerNotFound` | `ModifyListener`, `DeleteListener`, `DescribeListeners` | The specified listener does not exist. |
+| `RuleNotFound` | `SetRulePriorities`, `DeleteRule`, `DescribeRules` | The specified rule does not exist. |
 
 Some operations are deliberately left alone. `API_DeleteTargetGroup` publishes no not-found code;
 its Errors list is `ResourceInUse` alone. `API_DeleteLoadBalancer` does list
 `LoadBalancerNotFound`, but its description says *"If the load balancer does not exist or has
 already been deleted, the call succeeds"*. That sentence addresses exactly this case and the Errors
-list does not, so the delete still succeeds. `DescribeTargetGroups`,
-`DescribeListeners` and `DescribeRules` filter by an ARN *list*, where an ARN naming nothing is a
-filter that matches nothing. Those pages do publish the not-found codes for an ARN in the list, and
-refusing one there is a separate change, still open. `Describe`/`ModifyLoadBalancerAttributes` read
-no ARN at all.
+list does not, so the delete still succeeds. `Describe`/`ModifyLoadBalancerAttributes` read no ARN
+at all.
+
+For the three list-filtered describes, one ARN naming nothing refuses the **whole** call, even beside
+ARNs that do name records. None of the three pages says whether a partial match answers the records
+it found; each publishes the code with a sentence about the request ("The specified target group does
+not exist."), so the request is what is refused. An ARN counts as held if the caller's account and
+Region hold a record of that kind under it, whatever the describe's other filters. Two neighbouring
+filters are unchanged and still match nothing silently: a `Names` entry naming no target group, and a
+`LoadBalancerArn` or `ListenerArn` naming nothing, though `DescribeTargetGroups` and
+`DescribeListeners` publish `LoadBalancerNotFound` and `DescribeRules` publishes `ListenerNotFound`.
 
 ### The response envelope, and which plugins still lack it
 
@@ -13073,9 +13080,9 @@ SNS publish: $0.0000005 per message.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateSecret | Tags are stored key-ordered, so two identical runs report them alike |
+| CreateSecret | Tags are stored key-ordered, so two identical runs report them alike. A `ClientRequestToken` becomes the initial version's `VersionId`, and a retried create is idempotent — see [A version's identity is its `ClientRequestToken`](#a-versions-identity-is-its-clientrequesttoken) |
 | GetSecretValue | Returns SecretString or SecretBinary; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
-| PutSecretValue | Creates a new version; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| PutSecretValue | Creates a new version under the caller's `ClientRequestToken`; a resubmitted token is a no-op with the same value and `ResourceExistsException` with a different one — see [A version's identity is its `ClientRequestToken`](#a-versions-identity-is-its-clientrequesttoken). Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | UpdateSecret | Rewrites `Description`, `KmsKeyId` and the value; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
@@ -13086,13 +13093,34 @@ SNS publish: $0.0000005 per message.
 | UntagResource | Idempotent — an absent key is not an error — but a secret scheduled for deletion is refused even then, see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed, and a secret scheduled for deletion is refused — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
 
-A version ID is minted from the request ID (#856), so a replayed `CreateSecret` or `PutSecretValue`
-reports the version the recording reported and the recorded `GetSecretValue` naming it still answers
-its value. Two things about the value are known-unfaithful and tracked on
-[#1285](https://github.com/scttfrdmn/substrate/issues/1285): it is sixteen characters where
-`VersionId` publishes a minimum of 32, and `CreateSecret` and `PutSecretValue` mint their own rather
-than using the caller's `ClientRequestToken`, which AWS documents as *becoming* the version ID and
-builds an idempotency contract on. `RotateSecret` already echoes the token it was sent.
+### A version's identity is its `ClientRequestToken`
+
+`API_PutSecretValue`, `API_CreateSecret` and `API_RotateSecret` each say the request's
+`ClientRequestToken` "becomes the `VersionId` of the new version", and all three publish it, like
+`VersionId`, as 32 to 64 characters. Since
+[#1285](https://github.com/scttfrdmn/substrate/issues/1285) all three use the token they were sent,
+and `GetSecretValue` reaches the version by it. `PutSecretValue` and `CreateSecret` also honour the
+idempotency contract both pages publish on the token:
+
+| Request | Answer |
+|---|---|
+| A token not yet a version of the secret | A new version under that `VersionId` |
+| A token naming an existing version, with the same `SecretString`/`SecretBinary` | `200` reporting that version; nothing is written and `AWSCURRENT` does not move |
+| A token naming an existing version, with a different value | `ResourceExistsException`/400; the version keeps its value |
+| A token shorter than 32 or longer than 64 characters | `InvalidParameterException`/400, nothing written |
+
+For `CreateSecret` the retry case is a create of a name that already exists: the same token and
+value answer the first create's `ARN`, `Name` and `VersionId`, and any other create of that name is
+the name collision it always was. `ResourceExistsException` is the code each page publishes that
+fits a version that "can't be modified"; `InvalidRequestException` is published too, but none of
+its listed causes is this one.
+
+With no token, substrate mints the version ID from the request ID (#856), so a replayed
+`CreateSecret` or `PutSecretValue` reports the version the recording reported and the recorded
+`GetSecretValue` naming it still answers its value. The minted rendering is a version-4 UUID, 36
+characters: `VersionId` publishes a width and no pattern, and the UUID is what the pages recommend
+for the token, what the CLI and SDKs generate, and the shape of every example version ID. Until
+#1285 it was sixteen uppercase hex characters, half the published minimum.
 
 ### A `SecretId` addresses the secret its own ARN names
 
@@ -13321,6 +13349,7 @@ through `DescribeSecret` and so belongs here.
 |---|---|
 | `RotateSecret` with a `ClientRequestToken` and a `RotationLambdaARN` | `200` with `ARN`, `Name` and `VersionId` |
 | `RotateSecret` with no `ClientRequestToken` | `InvalidParameterException`/400, nothing written |
+| A `ClientRequestToken` outside the published 32–64 characters | `InvalidParameterException`/400, nothing written (#1285) |
 | `RotateSecret` on a secret with no rotation function, naming none | `InvalidRequestException`/400 naming the cause, nothing written |
 | `RotateSecret` naming no function on a secret that already has one | `200` — the stored function is used and is not cleared |
 | `RotationRules` with both `AutomaticallyAfterDays` and `ScheduleExpression` | `InvalidParameterException`/400, nothing written |
@@ -21632,9 +21661,9 @@ Substrate has never seen reports an empty `VpcId`.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFileSystem | Answers `{"FileSystem"}` as published. [Neither `Required: Yes` member is checked and no member is validated](#createfilesystem-validates-none-of-its-members); [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` is not read](#clientrequesttoken-is-not-read-so-creating-a-file-system-twice-creates-two) |
+| CreateFileSystem | Answers `{"FileSystem"}` as published. [Neither `Required: Yes` member is checked and no member is validated](#createfilesystem-validates-none-of-its-members); [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` makes a retry answer the file system it first created](#clientrequesttoken-makes-create-and-delete-idempotent) |
 | DescribeFileSystems | Describes the IDs given, or every non-deleted file system when `FileSystemIds` is absent, which is what the page publishes. [`MaxResults` and `NextToken` are ignored and no token is emitted](#describefilesystems-answers-every-file-system-in-one-page) |
-| DeleteFileSystem | A soft delete. [The response body is the wrong shape](#deletefilesystem-answers-a-file-system-object-where-the-published-response-is-flat) and [the lifecycle it records is not a published value](#a-deleted-file-system-carries-a-lifecycle-the-api-does-not-publish) |
+| DeleteFileSystem | [Answers the published flat shape with `Lifecycle` `DELETING`, and removes the file system](#deletefilesystem-answers-the-published-flat-shape-and-reports-deleting); [`ClientRequestToken` makes a retry answer the first delete](#clientrequesttoken-makes-create-and-delete-idempotent) |
 
 Everything else on the FSx API is unrouted: `CreateFileSystemFromBackup` and `UpdateFileSystem`, the
 backup surface (`CreateBackup`, `CopyBackup`, `DeleteBackup`, `DescribeBackups`), the volume and
@@ -21644,27 +21673,33 @@ call to any of them is refused as an unrecognised action, so an FSx file system 
 up, restored, resized, or read through a data repository — and because `ListTagsForResource` is
 unrouted, a file system's tags can only be read back inside the file system record itself.
 
-### DeleteFileSystem answers a file system object where the published response is flat
+### DeleteFileSystem answers the published flat shape and reports DELETING
 
-`API_DeleteFileSystem` publishes a response of five top-level members — `FileSystemId`, `Lifecycle`,
-`LustreResponse`, `OpenZFSResponse` and `WindowsResponse` — and no `FileSystem` member. Substrate
-answers the whole file-system record under a `FileSystem` key, the shape `CreateFileSystem` uses. An
-SDK's `DeleteFileSystemOutput` unmarshals that as an empty struct: the ID is nil and the lifecycle is
-the empty string, so a caller cannot read back which file system it deleted or what state the delete
-left it in. [#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+`API_DeleteFileSystem` publishes a flat response: `FileSystemId`, `Lifecycle`, and the per-type
+`LustreResponse`, `OpenZFSResponse` or `WindowsResponse`. Until
+[#1210](https://github.com/scttfrdmn/substrate/issues/1210), Substrate answered the whole record under
+a `FileSystem` key, the `CreateFileSystem` shape, which an SDK's `DeleteFileSystemOutput` decodes as
+empty, and reported `DELETED`, which is on no FSx page. It now answers the flat shape, with
+`Lifecycle` `DELETING`, as the page publishes: "If the `DeleteFileSystem` operation is successful,
+this status is `DELETING`." (#1210 named the member `LifecycleStatus`; the page names it `Lifecycle`,
+and the page is what this follows.)
 
-### A deleted file system carries a Lifecycle the API does not publish
+The per-type object carries `FinalBackupId` and `FinalBackupTags`. Substrate models no backup, so
+`FinalBackupId` is never answered. `WindowsResponse` is answered for a `WINDOWS` file system, the one
+type whose delete takes a final backup by default. `LustreResponse` and `OpenZFSResponse` are answered
+when the request carried that type's configuration. Each echoes the `FinalBackupTags` it was sent.
 
-The delete marks the record `DELETED`. The published `Lifecycle` values are `AVAILABLE | CREATING |
-FAILED | DELETING | MISCONFIGURED | UPDATING | MISCONFIGURED_UNAVAILABLE`, and the page states that
-"If the `DeleteFileSystem` operation is successful, this status is `DELETING`." `DELETED` is on no
-FSx page, so a consumer switching on the published enum falls through every arm. The value is also
-load-bearing inside the plugin, which treats it as not-found on `DescribeFileSystems` and filters it
-out of the list, so the published `DELETING` window is never observable: a file system is available
-and then absent. Reporting `DELETING` is the published behaviour and would keep the SDK's delete
-waiter working, because the page also publishes that describing a deleted file system answers
-`FileSystemNotFound`.
-[#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+**A deleted file system is removed at once.** The page says the delete "returns while the file system
+has the `DELETING` status", and that `DescribeFileSystems` on a deleted ID "returns a
+`FileSystemNotFound` error". Substrate removes the record in the delete, so the next describe answers
+`FileSystemNotFound`, and an SDK's deletion waiter completes on its first poll. A second delete of the
+same ID answers `FileSystemNotFound` too. Making `DELETING` observable to `DescribeFileSystems` for a
+seeded number of observations is the progression
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196) owns, for `CREATING` as well.
+
+The lifecycle values FSx reports are therefore `AVAILABLE`, on every file system that exists, and
+`DELETING`, on the delete response. A record a recording made before #1210 soft-deleted with
+`DELETED` still reads back as absent.
 
 ### A new file system is AVAILABLE and was never CREATING
 
@@ -21692,16 +21727,28 @@ on `BadRequest`/400, "A generic error indicating a failure with a client request
 entry in the operation's own Errors section and already has a constructor in the plugin.
 [#1197](https://github.com/scttfrdmn/substrate/issues/1197).
 
-### ClientRequestToken is not read so creating a file system twice creates two
+### ClientRequestToken makes create and delete idempotent
 
-The page publishes the whole idempotency contract: "If a file system with the specified client request
+`API_CreateFileSystem` publishes the contract: "If a file system with the specified client request
 token exists and the parameters match, `CreateFileSystem` returns the description of the existing file
 system. If a file system with the specified client request token exists and the parameters don't
-match, this call returns `IncompatibleParameterError`." Substrate does not decode the token, so the
-same request sent twice creates two file systems with different IDs and `IncompatibleParameterError`,
-published at 400, has no site in the plugin. A consumer testing its own retry-on-timeout path — the
-case the token exists for — observes a duplicate resource instead of the published replay.
-[#1210](https://github.com/scttfrdmn/substrate/issues/1210).
+match, this call returns `IncompatibleParameterError`." `API_DeleteFileSystem` publishes the same token
+"to ensure idempotent deletion", and the same `IncompatibleParameterError`/400. Until
+[#1210](https://github.com/scttfrdmn/substrate/issues/1210) neither token was read, so a retried
+create made a second file system.
+
+Both are honoured now. A token is recorded per account, Region and operation, with a fingerprint of
+every other request member.
+- **A retried create** with the same parameters answers the file system the first create made, in its
+  current state. If that file system has been deleted since, the retry answers `FileSystemNotFound`.
+- **A retried delete** answers the first delete's response, although the file system is gone.
+- **Different parameters** under a used token answer `IncompatibleParameterError`/400.
+- **A token outside the published constraint** (1 to 63 characters matching `[A-za-z0-9_.-]`, the
+  class as published) is refused `BadRequest`/400.
+
+The tokens are state, so they replay with everything else. An SDK fills the token in on every call,
+so a consumer's retry-on-timeout path, the case the token exists for, now observes the published
+replay.
 
 ### DescribeFileSystems answers every file system in one page
 
@@ -21723,8 +21770,11 @@ case a test wants to reach and cannot.
 for Lustre file systems so that an SDK consumer can dereference the mount name without a nil check.
 Published and never populated: `AdministrativeActions`, `FailureDetails`, `FileSystemTypeVersion`,
 `KmsKeyId`, `NetworkInterfaceIds`, `NetworkType`, and the ONTAP, OpenZFS and Windows configuration
-blocks. Every name Substrate does emit is a published one, and `CreationTime` is a JSON number as the
-model declares. The absences bite hardest through CloudFormation, where two of the four published
+blocks. Every name Substrate does emit is a published one. `CreationTime` is a JSON number of epoch
+seconds to three decimals, as `awsJson1_1` publishes a `Timestamp`. Until
+[#1373](https://github.com/scttfrdmn/substrate/issues/1373) it was whole seconds, so two file systems
+created in one second could not be ordered. The record holds the fraction in the same field, so one
+written before the fix still decodes, and renders `.000`. The absences bite hardest through CloudFormation, where two of the four published
 `Fn::GetAtt` attributes have no stored value.
 [#1199](https://github.com/scttfrdmn/substrate/issues/1199).
 
@@ -21735,7 +21785,9 @@ model declares. The absences bite hardest through CloudFormation, where two of t
 | a body that will not parse | `BadRequest` | 400 |
 | `FileSystemId` absent on `DeleteFileSystem` | `BadRequest` | 400 |
 | a file system ID that does not exist | `FileSystemNotFound` | 400 |
-| a file system already deleted, on `DescribeFileSystems` | `FileSystemNotFound` | 400 |
+| a file system already deleted, on `DescribeFileSystems` or `DeleteFileSystem` | `FileSystemNotFound` | 400 |
+| a `ClientRequestToken` outside 1–63 characters of `[A-za-z0-9_.-]` | `BadRequest` | 400 |
+| a used `ClientRequestToken` with different parameters | `IncompatibleParameterError` | 400 |
 | a target Substrate does not route | `UnknownOperationException` | 404 |
 
 All four FSx codes are published spellings at published statuses. `BadRequest`/400 and
@@ -21746,13 +21798,15 @@ Refusing an absent `FileSystemId` is correct on the delete, where it is `Require
 absence of the same check on `DescribeFileSystems` is also correct, where `FileSystemIds` is
 `Required: No` and an absent list means describe them all.
 
-Published and with no site: `ActiveDirectoryError`/400, `IncompatibleParameterError`/400,
-`InvalidExportPath`/400, `InvalidImportPath`/400, `InvalidNetworkSettings`/400,
-`InvalidPerUnitStorageThroughput`/400, `MissingFileSystemConfiguration`/400 and
-`ServiceLimitExceeded`/400 on `CreateFileSystem`; `IncompatibleParameterError`/400 and
+`IncompatibleParameterError`/400 is in the Errors section of both `CreateFileSystem` and
+`DeleteFileSystem` (#1210).
+
+Published and with no site: `ActiveDirectoryError`/400, `InvalidExportPath`/400,
+`InvalidImportPath`/400, `InvalidNetworkSettings`/400, `InvalidPerUnitStorageThroughput`/400,
+`MissingFileSystemConfiguration`/400 and `ServiceLimitExceeded`/400 on `CreateFileSystem`;
 `ServiceLimitExceeded`/400 on `DeleteFileSystem`; and `InternalServerError`/500 on all three. No
-client token is tracked, no network setting is validated, no configuration block is required and no
-file-system quota is enforced, so none of these conditions can arise.
+network setting is validated, no configuration block is required and no file-system quota is
+enforced, so none of these conditions can arise.
 
 ### The account and Region a record carries reach no response
 

@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -122,21 +121,21 @@ func generateSecretARN(region, accountID, name string) string {
 	return fmt.Sprintf("arn:aws:secretsmanager:%s:%s:secret:%s", region, accountID, name)
 }
 
-// generateVersionID mints a secret version ID from m — sixteen uppercase hex characters, which is
-// byte-for-byte the width and case the crypto/rand form produced, so a version ID a previous
-// substrate recorded is still the shape this one mints.
+// generateVersionID mints a secret version ID from m, for a write that supplies no ClientRequestToken.
+//
+// The rendering is a version-4 UUID ([IDMint.UUID]): 36 characters, lowercase hex in the 8-4-4-4-12
+// shape. AWS publishes VersionId with "Length Constraints: Minimum length of 32. Maximum length of
+// 64." and no pattern, so the alphabet is substrate's to choose and only the width is stated. The UUID
+// is the rendering with the most support: ClientRequestToken, which becomes the VersionId, says "We
+// recommend that you generate a UUID-type value", the CLI and SDKs fill it with "a random UUID", and
+// every example version ID on the pages is UUID-shaped. Until #1285 this minted sixteen uppercase hex
+// characters, half the published minimum.
 //
 // Deriving it matters more than a bare identifier would, because a version ID is a *key*: a caller
 // reads a specific version back through `GetSecretValue`'s `VersionId`. A replay that re-minted one
 // answers that recorded read with no `SecretString` at all — substrate reports an unknown version by
 // omitting the member rather than by refusing — which is the quietest way an identifier can break a
 // replay and the reason the tier-4 stream in ids_test.go records exactly that pair.
-//
-// TODO(#1285): the width is short of what AWS publishes, and the caller's own `ClientRequestToken`
-// is ignored. API_PutSecretValue gives `VersionId` a length of 32–64 and states that the request's
-// `ClientRequestToken` — itself 32–64 — "becomes the VersionId of the new version". Substrate emits
-// sixteen characters and mints its own regardless. Both are fidelity gaps rather than derivation
-// ones, so #856 preserves the shape and #1285 changes it.
 func generateVersionID(m *IDMint) string {
-	return strings.ToUpper(m.Hex(8))
+	return m.UUID()
 }

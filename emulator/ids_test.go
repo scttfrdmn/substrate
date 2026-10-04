@@ -1378,8 +1378,8 @@ func idsRecordSecretsManager(t *testing.T, ts *emulator.TestServer) {
 		"secretsmanager.CreateSecret",
 		map[string]any{"Name": "ids-tier4", "SecretString": "first"}), &created))
 	require.NotEmpty(t, created.ARN)
-	require.Len(t, created.VersionID, 16,
-		"a version id is sixteen uppercase hex characters until #1285 widens it")
+	require.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`, created.VersionID,
+		"a minted version id is a version-4 UUID, inside VersionId's published 32–64 (#1285)")
 
 	var put struct {
 		VersionID string `json:"VersionId"`

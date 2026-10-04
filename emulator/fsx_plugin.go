@@ -35,7 +35,8 @@ type FSxFileSystem struct {
 	Lifecycle string `json:"lifecycle"`
 	// Tags contains the tags applied to the file system.
 	Tags []FSxTag `json:"tags,omitempty"`
-	// CreationTime is the Unix epoch timestamp when the file system was created.
+	// CreationTime is when the file system was created, in fractional Unix epoch seconds. Records
+	// written before #1373 hold whole seconds in the same field.
 	CreationTime float64 `json:"creation_time"`
 	// LustreMountName is the mount name used for LUSTRE file systems.
 	// For SCRATCH_2 deployments this is always "fsx"; other types use a random value.
@@ -120,6 +121,7 @@ func (p *FSxPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 
 func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
+		ClientRequestToken  string   `json:"ClientRequestToken"`
 		FileSystemType      string   `json:"FileSystemType"`
 		StorageCapacity     int32    `json:"StorageCapacity"`
 		StorageType         string   `json:"StorageType"`
@@ -132,6 +134,28 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, fsxInvalidBody()
+		}
+	}
+	// API_CreateFileSystem: with a token already used and the parameters the same, the call "returns
+	// the description of the existing file system"; with the parameters different, it returns
+	// IncompatibleParameterError.
+	var fingerprint string
+	if input.ClientRequestToken != "" {
+		fp, err := fsxRequestFingerprint(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		fingerprint = fp
+		rec, found, err := p.fsxCheckToken(ctx, "CreateFileSystem", input.ClientRequestToken, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			existing, err := p.loadFileSystem(ctx, rec.FileSystemID)
+			if err != nil {
+				return nil, err
+			}
+			return fsxJSONResponse(http.StatusOK, map[string]interface{}{"FileSystem": fsxToWire(*existing)})
 		}
 	}
 	if input.FileSystemType == "" {
@@ -186,7 +210,7 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		ResourceARN:          arn,
 		Lifecycle:            "AVAILABLE",
 		Tags:                 input.Tags,
-		CreationTime:         float64(p.tc.Now().Unix()),
+		CreationTime:         fsxEpochNow(p.tc),
 		LustreMountName:      lustreMountName,
 		LustreDeploymentType: lustreDeploymentType,
 		AccountID:            ctx.AccountID,
@@ -202,6 +226,11 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("fsx createFileSystem put: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), fsID)
+	if input.ClientRequestToken != "" {
+		if err := p.fsxRecordToken(ctx, "CreateFileSystem", input.ClientRequestToken, fsxTokenRecord{FileSystemID: fsID, Fingerprint: fingerprint}); err != nil {
+			return nil, err
+		}
+	}
 
 	return fsxJSONResponse(http.StatusOK, map[string]interface{}{
 		"FileSystem": fsxToWire(fs),
@@ -224,32 +253,13 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 	if len(input.FileSystemIDs) > 0 {
 		result := make([]map[string]interface{}, 0, len(input.FileSystemIDs))
 		for _, id := range input.FileSystemIDs {
-			data, err := p.state.Get(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, id))
+			// loadFileSystem answers FileSystemNotFound for a deleted ID, as the page says, so an
+			// SDK deletion waiter completes on the first poll.
+			fs, err := p.loadFileSystem(ctx, id)
 			if err != nil {
-				return nil, fmt.Errorf("fsx describeFileSystems get: %w", err)
+				return nil, err
 			}
-			if data == nil {
-				return nil, &AWSError{
-					Code:       "FileSystemNotFound",
-					Message:    fmt.Sprintf("File system '%s' does not exist.", id),
-					HTTPStatus: http.StatusBadRequest,
-				}
-			}
-			var fs FSxFileSystem
-			if err := json.Unmarshal(data, &fs); err != nil {
-				return nil, fmt.Errorf("fsx describeFileSystems unmarshal: %w", err)
-			}
-			// Treat DELETED the same as not-found so that SDK delete waiters
-			// (NewFileSystemDeletedWaiter) receive FileSystemNotFound and
-			// consider the delete complete on the first poll.
-			if fs.Lifecycle == "DELETED" {
-				return nil, &AWSError{
-					Code:       "FileSystemNotFound",
-					Message:    fmt.Sprintf("File system '%s' does not exist.", id),
-					HTTPStatus: http.StatusBadRequest,
-				}
-			}
-			result = append(result, fsxToWire(fs))
+			result = append(result, fsxToWire(*fs))
 		}
 		return fsxJSONResponse(http.StatusOK, map[string]interface{}{
 			"FileSystems": result,
@@ -271,7 +281,7 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 		if unmarshalErr := json.Unmarshal(data, &fs); unmarshalErr != nil {
 			continue
 		}
-		if fs.Lifecycle != "DELETED" {
+		if fs.Lifecycle != fsxLifecycleLegacyDeleted {
 			result = append(result, fsxToWire(fs))
 		}
 	}
@@ -282,7 +292,11 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 
 func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		FileSystemID string `json:"FileSystemId"`
+		ClientRequestToken   string           `json:"ClientRequestToken"`
+		FileSystemID         string           `json:"FileSystemId"`
+		LustreConfiguration  *fsxDeleteConfig `json:"LustreConfiguration"`
+		OpenZFSConfiguration *fsxDeleteConfig `json:"OpenZFSConfiguration"`
+		WindowsConfiguration *fsxDeleteConfig `json:"WindowsConfiguration"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -293,37 +307,79 @@ func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fsxBadRequest("FileSystemId is required")
 	}
 
-	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, input.FileSystemID))
-	if err != nil {
-		return nil, fmt.Errorf("fsx deleteFileSystem get: %w", err)
-	}
-	if data == nil {
-		return nil, &AWSError{
-			Code:       "FileSystemNotFound",
-			Message:    fmt.Sprintf("File system '%s' does not exist.", input.FileSystemID),
-			HTTPStatus: http.StatusBadRequest,
+	// A token already used for this delete answers the delete's first response: the file system is
+	// gone by now, and "idempotent deletion" is the token's whole published purpose.
+	var fingerprint string
+	if input.ClientRequestToken != "" {
+		fp, err := fsxRequestFingerprint(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		fingerprint = fp
+		rec, found, err := p.fsxCheckToken(ctx, "DeleteFileSystem", input.ClientRequestToken, fingerprint)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			return &AWSResponse{
+				StatusCode: http.StatusOK,
+				Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+				Body:       rec.Response,
+			}, nil
 		}
 	}
 
-	var fs FSxFileSystem
-	if err := json.Unmarshal(data, &fs); err != nil {
-		return nil, fmt.Errorf("fsx deleteFileSystem unmarshal: %w", err)
+	fs, err := p.loadFileSystem(ctx, input.FileSystemID)
+	if err != nil {
+		return nil, err
 	}
-
-	// Soft-delete: mark as DELETED.
-	fs.Lifecycle = "DELETED"
-	updated, err := json.Marshal(fs)
+	body, err := json.Marshal(fsxDeleteToWire(*fs, input.LustreConfiguration, input.OpenZFSConfiguration, input.WindowsConfiguration))
 	if err != nil {
 		return nil, fmt.Errorf("fsx deleteFileSystem marshal: %w", err)
 	}
-	if err := p.state.Put(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, input.FileSystemID), updated); err != nil {
-		return nil, fmt.Errorf("fsx deleteFileSystem put: %w", err)
+
+	goCtx := context.Background()
+	if err := p.state.Delete(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, input.FileSystemID)); err != nil {
+		return nil, fmt.Errorf("fsx deleteFileSystem delete: %w", err)
+	}
+	removeFromStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), input.FileSystemID)
+	if input.ClientRequestToken != "" {
+		rec := fsxTokenRecord{FileSystemID: input.FileSystemID, Fingerprint: fingerprint, Response: body}
+		if err := p.fsxRecordToken(ctx, "DeleteFileSystem", input.ClientRequestToken, rec); err != nil {
+			return nil, err
+		}
 	}
 
-	return fsxJSONResponse(http.StatusOK, map[string]interface{}{
-		"FileSystem": fsxToWire(fs),
-	})
+	return &AWSResponse{
+		StatusCode: http.StatusOK,
+		Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+		Body:       body,
+	}, nil
+}
+
+// loadFileSystem reads one file system, answering FileSystemNotFound when it does not exist or was
+// soft-deleted by a recording made before #1210.
+func (p *FSxPlugin) loadFileSystem(ctx *RequestContext, id string) (*FSxFileSystem, error) {
+	data, err := p.state.Get(context.Background(), fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, id))
+	if err != nil {
+		return nil, fmt.Errorf("fsx loadFileSystem get: %w", err)
+	}
+	notFound := &AWSError{
+		Code:       "FileSystemNotFound",
+		Message:    fmt.Sprintf("File system '%s' does not exist.", id),
+		HTTPStatus: http.StatusBadRequest,
+	}
+	if data == nil {
+		return nil, notFound
+	}
+	var fs FSxFileSystem
+	if err := json.Unmarshal(data, &fs); err != nil {
+		return nil, fmt.Errorf("fsx loadFileSystem unmarshal: %w", err)
+	}
+	if fs.Lifecycle == fsxLifecycleLegacyDeleted {
+		return nil, notFound
+	}
+	return &fs, nil
 }
 
 // --- Wire format helpers -----------------------------------------------------
@@ -340,7 +396,7 @@ func fsxToWire(fs FSxFileSystem) map[string]interface{} {
 		"DNSName":         fs.DNSName,
 		"ResourceARN":     fs.ResourceARN,
 		"Lifecycle":       fs.Lifecycle,
-		"CreationTime":    fs.CreationTime,
+		"CreationTime":    fsxCreationTime(fs.CreationTime),
 		"Tags":            fs.Tags,
 		"OwnerId":         fs.AccountID,
 	}

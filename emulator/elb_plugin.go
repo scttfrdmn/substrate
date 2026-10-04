@@ -345,15 +345,20 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
 	}
 	var result tgResult
+	held := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("elb describeTargetGroups get: %w", getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var tg ELBTargetGroup
 		if json.Unmarshal(data, &tg) != nil {
 			continue
 		}
+		held[tg.ARN] = true
 		if len(names) > 0 && !containsStr(names, tg.Name) {
 			continue
 		}
@@ -361,6 +366,9 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 			continue
 		}
 		result.TargetGroups = append(result.TargetGroups, tgToItem(tg))
+	}
+	if err := elbRequireEveryARN(arns, held, elbKindTargetGroup); err != nil {
+		return nil, err
 	}
 	return elbOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS, result)
 }
@@ -653,15 +661,20 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 		Listeners []elbListenerItem `xml:"Listeners>member"`
 	}
 	var result listenerResult
+	held := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("elb describeListeners get: %w", getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var l ELBListener
 		if json.Unmarshal(data, &l) != nil {
 			continue
 		}
+		held[l.ARN] = true
 		if len(listenerARNs) > 0 && !containsStr(listenerARNs, l.ARN) {
 			continue
 		}
@@ -669,6 +682,9 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 		result.Listeners = append(result.Listeners, listenerToItem(l))
+	}
+	if err := elbRequireEveryARN(listenerARNs, held, elbKindListener); err != nil {
+		return nil, err
 	}
 	return elbOKResponse(reqCtx, "DescribeListeners", elbXMLNS, result)
 }
@@ -834,15 +850,20 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Rules []elbRuleItem `xml:"Rules>member"`
 	}
 	var result ruleResult
+	held := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("elb describeRules get: %w", getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var r ELBRule
 		if json.Unmarshal(data, &r) != nil {
 			continue
 		}
+		held[r.ARN] = true
 		if len(ruleARNs) > 0 && !containsStr(ruleARNs, r.ARN) {
 			continue
 		}
@@ -850,6 +871,9 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			continue
 		}
 		result.Rules = append(result.Rules, ruleToItem(r))
+	}
+	if err := elbRequireEveryARN(ruleARNs, held, elbKindRule); err != nil {
+		return nil, err
 	}
 	return elbOKResponse(reqCtx, "DescribeRules", elbXMLNS, result)
 }
@@ -961,6 +985,24 @@ func elbPublishedNotFound(kind string) *AWSError {
 		elbKindRule:        "The specified rule does not exist.",
 	}[kind]
 	return &AWSError{Code: elbNotFoundCodes[kind], Message: msg, HTTPStatus: http.StatusBadRequest}
+}
+
+// elbRequireEveryARN refuses a describe whose ARN-list filter names a record of kind the caller does
+// not hold, with that kind's published not-found code.
+//
+// DescribeTargetGroups, DescribeListeners and DescribeRules each publish TargetGroupNotFound,
+// ListenerNotFound and RuleNotFound respectively, and until #1370 an ARN naming nothing silently
+// matched nothing, so the call answered 200 with a shorter or empty list. None of the three pages
+// says whether one missing ARN among several refuses the whole call; the published sentence ("The
+// specified target group does not exist.") is about the request, so the whole call is refused.
+// held is every ARN of the kind in the caller's scope, regardless of the describe's other filters.
+func elbRequireEveryARN(arns []string, held map[string]bool, kind string) error {
+	for _, arn := range arns {
+		if !held[arn] {
+			return elbPublishedNotFound(kind)
+		}
+	}
+	return nil
 }
 
 // elbXMLNS is the XML namespace ELBv2 (2015-12-01) responses carry.

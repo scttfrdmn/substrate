@@ -9,6 +9,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ELBv2's three describes refuse an ARN-list filter naming nothing** (#1370). `DescribeTargetGroups`,
+  `DescribeListeners` and `DescribeRules` filtered by `TargetGroupArns`/`ListenerArns`/`RuleArns`, and
+  an ARN naming nothing matched nothing. So a describe of a deleted or mistyped resource answered 200
+  with a shorter or empty list. Each now answers its page's code at HTTP 400 with the page's sentence:
+  `TargetGroupNotFound`, `ListenerNotFound` and `RuleNotFound`.
+  - One missing ARN refuses the whole call, even beside ARNs that name records. No page says whether
+    a partial match answers what it found, and each publishes the code against the request.
+  - A store read error in the three scans is returned rather than skipped, since a skipped record
+    would now read as not found.
+  - Three other filters (`Names`, `LoadBalancerArn`, `ListenerArn`) still match nothing silently;
+    that is #1375.
+
+- **FSx's `DeleteFileSystem` answers its published flat shape and reports `DELETING`, and both
+  create and delete honour `ClientRequestToken`** (#1210). The delete answered the whole record under
+  a `FileSystem` key, which an SDK's `DeleteFileSystemOutput` decodes as empty, with a `Lifecycle` of
+  `DELETED`, which is on no FSx page. It now answers `FileSystemId` and `Lifecycle` `DELETING`, the
+  name and value `API_DeleteFileSystem` publishes (the issue said `LifecycleStatus`; the page names it
+  `Lifecycle`), plus `WindowsResponse`, `LustreResponse` or `OpenZFSResponse` echoing the request's
+  `FinalBackupTags`.
+  - The file system is removed in the delete, so the next `DescribeFileSystems` answers
+    `FileSystemNotFound`, as the page says, and an SDK deletion waiter completes on its first poll.
+    An observable `DELETING` window is #1196's progression. A record an older recording soft-deleted
+    with `DELETED` still reads back as absent.
+  - `ClientRequestToken` is read on both operations. A retried create answers the file system it
+    first made; a retried delete answers the first delete's response. A used token with different
+    parameters is `IncompatibleParameterError`/400, and a token outside its published 1–63 characters
+    of `[A-za-z0-9_.-]` is `BadRequest`/400.
+
+- **FSx's `CreationTime` keeps its fraction** (#1373). It was `float64(Unix())`, whole seconds, so two
+  file systems created in one second could not be ordered. The record stores fractional epoch seconds
+  in the same field, and `fsxToWire` renders `EpochSeconds` to three decimals. A record written before
+  the fix decodes unchanged and renders `.000`.
+
+- **A Secrets Manager version's identity is its `ClientRequestToken`, inside the published width**
+  (#1285). `PutSecretValue` and `CreateSecret` decoded the caller's `ClientRequestToken` and minted
+  their own version ID regardless, though each page says the token "becomes the `VersionId` of the new
+  version". The minted ID was also sixteen characters, where `VersionId` publishes 32 to 64. A retried
+  write therefore created a second version where AWS creates none.
+  - Both now use the token, and `GetSecretValue` reaches the version by it. A resubmitted token with
+    the same value answers the existing version and writes nothing. With a different value it is
+    `ResourceExistsException`/400, since an existing version cannot be modified.
+  - A token outside 32–64 characters is `InvalidParameterException`/400 at all three operations that
+    take one, `RotateSecret` included.
+  - With no token, the minted `VersionId` is a version-4 UUID (36 characters), the shape the pages
+    recommend and use in every example, still derived from the request ID (#856).
+  - Four gaps the fix exposed (`CreateSecret`'s 409, `UpdateSecret`'s token, the version listing, and
+    the string/binary comparison) are #1376.
+
 - **Step Functions' `GetExecutionHistory` answers epoch-second timestamps and published event types**
   (#1323). Each event's `timestamp` answered the stored `time.Time` as an RFC3339 string where
   `API_HistoryEvent` publishes a `Timestamp`, Required: Yes, so the sfn client could not decode the

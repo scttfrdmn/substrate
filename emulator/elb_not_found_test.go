@@ -201,3 +201,103 @@ func TestELB_AStoreWriteFaultAfterTheLookupIsAnError(t *testing.T) {
 		})
 	}
 }
+
+// The three describes refuse an ARN-list filter naming a record the caller does not hold (#1370).
+//
+// Each page publishes its kind's not-found code at 400. Until #1370 an ARN naming nothing matched
+// nothing, so a describe of a deleted or mistyped resource answered 200 with an empty list, which a
+// caller polling for the resource cannot tell from "no match". One missing ARN among real ones
+// refuses the whole call: the pages publish the code against the request, not per member.
+func TestELB_ADescribeFilterNamingNothingIsRefused(t *testing.T) {
+	ts := newELBTestServer(t)
+	ok := func(params map[string]string) []byte {
+		t.Helper()
+		status, body := elbWireCall(t, ts.URL, params)
+		require.Equal(t, http.StatusOK, status, "%s: %s", params["Action"], body)
+		return body
+	}
+	lb := elbWireARN(t, ok(map[string]string{"Action": "CreateLoadBalancer", "Name": "df-alb", "Type": "application"}), "LoadBalancerArn")
+	tg := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateTargetGroup", "Name": "df-tg", "Protocol": "HTTP", "Port": "80", "VpcId": "vpc-12345678",
+	}), "TargetGroupArn")
+	listener := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateListener", "LoadBalancerArn": lb, "Protocol": "HTTP", "Port": "80",
+		"DefaultActions.member.1.Type": "forward", "DefaultActions.member.1.TargetGroupArn": tg,
+	}), "ListenerArn")
+	rule := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateRule", "ListenerArn": listener, "Priority": "10",
+		"Conditions.member.1.Field": "path-pattern", "Conditions.member.1.Values.member.1": "/df/*",
+		"Actions.member.1.Type": "forward", "Actions.member.1.TargetGroupArn": tg,
+	}), "RuleArn")
+	missing := func(arn string) string { return arn[:len(arn)-4] + "0000" }
+
+	for _, tc := range []struct {
+		action, member, arn, code, message, found string
+	}{
+		{"DescribeTargetGroups", "TargetGroupArns.member", tg, "TargetGroupNotFound", "The specified target group does not exist.", "<TargetGroupName>df-tg</TargetGroupName>"},
+		{"DescribeListeners", "ListenerArns.member", listener, "ListenerNotFound", "The specified listener does not exist.", "<ListenerArn>" + listener + "</ListenerArn>"},
+		{"DescribeRules", "RuleArns.member", rule, "RuleNotFound", "The specified rule does not exist.", "<RuleArn>" + rule + "</RuleArn>"},
+	} {
+		t.Run(tc.action, func(t *testing.T) {
+			for name, params := range map[string]map[string]string{
+				"alone":             {"Action": tc.action, tc.member + ".1": missing(tc.arn)},
+				"beside a real one": {"Action": tc.action, tc.member + ".1": tc.arn, tc.member + ".2": missing(tc.arn)},
+			} {
+				status, body := elbWireCall(t, ts.URL, params)
+				require.Equalf(t, http.StatusBadRequest, status, "%s, an ARN naming nothing %s: %s", tc.action, name, body)
+				code, message := elbWireError(t, body)
+				require.Equal(t, tc.code, code, "%s %s: %s", tc.action, name, body)
+				require.Equal(t, tc.message, message, "%s %s: %s", tc.action, name, body)
+			}
+			body := ok(map[string]string{"Action": tc.action, tc.member + ".1": tc.arn})
+			require.Contains(t, string(body), tc.found, "%s on the real ARN must answer as before", tc.action)
+		})
+	}
+
+	// A describe without an ARN filter is unchanged: it lists, and refuses nothing.
+	require.Contains(t, string(ok(map[string]string{"Action": "DescribeTargetGroups"})), "<TargetGroupName>df-tg</TargetGroupName>")
+	require.Contains(t, string(ok(map[string]string{"Action": "DescribeRules", "ListenerArn": listener})), "<RuleArn>"+rule+"</RuleArn>")
+}
+
+// A store read that fails during one of the three describes is an error, never a shorter list or a
+// not-found refusal for a record that may well exist.
+func TestELB_ADescribeStoreReadFaultIsAnError(t *testing.T) {
+	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+	ts := newELBTestServerWithState(t, fault)
+	ok := func(params map[string]string) []byte {
+		t.Helper()
+		status, body := elbWireCall(t, ts.URL, params)
+		require.Equal(t, http.StatusOK, status, "%s: %s", params["Action"], body)
+		return body
+	}
+	lb := elbWireARN(t, ok(map[string]string{"Action": "CreateLoadBalancer", "Name": "dr-alb", "Type": "application"}), "LoadBalancerArn")
+	tg := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateTargetGroup", "Name": "dr-tg", "Protocol": "HTTP", "Port": "80", "VpcId": "vpc-12345678",
+	}), "TargetGroupArn")
+	listener := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateListener", "LoadBalancerArn": lb, "Protocol": "HTTP", "Port": "80",
+		"DefaultActions.member.1.Type": "forward", "DefaultActions.member.1.TargetGroupArn": tg,
+	}), "ListenerArn")
+	rule := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateRule", "ListenerArn": listener, "Priority": "10",
+		"Conditions.member.1.Field": "path-pattern", "Conditions.member.1.Values.member.1": "/dr/*",
+		"Actions.member.1.Type": "forward", "Actions.member.1.TargetGroupArn": tg,
+	}), "RuleArn")
+
+	for _, tc := range []struct {
+		prefix string
+		params map[string]string
+	}{
+		{"tg:", map[string]string{"Action": "DescribeTargetGroups", "TargetGroupArns.member.1": tg}},
+		{"listener:", map[string]string{"Action": "DescribeListeners", "ListenerArns.member.1": listener}},
+		{"rule:", map[string]string{"Action": "DescribeRules", "RuleArns.member.1": rule}},
+	} {
+		t.Run(tc.params["Action"], func(t *testing.T) {
+			fault.failGet = tc.prefix
+			defer func() { fault.failGet = "" }()
+			status, body := elbWireCall(t, ts.URL, tc.params)
+			require.GreaterOrEqualf(t, status, http.StatusInternalServerError,
+				"%s must fail on a store read fault, not answer %d: %s", tc.params["Action"], status, body)
+		})
+	}
+}
