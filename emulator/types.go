@@ -92,6 +92,13 @@ type AWSError struct {
 
 	// HTTPStatus is the HTTP status code associated with this error.
 	HTTPStatus int
+
+	// Members holds further members of the error shape the service publishes, rendered into a
+	// REST-JSON error body beside message. It exists for MSK, whose Error shape is
+	// {message, invalidParameter} with no code member, so invalidParameter is the only
+	// machine-readable field a caller gets (#1211). A key never replaces message, Message or Code.
+	// The other protocols ignore it.
+	Members map[string]string
 }
 
 // Error implements the error interface.

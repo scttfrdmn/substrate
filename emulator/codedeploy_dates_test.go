@@ -156,9 +156,10 @@ func TestCodeDeployDates_PublishedDatesAreEpochSeconds(t *testing.T) {
 	// so a consumer computing a deployment's duration gets zero against a running clock too. #1196
 	// owns it — a deployment is Succeeded before CreateDeployment returns — and this records that the
 	// equality is known, so a later reader does not take it for what this test is asserting.
-	require.Contains(t, string(getDeployment),
-		`"createTime":`+codedeployDatesRendered+`,"completeTime":`+codedeployDatesRendered,
-		"GetDeployment answers completeTime equal to createTime (#1196): %s", getDeployment)
+	for _, member := range []string{"createTime", "completeTime", "startTime"} {
+		require.Containsf(t, string(getDeployment), `"`+member+`":`+codedeployDatesRendered,
+			"GetDeployment answers %s at the creation instant (#1196): %s", member, getDeployment)
+	}
 }
 
 func TestCodeDeployDates_NoResponseRendersAnRFC3339Date(t *testing.T) {

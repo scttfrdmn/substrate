@@ -27,6 +27,118 @@ type MSKCluster struct {
 	Region string `json:"Region"`
 	// CreatedAt is the time the cluster was created.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// The members below were added by #1199 and #1211. Each is omitempty, so a record written before
+	// them decodes unchanged and reads as a provisioned cluster with none of them set.
+
+	// ClusterType is PROVISIONED or SERVERLESS, the published ClusterType values. Empty means
+	// PROVISIONED, which is every cluster a record from before #1211 describes.
+	ClusterType string `json:"ClusterType,omitempty"`
+	// Serverless holds a serverless cluster's configuration, as CreateClusterV2 received it.
+	Serverless *MSKServerless `json:"Serverless,omitempty"`
+	// EncryptionInfo is the create request's encryptionInfo, as received.
+	EncryptionInfo *MSKEncryptionInfo `json:"EncryptionInfo,omitempty"`
+	// ClientAuthentication is the create request's clientAuthentication, as received.
+	ClientAuthentication *MSKClientAuthentication `json:"ClientAuthentication,omitempty"`
+	// EnhancedMonitoring is the create request's enhancedMonitoring, as received.
+	EnhancedMonitoring string `json:"EnhancedMonitoring,omitempty"`
+	// StorageMode is the create request's storageMode, as received.
+	StorageMode string `json:"StorageMode,omitempty"`
+	// ConfigurationInfo is the create request's configurationInfo, as received.
+	ConfigurationInfo *MSKConfigurationInfo `json:"ConfigurationInfo,omitempty"`
+}
+
+// MSKServerless is a serverless cluster's configuration: the ServerlessRequest members of
+// CreateClusterV2, both of which its page marks Required.
+type MSKServerless struct {
+	// VpcConfigs is the cluster's VPC configuration.
+	VpcConfigs []MSKVpcConfig `json:"VpcConfigs"`
+	// ClientAuthentication is the cluster's client authentication.
+	ClientAuthentication MSKServerlessClientAuthentication `json:"ClientAuthentication"`
+}
+
+// MSKVpcConfig is one VpcConfig of a serverless cluster.
+type MSKVpcConfig struct {
+	// SubnetIDs is the subnets the cluster connects to; Required on the page.
+	SubnetIDs []string `json:"SubnetIds"`
+	// SecurityGroupIDs is the security groups attached to its ENIs.
+	SecurityGroupIDs []string `json:"SecurityGroupIds,omitempty"`
+}
+
+// MSKServerlessClientAuthentication is a serverless cluster's client authentication.
+type MSKServerlessClientAuthentication struct {
+	// Sasl holds its SASL settings.
+	Sasl *MSKServerlessSasl `json:"Sasl,omitempty"`
+}
+
+// MSKServerlessSasl is a serverless cluster's SASL settings; IAM is the only one published.
+type MSKServerlessSasl struct {
+	// IAM is SASL/IAM authentication.
+	IAM *MSKEnabled `json:"Iam,omitempty"`
+}
+
+// MSKEnabled is the one-member {enabled} object MSK's authentication settings share.
+type MSKEnabled struct {
+	// Enabled reports whether the setting is on.
+	Enabled bool `json:"Enabled"`
+}
+
+// MSKEncryptionInfo is a cluster's encryptionInfo.
+type MSKEncryptionInfo struct {
+	// EncryptionAtRest holds the data-volume KMS key.
+	EncryptionAtRest *MSKEncryptionAtRest `json:"EncryptionAtRest,omitempty"`
+	// EncryptionInTransit holds the in-transit settings.
+	EncryptionInTransit *MSKEncryptionInTransit `json:"EncryptionInTransit,omitempty"`
+}
+
+// MSKEncryptionAtRest is a cluster's encryptionAtRest.
+type MSKEncryptionAtRest struct {
+	// DataVolumeKMSKeyID is the KMS key; Required on the page when the object is sent.
+	DataVolumeKMSKeyID string `json:"DataVolumeKMSKeyId"`
+}
+
+// MSKEncryptionInTransit is a cluster's encryptionInTransit. Both members are optional, and the page
+// states each default: clientBroker TLS, inCluster true.
+type MSKEncryptionInTransit struct {
+	// ClientBroker is TLS, TLS_PLAINTEXT or PLAINTEXT.
+	ClientBroker string `json:"ClientBroker,omitempty"`
+	// InCluster reports whether broker-to-broker traffic is encrypted.
+	InCluster *bool `json:"InCluster,omitempty"`
+}
+
+// MSKClientAuthentication is a provisioned cluster's clientAuthentication.
+type MSKClientAuthentication struct {
+	// Sasl holds the SASL settings.
+	Sasl *MSKSasl `json:"Sasl,omitempty"`
+	// TLS holds TLS client authentication.
+	TLS *MSKTLSAuthentication `json:"Tls,omitempty"`
+	// Unauthenticated allows unauthenticated access.
+	Unauthenticated *MSKEnabled `json:"Unauthenticated,omitempty"`
+}
+
+// MSKSasl is a provisioned cluster's SASL settings.
+type MSKSasl struct {
+	// IAM is SASL/IAM authentication.
+	IAM *MSKEnabled `json:"Iam,omitempty"`
+	// Scram is SASL/SCRAM authentication.
+	Scram *MSKEnabled `json:"Scram,omitempty"`
+}
+
+// MSKTLSAuthentication is TLS client authentication.
+type MSKTLSAuthentication struct {
+	// CertificateAuthorityArnList is the private CAs that issue client certificates.
+	CertificateAuthorityArnList []string `json:"CertificateAuthorityArnList,omitempty"`
+	// Enabled reports whether TLS authentication is on.
+	Enabled bool `json:"Enabled"`
+}
+
+// MSKConfigurationInfo is the configuration a cluster's brokers use. Both members are Required on the
+// page when the object is sent.
+type MSKConfigurationInfo struct {
+	// Arn is the configuration's ARN.
+	Arn string `json:"Arn"`
+	// Revision is the configuration revision, at least 1.
+	Revision int64 `json:"Revision"`
 }
 
 // MSKBrokerNodeGroupInfo holds configuration for MSK broker nodes.
@@ -73,6 +185,8 @@ type MSKBrokerNodeInfo struct {
 	ClientSubnet string `json:"ClientSubnet"`
 	// CurrentBrokerSoftwareInfo holds the software version running on the broker.
 	CurrentBrokerSoftwareInfo MSKBrokerSoftwareInfo `json:"CurrentBrokerSoftwareInfo"`
+	// Endpoints is the broker's host names, the same ones GetBootstrapBrokers answers.
+	Endpoints []string `json:"Endpoints,omitempty"`
 }
 
 // MSKBrokerSoftwareInfo holds software version information for a broker node.
@@ -103,36 +217,261 @@ type MSKBrokerSoftwareInfo struct {
 // Do not "fix" a casing bug here by retagging a state type above. That conflates
 // the two jobs again, and it silently changes the format of every recorded run.
 
-// mskClusterInfoOut is the ClusterInfo element of the v1 DescribeCluster and
-// ListClusters responses.
+// mskClusterInfoOut is the ClusterInfo element of the v1 DescribeCluster and ListClusters responses.
+//
+// It carries the published ClusterInfo members the record models (#1199): clusterArn, clusterName,
+// state, creationTime, tags, brokerNodeGroupInfo, numberOfBrokerNodes, currentBrokerSoftwareInfo,
+// encryptionInfo, clientAuthentication, enhancedMonitoring and storageMode. Absent, because nothing
+// in substrate holds them: activeOperationArn (no cluster operation is modeled), currentVersion
+// (MSK's own opaque version string), customerActionStatus, loggingInfo, openMonitoring, rebalancing,
+// stateInfo (a cluster never reaches a failed state), and the two zookeeper connect strings (no
+// ZooKeeper is modeled). An absent member is omitted rather than sent empty.
 type mskClusterInfoOut struct {
-	ClusterARN                string                    `json:"clusterArn"`
-	ClusterName               string                    `json:"clusterName"`
-	State                     string                    `json:"state"`
-	BrokerNodeGroupInfo       mskBrokerNodeGroupInfoOut `json:"brokerNodeGroupInfo"`
-	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut  `json:"currentBrokerSoftwareInfo"`
-	NumberOfBrokerNodes       int                       `json:"numberOfBrokerNodes"`
-	Tags                      map[string]string         `json:"tags,omitempty"`
-	CreationTime              time.Time                 `json:"creationTime"`
+	ClusterARN                string                      `json:"clusterArn"`
+	ClusterName               string                      `json:"clusterName"`
+	State                     string                      `json:"state"`
+	BrokerNodeGroupInfo       *mskBrokerNodeGroupInfoOut  `json:"brokerNodeGroupInfo,omitempty"`
+	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut    `json:"currentBrokerSoftwareInfo"`
+	NumberOfBrokerNodes       int                         `json:"numberOfBrokerNodes,omitempty"`
+	EncryptionInfo            *mskEncryptionInfoOut       `json:"encryptionInfo,omitempty"`
+	ClientAuthentication      *mskClientAuthenticationOut `json:"clientAuthentication,omitempty"`
+	EnhancedMonitoring        string                      `json:"enhancedMonitoring,omitempty"`
+	StorageMode               string                      `json:"storageMode,omitempty"`
+	Tags                      map[string]string           `json:"tags,omitempty"`
+	CreationTime              time.Time                   `json:"creationTime"`
 }
 
-// mskClusterOut is the Cluster element of the v2 DescribeClusterV2 and
-// ListClustersV2 responses, which wraps the provisioned detail in a sub-object.
+// mskClusterOut is the Cluster element of the v2 DescribeClusterV2 and ListClustersV2 responses,
+// checked against v2-clusters.html and v2-clusters-clusterarn.html (#1211). A provisioned cluster
+// answers provisioned; a serverless one answers serverless. The Cluster members absent here are
+// activeOperationArn, currentVersion and stateInfo, for the reasons [mskClusterInfoOut] gives.
 type mskClusterOut struct {
-	ClusterARN   string            `json:"clusterArn"`
-	ClusterName  string            `json:"clusterName"`
-	ClusterType  string            `json:"clusterType"`
-	State        string            `json:"state"`
-	CreationTime time.Time         `json:"creationTime"`
-	Tags         map[string]string `json:"tags,omitempty"`
-	Provisioned  mskProvisionedOut `json:"provisioned"`
+	ClusterARN   string             `json:"clusterArn"`
+	ClusterName  string             `json:"clusterName"`
+	ClusterType  string             `json:"clusterType"`
+	State        string             `json:"state"`
+	CreationTime time.Time          `json:"creationTime"`
+	Tags         map[string]string  `json:"tags,omitempty"`
+	Provisioned  *mskProvisionedOut `json:"provisioned,omitempty"`
+	Serverless   *mskServerlessOut  `json:"serverless,omitempty"`
 }
 
-// mskProvisionedOut is the Provisioned member of a v2 Cluster.
+// mskProvisionedOut is the Provisioned member of a v2 Cluster. Absent for the reasons
+// [mskClusterInfoOut] gives: customerActionStatus, loggingInfo, openMonitoring, rebalancing and the
+// zookeeper connect strings.
 type mskProvisionedOut struct {
-	BrokerNodeGroupInfo       mskBrokerNodeGroupInfoOut `json:"brokerNodeGroupInfo"`
-	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut  `json:"currentBrokerSoftwareInfo"`
-	NumberOfBrokerNodes       int                       `json:"numberOfBrokerNodes"`
+	BrokerNodeGroupInfo       *mskBrokerNodeGroupInfoOut  `json:"brokerNodeGroupInfo,omitempty"`
+	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut    `json:"currentBrokerSoftwareInfo"`
+	NumberOfBrokerNodes       int                         `json:"numberOfBrokerNodes,omitempty"`
+	EncryptionInfo            *mskEncryptionInfoOut       `json:"encryptionInfo,omitempty"`
+	ClientAuthentication      *mskClientAuthenticationOut `json:"clientAuthentication,omitempty"`
+	EnhancedMonitoring        string                      `json:"enhancedMonitoring,omitempty"`
+	StorageMode               string                      `json:"storageMode,omitempty"`
+}
+
+// mskServerlessOut is the Serverless member of a v2 Cluster. kafkaVersion is published and absent:
+// a serverless create takes none, so substrate has none to report.
+type mskServerlessOut struct {
+	VpcConfigs           []mskVpcConfigOut                    `json:"vpcConfigs"`
+	ClientAuthentication mskServerlessClientAuthenticationOut `json:"clientAuthentication"`
+}
+
+// mskVpcConfigOut is one VpcConfig of a serverless cluster.
+type mskVpcConfigOut struct {
+	SubnetIDs        []string `json:"subnetIds"`
+	SecurityGroupIDs []string `json:"securityGroupIds,omitempty"`
+}
+
+// mskServerlessClientAuthenticationOut is a serverless cluster's clientAuthentication.
+type mskServerlessClientAuthenticationOut struct {
+	Sasl *mskServerlessSaslOut `json:"sasl,omitempty"`
+}
+
+// mskServerlessSaslOut is a serverless cluster's SASL settings.
+type mskServerlessSaslOut struct {
+	IAM *mskEnabledOut `json:"iam,omitempty"`
+}
+
+// mskEnabledOut is the one-member {enabled} object.
+type mskEnabledOut struct {
+	Enabled bool `json:"enabled"`
+}
+
+// mskEncryptionInfoOut is a cluster's encryptionInfo.
+type mskEncryptionInfoOut struct {
+	EncryptionAtRest    *mskEncryptionAtRestOut   `json:"encryptionAtRest,omitempty"`
+	EncryptionInTransit mskEncryptionInTransitOut `json:"encryptionInTransit"`
+}
+
+// mskEncryptionAtRestOut is a cluster's encryptionAtRest.
+type mskEncryptionAtRestOut struct {
+	DataVolumeKMSKeyID string `json:"dataVolumeKMSKeyId"`
+}
+
+// mskEncryptionInTransitOut is a cluster's encryptionInTransit, always answered with the page's
+// stated defaults filled in (clientBroker TLS, inCluster true), since those are what the cluster runs
+// with when the create named neither.
+type mskEncryptionInTransitOut struct {
+	ClientBroker string `json:"clientBroker"`
+	InCluster    bool   `json:"inCluster"`
+}
+
+// mskClientAuthenticationOut is a provisioned cluster's clientAuthentication.
+type mskClientAuthenticationOut struct {
+	Sasl            *mskSaslOut              `json:"sasl,omitempty"`
+	TLS             *mskTLSAuthenticationOut `json:"tls,omitempty"`
+	Unauthenticated *mskEnabledOut           `json:"unauthenticated,omitempty"`
+}
+
+// mskSaslOut is a provisioned cluster's SASL settings.
+type mskSaslOut struct {
+	IAM   *mskEnabledOut `json:"iam,omitempty"`
+	Scram *mskEnabledOut `json:"scram,omitempty"`
+}
+
+// mskTLSAuthenticationOut is TLS client authentication.
+type mskTLSAuthenticationOut struct {
+	CertificateAuthorityArnList []string `json:"certificateAuthorityArnList,omitempty"`
+	Enabled                     bool     `json:"enabled"`
+}
+
+// mskClusterTypeOf answers the published ClusterType of a stored cluster. A record from before #1211
+// carries none, and every cluster it could describe was provisioned.
+func mskClusterTypeOf(c *MSKCluster) string {
+	if c.ClusterType == "" {
+		return mskClusterTypeProvisioned
+	}
+	return c.ClusterType
+}
+
+const (
+	mskClusterTypeProvisioned = "PROVISIONED"
+	mskClusterTypeServerless  = "SERVERLESS"
+)
+
+// mskClusterInfoWire projects a stored cluster onto the v1 ClusterInfo wire shape.
+func mskClusterInfoWire(c *MSKCluster) mskClusterInfoOut {
+	out := mskClusterInfoOut{
+		ClusterARN:                c.ClusterARN,
+		ClusterName:               c.ClusterName,
+		State:                     c.State,
+		CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoWire(c),
+		NumberOfBrokerNodes:       c.NumberOfBrokerNodes,
+		Tags:                      c.Tags,
+		CreationTime:              c.CreatedAt,
+	}
+	if mskClusterTypeOf(c) == mskClusterTypeProvisioned {
+		bng := mskBrokerNodeGroupInfoWire(c.BrokerNodeGroupInfo)
+		out.BrokerNodeGroupInfo = &bng
+		enc := mskEncryptionInfoWire(c.EncryptionInfo)
+		out.EncryptionInfo = &enc
+		out.ClientAuthentication = mskClientAuthenticationWire(c.ClientAuthentication)
+		out.EnhancedMonitoring = c.EnhancedMonitoring
+		out.StorageMode = c.StorageMode
+	}
+	return out
+}
+
+// mskClusterWire projects a stored cluster onto the v2 Cluster wire shape.
+func mskClusterWire(c *MSKCluster) mskClusterOut {
+	out := mskClusterOut{
+		ClusterARN:   c.ClusterARN,
+		ClusterName:  c.ClusterName,
+		ClusterType:  mskClusterTypeOf(c),
+		State:        c.State,
+		CreationTime: c.CreatedAt,
+		Tags:         c.Tags,
+	}
+	if out.ClusterType == mskClusterTypeServerless && c.Serverless != nil {
+		out.Serverless = mskServerlessWire(c.Serverless)
+		return out
+	}
+	bng := mskBrokerNodeGroupInfoWire(c.BrokerNodeGroupInfo)
+	enc := mskEncryptionInfoWire(c.EncryptionInfo)
+	out.Provisioned = &mskProvisionedOut{
+		BrokerNodeGroupInfo:       &bng,
+		CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoWire(c),
+		NumberOfBrokerNodes:       c.NumberOfBrokerNodes,
+		EncryptionInfo:            &enc,
+		ClientAuthentication:      mskClientAuthenticationWire(c.ClientAuthentication),
+		EnhancedMonitoring:        c.EnhancedMonitoring,
+		StorageMode:               c.StorageMode,
+	}
+	return out
+}
+
+// mskBrokerSoftwareInfoWire projects the brokers' software: the Kafka version and, when the create
+// named one, the configuration and its revision.
+func mskBrokerSoftwareInfoWire(c *MSKCluster) mskBrokerSoftwareInfoOut {
+	out := mskBrokerSoftwareInfoOut{KafkaVersion: c.KafkaVersion}
+	if c.ConfigurationInfo != nil {
+		out.ConfigurationARN = c.ConfigurationInfo.Arn
+		out.ConfigurationRevision = c.ConfigurationInfo.Revision
+	}
+	return out
+}
+
+// mskEncryptionInfoWire projects encryption, filling encryptionInTransit's published defaults.
+func mskEncryptionInfoWire(e *MSKEncryptionInfo) mskEncryptionInfoOut {
+	clientBroker, inCluster := mskEffectiveInTransit(e)
+	out := mskEncryptionInfoOut{EncryptionInTransit: mskEncryptionInTransitOut{ClientBroker: clientBroker, InCluster: inCluster}}
+	if e != nil && e.EncryptionAtRest != nil {
+		out.EncryptionAtRest = &mskEncryptionAtRestOut{DataVolumeKMSKeyID: e.EncryptionAtRest.DataVolumeKMSKeyID}
+	}
+	return out
+}
+
+// mskEffectiveInTransit answers the in-transit settings a cluster runs with: what the create sent,
+// or the page's stated default for whichever it did not — clientBroker "The default value is TLS",
+// inCluster "The default value is true".
+func mskEffectiveInTransit(e *MSKEncryptionInfo) (clientBroker string, inCluster bool) {
+	clientBroker, inCluster = "TLS", true
+	if e == nil || e.EncryptionInTransit == nil {
+		return clientBroker, inCluster
+	}
+	if e.EncryptionInTransit.ClientBroker != "" {
+		clientBroker = e.EncryptionInTransit.ClientBroker
+	}
+	if e.EncryptionInTransit.InCluster != nil {
+		inCluster = *e.EncryptionInTransit.InCluster
+	}
+	return clientBroker, inCluster
+}
+
+// mskClientAuthenticationWire projects provisioned client authentication, or nil when none was sent.
+func mskClientAuthenticationWire(a *MSKClientAuthentication) *mskClientAuthenticationOut {
+	if a == nil {
+		return nil
+	}
+	out := &mskClientAuthenticationOut{}
+	if a.Sasl != nil {
+		out.Sasl = &mskSaslOut{IAM: mskEnabledWire(a.Sasl.IAM), Scram: mskEnabledWire(a.Sasl.Scram)}
+	}
+	if a.TLS != nil {
+		out.TLS = &mskTLSAuthenticationOut{CertificateAuthorityArnList: a.TLS.CertificateAuthorityArnList, Enabled: a.TLS.Enabled}
+	}
+	out.Unauthenticated = mskEnabledWire(a.Unauthenticated)
+	return out
+}
+
+// mskServerlessWire projects a serverless configuration.
+func mskServerlessWire(s *MSKServerless) *mskServerlessOut {
+	out := &mskServerlessOut{VpcConfigs: make([]mskVpcConfigOut, 0, len(s.VpcConfigs))}
+	for _, v := range s.VpcConfigs {
+		out.VpcConfigs = append(out.VpcConfigs, mskVpcConfigOut(v))
+	}
+	if s.ClientAuthentication.Sasl != nil {
+		out.ClientAuthentication.Sasl = &mskServerlessSaslOut{IAM: mskEnabledWire(s.ClientAuthentication.Sasl.IAM)}
+	}
+	return out
+}
+
+// mskEnabledWire projects an {enabled} object, or nil when absent.
+func mskEnabledWire(e *MSKEnabled) *mskEnabledOut {
+	if e == nil {
+		return nil
+	}
+	return &mskEnabledOut{Enabled: e.Enabled}
 }
 
 // mskBrokerNodeGroupInfoOut is the brokerNodeGroupInfo member of a cluster.
@@ -158,7 +497,9 @@ type mskEBSStorageInfoOut struct {
 // mskBrokerSoftwareInfoOut is the currentBrokerSoftwareInfo member of a cluster
 // or a broker node.
 type mskBrokerSoftwareInfoOut struct {
-	KafkaVersion string `json:"kafkaVersion,omitempty"`
+	ConfigurationARN      string `json:"configurationArn,omitempty"`
+	ConfigurationRevision int64  `json:"configurationRevision,omitempty"`
+	KafkaVersion          string `json:"kafkaVersion,omitempty"`
 }
 
 // mskNodeInfoOut is the nodeInfoList element of a ListNodes response. The model
@@ -176,39 +517,7 @@ type mskBrokerNodeInfoOut struct {
 	BrokerID                  float64                  `json:"brokerId"`
 	ClientSubnet              string                   `json:"clientSubnet,omitempty"`
 	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut `json:"currentBrokerSoftwareInfo"`
-}
-
-// mskClusterInfoWire projects a stored cluster onto the v1 ClusterInfo wire shape.
-func mskClusterInfoWire(c *MSKCluster) mskClusterInfoOut {
-	return mskClusterInfoOut{
-		ClusterARN:                c.ClusterARN,
-		ClusterName:               c.ClusterName,
-		State:                     c.State,
-		BrokerNodeGroupInfo:       mskBrokerNodeGroupInfoWire(c.BrokerNodeGroupInfo),
-		CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoOut{KafkaVersion: c.KafkaVersion},
-		NumberOfBrokerNodes:       c.NumberOfBrokerNodes,
-		Tags:                      c.Tags,
-		CreationTime:              c.CreatedAt,
-	}
-}
-
-// mskClusterWire projects a stored cluster onto the v2 Cluster wire shape. Every
-// cluster substrate creates is provisioned; serverless is not modeled, so
-// clusterType is constant rather than derived.
-func mskClusterWire(c *MSKCluster) mskClusterOut {
-	return mskClusterOut{
-		ClusterARN:   c.ClusterARN,
-		ClusterName:  c.ClusterName,
-		ClusterType:  "PROVISIONED",
-		State:        c.State,
-		CreationTime: c.CreatedAt,
-		Tags:         c.Tags,
-		Provisioned: mskProvisionedOut{
-			BrokerNodeGroupInfo:       mskBrokerNodeGroupInfoWire(c.BrokerNodeGroupInfo),
-			CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoOut{KafkaVersion: c.KafkaVersion},
-			NumberOfBrokerNodes:       c.NumberOfBrokerNodes,
-		},
-	}
+	Endpoints                 []string                 `json:"endpoints,omitempty"`
 }
 
 // mskBrokerNodeGroupInfoWire projects broker node configuration onto the wire.
@@ -237,6 +546,7 @@ func mskNodeInfoWire(n MSKNodeInfo) mskNodeInfoOut {
 			CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoOut{
 				KafkaVersion: n.BrokerNodeInfo.CurrentBrokerSoftwareInfo.KafkaVersion,
 			},
+			Endpoints: n.BrokerNodeInfo.Endpoints,
 		},
 		InstanceType: n.InstanceType,
 		NodeARN:      n.NodeARN,

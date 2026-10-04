@@ -59,6 +59,20 @@ func mskWireCreate(t *testing.T, p *emulator.MSKPlugin, ctx *emulator.RequestCon
 	})
 }
 
+// mskMinimalCluster is the smallest CreateCluster body clusters.html accepts: the four members it marks
+// Required: True, with brokerNodeGroupInfo's own two required members (#1197).
+func mskMinimalCluster(name string) map[string]any {
+	return map[string]any{
+		"clusterName":         name,
+		"kafkaVersion":        "3.5.1",
+		"numberOfBrokerNodes": 2,
+		"brokerNodeGroupInfo": map[string]any{
+			"instanceType":  "kafka.m5.large",
+			"clientSubnets": []string{"subnet-1", "subnet-2"},
+		},
+	}
+}
+
 // mskWireCluster creates one cluster and returns its ARN.
 func mskWireCluster(t *testing.T, p *emulator.MSKPlugin, ctx *emulator.RequestContext, name string) string {
 	t.Helper()
@@ -207,7 +221,7 @@ func TestMSKWire_GetBootstrapBrokers(t *testing.T) {
 	arn := mskWireCluster(t, p, ctx, "wire-brokers")
 
 	m, raw := mskWireBody(t, p, ctx, "GET", "/v1/clusters/"+arn+"/bootstrap-brokers", nil)
-	requireKeys(t, "GetBootstrapBrokers", m, "bootstrapBrokerString")
+	requireKeys(t, "GetBootstrapBrokers", m, "bootstrapBrokerStringTls")
 	mskAssertNoInternalFields(t, "GetBootstrapBrokers", raw)
 }
 
@@ -310,6 +324,7 @@ func TestMSKWire_UnsetOptionalsAreOmitted(t *testing.T) {
 	// No securityGroups, no storageInfo, no tags.
 	m, _ := mskWireBody(t, p, ctx, "POST", "/v1/clusters", map[string]any{
 		"clusterName":         "wire-sparse",
+		"kafkaVersion":        "3.5.1",
 		"numberOfBrokerNodes": 2,
 		"brokerNodeGroupInfo": map[string]any{
 			"instanceType":  "kafka.m5.large",
@@ -454,6 +469,7 @@ func TestMSKWire_StateEncodingUnchanged(t *testing.T) {
 	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
 	if _, err := p.HandleRequest(ctx, mskRequest("POST", "/v1/clusters", map[string]any{
 		"clusterName":         "state-shape",
+		"kafkaVersion":        "3.5.1",
 		"numberOfBrokerNodes": 2,
 		"brokerNodeGroupInfo": map[string]any{
 			"instanceType":  "kafka.m5.large",

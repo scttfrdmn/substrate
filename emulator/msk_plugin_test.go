@@ -87,6 +87,10 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		"ClusterName":         "my-kafka",
 		"KafkaVersion":        "3.5.1",
 		"NumberOfBrokerNodes": 3,
+		"BrokerNodeGroupInfo": map[string]any{
+			"InstanceType":  "kafka.m5.large",
+			"ClientSubnets": []string{"subnet-1"},
+		},
 	}))
 	if err == nil {
 		t.Fatal("want error for duplicate cluster, got nil")
@@ -158,13 +162,15 @@ func TestMSKPlugin_CreateListDescribeDeleteCluster(t *testing.T) {
 		t.Fatalf("GetBootstrapBrokers: %v", err)
 	}
 	var brokers struct {
-		BootstrapBrokerString string `json:"bootstrapBrokerString"`
+		// TLS is the published default client-broker encryption, so a cluster created without
+		// encryptionInfo answers the TLS string, not the plaintext one (#1199).
+		BootstrapBrokerString string `json:"bootstrapBrokerStringTls"`
 	}
 	if err := json.Unmarshal(resp.Body, &brokers); err != nil {
 		t.Fatalf("unmarshal brokers: %v", err)
 	}
 	if brokers.BootstrapBrokerString == "" {
-		t.Error("want non-empty bootstrapBrokerString")
+		t.Error("want non-empty bootstrapBrokerStringTls")
 	}
 
 	// DeleteCluster

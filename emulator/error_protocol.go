@@ -474,11 +474,20 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 		return payload, contentTypeCBOR, hdrs
 
 	case errProtoRESTJSON:
-		payload, err := json.Marshal(map[string]string{
+		doc := map[string]string{
 			"message": e.Message,
 			"Message": e.Message,
 			"Code":    e.Code,
-		})
+		}
+		// A published member of the service's error shape (MSK's invalidParameter, #1211). The three
+		// keys above are never replaced, so a plugin cannot make the code or message disagree with the
+		// header.
+		for k, v := range e.Members {
+			if _, taken := doc[k]; !taken {
+				doc[k] = v
+			}
+		}
+		payload, err := json.Marshal(doc)
 		if err != nil {
 			return nil, "application/json", nil
 		}

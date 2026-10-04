@@ -116,7 +116,7 @@ func TestMintedIDs_SatisfyTheirPublishedPatterns(t *testing.T) {
 			mint: func(t *testing.T) string {
 				p := &emulator.MSKPlugin{}
 				ctx, _ := wireSetup(t, p, "req-minted-msk")
-				body := wireREST(t, p, ctx, "kafka", http.MethodPost, "/v1/clusters", map[string]any{"ClusterName": "minted"})
+				body := wireREST(t, p, ctx, "kafka", http.MethodPost, "/v1/clusters", mskMinimalCluster("minted"))
 				return mintedIDMember(t, body, "clusterArn")
 			},
 		},

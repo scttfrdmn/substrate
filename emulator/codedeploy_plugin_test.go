@@ -235,6 +235,7 @@ func TestCodeDeployPlugin_CreateGetDeployment(t *testing.T) {
 	_, err = p.HandleRequest(ctx, codedeployRequest(t, "CreateDeploymentGroup", map[string]any{
 		"applicationName":     "deploy-app",
 		"deploymentGroupName": "deploy-group",
+		"serviceRoleArn":      "arn:aws:iam::123456789012:role/codedeploy-role",
 	}))
 	if err != nil {
 		t.Fatalf("CreateDeploymentGroup: %v", err)
@@ -314,6 +315,7 @@ func TestCodeDeployPlugin_Duplicate_Errors(t *testing.T) {
 	_, err = p.HandleRequest(ctx, codedeployRequest(t, "CreateDeploymentGroup", map[string]any{
 		"applicationName":     "dup-app",
 		"deploymentGroupName": "dup-group",
+		"serviceRoleArn":      "arn:aws:iam::123456789012:role/codedeploy-role",
 	}))
 	if err != nil {
 		t.Fatalf("CreateDeploymentGroup: %v", err)
@@ -323,6 +325,7 @@ func TestCodeDeployPlugin_Duplicate_Errors(t *testing.T) {
 	_, err = p.HandleRequest(ctx, codedeployRequest(t, "CreateDeploymentGroup", map[string]any{
 		"applicationName":     "dup-app",
 		"deploymentGroupName": "dup-group",
+		"serviceRoleArn":      "arn:aws:iam::123456789012:role/codedeploy-role",
 	}))
 	if err == nil {
 		t.Fatal("want error for duplicate deployment group, got nil")

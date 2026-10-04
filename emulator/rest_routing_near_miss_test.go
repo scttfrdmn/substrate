@@ -81,7 +81,7 @@ func TestMSKRouting_ANearMissPathIsUnknown(t *testing.T) {
 	p := &emulator.MSKPlugin{}
 	ctx, _ := wireSetup(t, p, "req-msk-nearmiss")
 	arn := mintedIDMember(t, wireREST(t, p, ctx, "kafka", http.MethodPost, "/v1/clusters",
-		map[string]any{"ClusterName": "nm"}), "clusterArn")
+		mskMinimalCluster("nm")), "clusterArn")
 
 	requireRefusal(t, p, ctx, "kafka", []nearMissCase{
 		// The two sub-resource arms tested only the suffix, so these were ListNodes and
