@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
 	"time"
 
@@ -82,6 +83,7 @@ func TestEMRServerlessPlugin_CreateGetDeleteApp(t *testing.T) {
 		"name":         "my-spark-app",
 		"type":         "SPARK",
 		"releaseLabel": "emr-6.9.0",
+		"clientToken":  "create-my-spark-app",
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("createApplication: expected 200, got %d; body: %s", resp.StatusCode, emrBody(t, resp))
@@ -140,8 +142,10 @@ func TestEMRServerlessPlugin_StartGetCancelJobRun(t *testing.T) {
 
 	// Create application first
 	resp := emrRequest(t, ts, http.MethodPost, "/applications", map[string]string{
-		"name": "app1",
-		"type": "SPARK",
+		"name":         "app1",
+		"type":         "SPARK",
+		"releaseLabel": "emr-6.9.0",
+		"clientToken":  "create-app1",
 	})
 	var cr struct {
 		ApplicationId string `json:"applicationId"`
@@ -153,7 +157,9 @@ func TestEMRServerlessPlugin_StartGetCancelJobRun(t *testing.T) {
 
 	// StartJobRun
 	resp2 := emrRequest(t, ts, http.MethodPost, "/applications/"+appID+"/jobruns", map[string]string{
-		"name": "my-run",
+		"name":             "my-run",
+		"clientToken":      "start-my-run",
+		"executionRoleArn": "arn:aws:iam::123456789012:role/emr-run",
 	})
 	if resp2.StatusCode != http.StatusOK {
 		t.Fatalf("startJobRun: expected 200, got %d; body: %s", resp2.StatusCode, emrBody(t, resp2))
@@ -200,8 +206,10 @@ func TestEMRServerlessPlugin_ListJobRuns(t *testing.T) {
 
 	// Create application
 	resp := emrRequest(t, ts, http.MethodPost, "/applications", map[string]string{
-		"name": "app2",
-		"type": "HIVE",
+		"name":         "app2",
+		"type":         "HIVE",
+		"releaseLabel": "emr-6.9.0",
+		"clientToken":  "create-app2",
 	})
 	var cr struct {
 		ApplicationId string `json:"applicationId"`
@@ -213,7 +221,9 @@ func TestEMRServerlessPlugin_ListJobRuns(t *testing.T) {
 
 	// Start 3 runs
 	for i := 0; i < 3; i++ {
-		r := emrRequest(t, ts, http.MethodPost, "/applications/"+appID+"/jobruns", map[string]string{"name": "run"})
+		r := emrRequest(t, ts, http.MethodPost, "/applications/"+appID+"/jobruns", map[string]string{
+			"name": "run", "clientToken": "start-run-" + strconv.Itoa(i), "executionRoleArn": "arn:aws:iam::123456789012:role/emr-run",
+		})
 		emrBody(t, r)
 	}
 

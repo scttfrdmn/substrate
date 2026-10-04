@@ -39,8 +39,10 @@ linters:
       locale: US
       # AWS spells its CANCELLED status values with two L's (Omics RunStatus, Athena
       # QueryExecutionState, …), and a published enum value must be emitted verbatim (#1364).
+      # CANCELLING is the matching transitional value (EMR Serverless JobRunState, #1198).
       ignore-rules:
         - cancelled
+        - cancelling
   exclusions:
     rules:
       # Allow TODO comments that reference issue numbers.

@@ -50,7 +50,7 @@ func TestTransferPlugin_ServerCRUD(t *testing.T) {
 
 	// CreateServer.
 	resp, err := p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-		"Domain":       "SFTP",
+		"Domain":       "S3",
 		"EndpointType": "PUBLIC",
 	}))
 	if err != nil {
@@ -96,8 +96,8 @@ func TestTransferPlugin_ServerCRUD(t *testing.T) {
 	if descResult.Server.State != "ONLINE" {
 		t.Errorf("want State=ONLINE, got %q", descResult.Server.State)
 	}
-	if descResult.Server.Domain != "SFTP" {
-		t.Errorf("want Domain=SFTP, got %q", descResult.Server.Domain)
+	if descResult.Server.Domain != "S3" {
+		t.Errorf("want Domain=S3, got %q", descResult.Server.Domain)
 	}
 
 	// UpdateServer.
@@ -163,7 +163,7 @@ func TestTransferPlugin_ListServers(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		resp, err := p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-			"Domain": "SFTP",
+			"Domain": "S3",
 		}))
 		if err != nil {
 			t.Fatalf("CreateServer %d: %v", i, err)
@@ -197,7 +197,7 @@ func TestTransferPlugin_UserCRUD(t *testing.T) {
 
 	// Create server first.
 	resp, err := p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-		"Domain": "SFTP",
+		"Domain": "S3",
 	}))
 	if err != nil {
 		t.Fatalf("CreateServer: %v", err)
@@ -231,17 +231,19 @@ func TestTransferPlugin_UserCRUD(t *testing.T) {
 		t.Errorf("want UserName=alice, got %q", createUserResult.UserName)
 	}
 
-	// Duplicate CreateUser.
+	// Duplicate CreateUser. Role is Required: Yes, so the duplicate carries one to reach the
+	// existence check rather than the required-member one.
 	_, err = p.HandleRequest(ctx, transferRequest(t, "CreateUser", map[string]any{
 		"ServerId": serverID,
 		"UserName": "alice",
+		"Role":     "arn:aws:iam::123456789012:role/transfer-user-role",
 	}))
 	if err == nil {
 		t.Fatal("want error for duplicate user, got nil")
 	}
 	awsErr, ok := err.(*emulator.AWSError)
-	if !ok || awsErr.Code != "ConflictException" {
-		t.Errorf("want ConflictException, got %v", err)
+	if !ok || awsErr.Code != "ResourceExistsException" || awsErr.HTTPStatus != http.StatusBadRequest {
+		t.Errorf("want ResourceExistsException/400, got %v", err)
 	}
 
 	// DescribeUser.
@@ -320,7 +322,7 @@ func TestTransferPlugin_ListUsers(t *testing.T) {
 
 	// Create server.
 	resp, err := p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-		"Domain": "SFTP",
+		"Domain": "S3",
 	}))
 	if err != nil {
 		t.Fatalf("CreateServer: %v", err)
@@ -338,6 +340,7 @@ func TestTransferPlugin_ListUsers(t *testing.T) {
 		_, err := p.HandleRequest(ctx, transferRequest(t, "CreateUser", map[string]any{
 			"ServerId": serverID,
 			"UserName": name,
+			"Role":     "arn:aws:iam::123456789012:role/transfer-user-role",
 		}))
 		if err != nil {
 			t.Fatalf("CreateUser %s: %v", name, err)
@@ -371,7 +374,7 @@ func TestTransferPlugin_DeleteServer_CascadesUsers(t *testing.T) {
 
 	// Create server.
 	resp, err := p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-		"Domain": "SFTP",
+		"Domain": "S3",
 	}))
 	if err != nil {
 		t.Fatalf("CreateServer: %v", err)
@@ -388,6 +391,7 @@ func TestTransferPlugin_DeleteServer_CascadesUsers(t *testing.T) {
 	_, err = p.HandleRequest(ctx, transferRequest(t, "CreateUser", map[string]any{
 		"ServerId": serverID,
 		"UserName": "cascade-user",
+		"Role":     "arn:aws:iam::123456789012:role/transfer-user-role",
 	}))
 	if err != nil {
 		t.Fatalf("CreateUser: %v", err)
@@ -404,7 +408,7 @@ func TestTransferPlugin_DeleteServer_CascadesUsers(t *testing.T) {
 	// Create a new server and try to create a user with same name — should succeed
 	// because the old server's user index was cleaned up.
 	resp, err = p.HandleRequest(ctx, transferRequest(t, "CreateServer", map[string]any{
-		"Domain": "SFTP",
+		"Domain": "S3",
 	}))
 	if err != nil {
 		t.Fatalf("CreateServer 2: %v", err)
@@ -418,6 +422,7 @@ func TestTransferPlugin_DeleteServer_CascadesUsers(t *testing.T) {
 	_, err = p.HandleRequest(ctx, transferRequest(t, "CreateUser", map[string]any{
 		"ServerId": serverResult2.ServerId,
 		"UserName": "cascade-user",
+		"Role":     "arn:aws:iam::123456789012:role/transfer-user-role",
 	}))
 	if err != nil {
 		t.Fatalf("CreateUser on new server: %v", err)

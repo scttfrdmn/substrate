@@ -267,9 +267,9 @@ func TestRedshiftPlugin_ParameterGroup_SubnetGroup(t *testing.T) {
 
 	// CreateClusterSubnetGroup.
 	resp, err = p.HandleRequest(ctx, redshiftRequest(t, "CreateClusterSubnetGroup", map[string]string{
-		"ClusterSubnetGroupName": "my-sg",
-		"Description":            "Test subnet group",
-		"VpcId":                  "vpc-12345678",
+		"ClusterSubnetGroupName":       "my-sg",
+		"Description":                  "Test subnet group",
+		"SubnetIds.SubnetIdentifier.1": "subnet-12345678",
 	}))
 	if err != nil {
 		t.Fatalf("CreateClusterSubnetGroup: %v", err)
