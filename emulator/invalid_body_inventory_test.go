@@ -465,9 +465,10 @@ var invalidBodyServices = []invalidBodyService{
 	{
 		// Timestream is two entries rather than one because it is two endpoints: ListTables is on the
 		// ingest host and Query on the query host, and a single row would have to pick one and silently
-		// stop covering the other.
+		// stop covering the other. Both are the cell hosts DescribeEndpoints hands out: a regional
+		// ingest. or query. host recognizes only DescribeEndpoints (#1209).
 		name:       "timestream-write",
-		host:       "ingest.timestream.us-east-1.amazonaws.com",
+		host:       "ingest-cell1.timestream.us-east-1.amazonaws.com",
 		code:       "ValidationException",
 		provenance: "the Timestream Write operation pages",
 		cases: []invalidBodyCase{
@@ -476,7 +477,7 @@ var invalidBodyServices = []invalidBodyService{
 	},
 	{
 		name:       "timestream-query",
-		host:       "query.timestream.us-east-1.amazonaws.com",
+		host:       "query-cell1.timestream.us-east-1.amazonaws.com",
 		code:       "ValidationException",
 		provenance: "the Timestream Query operation pages",
 		cases: []invalidBodyCase{
@@ -1062,7 +1063,7 @@ func TestInvalidBodyLeavesAnAbsentBodyAlone(t *testing.T) {
 		{name: "cloudwatchlogs/DescribeLogGroups", host: "logs.us-east-1.amazonaws.com", target: "Logs_20140328.DescribeLogGroups"},
 		{name: "athena/ListQueryExecutions", host: "athena.us-east-1.amazonaws.com", target: "AmazonAthena.ListQueryExecutions"},
 		{name: "athena/ListWorkGroups", host: "athena.us-east-1.amazonaws.com", target: "AmazonAthena.ListWorkGroups"},
-		{name: "timestream-write/ListTables", host: "ingest.timestream.us-east-1.amazonaws.com", target: "Timestream_20181101.ListTables"},
+		{name: "timestream-write/ListTables", host: "ingest-cell1.timestream.us-east-1.amazonaws.com", target: "Timestream_20181101.ListTables"},
 		{name: "secretsmanager/ListSecrets", host: "secretsmanager.us-east-1.amazonaws.com", target: "secretsmanager.ListSecrets"},
 		{name: "ecr/DescribeRepositories", host: "api.ecr.us-east-1.amazonaws.com", target: "AmazonEC2ContainerRegistry_V20150921.DescribeRepositories"},
 		{name: "cloudtrail/DescribeTrails", host: "cloudtrail.us-east-1.amazonaws.com", target: "com.amazonaws.cloudtrail.v20131101.CloudTrail_20131101.DescribeTrails"},

@@ -263,6 +263,18 @@ func TestPluginRouting_TheFourMissesFoundBy739(t *testing.T) {
 			want: "timestream",
 			why:  "The query endpoint reduced to \"query\" for the same reason.",
 		},
+		{
+			name: "timestream ingest cell endpoint",
+			host: "ingest-cell1.timestream.us-east-1.amazonaws.com",
+			want: "timestream",
+			why:  "DescribeEndpoints hands out a cell host, which is where a discovering client then writes (#1209).",
+		},
+		{
+			name: "timestream query cell endpoint",
+			host: "query-cell2.timestream.eu-west-1.amazonaws.com",
+			want: "timestream",
+			why:  "The query cell host, under any cell number and Region (#1209).",
+		},
 	}
 
 	for _, tt := range tests {

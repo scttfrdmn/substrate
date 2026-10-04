@@ -57,6 +57,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - The three messages and their order are observed, not published. An observable
     `InProgress → Deployed` window is #1381.
 
+- **Redshift answers the published Query envelope, element names and codes** (#1208). Every response
+  marshaled its result as the document root, with no namespace and the request ID discarded, so no
+  SDK could decode any of the ten routed operations. Each now answers
+  `{Operation}Response` / `{Operation}Result` / `ResponseMetadata` in
+  `http://redshift.amazonaws.com/doc/2012-12-01/`, with the request's own ID, through the envelope
+  ELB's responses use (#1149).
+  - A single cluster is `<Cluster>`, not `<Cluster><member>`, and each list names its elements as
+    published: `Clusters>Cluster`, `ParameterGroups>ClusterParameterGroup`,
+    `ClusterSubnetGroups>ClusterSubnetGroup` and `Snapshots>Snapshot`.
+  - The refusals are `ClusterAlreadyExists`/400 and `ClusterNotFound`/404, as the pages publish, not
+    the model's `…Fault` shape names. The issue gave the not-found status as 400; the pages give 404.
+  - An unrouted action answers `InvalidParameterValue`/400, and a missing one `MissingAction`/400,
+    from Redshift's own Common Errors page, which publishes no `InvalidAction`.
+  - The Redshift test harness runs on a frozen clock rather than `time.Now()`.
+
+- **Timestream answers typed query columns, refuses a query it cannot evaluate, and enforces endpoint
+  discovery** (#1209). An unseeded `Query` typed every column `VARCHAR`, sorted them alphabetically,
+  rendered every value with `%v`, and answered any SQL with a row per stored record. A consumer who
+  forgot to seed got a plausible wrong result to assert against.
+  - Without a seed, only `SELECT * FROM db.table` is answered, in the table's logical shape: `time`
+    (`TIMESTAMP`), the dimensions, `measure_name`, then one column per measure, each typed, with
+    `NullValue` where a record has none. Any other unseeded query is `ValidationException`/400,
+    naming the seed endpoint, because `QueryStatus` has no member that could say "reconstructed".
+  - `QueryStatus` is answered (100%, with byte counts equal to the answered rows), and a seed may
+    supply its own. `NextToken` is omitted rather than `""`. `WriteRecords` merges
+    `CommonAttributes`.
+  - A regional `ingest.`/`query.` host recognizes only `DescribeEndpoints`, which answers the API's
+    cell address (`ingest-cell1.`/`query-cell1.`; the `-cellN` form is substrate's reading). A cell
+    host refuses the other API's operations with `InvalidEndpointException`/400. A host naming
+    neither API (an `--endpoint-url`) is not enforced.
+
+- **EMR Serverless, MSK and FSx mint identifiers inside their published patterns** (#1204).
+  - An EMR Serverless job run ID was a dashed UUID where every page publishes `[0-9a-z]+`. It is
+    now `00` and fourteen lowercase hex, and the run ARN satisfies its published pattern.
+    `ListJobRuns` answered the ID as `jobRunId`, a member of `JobRun` rather than of `JobRunSummary`,
+    so every element's `id` was empty in an SDK. It answers `id` (plus `arn` and `name`), and
+    `jobRunId` is not also emitted.
+  - An MSK cluster ARN's UUID is a request-derived v4 UUID and a digit, where it was the name's
+    length and the clock, so on a frozen clock a re-created cluster reused its predecessor's ARN.
+    Resolution now requires the ARN to be the record's own, so a deleted cluster's ARN answers
+    `NotFoundException` rather than resolving to its replacement.
+  - FSx's Lustre `MountName` is eight hex characters, inside the published maximum of eight (it was
+    sixteen). The constant `fsx` belongs to `SCRATCH_1`, which is also the published default
+    deployment type; substrate had defaulted to `SCRATCH_2` and given it the constant.
+  - `TestMintedIDs_SatisfyTheirPublishedPatterns` asserts every minted ID in the batch's nine
+    services against its published pattern, and `docs/services.md` tabulates each service's shape.
+
+- **EMR Serverless, MSK and AWS Backup route by whole path segments** (#1205, #1176). EMR Serverless
+  searched for the substring `/jobruns`, so `/applications/ab/jobrunsbad` routed as `ListJobRuns`,
+  and `/applications/ab/cd/jobruns` read the application ID as `ab/cd`. MSK matched `/nodes` and
+  `/bootstrap-brokers` on the suffix alone, and Backup, found by the sweep, tested prefixes and
+  searched for `/selections`. Each now matches its published URIs positionally, and every other path
+  answers `UnknownOperationException`/404.
+  - Backup accepts one trailing slash, which several of its published URIs carry, so
+    `GET /backup/plans/{id}/` reaches the plan (#1176).
+  - `emulator/rest_routing_near_miss_test.go` enumerates the near-misses for all three plugins.
+
 - **An ECR image digest is the SHA-256 of its manifest** (#1283). `PutImage` minted a digest
   unrelated to the manifest, so every push stored a new image, a caller could not verify a push by
   hashing what it sent, and `ImageAlreadyExistsException` could not fire. The digest is now

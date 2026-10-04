@@ -458,8 +458,10 @@ func extractServiceFromHost(host string) string {
 	// operation class rather than the service: "ingest.timestream.{region}" for
 	// writes, "query.timestream.{region}" for queries. Both reduced to "ingest" or
 	// "query" and reached no plugin (#739). A caller passing --endpoint-url was
-	// unaffected, which is why the suite never saw it.
-	if strings.HasPrefix(host, "ingest.timestream.") || strings.HasPrefix(host, "query.timestream.") {
+	// unaffected, which is why the suite never saw it. The cell hosts DescribeEndpoints hands out,
+	// "ingest-cellN.timestream.{region}" and "query-cellN.timestream.{region}", are the addresses a
+	// discovering client then calls, so they route here too (#1209).
+	if isTimestreamEndpointHost(host) {
 		return "timestream"
 	}
 

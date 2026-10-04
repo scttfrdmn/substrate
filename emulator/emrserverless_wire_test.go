@@ -122,7 +122,7 @@ func TestEMRServerlessWire_ResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{op: "GetApplication", method: "GET", path: appPath, anchor: `"releaseLabel":"emr-7.0.0"`},
 		{op: "StartJobRun", held: started, anchor: `"jobRunId":"` + run.JobRunID + `"`},
 		{op: "GetJobRun", method: "GET", path: runPath, anchor: `"jobRunId":"` + run.JobRunID + `"`},
-		{op: "ListJobRuns", method: "GET", path: appPath + "/jobruns", anchor: `"jobRunId":"` + run.JobRunID + `"`},
+		{op: "ListJobRuns", method: "GET", path: appPath + "/jobruns", anchor: `"id":"` + run.JobRunID + `"`},
 		{op: "CancelJobRun", method: "DELETE", path: runPath, anchor: `"jobRunId":"` + run.JobRunID + `"`},
 		// Last: it removes the record the cases above read.
 		{op: "DeleteApplication", method: "DELETE", path: appPath, anchor: "{}"},

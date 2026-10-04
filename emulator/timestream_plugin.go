@@ -5,8 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
-	"strings"
 	"time"
 )
 
@@ -38,7 +36,13 @@ func (p *TimestreamPlugin) Initialize(_ context.Context, cfg PluginConfig) error
 func (p *TimestreamPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches a Timestream JSON-target request to the appropriate handler.
+//
+// An operation arriving on a Timestream endpoint that does not serve it is refused first; see
+// emulator/timestream_query.go.
 func (p *TimestreamPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	if err := checkTimestreamEndpoint(req); err != nil {
+		return nil, err
+	}
 	switch req.Operation {
 	// Write service — database operations.
 	case "CreateDatabase":
@@ -288,9 +292,10 @@ func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (
 
 func (p *TimestreamPlugin) writeRecords(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		DatabaseName string           `json:"DatabaseName"`
-		TableName    string           `json:"TableName"`
-		Records      []map[string]any `json:"Records"`
+		DatabaseName     string                   `json:"DatabaseName"`
+		TableName        string                   `json:"TableName"`
+		CommonAttributes timestreamStoredRecord   `json:"CommonAttributes"`
+		Records          []timestreamStoredRecord `json:"Records"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil || input.DatabaseName == "" || input.TableName == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "DatabaseName and TableName are required", HTTPStatus: http.StatusBadRequest}
@@ -301,16 +306,29 @@ func (p *TimestreamPlugin) writeRecords(reqCtx *RequestContext, req *AWSRequest)
 	if _, err := p.loadTable(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName); err != nil {
 		return nil, err
 	}
-	// Store records for later query retrieval.
+	// Store records for later query retrieval, each with the request's CommonAttributes merged in, so
+	// a SELECT * answers what the write meant rather than what one record spelled out (#1209).
 	goCtx := context.Background()
 	recordsKey := timestreamRecordsKey(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName)
-	var existing []map[string]any
-	if data, err := p.state.Get(goCtx, timestreamNamespace, recordsKey); err == nil && data != nil {
-		_ = json.Unmarshal(data, &existing)
+	var existing []timestreamStoredRecord
+	data, err := p.state.Get(goCtx, timestreamNamespace, recordsKey)
+	if err != nil {
+		return nil, fmt.Errorf("timestream writeRecords read records: %w", err)
 	}
-	existing = append(existing, input.Records...)
-	if data, err := json.Marshal(existing); err == nil {
-		_ = p.state.Put(goCtx, timestreamNamespace, recordsKey, data)
+	if data != nil {
+		if err := json.Unmarshal(data, &existing); err != nil {
+			return nil, fmt.Errorf("timestream writeRecords decode records: %w", err)
+		}
+	}
+	for _, rec := range input.Records {
+		existing = append(existing, mergeTimestreamCommon(input.CommonAttributes, rec))
+	}
+	out, err := json.Marshal(existing)
+	if err != nil {
+		return nil, fmt.Errorf("timestream writeRecords marshal records: %w", err)
+	}
+	if err := p.state.Put(goCtx, timestreamNamespace, recordsKey, out); err != nil {
+		return nil, fmt.Errorf("timestream writeRecords put records: %w", err)
 	}
 
 	n := int64(len(input.Records))
@@ -325,17 +343,22 @@ func (p *TimestreamPlugin) writeRecords(reqCtx *RequestContext, req *AWSRequest)
 
 // --- Query operations ---
 
-func (p *TimestreamPlugin) describeEndpoints(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+// describeEndpoints answers the cell address of the API the request's host names; see
+// timestreamEndpointAddress.
+func (p *TimestreamPlugin) describeEndpoints(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	address := timestreamEndpointAddress(classifyTimestreamHost(req.Headers["Host"]), reqCtx.Region)
 	return timestreamJSONResponse(http.StatusOK, map[string]any{
 		"Endpoints": []map[string]any{
 			{
-				"Address":              "timestream." + reqCtx.Region + ".amazonaws.com",
+				"Address":              address,
 				"CachePeriodInMinutes": int64(1),
 			},
 		},
 	})
 }
 
+// query answers a seeded result, or `SELECT * FROM db.table` reconstructed from stored records, and
+// refuses any other unseeded query; see emulator/timestream_query.go.
 func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		QueryString string `json:"QueryString"`
@@ -346,7 +369,19 @@ func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	result := p.lookupQueryResult(input.QueryString, reqCtx.AccountID, reqCtx.Region)
+	result, seeded, err := p.seededQueryResult(input.QueryString)
+	if err != nil {
+		return nil, err
+	}
+	if !seeded {
+		db, table, ok := timestreamUnseededSelectAll(input.QueryString)
+		if !ok {
+			return nil, timestreamUnevaluated(input.QueryString)
+		}
+		if result, err = p.timestreamSelectAll(reqCtx, db, table); err != nil {
+			return nil, err
+		}
+	}
 
 	rows := result.Rows
 	if rows == nil {
@@ -356,12 +391,22 @@ func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if cols == nil {
 		cols = []TimestreamColumnInfo{}
 	}
+	status := result.QueryStatus
+	if status == nil {
+		derived, err := timestreamQueryStatus(rows)
+		if err != nil {
+			return nil, err
+		}
+		status = &derived
+	}
 
+	// NextToken is omitted: every result is answered whole, and API_query_Query's NextToken has a
+	// minimum length of 1, so the empty string answered before #1209 was never a value it publishes.
 	return timestreamJSONResponse(http.StatusOK, map[string]any{
-		"QueryId":    timestreamQueryID(reqCtx.IDs),
-		"Rows":       rows,
-		"ColumnInfo": cols,
-		"NextToken":  "",
+		"QueryId":     timestreamQueryID(reqCtx.IDs),
+		"Rows":        rows,
+		"ColumnInfo":  cols,
+		"QueryStatus": status,
 	})
 }
 
@@ -383,109 +428,35 @@ func timestreamQueryID(m *IDMint) string {
 	return m.Hex(16)
 }
 
-// lookupQueryResult returns the seeded result for the given query string,
-// falling back to the wildcard "*" seed, then to stored records from
-// WriteRecords if the query matches "SELECT * FROM db.table", and finally
-// an empty result.
-func (p *TimestreamPlugin) lookupQueryResult(qs, accountID, region string) TimestreamQueryResult {
+// seededQueryResult returns the result seeded for the query string, falling back to the wildcard
+// "*" seed, and reports whether either was found.
+func (p *TimestreamPlugin) seededQueryResult(qs string) (TimestreamQueryResult, bool, error) {
 	goCtx := context.Background()
 	for _, key := range []string{qs, "*"} {
 		raw, err := p.state.Get(goCtx, timestreamCtrlNamespace, timestreamCtrlResultKey(key))
-		if err != nil || raw == nil {
+		if err != nil {
+			return TimestreamQueryResult{}, false, fmt.Errorf("timestream query read seed: %w", err)
+		}
+		if raw == nil {
 			continue
 		}
 		var result TimestreamQueryResult
-		if err2 := json.Unmarshal(raw, &result); err2 == nil {
-			return result
+		if err := json.Unmarshal(raw, &result); err != nil {
+			return TimestreamQueryResult{}, false, fmt.Errorf("timestream query decode seed: %w", err)
 		}
+		return result, true, nil
 	}
-
-	// Try to serve from stored records if query matches SELECT * FROM db.table.
-	if db, table, ok := parseTimestreamSelect(qs); ok {
-		recordsKey := timestreamRecordsKey(accountID, region, db, table)
-		raw, err := p.state.Get(goCtx, timestreamNamespace, recordsKey)
-		if err == nil && raw != nil {
-			return recordsToQueryResult(raw)
-		}
-	}
-
-	return TimestreamQueryResult{}
-}
-
-// parseTimestreamSelect extracts db and table from a simple SELECT * FROM db.table query.
-func parseTimestreamSelect(sql string) (db, table string, ok bool) {
-	upper := strings.ToUpper(strings.TrimSpace(sql))
-	if !strings.HasPrefix(upper, "SELECT") {
-		return "", "", false
-	}
-	fromIdx := strings.Index(upper, "FROM")
-	if fromIdx < 0 {
-		return "", "", false
-	}
-	rest := strings.TrimSpace(sql[fromIdx+4:])
-	// Remove trailing WHERE/ORDER/LIMIT clauses.
-	for _, kw := range []string{" WHERE ", " ORDER ", " LIMIT ", " GROUP "} {
-		if idx := strings.Index(strings.ToUpper(rest), kw); idx >= 0 {
-			rest = rest[:idx]
-		}
-	}
-	rest = strings.TrimSpace(rest)
-	// Strip quotes.
-	rest = strings.ReplaceAll(rest, "\"", "")
-	// Split on dot.
-	parts := strings.SplitN(rest, ".", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", false
-	}
-	return parts[0], parts[1], true
-}
-
-// recordsToQueryResult converts stored WriteRecords data to a TimestreamQueryResult.
-func recordsToQueryResult(raw []byte) TimestreamQueryResult {
-	var records []map[string]any
-	if err := json.Unmarshal(raw, &records); err != nil || len(records) == 0 {
-		return TimestreamQueryResult{}
-	}
-
-	// Collect unique column names from all records.
-	colSet := make(map[string]bool)
-	for _, rec := range records {
-		for k := range rec {
-			colSet[k] = true
-		}
-	}
-	var colNames []string
-	for name := range colSet {
-		colNames = append(colNames, name)
-	}
-	sort.Strings(colNames)
-	sortedCols := make([]TimestreamColumnInfo, len(colNames))
-	for i, name := range colNames {
-		sortedCols[i] = TimestreamColumnInfo{Name: name, Type: TimestreamColumnInfoType{ScalarType: "VARCHAR"}}
-	}
-
-	// Build rows.
-	var rows []TimestreamRow
-	for _, rec := range records {
-		var data []TimestreamDatum
-		for _, name := range colNames {
-			val := ""
-			if v, ok := rec[name]; ok {
-				val = fmt.Sprintf("%v", v)
-			}
-			data = append(data, TimestreamDatum{ScalarValue: val})
-		}
-		rows = append(rows, TimestreamRow{Data: data})
-	}
-
-	return TimestreamQueryResult{Rows: rows, ColumnInfo: sortedCols}
+	return TimestreamQueryResult{}, false, nil
 }
 
 // --- Load helpers ---
 
 func (p *TimestreamPlugin) loadDatabase(acct, region, name string) (TimestreamDatabase, error) {
 	raw, err := p.state.Get(context.Background(), timestreamNamespace, timestreamDBKey(acct, region, name))
-	if err != nil || raw == nil {
+	if err != nil {
+		return TimestreamDatabase{}, fmt.Errorf("timestream load database: %w", err)
+	}
+	if raw == nil {
 		return TimestreamDatabase{}, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    "Database not found: " + name,
@@ -501,7 +472,10 @@ func (p *TimestreamPlugin) loadDatabase(acct, region, name string) (TimestreamDa
 
 func (p *TimestreamPlugin) loadTable(acct, region, dbName, tableName string) (TimestreamTable, error) {
 	raw, err := p.state.Get(context.Background(), timestreamNamespace, timestreamTableKey(acct, region, dbName, tableName))
-	if err != nil || raw == nil {
+	if err != nil {
+		return TimestreamTable{}, fmt.Errorf("timestream load table: %w", err)
+	}
+	if raw == nil {
 		return TimestreamTable{}, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    fmt.Sprintf("Table not found: %s/%s", dbName, tableName),

@@ -144,7 +144,7 @@ func TestSingleAccount_NoSecondHardcodedAccountInProduction(t *testing.T) {
 // an ARN between colons, or after one and before a slash, so a run bounded by
 // anything else is part of a longer token rather than an account. That excludes
 // Kinesis's "shardId-000000000000" and DynamoDB's stream shard IDs, both preceded by
-// a hyphen, and MSK's "-0001-0001-0001-000000000001" for the same reason. Requiring
+// a hyphen. Requiring
 // the run to be maximal excludes the twenty-digit shard sequence and the
 // fourteen-digit pricing offer version, which are not twelve digits long even though
 // they contain twelve consecutive ones.
