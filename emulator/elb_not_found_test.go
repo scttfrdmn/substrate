@@ -8,6 +8,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // ELBv2 operations that address one resource by ARN refuse an ARN naming nothing (#1313).
@@ -153,4 +155,49 @@ func TestELB_AnARNNamingNothingIsRefusedWithThePublishedCode(t *testing.T) {
 		described := ok(map[string]string{"Action": "DescribeRules", "RuleArns.member.1": r2})
 		require.Contains(t, string(described), "<Priority>5</Priority>", "a refused call must reprice nothing: %s", described)
 	})
+}
+
+// A store write that fails after a target group, listener or rule is found is returned as an error,
+// never answered as the operation's success over a record that was not written.
+func TestELB_AStoreWriteFaultAfterTheLookupIsAnError(t *testing.T) {
+	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+	ts := newELBTestServerWithState(t, fault)
+	ok := func(params map[string]string) []byte {
+		t.Helper()
+		status, body := elbWireCall(t, ts.URL, params)
+		require.Equal(t, http.StatusOK, status, "%s: %s", params["Action"], body)
+		return body
+	}
+	lb := elbWireARN(t, ok(map[string]string{"Action": "CreateLoadBalancer", "Name": "fault-alb", "Type": "application"}), "LoadBalancerArn")
+	tg := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateTargetGroup", "Name": "fault-tg", "Protocol": "HTTP", "Port": "80", "VpcId": "vpc-12345678",
+	}), "TargetGroupArn")
+	listener := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateListener", "LoadBalancerArn": lb, "Protocol": "HTTP", "Port": "80",
+		"DefaultActions.member.1.Type": "forward", "DefaultActions.member.1.TargetGroupArn": tg,
+	}), "ListenerArn")
+	rule := elbWireARN(t, ok(map[string]string{
+		"Action": "CreateRule", "ListenerArn": listener, "Priority": "10",
+		"Conditions.member.1.Field": "path-pattern", "Conditions.member.1.Values.member.1": "/fault/*",
+		"Actions.member.1.Type": "forward", "Actions.member.1.TargetGroupArn": tg,
+	}), "RuleArn")
+	ok(map[string]string{"Action": "RegisterTargets", "TargetGroupArn": tg, "Targets.member.1.Id": "i-0123456789abcdef0"})
+
+	for _, tc := range []struct {
+		prefix string
+		params map[string]string
+	}{
+		{"tg:", map[string]string{"Action": "RegisterTargets", "TargetGroupArn": tg, "Targets.member.1.Id": "i-0fedcba9876543210"}},
+		{"tg:", map[string]string{"Action": "DeregisterTargets", "TargetGroupArn": tg, "Targets.member.1.Id": "i-0123456789abcdef0"}},
+		{"listener:", map[string]string{"Action": "ModifyListener", "ListenerArn": listener, "Port": "8080"}},
+		{"rule:", map[string]string{"Action": "SetRulePriorities", "RulePriorities.member.1.RuleArn": rule, "RulePriorities.member.1.Priority": "20"}},
+	} {
+		t.Run(tc.params["Action"], func(t *testing.T) {
+			fault.failPut = tc.prefix
+			defer func() { fault.failPut = "" }()
+			status, body := elbWireCall(t, ts.URL, tc.params)
+			require.GreaterOrEqualf(t, status, http.StatusInternalServerError,
+				"%s must fail on a store write fault, not answer %d: %s", tc.params["Action"], status, body)
+		})
+	}
 }

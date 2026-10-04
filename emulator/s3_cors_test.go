@@ -5,6 +5,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // A bucket's CORS configuration is recorded and answered back (#1278). The assertions are on the raw
@@ -133,4 +135,34 @@ func TestS3CORS_DeleteBucketRemovesTheConfiguration(t *testing.T) {
 
 	w := s3Request(t, srv, http.MethodGet, "/"+bucket+"?cors", nil, nil)
 	require.Equal(t, "NoSuchCORSConfiguration", parseS3Error(t, w.Body.Bytes()).Code, "%s", w.Body.String())
+}
+
+// A store fault at any read or write the CORS handlers make is an error, never answered as a
+// configuration, an absence or a success.
+func TestS3CORS_AStoreFaultIsAnError(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		body   []byte
+	}{
+		{"PutBucketCors, bucket read", func(m *cfFaultStateManager) { m.failGet = "bucket:fault-cors" }, http.MethodPut, []byte(s3CORSBody)},
+		{"PutBucketCors, write", func(m *cfFaultStateManager) { m.failPut = "bucket_cors:" }, http.MethodPut, []byte(s3CORSBody)},
+		{"GetBucketCors, read", func(m *cfFaultStateManager) { m.failGet = "bucket_cors:" }, http.MethodGet, nil},
+		{"GetBucketCors, corrupt record", func(m *cfFaultStateManager) { m.corruptGet = "bucket_cors:" }, http.MethodGet, nil},
+		{"DeleteBucketCors, delete", func(m *cfFaultStateManager) { m.failDelete = "bucket_cors:" }, http.MethodDelete, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newS3TestServerWithState(t, fault)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/fault-cors", nil, nil).Code)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/fault-cors?cors", []byte(s3CORSBody), nil).Code)
+
+			tc.arm(fault)
+			w := s3Request(t, srv, tc.method, "/fault-cors?cors", tc.body, nil)
+			require.GreaterOrEqualf(t, w.Code, http.StatusInternalServerError, "%s must fail on a store fault: %s", tc.name, w.Body.String())
+		})
+	}
 }
