@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -69,6 +69,9 @@ operation-docs-check: ## Fail if a routed operation has no row in docs/services.
 
 operation-docs-write: ## Rewrite the undocumented-operations inventory (run by hand after writing rows)
 	go run ./cmd/check-operation-docs -write
+
+docs-headings-check: ## Fail if docs/services.md names a service section twice
+	./scripts/check-docs-headings.sh
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh

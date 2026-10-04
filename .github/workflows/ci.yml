@@ -138,6 +138,11 @@ jobs:
       - name: Check docs/services.md is in sync with the plugin registry
         run: make docs-reference-check
 
+      # The check above compares the generated matrix, not the hand-written prose, so a
+      # section copied in twice passes it. #1384 shipped 41 duplicated sections that way.
+      - name: Check docs/services.md names each service section once
+        run: make docs-headings-check
+
       # The matrix check above compares operation *counts*; this compares the operations
       # themselves against each service's hand-written table, in both directions. It runs
       # in CI and not only in `make` for the reason the wire-bookkeeping baseline does: an
