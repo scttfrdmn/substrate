@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **One shared seeded-progression helper, with EC2 snapshots and instances on it** (#1155, #1196).
+  EC2's snapshot (#715) and instance (#514) progressions each carried their own copy of the seeded
+  observation countdown:
+  - a seed keyed by ID or `"*"`, with per-resource counters (#582);
+  - peek vs observe, terminal-stop of counter writes, and reset on a state change;
+  - the POST/DELETE control-plane handlers.
+
+  `emulator/progression.go` is now the one copy, generic over each kind's seed type, for the
+  services #1155 and #1196 name to build on. EC2's endpoints, seed shapes and behaviour are
+  unchanged, except that a seed refused for an unknown state now answers valid JSON.
+  `docs/services.md` gains "How a progression is seeded", the rules every progressing resource
+  shares.
+
 ## [v0.122.0] - 2026-10-04
 
 ### Added

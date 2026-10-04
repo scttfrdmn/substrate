@@ -2124,6 +2124,47 @@ not see a parse guard. A decoded tag set compares equal whatever order it arrive
 
 ---
 
+## How a progression is seeded
+
+**A resource whose published lifecycle passes through a non-terminal state can be seeded to report
+it for a counted number of observations before it settles.** Substrate completes work in the
+request that starts it, so without a seed a resource is in its settled state from the first read,
+and a caller's poll, wait or retry loop exits on its first iteration. A seed makes the transition
+observable. Every resource that progresses uses one mechanism, `emulator/progression.go`, so the
+rules below hold for all of them, and each service's section says only which states it reports and
+which member its seed endpoint names.
+
+- **The endpoint.** `POST /v1/{service}/{kind}-status` writes a seed, and `DELETE` removes one
+  (`?{id}=…`) or all of them (no query). The body names a resource ID, or `"*"` for every resource
+  of the kind, and a count of observations. A seed whose count is negative, or that names a state
+  outside the kind's published enumeration, is refused with 400 and stored nothing.
+- **The count is in observations, not time.** The simulated clock advances with wall time from its
+  baseline, so a duration would make a "still pending" assertion depend on how long the test ran. "The
+  next two polls see `pending`" is exactly reproducible, live and on replay.
+- **Describes observe; creates and preconditions peek.** Only a describe-style read spends an
+  observation. A create reporting the state a resource is born in, or a precondition check refusing
+  a resource that is not ready, reads the countdown without spending it, so a count means the same
+  number of polls whatever else the test does.
+- **The ID outranks the wildcard, and each resource counts separately.** A seed for one resource
+  governs it even when a `"*"` seed is also in place. Under a `"*"` seed every resource has its own
+  countdown, so one describe over five resources spends one observation of each rather than five
+  of a shared one.
+- **A seed never rewrites the resource.** It governs what an observation *reports*. Clearing it —
+  or `POST /v1/state/reset` — makes every resource read its own record again, and an unseeded
+  resource reads exactly as it would with no seed endpoint at all.
+- **Seeding restarts the countdowns it governs.** A second `POST` gives a full new progression
+  rather than the remainder of the first. A service may also restart a resource's countdown on an
+  operation that starts a new transition — a stop after a start — so one seed covers several.
+- **A settled resource writes nothing.** The countdown position is stored only while it can still
+  change an answer, so polling a settled resource adds no events to the log a replay walks.
+
+The seed is recorded and replayed in position like every control-plane write; see
+[How a seed survives a replay](#how-a-seed-survives-a-replay). The two EC2 progressions are the
+worked examples: [Seeding a snapshot progression](#seeding-a-snapshot-progression) and
+[Seeding an instance-state progression](#seeding-an-instance-state-progression).
+
+---
+
 ## How a seed survives a replay
 
 **A seed is recorded as an event and re-applied where it was written, so a stream recorded under
