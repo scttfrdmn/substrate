@@ -22,6 +22,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/services.md` gains "How a progression is seeded", the rules every progressing resource
   shares.
 
+### Fixed
+
+- **A Batch job progresses through the seven published statuses** (#1248). `SubmitJob` stored
+  `SUCCEEDED`, so six of `jobStatus`'s seven values were unreachable, a waiter exited on its first
+  poll, and `ListJobs`' `RUNNING` default (#1236) was always empty. A submitted job's record now holds
+  `SUBMITTED`, and `DescribeJobs` and `ListJobs` report its progression through the shared helper.
+  - Unseeded, the first observation reports `SUCCEEDED`, so earlier fixtures keep their meaning.
+  - `POST /v1/batch/job-status` seeds a count of observations in each transient state, walked in the
+    published order, then `SUCCEEDED` or `FAILED` with a `statusReason`. It is keyed by job ID or
+    `"*"`, recorded and replayed, and never rewrites the record.
+  - `ListJobs` observes each job in its scope through the same projection as `DescribeJobs`.
+  - `TerminateJob` ends any job not yet settled. The newly routed `CancelJob` ends `SUBMITTED`,
+    `PENDING` and `RUNNABLE` jobs and leaves `STARTING`/`RUNNING` ones, still answering 200, as
+    `API_CancelJob` publishes.
+- **A HealthOmics run progresses through its published statuses when seeded** (#1371). A run was
+  `COMPLETED` in the request that started it. Unseeded, it still is, the nominal path.
+  `POST /v1/omics/run-status` (keyed by `runId` or `"*"`) seeds a countdown: `PENDING`, `STARTING`,
+  then `RUNNING`, or one pinned `state`, before `COMPLETED` or `FAILED` with the seeded
+  `failureReason`. `GetRun` and `ListRuns` observe; `StartRun`, which now answers `status`, only
+  peeks.
+- **HealthOmics' `CancelRun` answers 202 and passes through `STOPPING`, and `DeleteRun` is routed**
+  (#1165). `CancelRun` answered 204 where `API_CancelRun` publishes 202, and was also reachable as
+  `DELETE /run/{id}`, the URI `API_DeleteRun` publishes. It is now `POST /run/{id}/cancel` only.
+  - An active run reports `STOPPING` for `stoppingObservations` (default 1) before `CANCELLED`, and a
+    settled run is `ConflictException`/409.
+  - `DELETE /run/{id}` is `DeleteRun`: 202 for a `COMPLETED`, `FAILED` or `CANCELLED` run, otherwise
+    `ConflictException`/409.
+- **A Bedrock batch job stops through `Stopping`, a terminal job refuses the stop, and the job-status
+  seed counts down** (#1174). `StopModelInvocationJob` wrote `Stopped` over any job, including a
+  `Completed` or `Failed` one.
+  - A stop now leaves the job `Stopping` for one read, then `Stopped`. `POST
+    /v1/bedrock/model-invocation-job-stop` seeds the count.
+  - A job whose observed status is terminal answers `ConflictException`/400, and a repeated stop while
+    stopping is a no-op.
+  - `CreateModelInvocationJob` checks all five `Required: Yes` members.
+  - The `/v1/bedrock/model-invocation-job-status` seed moves onto the shared helper. A seeded job
+    reports `pendingStatus` for `pendingObservations` reads, then the seeded `status`. Statuses are
+    validated against the ten published values, and a seed with no count reads as the old override.
+- **A CloudFront distribution reports `InProgress` for a seeded window after a create or update**
+  (#1381). A distribution was `Deployed` from creation, so the deploy waiters passed on their first
+  poll. `GetDistribution` and `ListDistributions` now observe a seeded countdown:
+  `POST`/`DELETE /v1/cloudfront/distribution-status`, keyed by distribution ID or `"*"`.
+  - Every `UpdateDistribution`, including the disable before a delete, restarts the countdown, and a
+    list advances each distribution's own countdown once (#582).
+  - The default window is zero, so an unseeded distribution is `Deployed` at once, as before.
+  - `API_DeleteDistribution` publishes no refusal for a distribution still `InProgress`, so a disabled
+    distribution deletes during the window.
+- **A Kinesis stream reports `CREATING` and `UPDATING` before `ACTIVE`** (#1119). `CreateStream`,
+  `UpdateShardCount`, `MergeShards` and `SplitShard` completed in the request.
+  `POST /v1/kinesis/stream-status` makes a seeded number of `DescribeStream`/`DescribeStreamSummary`
+  observations report `CREATING` after a create, or `UPDATING` after a reshard. Each reshard restarts
+  the countdown, and unseeded streams are unchanged.
+  - The three reshards refuse a stream that is not `ACTIVE` with `ResourceInUseException`/400, as each
+    page publishes. The check peeks, so a refusal spends no observation.
+  - `DELETING` is not modeled: `DeleteStream` removes the stream at once.
+
+  The operation catalog goes from 1,032 to 1,034 (`CancelJob`, `DeleteRun`).
+
 ## [v0.122.0] - 2026-10-04
 
 ### Added

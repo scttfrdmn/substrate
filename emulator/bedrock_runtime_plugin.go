@@ -3,9 +3,11 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,12 +22,6 @@ func bedrockRuntimeCtrlResponseKey(modelID string) string {
 	return "response:" + modelID
 }
 
-// bedrockRuntimeCtrlJobStatusKey returns the state key for a seeded model
-// invocation job status override.
-func bedrockRuntimeCtrlJobStatusKey(jobID string) string {
-	return "jobstatus:" + jobID
-}
-
 // BedrockRuntimePlugin emulates the Amazon Bedrock Runtime service.
 // It handles ApplyGuardrail for the bedrock-runtime host, supporting
 // pass-through (action NONE) and blocklist-based intervention
@@ -34,6 +30,10 @@ type BedrockRuntimePlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// seedMu serializes a job read's observation of its countdown, so two reads cannot spend
+	// the same observation (#1174, the shared rule of emulator/progression.go).
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "bedrock-runtime".
@@ -348,8 +348,20 @@ func (p *BedrockRuntimePlugin) createModelInvocationJob(ctx *RequestContext, req
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, bedrockInvalidBody()
 	}
-	if body.JobName == "" {
-		return nil, bedrockValidationError("jobName is required")
+	// API_CreateModelInvocationJob marks five members Required: Yes (#1174).
+	for _, m := range []struct {
+		name    string
+		present bool
+	}{
+		{"jobName", body.JobName != ""},
+		{"modelId", body.ModelID != ""},
+		{"roleArn", body.RoleArn != ""},
+		{"inputDataConfig", bedrockJSONPresent(body.InputDataConfig)},
+		{"outputDataConfig", bedrockJSONPresent(body.OutputDataConfig)},
+	} {
+		if !m.present {
+			return nil, bedrockValidationError(m.name + " is required")
+		}
 	}
 
 	jobID := generateBedrockJobID(ctx.IDs)
@@ -379,71 +391,86 @@ func (p *BedrockRuntimePlugin) createModelInvocationJob(ctx *RequestContext, req
 	return bedrockRuntimeJSONResponse(http.StatusOK, map[string]string{"jobArn": jobArn})
 }
 
-// loadModelInvocationJob fetches a job by ID and applies any seeded status override.
+// loadModelInvocationJob fetches a job's stored record by ID, answering the published
+// ResourceNotFoundException when there is none. It applies no seed; see
+// [BedrockRuntimePlugin.observeModelInvocationJob].
 func (p *BedrockRuntimePlugin) loadModelInvocationJob(ctx *RequestContext, jobID string) (*BedrockModelInvocationJob, error) {
-	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID))
-	if err != nil || data == nil {
+	data, err := p.state.Get(context.Background(), bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID))
+	if err != nil {
+		return nil, fmt.Errorf("loadModelInvocationJob: get: %w", err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "model invocation job " + jobID + " not found", HTTPStatus: http.StatusNotFound}
 	}
 	var job BedrockModelInvocationJob
 	if err := json.Unmarshal(data, &job); err != nil {
 		return nil, fmt.Errorf("loadModelInvocationJob: unmarshal: %w", err)
 	}
-	p.applySeededJobStatus(goCtx, jobID, &job)
 	return &job, nil
 }
 
-// applySeededJobStatus overrides a job's status from a control-plane seed, if any
-// (exact job-ID match first, then the "*" wildcard).
-func (p *BedrockRuntimePlugin) applySeededJobStatus(goCtx context.Context, jobID string, job *BedrockModelInvocationJob) {
-	for _, key := range []string{
-		bedrockRuntimeCtrlJobStatusKey(jobID),
-		bedrockRuntimeCtrlJobStatusKey("*"),
-	} {
-		data, err := p.state.Get(goCtx, bedrockRuntimeCtrlNamespace, key)
-		if err != nil || data == nil {
-			continue
-		}
-		var seed struct {
-			Status  string `json:"status"`
-			Message string `json:"message"`
-		}
-		if json.Unmarshal(data, &seed) == nil && seed.Status != "" {
-			job.Status = seed.Status
-			job.Message = seed.Message
-		}
-		return
+// observeModelInvocationJob loads a job and reports it as one read observes it: the governing
+// countdown is spent once, and the record is not rewritten (#1174).
+func (p *BedrockRuntimePlugin) observeModelInvocationJob(ctx *RequestContext, jobID string) (*BedrockModelInvocationJob, error) {
+	job, err := p.loadModelInvocationJob(ctx, jobID)
+	if err != nil {
+		return nil, err
 	}
+	view, err := p.bedrockJobObservedStatus(context.Background(), jobID, job, true)
+	if err != nil {
+		return nil, err
+	}
+	job.Status, job.Message = view.status, view.message
+	return job, nil
 }
 
 // getModelInvocationJob handles GetModelInvocationJob.
 func (p *BedrockRuntimePlugin) getModelInvocationJob(ctx *RequestContext, _ *AWSRequest, jobID string) (*AWSResponse, error) {
-	job, err := p.loadModelInvocationJob(ctx, jobID)
+	job, err := p.observeModelInvocationJob(ctx, jobID)
 	if err != nil {
 		return nil, err
 	}
 	return bedrockRuntimeJSONResponse(http.StatusOK, bedrockInvocationJobToWire(*job))
 }
 
-// stopModelInvocationJob handles StopModelInvocationJob, transitioning the job to Stopped.
+// stopModelInvocationJob handles StopModelInvocationJob.
+//
+// A job in a terminal status (Completed, Failed, Stopped, PartiallyCompleted, Expired) answers the
+// page's ConflictException at 400; before #1174 the stop overwrote it with Stopped. Any other job
+// is left `Stopping`, which the next reads report until its stop countdown ends and they report
+// `Stopped`; see bedrock_job_progression.go. A job already stopping answers success and is left as
+// it is, so a repeated stop neither fails nor restarts the countdown. The precondition peeks: a
+// refused stop spends no observation.
 func (p *BedrockRuntimePlugin) stopModelInvocationJob(ctx *RequestContext, _ *AWSRequest, jobID string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	data, err := p.state.Get(goCtx, bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID))
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "model invocation job " + jobID + " not found", HTTPStatus: http.StatusNotFound}
+	job, err := p.loadModelInvocationJob(ctx, jobID)
+	if err != nil {
+		return nil, err
 	}
-	var job BedrockModelInvocationJob
-	if err := json.Unmarshal(data, &job); err != nil {
-		return nil, fmt.Errorf("stopModelInvocationJob: unmarshal: %w", err)
+	view, err := p.bedrockJobObservedStatus(goCtx, jobID, job, false)
+	if err != nil {
+		return nil, err
 	}
-	job.Status = "Stopped"
+	if bedrockJobIsTerminal(view.status) {
+		return nil, &AWSError{
+			Code:       "ConflictException",
+			Message:    fmt.Sprintf("model invocation job %s is %s and cannot be stopped", jobID, view.status),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if view.status == "Stopping" {
+		return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{})
+	}
+	job.Status = "Stopping"
 	updated, err := json.Marshal(job)
 	if err != nil {
 		return nil, fmt.Errorf("bedrock stopModelInvocationJob marshal: %w", err)
 	}
 	if err := p.state.Put(goCtx, bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID), updated); err != nil {
 		return nil, fmt.Errorf("stopModelInvocationJob: put: %w", err)
+	}
+	if err := bedrockJobStopProgressions.reset(goCtx, p.state, jobID); err != nil {
+		return nil, fmt.Errorf("stopModelInvocationJob: %w", err)
 	}
 	return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{})
 }
@@ -452,13 +479,20 @@ func (p *BedrockRuntimePlugin) stopModelInvocationJob(ctx *RequestContext, _ *AW
 // for all jobs in the account and region.
 func (p *BedrockRuntimePlugin) listModelInvocationJobs(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
-	ids, _ := loadStringIndex(goCtx, p.state, bedrockRuntimeNamespace, bedrockModelInvocationJobIDsKey(ctx.AccountID, ctx.Region))
+	ids, err := loadStringIndex(goCtx, p.state, bedrockRuntimeNamespace, bedrockModelInvocationJobIDsKey(ctx.AccountID, ctx.Region))
+	if err != nil {
+		return nil, fmt.Errorf("listModelInvocationJobs: load index: %w", err)
+	}
 
 	summaries := make([]bedrockInvocationJobOut, 0, len(ids))
 	for _, id := range ids {
-		job, err := p.loadModelInvocationJob(ctx, id)
+		job, err := p.observeModelInvocationJob(ctx, id)
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+			continue // an index entry whose record is gone
+		}
 		if err != nil {
-			continue
+			return nil, err
 		}
 		summaries = append(summaries, bedrockInvocationJobToWire(*job))
 	}
@@ -476,4 +510,10 @@ func bedrockRuntimeJSONResponse(status int, v interface{}) (*AWSResponse, error)
 		Headers:    map[string]string{"Content-Type": "application/json"},
 		Body:       body,
 	}, nil
+}
+
+// bedrockJSONPresent reports whether a JSON request member was sent with a value.
+func bedrockJSONPresent(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	return trimmed != "" && trimmed != "null"
 }

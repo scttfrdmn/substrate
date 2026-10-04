@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand" // nosemgrep
 	"net/http"
@@ -15,8 +16,9 @@ import (
 const omicsNamespace = "omics"
 
 // OmicsPlugin emulates the Amazon HealthOmics service.
-// It handles workflow run CRUD operations (StartRun, GetRun, CancelRun, ListRuns)
-// using the HealthOmics REST/JSON API at /run/... paths.
+// It handles workflow run operations (StartRun, GetRun, ListRuns, CancelRun, DeleteRun)
+// using the HealthOmics REST/JSON API at /run/... paths. A run's status progresses only when
+// seeded; see omics_run_progression.go.
 type OmicsPlugin struct {
 	state  StateManager
 	logger Logger
@@ -36,6 +38,10 @@ type OmicsPlugin struct {
 	// unrelated one. The seed itself is still per-process wall-clock; making it
 	// reproducible across processes is #856.
 	rngSeed int64
+
+	// seedMu serializes the read-modify-write of a run-status countdown; see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "omics".
@@ -85,6 +91,8 @@ func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return p.getRun(ctx, req, runID)
 	case "CancelRun":
 		return p.cancelRun(ctx, req, runID)
+	case "DeleteRun":
+		return p.deleteRun(ctx, req, runID)
 	case "ListRuns":
 		return p.listRuns(ctx, req)
 	default:
@@ -93,21 +101,27 @@ func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 }
 
 // parseOmicsOperation maps an HTTP method and path to a HealthOmics operation name
-// and optional run ID.
+// and optional run ID, matching the published URIs by whole segment.
+//
+// DELETE /run/{id} is DeleteRun, as API_DeleteRun publishes it. It was routed to CancelRun
+// until #1165, which made a delete of a finished run "cancel" it and the published
+// POST /run/{id}/cancel and the delete indistinguishable.
 func parseOmicsOperation(method, path string) (op, runID string) {
-	rest := strings.TrimPrefix(path, "/")
+	segs := strings.Split(strings.Trim(path, "/"), "/")
+	if segs[0] != "run" {
+		return "", ""
+	}
 	switch {
-	case rest == "run" && method == "POST":
+	case len(segs) == 1 && method == http.MethodPost:
 		return "StartRun", ""
-	case rest == "run" && method == "GET":
+	case len(segs) == 1 && method == http.MethodGet:
 		return "ListRuns", ""
-	case strings.HasPrefix(rest, "run/") && method == "GET":
-		return "GetRun", strings.TrimPrefix(rest, "run/")
-	case strings.HasPrefix(rest, "run/") && method == "DELETE":
-		return "CancelRun", strings.TrimPrefix(rest, "run/")
-	// SDK v2 uses POST /run/{id}/cancel instead of DELETE /run/{id}.
-	case strings.HasSuffix(rest, "/cancel") && strings.HasPrefix(rest, "run/") && method == "POST":
-		return "CancelRun", strings.TrimSuffix(strings.TrimPrefix(rest, "run/"), "/cancel")
+	case len(segs) == 2 && segs[1] != "" && method == http.MethodGet:
+		return "GetRun", segs[1]
+	case len(segs) == 2 && segs[1] != "" && method == http.MethodDelete:
+		return "DeleteRun", segs[1]
+	case len(segs) == 3 && segs[1] != "" && segs[2] == "cancel" && method == http.MethodPost:
+		return "CancelRun", segs[1]
 	}
 	return "", ""
 }
@@ -117,7 +131,8 @@ type OmicsRun struct {
 	// ID is the 10-digit numeric run identifier.
 	ID string `json:"id"`
 
-	// Status is the run status (COMPLETED for deterministic emulation).
+	// Status is the run's recorded status: COMPLETED from StartRun, or CANCELLED once CancelRun
+	// applies. What an observation reports is derived from it and any seed; see omicsRunReport.
 	Status string `json:"status"`
 
 	// WorkflowID is the workflow to run.
@@ -182,42 +197,68 @@ func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	idsKey := "run_ids:" + ctx.AccountID + "/" + ctx.Region
 	updateStringIndex(goCtx, p.state, omicsNamespace, idsKey, runID)
-	return omicsJSONResponse(http.StatusCreated, map[string]string{"id": runID})
+
+	// API_StartRun publishes the run's status in the create response. It is what the run's first
+	// observation would report, peeked rather than observed, so a "*" seed's countdown is not
+	// spent by the create.
+	obs, err := p.peekRun(goCtx, run)
+	if err != nil {
+		return nil, fmt.Errorf("startRun: status: %w", err)
+	}
+	return omicsJSONResponse(http.StatusCreated, map[string]string{"id": runID, "status": obs.status})
 }
 
-func (p *OmicsPlugin) getRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {
-	goCtx := context.Background()
+// loadRun reads one run, answering ResourceNotFoundException when it does not exist and the store's
+// own error, wrapped, when the read fails.
+func (p *OmicsPlugin) loadRun(ctx *RequestContext, runID string) (OmicsRun, string, error) {
 	runKey := "run:" + ctx.AccountID + "/" + ctx.Region + "/" + runID
-	data, err := p.state.Get(goCtx, omicsNamespace, runKey)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "run " + runID + " not found", HTTPStatus: http.StatusNotFound}
+	data, err := p.state.Get(context.Background(), omicsNamespace, runKey)
+	if err != nil {
+		return OmicsRun{}, "", fmt.Errorf("omics load run %s: %w", runID, err)
+	}
+	if data == nil {
+		return OmicsRun{}, "", &AWSError{Code: "ResourceNotFoundException", Message: "run " + runID + " not found", HTTPStatus: http.StatusNotFound}
 	}
 	var run OmicsRun
 	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, fmt.Errorf("getRun: unmarshal: %w", err)
+		return OmicsRun{}, "", fmt.Errorf("omics load run %s: unmarshal: %w", runID, err)
 	}
-	return omicsJSONResponse(http.StatusOK, omicsRunToWire(run))
+	return run, runKey, nil
+}
+
+func (p *OmicsPlugin) getRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {
+	run, _, err := p.loadRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	obs, err := p.observeRun(context.Background(), run)
+	if err != nil {
+		return nil, fmt.Errorf("getRun: status: %w", err)
+	}
+	return omicsJSONResponse(http.StatusOK, omicsRunToWire(run, obs))
 }
 
 // omicsRunStatusCancelled is the status CancelRun leaves a run in, spelled as API_GetRun and
 // API_RunListItem publish it. Until #1364 it was CANCELED, one L, which neither page lists, so a wait
-// loop matching the published value never saw its terminal state.
-//
-// The run goes straight to it. The enum also publishes STOPPING, but a run here is born COMPLETED and
-// nothing in this plugin moves a run through any intermediate status, so there is no progression a
-// STOPPING observation could be part of; modeling one would be the plugin's first.
+// loop matching the published value never saw its terminal state. A cancelled run reports STOPPING
+// first, for the seeded number of observations; see omics_run_progression.go.
 const omicsRunStatusCancelled = "CANCELLED"
 
+// cancelRun handles CancelRun: POST /run/{id}/cancel, answering 202 with an empty body as
+// API_CancelRun publishes. A run that has settled — COMPLETED, FAILED or CANCELLED — is in no state a
+// cancel applies to, and is refused with the page's ConflictException.
 func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {
-	goCtx := context.Background()
-	runKey := "run:" + ctx.AccountID + "/" + ctx.Region + "/" + runID
-	data, err := p.state.Get(goCtx, omicsNamespace, runKey)
-	if err != nil || data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "run " + runID + " not found", HTTPStatus: http.StatusNotFound}
+	run, runKey, err := p.loadRun(ctx, runID)
+	if err != nil {
+		return nil, err
 	}
-	var run OmicsRun
-	if err := json.Unmarshal(data, &run); err != nil {
-		return nil, fmt.Errorf("cancelRun: unmarshal: %w", err)
+	goCtx := context.Background()
+	obs, err := p.peekRun(goCtx, run)
+	if err != nil {
+		return nil, fmt.Errorf("cancelRun: status: %w", err)
+	}
+	if obs.settled() {
+		return nil, omicsConflict("CancelRun", runID, obs.status)
 	}
 	run.Status = omicsRunStatusCancelled
 	updated, err := json.Marshal(run)
@@ -227,13 +268,49 @@ func (p *OmicsPlugin) cancelRun(ctx *RequestContext, _ *AWSRequest, runID string
 	if err := p.state.Put(goCtx, omicsNamespace, runKey, updated); err != nil {
 		return nil, fmt.Errorf("cancelRun: put: %w", err)
 	}
-	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
+	// The STOPPING countdown starts from the next observation.
+	if err := omicsRunProgressions.reset(goCtx, p.state, runID); err != nil {
+		return nil, fmt.Errorf("cancelRun: %w", err)
+	}
+	return &AWSResponse{StatusCode: http.StatusAccepted, Headers: map[string]string{}, Body: nil}, nil
 }
 
+// deleteRun handles DeleteRun: DELETE /run/{id}, answering 202 with an empty body. API_DeleteRun
+// allows it only for a run "that has reached a COMPLETED, FAILED, or CANCELLED stage", and publishes
+// ConflictException for one that has not. The run's record, its index entry and its countdown are
+// removed, so GetRun then answers ResourceNotFoundException, as the page says it will.
+func (p *OmicsPlugin) deleteRun(ctx *RequestContext, _ *AWSRequest, runID string) (*AWSResponse, error) {
+	run, runKey, err := p.loadRun(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	goCtx := context.Background()
+	obs, err := p.peekRun(goCtx, run)
+	if err != nil {
+		return nil, fmt.Errorf("deleteRun: status: %w", err)
+	}
+	if !obs.settled() {
+		return nil, omicsConflict("DeleteRun", runID, obs.status)
+	}
+	if err := p.state.Delete(goCtx, omicsNamespace, runKey); err != nil {
+		return nil, fmt.Errorf("deleteRun: delete: %w", err)
+	}
+	removeFromStringIndex(goCtx, p.state, omicsNamespace, "run_ids:"+ctx.AccountID+"/"+ctx.Region, runID)
+	if err := omicsRunProgressions.reset(goCtx, p.state, runID); err != nil {
+		return nil, fmt.Errorf("deleteRun: %w", err)
+	}
+	return &AWSResponse{StatusCode: http.StatusAccepted, Headers: map[string]string{}, Body: nil}, nil
+}
+
+// listRuns handles ListRuns. Each run listed is observed, as GetRun observes it, so a list and a
+// describe of the same run agree and either one counts as a poll.
 func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	idsKey := "run_ids:" + ctx.AccountID + "/" + ctx.Region
-	ids, _ := loadStringIndex(goCtx, p.state, omicsNamespace, idsKey)
+	ids, err := loadStringIndex(goCtx, p.state, omicsNamespace, idsKey)
+	if err != nil {
+		return nil, fmt.Errorf("listRuns: index: %w", err)
+	}
 
 	type runItem struct {
 		ID     string `json:"id"`
@@ -242,15 +319,19 @@ func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse
 	}
 	items := make([]runItem, 0, len(ids))
 	for _, id := range ids {
-		key := "run:" + ctx.AccountID + "/" + ctx.Region + "/" + id
-		data, err := p.state.Get(goCtx, omicsNamespace, key)
-		if err != nil || data == nil {
-			continue
+		run, _, err := p.loadRun(ctx, id)
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) {
+			continue // an index entry whose record is gone
 		}
-		var run OmicsRun
-		if json.Unmarshal(data, &run) == nil {
-			items = append(items, runItem{ID: run.ID, Status: run.Status, Name: run.Name})
+		if err != nil {
+			return nil, fmt.Errorf("listRuns: %w", err)
 		}
+		obs, err := p.observeRun(goCtx, run)
+		if err != nil {
+			return nil, fmt.Errorf("listRuns: status: %w", err)
+		}
+		items = append(items, runItem{ID: run.ID, Status: obs.status, Name: run.Name})
 	}
 	return omicsJSONResponse(http.StatusOK, map[string]interface{}{"items": items})
 }

@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -23,6 +24,9 @@ type KinesisPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes advancing a seeded stream-status progression (#1119); see
+	// [progression.observe] for why the read-modify-write needs it.
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "kinesis".
@@ -181,6 +185,12 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	idxKey := kinesisStreamNamesKey(ctx.AccountID, ctx.Region)
 	updateStringIndex(goCtx, p.state, kinesisNamespace, idxKey, body.StreamName)
 
+	// A stream re-created under a deleted one's name and ARN starts its CREATING countdown from the
+	// beginning rather than from wherever its predecessor's had reached (#1119).
+	if err := kinesisStreamProgressions.reset(goCtx, p.state, streamARN); err != nil {
+		return nil, err
+	}
+
 	return kinesisJSONResponse(http.StatusOK, struct{}{})
 }
 
@@ -217,6 +227,10 @@ func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	idxKey := kinesisStreamNamesKey(target.AccountID, target.Region)
 	removeFromStringIndex(goCtx, p.state, kinesisNamespace, idxKey, target.Name)
 
+	if err := kinesisStreamProgressions.reset(goCtx, p.state, stream.StreamArn); err != nil {
+		return nil, err
+	}
+
 	return kinesisJSONResponse(http.StatusOK, struct{}{})
 }
 
@@ -234,6 +248,10 @@ func (p *KinesisPlugin) describeStream(ctx *RequestContext, req *AWSRequest) (*A
 
 	stream, err := p.loadStream(target)
 	if err != nil {
+		return nil, err
+	}
+	// One of the two reads the pages tell a caller to poll, so it spends an observation (#1119).
+	if stream.StreamStatus, err = p.streamStatus(context.Background(), stream, true); err != nil {
 		return nil, err
 	}
 
@@ -256,6 +274,10 @@ func (p *KinesisPlugin) describeStreamSummary(ctx *RequestContext, req *AWSReque
 
 	stream, err := p.loadStream(target)
 	if err != nil {
+		return nil, err
+	}
+	// One of the two reads the pages tell a caller to poll, so it spends an observation (#1119).
+	if stream.StreamStatus, err = p.streamStatus(context.Background(), stream, true); err != nil {
 		return nil, err
 	}
 
@@ -315,12 +337,20 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 	if vErr := kinesisValidateShardCountUpdate(body.ScalingType, body.TargetShardCount, current); vErr != nil {
 		return nil, vErr
 	}
+	goCtx := context.Background()
+	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
+		return nil, err
+	}
 
 	stream.ShardCount = *body.TargetShardCount
 	stream.Shards = generateKinesisShards(*body.TargetShardCount)
-	// StreamStatus is set straight to ACTIVE, where the page says a reshard reports UPDATING until
-	// it completes. Making that observable means a seeded observation count, which is #1119.
-	stream.StreamStatus = "ACTIVE"
+	// The record's StreamStatus is the settled ACTIVE the reshard ends on. What a describe reports
+	// in between — UPDATING, for as many observations as a seed holds it — is the progression's
+	// (#1119); unseeded, the stream is ACTIVE at once, as it always was.
+	stream.StreamStatus = kinesisStatusActive
+	if err := p.startStreamTransition(goCtx, &stream); err != nil {
+		return nil, err
+	}
 
 	if err := p.saveStream(stream); err != nil {
 		return nil, err
@@ -663,6 +693,15 @@ func (p *KinesisPlugin) mergeShards(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if err != nil {
 		return nil, err
 	}
+	// API_MergeShards and API_SplitShard both publish ResourceInUseException for a stream that is
+	// not ACTIVE, and both say the operation sets the stream to UPDATING (#1119).
+	goCtx := context.Background()
+	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
+		return nil, err
+	}
+	if err := p.startStreamTransition(goCtx, &stream); err != nil {
+		return nil, err
+	}
 
 	if stream.ShardCount > 1 {
 		stream.ShardCount--
@@ -692,6 +731,15 @@ func (p *KinesisPlugin) splitShard(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 	stream, err := p.loadStream(target)
 	if err != nil {
+		return nil, err
+	}
+	// API_MergeShards and API_SplitShard both publish ResourceInUseException for a stream that is
+	// not ACTIVE, and both say the operation sets the stream to UPDATING (#1119).
+	goCtx := context.Background()
+	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
+		return nil, err
+	}
+	if err := p.startStreamTransition(goCtx, &stream); err != nil {
 		return nil, err
 	}
 

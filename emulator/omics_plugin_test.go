@@ -13,12 +13,18 @@ import (
 )
 
 // newOmicsTestServer builds a minimal server with the OmicsPlugin registered.
+// omicsFrozenInstant is the instant every HealthOmics test's clock is frozen at.
+var omicsFrozenInstant = time.Unix(1700000000, 0).UTC()
+
 func newOmicsTestServer(t *testing.T) *httptest.Server {
 	t.Helper()
 	registry := emulator.NewPluginRegistry()
 	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
 	state := emulator.NewMemoryStateManager()
-	tc := emulator.NewTimeController(time.Now())
+	// A fixed, frozen instant: CLAUDE.md forbids a test that depends on the wall clock.
+	tc := emulator.NewTimeController(omicsFrozenInstant)
+	tc.Freeze()
+	tc.SetTime(omicsFrozenInstant)
 	logger := emulator.NewDefaultLogger(0, false)
 
 	p := &emulator.OmicsPlugin{}
@@ -74,7 +80,10 @@ func omicsBody(t *testing.T, r *http.Response) []byte {
 }
 
 // TestOmicsPlugin_StartGetCancelRun verifies full run lifecycle.
-func TestOmicsPlugin_StartGetCancelRun(t *testing.T) {
+// TestOmicsPlugin_StartGetDeleteRun walks an unseeded run from StartRun through DeleteRun. An
+// unseeded run is COMPLETED at once, which is a state DeleteRun accepts and CancelRun does not; the
+// cancel path is TestOmicsRun_CancelPassesThroughStoppingToCancelled's.
+func TestOmicsPlugin_StartGetDeleteRun(t *testing.T) {
 	ts := newOmicsTestServer(t)
 
 	// StartRun
@@ -121,23 +130,21 @@ func TestOmicsPlugin_StartGetCancelRun(t *testing.T) {
 		t.Errorf("expected my-run, got %q", getRun.Name)
 	}
 
-	// CancelRun
+	// DeleteRun: DELETE /run/{id}, 202 with an empty body, as API_DeleteRun publishes (#1165).
+	// Until #1165 this path was routed to CancelRun.
 	resp3 := omicsRequest(t, ts, http.MethodDelete, "/run/"+runID, nil)
-	if resp3.StatusCode != http.StatusNoContent {
-		t.Fatalf("cancelRun: expected 204, got %d", resp3.StatusCode)
+	if resp3.StatusCode != http.StatusAccepted {
+		t.Fatalf("deleteRun: expected 202, got %d", resp3.StatusCode)
 	}
-	omicsBody(t, resp3)
+	if b := omicsBody(t, resp3); len(b) != 0 {
+		t.Errorf("deleteRun: expected an empty body, got %s", b)
+	}
 
-	// GetRun — status should be CANCELLED, as API_GetRun publishes it (#1364)
+	// GetRun can no longer find it.
 	resp4 := omicsRequest(t, ts, http.MethodGet, "/run/"+runID, nil)
-	var afterCancel struct {
-		Status string `json:"status"`
-	}
-	if err := json.Unmarshal(omicsBody(t, resp4), &afterCancel); err != nil {
-		t.Fatalf("decode after-cancel: %v", err)
-	}
-	if afterCancel.Status != "CANCELLED" {
-		t.Errorf("expected CANCELLED, got %q", afterCancel.Status)
+	omicsBody(t, resp4)
+	if resp4.StatusCode != http.StatusNotFound {
+		t.Errorf("getRun after delete: expected 404, got %d", resp4.StatusCode)
 	}
 }
 
