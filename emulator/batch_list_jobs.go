@@ -218,6 +218,16 @@ func (p *BatchPlugin) listJobs(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		if err := json.Unmarshal(data, &job); err != nil {
 			return nil, fmt.Errorf("listJobs unmarshal job %s: %w", id, err)
 		}
+		// The queue and the filter decide whether the job is in the listing at all; only a job in
+		// scope is observed, so a listing of one queue spends nothing from another queue's jobs.
+		// Its status is then the one an observation reports, the same projection DescribeJobs
+		// answers (#1248), and the jobStatus filter, RUNNING by default, applies to that.
+		if !batchListJobsInScope(job, body, filter) {
+			continue
+		}
+		if job, err = batchJobObserved(goCtx, p.state, &p.seedMu, job, true); err != nil {
+			return nil, fmt.Errorf("listJobs observe job %s: %w", id, err)
+		}
 		if !batchListJobsMatches(job, body, filter) {
 			continue
 		}
@@ -329,7 +339,7 @@ func batchListJobsPageSize(maxResults int, usesFilter bool) int {
 // says so: *"If the `filters` parameter is specified, the `jobStatus` parameter is ignored and jobs
 // with any status are returned."* Otherwise an absent `jobStatus` is `RUNNING`.
 func batchListJobsMatches(job BatchJob, body *batchListJobsRequest, filter *batchKeyValuesPair) bool {
-	if body.JobQueue != "" && batchQueueName(job.JobQueue) != batchQueueName(body.JobQueue) {
+	if !batchListJobsInScope(job, body, filter) {
 		return false
 	}
 
@@ -343,6 +353,15 @@ func batchListJobsMatches(job BatchJob, body *batchListJobsRequest, filter *batc
 		}
 	}
 
+	return true
+}
+
+// batchListJobsInScope reports whether job is one the listing covers before its status is
+// considered: on the named queue, and matching the filter if there is one.
+func batchListJobsInScope(job BatchJob, body *batchListJobsRequest, filter *batchKeyValuesPair) bool {
+	if body.JobQueue != "" && batchQueueName(job.JobQueue) != batchQueueName(body.JobQueue) {
+		return false
+	}
 	return filter == nil || batchFilterMatchesJob(job, *filter)
 }
 

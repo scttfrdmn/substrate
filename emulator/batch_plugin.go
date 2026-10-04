@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,6 +23,9 @@ type BatchPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes a job progression's read-modify-write of its observation counter; see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "batch".
@@ -51,6 +56,8 @@ func (p *BatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return p.describeJobs(ctx, req)
 	case "TerminateJob":
 		return p.terminateJob(ctx, req, jobID)
+	case "CancelJob":
+		return p.cancelJob(ctx, req)
 	case "ListJobs":
 		return p.listJobs(ctx, req)
 	case "CreateComputeEnvironment":
@@ -89,6 +96,8 @@ func parseBatchOperation(method, path string) (op, jobID string) {
 	case rest == "v1/terminatejob" && method == "POST":
 		// SDK sends jobId in the request body; extracted by terminateJob handler.
 		return "TerminateJob", ""
+	case rest == "v1/canceljob" && method == "POST":
+		return "CancelJob", ""
 	case rest == "v1/createcomputeenvironment" && method == "POST":
 		return "CreateComputeEnvironment", ""
 	case rest == "v1/createjobqueue" && method == "POST":
@@ -583,10 +592,12 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		JobName:       body.JobName,
 		JobQueue:      body.JobQueue,
 		JobDefinition: body.JobDefinition,
-		Status:        "SUCCEEDED",
-		CreatedAt:     p.tc.Now().UnixNano() / int64(time.Millisecond),
-		AccountID:     ctx.AccountID,
-		Region:        ctx.Region,
+		// The Job states page: a submitted job "enters the SUBMITTED state". What a describe
+		// reports from here is the job's progression (batch_job_progression.go, #1248).
+		Status:    "SUBMITTED",
+		CreatedAt: p.tc.Now().UnixNano() / int64(time.Millisecond),
+		AccountID: ctx.AccountID,
+		Region:    ctx.Region,
 	}
 
 	data, err := json.Marshal(job)
@@ -626,9 +637,14 @@ func (p *BatchPlugin) describeJobs(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			continue
 		}
 		var job BatchJob
-		if json.Unmarshal(data, &job) == nil {
-			jobs = append(jobs, batchJobToWire(job))
+		if json.Unmarshal(data, &job) != nil {
+			continue
 		}
+		observed, err := batchJobObserved(goCtx, p.state, &p.seedMu, job, true)
+		if err != nil {
+			return nil, fmt.Errorf("describeJobs observe %s: %w", id, err)
+		}
+		jobs = append(jobs, batchJobToWire(observed))
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{"jobs": jobs})
 }
@@ -661,19 +677,76 @@ func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID s
 		return nil, fmt.Errorf("terminateJob: unmarshal: %w", err)
 	}
 
-	job.Status = "FAILED"
-	if body.Reason != "" {
-		job.StatusReason = body.Reason
-	}
-
-	updated, err := json.Marshal(job)
-	if err != nil {
-		return nil, fmt.Errorf("batch terminateJob marshal: %w", err)
-	}
-	if err := p.state.Put(goCtx, batchNamespace, key, updated); err != nil {
-		return nil, fmt.Errorf("terminateJob: put: %w", err)
+	// API_TerminateJob: STARTING and RUNNING jobs "are terminated, which causes them to transition
+	// to FAILED. Jobs that have not progressed to the STARTING state are cancelled" — also FAILED.
+	// A job that has already settled is left as it is; the operation still succeeds.
+	if err := p.endJob(goCtx, key, job, body.Reason, batchJobTransientStates); err != nil {
+		return nil, fmt.Errorf("terminateJob: %w", err)
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+// cancelJob handles CancelJob. API_CancelJob: jobs "in a SUBMITTED, PENDING, or RUNNABLE state are
+// cancelled and the job status is updated to FAILED". Jobs that progressed to STARTING or RUNNING
+// "aren't cancelled. However, the API operation still succeeds, even if no job is cancelled". Both
+// end a cancelled job FAILED with the caller's reason.
+func (p *BatchPlugin) cancelJob(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var body struct {
+		JobID  string `json:"jobId"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, batchClientError("the request body is not valid JSON")
+	}
+	goCtx := context.Background()
+	key := "job:" + ctx.AccountID + "/" + ctx.Region + "/" + body.JobID
+	data, err := p.state.Get(goCtx, batchNamespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("cancelJob: get: %w", err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "ClientException", Message: "job " + body.JobID + " not found", HTTPStatus: http.StatusBadRequest}
+	}
+	var job BatchJob
+	if err := json.Unmarshal(data, &job); err != nil {
+		return nil, fmt.Errorf("cancelJob: unmarshal: %w", err)
+	}
+	if err := p.endJob(goCtx, key, job, body.Reason, []string{"SUBMITTED", "PENDING", "RUNNABLE"}); err != nil {
+		return nil, fmt.Errorf("cancelJob: %w", err)
+	}
+	return batchJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+// endJob writes job FAILED with reason when the state it is in now is one of endable. The state is
+// peeked, not observed, so ending a job spends none of the caller's polling budget. An unseeded
+// job's record is SUBMITTED until something ends it, so it is endable, as it was before #1248,
+// although its describe reports SUCCEEDED; see batch_job_progression.go.
+func (p *BatchPlugin) endJob(goCtx context.Context, key string, job BatchJob, reason string, endable []string) error {
+	current := job.Status
+	if !batchJobTerminal(current) {
+		seed, seen, err := batchJobProgressions.peek(goCtx, p.state, job.JobID)
+		if err != nil {
+			return err
+		}
+		if seed != nil {
+			current, _ = seed.stateAt(seen)
+		}
+	}
+	if !slices.Contains(endable, current) {
+		return nil
+	}
+	job.Status = "FAILED"
+	if reason != "" {
+		job.StatusReason = reason
+	}
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, batchNamespace, key, updated); err != nil {
+		return fmt.Errorf("put: %w", err)
+	}
+	return nil
 }
 
 func (p *BatchPlugin) createComputeEnvironment(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1032 operations**. This
+Substrate ships **67 built-in service plugins** routing **1034 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -26,7 +26,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
 | 7 | Backup | `backup` | REST/JSON | 12 |
-| 8 | Batch | `batch` | REST/JSON | 10 |
+| 8 | Batch | `batch` | REST/JSON | 11 |
 | 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
 | 10 | Budgets | `budgets` | JSON | 5 |
 | 11 | Cost Explorer | `ce` | JSON | 3 |
@@ -60,7 +60,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 39 | CloudWatch Logs | `logs` | JSON | 14 |
 | 40 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
 | 41 | MSK | `msk` | REST/JSON | 9 |
-| 42 | HealthOmics | `omics` | REST/JSON | 4 |
+| 42 | HealthOmics | `omics` | REST/JSON | 5 |
 | 43 | OpenSearch | `opensearch` | REST/JSON | 0 |
 | 44 | Organizations | `organizations` | JSON | 34 |
 | 45 | Price List Query API | `pricing` | JSON | 3 |
@@ -17562,9 +17562,9 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 | DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
 | DeleteStream | |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region |
-| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. The stream still never reports `UPDATING` — see the section below |
-| MergeShards | |
-| SplitShard | |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
+| MergeShards | Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
+| SplitShard | As `MergeShards` |
 | PutRecord | |
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
@@ -17880,14 +17880,48 @@ not hold rather than a value in the request:
 The seventh, *"Make over 10 TPS"*, is a call-rate limit rather than a property of any one request; it
 is the one rule the page attributes to `LimitExceededException` by name.
 
-**The stream still reports `ACTIVE` immediately after a reshard**, where the page says it reports
-`UPDATING` until the split or merge completes. Making that observable means a seeded count of
-observations — the shape `CLAUDE.md` requires and that `ec2SnapshotProgression` established — and it is
-tracked as [#1119](https://github.com/scttfrdmn/substrate/issues/1119) so that it and EC2's instance
-states share one mechanism rather than inventing a second. Capacity mode is unmodelled altogether,
+A reshard reports `UPDATING` before it reports `ACTIVE` when a seed holds it, which the next section
+sets out ([#1119](https://github.com/scttfrdmn/substrate/issues/1119)). Capacity mode is unmodelled altogether,
 which is why `ValidationException` has no site at all today;
 [#1118](https://github.com/scttfrdmn/substrate/issues/1118) carries it, together with the
 `StreamModeDetails` member both describe shapes publish `Required: No`.
+
+
+### A stream's status progresses
+
+`API_CreateStream` says a new stream reports `CREATING` and then `ACTIVE`, and `API_UpdateShardCount`,
+`API_MergeShards` and `API_SplitShard` each say the reshard reports `UPDATING` and then `ACTIVE`. Until
+[#1119](https://github.com/scttfrdmn/substrate/issues/1119) every stream was `ACTIVE` from the request
+that changed it, so a wait-for-`ACTIVE` loop exited on its first poll. The transition is now a seeded
+progression — see [How a progression is seeded](#how-a-progression-is-seeded) for the rules every one
+shares:
+
+```
+POST   /v1/kinesis/stream-status   {"streamName": "s", "pendingObservations": 2}
+POST   /v1/kinesis/stream-status   {"streamARN": "arn:aws:kinesis:…:stream/s", "pendingObservations": 2}
+POST   /v1/kinesis/stream-status   {"pendingObservations": 2}            (every stream)
+DELETE /v1/kinesis/stream-status   (every seed; ?stream=<name or ARN> for one)
+```
+
+- **The seed counts observations, not time.** `pendingObservations` observations of a governed stream
+  report its transient status, and the next reports `ACTIVE`. The default is no seed, so an unseeded
+  stream reads `ACTIVE` exactly as before.
+- **The status is the stream's most recent transition, not the seed's.** It is `CREATING` after
+  `CreateStream` and `UPDATING` after `UpdateShardCount`, `MergeShards` or `SplitShard`; each reshard
+  restarts the stream's countdown, so one seed covers every transition in a test. The reshard itself
+  is applied at once — the shard count a describe reports is the new one throughout.
+- **Which seed governs a stream:** one keyed by its ARN, then one keyed by its name (which applies to
+  that name in every account and Region), then the wildcard. The countdown is kept per stream, so a
+  wildcard seed is spent separately by each.
+- **What observes:** `DescribeStream` and `DescribeStreamSummary`, the reads the pages tell a caller to
+  poll, each spend one observation.
+- **What refuses:** `UpdateShardCount`, `MergeShards` and `SplitShard` answer `ResourceInUseException`/400
+  for a stream that is not `ACTIVE`, as each page publishes. The check peeks, so a refused reshard does
+  not spend the polls a test seeded. The message is substrate's wording; the pages publish the code.
+- **`DELETING` is not modeled.** `DeleteStream` removes the stream in the request, so a stream being
+  deleted answers `ResourceNotFoundException` at once, which is what a completed delete answers.
+- **Replay.** The seed is a control-plane write, recorded and re-applied in position (#1140), so a
+  recorded `CREATING`, `UPDATING`, `ACTIVE` sequence replays identically.
 
 ### The account and Region a record carries reach no response
 
@@ -17943,11 +17977,11 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 |-----------|-------|
 | CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277) |
 | CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`. A body substrate cannot decode is refused rather than creating an untagged distribution |
-| GetDistribution | Answers the `ETag` header (#1271) |
+| GetDistribution | Answers the `ETag` header (#1271). Observes the seeded `Status` window — see [A distribution reports InProgress for a seeded window](#a-distribution-reports-inprogress-for-a-seeded-window) (#1381) |
 | GetDistributionConfig | Answers the configuration the create or last update sent, with what `CreateDistribution` defaults filled in, and the `ETag` header — see [An update replaces the configuration](#an-update-replaces-the-configuration) |
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb. Replaces the configuration; requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412); refuses `MissingBody`, `IllegalUpdate` and `InvalidArgument`/400 one member per call (#1271) |
 | DeleteDistribution | Requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412) and a disabled distribution (`DistributionNotDisabled`/409) (#1271) |
-| ListDistributions | |
+| ListDistributions | Each distribution it reports spends one observation of its own seeded `Status` window (#1381) |
 | CreateInvalidation | Keeps and answers the `InvalidationBatch`; a resubmitted batch returns the first invalidation (#1360) |
 | GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
 | ListInvalidations | Refuses a distribution that does not exist rather than answering an empty list (#1091) |
@@ -18106,11 +18140,45 @@ it parses (`InvalidArgument`), the version is current, then the configuration's 
 it"*, under the `ETag` the disable answered. An enabled distribution is
 `DistributionNotDisabled`/409, after the version check.
 
-A distribution's `Status` is `Deployed` from creation, so the "wait for `Deployed`" step passes at
-once. An observable `InProgress` window is a progression of its own, not modeled.
+A disabled distribution deletes during its `InProgress` window: the page publishes no refusal for
+one still propagating, so substrate applies none (#1381).
 
 A CloudFormation stack delete performs the same sequence: read, disable under the version read,
-delete under the version the disable answered.
+delete under the version the disable answered. It does not poll for `Deployed` between the disable
+and the delete, because nothing refuses the delete, and its `GetDistributionConfig` read spends no
+observation.
+
+### A distribution reports InProgress for a seeded window
+
+`API_Distribution` publishes `Status`: *"When the status is `Deployed`, the distribution's
+information is fully propagated to all CloudFront edge locations."* A real distribution reports
+`InProgress` after `CreateDistribution` and after every `UpdateDistribution`, and `aws cloudfront
+wait distribution-deployed` and the SDK waiters poll `GetDistribution` for `Deployed`. Until #1381
+substrate reported `Deployed` at once, so a waiter's first poll passed and its polling and timeout
+handling were never exercised.
+
+The window is a seeded progression ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```
+POST   /v1/cloudfront/distribution-status   {"distributionId": "E… | *", "inProgressObservations": 2}
+DELETE /v1/cloudfront/distribution-status   (all; ?distributionId=E… for one)
+```
+
+| Read | Effect on the window |
+|------|----------------------|
+| `GetDistribution`, `ListDistributions` | Observe: each spends one observation of that distribution's countdown, and reports `InProgress` until the count is spent, then the record's `Deployed` |
+| `CreateDistribution`, `CreateDistributionWithTags` response | Peek: reports the first observation without spending it |
+| `UpdateDistribution` | Restarts the countdown — every update is a new propagation, the disable before a delete included — and its response peeks |
+| `GetDistributionConfig` | Publishes no `Status`; spends nothing |
+| `DeleteDistribution` | Removes the distribution's countdown |
+
+The default is **zero observations**: an unseeded distribution is `Deployed` from its first
+observation, as before #1381. A wait loop is opt-in because every existing consumer reads
+`Deployed` straight after a create, and a default window would turn each of those into a poll. The
+seed names a count and no states, because the page names exactly two values and the window runs from
+one to the other. The countdown is per distribution even under `"*"`, so one `ListDistributions` of
+five distributions advances each once (#582). The seed is a control-plane write recorded in
+position, so a replay reproduces the window exactly.
 
 ### Both invalidation codes name something
 
@@ -19919,10 +19987,11 @@ Firehose data ingestion: $0.029 per GB.
 | DescribeJobQueues | `jobQueues` filter takes names or full ARNs; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | RegisterJobDefinition | `jobDefinitionName` and `type` required; each registration is [the next revision](#a-job-definition-is-versioned) |
 | DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
-| SubmitJob | Returns `jobId`; the job is immediately `SUCCEEDED` |
-| DescribeJobs | |
+| SubmitJob | Returns `jobId`. The job is recorded `SUBMITTED`; what a describe reports is its [progression](#a-jobs-status-progresses-through-the-seven-published-values) (#1248) |
+| DescribeJobs | Each job reported is one [observation](#a-jobs-status-progresses-through-the-seven-published-values) of its progression |
 | ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
-| TerminateJob | Reports the job `FAILED` with the supplied `reason`. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
+| TerminateJob | A job not yet settled is reported `FAILED` with the supplied `reason`, as the page publishes for `STARTING`/`RUNNING` (terminated) and earlier states (cancelled). A settled job is left as it is. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
+| CancelJob | `POST /v1/canceljob`. A `SUBMITTED`, `PENDING` or `RUNNABLE` job is reported `FAILED` with the `reason`; a `STARTING` or `RUNNING` one is not cancelled, and the call still succeeds, as the page publishes (#1248). Answers `{}` |
 
 Every operation reports a bad request as **`ClientException`** at HTTP 400. The API
 reference declares exactly two errors for each Batch operation, `ClientException` and
@@ -19976,11 +20045,13 @@ outside them is refused; that a value outside a published `Valid Values` list is
 *"identifier[s] that's not valid"* the `ClientException` gloss covers is substrate's reading, on the
 same footing as the token refusal above.
 
-Because `SubmitJob` records a job `SUCCEEDED` at submission, **substrate's default listing is always
-empty** — no job is ever `RUNNING`. Implementing the default faithfully is what makes that visible;
-it is tracked as [#1248](https://github.com/scttfrdmn/substrate/issues/1248) rather than papered
-over by keeping the every-status listing, because a listing AWS would not have answered is not a
-substitute for a job that reaches `RUNNING`.
+An unseeded job settles to `SUCCEEDED` on its first observation, so **an unseeded run's default
+listing is still empty**: no unseeded job is ever `RUNNING`. A job seeded to sit in `RUNNING` is
+listed by the default, which is the case the faithful default exists for; see
+[A job's status progresses through the seven published values](#a-jobs-status-progresses-through-the-seven-published-values)
+([#1248](https://github.com/scttfrdmn/substrate/issues/1248)). A listing observes each job in the
+listing's scope (the queue and the filter) once before its status filter applies, so ListJobs and
+DescribeJobs report the same status at the same point in a job's progression.
 
 **One selector, or none.** *"You must specify only one of the following items: A job queue ID … A
 multi-node parallel job ID … An array job ID"* — all three are `Required: No` individually, so the
@@ -20027,6 +20098,39 @@ record. `nextToken` is the same offset cursor, refused when no previous `ListJob
 ListJobs also gained its published route, `POST /v1/listjobs`. Its members live in a body, which the
 legacy `GET /v1/jobs` route cannot carry, so that is the path an SDK call arrives on; the legacy
 route still answers, with every member absent.
+
+### A job's status progresses through the seven published values
+
+The Batch user guide's *Job states* page: *"When you submit a job to an AWS Batch job queue, the job
+enters the `SUBMITTED` state. It then passes through the following states until it succeeds … or
+fails"*, and `API_ListJobs`' `jobStatus` publishes `SUBMITTED | PENDING | RUNNABLE | STARTING |
+RUNNING | SUCCEEDED | FAILED`. Substrate used to record a job `SUCCEEDED` in the request that
+submitted it, so six of the seven were unreachable and a consumer's waiter exited on its first poll
+([#1248](https://github.com/scttfrdmn/substrate/issues/1248)).
+
+A submitted job's record now holds `SUBMITTED`, and what `DescribeJobs` and `ListJobs` report is
+the job's [progression](#how-a-progression-is-seeded):
+
+- **Unseeded**, the first observation reports `SUCCEEDED`. How many observations a default
+  progression spends in each state is unpublished; substrate's choice is none, so a fixture written
+  before the fix still reads one describe, one success.
+- **Seeded**, the job spends the seed's count of observations in each transient state it names,
+  walked in the published order, then reports the seed's terminal state: `SUCCEEDED`, or `FAILED`
+  with the seed's `statusReason`, which makes a waiter's failure branch reachable.
+- A job `TerminateJob` or `CancelJob` ended reports its record, `FAILED` with the caller's
+  `reason`, whatever the seed says. A seed never rewrites the record.
+
+```
+POST   /v1/batch/job-status  {"jobId":"*","transientObservations":{"RUNNABLE":1,"RUNNING":2},
+                              "finalState":"FAILED","statusReason":"Essential container exited"}
+DELETE /v1/batch/job-status  (all seeds; ?jobId=… for one)
+```
+
+`jobId` is a job's ID or `"*"`, resolved ID first. `transientObservations` names only transient
+states, and `finalState` only `SUCCEEDED` or `FAILED`; anything else, or a negative count, is
+refused 400. Terminating and cancelling decide on the state the job is in now, peeked rather than
+observed, so ending a job spends none of the caller's polling budget. A seed is a control-plane
+write, so it is recorded and a replay re-issues it in position.
 
 ### Resources are scoped to the caller
 
@@ -21167,10 +21271,10 @@ running.
 |-----------|-------|
 | InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
 | ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
-| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. None of the five members marked `Required: Yes` is checked. The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
-| GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports a [seeded status](#seeding-a-batch-job-status) if one is set |
-| ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; the seeded status is applied here too, so a poll on either operation agrees. Every published query filter is ignored and no `nextToken` is emitted |
-| StopModelInvocationJob | `POST /model-invocation-job/{jobIdentifier}/stop`. [Stops a job in any state and skips `Stopping`](#stopping-a-batch-job-is-immediate) |
+| CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. All five members marked `Required: Yes` (`jobName`, `modelId`, `roleArn`, `inputDataConfig`, `outputDataConfig`) are checked, and an absent one is `ValidationException`/400 ([#1174](https://github.com/scttfrdmn/substrate/issues/1174)). The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
+| GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports the job's [observed status](#a-batch-jobs-lifecycle): one read is one observation of its countdown |
+| ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; each summary is one observation of that job's countdown, so a poll on either operation agrees, and one List over N jobs spends one observation of each. Every published query filter is ignored and no `nextToken` is emitted |
+| StopModelInvocationJob | `POST /model-invocation-job/{jobIdentifier}/stop`. Leaves the job `Stopping`, then `Stopped`; a terminal job is `ConflictException`/400. See [A batch job's lifecycle](#a-batch-jobs-lifecycle) |
 
 `InvokeModelWithResponseStream`, `Converse` and `ConverseStream` are not routed, so no streaming or
 Converse-shaped call is served. Nor is the rest of the `bedrock` control plane —
@@ -21222,34 +21326,59 @@ DELETE /v1/bedrock-runtime/responses   (all, or ?modelId=… for one)
 `body` is required and is returned verbatim as the response payload, which is what `InvokeModel`
 publishes — the member named `body` *is* the HTTP body — so a seeded response is byte-exact.
 
-### Seeding a batch job status
+### A batch job's lifecycle
+
+A job is born `Submitted`, the first status `API_GetModelInvocationJob` documents ("submitted to a queue
+for validation"), and an unseeded job stays there: substrate runs no inference, so nothing moves it on
+its own. Two seeded countdowns, both on the shared [progression helper](#how-a-progression-is-seeded),
+make every other published status observable. `GetModelInvocationJob` and `ListModelInvocationJobs`
+are the observations; each read spends one observation of that job's own counter, and no read rewrites
+the stored record ([#1174](https://github.com/scttfrdmn/substrate/issues/1174)).
 
 ```
-POST   /v1/bedrock/model-invocation-job-status   {"jobId": "…", "status": "Failed", "message": "…"}
+POST   /v1/bedrock/model-invocation-job-status   {"jobId": "…", "pendingObservations": 2,
+                                                  "pendingStatus": "InProgress", "status": "Failed",
+                                                  "message": "…"}
 DELETE /v1/bedrock/model-invocation-job-status   (all, or ?jobId=… for one)
+
+POST   /v1/bedrock/model-invocation-job-stop     {"jobId": "…", "stoppingObservations": 3}
+DELETE /v1/bedrock/model-invocation-job-stop     (all, or ?jobId=… for one)
 ```
 
-`jobId` defaults to `"*"`. `status` is required and is **not** validated against the ten published
-values, so a misspelled status is reported back as the job's status rather than refused. A seed
-governs what an observation reports; it does not rewrite the stored record, so clearing the seed
-returns the job to the state its own history gave it.
+**The status seed.** A seeded job reports `pendingStatus` (default `InProgress`) for
+`pendingObservations` reads, then the seeded `status` with its `message`, the page's failure message.
+`jobId` defaults to `"*"`, and an exact ID wins over the wildcard. `status` is required, and both
+statuses must be one of the ten published values, so a misspelled status is refused rather than reported
+back (#1162's class). A seed with no `pendingObservations` settles at once, which is the static override
+this endpoint was before #1174, so a body written for it reads as it did. Clearing a seed returns the job
+to what its own history gave it.
 
-### Stopping a batch job is immediate
+**Stopping.** `StopModelInvocationJob` leaves the job `Stopping`, the page's "This job is being stopped
+by a user", for `stoppingObservations` reads, then `Stopped`. Unseeded, one read reports `Stopping`
+before `Stopped`; `stoppingObservations: 0` settles a stop at `Stopped` on its first read. Once a job is
+stopping, the status seed no longer governs it: the stop is the newer transition.
 
-`API_GetModelInvocationJob` glosses `Stopping` as the state a job is in *while* it stops and `Stopped`
-as the state after. `StopModelInvocationJob` writes `Stopped` directly, so `Stopping` is never
-observable, and it accepts a job in any state — including `Completed` and `Failed` — where AWS
-refuses with `ConflictException`. It answers `{}`, which is the published empty body.
-[#1174](https://github.com/scttfrdmn/substrate/issues/1174).
+- A job whose observed status is terminal (`Completed`, `Failed`, `Stopped`, `PartiallyCompleted`,
+  `Expired`) answers `ConflictException`/400, which `API_StopModelInvocationJob` publishes. Before
+  #1174 the stop overwrote the terminal status with `Stopped`.
+- A job already `Stopping` answers success and is left as it is, so a repeated stop neither fails nor
+  restarts the countdown. That is substrate's reading: the page names no case for it.
+- The stop's precondition peeks rather than observes, so a refused stop spends no observation.
+- The stop answers `{}`. The page says "an empty HTTP body".
+
+Both seeds are control-plane writes, so a recording replays them in position and reproduces every
+status it observed.
 
 ### What a refusal reports
 
 | Condition | Code | Status |
 |-----------|------|--------|
 | a body that will not parse, on `ApplyGuardrail` or `CreateModelInvocationJob` | `ValidationException` | 400 |
+| `CreateModelInvocationJob` without one of its five `Required: Yes` members | `ValidationException` | 400 |
 | a batch job that does not exist | `ResourceNotFoundException` | 404 |
+| `StopModelInvocationJob` on a job in a terminal status | `ConflictException` | 400 |
 
-Both match what the pages publish. Those two are the only operations that parse a body at all:
+All four match what the pages publish. Those two are the only operations that parse a body at all:
 `InvokeModel` [reads nothing but the model ID](#invokemodel-reads-nothing-but-the-model-id), so it has
 no body-parse refusal to answer.
 
@@ -21259,8 +21388,8 @@ The rest of what the pages publish has no site, because none of the conditions i
 `ResourceNotFoundException`/404, `ServiceQuotaExceededException`/400,
 `ServiceUnavailableException`/503, `ThrottlingException`/429 and `ValidationException`/400 — of which
 Substrate answers none: there is no quota, no model readiness, no timeout and no unknown model, so
-every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop
-and is answered by neither — a duplicate `jobName` is accepted, and so is stopping a finished job.
+every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop.
+The stop answers it for a terminal job (#1174); the create does not, so a duplicate `jobName` is accepted.
 `ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
 
 ### The account and Region a model invocation job carries reach no response
@@ -21290,32 +21419,34 @@ respond to call volume rather than to model size.
 
 **Protocol:** REST-JSON, path-routed. API version 2022-11-28.
 
-Four operations, all on workflow runs. A run's state is keyed by account and Region.
+Five operations, all on workflow runs. A run's state is keyed by account and Region.
 
-No workflow is executed. `StartRun` records the workflow ID, role and output URI as intent and the
-run is `COMPLETED` the moment it is created, so a consumer's wait loop observes a finished run on its
-first poll.
+No workflow is executed. `StartRun` records the workflow ID, role and output URI as intent. Unseeded,
+the run is `COMPLETED` the moment it is created, the nominal success path. Seeded, it passes through
+the published start-up statuses first; see [A run's status progresses only when
+seeded](#a-runs-status-progresses-only-when-seeded).
 
 ### Supported operations
 
 | Operation | Notes |
 |-----------|-------|
-| StartRun | `POST /run`. Answers HTTP 201 with [one of the eight published members](#startrun-answers-an-id-and-nothing-else) and checks none of the three required ones |
+| StartRun | `POST /run`. Answers HTTP 201 with `id` and `status` — [two of the eight published members](#startrun-answers-an-id-and-a-status) — and checks none of the three required ones |
 | GetRun | `GET /run/{id}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)) and eight members stand in for the roughly forty-four published ones — `arn`, `uuid`, `creationTime`, `startTime`, `stopTime`, `runOutputUri` and the whole resource-usage set are absent |
-| ListRuns | `GET /run`. `items` of `id`, `status` and `name` only, where `RunListItem` publishes ten members. `maxResults`, `startingToken`, `name`, `runGroupId` and `status` are ignored and no `nextToken` is emitted |
-| CancelRun | `POST /run/{id}/cancel`, and `DELETE /run/{id}` as well. [Answers 204 where the page publishes 202](#cancelrun-answers-the-wrong-status-and-spells-the-state-with-one-l) |
+| ListRuns | `GET /run`. `items` of `id`, `status` and `name` only, where `RunListItem` publishes ten members. Each run listed is observed, as `GetRun` observes it. `maxResults`, `startingToken`, `name`, `runGroupId` and `status` are ignored and no `nextToken` is emitted |
+| CancelRun | `POST /run/{id}/cancel`, 202 with an empty body. An active run passes through `STOPPING` to `CANCELLED`; a settled one is `ConflictException`/409. See [Cancelling and deleting a run](#cancelling-and-deleting-a-run) |
+| DeleteRun | `DELETE /run/{id}`, 202 with an empty body. Only a `COMPLETED`, `FAILED` or `CANCELLED` run; any other is `ConflictException`/409 |
 
-Nothing else is routed: `DeleteRun`, `ListRunTasks`, `GetRunTask`, the workflow surface
+Nothing else is routed: `ListRunTasks`, `GetRunTask`, the workflow surface
 (`CreateWorkflow`, `GetWorkflow`, `ListWorkflows`), run groups, sequence and reference stores, the
 read-set and annotation-store import jobs, and the three tag operations are all absent. HealthOmics
 resources are not scanned by the Resource Groups Tagging API either.
 
-### StartRun answers an id and nothing else
+### StartRun answers an id and a status
 
 `API_StartRun` publishes eight response members — `arn`, `configuration`, `id`, `networkingMode`,
-`runOutputUri`, `status`, `tags` and `uuid` — and Substrate answers `{"id": …}`. `status` is the
-absence that matters: a consumer that reads it off the create response, rather than polling `GetRun`,
-reads nothing.
+`runOutputUri`, `status`, `tags` and `uuid` — and Substrate answers `id` and `status`. The status is
+what the run's first observation would report, peeked rather than observed, so a `"*"` seed's
+countdown is not spent by the create (#1371).
 
 The same operation marks `outputUri`, `requestId` and `roleArn` `Required: Yes` and checks none of
 them, so a run starts with no role and no destination. `requestId` is the idempotency token and is
@@ -21325,27 +21456,53 @@ not read at all, so the same request twice creates two runs.
 No HealthOmics response carries an ARN anywhere in the plugin, though `API_StartRun` and `API_GetRun`
 both publish `arn`.
 
-### CancelRun answers the wrong status
+### A run's status progresses only when seeded
 
-`API_CancelRun` publishes HTTP **202** with an empty body; Substrate answers **204**. An SDK treats
-both as success, so the divergence is invisible through a client and visible in a recorded event log
-or a fixture diff ([#1165](https://github.com/scttfrdmn/substrate/issues/1165)).
+`API_GetRun` publishes `PENDING | STARTING | RUNNING | STOPPING | COMPLETED | DELETED | CANCELLED |
+FAILED`. Unseeded, a run is `COMPLETED` from its first observation. A seed makes the start-up
+observable, using the countdown every progressing resource shares (see [How a progression is
+seeded](#how-a-progression-is-seeded)):
 
-The state written is `CANCELLED`, as the published `RunStatus` enum
-(`PENDING | STARTING | RUNNING | STOPPING | COMPLETED | DELETED | CANCELLED | FAILED`) spells it on
-both `API_GetRun` and `API_RunListItem`. Until
-[#1364](https://github.com/scttfrdmn/substrate/issues/1364) it was `CANCELED`, with one L, so a
-consumer matching the published spelling never saw a cancelled run.
-`TestOmicsWire_ACancelledRunReportsThePublishedStatus` pins the spelling on the raw bytes of `GetRun`
-and `ListRuns`.
+```
+POST   /v1/omics/run-status   {"runId": "…" | "*", "pendingObservations": N,
+                               "state": "…", "finalState": "COMPLETED" | "FAILED",
+                               "failureReason": "…", "stoppingObservations": N}
+DELETE /v1/omics/run-status   (every seed; ?runId=… for one)
+```
 
-`STOPPING` is never observable, because the cancel is immediate. That is deliberate rather than
-missing: a run is born `COMPLETED` and the plugin moves no run through any intermediate status, so
-there is no progression a `STOPPING` observation could belong to. Modeling one would mean the plugin's
-first run-status progression, which is a feature of its own rather than a spelling fix.
+- While the countdown runs, the n-th observation reports the n-th published start-up status:
+  `PENDING`, `STARTING`, then `RUNNING` for every observation after the third. `state` pins a single
+  one instead.
+- Once it is spent, the run settles at `finalState`, `COMPLETED` by default. A `FAILED` run answers
+  the seed's `failureReason`, which has no default and is at most 64 characters, as `API_GetRun`
+  constrains it.
+- `GetRun` and `ListRuns` observe; `StartRun`, `CancelRun` and `DeleteRun` only peek. Each run keeps
+  its own count, so one `ListRuns` over five runs spends one observation of each.
+- A seed refused for a state outside the published start-up or final statuses is 400. `STOPPING` is
+  not seedable as a start-up state, and `CANCELLED` not as a final one: both are what `CancelRun`
+  produces.
+- The seed is a control-plane write, so a replay re-issues it in position, and a recorded run's
+  statuses replay identically (`TestOmicsRun_AProgressionReplaysIdentically`).
 
-`DELETE /run/{id}` is also accepted for `CancelRun`. AWS publishes that path for `DeleteRun`, which
-is a different operation; the arm exists because an older SDK generation used it.
+### Cancelling and deleting a run
+
+`API_CancelRun` is `POST /run/{id}/cancel`, answering HTTP **202** with an empty body; it answered
+204 until [#1165](https://github.com/scttfrdmn/substrate/issues/1165). It applies only to a run
+that has not settled: `ConflictException` (409), "the request cannot be applied to the target
+resource in its current state", is published, and a `COMPLETED`, `FAILED` or `CANCELLED` run is
+in no state a cancel applies to. An unseeded run is `COMPLETED` at once, so cancelling one is
+refused.
+
+A cancel of an active run writes `CANCELLED` and restarts the run's countdown. The next
+`stoppingObservations` observations (one by default, so a cancel always passes through it) report
+`STOPPING`, and the run then reports `CANCELLED`, spelled as `API_GetRun` and `API_RunListItem`
+publish it (#1364).
+
+`DELETE /run/{id}` is `API_DeleteRun`, which until #1165 was routed to `CancelRun`. It answers 202
+with an empty body and accepts only a run "that has reached a `COMPLETED`, `FAILED`, or `CANCELLED`
+stage"; any other is `ConflictException`/409. It removes the run's record, its list entry and its
+countdown, so `GetRun` then answers `ResourceNotFoundException`, as the page says it will.
+`DELETED`, which the enum also publishes, is therefore never observed: a deleted run is not found.
 
 ### What a refusal reports
 
@@ -21353,11 +21510,12 @@ is a different operation; the arm exists because an older SDK generation used it
 |-----------|------|--------|
 | a body that will not parse | `ValidationException` | 400 |
 | a run that does not exist | `ResourceNotFoundException` | 404 |
+| `CancelRun` of a settled run, or `DeleteRun` of an active one | `ConflictException` | 409 |
 
-Both match the published code and status on all three pages that carry them.
-`AccessDeniedException`, `ConflictException`, `InternalServerException`,
+All three match the published code and status on the pages that carry them.
+`AccessDeniedException`, `InternalServerException`,
 `RequestTimeoutException`, `ServiceQuotaExceededException` and `ThrottlingException` are published
-and have no site: no quota, concurrency conflict or transient failure is modelled.
+and have no site: no quota or transient failure is modelled.
 
 ### Run IDs
 
@@ -21371,7 +21529,7 @@ impossible.
 `OmicsRun` declares its account and Region under wire-visible `json` tags, because the record is what
 `MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `GetRun` used to answer the record whole, and answers `omicsRunToWire` now. `StartRun` and `ListRuns` answer members built one by one.
 `TestOmicsWire_RunResponsesCarryNoBookkeepingMember` in `emulator/omics_wire_test.go` drives the three routed operations that answer a body and walks each decoded document for either member at any
-depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `CancelRun` answers 204 with no body, so it has nothing to walk.
+depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `CancelRun` and `DeleteRun` answer 202 with no body, so they have nothing to walk.
 
 ### CloudFormation resource types
 

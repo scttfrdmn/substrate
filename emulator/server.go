@@ -440,6 +440,16 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Delete("/v1/ec2/snapshot-status", s.handleEC2ClearSnapshotStatus)
 		cp.Post("/v1/ec2/instance-state", s.handleEC2SeedInstanceState)
 		cp.Delete("/v1/ec2/instance-state", s.handleEC2ClearInstanceState)
+		cp.Post("/v1/batch/job-status", s.handleBatchSeedJobStatus)
+		cp.Delete("/v1/batch/job-status", s.handleBatchClearJobStatus)
+		cp.Post("/v1/omics/run-status", s.handleOmicsSeedRunStatus)
+		cp.Delete("/v1/omics/run-status", s.handleOmicsClearRunStatus)
+		cp.Post("/v1/cloudfront/distribution-status", s.handleCloudFrontSeedDistributionStatus)
+		cp.Delete("/v1/cloudfront/distribution-status", s.handleCloudFrontClearDistributionStatus)
+
+		// Kinesis stream-status progression control-plane endpoints (#1119).
+		cp.Post("/v1/kinesis/stream-status", s.handleKinesisSeedStreamStatus)
+		cp.Delete("/v1/kinesis/stream-status", s.handleKinesisClearStreamStatus)
 
 		// EC2 spot-placement-score control-plane endpoints (#892).
 		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
@@ -460,8 +470,20 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Bedrock Runtime control-plane endpoints.
 		cp.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 		cp.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
-		cp.Post("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeSeedJobStatus)
-		cp.Delete("/v1/bedrock/model-invocation-job-status", s.handleBedrockRuntimeClearJobStatus)
+		// A Bedrock batch-inference job's status and stop countdowns (#1174), on the shared
+		// progression helper; see bedrock_job_progression.go.
+		cp.Post("/v1/bedrock/model-invocation-job-status", func(w http.ResponseWriter, r *http.Request) {
+			bedrockJobStatusProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/bedrock/model-invocation-job-status", func(w http.ResponseWriter, r *http.Request) {
+			bedrockJobStatusProgressions.serveClear(w, r, s.state, s.logger)
+		})
+		cp.Post("/v1/bedrock/model-invocation-job-stop", func(w http.ResponseWriter, r *http.Request) {
+			bedrockJobStopProgressions.serveSeed(w, r, s.state, s.logger)
+		})
+		cp.Delete("/v1/bedrock/model-invocation-job-stop", func(w http.ResponseWriter, r *http.Request) {
+			bedrockJobStopProgressions.serveClear(w, r, s.state, s.logger)
+		})
 
 		// Pricing seed endpoints, as distinct from the discount and credit endpoints
 		// below: these two write to the state manager, so they belong here.

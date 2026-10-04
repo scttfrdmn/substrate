@@ -16,6 +16,12 @@ type KinesisStream struct {
 	// StreamStatus is the current status: CREATING, ACTIVE, UPDATING, or DELETING.
 	StreamStatus string `json:"StreamStatus"`
 
+	// TransitionStatus is the transient status the stream's most recent transition reports while a
+	// seeded progression holds it (#1119): UPDATING after a reshard. It is written only by a reshard,
+	// so empty means the most recent transition was the stream's creation, which reports CREATING.
+	// StreamStatus is the settled status the countdown ends on. See kinesis_stream_status_control.go.
+	TransitionStatus string `json:"TransitionStatus,omitempty"`
+
 	// ShardCount is the current number of open shards in the stream.
 	ShardCount int `json:"ShardCount"`
 

@@ -442,18 +442,20 @@ func TestBedrockModelInvocationJob_Lifecycle(t *testing.T) {
 		t.Fatalf("unexpected list: %+v", listed)
 	}
 
-	// Stop → Stopped.
+	// Stop → Stopping for one read, then Stopped (#1174).
 	resp = brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job/"+jobID+"/stop", nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("stop status = %d", resp.StatusCode)
 	}
 	_ = brBody(t, resp)
-	resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
-	if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
-		t.Fatalf("decode get-after-stop: %v", err)
-	}
-	if got.Status != "Stopped" {
-		t.Fatalf("expected Stopped, got %q", got.Status)
+	for _, want := range []string{"Stopping", "Stopped"} {
+		resp = brJobRequest(t, setup.server, http.MethodGet, "/model-invocation-job/"+jobID, nil)
+		if err := json.Unmarshal(brBody(t, resp), &got); err != nil {
+			t.Fatalf("decode get-after-stop: %v", err)
+		}
+		if got.Status != want {
+			t.Fatalf("expected %s, got %q", want, got.Status)
+		}
 	}
 }
 
@@ -473,8 +475,10 @@ func TestBedrockModelInvocationJob_SeededStatus(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
 
 	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{
-		"jobName": "batch-seed",
-		"modelId": "anthropic.claude-3-haiku",
+		"jobName": "batch-seed", "modelId": "anthropic.claude-3-haiku",
+		"roleArn":          "arn:aws:iam::123456789012:role/BedrockBatch",
+		"inputDataConfig":  map[string]any{"s3InputDataConfig": map[string]string{"s3Uri": "s3://in/"}},
+		"outputDataConfig": map[string]any{"s3OutputDataConfig": map[string]string{"s3Uri": "s3://out/"}},
 	})
 	var created struct {
 		JobArn string `json:"jobArn"`
@@ -512,7 +516,12 @@ func TestBedrockModelInvocationJob_SeededStatus(t *testing.T) {
 // removes a seeded status (both targeted and clear-all).
 func TestBedrockModelInvocationJob_ClearStatus(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
-	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{"jobName": "j", "modelId": "m"})
+	resp := brJobRequest(t, setup.server, http.MethodPost, "/model-invocation-job", map[string]any{
+		"jobName": "j", "modelId": "m",
+		"roleArn":          "arn:aws:iam::123456789012:role/BedrockBatch",
+		"inputDataConfig":  map[string]any{"s3InputDataConfig": map[string]string{"s3Uri": "s3://in/"}},
+		"outputDataConfig": map[string]any{"s3OutputDataConfig": map[string]string{"s3Uri": "s3://out/"}},
+	})
 	var created struct {
 		JobArn string `json:"jobArn"`
 	}

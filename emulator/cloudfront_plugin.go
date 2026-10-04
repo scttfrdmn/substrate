@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,8 @@ type CloudFrontPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes advancing a seeded distribution-status countdown (cloudfront_progression.go).
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "cloudfront".
@@ -370,10 +373,16 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfCon
 		Status     string   `xml:"Status"`
 		DomainName string   `xml:"DomainName"`
 	}
+	// The create's own response peeks at the seeded window (#1381): it reports the first
+	// observation of the new distribution without spending it.
+	status, err := p.distributionStatus(goCtx, dist, false)
+	if err != nil {
+		return nil, err
+	}
 	resp, err := cloudfrontXMLResponse(http.StatusCreated, xmlDist{
 		ID:         distID,
 		ARN:        arn,
-		Status:     "Deployed",
+		Status:     status,
 		DomainName: domainName,
 	})
 	if err != nil {
@@ -388,7 +397,12 @@ func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, d
 	if err != nil {
 		return nil, err
 	}
-	return p.marshalDistributionXML(dist)
+	// GetDistribution is what a deploy waiter polls, so it observes (#1381).
+	status, err := p.distributionStatus(context.Background(), dist, true)
+	if err != nil {
+		return nil, err
+	}
+	return p.marshalDistributionXML(dist, status)
 }
 
 // getDistributionConfig answers the distribution's configuration.
@@ -494,7 +508,16 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("cloudfront updateDistribution state.Put: %w", err)
 	}
 
-	return p.marshalDistributionXML(dist)
+	// Every update starts a new propagation, so it restarts the seeded window, and its own
+	// response peeks at the window's first observation (#1381).
+	if err := cfDistributionProgressions.reset(context.Background(), p.state, distID); err != nil {
+		return nil, fmt.Errorf("cloudfront updateDistribution reset status: %w", err)
+	}
+	status, err := p.distributionStatus(context.Background(), dist, false)
+	if err != nil {
+		return nil, err
+	}
+	return p.marshalDistributionXML(dist, status)
 }
 
 // deleteDistribution handles DELETE /2020-05-31/distribution/{Id}.
@@ -507,8 +530,8 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 // state so a caller holding a stale version re-reads before it is told anything about a
 // distribution it may no longer be looking at. Until #1271 the delete checked none of this.
 //
-// A distribution's Status is Deployed from its creation, so the "wait for Deployed" step of the
-// disable-wait-delete loop passes at once; an observable InProgress is a progression of its own.
+// The page publishes no refusal for a distribution still InProgress, so a disabled distribution
+// deletes whatever its seeded Status window would report (#1381; see cloudfront_progression.go).
 func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSRequest, distID string) (*AWSResponse, error) {
 	dist, err := p.loadDistribution(ctx, distID)
 	if err != nil {
@@ -532,6 +555,10 @@ func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSReque
 
 	idxKey := cfDistIDsKey(ctx.AccountID)
 	removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID)
+	// A deleted distribution's seeded countdown goes with it (#1381).
+	if err := cfDistributionProgressions.reset(goCtx, p.state, distID); err != nil {
+		return nil, fmt.Errorf("cloudfront deleteDistribution reset status: %w", err)
+	}
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
@@ -564,10 +591,16 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest)
 		if err := json.Unmarshal(data, &dist); err != nil {
 			continue
 		}
+		// ListDistributions is polled like GetDistribution, so each distribution it reports spends
+		// one observation of its own countdown (#1381, #582).
+		status, err := p.distributionStatus(goCtx, dist, true)
+		if err != nil {
+			return nil, err
+		}
 		summaries = append(summaries, xmlSummary{
 			ID:         dist.ID,
 			ARN:        dist.ARN,
-			Status:     dist.Status,
+			Status:     status,
 			DomainName: dist.DomainName,
 			Comment:    dist.Comment,
 			Enabled:    dist.Enabled,
@@ -1090,8 +1123,9 @@ func (p *CloudFrontPlugin) loadDistributionForAccount(accountID, distID string) 
 	return dist, nil
 }
 
-// marshalDistributionXML serializes a distribution to a <Distribution> XML response.
-func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (*AWSResponse, error) {
+// marshalDistributionXML serializes a distribution to a <Distribution> XML response, reporting
+// status — the read's observation of the seeded window (#1381) — rather than the record's own.
+func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution, status string) (*AWSResponse, error) {
 	type xmlDist struct {
 		XMLName          xml.Name `xml:"Distribution"`
 		ID               string   `xml:"Id"`
@@ -1105,7 +1139,7 @@ func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution) (
 	resp, err := cloudfrontXMLResponse(http.StatusOK, xmlDist{
 		ID:               dist.ID,
 		ARN:              dist.ARN,
-		Status:           dist.Status,
+		Status:           status,
 		DomainName:       dist.DomainName,
 		Comment:          dist.Comment,
 		Enabled:          dist.Enabled,
