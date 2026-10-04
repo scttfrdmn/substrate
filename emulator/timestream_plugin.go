@@ -103,7 +103,7 @@ func (p *TimestreamPlugin) createDatabase(reqCtx *RequestContext, req *AWSReques
 		return nil, &AWSError{Code: "ConflictException", Message: "Database already exists: " + input.DatabaseName, HTTPStatus: http.StatusConflict}
 	}
 
-	now := p.tc.Now().UTC().Format(time.RFC3339)
+	now := p.tc.Now().UTC()
 	db := TimestreamDatabase{
 		DatabaseName:    input.DatabaseName,
 		Arn:             fmt.Sprintf("arn:aws:timestream:%s:%s:database/%s", region, acct, input.DatabaseName),
@@ -111,12 +111,15 @@ func (p *TimestreamPlugin) createDatabase(reqCtx *RequestContext, req *AWSReques
 		CreationTime:    now,
 		LastUpdatedTime: now,
 	}
-	data, _ := json.Marshal(db)
+	data, err := json.Marshal(db)
+	if err != nil {
+		return nil, fmt.Errorf("marshal timestream database: %w", err)
+	}
 	if err := p.state.Put(goCtx, timestreamNamespace, timestreamDBKey(acct, region, input.DatabaseName), data); err != nil {
 		return nil, fmt.Errorf("put timestream database: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region), input.DatabaseName)
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Database": db})
+	return timestreamJSONResponse(http.StatusOK, map[string]any{"Database": timestreamDatabaseToWire(db)})
 }
 
 func (p *TimestreamPlugin) describeDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -130,7 +133,7 @@ func (p *TimestreamPlugin) describeDatabase(reqCtx *RequestContext, req *AWSRequ
 	if err != nil {
 		return nil, err
 	}
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Database": db})
+	return timestreamJSONResponse(http.StatusOK, map[string]any{"Database": timestreamDatabaseToWire(db)})
 }
 
 func (p *TimestreamPlugin) deleteDatabase(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -156,7 +159,7 @@ func (p *TimestreamPlugin) listDatabases(reqCtx *RequestContext, req *AWSRequest
 	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
 	names, _ := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region))
-	dbs := make([]TimestreamDatabase, 0, len(names))
+	dbs := make([]timestreamDatabaseOut, 0, len(names))
 	for _, name := range names {
 		raw, err := p.state.Get(goCtx, timestreamNamespace, timestreamDBKey(acct, region, name))
 		if err != nil || raw == nil {
@@ -164,7 +167,7 @@ func (p *TimestreamPlugin) listDatabases(reqCtx *RequestContext, req *AWSRequest
 		}
 		var db TimestreamDatabase
 		if err2 := json.Unmarshal(raw, &db); err2 == nil {
-			dbs = append(dbs, db)
+			dbs = append(dbs, timestreamDatabaseToWire(db))
 		}
 	}
 	return timestreamJSONResponse(http.StatusOK, map[string]any{"Databases": dbs})
@@ -199,7 +202,7 @@ func (p *TimestreamPlugin) createTable(reqCtx *RequestContext, req *AWSRequest) 
 	if retention.MagneticStoreRetentionPeriodInDays == 0 {
 		retention.MagneticStoreRetentionPeriodInDays = 7
 	}
-	now := p.tc.Now().UTC().Format(time.RFC3339)
+	now := p.tc.Now().UTC()
 	tbl := TimestreamTable{
 		DatabaseName:        input.DatabaseName,
 		TableName:           input.TableName,
@@ -209,12 +212,15 @@ func (p *TimestreamPlugin) createTable(reqCtx *RequestContext, req *AWSRequest) 
 		LastUpdatedTime:     now,
 		RetentionProperties: retention,
 	}
-	data, _ := json.Marshal(tbl)
+	data, err := json.Marshal(tbl)
+	if err != nil {
+		return nil, fmt.Errorf("marshal timestream table: %w", err)
+	}
 	if err := p.state.Put(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, input.TableName), data); err != nil {
 		return nil, fmt.Errorf("put timestream table: %w", err)
 	}
 	updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName), input.TableName)
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": tbl})
+	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": timestreamTableToWire(tbl)})
 }
 
 func (p *TimestreamPlugin) describeTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -229,7 +235,7 @@ func (p *TimestreamPlugin) describeTable(reqCtx *RequestContext, req *AWSRequest
 	if err != nil {
 		return nil, err
 	}
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": tbl})
+	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": timestreamTableToWire(tbl)})
 }
 
 func (p *TimestreamPlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -264,7 +270,7 @@ func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (
 	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
 	names, _ := loadStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName))
-	tables := make([]TimestreamTable, 0, len(names))
+	tables := make([]timestreamTableOut, 0, len(names))
 	for _, name := range names {
 		raw, err := p.state.Get(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, name))
 		if err != nil || raw == nil {
@@ -272,7 +278,7 @@ func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (
 		}
 		var tbl TimestreamTable
 		if err2 := json.Unmarshal(raw, &tbl); err2 == nil {
-			tables = append(tables, tbl)
+			tables = append(tables, timestreamTableToWire(tbl))
 		}
 	}
 	return timestreamJSONResponse(http.StatusOK, map[string]any{"Tables": tables})

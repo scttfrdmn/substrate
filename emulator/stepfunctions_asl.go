@@ -66,9 +66,15 @@ func (p *StepFunctionsPlugin) executeASL(
 		// Apply InputPath to derive the effective input.
 		effectiveInput := aslApplyPath(currentData, state.InputPath)
 
-		// Record StateEntered.
+		// A state type the interpreter does not run has no published entered event to record.
+		enteredType, known := aslStateEventType(state.Type, true)
+		if !known {
+			return p.aslFail(exec, &histID, "States.Runtime", "unknown state type: "+state.Type)
+		}
+
+		// Record the state's entered event.
 		{
-			ev := HistoryEvent{ID: nextID(), Type: "StateEntered", Timestamp: p.tc.Now()}
+			ev := HistoryEvent{ID: nextID(), Type: enteredType, Timestamp: p.tc.Now()}
 			d := map[string]interface{}{"name": stateName, "input": aslMarshalStr(effectiveInput)}
 			ev.StateEnteredEventDetails = &d
 			appendEvent(ev)
@@ -119,9 +125,9 @@ func (p *StepFunctionsPlugin) executeASL(
 						"Cause": stateErr.Cause,
 					}
 					merged := aslSetPath(currentData, cc.ResultPath, errOutput)
-					// StateExited for the caught state.
+					// The exited event for the caught state.
 					{
-						ev := HistoryEvent{ID: nextID(), Type: "StateExited", Timestamp: p.tc.Now()}
+						ev := HistoryEvent{ID: nextID(), Type: aslStateExitedType(state.Type), Timestamp: p.tc.Now()}
 						d := map[string]interface{}{"name": stateName, "output": aslMarshalStr(merged)}
 						ev.StateExitedEventDetails = &d
 						appendEvent(ev)
@@ -140,7 +146,7 @@ func (p *StepFunctionsPlugin) executeASL(
 
 		// For Choice state, data passes through unchanged.
 		if state.Type == "Choice" {
-			ev := HistoryEvent{ID: nextID(), Type: "StateExited", Timestamp: p.tc.Now()}
+			ev := HistoryEvent{ID: nextID(), Type: aslStateExitedType(state.Type), Timestamp: p.tc.Now()}
 			d := map[string]interface{}{"name": stateName, "output": aslMarshalStr(currentData)}
 			ev.StateExitedEventDetails = &d
 			appendEvent(ev)
@@ -159,9 +165,9 @@ func (p *StepFunctionsPlugin) executeASL(
 		// Apply OutputPath: select sub-value of current data.
 		currentData = aslApplyPath(currentData, state.OutputPath)
 
-		// Record StateExited.
+		// Record the state's exited event.
 		{
-			ev := HistoryEvent{ID: nextID(), Type: "StateExited", Timestamp: p.tc.Now()}
+			ev := HistoryEvent{ID: nextID(), Type: aslStateExitedType(state.Type), Timestamp: p.tc.Now()}
 			d := map[string]interface{}{"name": stateName, "output": aslMarshalStr(currentData)}
 			ev.StateExitedEventDetails = &d
 			appendEvent(ev)
@@ -655,4 +661,33 @@ func aslMarshalStr(v interface{}) string {
 		return "null"
 	}
 	return string(b)
+}
+
+// aslStateEventType returns the HistoryEvent type API_HistoryEvent publishes for entering (entered)
+// or leaving (!entered) a state of the given ASL Type, and whether one is published.
+//
+// The page publishes per-state spellings only, ChoiceStateEntered, TaskStateExited and so on, and no
+// generic StateEntered or StateExited, which is what substrate emitted until #1323: a consumer
+// switching on the published enum matched neither, and an SDK validating it refused both. A Fail
+// state publishes FailStateEntered and no exited event, because it ends the execution.
+func aslStateEventType(stateType string, entered bool) (string, bool) {
+	switch stateType {
+	case "Task", "Pass", "Choice", "Wait", "Succeed", "Parallel", "Map":
+		if entered {
+			return stateType + "StateEntered", true
+		}
+		return stateType + "StateExited", true
+	case "Fail":
+		if entered {
+			return "FailStateEntered", true
+		}
+	}
+	return "", false
+}
+
+// aslStateExitedType returns the published exited event type for a state the interpreter has
+// already entered, so its type is one aslStateEventType knows. Fail never reaches an exited site.
+func aslStateExitedType(stateType string) string {
+	t, _ := aslStateEventType(stateType, false)
+	return t
 }

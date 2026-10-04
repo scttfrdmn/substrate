@@ -7,6 +7,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Step Functions' `GetExecutionHistory` answers epoch-second timestamps and published event types**
+  (#1323). Each event's `timestamp` answered the stored `time.Time` as an RFC3339 string where
+  `API_HistoryEvent` publishes a `Timestamp`, Required: Yes, so the sfn client could not decode the
+  response. Every other Step Functions date already answered `sfnEpoch`. Every state also answered the
+  generic `StateEntered`/`StateExited`, which the page's closed Valid Values list does not contain.
+  - Events now answer through `sfnHistoryToWire` (`emulator/stepfunctions_wire.go`). The stored
+    history keeps its encoding, so an execution recorded before the fix reads back and answers the
+    number.
+  - Each `type` is derived from the ASL state's own type: `PassStateEntered`/`PassStateExited`, and
+    likewise for Task, Choice, Wait, Succeed, Parallel and Map. A Fail state answers
+    `FailStateEntered` and no exited event, as published. An unknown state type is refused before
+    any event is recorded.
+  - `emulator/stepfunctions_history_test.go` asserts both on the raw bytes.
+
+- **Timestream answers its database and table dates as epoch seconds** (#1207). `API_Database` and
+  `API_Table` publish `CreationTime` and `LastUpdatedTime` as `Timestamp`, a number under Timestream
+  Write's JSON protocol, and every database and table response answered whole-second RFC3339 strings,
+  which a typed SDK refuses. All six responses now answer `emulator/timestream_wire.go`'s projections,
+  to three decimals. This completes #1207; CodeDeploy's half shipped in #1327.
+  - **This changes a stored record.** The records hold `time.Time` now, so a create keeps its
+    sub-second instant, which the whole-second string could not. A record written before the fix
+    holds the old string, and it still decodes; a test proves it. A run recorded before the fix
+    diverges on replay for a create made at a sub-second instant.
+  - #1207's class-wide audit of the nine services in its batch is recorded on the issue. FSx
+    `CreationTime` drops its fraction (#1373), EMR Serverless renders no dates (#1199), and Step
+    Functions' history `timestamp` is fixed above (#1323).
+  - Two `json.Marshal` errors the create paths discarded are returned wrapped.
+
+- **AWS Config's recorder no longer keeps a seeded status after the seed is cleared** (#1320).
+  `StartConfigurationRecorder` and `StopConfigurationRecorder` read the *seeded* recorder status and
+  wrote it back. So a seeded `Failure` and its error code outlived the seed, and a Start stored
+  `Success` alongside the seeded `lastErrorCode`, the combination the seed endpoint itself refuses.
+  - Both now read the stored status, and only `DescribeConfigurationRecorderStatus` applies the seed,
+    the separation the conformance-pack seeds already kept.
+  - A Start also clears `lastErrorCode`/`lastErrorMessage`, so a status stored before the fix does
+    not carry them forward under `Success`.
+  - `TestConfigSeeds_AreAppliedAtReadTimeNotWrittenIntoTheResource` names the invariant: every
+    sequence of recorder writes, run with and without the seed, must store byte-identical records
+    once it is cleared.
+
+- **The shared wire-test clock is frozen, so an exact date assertion cannot flake.** `wireSetup`
+  seeded its `TimeController` without freezing it, so the clock advanced by elapsed wall time. Batch's
+  exact `createdAt` assertion (#1363) failed under a parallel `make test`. Every wire test now runs on
+  a frozen clock, as CLAUDE.md requires of a test.
+
 ## [v0.121.0] - 2026-10-03
 
 ### Added

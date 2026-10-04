@@ -106,16 +106,24 @@ func wireAssertNoMemberXML(t *testing.T, site string, body []byte, members []str
 	}
 }
 
-// wireSetup initializes p over a fresh state store with a clock seeded at a fixed instant, and returns
+// wireSetup initializes p over a fresh state store with a clock frozen at a fixed instant, and returns
 // a request context and the store. The store is handed back because a record is the only place its
 // bookkeeping members can be read from.
+//
+// The clock is frozen, Freeze then SetTime as TimeController.Freeze documents, so a test may assert a
+// rendered date exactly. Unfrozen, the clock advances by the wall time elapsed since it was set, and
+// an exact assertion then fails under load: TestBatchWire's createdAt did, in a parallel `make test`.
 func wireSetup(t *testing.T, p emulator.Plugin, requestID string) (*emulator.RequestContext, emulator.StateManager) {
 	t.Helper()
 	state := emulator.NewMemoryStateManager()
+	clock := time.Unix(1700000000, 0).UTC()
+	tc := emulator.NewTimeController(clock)
+	tc.Freeze()
+	tc.SetTime(clock)
 	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{
 		State:   state,
 		Logger:  emulator.NewDefaultLogger(slog.LevelError, false),
-		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Unix(1700000000, 0).UTC())},
+		Options: map[string]any{"time_controller": tc},
 	}), "Initialize")
 	return &emulator.RequestContext{
 		AccountID: "123456789012",
