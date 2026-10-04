@@ -153,6 +153,10 @@ func (p *CloudWatchLogsPlugin) deleteLogGroup(ctx *RequestContext, req *AWSReque
 	if err := p.state.Delete(goCtx, cloudwatchLogsNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("logs deleteLogGroup state.Delete: %w", err)
 	}
+	// And its tag history, so a group re-created under this name starts never-tagged (#1282).
+	if err := p.state.Delete(goCtx, cloudwatchLogsNamespace, cwlLogGroupTaggedKey(stateKey)); err != nil {
+		return nil, fmt.Errorf("logs deleteLogGroup tag history: %w", err)
+	}
 
 	// Remove from index.
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)

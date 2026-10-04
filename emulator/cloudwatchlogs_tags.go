@@ -68,6 +68,87 @@ const cwlMaxTagsPerResource = 50
 // cwlLogGroupARNType is the resource-type segment of a taggable log-group ARN.
 const cwlLogGroupARNType = "log-group:"
 
+// cwlLogGroupKeyPrefix is the colon-terminated prefix every log-group record is stored under; see
+// [cwLogGroupKey]. It is the only kind in the namespace that stores tags, which is what
+// [cwlKeyIsTaggable] tests.
+const cwlLogGroupKeyPrefix = "loggroup:"
+
+// cwlLogGroupTaggedKeyPrefix prefixes the side-car record that says a log group has carried a tag.
+//
+// # Why a side-car, when thirty-three other records carry an ever_tagged member
+//
+// GetResources reports a resource that "currently [is] tagged or ever had a tag" (#938), and every
+// other service the tagging API scans records the second half as a member of the resource's own
+// record. CWLogGroup does not, deliberately: such a member is a substrate-bookkeeping declaration
+// on a persisted record, the class scripts/check-wire-bookkeeping.sh inventories and #756 drove to
+// zero undischarged, and #1282 asked for the rule to be established without adding one. A side-car
+// carries it outside the record, so CWLogGroup's declared members are unchanged and no response
+// shape can come to carry it.
+//
+// #938's file comment argues against a side-car keyed by ARN, because most tag writers hold a
+// state key and not an ARN. This one is keyed by the group's state key, and every writer of a log
+// group's tags holds that key: CloudWatch Logs' own TagResource and UntagResource, and the tagging
+// API's merge arm. CreateLogGroup's inline tags need no stamp, for the reason #938 gives — a group
+// holding a tag is reported because it holds one, and the write that later empties the set stamps
+// the flag because it is looking at the set it empties.
+//
+// DeleteLogGroup removes it with the group, so a group re-created under the same name starts
+// never-tagged, as a new resource does.
+const cwlLogGroupTaggedKeyPrefix = "loggroup_tagged:"
+
+// cwlKeyIsTaggable reports whether a CloudWatch Logs state key names a record that stores tags.
+//
+// Only a log-group record does. The namespace also holds log streams, event blobs, the two name
+// indexes and the tag-history side-car, none of which an ARN addresses; the prefix is tested
+// colon-terminated because "loggroup" is a prefix of both "loggroup_names" and "loggroup_tagged".
+func cwlKeyIsTaggable(key string) bool {
+	return strings.HasPrefix(key, cwlLogGroupKeyPrefix)
+}
+
+// cwlLogGroupTaggedKey returns the tag-history side-car key for the log group stored at groupKey.
+func cwlLogGroupTaggedKey(groupKey string) string {
+	return cwlLogGroupTaggedKeyPrefix + strings.TrimPrefix(groupKey, cwlLogGroupKeyPrefix)
+}
+
+// cwlStampLogGroupEverTagged records that the log group stored at groupKey has carried a tag, when
+// [taggingEverTagged] says this write makes that so. tagsBefore is counted before the merge.
+func cwlStampLogGroupEverTagged(ctx context.Context, state StateManager, groupKey string, tagsBefore, tagsAdded int) error {
+	if !taggingEverTagged(false, tagsBefore, tagsAdded) {
+		return nil
+	}
+	if err := state.Put(ctx, cloudwatchLogsNamespace, cwlLogGroupTaggedKey(groupKey), []byte("true")); err != nil {
+		return fmt.Errorf("stamp log group tag history: %w", err)
+	}
+	return nil
+}
+
+// cwlLogGroupEverTagged reports whether the log group stored at groupKey has carried a tag.
+func cwlLogGroupEverTagged(ctx context.Context, state StateManager, groupKey string) (bool, error) {
+	data, err := state.Get(ctx, cloudwatchLogsNamespace, cwlLogGroupTaggedKey(groupKey))
+	if err != nil {
+		return false, fmt.Errorf("read log group tag history: %w", err)
+	}
+	return data != nil, nil
+}
+
+// cwlCheckTagQuota refuses a merge that would leave a log group over its 50-tag ceiling.
+//
+// One check serves both writers that enforce it — CloudWatch Logs' TagResource and the tagging API's
+// TagResources — so the Resource Groups Tagging API cannot put a group over a quota its own service
+// would then refuse every further add against, the #1000 failure.
+func cwlCheckTagQuota(groupName string, existing, add map[string]string, removeKeys []string) *AWSError {
+	merged := mergeStringMap(existing, add, removeKeys)
+	if len(merged) <= cwlMaxTagsPerResource {
+		return nil
+	}
+	return &AWSError{
+		Code: "TooManyTagsException",
+		Message: fmt.Sprintf("Resource %s would have %d tags; a resource can have no more than %d.",
+			groupName, len(merged), cwlMaxTagsPerResource),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // cwlDestinationARNType is the resource-type segment of a taggable destination ARN. Substrate
 // stores no destination, so an ARN of this type resolves to nothing; see this file's preamble.
 const cwlDestinationARNType = "destination:"
@@ -103,19 +184,18 @@ func (p *CloudWatchLogsPlugin) tagResource(req *AWSRequest) (*AWSResponse, error
 		return nil, err
 	}
 
-	merged := mergeStringMap(lg.Tags, body.Tags, nil)
-	if len(merged) > cwlMaxTagsPerResource {
-		return nil, &AWSError{
-			Code: "TooManyTagsException",
-			Message: fmt.Sprintf("Resource %s would have %d tags; a resource can have no more than %d.",
-				lg.LogGroupName, len(merged), cwlMaxTagsPerResource),
-			HTTPStatus: http.StatusBadRequest,
-		}
+	if quotaErr := cwlCheckTagQuota(lg.LogGroupName, lg.Tags, body.Tags, nil); quotaErr != nil {
+		return nil, quotaErr
 	}
-	lg.Tags = merged
+	tagsBefore := len(lg.Tags)
+	lg.Tags = mergeStringMap(lg.Tags, body.Tags, nil)
 
-	if putErr := p.storeLogGroup(context.Background(), stateKey, lg, "tagResource"); putErr != nil {
+	goCtx := context.Background()
+	if putErr := p.storeLogGroup(goCtx, stateKey, lg, "tagResource"); putErr != nil {
 		return nil, putErr
+	}
+	if stampErr := cwlStampLogGroupEverTagged(goCtx, p.state, stateKey, tagsBefore, len(body.Tags)); stampErr != nil {
+		return nil, fmt.Errorf("logs tagResource: %w", stampErr)
 	}
 	return cwLogsJSONResponse(http.StatusOK, struct{}{})
 }
@@ -142,9 +222,14 @@ func (p *CloudWatchLogsPlugin) untagResource(req *AWSRequest) (*AWSResponse, err
 		return nil, err
 	}
 
+	tagsBefore := len(lg.Tags)
 	lg.Tags = mergeStringMap(lg.Tags, nil, body.TagKeys)
-	if putErr := p.storeLogGroup(context.Background(), stateKey, lg, "untagResource"); putErr != nil {
+	goCtx := context.Background()
+	if putErr := p.storeLogGroup(goCtx, stateKey, lg, "untagResource"); putErr != nil {
 		return nil, putErr
+	}
+	if stampErr := cwlStampLogGroupEverTagged(goCtx, p.state, stateKey, tagsBefore, 0); stampErr != nil {
+		return nil, fmt.Errorf("logs untagResource: %w", stampErr)
 	}
 	return cwLogsJSONResponse(http.StatusOK, struct{}{})
 }

@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1021 operations**. This
+Substrate ships **67 built-in service plugins** routing **1023 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -22,7 +22,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 1 | Account Management | `account` | REST/JSON | 4 |
 | 2 | ACM | `acm` | JSON | 8 |
 | 3 | API Gateway (REST) | `apigateway` | REST/JSON | 41 |
-| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 26 |
+| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 28 |
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
 | 7 | Backup | `backup` | REST/JSON | 12 |
@@ -2353,11 +2353,12 @@ internal request. A Lambda event-source-mapping poll is deliberately left random
 from a wall-clock ticker and are recorded nowhere, so there is no recorded ID to derive from and a
 seed there would be no more reproducible than the fallback ([#1292](https://github.com/scttfrdmn/substrate/issues/1292)).
 
-An ECR image digest is minted rather than computed from the manifest, so it is reproducible across
-a replay but is not the SHA-256 of the image it names, and two pushes of identical manifest bytes
-store two images where AWS stores one. [#1283](https://github.com/scttfrdmn/substrate/issues/1283)
-tracks deriving it from the manifest, which changes what the digest *means* rather than where its
-bytes come from.
+An ECR image digest is not minted at all: it is the SHA-256 of the manifest bytes, so it is
+reproducible across a replay because it is content-derived, and it names the image it is the digest
+of ([#1283](https://github.com/scttfrdmn/substrate/issues/1283); see
+[An ECR digest is the SHA-256 of its manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest)). It
+was minted until #1283, which is a change to what the digest *means* rather than to where its bytes
+come from, and so was not this section's to make.
 
 An SQS send mints a message's initial receipt handle and each receive replaces it, matching real
 SQS: two `ReceiveMessage` calls that return the same message hand back different handles and only
@@ -11781,15 +11782,22 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans thirty-three resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans thirty-four resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
 APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
 clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
-distributions, KMS keys, SNS topics, Secrets Manager secrets, Systems Manager
-parameters, and ELBv2 load balancers, target groups, listeners and listener
-rules.
+distributions, CloudWatch Logs log groups, KMS keys, SNS topics, Secrets Manager
+secrets, Systems Manager parameters, and ELBv2 load balancers, target groups,
+listeners and listener rules.
+
+A log group is the newest (#1282). It is the one type whose previously-tagged state is
+a side-car key rather than an `ever_tagged` member of its record, for the reason
+[Tagging a log group takes the unsuffixed ARN](#tagging-a-log-group-takes-the-unsuffixed-arn)
+gives. An API Gateway HTTP or WebSocket API (`/apis/{id}`) is **not** reached by either
+half: the resolver has no v2 arm and the scan no v2 scanner, so its tags are reachable
+only through API Gateway v2's own tagging operations.
 
 ELBv2's four are the newest and the odd ones out, and the section on the ELB side
 ([An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api))
@@ -12141,8 +12149,26 @@ against the wrong thing.
 DynamoDB was the one arm that rule had missed: it built its key from the calling
 request's account, so an ARN naming another account's table tagged the caller's
 own same-named table and `UntagResources` stripped tags from it. The resolver no
-longer receives a request context at all, so no arm can reach for the caller's
-account again. ECS's own `TagResource` had the same defect and now shares one key
+longer receives a request context, so no arm can reach for the caller's account
+again — with one exception, for an ARN that carries **no** account by specification.
+
+An API Gateway REST API's ARN is `arn:aws:apigateway:{region}::/restapis/{id}`: the
+account segment is empty in the published format. The audit above listed API Gateway
+as agreeing with its plugin, and it did not. The arm read that empty segment into the
+key and looked up `api:/{region}/{id}`, while API Gateway writes
+`api:{account}/{region}/{id}`, so `TagResources` answered `InvalidParameterException`
+for every REST API a caller had created — and `GetRestApi` found it either side of the
+call (#1307). Its tests had passed because they wrote the record by hand at the key the
+resolver used. The resolver now receives the caller's account as a single named value,
+read only by an arm whose ARN format has no account to give: the REST API is the
+caller's own, which is the only resource such an ARN can name. An API Gateway ARN that
+*does* carry an account still resolves that account's record or none. The tests create
+the API through `POST /restapis`, so the two keys cannot disagree again unnoticed, and
+`RestAPIState`'s previously-tagged flag, which only that arm sets, is now reachable.
+
+The other formats with an empty account segment do not repeat it: an S3 bucket ARN
+(`arn:aws:s3:::{name}`) has none, but neither does its key, since a bucket name is
+global; and API Gateway v2's `/apis/{id}` has no arm at all (see above). ECS's own `TagResource` had the same defect and now shares one key
 builder with the ARN resolver, which is also what lets the tagging API reach an
 ECS service, task and task definition rather than a cluster only.
 
@@ -15218,9 +15244,23 @@ Three further readings worth knowing:
   no error code for exceeding the `tags` map maximum and inventing one would assert a
   refusal AWS documents nowhere ([#671](https://github.com/scttfrdmn/substrate/issues/671)).
 
-Note also what tagging does **not** reach: a log group is not resolvable through the
-Resource Groups Tagging API, which has no `logs` arm in its ARN resolver, so
-`GetResources` does not report one.
+**The Resource Groups Tagging API reaches a log group too** (#1282). Its `logs` arm parses
+the ARN through the same function these three operations use, so the two cannot disagree
+about which ARN names a group: the unsuffixed form is accepted, and the `:*` policy form, a
+`:log-stream:` ARN and a destination ARN are each refused (as `InternalServiceException`,
+the tagging API's answer for a type it cannot handle) rather than keyed to the group. A tag
+written through either side is read back through the other, and `TagResources` enforces
+the same 50-tag ceiling with the same `TooManyTagsException`.
+
+`GetResources` reports a log group under its **unsuffixed** ARN — the one a sweep can hand
+straight back to `TagResources` or `UntagResources` — and follows the tagging API's rule:
+a tagged group is reported, a group whose tags were all removed is reported with
+`"Tags": []`, and a group that never had a tag is not. The second state is recorded in a
+side-car key beside the group (`loggroup_tagged:{account}/{region}/{name}`), not in the group's
+own record, so `CWLogGroup` gains no bookkeeping member; `DeleteLogGroup` removes it, so a
+group re-created under the same name starts never-tagged. Every tag writer of a log group —
+`TagResource`, `UntagResource` and the tagging API — writes it, which is why the
+side-car is safe here where #938 found one unsafe across services.
 
 ### GetLogEvents pages by a pair of tokens
 
@@ -15819,6 +15859,7 @@ no error (#529).
 | CreateRoute | |
 | GetRoute | |
 | GetRoutes | One page, in ascending route ID |
+| UpdateRoute | Patches `routeKey`, `target`, `authorizationType` and `authorizerId`; a member absent from the body is left as it was (see *An update changes only what it names*). `404 NotFoundException` for an unknown API or route, `400 BadRequestException` for a body that does not decode |
 | DeleteRoute | |
 | CreateIntegration | |
 | GetIntegration | |
@@ -15827,6 +15868,7 @@ no error (#529).
 | CreateStage | |
 | GetStage | |
 | GetStages | One page, in ascending stage name |
+| UpdateStage | Patches `autoDeploy`, `accessLogSettings`, `defaultRouteSettings`, `description`, `stageVariables` and `deploymentId`; a member absent from the body is left as it was, and `lastUpdatedDate` is set from the simulated clock. `404 NotFoundException` for an unknown API or stage, `400 BadRequestException` for a body that does not decode |
 | DeleteStage | `204`, and idempotent: a stage name with nothing behind it is not refused |
 | CreateAuthorizer | |
 | GetAuthorizer | `404 NotFoundException` for an unknown authorizer |
@@ -15846,6 +15888,24 @@ no error (#529).
 | AWS::ApiGatewayV2::Route | RouteId | |
 | AWS::ApiGatewayV2::Integration | IntegrationId | |
 | AWS::ApiGatewayV2::Stage | StageName | |
+
+### An update changes only what it names
+
+`UpdateRoute` and `UpdateStage` are the convergence operations a second deploy calls: a route is
+retargeted at a replaced integration, and the `$default` stage's auto-deploy and access logging
+are brought to the desired state. Every member of `UpdateRouteInput` and `UpdateStageInput` is
+Required: No, so a member absent from the body leaves the stored value as it was. A member that is
+present replaces it, even when it is empty or `false`; that is how a caller detaches an authorizer
+(`"authorizerId": ""`) or turns auto-deploy off. Both answer the full updated `Route` or `Stage`,
+the shape `GetRoute` and `GetStage` read back, so a caller can converge on what it reads
+([#1279](https://github.com/scttfrdmn/substrate/issues/1279)).
+
+`autoDeploy` is recorded intent: substrate creates no deployment when the API changes. Members the
+published input declares and the records do not model are not read. For a route these are
+`authorizationScopes`, `apiKeyRequired`, `requestParameters`, `requestModels`,
+`modelSelectionExpression`, `operationName` and `routeResponseSelectionExpression`. For a stage they
+are `clientCertificateId` and `routeSettings`. Neither update answers the published
+`ConflictException`: no route-key or stage uniqueness is enforced.
 
 ### Cost
 
@@ -16742,9 +16802,9 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400); the registry-wide form [pages](#the-three-ecr-listings-page-three-different-ways), and the named form cannot |
 | DeleteRepository | Reports the deleted repository in the same shape; a repository holding images needs [`force`](#every-ecr-refusal-is-a-400), and its images go with it |
 | GetAuthorizationToken | Returns base64("AWS:password") |
-| PutImage | |
-| BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages` |
-| BatchDeleteImage | Removes tags from the repository's tag index; an entry that matches nothing is reported in `failures` |
+| PutImage | The digest is [the SHA-256 of the manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest); `imageManifest` is required; a repeat that changes nothing is `ImageAlreadyExistsException`, and a supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException` |
+| BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages`; answers the image under the tag it was asked by |
+| BatchDeleteImage | [By tag removes that tag](#an-ecr-digest-is-the-sha-256-of-its-manifest), and the image only with its last; by digest removes the image and every tag, one `imageId` per tag; an entry that matches nothing is reported in `failures` |
 | DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException` |
 | ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member |
 | TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
@@ -16890,6 +16950,33 @@ narrower: a name the **caller** supplied is answered for or refused, while a nam
 substrate's own index is skipped, because a missing record there is an internal inconsistency rather
 than a caller's mistake. Before #1090 every miss was dropped from the list, so a request naming one
 real and one imaginary repository answered 200 with a single entry.
+
+### An ECR digest is the SHA-256 of its manifest
+
+`PutImage` answers `imageDigest` as `sha256:` and the hex SHA-256 of the `imageManifest` bytes,
+exactly as pushed ([#1283](https://github.com/scttfrdmn/substrate/issues/1283)). A digest names
+content, so a caller can verify a push by hashing the manifest it sent, and two pushes of
+byte-identical manifests address **one** image. Substrate minted an unrelated value until #1283, so
+every push stored a new image, whatever its manifest.
+
+What follows from that, each from `API_PutImage` and `API_BatchDeleteImage`:
+
+| Push or delete | Answer |
+|---|---|
+| No `imageManifest`, or an empty one (Required, minimum length 1) | `InvalidParameterException`/400. This is also why manifest-less pushes cannot collide: there is no empty manifest to hash. |
+| A supplied `imageDigest` that is not the manifest's | `ImageDigestDoesNotMatchException`/400, and nothing is stored. A matching one is accepted. |
+| The same manifest under a new tag | The one image gains the tag. `ListImages` reports it once per tag under one digest, and `DescribeImages` once, with both tags. |
+| The same manifest under a tag that already names it, or with no tag | `ImageAlreadyExistsException`/400: "there were no changes to the manifest or image tag after the last push". |
+| Another manifest under an existing tag | The tag moves to the new image. Tag immutability is stored on the repository but not enforced, so `ImageTagAlreadyExistsException` has no site. |
+| `BatchDeleteImage` by tag | Removes that tag. The image is deleted with its last tag. |
+| `BatchDeleteImage` by digest | Removes the image and every tag, answering one `imageId` per tag, as the published sample does. A digest naming no image is a `failures` entry. |
+
+`BatchGetImage` answers an image under the tag it was asked by. Asked by digest, it answers the tag
+the image was first pushed under.
+
+A run recorded before #1283, replayed after it, diverges at its first `PutImage` that omitted
+`imageDigest`: the replay answers the manifest's digest where the recording holds a minted one, so a
+recorded read that names the minted digest finds nothing.
 
 ### The three ECR listings page three different ways
 

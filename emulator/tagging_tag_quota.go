@@ -111,8 +111,9 @@ func taggingQuotaRefusal(awsErr *AWSError) error {
 // it over the owning service's published per-resource tag quota.
 //
 // It returns nil for a namespace whose service publishes no quota substrate models, which is nineteen
-// of the 23 arms — a silent pass rather than an error, because the absence of a quota is the normal
-// case and the four that have one are named here explicitly.
+// of the 24 arms — a silent pass rather than an error, because the absence of a quota is the normal
+// case and the five that have one are named here explicitly. CloudWatch Logs is the fifth, added with
+// its merge arm (#1282); the file comment above predates it and describes the first four.
 //
 // The existing tag set is read out of raw with a **minimal decode** — a struct carrying the tag member
 // alone — rather than the arm's own concrete type. That keeps this function from having to know which
@@ -137,6 +138,11 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 		return taggingQuotaRefusal(taggingIAMQuotaRefusal(key, raw, addTags, removeKeys))
 	case kinesisNamespace:
 		return taggingQuotaRefusal(taggingKinesisQuotaRefusal(raw, addTags, removeKeys))
+	case cloudwatchLogsNamespace:
+		if !cwlKeyIsTaggable(key) {
+			return nil
+		}
+		return taggingQuotaRefusal(taggingCWLQuotaRefusal(raw, addTags, removeKeys))
 	default:
 		return nil
 	}
@@ -214,6 +220,22 @@ func taggingIAMQuotaRefusal(key string, raw []byte, addTags map[string]string, r
 		return nil
 	}
 	return iamCheckTagLimitAWSError(mergeIAMTags(record.Tags, addTags, removeKeys))
+}
+
+// taggingCWLQuotaRefusal applies [cwlCheckTagQuota] to a stored log group.
+//
+// CloudWatch Logs is the fifth service with a quota on this path (#1282): all three of its tagging
+// pages state "as many as 50 tags" and TagResource publishes TooManyTagsException/400 for exceeding
+// it, so the tagging API answers what CloudWatch Logs' own TagResource would.
+func taggingCWLQuotaRefusal(raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
+	var record struct {
+		LogGroupName string            `json:"LogGroupName"`
+		Tags         map[string]string `json:"Tags"`
+	}
+	if !taggingDecodeForQuota(raw, &record) {
+		return nil
+	}
+	return cwlCheckTagQuota(record.LogGroupName, record.Tags, addTags, removeKeys)
 }
 
 // taggingKinesisQuotaRefusal applies [kinesisCheckTagQuota] to a stored stream.

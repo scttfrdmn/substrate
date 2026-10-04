@@ -115,12 +115,12 @@ func TestECR_ListImagesPagesAndAnswersOneEntryPerTag(t *testing.T) {
 	ts := newECRTestServer(t)
 	ecrCallOK(t, ts, "CreateRepository", map[string]any{"repositoryName": "images"})
 
-	const shared = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	// One manifest pushed under two tags is one image carrying both (#1283): the digest is the
+	// manifest's, so the second push adds a tag rather than a second image.
 	for _, tag := range []string{"latest", "v1"} {
 		ecrCallOK(t, ts, "PutImage", map[string]any{
 			"repositoryName": "images",
 			"imageTag":       tag,
-			"imageDigest":    shared,
 			"imageManifest":  `{"schemaVersion":2}`,
 		})
 	}
@@ -166,12 +166,13 @@ func TestECR_ListImagesPagesAndAnswersOneEntryPerTag(t *testing.T) {
 func TestECR_DescribeImagesPagesAndRefusesAnImageItCannotAnswerFor(t *testing.T) {
 	ts := newECRTestServer(t)
 	ecrCallOK(t, ts, "CreateRepository", map[string]any{"repositoryName": "described"})
+	// Three distinct manifests, so three images: what this pins is pagination over three digests,
+	// not an accidental property of minted ones (#1283).
 	for i := 0; i < 3; i++ {
 		ecrCallOK(t, ts, "PutImage", map[string]any{
 			"repositoryName": "described",
 			"imageTag":       fmt.Sprintf("v%d", i),
-			"imageDigest":    fmt.Sprintf("sha256:%064d", i),
-			"imageManifest":  `{"schemaVersion":2}`,
+			"imageManifest":  fmt.Sprintf(`{"schemaVersion":2,"n":%d}`, i),
 		})
 	}
 

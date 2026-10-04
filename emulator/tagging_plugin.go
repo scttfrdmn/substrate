@@ -374,6 +374,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "glue", scan: p.scanGlueDatabases},
 		{typePrefix: "acm", scan: p.scanACMCertificates},
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
+		{typePrefix: "logs", scan: p.scanCloudWatchLogGroups},
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
@@ -1383,6 +1384,48 @@ func (p *TaggingPlugin) scanCloudFrontDistributions(_ context.Context, reqCtx *R
 	return out, nil
 }
 
+// scanCloudWatchLogGroups reports the caller's log groups (#1282).
+//
+// The ARN is the **unsuffixed** form, arn:aws:logs:{region}:{acct}:log-group:{name}, because that is
+// the one the tagging operations accept on both sides: CloudWatch Logs' TagResource refuses the
+// `:*`-suffixed policy form DescribeLogGroups reports under `arn` (#1273), and so does this
+// resolver's logs arm. A GetResources ARN a caller cannot hand back to TagResources would make the
+// sweep it exists for unable to act on what it found.
+//
+// Whether a group is reported follows #938's rule through the tag-history side-car rather than a
+// member of the record; see [cwlLogGroupTaggedKeyPrefix]. A store fault reading either is returned,
+// which [TaggingPlugin.scanAllResources] logs and skips, rather than reporting a group as never
+// tagged because its history could not be read.
+func (p *TaggingPlugin) scanCloudWatchLogGroups(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := taggingScanPrefix(cwlLogGroupKeyPrefix, reqCtx)
+	keys, err := p.state.List(goCtx, cloudwatchLogsNamespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list cloudwatch log groups: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, cloudwatchLogsNamespace, k)
+		if err != nil {
+			return nil, fmt.Errorf("get cloudwatch log group %s: %w", k, err)
+		}
+		var lg CWLogGroup
+		if raw == nil || json.Unmarshal(raw, &lg) != nil {
+			continue
+		}
+		everTagged, err := cwlLogGroupEverTagged(goCtx, p.state, k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: "arn:aws:logs:" + reqCtx.Region + ":" + reqCtx.AccountID + ":" + cwlLogGroupARNType + lg.LogGroupName,
+			Tags:        mapToTaggingTags(lg.Tags),
+			everTagged:  everTagged,
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -1400,11 +1443,11 @@ type tagResourcesOutput struct {
 	FailedResourcesMap map[string]failedResourcesInfo `json:"FailedResourcesMap,omitempty"`
 }
 
-// tagResources implements TagResources. It takes no account or region from the request
-// context: every resource is addressed by the ARN the caller named, through
-// [TaggingPlugin.resolveARN], which is what keeps a cross-account ARN out of the caller's own
-// resources.
-func (p *TaggingPlugin) tagResources(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// tagResources implements TagResources. It takes no Region from the request context, and the
+// account only for an ARN whose format carries none: every resource is addressed by the ARN the
+// caller named, through [TaggingPlugin.resolveARN], which is what keeps a cross-account ARN out of
+// the caller's own resources. See that function's header for the API Gateway exception (#1307).
+func (p *TaggingPlugin) tagResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in tagResourcesInput
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
@@ -1414,7 +1457,7 @@ func (p *TaggingPlugin) tagResources(_ *RequestContext, req *AWSRequest) (*AWSRe
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn)
+		ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
 		if err != nil {
 			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
@@ -1445,7 +1488,7 @@ type untagResourcesOutput struct {
 // untagResources implements UntagResources, addressing resources exactly as
 // [TaggingPlugin.tagResources] does so that the two cannot diverge on which resource an ARN
 // names — a removal aimed at the wrong resource is the more damaging direction.
-func (p *TaggingPlugin) untagResources(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var in untagResourcesInput
 	if err := json.Unmarshal(req.Body, &in); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
@@ -1455,7 +1498,7 @@ func (p *TaggingPlugin) untagResources(_ *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn)
+		ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
 		if err != nil {
 			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
@@ -1610,8 +1653,18 @@ func (p *TaggingPlugin) tagMergeFailure(arn string, err error) failedResourcesIn
 // documented for a partition mismatch but not for an account mismatch — so refusing is
 // substrate's reading, applied uniformly rather than per arm.
 //
+// # The one exception: an ARN that carries no account by specification
+//
+// An API Gateway ARN is arn:aws:apigateway:{region}::/restapis/{id} — its account segment is
+// empty in the published format, not merely omitted by a caller — so there is no account in it to
+// take. Such a resource can only be the caller's own, which is what callerAccount is for, and it is
+// the only thing it is for: an arm whose ARN format carries an account never reads it, so the
+// cross-account rule above holds for every arm that can state an account. When an API Gateway ARN
+// does carry one, the arm uses that instead, so a caller naming another account still reaches that
+// account's record or none (#1307).
+//
 // Returns an error if the ARN format is unrecognized.
-func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
+func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, err error) {
 	// ARN format: arn:aws:{service}:{region}:{account}:{resource}
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) < 6 || parts[0] != "arn" {
@@ -1708,14 +1761,39 @@ func (p *TaggingPlugin) resolveARN(arn string) (ns, key string, err error) {
 
 	case "apigateway":
 		// arn:aws:apigateway:{region}::/restapis/{apiId} — a v1 REST API. An HTTP or WebSocket
-		// API is /apis/{id}, which is a different resource with its own state key.
+		// API is /apis/{id}, which is a different resource with its own state key, and this
+		// resolver has no arm for it.
+		//
+		// The account segment is empty by specification, so the account is the caller's. Reading
+		// parts[4] here — as this arm did until #1307 — built api:/{region}/{id}, a key no plugin
+		// writes, so every REST API a caller created answered InvalidParameterException while
+		// GetRestApi found it either side of the call. See this function's header.
 		apiID, ok := strings.CutPrefix(resource, "/restapis/")
-		if !ok || strings.Contains(apiID, "/") {
+		if !ok || apiID == "" || strings.Contains(apiID, "/") {
 			return "", "", unsupportedTagResource("API Gateway %q is not a REST API ARN", resource)
 		}
-		region := parts[3]
 		acct := parts[4]
-		return apigatewayNamespace, "api:" + acct + "/" + region + "/" + apiID, nil
+		if acct == "" {
+			acct = callerAccount
+		}
+		return apigatewayNamespace, apigwAPIKey(acct, parts[3], apiID), nil
+
+	case "logs":
+		// arn:aws:logs:{region}:{acct}:log-group:{name} — through [cwlParseLogGroupTagARN], which is
+		// what CloudWatch Logs' own three tagging operations parse through, so the two cannot
+		// disagree about which ARN names a group (#1282). It takes the account and Region from the
+		// ARN, and it refuses the `:*`-suffixed policy form and a `:log-stream:` ARN rather than
+		// keying either to the group. A destination is taggable at AWS and unrepresentable here.
+		//
+		// Every refusal is the unsupported-type answer rather than the service's own
+		// ValidationException: the tagging API publishes neither that code nor a per-service ARN
+		// rule, and an ARN this arm cannot key is, from the tagging API's side, a type it does not
+		// handle — the same answer a qualified Lambda ARN gets above.
+		accountID, region, name, arnErr := cwlParseLogGroupTagARN(arn)
+		if arnErr != nil {
+			return "", "", unsupportedTagResource("CloudWatch Logs %q is not a taggable log-group ARN: %s", resource, arnErr.Code)
+		}
+		return cloudwatchLogsNamespace, cwLogGroupKey(accountID, region, name), nil
 
 	case "states":
 		// arn:aws:states:{region}:{acct}:stateMachine:{name} or :activity:{name}
@@ -2130,6 +2208,32 @@ func mergeResourceTags(
 		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
 		updated, _ := json.Marshal(api)
 		return state.Put(goCtx, ns, key, updated)
+
+	case cloudwatchLogsNamespace:
+		// Behind a kind guard, because the namespace also holds log streams, event blobs, two name
+		// indexes and the tag-history side-car, none of which an ARN addresses or stores tags in
+		// (#1282). Decoded as [CWLogGroup] rather than merged as raw JSON, because the guard leaves one
+		// record shape and CloudWatch Logs' own TagResource round-trips the same struct — a member this
+		// arm added to the raw record would be dropped by the next write from that side. That is also
+		// why the previously-tagged flag is a side-car here and not the ever_tagged member the
+		// raw-JSON helpers stamp; see [cwlLogGroupTaggedKeyPrefix].
+		if !cwlKeyIsTaggable(key) {
+			return fmt.Errorf("unsupported CloudWatch Logs resource key: %s", key)
+		}
+		var lg CWLogGroup
+		if err := json.Unmarshal(raw, &lg); err != nil {
+			return fmt.Errorf("unmarshal CWLogGroup: %w", err)
+		}
+		tagsBefore := len(lg.Tags)
+		lg.Tags = mergeStringMap(lg.Tags, addTags, removeKeys)
+		updated, err := json.Marshal(lg)
+		if err != nil {
+			return fmt.Errorf("marshal CWLogGroup: %w", err)
+		}
+		if err := state.Put(goCtx, ns, key, updated); err != nil {
+			return fmt.Errorf("put CWLogGroup: %w", err)
+		}
+		return cwlStampLogGroupEverTagged(goCtx, state, key, tagsBefore, len(addTags))
 
 	case statesNamespace:
 		// Through [mergeRecordStringMapTags] rather than a concrete type, and behind a kind

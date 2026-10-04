@@ -25,20 +25,15 @@ import (
 // carried it. That is the vacuous-assertion trap #1304 hit on EFS, and the fix is the
 // same: make the flag true first, prove it is true, then assert.
 //
-// # Why the flag is set through state rather than through TagResources
+// # The flag is set through TagResources, the one path that sets it
 //
 // RestAPIState.EverTagged is set at exactly one place — TaggingPlugin's apigatewayNamespace
-// merge arm — and that arm cannot currently reach an API a caller created. The tagging
-// resolver builds the state key from the ARN's account field, and an API Gateway REST API
-// ARN is `arn:aws:apigateway:{region}::/restapis/{id}`, whose account segment is empty by
-// specification, so it looks up `api:/us-east-1/{id}` while the plugin wrote
-// `api:123456789012/us-east-1/{id}`. TagResources answers InvalidParameterException.
-// That is #1307, not #756.
-//
-// So this test writes the flag onto the record the plugin itself stored, which is what the
-// merge arm would do if it could find it. What is under test here is the projection, and
-// the projection cannot tell how the flag got set — which is the point: a record whose flag
-// is true by any route must still answer a body without the member.
+// merge arm. Until #1307 that arm could not reach an API a caller created: the resolver read
+// the ARN's empty account segment into the key, so this test wrote the flag onto the record by
+// hand. It is now set by tagging the API through the Resource Groups Tagging API and untagging
+// it again, which is what a caller does, so the record under test is one only the real path
+// could have produced. The projection is still what is under test, and it cannot tell how the
+// flag got set — which is the point.
 //
 // Three of the four operations that answer a REST API, not four: CreateRestApi answers
 // before anything can have tagged the API, so its record's flag is necessarily false and
@@ -46,33 +41,48 @@ import (
 // AccountID and Region, which carry no omitempty and so need no such setup.
 func TestAPIGatewayWire_RestAPIOmitsEverTaggedOnceItIsSet(t *testing.T) {
 	state := emulator.NewMemoryStateManager()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	p := &emulator.APIGatewayPlugin{}
 	require.NoError(t, p.Initialize(context.Background(), emulator.PluginConfig{
 		State:   state,
-		Logger:  emulator.NewDefaultLogger(slog.LevelError, false),
+		Logger:  logger,
 		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Now())},
 	}), "APIGatewayPlugin.Initialize")
+	tagging := &emulator.TaggingPlugin{}
+	require.NoError(t, tagging.Initialize(context.Background(), emulator.PluginConfig{State: state, Logger: logger}),
+		"TaggingPlugin.Initialize")
 	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "r1"}
 
 	id := agwAPI(t, p, ctx, "flagged")
 
 	// The key apigwAPIKey builds: "api:" + account + "/" + region + "/" + id. Written out
 	// rather than called because it is unexported; a change to either side fails the Get
-	// below rather than silently seeding nothing.
+	// below rather than reading nothing.
 	const namespace = "apigateway"
 	key := "api:123456789012/us-east-1/" + id
 
 	goCtx := context.Background()
 	raw, err := state.Get(goCtx, namespace, key)
 	require.NoError(t, err, "the plugin's own record must be at %s/%s", namespace, key)
+	require.False(t, bytes.Contains(raw, []byte(`"ever_tagged"`)), "the flag starts unset: %s", raw)
 
-	var api emulator.RestAPIState
-	require.NoError(t, json.Unmarshal(raw, &api), "decode RestAPIState: %s", raw)
-	require.False(t, api.EverTagged, "the flag starts false — CreateRestApi with tags does not set it")
-	api.EverTagged = true
-	updated, err := json.Marshal(api)
-	require.NoError(t, err, "marshal RestAPIState")
-	require.NoError(t, state.Put(goCtx, namespace, key, updated), "seed EverTagged")
+	arn := "arn:aws:apigateway:us-east-1::/restapis/" + id
+	for _, call := range []struct {
+		op   string
+		body map[string]any
+	}{
+		{"TagResources", map[string]any{"ResourceARNList": []string{arn}, "Tags": map[string]string{"team": "wire"}}},
+		{"UntagResources", map[string]any{"ResourceARNList": []string{arn}, "TagKeys": []string{"team"}}},
+	} {
+		reqBody, marshalErr := json.Marshal(call.body)
+		require.NoError(t, marshalErr, "marshal %s", call.op)
+		resp, callErr := tagging.HandleRequest(ctx, &emulator.AWSRequest{
+			Service: "tagging", Operation: call.op, Path: "/", Body: reqBody,
+			Headers: map[string]string{"X-Amz-Target": "ResourceGroupsTaggingAPI_20170126." + call.op}, Params: map[string]string{},
+		})
+		require.NoError(t, callErr, "%s", call.op)
+		require.NotContains(t, string(resp.Body), "FailedResourcesMap", "%s must reach the API: %s", call.op, resp.Body)
+	}
 
 	// The anchor. A record that does not round-trip through the state encoding with the flag
 	// set makes every assertion below vacuous, so the encoding is read back and asserted

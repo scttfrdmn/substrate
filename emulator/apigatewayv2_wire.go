@@ -68,6 +68,11 @@ type v2StageOut struct {
 	StageVariables map[string]string `json:"stageVariables,omitempty"`
 	Tags           map[string]string `json:"tags,omitempty"`
 	CreatedDate    time.Time         `json:"createdDate"`
+
+	AutoDeploy           bool                 `json:"autoDeploy,omitempty"`
+	AccessLogSettings    *V2AccessLogSettings `json:"accessLogSettings,omitempty"`
+	DefaultRouteSettings *V2RouteSettings     `json:"defaultRouteSettings,omitempty"`
+	LastUpdatedDate      *time.Time           `json:"lastUpdatedDate,omitempty"`
 }
 
 // v2AuthorizerOut is the Authorizer element. The model spells the JWT member
@@ -163,6 +168,11 @@ func v2StageWire(s V2StageState) v2StageOut {
 		StageVariables: s.StageVariables,
 		Tags:           s.Tags,
 		CreatedDate:    s.CreatedDate,
+
+		AutoDeploy:           s.AutoDeploy,
+		AccessLogSettings:    s.AccessLogSettings,
+		DefaultRouteSettings: s.DefaultRouteSettings,
+		LastUpdatedDate:      s.LastUpdatedDate,
 	}
 }
 

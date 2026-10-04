@@ -9,6 +9,63 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An ECR image digest is the SHA-256 of its manifest** (#1283). `PutImage` minted a digest
+  unrelated to the manifest, so every push stored a new image, a caller could not verify a push by
+  hashing what it sent, and `ImageAlreadyExistsException` could not fire. The digest is now
+  `sha256:` and the hex SHA-256 of the manifest bytes, so one manifest is one image.
+  - `imageManifest` is required (`InvalidParameterException`), as `API_PutImage` publishes, which is
+    also why manifest-less pushes cannot collide.
+  - A supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException`.
+  - A repeat that changes nothing is `ImageAlreadyExistsException`. The same manifest under a new tag
+    adds the tag to the one image.
+  - `BatchDeleteImage` follows its page. By tag, it removes that tag and deletes the image only with
+    its last. By digest, it removes the image and every tag, one `imageId` per tag. A digest naming
+    nothing is a `failures` entry rather than a deletion. `BatchGetImage` answers under the tag asked
+    for.
+  - The ECR pagination fixtures push distinct manifests, so they pin pagination, not minted digests.
+    Tag immutability and untagged-image listing are #1379.
+
+- **The Resource Groups Tagging API reaches a CloudWatch Logs log group** (#1282). The resolver had
+  no `logs` arm, so `TagResources`/`UntagResources` reported every log-group ARN in
+  `FailedResourcesMap`, and `GetResources` never reported a group, though #1273 had made the tags
+  themselves readable through `logs:ListTagsForResource`.
+  - The arm parses through `cwlParseLogGroupTagARN`, the function CloudWatch Logs' own three tagging
+    operations use, so the two sides cannot disagree. The `:*` policy form, a `:log-stream:` ARN and a
+    destination ARN are refused rather than keyed to the group. The account and Region come from the
+    ARN.
+  - The merge is guarded to log-group keys, and enforces CloudWatch Logs' 50-tag ceiling with its own
+    `TooManyTagsException`.
+  - `GetResources` reports a group under its unsuffixed ARN when it is tagged, or with `"Tags": []`
+    when it was tagged before, but never one that was never tagged.
+  - The previously-tagged state is a side-car key beside the group, written by every tag writer and
+    removed by `DeleteLogGroup`. So `CWLogGroup` gains no bookkeeping member, and
+    `check-wire-bookkeeping` reports no new field.
+
+- **`TagResources` reaches a REST API a caller created** (#1307). An API Gateway ARN's account segment
+  is empty by specification, and the resolver read that empty segment into the key. It looked up
+  `api:/{region}/{id}`, which no plugin writes, so every real REST API answered
+  `InvalidParameterException` while `GetRestApi` found it.
+  - The resolver now takes the caller's account, read only by an arm whose ARN format carries no
+    account. An API Gateway ARN that does carry one still resolves that account's record or none.
+  - The two tagging tests create the API through `POST /restapis` instead of writing a hand-built
+    key, which is how the disagreement passed.
+  - `RestAPIState`'s previously-tagged flag is now reachable, and
+    `TestAPIGatewayWire_RestAPIOmitsEverTaggedOnceItIsSet` sets it through the tagging API.
+  - API Gateway v2 has no tagging-API arm or scanner; that is #1378.
+
+- **API Gateway v2 routes `UpdateRoute` and `UpdateStage`** (#1279). A `PATCH` to
+  `/v2/apis/{apiId}/routes/{routeId}` or `/v2/apis/{apiId}/stages/{stageName}` was refused as an
+  unknown route, so a second deploy had nothing to converge with. `UpdateRoute` patches `routeKey`,
+  `target`, `authorizationType` and `authorizerId`. `UpdateStage` patches `autoDeploy`,
+  `accessLogSettings`, `defaultRouteSettings`, `description`, `stageVariables` and `deploymentId`, and
+  sets `lastUpdatedDate` from the simulated clock.
+  - A member absent from the body is left as it was. A present one replaces it, even when empty or
+    `false`, which is how a caller detaches an authorizer or turns auto-deploy off.
+  - Both answer the full updated `Route` or `Stage`, refuse an unknown API, route or stage with
+    `NotFoundException`/404, and refuse a malformed body with `BadRequestException`.
+  - `autoDeploy` is recorded intent; no deployment is created. The operation catalog goes from 1021
+    to 1023.
+
 - **ELBv2's three describes refuse an ARN-list filter naming nothing** (#1370). `DescribeTargetGroups`,
   `DescribeListeners` and `DescribeRules` filtered by `TargetGroupArns`/`ListenerArns`/`RuleArns`, and
   an ARN naming nothing matched nothing. So a describe of a deleted or mistyped resource answered 200
