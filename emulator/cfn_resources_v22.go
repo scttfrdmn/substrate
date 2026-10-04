@@ -24,7 +24,10 @@ func (d *StackDeployer) deployCognitoUserPool(
 	poolName := resolveStringProp(props, "UserPoolName", logicalID, cctx)
 
 	body := map[string]interface{}{"PoolName": poolName}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoUserPool marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-idp",
@@ -87,7 +90,10 @@ func (d *StackDeployer) deployCognitoUserPoolClient(
 		"UserPoolId": poolID,
 		"ClientName": clientName,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoUserPoolClient marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-idp",
@@ -129,7 +135,10 @@ func (d *StackDeployer) deployCognitoUserPoolGroup(
 		"UserPoolId": poolID,
 		"GroupName":  groupName,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoUserPoolGroup marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-idp",
@@ -162,7 +171,10 @@ func (d *StackDeployer) deployCognitoUserPoolDomain(
 		"UserPoolId": poolID,
 		"Domain":     domain,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoUserPoolDomain marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-idp",
@@ -194,7 +206,10 @@ func (d *StackDeployer) deployCognitoIdentityPool(
 		"IdentityPoolName":               poolName,
 		"AllowUnauthenticatedIdentities": false,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoIdentityPool marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-identity",
@@ -234,7 +249,10 @@ func (d *StackDeployer) deployCognitoIdentityPoolRoleAttachment(
 		"IdentityPoolId": poolID,
 		"Roles":          props["Roles"],
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCognitoIdentityPoolRoleAttachment marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cognito-identity",

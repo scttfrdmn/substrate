@@ -666,7 +666,10 @@ func (p *BatchPlugin) terminateJob(ctx *RequestContext, req *AWSRequest, jobID s
 		job.StatusReason = body.Reason
 	}
 
-	updated, _ := json.Marshal(job)
+	updated, err := json.Marshal(job)
+	if err != nil {
+		return nil, fmt.Errorf("batch terminateJob marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, batchNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("terminateJob: put: %w", err)
 	}

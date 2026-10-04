@@ -637,7 +637,12 @@ func (s *Server) handleEmails(w http.ResponseWriter, r *http.Request) {
 		"Emails": emails,
 		"Count":  len(emails),
 	}
-	body, _ := json.Marshal(result)
+	body, err := json.Marshal(result)
+	if err != nil {
+		s.logger.Warn("failed to marshal emails response", "err", err)
+		http.Error(w, "failed to marshal emails response", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil { // nosemgrep
@@ -654,9 +659,14 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 
 // handleHealth returns a JSON liveness response. It always returns 200.
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
+	body, err := json.Marshal(map[string]string{"status": "ok", "version": Version})
+	if err != nil {
+		s.logger.Warn("failed to marshal health response", "err", err)
+		http.Error(w, "failed to marshal health response", http.StatusInternalServerError)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	body, _ := json.Marshal(map[string]string{"status": "ok", "version": Version})
 	if _, err := w.Write(body); err != nil { // nosemgrep
 		s.logger.Warn("failed to write health response", "err", err)
 	}
@@ -665,12 +675,17 @@ func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request) {
 // handleReady returns a JSON readiness response listing registered plugins.
 // It always returns 200.
 func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	body, _ := json.Marshal(map[string]interface{}{
+	body, err := json.Marshal(map[string]interface{}{
 		"status":  "ok",
 		"plugins": s.registry.Names(),
 	})
+	if err != nil {
+		s.logger.Warn("failed to marshal ready response", "err", err)
+		http.Error(w, "failed to marshal ready response", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	if _, err := w.Write(body); err != nil { // nosemgrep
 		s.logger.Warn("failed to write ready response", "err", err)
 	}

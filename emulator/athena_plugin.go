@@ -292,7 +292,10 @@ func (p *AthenaPlugin) stopQueryExecution(ctx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("stopQueryExecution: unmarshal: %w", err)
 	}
 	q.State = "CANCELED"
-	updated, _ := json.Marshal(q)
+	updated, err := json.Marshal(q)
+	if err != nil {
+		return nil, fmt.Errorf("athena stopQueryExecution marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, athenaNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("stopQueryExecution: put: %w", err)
 	}

@@ -229,8 +229,16 @@ func (s *Server) handleDebugStateDiff(w http.ResponseWriter, r *http.Request) {
 			removed[k] = fv
 			continue
 		}
-		fJSON, _ := json.Marshal(fv)
-		tJSON, _ := json.Marshal(tv)
+		fJSON, err := json.Marshal(fv)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
+		tJSON, err := json.Marshal(tv)
+		if err != nil {
+			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+			return
+		}
 		if string(fJSON) != string(tJSON) {
 			changed[k] = map[string]interface{}{
 				"before": fv,

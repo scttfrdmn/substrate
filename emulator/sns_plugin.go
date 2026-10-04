@@ -948,9 +948,13 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 	switch sub.Protocol {
 	case "sqs":
 		envelope := p.buildSNSEnvelope(ctx.IDs, sub, message, subject)
-		envelopeBytes, _ := json.Marshal(envelope)
+		envelopeBytes, err := json.Marshal(envelope)
+		if err != nil {
+			p.logger.Warn("sns dispatch to sqs: marshal envelope failed", "queue", sub.Endpoint, "err", err)
+			return
+		}
 		queueURL := sub.Endpoint
-		_, err := p.registry.RouteRequest(ctx, &AWSRequest{
+		_, err = p.registry.RouteRequest(ctx, &AWSRequest{
 			Service:   "sqs",
 			Operation: "SendMessage",
 			Headers:   map[string]string{},
@@ -969,7 +973,7 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 		if parts := strings.Split(fnName, ":"); len(parts) > 6 {
 			fnName = parts[len(parts)-1]
 		}
-		payload, _ := json.Marshal(map[string]interface{}{
+		payload, err := json.Marshal(map[string]interface{}{
 			"Records": []map[string]interface{}{
 				{
 					"EventSource":          "aws:sns",
@@ -983,7 +987,11 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 				},
 			},
 		})
-		_, err := p.registry.RouteRequest(ctx, &AWSRequest{
+		if err != nil {
+			p.logger.Warn("sns dispatch to lambda: marshal payload failed", "function", fnName, "err", err)
+			return
+		}
+		_, err = p.registry.RouteRequest(ctx, &AWSRequest{
 			Service:   "lambda",
 			Operation: "POST",
 			Path:      "/2015-03-31/functions/" + fnName + "/invocations",
@@ -996,7 +1004,11 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 		}
 	case "http", "https":
 		envelope := p.buildSNSEnvelope(ctx.IDs, sub, message, subject)
-		envelopeBytes, _ := json.Marshal(envelope)
+		envelopeBytes, err := json.Marshal(envelope)
+		if err != nil {
+			p.logger.Warn("sns dispatch to http: marshal envelope failed", "endpoint", sub.Endpoint, "err", err)
+			return
+		}
 		httpReq, reqErr := http.NewRequest(http.MethodPost, sub.Endpoint, bytes.NewReader(envelopeBytes))
 		if reqErr != nil {
 			p.logger.Warn("sns dispatch to http: build request failed", "endpoint", sub.Endpoint, "err", reqErr)

@@ -1224,11 +1224,14 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 	}
 
 	if canceled {
-		body, _ := json.Marshal(map[string]interface{}{
+		body, err := json.Marshal(map[string]interface{}{
 			"__type":              "TransactionCanceledException",
 			"message":             "Transaction canceled, please refer cancellation reasons for specific reasons",
 			"CancellationReasons": reasons,
 		})
+		if err != nil {
+			return nil, fmt.Errorf("dynamodb transactWriteItems marshal: %w", err)
+		}
 		return &AWSResponse{
 			StatusCode: http.StatusBadRequest,
 			Headers:    map[string]string{"Content-Type": "application/x-amz-json-1.0"},
@@ -1962,7 +1965,10 @@ func (p *DynamoDBPlugin) getRecords(ctx *RequestContext, req *AWSRequest) (*AWSR
 		nextSeq = cursor.Sequence
 	}
 	cursor.Sequence = nextSeq
-	nextCursorBytes, _ := json.Marshal(cursor)
+	nextCursorBytes, err := json.Marshal(cursor)
+	if err != nil {
+		return nil, fmt.Errorf("dynamodb getRecords marshal: %w", err)
+	}
 	nextIterator := base64.StdEncoding.EncodeToString(nextCursorBytes)
 
 	// Convert to DynamoDB Streams wire format.

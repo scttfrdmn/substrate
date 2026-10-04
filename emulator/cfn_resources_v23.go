@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -29,7 +30,10 @@ func (d *StackDeployer) deployKinesisStream(
 		"StreamName": name,
 		"ShardCount": 1,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployKinesisStream marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "kinesis",

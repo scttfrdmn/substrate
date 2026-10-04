@@ -1921,7 +1921,10 @@ func parseProxyResponse(body []byte) (*AWSResponse, error) {
 
 // proxyError returns a simple JSON error AWSResponse.
 func proxyError(status int, msg string) (*AWSResponse, error) {
-	body, _ := json.Marshal(map[string]string{"message": msg})
+	body, err := json.Marshal(map[string]string{"message": msg})
+	if err != nil {
+		return nil, fmt.Errorf("apigateway proxyError marshal: %w", err)
+	}
 	return &AWSResponse{
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "application/json"},

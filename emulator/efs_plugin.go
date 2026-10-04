@@ -215,7 +215,10 @@ func (p *EFSPlugin) updateFileSystem(reqCtx *RequestContext, req *AWSRequest, fs
 	if input.ThroughputMode != "" {
 		fs.ThroughputMode = input.ThroughputMode
 	}
-	updated, _ := json.Marshal(fs)
+	updated, err := json.Marshal(fs)
+	if err != nil {
+		return nil, fmt.Errorf("efs updateFileSystem marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, efsNamespace, key, updated); err != nil {
 		return nil, fmt.Errorf("efs updateFileSystem put: %w", err)
 	}
@@ -396,7 +399,9 @@ func (p *EFSPlugin) createMountTarget(reqCtx *RequestContext, req *AWSRequest) (
 	}
 	updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID)
 	updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.FileSystemID, mtID)
-	p.incrementMountTargetCount(goCtx, reqCtx, input.FileSystemID)
+	if err := p.incrementMountTargetCount(goCtx, reqCtx, input.FileSystemID); err != nil {
+		return nil, err
+	}
 
 	return efsJSONResponse(http.StatusOK, efsMountTargetToWire(mt))
 }
@@ -483,7 +488,9 @@ func (p *EFSPlugin) deleteMountTarget(reqCtx *RequestContext, _ *AWSRequest, mtI
 	removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID)
 	if fsID != "" {
 		removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+fsID, mtID)
-		p.decrementMountTargetCount(goCtx, reqCtx, fsID)
+		if err := p.decrementMountTargetCount(goCtx, reqCtx, fsID); err != nil {
+			return nil, err
+		}
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
@@ -558,7 +565,10 @@ func (p *EFSPlugin) mergeEFSTags(goCtx context.Context, reqCtx *RequestContext, 
 		}
 		fs.EverTagged = taggingEverTagged(fs.EverTagged, len(fs.Tags), len(addTags))
 		fs.Tags = mergeEFSTagSlice(fs.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(fs)
+		updated, err := json.Marshal(fs)
+		if err != nil {
+			return fmt.Errorf("efs mergeEFSTags marshal: %w", err)
+		}
 		return p.state.Put(goCtx, efsNamespace, key, updated)
 	}
 
@@ -577,7 +587,10 @@ func (p *EFSPlugin) mergeEFSTags(goCtx context.Context, reqCtx *RequestContext, 
 		}
 		ap.EverTagged = taggingEverTagged(ap.EverTagged, len(ap.Tags), len(addTags))
 		ap.Tags = mergeEFSTagSlice(ap.Tags, addTags, removeKeys)
-		updated, _ := json.Marshal(ap)
+		updated, err := json.Marshal(ap)
+		if err != nil {
+			return fmt.Errorf("efs mergeEFSTags marshal: %w", err)
+		}
 		return p.state.Put(goCtx, efsNamespace, key, updated)
 	}
 
@@ -640,37 +653,45 @@ func mergeEFSTagSlice(existing []EFSTag, add []EFSTag, removeKeys []string) []EF
 }
 
 // incrementMountTargetCount increments NumberOfMountTargets on a file system.
-func (p *EFSPlugin) incrementMountTargetCount(goCtx context.Context, reqCtx *RequestContext, fsID string) {
-	key := "filesystem:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + fsID
-	raw, err := p.state.Get(goCtx, efsNamespace, key)
-	if err != nil || raw == nil {
-		return
-	}
-	var fs EFSFileSystem
-	if json.Unmarshal(raw, &fs) != nil {
-		return
-	}
-	fs.NumberOfMountTargets++
-	updated, _ := json.Marshal(fs)
-	_ = p.state.Put(goCtx, efsNamespace, key, updated)
+func (p *EFSPlugin) incrementMountTargetCount(goCtx context.Context, reqCtx *RequestContext, fsID string) error {
+	return p.adjustMountTargetCount(goCtx, reqCtx, fsID, 1)
 }
 
-// decrementMountTargetCount decrements NumberOfMountTargets on a file system.
-func (p *EFSPlugin) decrementMountTargetCount(goCtx context.Context, reqCtx *RequestContext, fsID string) {
+// decrementMountTargetCount decrements NumberOfMountTargets on a file system, never below zero.
+func (p *EFSPlugin) decrementMountTargetCount(goCtx context.Context, reqCtx *RequestContext, fsID string) error {
+	return p.adjustMountTargetCount(goCtx, reqCtx, fsID, -1)
+}
+
+// adjustMountTargetCount adds delta to a file system's NumberOfMountTargets, clamped at zero.
+//
+// A file system that no longer exists is left alone. A store or encoding failure is returned
+// rather than dropped, so a mount-target write never answers success over a count it failed to
+// record (#1365).
+func (p *EFSPlugin) adjustMountTargetCount(goCtx context.Context, reqCtx *RequestContext, fsID string, delta int) error {
 	key := "filesystem:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + fsID
 	raw, err := p.state.Get(goCtx, efsNamespace, key)
-	if err != nil || raw == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("efs adjustMountTargetCount get: %w", err)
+	}
+	if raw == nil {
+		return nil
 	}
 	var fs EFSFileSystem
-	if json.Unmarshal(raw, &fs) != nil {
-		return
+	if err := json.Unmarshal(raw, &fs); err != nil {
+		return fmt.Errorf("efs adjustMountTargetCount unmarshal: %w", err)
 	}
-	if fs.NumberOfMountTargets > 0 {
-		fs.NumberOfMountTargets--
+	fs.NumberOfMountTargets += delta
+	if fs.NumberOfMountTargets < 0 {
+		fs.NumberOfMountTargets = 0
 	}
-	updated, _ := json.Marshal(fs)
-	_ = p.state.Put(goCtx, efsNamespace, key, updated)
+	updated, err := json.Marshal(fs)
+	if err != nil {
+		return fmt.Errorf("efs adjustMountTargetCount marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, efsNamespace, key, updated); err != nil {
+		return fmt.Errorf("efs adjustMountTargetCount put: %w", err)
+	}
+	return nil
 }
 
 // efsJSONResponse serializes v to JSON and returns an AWSResponse.

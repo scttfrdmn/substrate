@@ -8,6 +8,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 )
 
 // ----- v0.21.0 — ECR -------------------------------------------------------
@@ -23,7 +24,10 @@ func (d *StackDeployer) deployECRRepository(
 	name := resolveStringProp(props, "RepositoryName", logicalID, cctx)
 
 	body := map[string]interface{}{"repositoryName": name}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployECRRepository marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "ecr",
@@ -79,7 +83,10 @@ func (d *StackDeployer) deployECRLifecyclePolicy(
 		"repositoryName":      repoName,
 		"lifecyclePolicyText": policy,
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployECRLifecyclePolicy marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "ecr",
@@ -110,7 +117,10 @@ func (d *StackDeployer) deployECSCluster(
 	name := resolveStringProp(props, "ClusterName", logicalID, cctx)
 
 	body := map[string]interface{}{"clusterName": name}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployECSCluster marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "ecs",
@@ -171,7 +181,10 @@ func (d *StackDeployer) deployECSTaskDefinition(
 	if execRole, ok := props["ExecutionRoleArn"]; ok {
 		body["executionRoleArn"] = resolveValue(execRole, cctx)
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployECSTaskDefinition marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "ecs",
@@ -217,7 +230,10 @@ func (d *StackDeployer) deployECSService(
 		"desiredCount":   1,
 		"launchType":     resolveStringProp(props, "LaunchType", "FARGATE", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployECSService marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "ecs",

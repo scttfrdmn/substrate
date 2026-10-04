@@ -489,7 +489,10 @@ func (p *Route53Plugin) appendToList(scope, listName, id string) error {
 		}
 	}
 	ids = append(ids, id)
-	newData, _ := json.Marshal(ids)
+	newData, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("route53 appendToList marshal: %w", err)
+	}
 	return p.state.Put(context.Background(), route53Namespace, key, newData)
 }
 

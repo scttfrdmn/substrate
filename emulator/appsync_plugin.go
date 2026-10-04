@@ -160,7 +160,10 @@ func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 		AccountID: acct,
 	}
 
-	data, _ := json.Marshal(api)
+	data, err := json.Marshal(api)
+	if err != nil {
+		return nil, fmt.Errorf("appsync createGraphqlAPI marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKey(acct, region, apiID), data); err != nil {
 		return nil, fmt.Errorf("put appsync api: %w", err)
@@ -214,7 +217,10 @@ func (p *AppSyncPlugin) updateGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 			api.AuthenticationType = input.AuthenticationType
 		}
 	}
-	data, _ := json.Marshal(api)
+	data, err := json.Marshal(api)
+	if err != nil {
+		return nil, fmt.Errorf("appsync updateGraphqlAPI marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKey(reqCtx.AccountID, reqCtx.Region, apiID), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync api: %w", err3)
@@ -259,7 +265,10 @@ func (p *AppSyncPlugin) createDataSource(reqCtx *RequestContext, req *AWSRequest
 		ServiceRoleARN: input.ServiceRoleARN,
 		DataSourceARN:  fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s/datasources/%s", region, acct, apiID, input.Name),
 	}
-	data, _ := json.Marshal(ds)
+	data, err := json.Marshal(ds)
+	if err != nil {
+		return nil, fmt.Errorf("appsync createDataSource marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncDataSourceKey(acct, region, apiID, input.Name), data); err != nil {
 		return nil, fmt.Errorf("put appsync datasource: %w", err)
@@ -311,7 +320,10 @@ func (p *AppSyncPlugin) updateDataSource(reqCtx *RequestContext, req *AWSRequest
 			ds.Description = input.Description
 		}
 	}
-	data, _ := json.Marshal(ds)
+	data, err := json.Marshal(ds)
+	if err != nil {
+		return nil, fmt.Errorf("appsync updateDataSource marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncDataSourceKey(reqCtx.AccountID, reqCtx.Region, apiID, name), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync datasource: %w", err3)
@@ -362,7 +374,10 @@ func (p *AppSyncPlugin) createResolver(reqCtx *RequestContext, req *AWSRequest, 
 		ResponseMappingTemplate: input.ResponseMappingTemplate,
 		ResolverARN:             fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s/types/%s/resolvers/%s", region, acct, apiID, typeName, input.FieldName),
 	}
-	data, _ := json.Marshal(res)
+	data, err := json.Marshal(res)
+	if err != nil {
+		return nil, fmt.Errorf("appsync createResolver marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncResolverKey(acct, region, apiID, typeName, input.FieldName), data); err != nil {
 		return nil, fmt.Errorf("put appsync resolver: %w", err)
@@ -422,7 +437,10 @@ func (p *AppSyncPlugin) updateResolver(reqCtx *RequestContext, req *AWSRequest, 
 			res.ResponseMappingTemplate = input.ResponseMappingTemplate
 		}
 	}
-	data, _ := json.Marshal(res)
+	data, err := json.Marshal(res)
+	if err != nil {
+		return nil, fmt.Errorf("appsync updateResolver marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err3 := p.state.Put(goCtx, appSyncNamespace, appSyncResolverKey(reqCtx.AccountID, reqCtx.Region, apiID, typeName, fieldName), data); err3 != nil {
 		return nil, fmt.Errorf("update appsync resolver: %w", err3)
@@ -467,7 +485,10 @@ func (p *AppSyncPlugin) createFunction(reqCtx *RequestContext, req *AWSRequest, 
 		Description:    input.Description,
 		FunctionARN:    fmt.Sprintf("arn:aws:appsync:%s:%s:apis/%s/functions/%s", region, acct, apiID, funcID),
 	}
-	data, _ := json.Marshal(fn)
+	data, err := json.Marshal(fn)
+	if err != nil {
+		return nil, fmt.Errorf("appsync createFunction marshal: %w", err)
+	}
 	goCtx := context.Background()
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncFunctionKey(acct, region, apiID, funcID), data); err != nil {
 		return nil, fmt.Errorf("put appsync function: %w", err)
@@ -546,7 +567,10 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 		Description: input.Description,
 		Expires:     expires,
 	}
-	data, _ := json.Marshal(key)
+	data, err := json.Marshal(key)
+	if err != nil {
+		return nil, fmt.Errorf("appsync createAPIKey marshal: %w", err)
+	}
 	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKeyStateKey(acct, region, apiID, keyID), data); err != nil {
@@ -590,7 +614,10 @@ func (p *AppSyncPlugin) startSchemaCreation(reqCtx *RequestContext, req *AWSRequ
 		return nil, &AWSError{Code: "BadRequestException", Message: "invalid JSON", HTTPStatus: http.StatusBadRequest}
 	}
 	goCtx := context.Background()
-	data, _ := json.Marshal(input.Definition)
+	data, err := json.Marshal(input.Definition)
+	if err != nil {
+		return nil, fmt.Errorf("appsync startSchemaCreation marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncSchemaKey(reqCtx.AccountID, reqCtx.Region, apiID), data); err != nil {
 		return nil, fmt.Errorf("put appsync schema: %w", err)
 	}

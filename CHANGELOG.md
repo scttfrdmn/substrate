@@ -25,6 +25,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **No non-test code discards a `json.Marshal` or `xml.Marshal` error** (#1365). 142 sites wrote
+  `x, _ := json.Marshal(v)` (one `xml.Marshal`), most of them feeding `state.Put`, so a failed encode
+  stored an empty record and the operation answered 200 over state it never recorded.
+  - 120 now return the error wrapped with the plugin and operation.
+  - `openSearchOK`/`openSearchStatusOK` return `(*AWSResponse, error)`. EFS's mount-target counters
+    return their `Get`, `Unmarshal`, `Marshal` and `Put` errors to `CreateMountTarget` and
+    `DeleteMountTarget`, instead of letting `NumberOfMountTargets` drift.
+  - `/health`, `/ready`, `/v1/emails` and the debug state diff answer 500 on a failed encode. SNS
+    fan-out logs and skips a subscriber whose payload will not encode.
+  - CloudFormation's `resolveValue` falls back to the value's Go rendering, not `""`, when a
+    YAML-decoded value with non-string keys will not encode.
+  - Ten sites that provably cannot fail are recorded, each with its reason, in the new
+    `scripts/check-discarded-marshal.sh`. Eight are string-index helpers marshalling a `[]string` or
+    `map[string]string` (their other discarded errors are #1175), and two are fixed-shape error
+    builders.
+  - `make discarded-marshal-check` fails on a new discard, keyed by file and enclosing function. It
+    runs in CI beside `discarded-unmarshal-check` (#1007), which CI now runs too; until now that gate
+    ran only through `make`.
+
 - **FSx pages `DescribeFileSystems` and requires `CreateFileSystem`'s two Required members**
   (#1195, #1197). `MaxResults` and `NextToken` were unread, so every file system came back in one
   page. They page now, at most the published 50 per page. The token is omitted on the last page, and

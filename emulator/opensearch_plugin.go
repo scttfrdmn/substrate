@@ -101,7 +101,7 @@ func (p *OpenSearchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case strings.HasPrefix(subPath, "_mapping") || strings.HasPrefix(subPath, "_mappings"):
 		return p.putMapping(ctx, index)
 	case subPath == "_refresh":
-		return openSearchOK(map[string]interface{}{"_shards": map[string]int{"total": 1, "successful": 1, "failed": 0}}), nil
+		return openSearchOK(map[string]interface{}{"_shards": map[string]int{"total": 1, "successful": 1, "failed": 0}})
 	}
 
 	return openSearchError(http.StatusNotFound, "route_not_found", "no handler for "+method+" /"+rest), nil
@@ -134,7 +134,10 @@ func (p *OpenSearchPlugin) createIndex(_ *RequestContext, req *AWSRequest, index
 			}
 		}
 	}
-	data, _ := json.Marshal(meta)
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("opensearch createIndex marshal: %w", err)
+	}
 	if err := p.state.Put(goCtx, opensearchNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("opensearch createIndex put: %w", err)
 	}
@@ -142,7 +145,7 @@ func (p *OpenSearchPlugin) createIndex(_ *RequestContext, req *AWSRequest, index
 		"acknowledged":        true,
 		"shards_acknowledged": true,
 		"index":               index,
-	}), nil
+	})
 }
 
 func (p *OpenSearchPlugin) deleteIndex(_ *RequestContext, _ *AWSRequest, index string) (*AWSResponse, error) {
@@ -162,7 +165,7 @@ func (p *OpenSearchPlugin) deleteIndex(_ *RequestContext, _ *AWSRequest, index s
 		_ = p.state.Delete(goCtx, opensearchNamespace, "doc:"+index+"/"+id)
 	}
 	_ = p.state.Delete(goCtx, opensearchNamespace, "doc_ids:"+index)
-	return openSearchOK(map[string]interface{}{"acknowledged": true}), nil
+	return openSearchOK(map[string]interface{}{"acknowledged": true})
 }
 
 func (p *OpenSearchPlugin) getIndex(_ *RequestContext, index string) (*AWSResponse, error) {
@@ -186,13 +189,13 @@ func (p *OpenSearchPlugin) getIndex(_ *RequestContext, index string) (*AWSRespon
 				},
 			},
 		},
-	}), nil
+	})
 }
 
 func (p *OpenSearchPlugin) putMapping(_ *RequestContext, index string) (*AWSResponse, error) {
 	// Accept and ignore mapping updates; return acknowledged.
 	_ = index
-	return openSearchOK(map[string]interface{}{"acknowledged": true}), nil
+	return openSearchOK(map[string]interface{}{"acknowledged": true})
 }
 
 // --- Document operations ---
@@ -206,7 +209,10 @@ func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, i
 	indexKey := "index:" + index
 	if data, _ := p.state.Get(goCtx, opensearchNamespace, indexKey); data == nil {
 		meta := map[string]interface{}{"index": index, "created_at": p.tc.Now().Format(time.RFC3339), "doc_count": 0}
-		d, _ := json.Marshal(meta)
+		d, err := json.Marshal(meta)
+		if err != nil {
+			return nil, fmt.Errorf("opensearch indexDocument marshal: %w", err)
+		}
 		_ = p.state.Put(goCtx, opensearchNamespace, indexKey, d)
 	}
 
@@ -235,7 +241,7 @@ func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, i
 		"result":   result,
 		"_shards":  map[string]int{"total": 1, "successful": 1, "failed": 0},
 		"_seq_no":  0,
-	}), nil
+	})
 }
 
 func (p *OpenSearchPlugin) getDocument(_ *RequestContext, index, docID string) (*AWSResponse, error) {
@@ -253,7 +259,7 @@ func (p *OpenSearchPlugin) getDocument(_ *RequestContext, index, docID string) (
 		"_version": 1,
 		"found":    true,
 		"_source":  source,
-	}), nil
+	})
 }
 
 func (p *OpenSearchPlugin) deleteDocument(_ *RequestContext, index, docID string) (*AWSResponse, error) {
@@ -269,7 +275,7 @@ func (p *OpenSearchPlugin) deleteDocument(_ *RequestContext, index, docID string
 		"_version": 2,
 		"result":   "deleted",
 		"_shards":  map[string]int{"total": 1, "successful": 1, "failed": 0},
-	}), nil
+	})
 }
 
 // --- Bulk API ---
@@ -316,7 +322,10 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 						indexKey := "index:" + idx
 						if d, _ := p.state.Get(goCtx, opensearchNamespace, indexKey); d == nil {
 							m := map[string]interface{}{"index": idx, "created_at": p.tc.Now().Format(time.RFC3339)}
-							d2, _ := json.Marshal(m)
+							d2, err := json.Marshal(m)
+							if err != nil {
+								return nil, fmt.Errorf("opensearch bulk marshal: %w", err)
+							}
 							_ = p.state.Put(goCtx, opensearchNamespace, indexKey, d2)
 						}
 					}
@@ -342,7 +351,7 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 		"took":   1,
 		"errors": false,
 		"items":  items,
-	}), nil
+	})
 }
 
 // --- Search ---
@@ -395,14 +404,17 @@ func (p *OpenSearchPlugin) search(ctx *RequestContext, req *AWSRequest, index st
 			"remaining": remaining,
 			"size":      size,
 		}
-		sd, _ := json.Marshal(scrollState)
+		sd, err := json.Marshal(scrollState)
+		if err != nil {
+			return nil, fmt.Errorf("opensearch search marshal: %w", err)
+		}
 		_ = p.state.Put(goCtx, opensearchNamespace, "scroll:"+scrollID, sd)
 		hits := osPageHits(filtered, from, size)
-		return openSearchOK(p.buildSearchResponse(filtered, hits, body, scrollID)), nil
+		return openSearchOK(p.buildSearchResponse(filtered, hits, body, scrollID))
 	}
 
 	hits := osPageHits(filtered, from, size)
-	return openSearchOK(p.buildSearchResponse(filtered, hits, body, "")), nil
+	return openSearchOK(p.buildSearchResponse(filtered, hits, body, ""))
 }
 
 func (p *OpenSearchPlugin) buildSearchResponse(allDocs []map[string]interface{}, pageHits []map[string]interface{}, body openSearchSearchRequest, scrollID string) map[string]interface{} {
@@ -498,7 +510,10 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 
 	// Update scroll state.
 	state.Remaining = newRemaining
-	updated, _ := json.Marshal(state)
+	updated, err := json.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("opensearch scroll marshal: %w", err)
+	}
 	_ = p.state.Put(goCtx, opensearchNamespace, stateKey, updated)
 
 	return openSearchOK(map[string]interface{}{
@@ -511,7 +526,7 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 			"max_score": 1.0,
 			"hits":      hits,
 		},
-	}), nil
+	})
 }
 
 func (p *OpenSearchPlugin) clearScroll(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -545,7 +560,7 @@ func (p *OpenSearchPlugin) clearScroll(_ *RequestContext, req *AWSRequest) (*AWS
 	return openSearchOK(map[string]interface{}{
 		"succeeded": true,
 		"num_freed": len(ids),
-	}), nil
+	})
 }
 
 // --- Cluster health ---
@@ -565,7 +580,7 @@ func (p *OpenSearchPlugin) clusterHealth() (*AWSResponse, error) {
 		"delayed_unassigned_shards":       0,
 		"number_of_pending_tasks":         0,
 		"active_shards_percent_as_number": 100.0,
-	}), nil
+	})
 }
 
 // --- Helpers ---
@@ -1023,18 +1038,24 @@ func orEmpty(v interface{}) interface{} {
 }
 
 // openSearchOK returns a 200 JSON response.
-func openSearchOK(body interface{}) *AWSResponse {
+func openSearchOK(body interface{}) (*AWSResponse, error) {
 	return openSearchStatusOK(http.StatusOK, body)
 }
 
 // openSearchStatusOK returns a JSON response with the given status code.
-func openSearchStatusOK(status int, body interface{}) *AWSResponse {
-	b, _ := json.Marshal(body)
+//
+// It returns the marshal error rather than an empty body: body is arbitrary, and a search
+// response carries stored documents, so it is not a value that provably encodes (#1365).
+func openSearchStatusOK(status int, body interface{}) (*AWSResponse, error) {
+	b, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("opensearch response marshal: %w", err)
+	}
 	return &AWSResponse{
 		StatusCode: status,
 		Body:       b,
 		Headers:    map[string]string{"Content-Type": "application/json"},
-	}
+	}, nil
 }
 
 // openSearchInvalidBody reports that a request body would not decode.

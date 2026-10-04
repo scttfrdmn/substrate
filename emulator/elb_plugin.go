@@ -1030,7 +1030,10 @@ func (p *ELBPlugin) appendToList(scope, listName, id string) error {
 		_ = json.Unmarshal(data, &ids)
 	}
 	ids = append(ids, id)
-	newData, _ := json.Marshal(ids)
+	newData, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("elb appendToList marshal: %w", err)
+	}
 	return p.state.Put(context.Background(), elbNamespace, key, newData)
 }
 

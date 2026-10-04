@@ -248,7 +248,10 @@ func (p *ElastiCachePlugin) modifyCacheCluster(reqCtx *RequestContext, req *AWSR
 		}
 	}
 
-	updated, _ := json.Marshal(cluster)
+	updated, err := json.Marshal(cluster)
+	if err != nil {
+		return nil, fmt.Errorf("elasticache modifyCacheCluster marshal: %w", err)
+	}
 	if err := p.state.Put(context.Background(), elasticacheNamespace, stateKey, updated); err != nil {
 		return nil, fmt.Errorf("elasticache modifyCacheCluster put: %w", err)
 	}
@@ -467,7 +470,10 @@ func (p *ElastiCachePlugin) modifyReplicationGroup(reqCtx *RequestContext, req *
 		}
 	}
 
-	updated, _ := json.Marshal(rg)
+	updated, err := json.Marshal(rg)
+	if err != nil {
+		return nil, fmt.Errorf("elasticache modifyReplicationGroup marshal: %w", err)
+	}
 	if err := p.state.Put(context.Background(), elasticacheNamespace, stateKey, updated); err != nil {
 		return nil, fmt.Errorf("elasticache modifyReplicationGroup put: %w", err)
 	}
@@ -900,7 +906,10 @@ func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, r
 	}
 	merged := mergeStringMap(existingTags, add, removeKeys)
 	m["Tags"] = merged
-	updated, _ := json.Marshal(m)
+	updated, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("elasticache updateTagsByARN marshal: %w", err)
+	}
 	return p.state.Put(context.Background(), elasticacheNamespace, key, updated)
 }
 
@@ -917,7 +926,10 @@ func (p *ElastiCachePlugin) appendToIndex(scope, indexName, id string) error {
 		_ = json.Unmarshal(data, &ids)
 	}
 	ids = append(ids, id)
-	newData, _ := json.Marshal(ids)
+	newData, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("elasticache appendToIndex marshal: %w", err)
+	}
 	return p.state.Put(context.Background(), elasticacheNamespace, key, newData)
 }
 

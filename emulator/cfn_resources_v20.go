@@ -9,6 +9,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -30,7 +31,10 @@ func (d *StackDeployer) deployStepFunctionsStateMachine(
 		"roleArn":    resolveStringProp(props, "RoleArn", "", cctx),
 		"type":       resolveStringProp(props, "StateMachineType", "STANDARD", cctx),
 	}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployStepFunctionsStateMachine marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "states",
@@ -189,7 +193,10 @@ func (d *StackDeployer) deployStepFunctionsActivity(
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 
 	body := map[string]interface{}{"name": name}
-	bodyBytes, _ := json.Marshal(body)
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployStepFunctionsActivity marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "states",

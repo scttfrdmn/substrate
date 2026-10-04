@@ -775,7 +775,10 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		return nil, fmt.Errorf("lambda addPermission state.Put: %w", putErr)
 	}
 
-	stmtData, _ := json.Marshal(stmt)
+	stmtData, err := json.Marshal(stmt)
+	if err != nil {
+		return nil, fmt.Errorf("lambda addPermission marshal: %w", err)
+	}
 	return lambdaJSONResponse(http.StatusCreated, map[string]json.RawMessage{"Statement": stmtData})
 }
 
