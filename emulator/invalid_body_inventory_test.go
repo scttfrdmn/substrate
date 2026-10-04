@@ -1364,6 +1364,9 @@ var memberComplaintServices = []memberService{
 		code: "BadRequest",
 		cases: []memberCase{
 			{name: "deleteFileSystem", target: "AWSSimbaAPIService_v20180301.DeleteFileSystem", body: "{}", wantMessage: "FileSystemId is required"},
+			// #1197: CreateFileSystem's two Required: Yes members, each refused rather than defaulted.
+			{name: "createFileSystem/FileSystemType", target: "AWSSimbaAPIService_v20180301.CreateFileSystem", body: `{"SubnetIds":["subnet-0123456789abcdef0"]}`, wantMessage: "FileSystemType is required"},
+			{name: "createFileSystem/SubnetIds", target: "AWSSimbaAPIService_v20180301.CreateFileSystem", body: `{"FileSystemType":"LUSTRE"}`, wantMessage: "SubnetIds is required"},
 		},
 	},
 	{

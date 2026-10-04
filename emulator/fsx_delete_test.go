@@ -161,7 +161,7 @@ func TestFSxDelete_ADeletedFileSystemIsNotFound(t *testing.T) {
 func TestFSx_CreationTimeKeepsItsFraction(t *testing.T) {
 	t.Parallel()
 	h := newFSxHarness(t)
-	created := h.ok("CreateFileSystem", map[string]any{"FileSystemType": "LUSTRE", "StorageCapacity": 1200})
+	created := h.ok("CreateFileSystem", map[string]any{"FileSystemType": "LUSTRE", "StorageCapacity": 1200, "SubnetIds": []string{"subnet-0123456789abcdef0"}})
 	var out struct {
 		FileSystem struct {
 			FileSystemID string `json:"FileSystemId"`
@@ -257,7 +257,7 @@ func TestFSx_AClientRequestTokenOutsideItsPatternIsRefused(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newFSxHarness(t)
-			body := map[string]any{"ClientRequestToken": tc.token, "FileSystemType": "LUSTRE"}
+			body := map[string]any{"ClientRequestToken": tc.token, "FileSystemType": "LUSTRE", "SubnetIds": []string{"subnet-0123456789abcdef0"}}
 			if tc.op == "DeleteFileSystem" {
 				body = map[string]any{"ClientRequestToken": tc.token, "FileSystemId": h.create("LUSTRE", nil)}
 			}
@@ -292,7 +292,7 @@ func TestFSx_AStoreFaultIsAnError(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newFSxHarness(t)
-			body := map[string]any{"FileSystemType": "LUSTRE", "StorageCapacity": 1200}
+			body := map[string]any{"FileSystemType": "LUSTRE", "StorageCapacity": 1200, "SubnetIds": []string{"subnet-0123456789abcdef0"}}
 			if tc.op == "DeleteFileSystem" {
 				body = map[string]any{"FileSystemId": h.create("LUSTRE", nil)}
 			}

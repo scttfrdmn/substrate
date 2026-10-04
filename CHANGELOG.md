@@ -25,6 +25,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **FSx pages `DescribeFileSystems` and requires `CreateFileSystem`'s two Required members**
+  (#1195, #1197). `MaxResults` and `NextToken` were unread, so every file system came back in one
+  page. They page now, at most the published 50 per page. The token is omitted on the last page, and
+  one substrate did not issue is `BadRequest`/400.
+  - `FileSystemType` (defaulted to `LUSTRE`) and `SubnetIds` (accepted absent) are now required, and
+    `FileSystemType` and `StorageType` must be published values.
+  - A store read error in the listing is returned rather than skipped.
+  - The `SubnetIds` pattern is not enforced, for the reason `fsxValidateCreate` records.
+- **FSx's `LustreMountName` resolves through `Fn::GetAtt`** (#1199). The plugin held it, but the
+  deployer never recorded it. `RootVolumeId` still resolves empty, because OpenZFS volumes are not
+  modeled.
+- **A Backup vault answers its state, type and lock status, and `ListBackupVaults` pages and filters**
+  (#1199). `DescribeBackupVault` and `ListBackupVaults` answer `VaultState` `AVAILABLE`, `VaultType`
+  `BACKUP_VAULT`, `Locked` `false` and the create's `CreatorRequestId`, which `CreateBackupVault` now
+  reads and validates. `maxResults`, `nextToken`, `vaultType` and `shared` are read, and a bad value
+  is `InvalidParameterValueException`/400.
+- **Backup's `DeleteBackupPlan` answers its published body** (#1206, part of #1177): `BackupPlanArn`,
+  `BackupPlanId`, `DeletionDate` and `VersionId`, where it answered `{}`. The other `{}` answers in the
+  batch (Batch `TerminateJob`, Step Functions' deletes and tag operations, Backup's vault and
+  selection deletes) are faithful: their pages publish empty bodies.
+- **Step Functions' describes answer their configurations and a revision** (#1199).
+  - `DescribeStateMachine` answers `loggingConfiguration`, `tracingConfiguration` and
+    `encryptionConfiguration`, as sent or as their published defaults, plus a `revisionId` minted at
+    every create and update, which `UpdateStateMachine` also answers.
+  - `DescribeActivity` answers `encryptionConfiguration`.
+  - `CreateStateMachine`'s idempotency now compares the configurations, and `ActivityAlreadyExists`
+    answers its published condition, a changed `encryptionConfiguration`.
+- **An SQS event-source mapping polls on the simulated clock, and a replay reproduces what it
+  consumed** (#1292). The poller was a goroutine on a one-second wall-clock ticker. A frozen or scaled
+  clock did not affect it, an ESM's effect depended on how long a test ran, and nothing it did was
+  recorded, so a replay left the queue full.
+  - Polls are now evaluated at observation. Before each top-level request reaches its plugin, live and
+    on replay at the same step, every poll due at the simulated clock runs first. The first is due one
+    simulated second after a mapping is created or enabled, then one per simulated second.
+  - A frozen clock polls never; a test moves it with `AdvanceTime`, and the cadence follows
+    `SetScale`.
+  - Each poll's receive, invoke and deletes are recorded as events, under `req-clock-` request IDs
+    derived from the triggering request. A replay re-derives them at the recorded timestamp and skips
+    the recorded copies, so the queue replays consumed with no state-hash difference.
+  - When a mapping's next poll is due is stored at `esm_poll:{uuid}`, so `ESMConfig` and every mapping
+    response are unchanged.
+
 - **CodeDeploy's ListApplications pages by nextToken** (#1195). The handler took `_ *AWSRequest`,
   so `nextToken` was never read and never emitted, and `InvalidNextTokenException`, the operation's
   only published error, had no site. A page is now 100 names in creation order (the page states no

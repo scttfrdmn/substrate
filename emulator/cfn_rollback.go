@@ -169,9 +169,9 @@ func cfnFailedResources(resources []DeployedResource) []string {
 // The two Step Functions entries changed meaning in #1072 and are kept deliberately.
 // Both create operations now model the idempotency AWS publishes, so a re-Deploy of an
 // unchanged state machine or activity answers the existing ARN and reaches no refusal
-// for this map to clear. ActivityAlreadyExists is unreachable outright — the only
-// condition its page publishes for it is a changed EncryptionConfiguration, which this
-// plugin does not model — and StateMachineAlreadyExists now fires only for a genuinely
+// for this map to clear. ActivityAlreadyExists fires only for the one condition its page
+// publishes, a changed EncryptionConfiguration (#1199), which a re-Deploy of an unchanged
+// template does not send — and StateMachineAlreadyExists now fires only for a genuinely
 // different definition or type, the case the paragraph above argues an entry should be
 // absent for. Neither is removed: the entries cost nothing while the code is unreachable,
 // and dropping the live one would surface a refusal on the update path, which is

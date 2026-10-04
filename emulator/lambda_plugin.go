@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"sort"
@@ -27,9 +26,12 @@ type LambdaPlugin struct {
 	logger   Logger
 	tc       *TimeController
 	executor *LambdaExecutor // nil when Docker is disabled
-	registry *PluginRegistry // for SQS ESM poller
-	esmMu    sync.Mutex
-	esmStop  map[string]chan struct{} // UUID → stop channel
+	registry *PluginRegistry // for SQS ESM polls
+	// esmMu guards esmActive, the enabled SQS mappings [LambdaPlugin.RunDue] polls.
+	esmMu     sync.Mutex
+	esmActive map[string]struct{}
+	// pollMu serializes RunDue, so two concurrent requests cannot both run one due poll.
+	pollMu sync.Mutex
 }
 
 // Name returns the service name "lambda".
@@ -50,7 +52,7 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	if reg, ok := cfg.Options["registry"].(*PluginRegistry); ok {
 		p.registry = reg
 	}
-	p.esmStop = make(map[string]chan struct{})
+	p.esmActive = make(map[string]struct{})
 	return nil
 }
 
@@ -132,17 +134,12 @@ func (p *LambdaPlugin) evictWarmContainer(accountID, region, name string) {
 	p.executor.Evict(lambdaFunctionARN(region, accountID, name))
 }
 
-// stopAllPollers closes every event-source-mapping stop channel and forgets it,
-// ending the poller goroutine each one owns. It is safe on a plugin that has never
-// handled a request: ranging a nil map yields nothing.
+// stopAllPollers forgets every mapping [LambdaPlugin.RunDue] polls. It is safe on a plugin
+// that has never handled a request.
 func (p *LambdaPlugin) stopAllPollers() {
 	p.esmMu.Lock()
 	defer p.esmMu.Unlock()
-
-	for _, ch := range p.esmStop {
-		close(ch)
-	}
-	p.esmStop = make(map[string]chan struct{})
+	p.esmActive = make(map[string]struct{})
 }
 
 // HandleRequest dispatches a Lambda REST API request to the appropriate handler.
@@ -1285,13 +1282,11 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("lambda createEventSourceMapping saveESMIDs: %w", err)
 	}
 
-	// Start SQS poller when ESM is for an SQS source and registry is available.
+	// An enabled SQS mapping is polled by RunDue on the simulated clock (#1292).
 	if esm.State == "Enabled" && p.registry != nil && strings.Contains(input.EventSourceArn, ":sqs:") {
-		stopCh := make(chan struct{})
-		p.esmMu.Lock()
-		p.esmStop[uuid] = stopCh
-		p.esmMu.Unlock()
-		go p.sqsPollerLoop(*esm, stopCh)
+		if err := p.activatePolling(bgCtx, uuid); err != nil {
+			return nil, err
+		}
 	}
 
 	return lambdaJSONResponse(http.StatusCreated, esm)
@@ -1513,23 +1508,17 @@ func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("lambda updateEventSourceMapping saveESM: %w", err)
 	}
 
-	// Manage SQS poller lifecycle based on state transition.
+	// Polling follows the state transition: enabling starts the cadence again from now,
+	// disabling stops it.
 	if p.registry != nil && strings.Contains(esm.EventSourceARN, ":sqs:") {
 		if prevState != "Enabled" && esm.State == "Enabled" {
-			// Start poller.
-			stopCh := make(chan struct{})
-			p.esmMu.Lock()
-			p.esmStop[uuid] = stopCh
-			p.esmMu.Unlock()
-			go p.sqsPollerLoop(*esm, stopCh)
-		} else if prevState == "Enabled" && esm.State != "Enabled" {
-			// Stop poller.
-			p.esmMu.Lock()
-			if ch, ok := p.esmStop[uuid]; ok {
-				close(ch)
-				delete(p.esmStop, uuid)
+			if err := p.activatePolling(context.Background(), uuid); err != nil {
+				return nil, err
 			}
-			p.esmMu.Unlock()
+		} else if prevState == "Enabled" && esm.State != "Enabled" {
+			if err := p.deactivatePolling(context.Background(), uuid); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -1553,13 +1542,9 @@ func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) 
 		return nil, fmt.Errorf("lambda deleteEventSourceMapping: %w", delErr)
 	}
 
-	// Stop SQS poller if running.
-	p.esmMu.Lock()
-	if ch, ok := p.esmStop[uuid]; ok {
-		close(ch)
-		delete(p.esmStop, uuid)
+	if err := p.deactivatePolling(context.Background(), uuid); err != nil {
+		return nil, err
 	}
-	p.esmMu.Unlock()
 
 	// Remove from function's ESM list.
 	ids, err := p.loadESMIDs(context.Background(), esm.FunctionARN)
@@ -1575,168 +1560,4 @@ func (p *LambdaPlugin) deleteEventSourceMapping(_ *RequestContext, uuid string) 
 	_ = p.saveESMIDs(context.Background(), esm.FunctionARN, filtered)
 
 	return lambdaJSONResponse(http.StatusOK, esm)
-}
-
-// --- SQS ESM poller --------------------------------------------------------
-
-// sqsPollerLoop polls an SQS queue and invokes the Lambda function with each
-// batch of messages. It runs until stopCh is closed.
-func (p *LambdaPlugin) sqsPollerLoop(esm ESMConfig, stopCh <-chan struct{}) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-stopCh:
-			return
-		case <-ticker.C:
-			p.pollAndInvoke(esm)
-		}
-	}
-}
-
-// pollAndInvoke fetches messages from SQS, invokes Lambda, and deletes
-// successfully processed messages.
-func (p *LambdaPlugin) pollAndInvoke(esm ESMConfig) {
-	// Derive queue URL from ARN: arn:aws:sqs:{region}:{acct}:{name}
-	arnParts := strings.Split(esm.EventSourceARN, ":")
-	if len(arnParts) < 6 {
-		return
-	}
-	region, acct, queueName := arnParts[3], arnParts[4], arnParts[5]
-	queueURL := "http://sqs." + region + ".localhost/" + acct + "/" + queueName
-
-	batchSize := esm.BatchSize
-	if batchSize <= 0 {
-		batchSize = 10
-	}
-
-	// ReceiveMessage.
-	receiveReq := &AWSRequest{
-		Service:   "sqs",
-		Operation: "ReceiveMessage",
-		Params: map[string]string{
-			"Action":              "ReceiveMessage",
-			"QueueUrl":            queueURL,
-			"MaxNumberOfMessages": fmt.Sprintf("%d", batchSize),
-			"WaitTimeSeconds":     "0",
-		},
-		Headers: map[string]string{},
-		Path:    "/",
-		Body:    nil,
-	}
-	// No mint, deliberately. Substrate has four internal dispatch sites — a context built
-	// here rather than parsed off the wire — and #856's tier 8 gave a derived mint to the
-	// two that had something to derive from: the CloudFormation deployer's and an API
-	// Gateway proxy integration's. The other two are this poller's receive and its invoke
-	// below. An ESM poll is driven by a wall-clock ticker and is recorded nowhere, so
-	// there is no recorded request id for a replay to derive from and a seed here would be
-	// exactly as random as the nil mint it replaced. What this path needs is a simulated
-	// clock and a recorded dispatch, which is #1292.
-	rxCtx := &RequestContext{
-		RequestID: generateRequestID(),
-		AccountID: acct,
-		Region:    region,
-		Timestamp: time.Now(),
-		Metadata:  make(map[string]interface{}),
-	}
-	rxResp, err := p.registry.RouteRequest(rxCtx, receiveReq)
-	if err != nil || rxResp == nil {
-		return
-	}
-
-	// Parse ReceiveMessageResponse XML.
-	type sqsMessage struct {
-		MessageID     string `xml:"MessageId"`
-		ReceiptHandle string `xml:"ReceiptHandle"`
-		Body          string `xml:"Body"`
-	}
-	type rxResult struct {
-		Messages []sqsMessage `xml:"ReceiveMessageResult>Message"`
-	}
-	var parsed rxResult
-	if xmlErr := xml.Unmarshal(rxResp.Body, &parsed); xmlErr != nil || len(parsed.Messages) == 0 {
-		return
-	}
-
-	// Build Lambda event JSON.
-	type sqsRecord struct {
-		MessageID      string            `json:"messageId"`
-		ReceiptHandle  string            `json:"receiptHandle"`
-		Body           string            `json:"body"`
-		Attributes     map[string]string `json:"attributes"`
-		EventSource    string            `json:"eventSource"`
-		EventSourceARN string            `json:"eventSourceARN"`
-		AWSRegion      string            `json:"awsRegion"`
-	}
-	records := make([]sqsRecord, len(parsed.Messages))
-	for i, m := range parsed.Messages {
-		records[i] = sqsRecord{
-			MessageID:      m.MessageID,
-			ReceiptHandle:  m.ReceiptHandle,
-			Body:           m.Body,
-			Attributes:     map[string]string{},
-			EventSource:    "aws:sqs",
-			EventSourceARN: esm.EventSourceARN,
-			AWSRegion:      region,
-		}
-	}
-	eventJSON, marshalErr := json.Marshal(map[string]interface{}{"Records": records})
-	if marshalErr != nil {
-		return
-	}
-
-	// Derive the function's name, account and Region from its own ARN:
-	// arn:aws:lambda:{region}:{account}:function:{name}. The invoke context has to carry the
-	// *function's* account and Region rather than the event source's, because since #943 the
-	// state key the invoke resolves is built from them, and a mapping can name a queue in one
-	// account and a function in another.
-	fnParts := strings.Split(esm.FunctionARN, ":")
-	if len(fnParts) < 7 {
-		return
-	}
-	fnRegion, fnAcct, fnName := fnParts[3], fnParts[4], fnParts[6]
-
-	// Invoke Lambda.
-	invokeReq := &AWSRequest{
-		Service:   "lambda",
-		Operation: "POST",
-		Path:      "/2015-03-31/functions/" + fnName + "/invocations",
-		Headers:   map[string]string{"Content-Type": "application/json"},
-		Body:      eventJSON,
-	}
-	// Mintless for the same reason as the receive above (#1292): the identifier this
-	// invocation's plugin would publish has no recorded request id behind it.
-	invokeCtx := &RequestContext{
-		RequestID: generateRequestID(),
-		AccountID: fnAcct,
-		Region:    fnRegion,
-		Timestamp: time.Now(),
-		Metadata:  make(map[string]interface{}),
-	}
-	invokeResp, invokeErr := p.registry.RouteRequest(invokeCtx, invokeReq)
-	if invokeErr != nil {
-		p.logger.Warn("lambda ESM: invoke failed", "function", fnName, "err", invokeErr)
-		return
-	}
-	if invokeResp != nil && invokeResp.StatusCode >= 300 {
-		p.logger.Warn("lambda ESM: invoke non-2xx", "function", fnName, "status", invokeResp.StatusCode)
-		return
-	}
-
-	// Delete successfully processed messages.
-	for _, m := range parsed.Messages {
-		deleteReq := &AWSRequest{
-			Service:   "sqs",
-			Operation: "DeleteMessage",
-			Params: map[string]string{
-				"Action":        "DeleteMessage",
-				"QueueUrl":      queueURL,
-				"ReceiptHandle": m.ReceiptHandle,
-			},
-			Headers: map[string]string{},
-			Path:    "/",
-			Body:    nil,
-		}
-		_, _ = p.registry.RouteRequest(rxCtx, deleteReq)
-	}
 }

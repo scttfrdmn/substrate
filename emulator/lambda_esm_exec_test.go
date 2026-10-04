@@ -17,9 +17,11 @@ import (
 func TestPollAndInvoke(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
+	// Frozen, and moved by hand below: the mapping polls on the simulated clock (#1292).
+	ts.FreezeTimeAt(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 
 	// Create SQS queue.
-	queueName := fmt.Sprintf("esm-test-%d", time.Now().UnixNano())
+	queueName := "esm-test-queue" // each test has its own server, so a constant name is unique
 	esmCreateSQSQueue(t, ts, queueName)
 	acct := "123456789012" // fallbackAccountID used without auth
 	queueURL := fmt.Sprintf("http://sqs.us-east-1.amazonaws.com/%s/%s", acct, queueName)
@@ -37,8 +39,9 @@ func TestPollAndInvoke(t *testing.T) {
 	sqsARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, acct, queueName)
 	esmID := esmCreateESM(t, ts, fnName, sqsARN)
 
-	// The poller runs in the background; wait a bit for it to fire.
-	time.Sleep(3 * time.Second)
+	// The first poll is due one simulated second after the mapping is created, and runs
+	// before the next request reaches its plugin.
+	ts.AdvanceTime(time.Second)
 
 	// Delete the ESM to stop the poller.
 	esmDeleteESM(t, ts, esmID)
@@ -56,7 +59,7 @@ func TestESMPollerLifecycle(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 
-	queueName := fmt.Sprintf("esm-lifecycle-%d", time.Now().UnixNano())
+	queueName := "esm-lifecycle-queue"
 	acct := "123456789012"
 	region := "us-east-1"
 	sqsARN := fmt.Sprintf("arn:aws:sqs:%s:%s:%s", region, acct, queueName)

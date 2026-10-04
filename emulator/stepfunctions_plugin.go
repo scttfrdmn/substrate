@@ -356,9 +356,13 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 		RoleArn    string              `json:"roleArn"`
 		Type       string              `json:"type"`
 		Tags       []map[string]string `json:"tags"`
+		sfnConfigs
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, sfnInvalidBody()
+	}
+	if err := input.normalize(); err != nil {
+		return nil, err
 	}
 	// Three published constraints that nothing checked before #1072: name is Required: Yes with a
 	// character list and a 1–80 bound, roleArn is Required: Yes, and type has two Valid Values. Each
@@ -398,7 +402,7 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 		// and creation date, and leaves roleArn and tags as they were — see
 		// [sfnStateMachineIsIdempotentCreate]. Only a genuine collision is a refusal, now at the
 		// published 400 rather than 409.
-		if sfnStateMachineIsIdempotentCreate(existing, input.Definition, smType) {
+		if sfnStateMachineIsIdempotentCreate(existing, input.Definition, smType, input.sfnConfigs) {
 			return statesJSONResponse(http.StatusOK, map[string]interface{}{
 				"stateMachineArn": existing.StateMachineArn,
 				"creationDate":    sfnEpoch(existing.CreatedDate),
@@ -427,6 +431,11 @@ func (p *StepFunctionsPlugin) createStateMachine(ctx *RequestContext, req *AWSRe
 		CreatedDate:     now,
 		AccountID:       ctx.AccountID,
 		Region:          ctx.Region,
+
+		LoggingConfiguration:    input.Logging,
+		TracingConfiguration:    input.Tracing,
+		EncryptionConfiguration: input.Encryption,
+		RevisionID:              ctx.IDs.UUID(),
 	}
 
 	if err := p.saveStateMachine(goCtx, sm); err != nil {
@@ -465,14 +474,18 @@ func (p *StepFunctionsPlugin) describeStateMachine(_ *RequestContext, req *AWSRe
 	return statesJSONResponse(http.StatusOK, smToMap(sm))
 }
 
-func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *StepFunctionsPlugin) updateStateMachine(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		StateMachineArn string `json:"stateMachineArn"`
 		Definition      string `json:"definition"`
 		RoleArn         string `json:"roleArn"`
+		sfnConfigs
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, sfnInvalidBody()
+	}
+	if err := input.normalize(); err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -495,6 +508,21 @@ func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequ
 	if input.RoleArn != "" {
 		sm.RoleArn = input.RoleArn
 	}
+	// API_UpdateStateMachine takes the three configuration objects, each Required: No, so one the
+	// update omits is left as it was.
+	if input.Logging != nil {
+		sm.LoggingConfiguration = input.Logging
+	}
+	if input.Tracing != nil {
+		sm.TracingConfiguration = input.Tracing
+	}
+	if input.Encryption != nil {
+		sm.EncryptionConfiguration = input.Encryption
+	}
+	// A new revisionId per update, which is what lets a caller compare two configurations "without
+	// performing a diff" (API_DescribeStateMachine). API_UpdateStateMachine publishes revisionId in its
+	// own response, so it is answered there too.
+	sm.RevisionID = ctx.IDs.UUID()
 
 	if err := p.saveStateMachine(goCtx, sm); err != nil {
 		return nil, fmt.Errorf("stepfunctions updateStateMachine saveStateMachine: %w", err)
@@ -502,6 +530,7 @@ func (p *StepFunctionsPlugin) updateStateMachine(_ *RequestContext, req *AWSRequ
 
 	out := map[string]interface{}{
 		"updateDate": sfnEpoch(p.tc.Now()),
+		"revisionId": sm.RevisionID,
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -994,9 +1023,16 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 	var input struct {
 		Name string              `json:"name"`
 		Tags []map[string]string `json:"tags"`
+		// Only encryptionConfiguration of the three: API_CreateActivity takes no logging or tracing
+		// configuration, so normalize's checks on those two pass trivially.
+		sfnConfigs
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, sfnInvalidBody()
+	}
+	input.Logging, input.Tracing = nil, nil
+	if err := input.normalize(); err != nil {
+		return nil, err
 	}
 	// API_CreateActivity publishes the same name-constraint list as API_CreateStateMachine, word for
 	// word, and InvalidName is the one code both pages publish for breaking it (#1072).
@@ -1017,13 +1053,14 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 		// create against a name that exists is a success answering the stored record, and returning it
 		// unchanged is what leaves the tags alone.
 		//
-		// **That makes ActivityAlreadyExists unreachable in substrate, and the reason is worth stating
-		// rather than leaving as a silent gap.** The page glosses it "Activity already exists.
+		// The one exception is ActivityAlreadyExists, which the page glosses "Activity already exists.
 		// EncryptionConfiguration may not be updated." — so the one condition AWS publishes for it is a
-		// differing encryptionConfiguration, which is a request member this handler does not decode and
-		// ActivityState does not hold. Substrate answered it at 409 for a plain duplicate name, which is
-		// neither the published status (400) nor the published condition. Modeling the idempotency is
-		// what removes both divergences at once; the code returns if encryption is ever modeled.
+		// differing encryptionConfiguration. Until #1199 this handler did not decode that member and the
+		// code was unreachable; it is decoded and recorded now, so a repeat that changes it is the
+		// published refusal, at the published 400.
+		if !sfnSameJSON(existing.EncryptionConfiguration, input.Encryption) {
+			return nil, sfnActivityAlreadyExists(input.Name)
+		}
 		return statesJSONResponse(http.StatusOK, map[string]interface{}{
 			"activityArn":  existing.ActivityArn,
 			"creationDate": sfnEpoch(existing.CreatedDate),
@@ -1046,6 +1083,8 @@ func (p *StepFunctionsPlugin) createActivity(ctx *RequestContext, req *AWSReques
 		CreatedDate: now,
 		AccountID:   ctx.AccountID,
 		Region:      ctx.Region,
+
+		EncryptionConfiguration: input.Encryption,
 	}
 
 	if err := p.saveActivity(goCtx, act); err != nil {
@@ -1081,10 +1120,13 @@ func (p *StepFunctionsPlugin) describeActivity(_ *RequestContext, req *AWSReques
 		return nil, err
 	}
 
+	// All four of API_DescribeActivity's members (#1199). encryptionConfiguration is the create's own,
+	// or the published AWS-owned-key default when the create named none.
 	out := map[string]interface{}{
-		"activityArn":  act.ActivityArn,
-		"name":         act.Name,
-		"creationDate": sfnEpoch(act.CreatedDate),
+		"activityArn":             act.ActivityArn,
+		"name":                    act.Name,
+		"creationDate":            sfnEpoch(act.CreatedDate),
+		"encryptionConfiguration": sfnOrDefault(act.EncryptionConfiguration, sfnDefaultEncryption),
 	}
 	return statesJSONResponse(http.StatusOK, out)
 }
@@ -1214,16 +1256,35 @@ func (p *StepFunctionsPlugin) deleteActivity(_ *RequestContext, req *AWSRequest)
 // --- Response helpers ---
 
 // smToMap converts a StateMachineState to the AWS API DescribeStateMachine shape.
+//
+// It answers eleven of API_DescribeStateMachine's fourteen response members (#1199). The three
+// configuration objects are answered verbatim as sent, or as their published defaults when the request
+// named none, so a consumer reading loggingConfiguration.level reads OFF rather than an absent member.
+// revisionId is answered when the record holds one, which every state machine created or updated since
+// #1199 does.
+//
+// The three it does not answer have no value for any state machine substrate holds: description is
+// "the description of the state machine version" and label identifies a Distributed Map state named by
+// a qualified ARN, and neither versions nor qualified ARNs are modeled; variableReferences lists the
+// variables each state references, which a definition with no Assign or JSONata variables has none of,
+// and which substrate does not derive.
 func smToMap(sm *StateMachineState) map[string]interface{} {
-	return map[string]interface{}{
-		"stateMachineArn": sm.StateMachineArn,
-		"name":            sm.Name,
-		"status":          sm.Status,
-		"definition":      sm.Definition,
-		"roleArn":         sm.RoleArn,
-		"type":            sm.Type,
-		"creationDate":    sfnEpoch(sm.CreatedDate),
+	out := map[string]interface{}{
+		"stateMachineArn":         sm.StateMachineArn,
+		"name":                    sm.Name,
+		"status":                  sm.Status,
+		"definition":              sm.Definition,
+		"roleArn":                 sm.RoleArn,
+		"type":                    sm.Type,
+		"creationDate":            sfnEpoch(sm.CreatedDate),
+		"loggingConfiguration":    sfnOrDefault(sm.LoggingConfiguration, sfnDefaultLogging),
+		"tracingConfiguration":    sfnOrDefault(sm.TracingConfiguration, sfnDefaultTracing),
+		"encryptionConfiguration": sfnOrDefault(sm.EncryptionConfiguration, sfnDefaultEncryption),
 	}
+	if sm.RevisionID != "" {
+		out["revisionId"] = sm.RevisionID
+	}
+	return out
 }
 
 // execToMap converts an ExecutionState to the AWS API DescribeExecution shape.

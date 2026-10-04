@@ -44,9 +44,11 @@ import (
 //
 // # Why the three deletes are driven anyway
 //
-// DeleteBackupVault, DeleteBackupPlan and DeleteBackupSelection each answer `{}` and read nothing off
-// the record they address, so there is nothing a projection could leak and no record member to anchor
-// on. They are driven because "every response that answers the record" is what the projected file
+// DeleteBackupVault and DeleteBackupSelection each answer `{}`, as their pages publish, and read
+// nothing off the record they address, so there is nothing a projection could leak and no record
+// member to anchor on. DeleteBackupPlan answers its four published members since #1206's survey
+// (#1177), built member by member from the plan it deletes, and anchors on BackupPlanId. All three
+// are driven because "every response that answers the record" is what the projected file
 // asks for, and a reader should not have to work out whether the list of twelve is complete or a
 // sample; their anchor is the empty document itself. A control run confirms the walk would catch a
 // leak at each of the three if one were added, so the subtests are regression guards rather than
@@ -284,7 +286,7 @@ func TestBackupWire_PlanResponsesCarryNoBookkeepingMember(t *testing.T) {
 			body:   map[string]any{"BackupPlan": map[string]any{"BackupPlanName": name + "-renamed"}},
 			anchor: `"BackupPlanArn":"` + arn + `"`},
 		// Last, and answers an empty object: it removes the record every case above reads.
-		{site: "DeleteBackupPlan", method: "DELETE", path: "/backup/plans/" + plan.BackupPlanID, anchor: "{}"},
+		{site: "DeleteBackupPlan", method: "DELETE", path: "/backup/plans/" + plan.BackupPlanID, anchor: `"BackupPlanId":"` + plan.BackupPlanID + `"`},
 	} {
 		backupWireRunCase(t, p, ctx, tc)
 	}

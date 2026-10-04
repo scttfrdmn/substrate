@@ -3,8 +3,11 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"strconv"
 	"time"
 )
 
@@ -46,7 +49,7 @@ func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*
 	case "DeleteBackupVault":
 		return p.deleteBackupVault(reqCtx, vaultName)
 	case "ListBackupVaults":
-		return p.listBackupVaults(reqCtx)
+		return p.listBackupVaults(reqCtx, req)
 	case "CreateBackupPlan":
 		return p.createBackupPlan(reqCtx, req)
 	case "GetBackupPlan":
@@ -75,10 +78,23 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 
 	var input struct {
 		EncryptionKeyArn string `json:"EncryptionKeyArn"`
+		CreatorRequestID string `json:"CreatorRequestId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, backupInvalidBody()
+		}
+	}
+	// API_CreateBackupVault: CreatorRequestId is optional, and "If used, this parameter must contain 1
+	// to 50 alphanumeric or '-_.' characters." The refusal is the page's InvalidParameterValueException,
+	// "something is wrong with a parameter's value". The value is recorded and reported; the retry
+	// semantics the gloss describes are not modeled, so a second create of the same name answers
+	// AlreadyExistsException whatever its CreatorRequestId.
+	if input.CreatorRequestID != "" && !backupCreatorRequestIDPattern.MatchString(input.CreatorRequestID) {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValueException",
+			Message:    "CreatorRequestId must contain 1 to 50 alphanumeric or '-_.' characters.",
+			HTTPStatus: http.StatusBadRequest,
 		}
 	}
 
@@ -99,6 +115,7 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 		EncryptionKeyArn:       input.EncryptionKeyArn,
 		CreationDate:           now,
 		NumberOfRecoveryPoints: 0,
+		CreatorRequestID:       input.CreatorRequestID,
 		AccountID:              reqCtx.AccountID,
 		Region:                 reqCtx.Region,
 	}
@@ -142,24 +159,104 @@ func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-func (p *BackupPlugin) listBackupVaults(reqCtx *RequestContext) (*AWSResponse, error) {
+// listBackupVaults handles ListBackupVaults.
+//
+// API_ListBackupVaults publishes four query parameters, and until #1199's audit none was read: the
+// list was one page with no NextToken, and both filters matched everything.
+//
+//   - maxResults (Valid Range 1–1000) bounds the page; outside the range is
+//     InvalidParameterValueException/400, which the page glosses "the value is out of range". With
+//     none the page size is the published maximum, 1000.
+//   - nextToken is [encodeOffsetPaginationToken]'s offset over the vault index, which is kept sorted
+//     by name, so a walk is stable. It is omitted, not emitted empty, on the last page, and one
+//     substrate did not issue is InvalidParameterValueException rather than read as page one (#915).
+//   - vaultType (ByVaultType) must be one of its published Valid Values. Every vault substrate
+//     creates is BACKUP_VAULT — CreateLogicallyAirGappedBackupVault and
+//     CreateRestoreAccessBackupVault are unrouted — so BACKUP_VAULT matches every vault and the other
+//     two match none.
+//   - shared (ByShared) is a boolean the page glosses as sorting "the list of vaults by shared
+//     vaults"; the CLI and SDKs use it to list the vaults shared with the caller. Substrate shares no
+//     vault across accounts, so true answers an empty list and false the full one. A value that is not
+//     a boolean is InvalidParameterValueException.
+//
+// A vault whose record cannot be read is an error rather than skipped, since a skipped vault would
+// shorten the list and shift every later offset.
+func (p *BackupPlugin) listBackupVaults(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	invalid := func(msg string) error {
+		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
+	}
+	pageSize := backupListVaultsMax
+	if raw, ok := req.Params["maxResults"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > backupListVaultsMax {
+			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListVaultsMax))
+		}
+		pageSize = n
+	}
+	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
+	if !ok {
+		return nil, invalid("The nextToken is not valid.")
+	}
+	matchesType := true
+	if vt, ok := req.Params["vaultType"]; ok {
+		if !backupVaultTypes[vt] {
+			return nil, invalid("vaultType must be one of BACKUP_VAULT, LOGICALLY_AIR_GAPPED_BACKUP_VAULT or RESTORE_ACCESS_BACKUP_VAULT.")
+		}
+		matchesType = vt == backupVaultTypeStandard
+	}
+	if shared, ok := req.Params["shared"]; ok {
+		b, err := strconv.ParseBool(shared)
+		if err != nil {
+			return nil, invalid("shared must be true or false.")
+		}
+		if b {
+			matchesType = false
+		}
+	}
+
 	goCtx := context.Background()
 	names, err := loadStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
 		return nil, fmt.Errorf("backup listBackupVaults load index: %w", err)
 	}
 	vaults := make([]BackupVault, 0, len(names))
-	for _, name := range names {
-		v, err := p.loadVault(reqCtx.AccountID, reqCtx.Region, name)
-		if err != nil {
-			continue
+	if matchesType {
+		for _, name := range names {
+			v, err := p.loadVault(reqCtx.AccountID, reqCtx.Region, name)
+			var awsErr *AWSError
+			if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+				continue // an index entry outliving its record, which is not a fault
+			}
+			if err != nil {
+				return nil, err
+			}
+			vaults = append(vaults, *v)
 		}
-		vaults = append(vaults, *v)
 	}
-	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupVaultList": backupVaultsToWire(vaults),
-	})
+	page, next := pageByOffsetToken(vaults, offset, pageSize)
+	out := map[string]interface{}{"BackupVaultList": backupVaultsToWire(page)}
+	if next != "" {
+		out["NextToken"] = next
+	}
+	return backupJSONResponse(http.StatusOK, out)
 }
+
+// backupListVaultsMax is ListBackupVaults' published maxResults maximum, and its page size when the
+// caller names none.
+const backupListVaultsMax = 1000
+
+// backupVaultTypeStandard is the one VaultType substrate creates: CreateBackupVault makes a
+// BACKUP_VAULT, and the operations that make the other two types are unrouted.
+const backupVaultTypeStandard = "BACKUP_VAULT"
+
+// backupVaultTypes is the Valid Values list API_ListBackupVaults publishes for ByVaultType.
+var backupVaultTypes = map[string]bool{
+	"BACKUP_VAULT": true, "LOGICALLY_AIR_GAPPED_BACKUP_VAULT": true, "RESTORE_ACCESS_BACKUP_VAULT": true,
+}
+
+// backupCreatorRequestIDPattern is API_CreateBackupVault's "1 to 50 alphanumeric or '-_.'
+// characters".
+var backupCreatorRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,50}$`)
 
 func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
@@ -276,8 +373,15 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 	})
 }
 
+// deleteBackupPlan handles DeleteBackupPlan.
+//
+// API_DeleteBackupPlan publishes a body — BackupPlanArn, BackupPlanId, DeletionDate and VersionId —
+// and the handler answered `{}`, the shape of the Backup deletes whose pages publish an empty one
+// (#1206's survey; #1177). It now answers all four, from the record it deletes. DeletionDate is the
+// simulated clock's now, as EpochSeconds, the Unix form every Backup date takes (#1324).
 func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (*AWSResponse, error) {
-	if _, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID); err != nil {
+	plan, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID)
+	if err != nil {
 		return nil, err
 	}
 	goCtx := context.Background()
@@ -286,7 +390,12 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 		return nil, fmt.Errorf("backup deleteBackupPlan delete: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region), planID)
-	return backupJSONResponse(http.StatusOK, map[string]interface{}{})
+	return backupJSONResponse(http.StatusOK, map[string]interface{}{
+		"BackupPlanArn": plan.BackupPlanArn,
+		"BackupPlanId":  plan.BackupPlanID,
+		"DeletionDate":  EpochSeconds(p.tc.Now()),
+		"VersionId":     plan.VersionID,
+	})
 }
 
 func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, error) {
