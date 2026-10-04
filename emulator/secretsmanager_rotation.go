@@ -34,12 +34,15 @@ import (
 //     needs OwningService, which substrate models nothing of, so it is not refused — recorded here
 //     rather than left as a silent gap.
 //
+// ClientRequestToken's published length (32 to 64) is enforced, by [smValidClientRequestToken], since
+// #1285 made the token a version ID at PutSecretValue and CreateSecret too and enforced it at all three,
+// so no sibling accepts a token this operation refuses.
+//
 // Deliberately not enforced, and recorded rather than skipped: the published length constraints on
-// ClientRequestToken (32 to 64), ExternalSecretRotationRoleArn (20 to 2048) and RotationLambdaARN (0 to
-// 2048), and the patterns on Duration ([0-9]+h) and ScheduleExpression. Substrate does not validate
-// parameter lengths or patterns as a rule, and adding it at this one operation would answer
-// InvalidParameterException for a token a consumer's test chose while every sibling operation accepted
-// it. #952 asked for none of it; the class is worth its own issue rather than one operation's exception.
+// ExternalSecretRotationRoleArn (20 to 2048) and RotationLambdaARN (0 to 2048), and the patterns on
+// Duration ([0-9]+h) and ScheduleExpression. Substrate does not validate parameter lengths or patterns
+// as a rule. #952 asked for none of it; the class is worth its own issue rather than one operation's
+// exception.
 //
 // ExternalSecretRotationRoleArn and ExternalSecretRotationMetadata are decoded by nothing here. They
 // belong to the managed-external-secret integration substrate models no part of — there is no Type
@@ -145,6 +148,9 @@ func (p *SecretsManagerPlugin) rotateSecret(ctx *RequestContext, req *AWSRequest
 				"must generate one, and it becomes the VersionId of the new version",
 			HTTPStatus: http.StatusBadRequest,
 		}
+	}
+	if tokenErr := smValidClientRequestToken(input.ClientRequestToken); tokenErr != nil {
+		return nil, tokenErr
 	}
 
 	rules, rulesErr := smValidateRotationRules(input.RotationRules)

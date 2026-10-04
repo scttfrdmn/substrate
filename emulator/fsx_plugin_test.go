@@ -158,15 +158,16 @@ func TestFSx_CreateDescribeDelete(t *testing.T) {
 	resp = fsxRequest(t, ts, "DeleteFileSystem", string(deleteBody))
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readFSxBody(t, resp)
+	// API_DeleteFileSystem's response is flat, and a successful delete reports DELETING (#1210).
 	var delResp struct {
-		FileSystem struct {
-			Lifecycle string `json:"Lifecycle"`
-		} `json:"FileSystem"`
+		FileSystemID string `json:"FileSystemId"`
+		Lifecycle    string `json:"Lifecycle"`
 	}
 	require.NoError(t, json.Unmarshal(body, &delResp))
-	assert.Equal(t, "DELETED", delResp.FileSystem.Lifecycle)
+	assert.Equal(t, fsID, delResp.FileSystemID)
+	assert.Equal(t, "DELETING", delResp.Lifecycle)
 
-	// Describe all after delete — should return empty list (DELETED filtered out).
+	// Describe all after delete: the file system is gone.
 	resp = fsxRequest(t, ts, "DescribeFileSystems", "{}")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body = readFSxBody(t, resp)

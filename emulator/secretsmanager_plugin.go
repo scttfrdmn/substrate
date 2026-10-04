@@ -142,12 +142,20 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		SecretString string  `json:"SecretString"`
 		SecretBinary string  `json:"SecretBinary"`
 		Tags         []SMTag `json:"Tags"`
+		Token        string  `json:"ClientRequestToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	if input.Name == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+	}
+	if tokenErr := smValidClientRequestToken(input.Token); tokenErr != nil {
+		return nil, tokenErr
+	}
+	value := input.SecretString
+	if value == "" {
+		value = input.SecretBinary
 	}
 
 	goCtx := context.Background()
@@ -156,6 +164,23 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		return nil, err
 	}
 	if existing != nil {
+		// A retried create: API_CreateSecret's ClientRequestToken contract ignores a request whose
+		// token names an existing version holding the same value, and refuses one whose version holds
+		// a different value (#1285). Any other create of an existing name is the name collision.
+		if input.Token != "" && existing.DeletionDate.IsZero() {
+			found, same, verErr := p.smExistingVersion(goCtx, ctx.AccountID, ctx.Region, input.Name, input.Token, value)
+			if verErr != nil {
+				return nil, verErr
+			}
+			if found && same {
+				return smJSONResponse(http.StatusOK, map[string]interface{}{
+					"ARN": existing.ARN, "Name": existing.Name, "VersionId": input.Token,
+				})
+			}
+			if found {
+				return nil, smVersionAlreadyExists(input.Token)
+			}
+		}
 		return nil, &AWSError{
 			Code:       "ResourceExistsException",
 			Message:    fmt.Sprintf("A resource with the ID %q already exists", input.Name),
@@ -169,7 +194,7 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 
 	now := p.tc.Now()
 	arn := generateSecretARN(ctx.Region, ctx.AccountID, input.Name)
-	versionID := generateVersionID(ctx.IDs)
+	versionID := smVersionID(input.Token, ctx.IDs)
 
 	secret := &SecretState{
 		ARN:              arn,
@@ -189,10 +214,6 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 	}
 
 	// Store secret value.
-	value := input.SecretString
-	if value == "" {
-		value = input.SecretBinary
-	}
 	if value != "" {
 		if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(ctx.AccountID, ctx.Region, input.Name, versionID), []byte(value)); err != nil {
 			return nil, fmt.Errorf("sm createSecret store value: %w", err)
@@ -278,6 +299,9 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
+	if tokenErr := smValidClientRequestToken(input.VersionID); tokenErr != nil {
+		return nil, tokenErr
+	}
 
 	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
 	if idErr != nil {
@@ -300,10 +324,27 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
 
-	versionID := generateVersionID(ctx.IDs)
 	value := input.SecretString
 	if value == "" {
 		value = input.SecretBinary
+	}
+	// "This value becomes the VersionId of the new version" (#1285). A token naming an existing version
+	// is a retry: the same value "succeeds but does nothing", reporting that version and moving no
+	// pointer, and a different value is refused because an existing version cannot be modified.
+	versionID := smVersionID(input.VersionID, ctx.IDs)
+	if input.VersionID != "" {
+		found, same, verErr := p.smExistingVersion(goCtx, target.AccountID, target.Region, target.Name, versionID, value)
+		if verErr != nil {
+			return nil, verErr
+		}
+		if found && same {
+			return smJSONResponse(http.StatusOK, map[string]interface{}{
+				"ARN": secret.ARN, "Name": secret.Name, "VersionId": versionID,
+			})
+		}
+		if found {
+			return nil, smVersionAlreadyExists(versionID)
+		}
 	}
 	if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID), []byte(value)); err != nil {
 		return nil, fmt.Errorf("sm putSecretValue store value: %w", err)
