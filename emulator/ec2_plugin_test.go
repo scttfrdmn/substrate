@@ -2261,13 +2261,27 @@ func TestEC2_NatGateway_CreateDescribeDelete(t *testing.T) {
 	if delResp.StatusCode != http.StatusOK {
 		t.Fatalf("DeleteNatGateway: expected 200, got %d", delResp.StatusCode)
 	}
-	var delResult struct {
-		NatGatewayID string `xml:"natGatewayId"`
-		State        string `xml:"state"`
+	delBody, err := io.ReadAll(delResp.Body)
+	if err != nil {
+		t.Fatalf("read DeleteNatGateway body: %v", err)
 	}
-	_ = xml.NewDecoder(delResp.Body).Decode(&delResult)
-	if delResult.State != "deleted" {
-		t.Errorf("state after delete %q, expected deleted", delResult.State)
+	// API_DeleteNatGateway publishes natGatewayId alone; the state is read through a describe.
+	if strings.Contains(string(delBody), "<state>") {
+		t.Errorf("DeleteNatGateway answered a state element its page does not publish: %s", delBody)
+	}
+	if !strings.Contains(string(delBody), "<natGatewayId>"+natID+"</natGatewayId>") {
+		t.Errorf("DeleteNatGateway must answer natGatewayId %s: %s", natID, delBody)
+	}
+	afterResp := ec2Request(t, ts, map[string]string{"Action": "DescribeNatGateways", "NatGatewayId.1": natID})
+	defer afterResp.Body.Close() //nolint:errcheck
+	var after struct {
+		NatGateways []struct {
+			State string `xml:"state"`
+		} `xml:"natGatewaySet>item"`
+	}
+	_ = xml.NewDecoder(afterResp.Body).Decode(&after)
+	if len(after.NatGateways) != 1 || after.NatGateways[0].State != "deleted" {
+		t.Errorf("DescribeNatGateways after delete: %+v, expected one gateway in state deleted", after.NatGateways)
 	}
 }
 

@@ -24,6 +24,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A NAT gateway's state progresses through a seeded count of observations** (#1188).
+  `CreateNatGateway` settled `available` at once, so a consumer's wait loop never ran its body.
+  `POST`/`DELETE /v1/ec2/nat-gateway-state` seeds the countdown on the shared helper. A gateway
+  created under a seed is born `pending`, as both published samples show, and `DescribeNatGateways`
+  reports it settling. The default count is zero, so an unseeded gateway reads as before.
+  - A seeded `failed` carries a published `failureCode`, and a delete reports `deleting` before
+    `deleted`.
+  - A named `AllocationId` that resolves to nothing is `InvalidAllocationID.NotFound`, where it was
+    dropped, building a public gateway with no public IP. `PrivateIpAddress` is honored inside the
+    subnet's CIDR, and `ClientToken` makes the create idempotent.
+  - `DeleteNatGateway` answers `natGatewayId` alone, as published.
+- **A replayed `CreateKeyPair` answers the key material and fingerprint it recorded, of the type it
+  was asked for** (#1296). The key was drawn from `crypto/rand`, and was always EC P-256 beside
+  `keyType` `rsa`. It is now built from bytes the request's mint derives, since the toolchain's key
+  generators ignore a supplied reader. That gives a 2048-bit PKCS#1 RSA key fingerprinted as the SHA-1
+  of its DER private key, or an OpenSSH ed25519 key fingerprinted as the base64 SHA-256 of its public
+  key, as the page publishes each. An unpublished `KeyType` is `InvalidParameterValue`.
+- **Athena reports a cancelled query as `CANCELLED`** (#1154). `StopQueryExecution` wrote `CANCELED`,
+  one L, which `QueryExecutionStatus.State` does not publish.
+- **Athena queries, CodeBuild builds and CodePipeline executions progress under a seed** (part of
+  #1155). Each was terminal in the request that started it. `POST`/`DELETE /v1/athena/query-status`,
+  `/v1/codebuild/build-status` and `/v1/codepipeline/execution-status` make the published transient
+  states observable for a seeded number of reads, then a seeded final state. Unseeded, every resource
+  reads as before.
+  - Athena: `GetQueryExecution` reports `QUEUED`/`RUNNING` without `CompletionDateTime`, then the final
+    state with the seed's `StateChangeReason` and `AthenaError`. `GetQueryResults` refuses a query that
+    has not `SUCCEEDED` with `InvalidRequestException`/400.
+  - CodeBuild: `BatchGetBuilds` reports `IN_PROGRESS` in the seeded phase without `endTime`.
+  - CodePipeline: `GetPipelineExecution` reports `InProgress`/`Stopping`, then the final status with the
+    seed's `statusSummary`.
+- **SageMaker training jobs progress, and List and Describe agree** (#1162, part of #1155).
+  `POST /v1/sagemaker/training-job-status` takes `pendingObservations` and `transientStatus` beside
+  `status`/`failureReason`, validated against the published enum. Describe and each `ListTrainingJobs`
+  spend one observation each, and `StopTrainingJob` restarts the countdown. `DeleteApp` refuses an
+  absent app with `ResourceNotFound`/400.
+- **A Redshift Data statement's seeded status is read when it is described** (#1163, part of #1155).
+  The seed is keyed by `statementId` or `"*"`, clearable with DELETE, and accepts all six statuses
+  with a countdown. `GetStatementResult` refuses a statement that is not `FINISHED`.
+  `DescribeStatement` reports `HasResultSet`, `UpdatedAt` moves when a seeded statement settles, and
+  responses are `application/x-amz-json-1.1`.
+- **QuickSight ingestions and data-source creations progress, and an unknown ingestion is not found**
+  (#1168, part of #1155). `POST /v1/quicksight/ingestion-status` and `/v1/quicksight/data-source-status`
+  are counted, enum-validated progressions, with `ErrorInfo` and seedable `RowInfo`. `DescribeIngestion`
+  refuses an ID that is not the data set's with `ResourceNotFoundException`/404, as the page publishes.
+  An unseeded ingestion reports no `RowInfo`, where it fabricated 1000 rows.
+
 - **A Batch job progresses through the seven published statuses** (#1248). `SubmitJob` stored
   `SUCCEEDED`, so six of `jobStatus`'s seven values were unreachable, a waiter exited on its first
   poll, and `ListJobs`' `RUNNING` default (#1236) was always empty. A submitted job's record now holds

@@ -2250,12 +2250,10 @@ one from `crypto/rand`: the shared helper they all used is deleted, and the only
 left in the tree is the mint's own fallback for a request that has no ID to derive from — which is
 what a hand-built request context has, and is how every plugin unit test constructs one.
 
-Three kinds of value are not request-derived, each for its own reason:
+Two kinds of value are not request-derived, each for its own reason:
 
 - The request ID itself, which is the seed, and substrate's own bookkeeping IDs — an event ID, a
   snapshot ID, a replay ID — which no AWS call observes.
-- EC2 key-pair **material**, which needs a deterministic reader into the key generator rather than
-  a derived string. A replayed `CreateKeyPair` still diverges on the key and its fingerprint.
 - Anything already derived from its inputs rather than drawn at all: a public IP from its instance
   ID, a NAT gateway's private IP from its gateway ID, a secret's ARN from its name, an
   [unresolvable instance profile's `AIPA…` ID](#an-instances-iaminstanceprofile-is-resolved-from-iam-not-minted-per-read)
@@ -2263,6 +2261,13 @@ Three kinds of value are not request-derived, each for its own reason:
   [stack and change-set ARNs](#stack-and-change-set-arns-are-deterministic), which predate this
   rule and are what generalising it was modelled on. A value of this kind is stable across two
   *different* requests, which a request-derived one is not — the property a repeated read needs.
+
+EC2 key-pair material was the last value outside the rule, and is now inside it (#1296). The Go
+toolchain's key generators ignore a caller-supplied random reader, so the key is constructed from
+mint-derived bytes instead: `ed25519.NewKeyFromSeed` over 32 of them, or an RSA key whose primes
+are found by a deterministic search over an HMAC-SHA256 stream keyed by them. A replayed
+`CreateKeyPair` answers the same material and fingerprint, and a seedless mint still yields a random
+key.
 
 Nine services published an identifier from one shared generator rather than declaring their own, so
 they moved together: an ECS task ID, a Step Functions execution name, an SQS message ID,
@@ -7395,10 +7400,10 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DisassociateAddress | `AssociationId` is resolved by scanning the region's addresses; the association is cleared and, where it named an instance, the instance's `publicIp` and `publicDnsName` are cleared with it. An `AssociationId` naming nothing answers `return=true` — which is **not** a divergence here: AWS publishes *"This is an idempotent operation. If you perform the operation more than once, Amazon EC2 doesn't return an error."* The page marks `AssociationId` `Required: No` while its own prose says *"This parameter is required"*, and substrate follows the prose only to the extent of reading it |
 | ReleaseAddress | `AllocationId` is required and checked; an address still associated is refused with `InvalidIPAddress.InUse`/400, which is why a release is preceded by a disassociate. The record is deleted rather than marked, so the release is **not** idempotent — a second one answers `InvalidAllocationID.NotFound` |
-| CreateNatGateway | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the VPC is taken from the subnet rather than the request. `TagSpecification.N` scoped to `natgateway`, validated [before the gateway is written](#a-tagged-create-is-authorized-twice). `ConnectivityType` defaults to `public`; `privateIp` is derived deterministically from the minted gateway ID, so it replays identically. `state` is `available` at once, with no `pending` to poll through. `AllocationId` is looked up but **not resolved**: one naming nothing leaves `allocationId` and `publicIp` silently absent from a `public` gateway rather than refusing the request |
-| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DeleteNatGateway | `NatGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); the record is kept with `state` `deleted` rather than removed, so `DescribeNatGateways` keeps reporting it — as AWS does, though AWS stops after about an hour and substrate reports it for the life of the store. There is no `deleting` state to poll through, and a second delete answers `deleted` again rather than refusing |
-| CreateKeyPair | `KeyName` is required (`MissingParameter`), and a name already held answers `InvalidKeyPair.Duplicate`/400. `TagSpecification.N` scoped to `key-pair`; `tagSet` is [omitted rather than empty](#an-untagged-resource-omits-tagset) for an untagged key. `keyMaterial` is a **real** PKCS#8 PEM private key, so a caller can parse it — but it is always EC P-256, where AWS publishes `rsa \| ed25519`, and `KeyType` is echoed back unvalidated (defaulting to `rsa`), so the reported type and the material disagree. `keyFingerprint` is the SHA-256 digest of the public key DER, where AWS publishes the SHA-1 digest of the DER-encoded private key for an RSA pair. `KeyFormat` (`pem \| ppk`) is not read — the answer is always PEM — and the published 5,000-per-Region quota is not enforced. The response also renders `keyType`, which this operation's Response Elements do not publish |
+| CreateNatGateway | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the VPC is taken from the subnet rather than the request. `TagSpecification.N` scoped to `natgateway`, validated [before the gateway is written](#a-tagged-create-is-authorized-twice). `ConnectivityType` defaults to `public`. A named `AllocationId` that resolves to no Elastic IP is `InvalidAllocationID.NotFound` (#1188). `PrivateIpAddress` is honored and must be an IPv4 address inside the subnet's CIDR block (`InvalidParameterValue` otherwise); without it `privateIp` is derived from the minted gateway ID, so it replays identically. `ClientToken` is echoed as `clientToken` and makes the create idempotent — see [Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression). `state` is `available` unless a seed is in place, in which case the gateway is born `pending`. `networkInterfaceId` is not answered: no network interface is modeled |
+| DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared). `state` is what the [seeded progression](#seeding-a-nat-gateway-progression) reports, taken before the filters run, and a `failed` gateway carries `failureCode` and `failureMessage` |
+| DeleteNatGateway | `NatGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). The answer is `natGatewayId` alone, as published; the `state` element substrate used to add is on no page. The record settles `deleted` and is kept, so `DescribeNatGateways` keeps reporting it — as AWS does, though AWS stops after about an hour and substrate reports it for the life of the store. A seed's count reports `deleting` first ([Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression)). A second delete answers again rather than refusing |
+| CreateKeyPair | `KeyName` is required (`MissingParameter`), and a name already held answers `InvalidKeyPair.Duplicate`/400. `TagSpecification.N` scoped to `key-pair`; `tagSet` is [omitted rather than empty](#an-untagged-resource-omits-tagset) for an untagged key. `KeyType` is `rsa` (the default) or `ed25519`, anything else `InvalidParameterValue`, and the key is that type (#1296): a 2048-bit RSA key as the PKCS#1 `RSA PRIVATE KEY` PEM the page publishes, fingerprinted as the colon-separated SHA-1 digest of its DER (PKCS#8) private key; or an ed25519 key in OpenSSH format, fingerprinted as the base64 SHA-256 digest of its public key. The material is [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded), so a replay answers the same key. `KeyFormat` (`pem \| ppk`) is not read — the answer is always PEM — and the published 5,000-per-Region quota is not enforced. The response also renders `keyType`, which this operation's Response Elements do not publish |
 | ImportKeyPair | `KeyName` and `PublicKeyMaterial` are both required, and a duplicate name answers `InvalidKeyPair.Duplicate`. The material is base64-decoded, falling back to the raw bytes when it is not base64, and is fingerprinted as given rather than re-derived, so the fingerprint follows what the caller supplied. `keyType` is inferred from the SSH prefix — `ssh-ed25519` gives `ed25519` and everything else, **including `ecdsa-*`, gives `rsa`**. `TagSpecification.N` scoped to `key-pair`; no `keyMaterial` is returned, matching AWS |
 | DescribeKeyPairs | `KeyName.N` and `KeyPairId.N` [union](#twelve-describes-gained-filters) and **narrow rather than assert**: an unknown name or ID is an empty answer where AWS publishes `InvalidKeyPair.NotFound` — one of the five selector families whose assertion is [unimplemented rather than declined](#which-selectors-assert-existence). **All five** filters are evaluated, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Reports `keyPairId`, `keyName`, `keyFingerprint`, `keyType`, `createTime` and `tagSet`. No pagination, matching AWS, which publishes none |
 | DeleteKeyPair | Either `KeyName` or `KeyPairId`; both absent answers `MissingParameter`, which is substrate's reading — AWS marks both `Required: No` and publishes no error for the empty request. A `key-`-prefixed value is resolved by scanning the region's key pairs, and anything else is taken as a name. Silently idempotent: a key pair naming nothing answers `return=true`, matching AWS, whose page publishes no error for a nonexistent key pair. The published `keyPairId` response element is not rendered — the answer is `return` alone |
@@ -10875,6 +10880,51 @@ thing a programmatic replay has to pass.
 There is no Python helper for this endpoint: `pytest_substrate`'s seeding helpers are hardcoded
 to the Athena, Redshift Data and Timestream result endpoints, so drive this one with raw HTTP,
 as the fleet seed above is driven.
+
+### Seeding a NAT gateway progression
+
+A NAT gateway is one of the slowest resources in a VPC to come up, which is why every CDK,
+CloudFormation and Terraform run waits on it, and `API_CreateNatGateway`'s two published sample
+responses both show `pending`. Substrate settles the record `available` at once, so a consumer's
+wait loop never runs its body. A seed makes the transition observable, on the rules every
+progression shares ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```bash
+# A gateway created now is born pending; the next two DescribeNatGateways report pending, then available.
+curl -X POST http://localhost:4566/v1/ec2/nat-gateway-state \
+  -d '{"natGatewayId":"*","pendingObservations":2}'
+
+# Fail after one pending observation, with a published failure code. The failureMessage defaults
+# to the page's message for the code, with the gateway's own allocation ID substituted.
+curl -X POST http://localhost:4566/v1/ec2/nat-gateway-state \
+  -d '{"natGatewayId":"*","pendingObservations":1,"finalState":"failed",
+       "failureCode":"InvalidAllocationID.NotFound"}'
+
+curl -X DELETE 'http://localhost:4566/v1/ec2/nat-gateway-state?natGatewayId=nat-0abc123'
+curl -X DELETE http://localhost:4566/v1/ec2/nat-gateway-state
+```
+
+- **The default count is zero.** An unseeded gateway reads as it always has, `available` from the
+  create on, so every existing fixture and recorded event log replays byte-identically (#1188).
+- **`state` and `finalState`** must be values of `NatGateway.state`
+  (`pending | failed | available | deleting | deleted`); they default to `pending` and `available`.
+- **`failureCode`** must be one of the six codes the page publishes (`InsufficientFreeAddressesInSubnet`,
+  `Gateway.NotAttached`, `InvalidAllocationID.NotFound`, `Resource.AlreadyAssociated`,
+  `InternalError`, `InvalidSubnetID.NotFound`), and is accepted only with `finalState` `failed`. A
+  failed gateway with no code reports `InternalError`, because the page documents a failed gateway
+  as always carrying one.
+- **The delete is modeled too.** `DeleteNatGateway` restarts the countdown, and the same
+  `pendingObservations` report `deleting` before `deleted`.
+- **What counts as an observation** is a `DescribeNatGateways` that includes the gateway, taken
+  before the `state` filter runs, so a waiter polling with `Name=state,Values=available` still
+  advances the countdown. `CreateNatGateway` and a `ClientToken` retry only peek.
+
+**`ClientToken`.** `CreateNatGateway` is on EC2's list of actions that are idempotent using a
+client token. A retry with the same token and the same parameters answers the gateway first created,
+with its current state, and creates nothing; one with different parameters is
+`IdempotentParameterMismatch`. The token is echoed as `clientToken` only when one was sent. A token
+over the published 64 ASCII characters is `InvalidParameterValue`, substrate's reading: the page
+publishes no code for it.
 
 ### Seeding an instance-state progression
 
@@ -20206,39 +20256,55 @@ is `2017-05-18` and appears in no wire field.
 
 | Operation | Notes |
 |-----------|-------|
-| StartQueryExecution | `QueryString` required; the query is [already `SUCCEEDED` when the call returns](#a-query-has-already-succeeded-when-startqueryexecution-returns) |
-| GetQueryExecution | Reports `QueryExecutionId`, `Query`, `WorkGroup`, `Status` and `ResultConfiguration.OutputLocation`, and nothing else |
-| GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text); `MaxResults` and `NextToken` are not read |
-| StopQueryExecution | Accepted for any stored execution, including one already `SUCCEEDED` |
+| StartQueryExecution | `QueryString` required; the query is `SUCCEEDED` when the call returns unless [a seed makes it progress](#a-query-progresses-under-a-seed) |
+| GetQueryExecution | Reports `QueryExecutionId`, `Query`, `WorkGroup`, `Status` and `ResultConfiguration.OutputLocation`, and nothing else; each call is [one observation of a seeded progression](#a-query-progresses-under-a-seed) |
+| GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text) once the query has `SUCCEEDED`, and refuses it with `InvalidRequestException`/400 before; `MaxResults` and `NextToken` are not read |
+| StopQueryExecution | Writes `CANCELLED` ([#1154](https://github.com/scttfrdmn/substrate/issues/1154)); accepted for any stored execution, including one already `SUCCEEDED` |
 | ListQueryExecutions | `MaxResults` defaults to 50 and is not clamped |
 | CreateWorkGroup | `Name` and `Description` are read; `Configuration` and `Tags` are discarded |
 | GetWorkGroup | Reports `Name`, `State` and `Description`, and nothing else; [synthesises the `primary` workgroup](#the-primary-workgroup-and-what-is-synthesised-about-it) when no record was written for it |
 | DeleteWorkGroup | Refuses `primary` with `InvalidRequestException`/400 and *"The primary workgroup cannot be deleted"*, which `API_DeleteWorkGroup` itself states; `RecursiveDeleteOption` is not read |
 | ListWorkGroups | `MaxResults` defaults to 50 and is not clamped; [the `primary` workgroup is prepended](#the-primary-workgroup-and-what-is-synthesised-about-it) and pages like any other entry |
 
-### A query has already succeeded when StartQueryExecution returns
+### A query progresses under a seed
 
 `StartQueryExecution` stores the execution with `State: "SUCCEEDED"` and `SubmissionDateTime` equal to
-`CompletionDateTime`, both read from the simulated clock. So `QUEUED`, `RUNNING` and `FAILED` — three
-of the five values `QueryExecutionStatus.State` publishes — cannot be produced by any code path, and
-there is no seed that changes that. `CANCELLED` is reachable, through `StopQueryExecution`.
+`CompletionDateTime`, both read from the simulated clock. Unseeded, that is what every
+`GetQueryExecution` reports, so a poll loop exits on its first observation. A seed makes the published
+transient states observable first ([#1155](https://github.com/scttfrdmn/substrate/issues/1155)), under
+the rules [every progression shares](#how-a-progression-is-seeded):
 
-The consequence for a consumer is that a `GetQueryExecution` poll loop terminates on its first
-observation on every run. That is a useful property for a fast test and a useless one for testing the
-loop: the waiter, the backoff and the failure branch are never entered, so a test cannot distinguish
-"my waiter works" from "my waiter never ran". A failure branch keyed on `State == "FAILED"` is dead
-code against Substrate.
+```
+POST   /v1/athena/query-status   {"queryExecutionId": "…" | "*", "pendingObservations": 2,
+                                  "state": "QUEUED", "finalState": "FAILED",
+                                  "stateChangeReason": "…",
+                                  "athenaError": {"ErrorCategory": 2, "ErrorType": 1006,
+                                                  "Retryable": false, "ErrorMessage": "…"}}
+DELETE /v1/athena/query-status   (all seeds; ?queryExecutionId=… for one)
+```
 
-[#1155](https://github.com/scttfrdmn/substrate/issues/1155) covers this across the five services that
-share it, in the shape #514 shipped for EC2 instance state: a seeded **count of observations** in the
-transient state, defaulting to zero so no existing fixture changes.
+- `GetQueryExecution` reports `state` — `QUEUED` or `RUNNING`, default `RUNNING` — for
+  `pendingObservations` calls, with no `CompletionDateTime`, since the query has not completed. It then
+  reports `finalState` (`SUCCEEDED`, `FAILED` or `CANCELLED`; default the record's own) with
+  `CompletionDateTime`, and with the seed's `StateChangeReason` and `AthenaError` — the two members
+  `QueryExecutionStatus` publishes for a failure. A state outside `QueryExecutionStatus.State`'s Valid
+  Values, or an `AthenaError` outside `API_AthenaError`'s published ranges (`ErrorCategory` 1–3,
+  `ErrorType` 0–9999), is refused with 400 and not stored.
+- `GetQueryResults` answers only a query that has `SUCCEEDED`; before then it is
+  `InvalidRequestException`/400, the code `API_GetQueryResults` publishes for a bad request. The page
+  gives no sentence for the case, so substrate's two — *"Query has not yet finished. Current state:
+  RUNNING"* and *"Query did not finish successfully. Final query state: FAILED"* — are its own reading.
+  The check peeks rather than observes, so fetching results never spends the countdown a
+  `GetQueryExecution` loop is waiting through.
+- `StopQueryExecution` writes `CANCELLED`, two `L`s, as `QueryExecutionStatus.State` spells it
+  ([#1154](https://github.com/scttfrdmn/substrate/issues/1154); it wrote `CANCELED` before). The record's
+  `CANCELLED` outranks a seed: a stop is the caller's own action, so a query stopped mid-countdown reads
+  as stopped from then on.
+- `ListQueryExecutions` answers identifiers only, so it has no status to disagree with
+  `GetQueryExecution` about.
 
-`StopQueryExecution` writes `CANCELED` with one `L`, where the published enum spells it `CANCELLED` —
-[#1154](https://github.com/scttfrdmn/substrate/issues/1154). A consumer comparing against its SDK's
-generated constant matches neither the stored value nor anything else.
-
-`QueryExecutionStatus`' `StateChangeReason` and `AthenaError` members are not emitted at all, so a
-query has no reason to report even once a failure state can be reached.
+A stop is still accepted for a query that has already `SUCCEEDED`, which it cancels; real Athena leaves
+a finished query as it finished. That divergence predates the seed and is unchanged.
 
 ### The result set is seeded by SQL text
 
@@ -20475,8 +20541,8 @@ management events and $2.00 per 100,000 events for additional copies; Substrate 
 | UpdateProject | [Reads a `project` wrapper AWS does not send](#updateproject-cannot-be-reached-from-an-sdk) |
 | DeleteProject | [Refuses an absent project](#deleteproject-is-not-idempotent) |
 | ListProjects | Reports names only; `sortBy`, `sortOrder` and `nextToken` are not read |
-| StartBuild | Only `projectName` is read; the build is [`SUCCEEDED` before the call returns](#a-build-has-already-succeeded-when-startbuild-returns) |
-| BatchGetBuilds | An unreadable stored record is reported in `buildsNotFound`, so a store failure is indistinguishable from an absent build |
+| StartBuild | Only `projectName` is read; the build is `SUCCEEDED` before the call returns unless [a seed makes it progress](#a-build-progresses-under-a-seed) |
+| BatchGetBuilds | Each build is [one observation of its own seeded progression](#a-build-progresses-under-a-seed); an unreadable stored record is reported in `buildsNotFound`, so a store failure is indistinguishable from an absent build |
 
 ### UpdateProject cannot be reached from an SDK
 
@@ -20501,14 +20567,38 @@ shape of an idempotent delete. A teardown path that runs twice succeeds against 
 under a code the SDK's own model does not associate with the operation.
 [#1159](https://github.com/scttfrdmn/substrate/issues/1159).
 
-### A build has already succeeded when StartBuild returns
+### A build progresses under a seed
 
 `StartBuild` stores the build with `buildStatus: "SUCCEEDED"`, `currentPhase: "COMPLETED"` and
-`startTime` equal to `endTime`. `IN_PROGRESS`, `FAILED`, `FAULT`, `TIMED_OUT` and `STOPPED` cannot be
-produced, and `Build`'s `phases`, `logs`, `artifacts` and `buildComplete` members are not emitted at
-all. Everything the *project* carried about how to build is recorded and ignored — running the build
-is workload-internal and out of scope — but a consumer's wait loop has nothing to wait for.
-[#1155](https://github.com/scttfrdmn/substrate/issues/1155).
+`startTime` equal to `endTime`, which is what an unseeded build reports. Running the build is
+workload-internal and out of scope, but its status is observable, and a seed makes the published
+in-progress state observable before the final one
+([#1155](https://github.com/scttfrdmn/substrate/issues/1155)), under the rules
+[every progression shares](#how-a-progression-is-seeded):
+
+```
+POST   /v1/codebuild/build-status   {"buildId": "project:uuid" | "*", "pendingObservations": 2,
+                                     "currentPhase": "PRE_BUILD", "finalStatus": "FAILED",
+                                     "statusCode": "COMMAND_EXECUTION_ERROR", "message": "…"}
+DELETE /v1/codebuild/build-status   (all seeds; ?buildId=… for one)
+```
+
+- `BatchGetBuilds` reports `buildStatus: "IN_PROGRESS"`, with `currentPhase` the seed's phase (default
+  `BUILD`) and no `endTime`, for `pendingObservations` observations. It then reports `finalStatus` —
+  `SUCCEEDED`, `FAILED`, `FAULT`, `TIMED_OUT` or `STOPPED`, default the record's — with
+  `currentPhase: "COMPLETED"` and `endTime`. Each build in one call is one observation of its own
+  countdown, so a call over several builds spends one from each.
+- `Build` publishes no top-level failure reason: the diagnostic lives in a phase's `contexts`. So a
+  failed final status with a seeded `statusCode` or `message` also reports
+  `phases: [{"phaseType": <the seed's phase>, "phaseStatus": <finalStatus>, "contexts": [{"statusCode", "message"}]}]`.
+  Otherwise `phases` stays absent, as it is for every unseeded build.
+- `StartBuild`'s own response is a create-time read. It reports the seed's first state without
+  spending an observation, so `pendingObservations` counts `BatchGetBuilds` polls only.
+- A phase outside `API_BuildPhase`'s `phaseType` values (or `COMPLETED`, which ends a build rather than
+  naming a phase in it), or a final status outside `API_Build`'s `buildStatus` values, is refused with
+  400 and not stored.
+
+`logs`, `artifacts` and `buildComplete` are still not emitted.
 
 `StartBuild` also reads only `projectName`: the twenty-odd `*Override` members AWS publishes, and
 `idempotencyToken`, are neither stored nor refused, so two identical calls mint two builds.
@@ -20578,17 +20668,32 @@ has nothing to multiply.
 | UpdatePipeline | Merges `roleArn` and `stages`, increments `version`; reports no `metadata` |
 | DeletePipeline | |
 | ListPipelines | Reports name, version and timestamps; `maxResults` and `nextToken` are not read. A pipeline whose record cannot be loaded is skipped |
-| StartPipelineExecution | The execution is [`Succeeded` before the call returns](#an-execution-has-already-succeeded-when-startpipelineexecution-returns); `clientRequestToken` and `variables` are not read |
+| StartPipelineExecution | The execution is `Succeeded` before the call returns unless [a seed makes it progress](#an-execution-progresses-under-a-seed); `clientRequestToken` and `variables` are not read |
 | GetPipelineState | Reports every stage as `Succeeded` with an [empty `pipelineExecutionId`](#getpipelinestate-reports-a-shape-no-execution-produced) |
 | GetPipelineExecution | `pipelineName` is [decoded and ignored](#getpipelineexecution-and-getpipeline-answer-for-the-wrong-resource) |
 
-### An execution has already succeeded when StartPipelineExecution returns
+### An execution progresses under a seed
 
-`StartPipelineExecution` stores the execution with `Status: "Succeeded"`, so `InProgress`, `Stopping`,
-`Stopped`, `Superseded`, `Failed` and `Cancelled` cannot be produced. No stage action runs — that is
-workload-internal — but neither does any stage *state* progress, so a consumer polling
-`GetPipelineExecution` for completion is answered on its first observation every time.
-[#1155](https://github.com/scttfrdmn/substrate/issues/1155).
+`StartPipelineExecution` stores the execution with `Status: "Succeeded"`, which is what an unseeded
+`GetPipelineExecution` reports. No stage action runs — that is workload-internal — but the execution's
+status is observable, and a seed makes the published in-flight states observable first
+([#1155](https://github.com/scttfrdmn/substrate/issues/1155)), under the rules
+[every progression shares](#how-a-progression-is-seeded):
+
+```
+POST   /v1/codepipeline/execution-status   {"pipelineExecutionId": "…" | "*", "pendingObservations": 2,
+                                            "status": "InProgress", "finalStatus": "Failed",
+                                            "statusSummary": "…"}
+DELETE /v1/codepipeline/execution-status   (all seeds; ?pipelineExecutionId=… for one)
+```
+
+`GetPipelineExecution` reports `status` — `InProgress` or `Stopping`, default `InProgress` — for
+`pendingObservations` calls, then `finalStatus`, which is `Succeeded`, `Failed`, `Stopped`,
+`Superseded` or `Cancelled` (default the record's). The final observation also carries the seed's
+`statusSummary`, the member `API_PipelineExecution` publishes to describe a status. Together the two
+halves are the seven published values, and a status outside its half is refused with 400 and not
+stored. `ListPipelineExecutions` is not routed, so `GetPipelineExecution` is the only observation.
+`GetPipelineState` still reports every stage `Succeeded` and is not governed by the seed.
 
 `clientRequestToken` is the published idempotency member and is not read, so a retried start mints a
 second execution where AWS would return the first.
@@ -20680,38 +20785,45 @@ pipeline per month rather than per execution, so the attribution is a proxy: Sub
 
 | Operation | Notes |
 |-----------|-------|
-| ExecuteStatement | `Sql` required; the statement is [`FINISHED` before the call returns](#the-statement-status-is-seeded-at-execute-time-and-frozen). `SecretArn` is decoded and not stored; `Parameters`, `StatementName`, `WithEvent` and `ClientToken` are not read |
-| DescribeStatement | Reports `Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt` and `Error`, and [nothing else](#describestatement-reports-six-members) |
-| GetStatementResult | Returns [the result set seeded for the statement's SQL](#the-result-set-is-seeded-by-the-statements-sql); `NextToken` is not read and no `NextToken` is emitted |
+| ExecuteStatement | `Sql` required; the statement is recorded `FINISHED`, and [a seed governs what a describe reports](#a-statements-status-is-seeded-and-read-when-it-is-described). `SecretArn` is decoded and not stored; `Parameters`, `StatementName`, `WithEvent` and `ClientToken` are not read |
+| DescribeStatement | Reports `Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt`, `HasResultSet` and `Error`, and [nothing else](#describestatement-reports-seven-members). Each describe is one observation of a seeded statement |
+| GetStatementResult | Returns [the result set seeded for the statement's SQL](#the-result-set-is-seeded-by-the-statements-sql) for a `FINISHED` statement, and refuses any other with `ValidationException`; `NextToken` is not read and no `NextToken` is emitted |
 
 `BatchExecuteStatement`, `CancelStatement`, `DescribeTable`, `ListDatabases`, `ListSchemas`,
 `ListStatements`, `ListTables` and `GetStatementResultV2` are not routed.
 
-### The statement status is seeded at execute time and frozen
+### A statement's status is seeded, and read when it is described
 
-A statement's status is read from the control plane **when `ExecuteStatement` runs** and stored on the
-record; `DescribeStatement` reports what was stored. Four consequences, all of them
-[#1163](https://github.com/scttfrdmn/substrate/issues/1163):
-
-- Seeding *after* `ExecuteStatement` has no effect on that statement.
-- No progression is expressible: a statement cannot be `STARTED` for two observations and then
-  `FINISHED`, which is the shape of every Redshift Data wait loop.
-- The seed is one global value under the literal key `status` — no statement ID, no `"*"` wildcard, no
-  account or Region qualification — so one seed governs every statement in every account, and there is
-  **no `DELETE /v1/redshift-data/status`**, so a seeded `FAILED` persists for the life of the process.
-- Both control-plane reads discard their error, so a store failure is indistinguishable from an absent
-  seed.
+A statement is recorded `FINISHED`: substrate runs no SQL, so the work is done in the request that
+starts it. A seed governs what each `DescribeStatement` *reports*, read at that describe rather than
+frozen onto the statement when it ran, so a seed written after `ExecuteStatement` governs that
+statement too ([#1163](https://github.com/scttfrdmn/substrate/issues/1163),
+[#1155](https://github.com/scttfrdmn/substrate/issues/1155)). It follows
+[the rules every progression shares](#how-a-progression-is-seeded).
 
 ```
-POST /v1/redshift-data/status   {"status": "FAILED", "errorMessage": "query timed out"}
+POST   /v1/redshift-data/status   {"statementId": "…", "pendingObservations": 2, "transientStatus": "STARTED", "status": "FAILED", "errorMessage": "query timed out"}
+DELETE /v1/redshift-data/status   (all seeds; ?statementId=… for one)
 ```
 
-The endpoint accepts `FINISHED`, `FAILED`, `ABORTED` and `STARTED`, and refuses anything else with
-HTTP 400 — so `SUBMITTED` and `PICKED`, two of the six values the published enum carries, cannot be
-seeded. `errorMessage` is reported as `Error` only when the status is `FAILED`.
+- **Keyed by statement:** `statementId` names one statement, and empty or `"*"` governs every
+  statement, the exact ID winning. It used to be one global value under the literal key `status`.
+- **Counted:** `pendingObservations` describes report `transientStatus` (`SUBMITTED`, `PICKED` or
+  `STARTED`, default `STARTED`) before the statement settles to `status`. `status` may be any of the
+  six published values (`SUBMITTED | PICKED | STARTED | FINISHED | ABORTED | FAILED`), defaulting to the
+  recorded `FINISHED`. The handler used to refuse `SUBMITTED` and `PICKED`.
+- **`errorMessage`** is reported as `Error` alongside a settled `FAILED`, and refused with any other
+  status.
+- **Backward compatible:** the pre-#1163 body, `{"status": "FAILED", "errorMessage": "…"}`, still
+  parses, as the `"*"` wildcard with no countdown. Statuses are accepted in any case and stored
+  upper-cased, as before.
+- A status outside its enumeration, or a negative count, is refused with 400.
+- A store failure reading the seed is an error, not an absent seed.
 
-`GetStatementResult` does not consult the status at all: a statement seeded `FAILED` still returns its
-seeded rows at HTTP 200.
+`GetStatementResult` *peeks*: it spends no observation, and answers a result only for a statement whose
+next describe would report `FINISHED`. Any other statement, including one seeded `FAILED` or `ABORTED`,
+which used to answer its seeded rows, is `ValidationException`/400, the client-error code
+`API_GetStatementResult` publishes.
 
 ### The result set is seeded by the statement's SQL
 
@@ -20724,18 +20836,23 @@ Lookup order is a Go-level in-memory map (exact SQL, then `"*"`), then the contr
 SQL, then `"*"`), then an empty result set. The match is exact string equality on the SQL the statement
 was created with. `TotalNumRows` is the number of seeded records.
 
-### DescribeStatement reports six members
+### DescribeStatement reports seven members
 
-`Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt` and — for a failed statement — `Error`.
-`UpdatedAt` is always exactly `CreatedAt`. Absent are `HasResultSet`, which is the member a consumer
-checks before calling `GetStatementResult`, along with `Duration`, `ResultRows`, `ResultSize`,
-`RedshiftPid`, `RedshiftQueryId`, `WorkgroupName`, `ClusterIdentifier`, `Database`, `DbUser`,
-`SecretArn`, `SessionId`, `SubStatements` and `QueryParameters`. The two timestamps are emitted as
-epoch seconds, which is what the protocol's JSON version specifies.
+`Id`, `Status`, `QueryString`, `CreatedAt`, `UpdatedAt`, `HasResultSet` and, for a failed statement,
+`Error` ([#1163](https://github.com/scttfrdmn/substrate/issues/1163)).
+- **`HasResultSet`** is `true` exactly when the reported status is `FINISHED`, the statements for which
+  `GetStatementResult` answers a result. The page says the result set "can be empty", and an unseeded
+  one is.
+- **`UpdatedAt`** is the simulated instant a seeded statement was first observed in its settled status
+  after a countdown, so it is later than `CreatedAt` when the clock moved while the statement ran. A
+  statement nothing seeds is created settled and never changes, so its `UpdatedAt` is its `CreatedAt`.
+- **Absent:** `Duration`, `ResultRows`, `ResultSize`, `RedshiftPid`, `RedshiftQueryId`,
+  `WorkgroupName`, `ClusterIdentifier`, `Database`, `DbUser`, `SecretArn`, `SessionId`,
+  `SubStatements` and `QueryParameters`.
 
-Responses carry `Content-Type: application/json` where the service's protocol is JSON 1.1 and
-`application/x-amz-json-1.1` is what the rest of the tree emits — also
-[#1163](https://github.com/scttfrdmn/substrate/issues/1163).
+The two timestamps are emitted as epoch seconds, which is what the protocol's JSON version specifies.
+Responses carry `Content-Type: application/x-amz-json-1.1`, the Redshift Data API's protocol; they
+carried `application/json` until #1163.
 
 ### What a refusal reports
 
@@ -20744,6 +20861,7 @@ Responses carry `Content-Type: application/json` where the service's protocol is
 | a body that will not parse | `ValidationException` | 400 |
 | `Sql` or `Id` absent or empty | `ValidationException` | 400 |
 | a statement that does not exist | `ResourceNotFoundException` | 400 |
+| `GetStatementResult` for a statement that is not `FINISHED` | `ValidationException` | 400 |
 
 Both codes and both statuses are what `API_DescribeStatement` publishes.
 `ActiveStatementsExceededException`, `ActiveWaitingRequestsExceededException`,
@@ -20784,45 +20902,54 @@ Two unrelated slices of SageMaker are modelled: the Studio app lifecycle and tra
 | ListDomains | Always an empty list — Substrate has no domain records |
 | ListApps | `DomainIdEquals` and `UserProfileNameEquals` filter; `MaxResults`, `NextToken`, `SortBy` and `SortOrder` are not read |
 | CreateApp | Only `AppName` is required; `AppType` and `DomainId` are `Required: Yes` and unchecked |
-| DeleteApp | [Answers 200 for an app that does not exist](#deleteapp-does-not-look-before-deleting) |
+| DeleteApp | [Refuses an app that does not exist](#deleteapp-refuses-an-absent-app) with `ResourceNotFound`/400 |
 | DescribeApp | Reports the stored record whole |
 | CreatePresignedDomainUrl | A fixed stub URL; no domain, user profile or expiry is read |
-| CreateTrainingJob | Only `TrainingJobName` is read; the job is [`Completed` before the call returns](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint) |
-| DescribeTrainingJob | Applies [the seeded status](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint) |
-| StopTrainingJob | Writes `Stopped` directly; `Stopping` is never observable, and a `Completed` job is stopped without complaint |
-| ListTrainingJobs | [Does not apply the seed](#a-training-job-is-completed-at-birth-and-the-seed-drives-one-endpoint); reads no request member at all, so `StatusEquals`, `NameContains`, the four time filters, `SortBy`, `SortOrder`, `MaxResults` and `NextToken` are all ignored |
+| CreateTrainingJob | Only `TrainingJobName` is read; the job is recorded `Completed`, and [a seed governs what is observed](#a-training-jobs-status-is-a-seeded-progression) |
+| DescribeTrainingJob | One observation of [the seeded progression](#a-training-jobs-status-is-a-seeded-progression) |
+| StopTrainingJob | Writes `Stopped` and restarts the job's countdown, so a seed can report `Stopping` first; a `Completed` job is stopped without complaint |
+| ListTrainingJobs | Each listed job is one observation of [the same progression](#a-training-jobs-status-is-a-seeded-progression), so List and Describe agree (#1162). It reads no request member at all, so `StatusEquals`, `NameContains`, the four time filters, `SortBy`, `SortOrder`, `MaxResults` and `NextToken` are all ignored |
 
-### A training job is Completed at birth, and the seed drives one endpoint
+### A training job's status is a seeded progression
 
-`CreateTrainingJob` stores `TrainingJobStatus: "Completed"`, so `InProgress` and `Stopping` are
-unreachable without a seed. Nothing in `CreateTrainingJob`'s large published input is read beyond the
-name: the algorithm, the resource configuration, the hyper-parameters and the input data are neither
-stored nor validated. Running the training is out of scope; the seed is what makes the *outcome*
-assertable:
+`CreateTrainingJob` records `TrainingJobStatus: "Completed"`. Nothing in `CreateTrainingJob`'s large
+published input is read beyond the name: the algorithm, the resource configuration, the
+hyper-parameters and the input data are neither stored nor validated. Running the training is out of
+scope; a seed is what makes the *transition and the outcome* observable
+([#1155](https://github.com/scttfrdmn/substrate/issues/1155),
+[#1162](https://github.com/scttfrdmn/substrate/issues/1162)), following
+[the rules every progression shares](#how-a-progression-is-seeded):
 
 ```
-POST   /v1/sagemaker/training-job-status   {"trainingJobName": "job-1", "status": "Failed",
+POST   /v1/sagemaker/training-job-status   {"trainingJobName": "job-1", "pendingObservations": 2,
+                                            "transientStatus": "InProgress", "status": "Failed",
                                             "failureReason": "CapacityError: …"}
 DELETE /v1/sagemaker/training-job-status    (all seeds; ?trainingJobName=… for one)
 ```
 
-`trainingJobName` defaults to the `"*"` wildcard, and lookup is exact name first, then `"*"`. The seed
-overrides what an observation **reports**; it never rewrites the stored record.
+- **Keyed by job:** `trainingJobName` defaults to the `"*"` wildcard, and the exact name wins.
+- **Counted:** `pendingObservations` observations report `transientStatus` (`InProgress` or
+  `Stopping`), then the job settles to `status`, the recorded status when empty. `DescribeTrainingJob`
+  and every `ListTrainingJobs` that lists the job each spend one, so the two answer the same status for
+  the same job: `ListTrainingJobs` used to report the record while `DescribeTrainingJob` reported the
+  seed.
+- **`failureReason`** is reported with a settled `Failed`, and refused with any other status.
+- **Validated:** `status` must be one of `TrainingJobStatus`' published values
+  (`InProgress | Completed | Failed | Stopping | Stopped`); a misspelling used to be accepted and
+  reported. `{"trainingJobName": …, "status": …, "failureReason": …}`, the pre-#1155 body, still means
+  what it meant: no countdown, settled from the first observation.
+- **A stop restarts the countdown.** After `StopTrainingJob`, the countdown reports `Stopping` by
+  default and the job settles to its recorded `Stopped`. The seed's settled status and reason do not
+  override a stop the caller made, because the stop is itself the transition being observed.
 
-Two gaps, both [#1162](https://github.com/scttfrdmn/substrate/issues/1162):
+The POST answers `{"ok": true, "trainingJobName": "status:<name|*>"}`, the key the seed was stored
+under, as every progression's seed endpoint does.
 
-- `ListTrainingJobs` builds its summaries straight from state and does not apply the seed, so a job
-  seeded `Failed` is reported `Completed` by one endpoint and `Failed` by the other **in the same
-  instant** — two API observations of one resource that contradict each other.
-- The control plane checks only that `status` is non-empty, so a misspelling is accepted and reported
-  as a status outside the published enum. Redshift Data's status endpoint, which validates against its
-  four accepted values, is the in-tree counterexample.
+### DeleteApp refuses an absent app
 
-### DeleteApp does not look before deleting
-
-`DeleteApp` deletes the state key unconditionally and answers 200 with an empty body, so deleting an
-app that never existed succeeds. `API_DeleteApp` publishes `ResourceNotFound`, which `DescribeApp`
-already answers for the same condition. [#1162](https://github.com/scttfrdmn/substrate/issues/1162).
+`DeleteApp` refuses an app that does not exist with `ResourceNotFound`/400, which `API_DeleteApp`
+publishes and `DescribeApp` already answered for the same condition. It used to delete the state key
+unconditionally and answer 200 ([#1162](https://github.com/scttfrdmn/substrate/issues/1162)).
 
 An app's state key is the account, Region, domain ID, user profile name, app type and app name joined —
 all six, so two apps differing only in type are distinct records, which is what AWS's four-part
@@ -20834,7 +20961,7 @@ identity implies.
 |-----------|------|--------|
 | a body that will not parse | `ValidationException` | 400 |
 | `AppName` or `TrainingJobName` absent or empty | `ValidationException` | 400 |
-| an app or training job that does not exist | `ResourceNotFound` | 400 |
+| an app or training job that does not exist, including on `DeleteApp` | `ResourceNotFound` | 400 |
 
 `ResourceNotFound` is spelled without the `Exception` suffix because that is how SageMaker publishes
 it, and at 400, which is the status its pages publish. SageMaker's `ResourceInUse`,
@@ -21552,18 +21679,20 @@ and no run is more expensive than another.
 
 Four operations over two resources: data sources and data sets, plus a data set's ingestion.
 
-No data is ever read from a source and no ingestion runs. A data source is
-`CREATION_SUCCESSFUL` the moment it is created, and an ingestion is `COMPLETED` with a fixed row
-count the moment it is asked about.
+No data is ever read from a source and no ingestion runs. A data source is recorded
+`CREATION_SUCCESSFUL` and a data set's ingestion `COMPLETED`; seeds make the creation and the
+ingestion progress, observation by observation, and settle to a failure where a test needs one
+([#1155](https://github.com/scttfrdmn/substrate/issues/1155),
+[#1168](https://github.com/scttfrdmn/substrate/issues/1168)).
 
 ### Supported operations
 
 | Operation | Notes |
 |-----------|-------|
-| CreateDataSource | `POST /accounts/{AwsAccountId}/data-sources`. Answers HTTP 201 with the four published members and `CreationStatus: CREATION_SUCCESSFUL`, so `CREATION_IN_PROGRESS` is never observable. `Name` and `Type` are `Required: Yes` and unchecked, so a data source can have neither |
-| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Answers five of `API_DataSource`'s members and none it does not publish, and adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
+| CreateDataSource | `POST /accounts/{AwsAccountId}/data-sources`. Answers HTTP 201 with the four published members; `CreationStatus` is `CREATION_SUCCESSFUL`, or `CREATION_IN_PROGRESS` while [a seed's countdown runs](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions). `Name` and `Type` are `Required: Yes` and unchecked, so a data source can have neither |
+| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Answers five of `API_DataSource`'s members, plus `ErrorInfo` for a seeded `CREATION_FAILED`, and none it does not publish. Each describe is one observation of [the seeded creation](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions). It adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
 | CreateDataSet | `POST /accounts/{AwsAccountId}/data-sets`. Answers HTTP 201 with `DataSetId`, `Arn`, `IngestionId` and `RequestId`; `PhysicalTableMap`, `ImportMode` and the rest of the definition are not read |
-| DescribeIngestion | `GET /accounts/{AwsAccountId}/data-sets/{DataSetId}/ingestions/{IngestionId}`. [Reports any ingestion ID as `COMPLETED`](#any-ingestion-id-is-reported-completed) |
+| DescribeIngestion | `GET /accounts/{AwsAccountId}/data-sets/{DataSetId}/ingestions/{IngestionId}`. Answers the data set's one ingestion, the one `CreateDataSet` minted, and refuses any other ID; each describe is one observation of [the seeded ingestion](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions) |
 
 Every other QuickSight operation is unrouted: the updates and deletes
 (`UpdateDataSource`, `DeleteDataSource`, `UpdateDataSet`, `DeleteDataSet`), the lists
@@ -21580,14 +21709,53 @@ Region is visible in every other, because the key omits the Region. The rest of 
 regional resource by account **and** Region; QuickSight is the exception.
 [#1167](https://github.com/scttfrdmn/substrate/issues/1167).
 
-### Any ingestion ID is reported COMPLETED
+### A data source's creation and an ingestion are seeded progressions
 
-`DescribeIngestion` loads the **data set** key, ignores the ingestion ID entirely, and fabricates the
-response: `IngestionStatus: COMPLETED` with `RowsIngested: 1000` and `RowsDropped: 0`, plus an ARN
-built from the ID it was given. So any ingestion ID whatsoever answers HTTP 200 as long as the data
-set exists, a data set that was never ingested reports a thousand rows, and `INITIALIZED`,
-`QUEUED`, `RUNNING`, `FAILED` and `CANCELLED` are unobservable — the poll loop the operation exists
-for finishes on its first call. [#1168](https://github.com/scttfrdmn/substrate/issues/1168).
+Both follow [the rules every progression shares](#how-a-progression-is-seeded).
+
+**An ingestion.** `DescribeIngestion` answers the data set's one ingestion, the initial ingestion
+`CreateDataSet` minted, and refuses any other ID with `ResourceNotFoundException`/404, as
+`API_DescribeIngestion` publishes. It used to load only the data set and fabricate the ingestion from
+the path, so any ID at all was `COMPLETED` with exactly 1,000 rows
+([#1168](https://github.com/scttfrdmn/substrate/issues/1168)).
+- **Unseeded:** the ingestion reports `COMPLETED` and **no `RowInfo`**, since substrate ingests no
+  rows to count.
+- **`CreatedTime`** is when the ingestion started, recorded at `CreateDataSet`. A data set recorded
+  before #1168 reports the time of the describe, as it always did.
+
+```
+POST   /v1/quicksight/ingestion-status   {"ingestionId": "…", "pendingObservations": 2,
+                                          "transientStatus": "QUEUED", "status": "FAILED",
+                                          "errorType": "S3_MANIFEST_ERROR", "errorMessage": "…",
+                                          "rowsIngested": 0, "rowsDropped": 0, "totalRowsInDataset": 0}
+DELETE /v1/quicksight/ingestion-status   (all seeds; ?ingestionId=… for one)
+```
+
+- **Counted:** `pendingObservations` describes report `transientStatus` (`INITIALIZED`, `QUEUED` or
+  `RUNNING`, default `RUNNING`), then the ingestion settles to `status`, `COMPLETED` when empty.
+- **On settling,** `errorType`/`errorMessage` are reported as `ErrorInfo`, only with `FAILED` or
+  `CANCELLED`. The row counts are reported as `RowInfo`, and only when seeded.
+- **Validated:** every value is checked against its published enumeration (`IngestionStatus`,
+  `ErrorInfo.Type`), and a negative row count is refused with 400.
+
+**A data source's creation.**
+
+```
+POST   /v1/quicksight/data-source-status   {"dataSourceId": "…", "pendingObservations": 1,
+                                            "status": "CREATION_FAILED",
+                                            "errorType": "ACCESS_DENIED", "errorMessage": "…"}
+DELETE /v1/quicksight/data-source-status   (all seeds; ?dataSourceId=… for one)
+```
+
+- **Counted:** `pendingObservations` observations report `CREATION_IN_PROGRESS`, then the data source
+  settles to `CREATION_SUCCESSFUL` (the recorded value, and the default) or `CREATION_FAILED`, with
+  `errorType`/`errorMessage` as `ErrorInfo` (`DataSourceErrorInfo`).
+- **The create peeks:** `CreateDataSource`'s own `CreationStatus` reports what the first describe
+  will, without spending its observation. `API_CreateDataSource` does not say which value a create
+  returns.
+- **Validated:** the update and deletion values (`UPDATE_*`, `DELETED`) are published but refused as
+  a seeded status, because substrate routes no `UpdateDataSource` or `DeleteDataSource` for them to
+  end.
 
 ### Status is bound to the status line, not the body
 
@@ -21602,7 +21770,7 @@ SDK and visible as an unpublished extra member to anything reading the raw body.
 | Condition | Code | Status |
 |-----------|------|--------|
 | a body that will not parse, or `DataSourceId`/`DataSetId` absent | `InvalidParameterValue` | 400 |
-| a data source, data set or data set's ingestion that does not exist | `ResourceNotFoundException` | 404 |
+| a data source, data set or ingestion that does not exist, including an ingestion ID that is not the data set's | `ResourceNotFoundException` | 404 |
 
 `ResourceNotFoundException`/404 is what the pages publish. `InvalidParameterValue` is not: QuickSight
 publishes `InvalidParameterValueException`, and one code with the message *"DataSourceId is

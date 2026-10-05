@@ -299,7 +299,7 @@ var cfnStampTemplate = `{
 		"Rtb":     {"Type": "AWS::EC2::RouteTable", "Properties": {"VpcId": {"Ref": "Vpc"}}},
 		"Eip":     {"Type": "AWS::EC2::EIP", "Properties": {"Domain": "vpc"}},
 		"Nat":     {"Type": "AWS::EC2::NatGateway", "Properties": {
-			"SubnetId": {"Ref": "Subnet"}, "AllocationId": {"Ref": "Eip"}}},
+			"SubnetId": {"Ref": "Subnet"}, "AllocationId": {"Fn::GetAtt": ["Eip", "AllocationId"]}}},
 		"Lt":      {"Type": "AWS::EC2::LaunchTemplate", "Properties": {
 			"LaunchTemplateName": "stamped-lt",
 			"LaunchTemplateData": {"InstanceType": "t3.micro"}}},

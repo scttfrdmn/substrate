@@ -55,13 +55,14 @@ import (
 //
 // The request id itself, which is the seed (#866 settled that it is wall-clock and recorded
 // rather than derived). Substrate's own bookkeeping ids — an event id, a snapshot id, a
-// replay id — which no AWS call observes. A Lambda ESM poll's dispatches, which are driven by
-// a wall-clock ticker and recorded nowhere, so there is nothing for a replay to derive from
-// (#1292). EC2 key-pair *material*, which needs a
-// deterministic reader into the key generator rather than a string; a replayed CreateKeyPair
-// still diverges on the key and its fingerprint (see the #856 checklist). And everything
-// already derived from its inputs: a public IP from its instance id, a secret's ARN from its
-// name, CloudFormation's stack UUIDs from account and region.
+// replay id — which no AWS call observes. And everything already derived from its inputs: a
+// public IP from its instance id, a secret's ARN from its name, CloudFormation's stack UUIDs
+// from account and region.
+//
+// Two values that used to be on this list no longer are. A Lambda ESM poll's dispatches derive
+// their request ids from the request that triggered them (#1292). EC2 key-pair *material* is
+// constructed from mint-derived bytes (#1296; see ec2_key_material.go), because the Go
+// toolchain's key generators ignore a caller-supplied reader.
 //
 // No plugin draw site remains. randomHex, the shared helper the migration was arranged
 // around, is deleted: its last caller minted an EC2 instance profile's AIPA… id inside a

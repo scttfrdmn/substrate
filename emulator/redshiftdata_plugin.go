@@ -5,18 +5,21 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"sync"
 	"time"
 )
 
 // RedshiftDataPlugin emulates the AWS Redshift Data API service (redshift-data).
-// It supports executing SQL statements and fetching results deterministically —
-// statements complete synchronously (Status: "FINISHED") with no simulated latency.
-// GetStatementResult returns configurable rows seeded via the plugin options.
+// It supports executing SQL statements and fetching results deterministically. A statement is
+// recorded FINISHED; a seed through POST /v1/redshift-data/status makes describes report it STARTED
+// (or SUBMITTED, PICKED) for a counted number of observations first, or settle FAILED or ABORTED
+// (#1155, #1163). GetStatementResult returns configurable rows seeded via the plugin options.
 type RedshiftDataPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the statement progression's observation counter.
+	seedMu sync.Mutex
 	// results holds pre-seeded statement results keyed by SQL or by "*" (wildcard).
 	results map[string]*RedshiftDataResult
 }
@@ -88,23 +91,12 @@ func (p *RedshiftDataPlugin) executeStatement(reqCtx *RequestContext, req *AWSRe
 
 	goCtx := context.Background()
 
-	// Resolve statement status from HTTP control-plane override (or default to FINISHED).
-	status := "FINISHED"
-	errMsg := ""
-	if d, _ := p.state.Get(goCtx, redshiftDataCtrlNamespace, redshiftDataCtrlStatusKey); d != nil {
-		status = strings.TrimSpace(string(d))
-	}
-	if status == "FAILED" {
-		if d, _ := p.state.Get(goCtx, redshiftDataCtrlNamespace, redshiftDataCtrlErrorKey); d != nil {
-			errMsg = strings.TrimSpace(string(d))
-		}
-	}
-
+	// The statement is recorded FINISHED, the work being done in this request. A seed governs what a
+	// describe reports, read at observation time rather than frozen here (#1163).
 	id := generateRedshiftDataID(reqCtx.IDs)
 	stmt := RedshiftDataStatement{
 		ID:                id,
-		Status:            status,
-		Error:             errMsg,
+		Status:            "FINISHED",
 		QueryString:       input.SQL,
 		WorkgroupName:     input.WorkgroupName,
 		ClusterIdentifier: input.ClusterIdentifier,
@@ -142,15 +134,23 @@ func (p *RedshiftDataPlugin) describeStatement(reqCtx *RequestContext, req *AWSR
 		return nil, err
 	}
 
+	view, err := p.statementView(stmt, true)
+	if err != nil {
+		return nil, err
+	}
 	resp := map[string]interface{}{
 		"Id":          stmt.ID,
-		"Status":      stmt.Status,
+		"Status":      view.status,
 		"QueryString": stmt.QueryString,
 		"CreatedAt":   stmt.CreatedAt.Unix(),
-		"UpdatedAt":   stmt.CreatedAt.Unix(),
+		"UpdatedAt":   view.updatedAt.Unix(),
+		// API_DescribeStatement: "whether the statement has a result set. The result set can be
+		// empty." GetStatementResult answers a result, empty when none is seeded, for exactly the
+		// statements that have finished, so the two agree (#1163).
+		"HasResultSet": view.status == "FINISHED",
 	}
-	if stmt.Error != "" {
-		resp["Error"] = stmt.Error
+	if view.errorMsg != "" {
+		resp["Error"] = view.errorMsg
 	}
 	return redshiftDataJSONResponse(http.StatusOK, resp)
 }
@@ -168,6 +168,21 @@ func (p *RedshiftDataPlugin) getStatementResult(reqCtx *RequestContext, req *AWS
 	stmt, err := p.loadStatement(reqCtx.AccountID, reqCtx.Region, input.ID)
 	if err != nil {
 		return nil, err
+	}
+	// Peek, so asking for a result never moves a statement along. A statement that has not
+	// finished has no result to answer: it used to answer the seeded rows for a statement seeded
+	// FAILED or ABORTED (#1163). API_GetStatementResult publishes ValidationException as its
+	// client-error code.
+	view, err := p.statementView(stmt, false)
+	if err != nil {
+		return nil, err
+	}
+	if view.status != "FINISHED" {
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    "Statement " + stmt.ID + " has status " + view.status + "; a result is available only for a FINISHED statement.",
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
 
 	// Look up pre-seeded result by SQL or fallback to wildcard "*".
@@ -272,7 +287,8 @@ func redshiftDataJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 	}
 	return &AWSResponse{
 		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "application/json"},
-		Body:       body,
+		// The Redshift Data API speaks awsJson1_1, whose content type this is (#1163).
+		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+		Body:    body,
 	}, nil
 }

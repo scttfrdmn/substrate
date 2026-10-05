@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"sync"
 	"time"
 )
 
@@ -59,12 +60,15 @@ type AthenaWorkGroup struct {
 // GetQueryResults, StopQueryExecution) using the Athena JSON-target protocol
 // (X-Amz-Target: AmazonAthena.{Op}).
 //
-// Queries immediately transition to SUCCEEDED (deterministic), so the polling
-// loop in callers like clAWS exits on the first GetQueryExecution call.
+// An unseeded query is SUCCEEDED in the request that submits it, so a polling loop exits on its
+// first GetQueryExecution call. A seed at POST /v1/athena/query-status makes QUEUED/RUNNING and a
+// failure observable first (#1155); see athena_query_progression.go.
 type AthenaPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes advancing a seeded query progression; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "athena".
@@ -125,7 +129,8 @@ type AthenaQuery struct {
 	// OutputLocation is the S3 output location for results.
 	OutputLocation string `json:"OutputLocation"`
 
-	// State is the query state (SUCCEEDED, CANCELED, FAILED).
+	// State is the query state as stored: SUCCEEDED, or CANCELLED after StopQueryExecution. A seed
+	// governs what an observation reports without rewriting it (#1155).
 	State string `json:"State"`
 
 	// SubmissionDateTime is the epoch-seconds timestamp of query submission.
@@ -217,16 +222,32 @@ func (p *AthenaPlugin) getQueryExecution(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("getQueryExecution: unmarshal: %w", err)
 	}
 
+	observed, err := p.observedQueryStatus(goCtx, q, true)
+	if err != nil {
+		return nil, err
+	}
+	status := map[string]interface{}{
+		"State":              observed.State,
+		"SubmissionDateTime": q.SubmissionDateTime,
+	}
+	// CompletionDateTime is "the date and time that the query completed", so a query still QUEUED or
+	// RUNNING under a seed has none.
+	if observed.Terminal {
+		status["CompletionDateTime"] = q.CompletionDateTime
+	}
+	if observed.StateChangeReason != "" {
+		status["StateChangeReason"] = observed.StateChangeReason
+	}
+	if observed.AthenaError != nil {
+		status["AthenaError"] = observed.AthenaError
+	}
+
 	return athenaJSONResponse(http.StatusOK, map[string]interface{}{
 		"QueryExecution": map[string]interface{}{
 			"QueryExecutionId": q.QueryExecutionID,
 			"Query":            q.Query,
 			"WorkGroup":        q.WorkGroup,
-			"Status": map[string]interface{}{
-				"State":              q.State,
-				"SubmissionDateTime": q.SubmissionDateTime,
-				"CompletionDateTime": q.CompletionDateTime,
-			},
+			"Status":           status,
 			"ResultConfiguration": map[string]string{
 				"OutputLocation": q.OutputLocation,
 			},
@@ -256,6 +277,17 @@ func (p *AthenaPlugin) getQueryResults(ctx *RequestContext, req *AWSRequest) (*A
 	var q AthenaQuery
 	if err := json.Unmarshal(data, &q); err != nil {
 		return nil, fmt.Errorf("getQueryResults: unmarshal: %w", err)
+	}
+
+	// A query has results only once it has SUCCEEDED. The check peeks rather than observes: fetching
+	// results is not a poll of the query's status, and must not spend the countdown a consumer's
+	// GetQueryExecution loop is waiting through.
+	observed, err := p.observedQueryStatus(goCtx, q, false)
+	if err != nil {
+		return nil, err
+	}
+	if observed.State != "SUCCEEDED" {
+		return nil, athenaQueryNotSucceeded(observed)
 	}
 
 	// Look up seeded result by SQL (exact match, then wildcard "*").
@@ -291,7 +323,7 @@ func (p *AthenaPlugin) stopQueryExecution(ctx *RequestContext, req *AWSRequest) 
 	if err := json.Unmarshal(data, &q); err != nil {
 		return nil, fmt.Errorf("stopQueryExecution: unmarshal: %w", err)
 	}
-	q.State = "CANCELED"
+	q.State = athenaQueryCancelled
 	updated, err := json.Marshal(q)
 	if err != nil {
 		return nil, fmt.Errorf("athena stopQueryExecution marshal: %w", err)

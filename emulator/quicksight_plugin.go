@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -20,6 +21,9 @@ type QuickSightPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// seedMu serializes the ingestion and data-source progressions' observation counters.
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "quicksight".
@@ -150,6 +154,11 @@ type QuickSightDataSet struct {
 	// IngestionID is the UUID used to track the initial ingestion.
 	IngestionID string `json:"IngestionId"`
 
+	// IngestionCreatedTime is the epoch-seconds instant the initial ingestion started, which
+	// API_Ingestion publishes as CreatedTime (Required: Yes). A dataset recorded before #1168 has
+	// none, and reports the time of the describe, as it always did.
+	IngestionCreatedTime float64 `json:"IngestionCreatedTime,omitempty"`
+
 	// AccountID is the AWS account that owns the dataset.
 	AccountID string `json:"AccountID"`
 
@@ -188,11 +197,17 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("createDataSource: put: %w", err)
 	}
 
+	// A peek: the create answers what the first describe will, without spending its observation
+	// (#1155). API_CreateDataSource does not say which value a create returns.
+	status, _, err := p.dataSourceView(ds, false)
+	if err != nil {
+		return nil, err
+	}
 	reqID := generateQuickSightRequestID(ctx.IDs)
 	return quicksightJSONResponse(http.StatusCreated, map[string]interface{}{
 		"DataSourceId":   body.DataSourceID,
 		"Arn":            arn,
-		"CreationStatus": "CREATION_SUCCESSFUL",
+		"CreationStatus": status,
 		"RequestId":      reqID,
 	})
 }
@@ -212,8 +227,15 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 	if err := json.Unmarshal(data, &ds); err != nil {
 		return nil, fmt.Errorf("describeDataSource: unmarshal: %w", err)
 	}
+	status, errorInfo, err := p.dataSourceView(ds, true)
+	if err != nil {
+		return nil, err
+	}
+	ds.Status = status
+	out := quicksightDataSourceToWire(ds)
+	out.ErrorInfo = errorInfo
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
-		"DataSource": quicksightDataSourceToWire(ds),
+		"DataSource": out,
 		"RequestId":  generateQuickSightRequestID(ctx.IDs),
 		"Status":     http.StatusOK,
 	})
@@ -238,6 +260,8 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 		IngestionID: ingestionID,
 		AccountID:   ctx.AccountID,
 		Region:      ctx.Region,
+
+		IngestionCreatedTime: float64(p.tc.Now().UnixNano()) / 1e9,
 	}
 
 	goCtx := context.Background()
@@ -258,33 +282,63 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 	})
 }
 
+// describeIngestion answers the dataset's one ingestion: the initial ingestion CreateDataSet minted.
+//
+// It used to load only the dataset and fabricate the ingestion from the path, so any ingestion ID
+// at all was COMPLETED with exactly 1000 rows ingested (#1168). An ID that is not the dataset's is
+// now ResourceNotFoundException/404, as API_DescribeIngestion publishes. The status is COMPLETED
+// unless a seed says otherwise (POST /v1/quicksight/ingestion-status), and RowInfo is reported only
+// when a seed supplies it, since substrate ingests no rows to count.
 func (p *QuickSightPlugin) describeIngestion(ctx *RequestContext, _ *AWSRequest, _, dataSetID, ingestionID string) (*AWSResponse, error) {
 	goCtx := context.Background()
 	key := "dataset:" + ctx.AccountID + "/" + dataSetID
 	data, err := p.state.Get(goCtx, quicksightNamespace, key)
-	if err != nil || data == nil {
+	if err != nil {
+		return nil, fmt.Errorf("describeIngestion: get: %w", err)
+	}
+	if data == nil {
 		return nil, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    "DataSet " + dataSetID + " not found",
 			HTTPStatus: http.StatusNotFound,
 		}
 	}
+	var ds QuickSightDataSet
+	if err := json.Unmarshal(data, &ds); err != nil {
+		return nil, fmt.Errorf("describeIngestion: unmarshal: %w", err)
+	}
+	if ingestionID == "" || ingestionID != ds.IngestionID {
+		return nil, &AWSError{
+			Code:       "ResourceNotFoundException",
+			Message:    "Ingestion " + ingestionID + " not found for DataSet " + dataSetID,
+			HTTPStatus: http.StatusNotFound,
+		}
+	}
 
+	view, err := p.observeIngestion(ingestionID)
+	if err != nil {
+		return nil, err
+	}
 	ingArn := fmt.Sprintf("arn:aws:quicksight:%s:%s:dataset/%s/ingestion/%s",
 		ctx.Region, ctx.AccountID, dataSetID, ingestionID)
-	createdTime := float64(p.tc.Now().UnixNano()) / 1e9
-
+	createdTime := ds.IngestionCreatedTime
+	if createdTime == 0 {
+		createdTime = float64(p.tc.Now().UnixNano()) / 1e9
+	}
+	ingestion := map[string]interface{}{
+		"Arn":             ingArn,
+		"IngestionId":     ingestionID,
+		"IngestionStatus": view.status,
+		"CreatedTime":     createdTime,
+	}
+	if view.errorInfo != nil {
+		ingestion["ErrorInfo"] = view.errorInfo
+	}
+	if view.rowInfo != nil {
+		ingestion["RowInfo"] = view.rowInfo
+	}
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
-		"Ingestion": map[string]interface{}{
-			"Arn":             ingArn,
-			"IngestionId":     ingestionID,
-			"IngestionStatus": "COMPLETED",
-			"RowInfo": map[string]interface{}{
-				"RowsIngested": 1000,
-				"RowsDropped":  0,
-			},
-			"CreatedTime": createdTime,
-		},
+		"Ingestion": ingestion,
 		"RequestId": generateQuickSightRequestID(ctx.IDs),
 		"Status":    http.StatusOK,
 	})

@@ -197,7 +197,7 @@ func TestAthenaPlugin_StopQueryExecution_Canceled(t *testing.T) {
 		t.Fatalf("expected 200, got %d; body: %s", stopResp.StatusCode, athenaBody(t, stopResp))
 	}
 
-	// Verify state is CANCELED.
+	// Verify state is CANCELLED, as QueryExecutionStatus.State publishes it (#1154).
 	getResp := athenaRequest(t, ts, "GetQueryExecution", map[string]string{
 		"QueryExecutionId": started.QueryExecutionId,
 	})
@@ -211,8 +211,8 @@ func TestAthenaPlugin_StopQueryExecution_Canceled(t *testing.T) {
 	if err := json.Unmarshal(athenaBody(t, getResp), &result); err != nil {
 		t.Fatalf("decode get: %v", err)
 	}
-	if result.QueryExecution.Status.State != "CANCELED" {
-		t.Errorf("expected CANCELED, got %q", result.QueryExecution.Status.State)
+	if result.QueryExecution.Status.State != "CANCELLED" {
+		t.Errorf("expected CANCELLED, got %q", result.QueryExecution.Status.State)
 	}
 }
 
