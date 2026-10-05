@@ -76,7 +76,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 	if input.Name == "" {
-		return nil, &AWSError{Code: "MissingRequiredParameter", Message: "name is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ramMissingParameter("name is required")
 	}
 
 	goCtx := context.Background()
@@ -378,7 +378,7 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, _ *AWSRequest) (*AWSRe
 // loadShare loads a RAMResourceShare from state or returns a not-found error.
 func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare, error) {
 	if shareArn == "" {
-		return nil, &AWSError{Code: "MissingRequiredParameter", Message: "resourceShareArn is required", HTTPStatus: http.StatusBadRequest}
+		return nil, ramMissingParameter("resourceShareArn is required")
 	}
 	goCtx := context.Background()
 	data, err := p.state.Get(goCtx, ramNamespace, ramShareKey(acct, region, shareArn))

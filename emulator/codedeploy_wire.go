@@ -74,10 +74,10 @@ var codedeployGroupEchoMembers = []string{
 // codedeployLastDeploymentOut is API_LastDeploymentInfo, the shape of lastAttemptedDeployment and
 // lastSuccessfulDeployment.
 type codedeployLastDeploymentOut struct {
-	CreateTime   EpochSeconds `json:"createTime"`
-	DeploymentID string       `json:"deploymentId"`
-	EndTime      EpochSeconds `json:"endTime"`
-	Status       string       `json:"status"`
+	CreateTime   EpochSeconds  `json:"createTime"`
+	DeploymentID string        `json:"deploymentId"`
+	EndTime      *EpochSeconds `json:"endTime,omitempty"`
+	Status       string        `json:"status"`
 }
 
 // codedeployGroupToWire projects a persisted deployment group onto API_DeploymentGroupInfo.
@@ -88,7 +88,11 @@ type codedeployLastDeploymentOut struct {
 //
 // A map rather than a struct, because thirteen of the members are the caller's own JSON answered
 // back verbatim; [encoding/json] sorts the keys, so the rendering is stable for a replay.
-func codedeployGroupToWire(group CodeDeployGroup) map[string]any {
+//
+// attempted and successful are the group's last deployments as observed now, which
+// [CodeDeployPlugin.groupLastDeployments] derives; the group's stored references are not read here,
+// because they record each deployment's status at creation rather than what it reports (#1400).
+func codedeployGroupToWire(group CodeDeployGroup, attempted, successful *CodeDeployDeploymentRef) map[string]any {
 	out := map[string]any{
 		"applicationName":     group.ApplicationName,
 		"deploymentGroupId":   group.DeploymentGroupID,
@@ -115,11 +119,11 @@ func codedeployGroupToWire(group CodeDeployGroup) map[string]any {
 			out[member] = raw
 		}
 	}
-	if ref := group.LastAttemptedDeployment; ref != nil {
-		out["lastAttemptedDeployment"] = codedeployLastDeploymentToWire(*ref)
+	if attempted != nil {
+		out["lastAttemptedDeployment"] = codedeployLastDeploymentToWire(*attempted)
 	}
-	if ref := group.LastSuccessfulDeployment; ref != nil {
-		out["lastSuccessfulDeployment"] = codedeployLastDeploymentToWire(*ref)
+	if successful != nil {
+		out["lastSuccessfulDeployment"] = codedeployLastDeploymentToWire(*successful)
 	}
 	if len(group.TargetRevision) > 0 {
 		out["targetRevision"] = group.TargetRevision
@@ -128,13 +132,21 @@ func codedeployGroupToWire(group CodeDeployGroup) map[string]any {
 }
 
 // codedeployLastDeploymentToWire projects a deployment reference onto API_LastDeploymentInfo.
+//
+// endTime is "when the most recent deployment to the deployment group was complete", so a reference
+// whose end time is zero — a deployment the group observes as not yet terminal — answers none, as
+// GetDeployment's completeTime is withheld for the same deployment.
 func codedeployLastDeploymentToWire(ref CodeDeployDeploymentRef) codedeployLastDeploymentOut {
-	return codedeployLastDeploymentOut{
+	out := codedeployLastDeploymentOut{
 		CreateTime:   EpochSeconds(ref.CreateTime),
 		DeploymentID: ref.DeploymentID,
-		EndTime:      EpochSeconds(ref.EndTime),
 		Status:       ref.Status,
 	}
+	if !ref.EndTime.IsZero() {
+		end := EpochSeconds(ref.EndTime)
+		out.EndTime = &end
+	}
+	return out
 }
 
 // codedeployDeploymentEchoMembers are the members CreateDeployment takes and API_DeploymentInfo

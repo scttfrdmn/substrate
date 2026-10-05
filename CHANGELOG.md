@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A CloudFormation stack-tag propagation failure is reported to the caller** (#1138).
+  `reconcileStackTags` sent every failure to `logger.Warn` alone, so the stack and the resource
+  reported success while the resource silently lacked the stack's tags. Each failure is now recorded
+  on the new `DeployResult.TagPropagationFailures` (logical ID, physical ID, type and error).
+  - It is substrate's own in-process observation, since real CloudFormation writes tags in the
+    resource's own call and cannot be in that state.
+  - It is deliberately not `DeployedResource.Error`, so the resource and the stack keep the status
+    they earned. A service that models no tags is still skipped silently.
+- **A hosted zone's `Ref` and `Fn::GetAtt Id` answer the bare zone ID, and a `RecordSetGroup` deploys
+  into its zone** (#1256). The zone's physical ID and ARN were `CreateHostedZone`'s `/hostedzone/Z…`
+  path form, so a `RecordSet` naming its zone by `Ref` was refused, and a stack delete never reached
+  the zone.
+  - `Ref` and `Fn::GetAtt Id` now answer the ID the page publishes, and the ARN is
+    `arn:aws:route53:::hostedzone/<id>`.
+  - A `RecordSetGroup` passes its group-level `HostedZoneId` to its record sets, and a refused record
+    set fails the group. Both were silently lost before.
+- **QuickSight and RAM refuse with the spellings their pages publish** (#1169). QuickSight
+  `CreateDataSource`/`CreateDataSet` answer `InvalidParameterValueException`/400, not
+  `InvalidParameterValue`. RAM answers an absent `name` or `resourceShareArn` with `ValidationError`/400,
+  not the unpublished `MissingRequiredParameter`.
+- **SageMaker training jobs answer `SecondaryStatus`, and the two lists page and filter** (#1400).
+  - `DescribeTrainingJob` and the `ListTrainingJobs` summaries answer the Required `SecondaryStatus`,
+    consistent with the observed `TrainingJobStatus`.
+  - `ListTrainingJobs` and `ListApps` page, sort and filter by their published members, and refuse
+    out-of-range values and unissued tokens with `ValidationError`. `ListApps` defaults to 10 per
+    page, as published.
+  - Index and record read errors are returned instead of an empty list or a not-found.
+- **A CodeDeploy group's last deployments reflect the seeded deployment status** (#1400). A group keeps
+  its deployment history, and `lastAttemptedDeployment`/`lastSuccessfulDeployment` read each
+  deployment's observed status without spending an observation. `endTime` is absent until the
+  deployment finishes.
+- **QuickSight `DescribeDataSource` and SageMaker's describes return a store fault as an error** (#1400),
+  where they answered it as not found.
+
 - **ECR answers `imagePushedAt` and `expiresAt` as epoch seconds** (#1403). `DescribeImages`'
   `imagePushedAt` and `GetAuthorizationToken`'s `expiresAt` rendered as RFC3339 strings, where both
   pages type them as `Timestamp`, an epoch-seconds number under awsJson1_1, so a typed SDK refused

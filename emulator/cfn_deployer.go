@@ -1254,7 +1254,7 @@ func (d *StackDeployer) DeployWithOptions(
 	if prevErr != nil {
 		prev = nil
 	}
-	d.reconcileStackTags(resources, prev, opts.Tags)
+	tagFailures := d.reconcileStackTags(resources, prev, opts.Tags)
 
 	// Resolve outputs, and with them the export names this stack publishes.
 	outputs := make(map[string]string)
@@ -1303,19 +1303,21 @@ func (d *StackDeployer) DeployWithOptions(
 			totalCost:    totalCost,
 			start:        start,
 			onFailure:    opts.resolve(),
+			tagFailures:  tagFailures,
 		})
 	}
 
 	duration := d.tc.Now().Sub(start)
 
 	result := &DeployResult{
-		StackName: stackName,
-		Resources: resources,
-		StreamID:  streamID,
-		TotalCost: totalCost,
-		Duration:  duration,
-		Outputs:   outputs,
-		Status:    cfnStackCreateComplete,
+		StackName:              stackName,
+		Resources:              resources,
+		StreamID:               streamID,
+		TotalCost:              totalCost,
+		Duration:               duration,
+		Outputs:                outputs,
+		Status:                 cfnStackCreateComplete,
+		TagPropagationFailures: tagFailures,
 	}
 
 	// Persist stack state if state manager is available.
@@ -2755,14 +2757,19 @@ func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnConte
 // record shows this stack deployed that logical ID from an identical declaration, so it is the
 // same resource.
 //
-// Failures are logged, not returned, for [StackDeployer.warnStampFailed]'s reason: the resource
-// deployed, and a stack does not fail because a tag could not be written onto it.
+// A failure does not fail the resource or the stack, for [StackDeployer.warnStampFailed]'s
+// reason: the resource deployed, and a stack does not fail because a tag could not be written
+// onto it. It is logged, and since #1138 it is also returned, so the caller records it on
+// [DeployResult.TagPropagationFailures]; before that the log line was its only report. A
+// resource no arm models tags for is skipped silently, as before: that is a (false, nil)
+// return, not a failure.
 func (d *StackDeployer) reconcileStackTags(
 	resources []DeployedResource, prev *CFNStackState, next map[string]string,
-) {
+) []CFNTagPropagationFailure {
 	if d.state == nil || (len(prev.stackTags()) == 0 && len(next) == 0) {
-		return
+		return nil
 	}
+	var failures []CFNTagPropagationFailure
 	reqCtx := &RequestContext{AccountID: d.identity.accountID, Region: d.identity.region}
 	previous := prev.stackTags()
 
@@ -2781,8 +2788,15 @@ func (d *StackDeployer) reconcileStackTags(
 		if _, err := cfnPropagateStackTags(d.state, reqCtx, dr, previous, next); err != nil {
 			d.logger.Warn("cfn: could not propagate the stack's tags",
 				"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
+			failures = append(failures, CFNTagPropagationFailure{
+				LogicalID:  dr.LogicalID,
+				PhysicalID: dr.PhysicalID,
+				Type:       dr.Type,
+				Error:      err.Error(),
+			})
 		}
 	}
+	return failures
 }
 
 // warnStampFailed records a stamp that could not be written.
@@ -4100,11 +4114,23 @@ func (d *StackDeployer) deployRoute53HostedZone(
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	} else if resp != nil {
-		dr.ARN = extractXMLField(resp.Body, "Id")
-		dr.PhysicalID = dr.ARN
+		// CreateHostedZone answers its Id member in the API's path form, /hostedzone/Z23ABC4XYZL05B.
+		// The CloudFormation page publishes Ref (and Fn::GetAtt Id) as "the hosted zone ID, such as
+		// Z23ABC4XYZL05B" — the bare ID — so the prefix comes off here. Before #1256 the path form was
+		// both the physical ID and the ARN, so a RecordSet naming its zone by Ref built
+		// /2013-04-01/hostedzone//hostedzone/Z…/rrset and was refused, and the stack delete sent the
+		// same doubled path. The ARN is the form the same page quotes for aws:SourceArn,
+		// arn:aws:route53:::hostedzone/<id>.
+		zoneID := strings.TrimPrefix(extractXMLField(resp.Body, "Id"), route53HostedZonePathPrefix)
+		dr.PhysicalID = zoneID
+		dr.ARN = "arn:aws:route53:::hostedzone/" + zoneID
+		dr.Metadata = map[string]interface{}{"Id": zoneID}
 	}
 	return dr, cost, nil
 }
+
+// route53HostedZonePathPrefix is the prefix Route 53's API puts on a hosted zone's Id member.
+const route53HostedZonePathPrefix = "/hostedzone/"
 
 // deployRoute53RecordSet creates a Route 53 record set for the given CFN resource.
 func (d *StackDeployer) deployRoute53RecordSet(
@@ -4139,6 +4165,31 @@ func (d *StackDeployer) deployRoute53RecordSet(
 	return dr, cost, nil
 }
 
+// cfnRecordSetInGroup returns one of a RecordSetGroup's record sets with the group's zone filled in.
+//
+// AWS::Route53::RecordSetGroup declares HostedZoneId and HostedZoneName on the group, for every
+// record set in it; a RecordSet element inside the group does not repeat it. Until #1256 each
+// element was deployed with its own properties alone, so it named no zone at all and built
+// /2013-04-01/hostedzone//rrset. A zone the element does name is kept. The template's map is not
+// modified.
+func cfnRecordSetInGroup(group, rs map[string]interface{}) map[string]interface{} {
+	_, hasID := rs["HostedZoneId"]
+	_, hasName := rs["HostedZoneName"]
+	if hasID || hasName {
+		return rs
+	}
+	out := make(map[string]interface{}, len(rs)+2)
+	for k, v := range rs {
+		out[k] = v
+	}
+	for _, k := range []string{"HostedZoneId", "HostedZoneName"} {
+		if v, ok := group[k]; ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
 // deployRoute53RecordSetGroup creates multiple Route 53 record sets from a CFN
 // RecordSetGroup resource by iterating over its RecordSets list.
 func (d *StackDeployer) deployRoute53RecordSetGroup(
@@ -4156,11 +4207,23 @@ func (d *StackDeployer) deployRoute53RecordSetGroup(
 				continue
 			}
 			childID := fmt.Sprintf("%s-RecordSet%d", logicalID, i)
-			_, cost, err := d.deployRoute53RecordSet(ctx, childID, rsProps, streamID, cctx)
+			child, cost, err := d.deployRoute53RecordSet(ctx, childID, cfnRecordSetInGroup(props, rsProps), streamID, cctx)
 			if err != nil {
 				return DeployedResource{}, totalCost, fmt.Errorf("deployRoute53RecordSetGroup item %d: %w", i, err)
 			}
 			totalCost += cost
+			// A refused record set reports through its DeployedResource, never a Go error, and
+			// until #1256 that resource was discarded here — so a group whose every record set
+			// was refused reported a clean resource. The group is one CloudFormation resource,
+			// so its first refused record set fails it, and the rest are not attempted.
+			if child.Error != "" {
+				return DeployedResource{
+					LogicalID:  logicalID,
+					Type:       "AWS::Route53::RecordSetGroup",
+					PhysicalID: logicalID,
+					Error:      fmt.Sprintf("record set %d: %s", i, child.Error),
+				}, totalCost, nil
+			}
 		}
 	}
 	// The physical ID is the group's logical name, which is also what Ref returns for this type
