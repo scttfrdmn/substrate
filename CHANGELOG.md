@@ -24,6 +24,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **ECR enforces tag immutability and lists untagged images** (#1379). `imageTagMutability` was
+  stored and never read, and every listing was built from the tag index.
+  - On an `IMMUTABLE` repository, a `PutImage` whose tag already names a different image is
+    `ImageTagAlreadyExistsException`/400. `IMMUTABLE_WITH_EXCLUSION` reads as `IMMUTABLE`, since no
+    exclusion filter is modeled.
+  - `ListImages` and `DescribeImages` enumerate image records, so an untagged image is listed, and
+    both honor `filter.tagStatus` (`TAGGED`/`UNTAGGED`/`ANY`, default `ANY`) and `filter.imageStatus`.
+- **Lambda's `AddPermission` answers `Statement` as a string** (#1382), as `API_AddPermission`
+  publishes. `GetPolicy`'s `Policy` already did, and both are now asserted on the raw bytes.
+- **A new IAM role's propagation window is seedable** (part of #1274). `POST
+  /v1/lambda/role-propagation` (`roleArn` or none for `"*"`, `refusedAttempts`), on the shared
+  progression helper, refuses that many `CreateFunction` and `UpdateFunctionConfiguration` (new
+  `Role`) attempts with `InvalidParameterValueException`/400 and the observed sentence "The role
+  defined for the function cannot be assumed by Lambda." The window counts from the seed. Unseeded,
+  nothing changes, and a replay reproduces the refusals.
+- **MSK stores and answers `loggingInfo`, `openMonitoring`, `rebalancing` and `connectivityInfo`**
+  (#1386). Both create pages accept the four and both describe shapes publish them, but the create
+  decoded none of them. They are stored as sent and answered on v1 and v2, with `connectivityInfo`
+  inside `brokerNodeGroupInfo`, as both pages place it. Their Required members and enums are
+  enforced, each `BadRequestException` naming the member.
+- **AWS Backup refuses with the codes and status its pages publish** (#1390, #1173). A missing vault,
+  plan or selection answered 404, and a missing name answered `InvalidRequestException`. They now
+  answer `ResourceNotFoundException` and `MissingParameterValueException`, both at 400, as every
+  routed page publishes.
+- **AWS Backup's `CreatorRequestId` makes a create idempotent** (#1173). All three creates validate it
+  against its published pattern, record it, and answer the existing resource for a retry carrying a
+  recorded value, as `API_CreateBackupPlan` states.
+- **`UpdateBackupPlan` answers its published members** (#1177). It answered an `UpdatedAt` no Backup
+  page publishes and dropped `CreationDate`. It now answers `BackupPlanArn`, `BackupPlanId`, the plan's
+  own `CreationDate` in epoch seconds, and the new `VersionId`.
+- **Transfer Family's `UpdateUser` applies every member its page publishes, and `CreateServer` holds
+  `Tags` to 1–50** (#1391). `UpdateUser` read only `HomeDirectory` and `Role`. It now reads all six
+  with patch semantics, held to `CreateUser`'s constraints through one shared check.
+  `HomeDirectoryMappings` is held to 1–50,000 entries on both operations.
+
 - **CloudTrail's `GetTrailStatus` reports the trail's logging state, and a new trail is not logging**
   (#1157). `GetTrailStatus` answered `IsLogging: true` hardcoded, and `CreateTrail` stored a trail
   already logging, so a `StopLogging` changed state no response could show. A trail is now created

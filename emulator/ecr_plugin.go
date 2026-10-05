@@ -419,6 +419,19 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
 	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
 
+	// A tag that names another image would move, which a repository configured for tag immutability
+	// refuses with the published ImageTagAlreadyExistsException (#1379). A tag already naming this
+	// image moves nothing, so it falls through to ImageAlreadyExistsException below.
+	if current, tagged := tagsMap[body.ImageTag]; body.ImageTag != "" && tagged && current != digest {
+		mutability, err := ecrRepositoryMutability(repoData)
+		if err != nil {
+			return nil, fmt.Errorf("ecr putImage: %w", err)
+		}
+		if ecrTagsImmutable(mutability) {
+			return nil, ecrImageTagAlreadyExists(body.RepositoryName, body.ImageTag)
+		}
+	}
+
 	// The same manifest is the same image. ImageAlreadyExistsException is published for "the
 	// specified image has already been pushed, and there were no changes to the manifest or image
 	// tag after the last push": a repeat with no tag, or with a tag that already names this image.
@@ -582,14 +595,18 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			ImageDigest string `json:"imageDigest"`
 			ImageTag    string `json:"imageTag"`
 		} `json:"imageIds"`
-		MaxResults int    `json:"maxResults"`
-		NextToken  string `json:"nextToken"`
+		MaxResults int            `json:"maxResults"`
+		NextToken  string         `json:"nextToken"`
+		Filter     ecrImageFilter `json:"filter"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 	if body.RepositoryName == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "repositoryName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	if awsErr := body.Filter.validate(); awsErr != nil {
+		return nil, awsErr
 	}
 
 	// API_DescribeImages publishes, on both pagination members, "This option cannot be used when
@@ -644,19 +661,22 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			}
 		}
 	} else {
-		// All images: one entry per digest, however many tags point at it, because ImageDetail
-		// publishes imageTags as an array. Ranging over the tag map puts them in Go's randomized
-		// map order, so two identical calls could answer the same images in a different order and
-		// no offset cursor over them would mean anything; sorting by digest is the stable basis
-		// pageByOffsetToken requires of its caller.
-		seen := make(map[string]bool)
-		for _, d := range tagsMap {
-			if !seen[d] {
-				seen[d] = true
-				requestedDigests = append(requestedDigests, d)
+		// All images: one entry per image record, however many tags point at it, because
+		// ImageDetail publishes imageTags as an array, and including an image no tag names (#1379),
+		// which the tag index alone never yielded. The filter narrows this listing form; the
+		// enumerated form answers the images it names, which the page sets no filter rule against.
+		all, err := p.repositoryImageDigests(goCtx, ctx, body.RepositoryName)
+		if err != nil {
+			return nil, err
+		}
+		if body.Filter.admitsActive() {
+			byDigest := ecrTagsByDigest(tagsMap)
+			for _, d := range all {
+				if body.Filter.admitsTags(len(byDigest[d]) > 0) {
+					requestedDigests = append(requestedDigests, d)
+				}
 			}
 		}
-		sort.Strings(requestedDigests)
 	}
 
 	type imageDetail struct {
@@ -668,14 +688,7 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		ImagePushedAt    time.Time `json:"imagePushedAt"`
 	}
 
-	// Build reverse: digest → tags.
-	digestToTags := make(map[string][]string)
-	for tag, digest := range tagsMap {
-		digestToTags[digest] = append(digestToTags[digest], tag)
-	}
-	for d := range digestToTags {
-		sort.Strings(digestToTags[d])
-	}
+	digestToTags := ecrTagsByDigest(tagsMap)
 
 	var details []imageDetail
 	for _, digest := range requestedDigests {
@@ -837,9 +850,10 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 
 func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		RepositoryName string `json:"repositoryName"`
-		MaxResults     int    `json:"maxResults"`
-		NextToken      string `json:"nextToken"`
+		RepositoryName string         `json:"repositoryName"`
+		MaxResults     int            `json:"maxResults"`
+		NextToken      string         `json:"nextToken"`
+		Filter         ecrImageFilter `json:"filter"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
@@ -855,6 +869,9 @@ func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if err != nil {
 		return nil, err
 	}
+	if awsErr := body.Filter.validate(); awsErr != nil {
+		return nil, awsErr
+	}
 
 	goCtx := context.Background()
 
@@ -865,7 +882,11 @@ func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 
 	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
-	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
+	tagsByDigest := ecrTagsByDigest(p.loadImageTagsMap(goCtx, tagsKey))
+	digests, err := p.repositoryImageDigests(goCtx, ctx, body.RepositoryName)
+	if err != nil {
+		return nil, err
+	}
 
 	type imageID struct {
 		ImageDigest string `json:"imageDigest"`
@@ -881,16 +902,27 @@ func (p *ECRPlugin) listImages(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	// prose says a TAGGED filter lists "all of the tags in your repository", so the published
 	// listing is over image IDs rather than over images. Sorting by digest then tag is also the
 	// stable order pageByOffsetToken requires of its caller.
-	ids := make([]imageID, 0, len(tagsMap))
-	for tag, digest := range tagsMap {
-		ids = append(ids, imageID{ImageDigest: digest, ImageTag: tag})
-	}
-	sort.Slice(ids, func(i, j int) bool {
-		if ids[i].ImageDigest != ids[j].ImageDigest {
-			return ids[i].ImageDigest < ids[j].ImageDigest
+	//
+	// An image no tag names is one entry with its digest alone (#1379), which is what the page's
+	// UNTAGGED-then-BatchDeleteImage workflow pipes onward. The listing is over image records, so an
+	// untagged image is no longer invisible; the digests come sorted and each digest's tags sorted,
+	// keeping the digest-then-tag order.
+	ids := make([]imageID, 0, len(digests))
+	if body.Filter.admitsActive() {
+		for _, digest := range digests {
+			tags := tagsByDigest[digest]
+			if !body.Filter.admitsTags(len(tags) > 0) {
+				continue
+			}
+			if len(tags) == 0 {
+				ids = append(ids, imageID{ImageDigest: digest})
+				continue
+			}
+			for _, tag := range tags {
+				ids = append(ids, imageID{ImageDigest: digest, ImageTag: tag})
+			}
 		}
-		return ids[i].ImageTag < ids[j].ImageTag
-	})
+	}
 
 	type response struct {
 		ImageIDs  []imageID `json:"imageIds"`

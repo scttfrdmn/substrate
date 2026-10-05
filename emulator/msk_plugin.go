@@ -152,10 +152,11 @@ func parseKafkaOperation(method, path string) (op, clusterARN string) {
 // list (accepted: CloudFormation sends one, and the page's two-or-three-subnet rule is prose, not a
 // constraint the model states).
 type mskBrokerNodeGroupInfoIn struct {
-	InstanceType   string         `json:"InstanceType"`
-	ClientSubnets  []string       `json:"ClientSubnets"`
-	SecurityGroups []string       `json:"SecurityGroups"`
-	StorageInfo    MSKStorageInfo `json:"StorageInfo"`
+	InstanceType     string               `json:"InstanceType"`
+	ClientSubnets    []string             `json:"ClientSubnets"`
+	SecurityGroups   []string             `json:"SecurityGroups"`
+	StorageInfo      MSKStorageInfo       `json:"StorageInfo"`
+	ConnectivityInfo *MSKConnectivityInfo `json:"ConnectivityInfo"`
 }
 
 // mskProvisionedIn holds the members CreateCluster takes at its top level and CreateClusterV2 takes
@@ -170,6 +171,9 @@ type mskProvisionedIn struct {
 	EnhancedMonitoring   string                    `json:"EnhancedMonitoring"`
 	StorageMode          string                    `json:"StorageMode"`
 	ConfigurationInfo    *MSKConfigurationInfo     `json:"ConfigurationInfo"`
+	LoggingInfo          *MSKLoggingInfo           `json:"LoggingInfo"`
+	OpenMonitoring       *MSKOpenMonitoring        `json:"OpenMonitoring"`
+	Rebalancing          *MSKRebalancing           `json:"Rebalancing"`
 }
 
 // mskCheckClusterName enforces clusterName, Required: True with MinLength 1 and MaxLength 64 on both
@@ -222,6 +226,9 @@ func (in *mskProvisionedIn) check(required bool) error {
 		if v := b.StorageInfo.EbsStorageInfo.VolumeSize; v != 0 && (v < 1 || v > 16384) {
 			return mskBadRequest("volumeSize", "storageInfo.ebsStorageInfo.volumeSize must be 1 to 16384")
 		}
+		if err := mskCheckConnectivity(b.ConnectivityInfo); err != nil {
+			return err
+		}
 	}
 	if in.EncryptionInfo != nil {
 		if at := in.EncryptionInfo.EncryptionAtRest; at != nil && at.DataVolumeKMSKeyID == "" {
@@ -243,6 +250,69 @@ func (in *mskProvisionedIn) check(required bool) error {
 			return mskBadRequest("revision", "configurationInfo.revision must be at least 1")
 		}
 	}
+	return mskCheckLoggingAndMonitoring(in.LoggingInfo, in.OpenMonitoring, in.Rebalancing)
+}
+
+// mskCheckLoggingAndMonitoring enforces what both create pages state about loggingInfo,
+// openMonitoring and rebalancing (#1386): brokerLogs is Required when loggingInfo is sent, each
+// delivery target's enabled is Required when the target is sent, prometheus is Required when
+// openMonitoring is sent, each exporter's enabledInBroker is Required when the exporter is sent, and
+// rebalancing.status is one of its published values, PAUSED or ACTIVE. A destination's logGroup,
+// deliveryStream or bucket is not checked: the pages mark each optional, and what an enabled target
+// without one does is AWS's behavior, not something the model states.
+func mskCheckLoggingAndMonitoring(l *MSKLoggingInfo, o *MSKOpenMonitoring, r *MSKRebalancing) error {
+	if l != nil {
+		if l.BrokerLogs == nil {
+			return mskBadRequest("brokerLogs", "loggingInfo.brokerLogs is required")
+		}
+		for _, d := range []*MSKLogDestinations{l.BrokerLogs, l.AuthorizerLogs} {
+			if err := mskCheckLogDestinations(d); err != nil {
+				return err
+			}
+		}
+	}
+	if o != nil {
+		if o.Prometheus == nil {
+			return mskBadRequest("prometheus", "openMonitoring.prometheus is required")
+		}
+		for _, e := range []*MSKExporter{o.Prometheus.JmxExporter, o.Prometheus.NodeExporter} {
+			if e != nil && e.EnabledInBroker == nil {
+				return mskBadRequest("enabledInBroker", "openMonitoring.prometheus exporter enabledInBroker is required")
+			}
+		}
+	}
+	if r != nil && r.Status != "" && r.Status != "PAUSED" && r.Status != "ACTIVE" {
+		return mskBadRequest("status", "rebalancing.status must be PAUSED or ACTIVE")
+	}
+	return nil
+}
+
+// mskCheckLogDestinations enforces enabled, Required on each delivery target a log set names.
+func mskCheckLogDestinations(d *MSKLogDestinations) error {
+	if d == nil {
+		return nil
+	}
+	if (d.CloudWatchLogs != nil && d.CloudWatchLogs.Enabled == nil) ||
+		(d.Firehose != nil && d.Firehose.Enabled == nil) ||
+		(d.S3 != nil && d.S3.Enabled == nil) {
+		return mskBadRequest("enabled", "a loggingInfo delivery target's enabled is required")
+	}
+	return nil
+}
+
+// mskCheckConnectivity enforces the values connectivityInfo's members publish (#1386): networkType
+// is IPV4 or DUAL, and publicAccess.type is one of the two values its description names, DISABLED
+// and SERVICE_PROVIDED_EIPS. Every member is optional, so an absent one is accepted.
+func mskCheckConnectivity(c *MSKConnectivityInfo) error {
+	if c == nil {
+		return nil
+	}
+	if c.NetworkType != "" && c.NetworkType != "IPV4" && c.NetworkType != "DUAL" {
+		return mskBadRequest("networkType", "connectivityInfo.networkType must be IPV4 or DUAL")
+	}
+	if p := c.PublicAccess; p != nil && p.Type != "" && p.Type != "DISABLED" && p.Type != "SERVICE_PROVIDED_EIPS" {
+		return mskBadRequest("type", "connectivityInfo.publicAccess.type must be DISABLED or SERVICE_PROVIDED_EIPS")
+	}
 	return nil
 }
 
@@ -256,12 +326,16 @@ func (in *mskProvisionedIn) apply(c *MSKCluster) {
 	}
 	if b := in.BrokerNodeGroupInfo; b != nil {
 		c.BrokerNodeGroupInfo = MSKBrokerNodeGroupInfo{
-			InstanceType:   b.InstanceType,
-			ClientSubnets:  b.ClientSubnets,
-			SecurityGroups: b.SecurityGroups,
-			StorageInfo:    b.StorageInfo,
+			InstanceType:     b.InstanceType,
+			ClientSubnets:    b.ClientSubnets,
+			SecurityGroups:   b.SecurityGroups,
+			StorageInfo:      b.StorageInfo,
+			ConnectivityInfo: b.ConnectivityInfo,
 		}
 	}
+	c.LoggingInfo = in.LoggingInfo
+	c.OpenMonitoring = in.OpenMonitoring
+	c.Rebalancing = in.Rebalancing
 	c.EncryptionInfo = in.EncryptionInfo
 	c.ClientAuthentication = in.ClientAuthentication
 	c.EnhancedMonitoring = in.EnhancedMonitoring
