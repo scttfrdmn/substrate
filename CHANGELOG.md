@@ -24,6 +24,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **CloudTrail's `GetTrailStatus` reports the trail's logging state, and a new trail is not logging**
+  (#1157). `GetTrailStatus` answered `IsLogging: true` hardcoded, and `CreateTrail` stored a trail
+  already logging, so a `StopLogging` changed state no response could show. A trail is now created
+  not logging, as `API_StartLogging` implies, and `GetTrailStatus` answers the stored flag.
+  - `StartLoggingTime` and `StopLoggingTime` are recorded when the trail starts or stops and answered
+    as epoch seconds, each only once it exists. A repeated start or stop moves neither.
+  - The fabricated `LatestDeliveryTime` (the request's own time) is no longer answered, and neither
+    are the six members the page marks "no longer in use".
+- **Three more ELBv2 describe filters refuse a value naming nothing** (#1375). `DescribeTargetGroups`'
+  `Names` and `LoadBalancerArn`, `DescribeListeners`' `LoadBalancerArn` and `DescribeRules`'
+  `ListenerArn` matched nothing for a value naming nothing. Each now answers its page's code at 400
+  with the page's sentence: `TargetGroupNotFound`, `LoadBalancerNotFound` and `ListenerNotFound`.
+- **Secrets Manager versions carry staging labels, `UpdateSecret` takes its token, and string and
+  binary values differ** (#1376). `CreateSecret` on an existing name answered
+  `ResourceExistsException` at 409, where `API_CreateSecret` publishes 400.
+  - A secret holds every version it was given. `AWSCURRENT` moves to a new version and `AWSPREVIOUS`
+    to the one it left, and a version left with no label is deprecated.
+  - `ListSecretVersionIds` lists every version with its labels (deprecated ones only with
+    `IncludeDeprecated`), and pages by `MaxResults` (1–100) and `NextToken`.
+  - `UpdateSecret` takes `ClientRequestToken` as the new version's `VersionId`. It refuses a token
+    already in use with `ResourceExistsException` whatever the value, as its page states; the issue
+    had asked for a same-value resubmission to be idempotent. A metadata-only update answers no
+    `VersionId`.
+  - A version records whether it holds a `SecretString` or a `SecretBinary`, and `GetSecretValue`
+    answers `SecretBinary` for a binary version.
+- **The Resource Groups Tagging API reaches API Gateway v2 APIs, and API Gateway v2 routes its own
+  tagging operations** (#1378). `TagResource`, `GetTags` and `UntagResource` were unrouted, and the
+  tagging API had no `/apis/{id}` arm. All three now route on `/v2/tags/{resource-arn}`, and the
+  tagging API tags, untags and reports v2 APIs, so a tag written either way is read back both ways.
+  The account comes from the request context (#1307's rule), and the ever-tagged history is a side-car
+  key (as for log groups, #1282). The operation catalog goes from 1,036 to 1,039.
+
 - **Seven services' resources report a seeded lifecycle instead of a terminal state at birth** (#1196).
   Each was born in its terminal state, so no poll loop could observe a transition and the failure
   states were unreachable. Each now runs on the shared progression helper, with a recorded and

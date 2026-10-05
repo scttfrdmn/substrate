@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1036 operations**. This
+Substrate ships **67 built-in service plugins** routing **1039 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -22,7 +22,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 1 | Account Management | `account` | REST/JSON | 4 |
 | 2 | ACM | `acm` | JSON | 8 |
 | 3 | API Gateway (REST) | `apigateway` | REST/JSON | 41 |
-| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 28 |
+| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 31 |
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
 | 7 | Backup | `backup` | REST/JSON | 12 |
@@ -11286,18 +11286,18 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | DescribeLoadBalancerAttributes | |
 | ModifyLoadBalancerAttributes | |
 | CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
-| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. An ARN in `TargetGroupArns` naming nothing is refused `TargetGroupNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
+| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. An ARN in `TargetGroupArns` or a name in `Names` naming nothing is refused `TargetGroupNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteTargetGroup | |
 | ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | RegisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DeregisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DescribeTargetHealth | An ARN naming nothing is refused `TargetGroupNotFound`/400 rather than answered an empty list ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
-| DescribeListeners | Same listener shape as CreateListener. An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
+| DescribeListeners | Same listener shape as CreateListener. An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteListener | An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | ModifyListener | Answers the modified listener. An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
-| DescribeRules | Same rule shape as CreateRule. An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370)) |
+| DescribeRules | Same rule shape as CreateRule. An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400, and a `ListenerArn` naming nothing `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteRule | An ARN naming nothing is refused `RuleNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is refused `RuleNotFound`/400, and every pair is resolved before any is written, so a refused call reprices nothing ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | AddTags | Up to 50 user tags per resource |
@@ -11327,8 +11327,9 @@ that names nothing ([#1370](https://github.com/scttfrdmn/substrate/issues/1370))
 | Code | Operations | Message |
 |------|------------|---------|
 | `TargetGroupNotFound` | `ModifyTargetGroup`, `RegisterTargets`, `DeregisterTargets`, `DescribeTargetHealth`, `DescribeTargetGroups` | The specified target group does not exist. |
-| `ListenerNotFound` | `ModifyListener`, `DeleteListener`, `DescribeListeners` | The specified listener does not exist. |
+| `ListenerNotFound` | `ModifyListener`, `DeleteListener`, `DescribeListeners`, `DescribeRules` | The specified listener does not exist. |
 | `RuleNotFound` | `SetRulePriorities`, `DeleteRule`, `DescribeRules` | The specified rule does not exist. |
+| `LoadBalancerNotFound` | `DescribeTargetGroups`, `DescribeListeners` | The specified load balancer does not exist. |
 
 Some operations are deliberately left alone. `API_DeleteTargetGroup` publishes no not-found code;
 its Errors list is `ResourceInUse` alone. `API_DeleteLoadBalancer` does list
@@ -11341,10 +11342,19 @@ For the three list-filtered describes, one ARN naming nothing refuses the **whol
 ARNs that do name records. None of the three pages says whether a partial match answers the records
 it found; each publishes the code with a sentence about the request ("The specified target group does
 not exist."), so the request is what is refused. An ARN counts as held if the caller's account and
-Region hold a record of that kind under it, whatever the describe's other filters. Two neighbouring
-filters are unchanged and still match nothing silently: a `Names` entry naming no target group, and a
-`LoadBalancerArn` or `ListenerArn` naming nothing, though `DescribeTargetGroups` and
-`DescribeListeners` publish `LoadBalancerNotFound` and `DescribeRules` publishes `ListenerNotFound`.
+Region hold a record of that kind under it, whatever the describe's other filters.
+
+The describes' other filters follow the same rule ([#1375](https://github.com/scttfrdmn/substrate/issues/1375)):
+
+- A `Names` entry naming no target group refuses `DescribeTargetGroups` with `TargetGroupNotFound`,
+  even beside a name that does.
+- A `LoadBalancerArn` naming no load balancer refuses `DescribeTargetGroups` and `DescribeListeners`
+  with `LoadBalancerNotFound`.
+- A `ListenerArn` naming no listener refuses `DescribeRules` with `ListenerNotFound`.
+
+`DescribeTargetGroups` still does not *narrow* by a `LoadBalancerArn` that does name a load balancer:
+a target group's record holds no association to one (the listener holds it in the other direction),
+so the filter refuses a value naming nothing and otherwise answers every target group.
 
 ### The response envelope, and which plugins still lack it
 
@@ -12013,9 +12023,9 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans thirty-four resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans thirty-five resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
-APIs, Step Functions state machines and activities, ECR repositories, ECS
+APIs, API Gateway v2 HTTP and WebSocket APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
 clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
@@ -12023,12 +12033,13 @@ distributions, CloudWatch Logs log groups, KMS keys, SNS topics, Secrets Manager
 secrets, Systems Manager parameters, and ELBv2 load balancers, target groups,
 listeners and listener rules.
 
-A log group is the newest (#1282). It is the one type whose previously-tagged state is
-a side-car key rather than an `ever_tagged` member of its record, for the reason
+An API Gateway HTTP or WebSocket API (`/apis/{id}`) is the newest (#1378), reached by the
+same `apigateway` type filter as a REST API. A log group (#1282) and a v2 API are the two
+types whose previously-tagged state is a side-car key rather than an `ever_tagged` member
+of their record, for the reason
 [Tagging a log group takes the unsuffixed ARN](#tagging-a-log-group-takes-the-unsuffixed-arn)
-gives. An API Gateway HTTP or WebSocket API (`/apis/{id}`) is **not** reached by either
-half: the resolver has no v2 arm and the scan no v2 scanner, so its tags are reachable
-only through API Gateway v2's own tagging operations.
+gives. A v2 API's tags are also readable through API Gateway v2's own `GetTags`; see
+[An API's tags](#an-apis-tags).
 
 ELBv2's four are the newest and the odd ones out, and the section on the ELB side
 ([An ELBv2 resource is reachable through the tagging API](#an-elbv2-resource-is-reachable-through-the-tagging-api))
@@ -12399,7 +12410,8 @@ the API through `POST /restapis`, so the two keys cannot disagree again unnotice
 
 The other formats with an empty account segment do not repeat it: an S3 bucket ARN
 (`arn:aws:s3:::{name}`) has none, but neither does its key, since a bucket name is
-global; and API Gateway v2's `/apis/{id}` has no arm at all (see above). ECS's own `TagResource` had the same defect and now shares one key
+global; and API Gateway v2's `/apis/{id}` resolves by the same rule as `/restapis/{id}`,
+through the parser API Gateway v2's own tagging operations use (#1378). ECS's own `TagResource` had the same defect and now shares one key
 builder with the ARN resolver, which is also what lets the tagging API reach an
 ECS service, task and task definition rather than a cluster only.
 
@@ -13338,14 +13350,14 @@ SNS publish: $0.0000005 per message.
 | Operation | Notes |
 |-----------|-------|
 | CreateSecret | Tags are stored key-ordered, so two identical runs report them alike. A `ClientRequestToken` becomes the initial version's `VersionId`, and a retried create is idempotent — see [A version's identity is its `ClientRequestToken`](#a-versions-identity-is-its-clientrequesttoken) |
-| GetSecretValue | Returns SecretString or SecretBinary; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| GetSecretValue | Returns `SecretString` or `SecretBinary`, whichever the version was given as, with its `VersionStages`; reads a version by `VersionId` or `VersionStage` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels). Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | PutSecretValue | Creates a new version under the caller's `ClientRequestToken`; a resubmitted token is a no-op with the same value and `ResourceExistsException` with a different one — see [A version's identity is its `ClientRequestToken`](#a-versions-identity-is-its-clientrequesttoken). Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
-| UpdateSecret | Rewrites `Description`, `KmsKeyId` and the value; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
+| UpdateSecret | Rewrites `Description` and `KmsKeyId`; a value creates a new version under the caller's `ClientRequestToken`, and a token already in use is `ResourceExistsException` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels). Answers `VersionId` only when it created a version. Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
 | ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
 | DescribeSecret | The read path for a secret's tags; reports only the members it has a value for, plus `DeletedDate` while a recovery window is open |
-| ListSecretVersionIds | Reports the current version only |
+| ListSecretVersionIds | Every version with its staging labels; deprecated versions only with `IncludeDeprecated`; pages by `MaxResults`/`NextToken` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels) |
 | TagResource | Appends to the existing list rather than replacing it; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | UntagResource | Idempotent — an absent key is not an error — but a secret scheduled for deletion is refused even then, see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed, and a secret scheduled for deletion is refused — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
@@ -13378,6 +13390,47 @@ With no token, substrate mints the version ID from the request ID (#856), so a r
 characters: `VersionId` publishes a width and no pattern, and the UUID is what the pages recommend
 for the token, what the CLI and SDKs generate, and the shape of every example version ID. Until
 #1285 it was sixteen uppercase hex characters, half the published minimum.
+
+`UpdateSecret` takes the token too, since
+[#1376](https://github.com/scttfrdmn/substrate/issues/1376), but its page is stricter than the other
+two: "If you call this operation with a `ClientRequestToken` that matches an existing version's
+`VersionId`, the operation results in an error." So a token already in use is
+`ResourceExistsException`/400 there whatever the value, with no idempotent retry. An update with no
+value creates no version, its token names nothing, and its response carries no `VersionId`, as the
+page's metadata-only examples answer.
+
+A version holds either a `SecretString` or a `SecretBinary`, and the retry comparison counts the kind
+as well as the bytes, so the same text sent once as each is two different values. A write naming both
+is `InvalidParameterException`/400 ("Either `SecretString` or `SecretBinary` must have a value, but not
+both"), and a `PutSecretValue` naming neither is too.
+
+### A secret's versions carry staging labels
+
+A secret holds every version it was given, and each version carries the staging labels the pages
+describe ([#1376](https://github.com/scttfrdmn/substrate/issues/1376)). Until #1376 there was one
+pointer, and `ListSecretVersionIds` reported only it.
+
+| Write | Labels |
+|---|---|
+| `CreateSecret` with a value | The initial version gets `AWSCURRENT`. With no value there is no version |
+| `PutSecretValue` without `VersionStages`, or `UpdateSecret` with a value | `AWSCURRENT` moves to the new version, and `AWSPREVIOUS` to the version it left |
+| `PutSecretValue` with `VersionStages` | Each named label moves off the version that held it. Naming `AWSCURRENT` moves `AWSPREVIOUS` as above; not naming it leaves the current version current |
+
+A version left with no label is deprecated: a third value takes `AWSPREVIOUS` from the first.
+`ListSecretVersionIds` lists versions in creation order with `CreatedDate` and `VersionStages`, the
+member absent for a deprecated version. It includes deprecated versions only with
+`IncludeDeprecated`, as the page states. It pages by `MaxResults` (1–100; 100 when absent, substrate's
+reading, since the page states no default) and `NextToken`, refusing an out-of-range size with
+`InvalidParameterException` and an unissued token with `InvalidNextTokenException`, both 400.
+`GetSecretValue` reads a version by `VersionStage`: a label no version carries is
+`ResourceNotFoundException`, and a `VersionId` and `VersionStage` naming different versions is
+`InvalidParameterException` (the page states the rule and publishes no code for it, so the code is
+substrate's reading). It answers the version's own `CreatedDate`.
+
+Not modeled: AWS's removal of versions beyond 100 and its 24-hour retention, `UpdateSecretVersionStage`,
+and `KmsKeyIds` and `LastAccessedDate` on a listed version. A secret stored before #1376 carries no
+version list; its one version is read from its current version ID, labeled `AWSCURRENT`, and its
+first write moves the labels as above.
 
 ### A `SecretId` addresses the secret its own ARN names
 
@@ -16110,6 +16163,9 @@ no error (#529).
 | CreateDomainName | Reads `DomainName` only, and reports one `domainNameConfigurations` entry — `apiGatewayDomainName` derived from the name and the caller's Region, `endpointType` `REGIONAL`, `domainNameStatus` `AVAILABLE`. `DomainNameConfigurations` and `MutualTlsAuthentication` in the request are not read |
 | GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
 | CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`; the domain name is taken from the URI and is not required to exist. There is no `GetApiMappings` to read the collection back |
+| TagResource | `POST /v2/tags/{resource-arn}` with `{"tags": {…}}`; **201** with no body. Merges onto an API's tags (see *An API's tags*). `404 NotFoundException` for an API that does not exist, `400 BadRequestException` for a body that does not decode or an ARN that names no API |
+| GetTags | `GET /v2/tags/{resource-arn}`; answers `{"tags": {…}}`, an empty map for an untagged API. Same refusals as `TagResource` |
+| UntagResource | `DELETE /v2/tags/{resource-arn}?tagKeys=…`; **204**. `tagKeys` is Required and may repeat; its absence is `400 BadRequestException`. Same refusals as `TagResource` |
 
 ### CloudFormation resource types
 
@@ -16137,6 +16193,28 @@ published input declares and the records do not model are not read. For a route 
 `modelSelectionExpression`, `operationName` and `routeResponseSelectionExpression`. For a stage they
 are `clientCertificateId` and `routeSettings`. Neither update answers the published
 `ConflictException`: no route-key or stage uniqueness is enforced.
+
+### An API's tags
+
+The tags-resource-arn page publishes `TagResource`, `GetTags` and `UntagResource` on
+`/v2/tags/{resource-arn}`, and until [#1378](https://github.com/scttfrdmn/substrate/issues/1378)
+none was routed: an HTTP or WebSocket API's tags could be set at `CreateApi` and never read back.
+All three now route, and the Resource Groups Tagging API reaches the same tags, so a tag written
+either way is visible both ways.
+
+- **The ARN.** An API's ARN is `arn:aws:apigateway:{region}::/apis/{apiId}`. Its account segment is
+  empty by format, so the API is the caller's; an ARN that does name an account, or another Region,
+  reaches that scope's API or none, never the caller's. The rule is the one REST APIs follow
+  ([#1307](https://github.com/scttfrdmn/substrate/issues/1307)).
+- **What is taggable.** Only an API. AWS also tags stages, domain names and VPC links through these
+  operations; substrate stores no tags on those records, so their ARNs answer
+  `400 BadRequestException` rather than an empty set. That code is substrate's reading: the page
+  publishes it for an invalid parameter, not a list of taggable types.
+- **Tag history.** `GetResources` reports an API that is tagged or has been (#938). That history is a
+  side-car key beside the API (`apiv2_tagged:`) rather than an `ever_tagged` member of its record,
+  for the reason [Tagging a log group takes the unsuffixed ARN](#tagging-a-log-group-takes-the-unsuffixed-arn)
+  gives. Every writer of an API's tags stamps it, and `DeleteApi` removes it with the API.
+- **Not modeled.** The page publishes no per-resource tag limit, so none is enforced.
 
 ### Cost
 
@@ -20444,26 +20522,49 @@ observed to send. Neither is reached through a service alias, because the long f
 
 | Operation | Notes |
 |-----------|-------|
-| CreateTrail | `Name` required; `S3BucketName` is `Required: Yes` and unchecked; the trail is [logging from birth](#a-trail-is-born-logging-and-gettrailstatus-never-looks) |
+| CreateTrail | `Name` required; `S3BucketName` is `Required: Yes` and unchecked; the trail is [not logging until `StartLogging`](#a-trail-logs-only-once-started-and-gettrailstatus-reports-it) |
 | GetTrail | |
-| GetTrailStatus | Reports `IsLogging: true` [unconditionally](#a-trail-is-born-logging-and-gettrailstatus-never-looks) |
+| GetTrailStatus | Reports the trail's [`IsLogging` and its logging times](#a-trail-logs-only-once-started-and-gettrailstatus-reports-it) |
 | UpdateTrail | Merges the supplied members into the stored trail |
 | DeleteTrail | |
 | DescribeTrails | `trailNameList` filters; a name that matches nothing is skipped rather than refused. `IncludeShadowTrails` is parsed and not read |
-| StartLogging | Writes the flag; no endpoint reports it |
-| StopLogging | Writes the flag; no endpoint reports it |
+| StartLogging | Sets the flag `GetTrailStatus` reports, and records `StartLoggingTime` on a transition |
+| StopLogging | Clears the flag `GetTrailStatus` reports, and records `StopLoggingTime` on a transition |
 
-### A trail is born logging and GetTrailStatus never looks
+### A trail logs only once started, and GetTrailStatus reports it
 
-`CreateTrail` stores `IsLogging: true`, where AWS creates a trail that delivers nothing until an
-explicit `StartLogging`. And `GetTrailStatus` builds its response with `IsLogging: true` hardcoded
-rather than reading the stored flag, so `StopLogging` succeeds, changes state, and is invisible to the
-only operation that could report it.
+A new trail is not logging. `API_StartLogging` "starts the recording of AWS API calls and log file
+delivery for a trail", and `CreateTrail`'s response publishes no `IsLogging`, so `CreateTrail`
+stores the trail not logging, and `GetTrailStatus` reports `IsLogging: false` until `StartLogging`.
+Until [#1157](https://github.com/scttfrdmn/substrate/issues/1157) a trail was stored logging, and
+`GetTrailStatus` answered `IsLogging: true` hardcoded, so a `StopLogging` changed state that no
+response could show.
 
-The two compound: because a trail is born logging, a consumer that never calls `StartLogging` also
-sees `true`, so nothing distinguishes the hardcode from a working implementation. A test asserting
-that its own `StopLogging` took effect passes on a no-op.
-[#1157](https://github.com/scttfrdmn/substrate/issues/1157).
+`GetTrailStatus` answers the stored flag, plus the logging times the trail has:
+
+| Member | Answered |
+|--------|----------|
+| `IsLogging` | always: the stored flag |
+| `StartLoggingTime` | once the trail has started logging: when it last went from not logging to logging, as epoch seconds |
+| `StopLoggingTime` | once the trail has stopped logging: when it last went from logging to not logging, as epoch seconds |
+
+A `StartLogging` on a trail already logging, or a `StopLogging` on one already stopped, succeeds and
+moves neither time. That is substrate's reading: the page describes `StartLoggingTime` as "the most
+recent date and time when CloudTrail started recording", and a repeated start does not start it again.
+
+The page's delivery members (`LatestDeliveryTime`, `LatestDigestDeliveryTime`,
+`LatestNotificationTime`, `LatestCloudWatchLogsDeliveryTime` and their errors) are not answered.
+Substrate delivers no log, digest, notification or CloudWatch Logs record, so none has anything true
+to report. Until #1157, `LatestDeliveryTime` answered the request's own time, claiming a delivery
+that never happened. The six members the page marks "no longer in use" (`TimeLoggingStarted`,
+`TimeLoggingStopped`, `LatestDeliveryAttemptTime`, `LatestDeliveryAttemptSucceeded`,
+`LatestNotificationAttemptTime`, `LatestNotificationAttemptSucceeded`) are omitted rather than
+answered as empty strings. `TestCloudTrailLogging_GetTrailStatusReportsTheWalk`
+(`emulator/cloudtrail_logging_test.go`) walks create, status, `StartLogging`, status, `StopLogging`
+and status over the wire.
+
+An `AWS::CloudTrail::Trail` CloudFormation resource is still a stub that records no CloudTrail trail,
+so its `IsLogging` property neither starts nor stops anything.
 
 ### The account, Region and creation time a record carries reach no response
 
@@ -20482,9 +20583,8 @@ The reads now answer `cloudtrailTrailOut` and the writes `cloudtrailTrailWriteOu
 (`emulator/cloudtrail_wire.go`), and the stored record is unchanged.
 `TestCloudTrailWire_TrailResponsesCarryNoBookkeepingMember` drives all eight routed operations.
 
-With the leak gone, a stopped trail reports `IsLogging: false` through no published response:
-`GetTrailStatus` still hardcodes `true`. That was already the case for every published shape, and it
-is #1157's to fix.
+With the leak gone, `GetTrailStatus` is the one response that reports whether a trail is logging, as
+its page publishes; since #1157 it reports the stored flag.
 
 ### A trail's ARN is always in the aws partition
 

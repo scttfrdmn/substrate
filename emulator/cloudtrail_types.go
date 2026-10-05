@@ -34,8 +34,15 @@ type CloudTrailTrail struct {
 	HomeRegion string `json:"HomeRegion"`
 	// HasCustomEventSelectors indicates whether the trail has custom event selectors.
 	HasCustomEventSelectors bool `json:"HasCustomEventSelectors"`
-	// IsLogging indicates whether logging is currently enabled for the trail.
+	// IsLogging indicates whether logging is currently enabled for the trail. A trail is created
+	// not logging, as AWS creates one, and only StartLogging and StopLogging change it (#1157).
 	IsLogging bool `json:"IsLogging"`
+	// StartLoggingTime is when the trail last went from not logging to logging, and zero for a trail
+	// that has never logged. GetTrailStatus answers it as its published StartLoggingTime.
+	StartLoggingTime time.Time `json:"StartLoggingTime,omitzero"`
+	// StopLoggingTime is when the trail last went from logging to not logging, and zero for a trail
+	// that has never stopped. GetTrailStatus answers it as its published StopLoggingTime.
+	StopLoggingTime time.Time `json:"StopLoggingTime,omitzero"`
 	// CreatedAt is the time the trail was created.
 	CreatedAt time.Time `json:"CreatedAt"`
 	// AccountID is the AWS account that owns this trail.

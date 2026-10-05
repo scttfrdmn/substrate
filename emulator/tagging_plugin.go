@@ -357,6 +357,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "ec2", scan: p.scanEC2Instances},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
+		{typePrefix: "apigateway", scan: p.scanAPIGatewayV2APIs},
 		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
 		{typePrefix: "states", scan: p.scanStepFunctionsActivities},
 		{typePrefix: "ecr", scan: p.scanECRRepositories},
@@ -665,6 +666,39 @@ func (p *TaggingPlugin) scanAPIGatewayAPIs(_ context.Context, reqCtx *RequestCon
 			ResourceARN: arn,
 			Tags:        mapToTaggingTags(api.Tags),
 			everTagged:  api.EverTagged,
+		})
+	}
+	return out, nil
+}
+
+// scanAPIGatewayV2APIs reports the caller's API Gateway v2 HTTP and WebSocket APIs (#1378). The
+// previously-tagged half of the reporting rule is read from the side-car, as it is for log groups.
+// A store read error is returned rather than skipped, so a fault cannot read as an untagged API.
+func (p *TaggingPlugin) scanAPIGatewayV2APIs(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	prefix := taggingScanPrefix(apigwv2APIKeyPrefix, reqCtx)
+	keys, err := p.state.List(goCtx, apigatewayv2Namespace, prefix)
+	if err != nil {
+		return nil, fmt.Errorf("list apigatewayv2 apis: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, apigatewayv2Namespace, k)
+		if err != nil {
+			return nil, fmt.Errorf("get apigatewayv2 api %s: %w", k, err)
+		}
+		var api V2ApiState
+		if raw == nil || json.Unmarshal(raw, &api) != nil {
+			continue
+		}
+		everTagged, err := apigwv2EverTagged(goCtx, p.state, k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: apigwv2APIARN(reqCtx.Region, api.APIID),
+			Tags:        mapToTaggingTags(api.Tags),
+			everTagged:  everTagged,
 		})
 	}
 	return out, nil
@@ -1760,9 +1794,20 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		return "", "", unsupportedTagResource("IAM %q is not a taggable resource type", resource)
 
 	case "apigateway":
-		// arn:aws:apigateway:{region}::/restapis/{apiId} — a v1 REST API. An HTTP or WebSocket
-		// API is /apis/{id}, which is a different resource with its own state key, and this
-		// resolver has no arm for it.
+		// arn:aws:apigateway:{region}::/apis/{apiId} — an API Gateway v2 HTTP or WebSocket API, a
+		// different resource from a v1 REST API, with its own namespace and key (#1378). It is parsed
+		// by [apigwv2ParseAPIARN], which API Gateway v2's own tagging operations use, so the two sides
+		// cannot disagree about which ARN names an API, and it takes the account by the same rule as
+		// the REST API case below.
+		if strings.HasPrefix(resource, "/apis/") {
+			acct, region, apiID, ok := apigwv2ParseAPIARN(arn, callerAccount)
+			if !ok {
+				return "", "", unsupportedTagResource("API Gateway %q is not an HTTP or WebSocket API ARN", resource)
+			}
+			return apigatewayv2Namespace, apigwv2APIKey(acct, region, apiID), nil
+		}
+
+		// arn:aws:apigateway:{region}::/restapis/{apiId} — a v1 REST API.
 		//
 		// The account segment is empty by specification, so the account is the caller's. Reading
 		// parts[4] here — as this arm did until #1307 — built api:/{region}/{id}, a key no plugin
@@ -2232,6 +2277,29 @@ func mergeResourceTags(
 			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
 		}
 		return state.Put(goCtx, ns, key, updated)
+
+	case apigatewayv2Namespace:
+		// Behind a kind guard, because the namespace also holds routes, integrations, stages, indexes
+		// and the tag-history side-car, none of which an ARN addresses here. Decoded as [V2ApiState]
+		// because API Gateway v2's own TagResource round-trips the same struct, and the
+		// previously-tagged flag is a side-car for the reason [apigwv2APITaggedKeyPrefix] gives (#1378).
+		if !apigwv2KeyIsTaggable(key) {
+			return fmt.Errorf("unsupported API Gateway v2 resource key: %s", key)
+		}
+		var api V2ApiState
+		if err := json.Unmarshal(raw, &api); err != nil {
+			return fmt.Errorf("unmarshal V2ApiState: %w", err)
+		}
+		tagsBefore := len(api.Tags)
+		api.Tags = mergeStringMap(api.Tags, addTags, removeKeys)
+		updated, err := json.Marshal(api)
+		if err != nil {
+			return fmt.Errorf("marshal V2ApiState: %w", err)
+		}
+		if err := state.Put(goCtx, ns, key, updated); err != nil {
+			return fmt.Errorf("put V2ApiState: %w", err)
+		}
+		return apigwv2StampEverTagged(goCtx, state, key, tagsBefore, len(addTags))
 
 	case cloudwatchLogsNamespace:
 		// Behind a kind guard, because the namespace also holds log streams, event blobs, two name

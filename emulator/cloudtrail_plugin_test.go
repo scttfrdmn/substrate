@@ -209,34 +209,24 @@ func TestCloudTrailPlugin_DescribeTrails(t *testing.T) {
 }
 
 func TestCloudTrailPlugin_StartStopLogging(t *testing.T) {
-	// The persisted flag is what StartLogging and StopLogging change, and it is read from state here
-	// because no published response reports it yet. This test used to read it through GetTrail's
-	// IsLogging, a member API_Trail does not publish (#756). The member GetTrailStatus publishes is
-	// hardcoded true (#1157), so until that is fixed the stored record is the only honest observation.
-	state := emulator.NewMemoryStateManager()
-	p := &emulator.CloudTrailPlugin{}
-	if err := p.Initialize(t.Context(), emulator.PluginConfig{
-		State:   state,
-		Logger:  emulator.NewDefaultLogger(0, false),
-		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Now())},
-	}); err != nil {
-		t.Fatalf("CloudTrailPlugin.Initialize: %v", err)
-	}
-	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-ct-logging"}
+	// The flag StartLogging and StopLogging change is read through GetTrailStatus, the one operation
+	// that publishes IsLogging. Until #1157 that member was hardcoded true, so this test read the
+	// stored record instead; it reads the published member again now.
+	p, ctx := setupCloudTrailPlugin(t)
 
 	isLogging := func(t *testing.T) bool {
 		t.Helper()
-		data, err := state.Get(t.Context(), "cloudtrail", "trail:123456789012/us-east-1/logging-trail")
-		if err != nil || data == nil {
-			t.Fatalf("read trail record: %v", err)
+		resp, err := p.HandleRequest(ctx, cloudtrailRequest(t, "GetTrailStatus", map[string]any{"Name": "logging-trail"}))
+		if err != nil {
+			t.Fatalf("GetTrailStatus: %v", err)
 		}
-		var record struct {
+		var status struct {
 			IsLogging bool `json:"IsLogging"`
 		}
-		if err := json.Unmarshal(data, &record); err != nil {
-			t.Fatalf("decode trail record: %v", err)
+		if err := json.Unmarshal(resp.Body, &status); err != nil {
+			t.Fatalf("decode GetTrailStatus: %v", err)
 		}
-		return record.IsLogging
+		return status.IsLogging
 	}
 
 	if _, err := p.HandleRequest(ctx, cloudtrailRequest(t, "CreateTrail", map[string]any{
@@ -244,6 +234,9 @@ func TestCloudTrailPlugin_StartStopLogging(t *testing.T) {
 		"S3BucketName": "logging-bucket",
 	})); err != nil {
 		t.Fatalf("CreateTrail: %v", err)
+	}
+	if isLogging(t) {
+		t.Error("want IsLogging=false for a new trail, which does not log until StartLogging")
 	}
 
 	resp, err := p.HandleRequest(ctx, cloudtrailRequest(t, "StopLogging", map[string]any{"Name": "logging-trail"}))
@@ -286,18 +279,17 @@ func TestCloudTrailPlugin_GetTrailStatus(t *testing.T) {
 		t.Fatalf("want 200, got %d", resp.StatusCode)
 	}
 
-	var status struct {
-		IsLogging          bool  `json:"IsLogging"`
-		LatestDeliveryTime int64 `json:"LatestDeliveryTime"`
-	}
+	var status map[string]json.RawMessage
 	if err := json.Unmarshal(resp.Body, &status); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if !status.IsLogging {
-		t.Error("want IsLogging=true from GetTrailStatus")
+	// A new trail is not logging (#1157), and substrate delivers no log file, so it reports no
+	// LatestDeliveryTime rather than the request's own time.
+	if string(status["IsLogging"]) != "false" {
+		t.Errorf("want IsLogging=false from GetTrailStatus for a new trail, got %s", status["IsLogging"])
 	}
-	if status.LatestDeliveryTime == 0 {
-		t.Error("want non-zero LatestDeliveryTime")
+	if _, ok := status["LatestDeliveryTime"]; ok {
+		t.Errorf("want no LatestDeliveryTime, since nothing was delivered: %s", resp.Body)
 	}
 
 	// GetTrailStatus for non-existent trail.

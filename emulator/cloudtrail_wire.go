@@ -67,6 +67,34 @@ type cloudtrailTrailWriteOut struct {
 	TrailARN                   string `json:"TrailARN"`
 }
 
+// cloudtrailTrailStatusOut is GetTrailStatus's response.
+//
+// IsLogging is the persisted flag; until #1157 it was hardcoded true, so StopLogging was unobservable
+// through any response. StartLoggingTime and StopLoggingTime are the trail's recorded transitions, as
+// epoch seconds (CloudTrail speaks awsJson1_1, where a Timestamp is a number), and each is omitted
+// until the trail has made that transition, so a trail that has never logged reports no
+// StartLoggingTime.
+//
+// The page's other members are not answered. Substrate delivers no log, digest, notification or
+// CloudWatch Logs record, so LatestDeliveryTime and its siblings have nothing true to report;
+// answering the request's own time as LatestDeliveryTime, as substrate did, claimed a delivery that
+// never happened. The six string members the page marks "no longer in use" (TimeLoggingStarted,
+// LatestDeliveryAttemptTime and the rest) are omitted rather than answered as empty strings.
+type cloudtrailTrailStatusOut struct {
+	IsLogging        bool         `json:"IsLogging"`
+	StartLoggingTime EpochSeconds `json:"StartLoggingTime,omitzero"`
+	StopLoggingTime  EpochSeconds `json:"StopLoggingTime,omitzero"`
+}
+
+// cloudtrailTrailStatusToWire projects a persisted trail onto GetTrailStatus's response.
+func cloudtrailTrailStatusToWire(trail CloudTrailTrail) cloudtrailTrailStatusOut {
+	return cloudtrailTrailStatusOut{
+		IsLogging:        trail.IsLogging,
+		StartLoggingTime: EpochSeconds(trail.StartLoggingTime),
+		StopLoggingTime:  EpochSeconds(trail.StopLoggingTime),
+	}
+}
+
 // cloudtrailTrailWriteToWire projects a persisted trail onto CreateTrail's and UpdateTrail's response.
 func cloudtrailTrailWriteToWire(trail CloudTrailTrail) cloudtrailTrailWriteOut {
 	return cloudtrailTrailWriteOut{

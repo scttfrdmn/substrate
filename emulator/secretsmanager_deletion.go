@@ -183,8 +183,22 @@ func (p *SecretsManagerPlugin) purgeSecret(goCtx context.Context, target smSecre
 	if err := p.state.Delete(goCtx, secretsManagerNamespace, smSecretStateKey(target.AccountID, target.Region, target.Name)); err != nil {
 		return fmt.Errorf("sm purgeSecret delete record: %w", err)
 	}
-	if err := p.state.Delete(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, secret.CurrentVersionID)); err != nil {
-		return fmt.Errorf("sm purgeSecret delete version: %w", err)
+	// Every version's payload, not only the current one's, since a secret holds a version per value it
+	// was given (#1376).
+	versions, err := p.smVersions(goCtx, secret)
+	if err != nil {
+		return err
+	}
+	ids := []string{secret.CurrentVersionID}
+	for _, v := range versions {
+		if v.VersionID != secret.CurrentVersionID {
+			ids = append(ids, v.VersionID)
+		}
+	}
+	for _, id := range ids {
+		if err := p.state.Delete(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, id)); err != nil {
+			return fmt.Errorf("sm purgeSecret delete version %s: %w", id, err)
+		}
 	}
 
 	names, err := p.loadSecretNames(goCtx, target.AccountID, target.Region)

@@ -152,9 +152,11 @@ func TestTaggingResolveARN_AWrongTypeARNIsRefusedRatherThanMisKeyed(t *testing.T
 		arn:  "arn:aws:dynamodb:us-east-1:123456789012:table/orders/index/by-date",
 		why:  "an index nests under the table prefix too",
 	}, {
-		name: "apigateway http api",
-		arn:  "arn:aws:apigateway:us-east-1::/apis/abc123",
-		why:  `TrimPrefix("/restapis/") left "/apis/abc123", keying api:…//apis/abc123`,
+		// An HTTP API itself (/apis/{id}) resolves since #1378; a stage under one still names no
+		// record that stores tags, and must not be keyed to the API.
+		name: "apigateway http api stage",
+		arn:  "arn:aws:apigateway:us-east-1::/apis/abc123/stages/prod",
+		why:  `TrimPrefix("/restapis/") left "/apis/abc123/stages/prod"; a stage is not an API`,
 	}, {
 		name: "step functions execution",
 		arn:  "arn:aws:states:us-east-1:123456789012:execution:orders:run-1",
