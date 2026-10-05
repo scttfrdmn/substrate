@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An XML error response carries the request's own ID** (#1241). No Query-protocol error said which
+  request it answered.
+  - The Query `<ErrorResponse>` now closes with `<RequestId>` beside `<Error>`, as the smithy
+    awsQuery/restXml protocols and SQS's developer guide publish it.
+  - EC2's `<RequestID>` is the request's ID rather than `SUBSTRATE`, and IAM's handler-built error
+    documents carry it too.
+  - The value is the one `Event.RequestID` records, so a replayed refusal is byte-identical to its
+    recording.
+  - S3 error documents keep `SUBSTRATE`: they are built without the request context, and pipeline-
+    raised S3 errors must stay byte-identical to the plugin's own (#480).
+
 - **A CloudFormation stack-tag propagation failure is reported to the caller** (#1138).
   `reconcileStackTags` sent every failure to `logger.Warn` alone, so the stack and the resource
   reported success while the resource silently lacked the stack's tags. Each failure is now recorded

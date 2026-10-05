@@ -8,6 +8,7 @@ import (
 	"io"
 	"math"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -156,7 +157,7 @@ func TestEC2Error_UsesEC2Document(t *testing.T) {
 	assert.Equal(t, "Response", doc.XMLName.Local)
 	assert.NotEmpty(t, doc.Code, "the SDK reads the code at Errors>Error>Code")
 	assert.NotEmpty(t, doc.Message)
-	assert.Equal(t, "SUBSTRATE", doc.RequestID)
+	assert.True(t, strings.HasPrefix(doc.RequestID, "req-"), "the request's own id, not a fixed one (#1241): %q", doc.RequestID)
 	assert.Equal(t, "text/xml; charset=UTF-8", resp.Header.Get("Content-Type"))
 
 	// The wrapper is what the SDK keys on, so assert it literally: a document with
@@ -231,14 +232,14 @@ func TestMarshalAWSError_EC2EscapesMessage(t *testing.T) {
 	assert.Equal(t, `a<b&c>"d"`, doc.Message)
 }
 
-// TestMarshalAWSError_RequestIDIsDeterministic guards the reason the request id is a
-// fixed string rather than generateRequestID(), which derives from
-// time.Now().UnixNano(): two replays of one recorded run must produce byte-identical
-// error bodies, and a caller diffing responses must not see a field that moves on its
-// own. Both XML arms that carry a request id are checked.
+// TestMarshalAWSError_RequestIDIsDeterministic guards the reason the request id is
+// never generateRequestID(), which derives from time.Now().UnixNano(): two replays of
+// one recorded run must produce byte-identical error bodies, and a caller diffing
+// responses must not see a field that moves on its own. With no request in hand the
+// id is the fixed fallback; every XML arm that carries a request id is checked.
 func TestMarshalAWSError_RequestIDIsDeterministic(t *testing.T) {
 	t.Parallel()
-	for _, proto := range []string{emulator.ErrProtoEC2XMLForTest, emulator.ErrProtoS3XMLForTest} {
+	for _, proto := range []string{emulator.ErrProtoQueryXMLForTest, emulator.ErrProtoEC2XMLForTest, emulator.ErrProtoS3XMLForTest} {
 		first, _, _ := emulator.MarshalAWSErrorForTest("Throttling", "slow down", proto, "",
 			http.StatusServiceUnavailable)
 		second, _, _ := emulator.MarshalAWSErrorForTest("Throttling", "slow down", proto, "",

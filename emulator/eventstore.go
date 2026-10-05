@@ -142,6 +142,7 @@ type Event struct {
 	// shape, neither the recorded id nor a freshly minted one. That is the same rule
 	// substrateRequestID (error_protocol.go) already states for the error path:
 	// a body has to be byte-identical across two replays of one recorded run (#866).
+	// The Query and EC2 error documents render it too (#1241).
 	//
 	// Empty on a stream recorded before this field existed; see replayRequestID for
 	// what a replay does with that.

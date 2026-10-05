@@ -835,7 +835,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			Code:       "SerializationException",
 			Message:    "a request declaring Smithy-Protocol: rpc-v2-cbor must not carry an X-Amz-Target header",
 			HTTPStatus: http.StatusBadRequest,
-		}, r, req.Service)
+		}, r, req.Service, reqCtx.RequestID)
 		return
 	}
 
@@ -890,7 +890,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 				Code:       "InvalidClientTokenId",
 				Message:    fmt.Sprintf("region %q is not in the allowed list", reqCtx.Region),
 				HTTPStatus: http.StatusBadRequest,
-			}, r, req.Service)
+			}, r, req.Service, reqCtx.RequestID)
 			return
 		}
 	}
@@ -950,7 +950,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Step 1.6: SigV4 signature verification.
 	if s.opts.VerifySignatures {
 		if sigErr := VerifySigV4(r, rawBody, s.opts.Credentials); sigErr != nil {
-			s.writeError(w, sigErr, r, req.Service)
+			s.writeError(w, sigErr, r, req.Service, reqCtx.RequestID)
 			return
 		}
 	}
@@ -959,7 +959,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Presigned requests carry X-Amz-Algorithm in the query string; verify
 	// X-Amz-Date + X-Amz-Expires have not elapsed.
 	if checkPresignedExpiry(r.URL.Query(), s.tc.Now()) {
-		s.writeError(w, &AWSError{Code: "AccessDenied", Message: "Request has expired.", HTTPStatus: http.StatusForbidden}, r, req.Service)
+		s.writeError(w, &AWSError{Code: "AccessDenied", Message: "Request has expired.", HTTPStatus: http.StatusForbidden}, r, req.Service, reqCtx.RequestID)
 		return
 	}
 
@@ -1007,7 +1007,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			case stepAuth, stepFault:
 			}
 		}
-		s.writeError(w, gate.err, r, req.Service)
+		s.writeError(w, gate.err, r, req.Service, reqCtx.RequestID)
 		return
 	}
 
@@ -1064,7 +1064,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 
 	if routeErr != nil {
 		RecordSpanError(reqSpan, routeErr)
-		s.writeError(w, routeErr, r, req.Service)
+		s.writeError(w, routeErr, r, req.Service, reqCtx.RequestID)
 		return
 	}
 
@@ -1114,7 +1114,10 @@ func (s *Server) writeResponse(w http.ResponseWriter, resp *AWSResponse) {
 // distinguish REST-JSON from a plain JSON body, and picking the wrong shape
 // leaves the SDK unable to recover the error code at all (#392). For a service whose
 // model declares several protocols the request selects it instead (#757).
-func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, service string) {
+//
+// requestID is reqCtx.RequestID, which the XML documents carry so a failed call can be
+// correlated by the same id its recorded event holds (#1241).
+func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, service, requestID string) {
 	var awsErr *AWSError
 	if asAWSErr, ok := err.(*AWSError); ok {
 		awsErr = asAWSErr
@@ -1126,7 +1129,7 @@ func (s *Server) writeError(w http.ResponseWriter, err error, r *http.Request, s
 		}
 	}
 
-	body, respCT, extraHeaders := marshalAWSError(awsErr, errorWireContextFor(service, r))
+	body, respCT, extraHeaders := marshalAWSError(awsErr, errorWireContextFor(service, r, requestID))
 	if body == nil {
 		http.Error(w, awsErr.Message, awsErr.HTTPStatus)
 		return

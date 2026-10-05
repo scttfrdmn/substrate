@@ -52,16 +52,42 @@ func iamXMLEmptyResponse(op string) *AWSResponse {
 	}
 }
 
+// iamErrorRequestIDElement is the request-id element [iamErrorResponse] renders, which
+// [iamStampErrorRequestID] replaces with the request's own id before the response
+// leaves the plugin.
+const iamErrorRequestIDElement = "<RequestId>stub-request-id</RequestId>"
+
 // iamErrorResponse builds an IAM XML error response.
 // The returned response matches the IAM ErrorResponse envelope format.
+//
+// Its RequestId is a placeholder: hundreds of call sites build an error document with no
+// request context in hand, so the id is stamped once, at [IAMPlugin.HandleRequest],
+// rather than threaded through each of them.
 func iamErrorResponse(code, message string, status int) *AWSResponse {
-	body := fmt.Sprintf(`<ErrorResponse xmlns="`+iamXMLNS+`"><Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error><RequestId>stub-request-id</RequestId></ErrorResponse>`,
+	body := fmt.Sprintf(`<ErrorResponse xmlns="`+iamXMLNS+`"><Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error>`+iamErrorRequestIDElement+`</ErrorResponse>`,
 		xmlEsc(code), xmlEsc(message))
 	return &AWSResponse{
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "text/xml"},
 		Body:       []byte(body),
 	}
+}
+
+// iamStampErrorRequestID puts ctx.RequestID into the RequestId of an error document
+// [iamErrorResponse] built, so an IAM refusal a handler answers as a response carries
+// the same id as one the server's shared Query writer renders from an [AWSError] —
+// the id [Event.RequestID] records and a replay is dispatched with (#1241).
+//
+// Only an error status is touched, and only the placeholder element: the message is
+// escaped by [xmlEsc], so the element cannot occur inside it. A success body's
+// RequestId is left as it is.
+func iamStampErrorRequestID(resp *AWSResponse, ctx *RequestContext) *AWSResponse {
+	if resp == nil || ctx == nil || ctx.RequestID == "" || resp.StatusCode < http.StatusBadRequest {
+		return resp
+	}
+	resp.Body = bytes.Replace(resp.Body, []byte(iamErrorRequestIDElement),
+		[]byte("<RequestId>"+xmlEsc(ctx.RequestID)+"</RequestId>"), 1)
+	return resp
 }
 
 // xmlEsc returns s with XML special characters escaped.

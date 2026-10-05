@@ -998,6 +998,41 @@ the protocol nor the CloudWatch model names a shape for an undecodable body, so 
 
 ---
 
+## What an error response carries
+
+A refusal is the call a consumer logs and the one whose request ID a support case quotes, so an XML
+error document carries the **request's own ID** — the value `Event.RequestID` records and
+`replayRequestID` reproduces — exactly as a success envelope does
+([#1149](https://github.com/scttfrdmn/substrate/issues/1149) for ELB, #866 for the rule). Until
+[#1241](https://github.com/scttfrdmn/substrate/issues/1241) no Query error carried an ID at all, and
+EC2's carried the fixed string `SUBSTRATE`.
+
+| Family | Plugins | Document | Source |
+|---|---|---|---|
+| Query (and REST-XML) | CloudFormation, CloudFront, CloudWatch (Query), ElastiCache, ELB, IAM, RDS, Redshift, Route 53, SNS, STS | `<ErrorResponse><Error><Type>Sender</Type><Code>…</Code><Message>…</Message></Error><RequestId>…</RequestId></ErrorResponse>` | smithy [awsQuery](https://smithy.io/2.0/aws/protocols/aws-query-protocol.html) and [restXml](https://smithy.io/2.0/aws/protocols/aws-restxml-protocol.html) error serialization; the SQS developer guide's [XML error response](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-api-responses.html) quotes the same document from the service |
+| EC2 | EC2 | `<Response><Errors><Error><Code>…</Code><Message>…</Message></Error></Errors><RequestID>…</RequestID></Response>` — plural `Errors`, capital-D `RequestID` | [Error codes for the Amazon EC2 API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html), "Example error response"; smithy [ec2Query](https://smithy.io/2.0/aws/protocols/aws-ec2-query-protocol.html) |
+| S3 | S3 | bare `<Error>…<RequestId>SUBSTRATE</RequestId></Error>` | unchanged — see below |
+| JSON, REST-JSON, RPC v2 CBOR | the rest | no request ID in the body | — |
+
+`RequestId` is a **sibling** of `<Error>`, closing the document, not a child of it. No other Query
+service's API reference publishes a sample error response: the Common Errors pages of CloudFormation,
+CloudFront, CloudWatch, ElastiCache, IAM, RDS, Redshift, SNS and STS list codes and statuses only, and
+neither ELB generation's reference publishes one either. So the per-service document is the
+protocol's, not one read off each service's page.
+
+The ID is never minted per call. A replayed refusal is dispatched under the recorded ID, so a
+document built from it is byte-identical to the recording; a minted one would be reported as a
+difference on every replayed refusal. IAM's handlers build their own error document rather than
+raising an error for the shared writer, and the ID is stamped into it once, at the plugin's dispatch,
+so the two paths answer the same element.
+
+S3 keeps the fixed `SUBSTRATE`: its documents are built by the plugin without a request context, and a
+pipeline-raised S3 error (an injected fault, a quota refusal) is built by the same function so the two
+are byte-identical (#480). Threading the ID into one half only would break that. An in-process caller
+with no request in hand also renders `SUBSTRATE`.
+
+---
+
 ## Which account a request is attributed to
 
 Most plugins scope a resource to the account of the request that created it, and
@@ -11507,11 +11542,10 @@ Which other Query-protocol plugins answer the envelope today:
 | Redshift | **no** | and the result wrapper is the document root, so no SDK decodes it |
 | RDS, ElastiCache | **no** | built exactly as ELB's were: one inline response struct per handler |
 
-An XML **error** response carries no request ID for any plugin that shares
-`error_protocol.go`'s `ErrorResponse` document, ELB included. No ELB page publishes a sample error
-response, so what belongs inside one is not readable off an ELB page; EC2's page does publish one, and
-it is a different shape again (`<Response><Errors><Error>…</Errors><RequestID>`). That is one
-cross-plugin change rather than an ELB change.
+An XML **error** response carries the same request ID, in the Query protocol's
+`<ErrorResponse>…<RequestId>` document every Query plugin shares. No ELB page publishes a sample error
+response, so the document is the protocol's rather than one read off an ELB page; see
+[What an error response carries](#what-an-error-response-carries) (#1241).
 
 ### The Classic (2012-06-01) API, and the version that routes it
 
@@ -23611,8 +23645,9 @@ ID was accepted and discarded, so a Query-protocol SDK found neither the `…Res
 `…Result` it locates a result by
 ([#1208](https://github.com/scttfrdmn/substrate/issues/1208)). `TestRedshiftEnvelope_*` in
 `emulator/redshift_envelope_test.go` assert this on the raw bytes of every operation and of the
-refusals. A refusal answers the shared Query `<ErrorResponse>` document, which carries no request ID
-for any Query plugin; that is #1241.
+refusals. A refusal answers the shared Query `<ErrorResponse>` document, which carries the same
+request ID in its `<RequestId>`; see [What an error response carries](#what-an-error-response-carries)
+(#1241).
 
 ### Each element is named for what the reference publishes
 
@@ -25064,7 +25099,7 @@ service on the `ec2` protocol, whose error document wraps the error in a **plura
 `<Errors>` element and spells the request id `<RequestID>` with a capital D.
 
 ```xml
-<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>…</Message></Error></Errors><RequestID>SUBSTRATE</RequestID></Response>
+<Response><Errors><Error><Code>InsufficientInstanceCapacity</Code><Message>…</Message></Error></Errors><RequestID>req-…</RequestID></Response>
 ```
 
 The AWS SDKs read the code at the XPath `Errors>Error>Code`, which finds nothing in a
@@ -25085,8 +25120,10 @@ their real error documents genuinely are wrapped, so they were already correct. 
 other XML service is on the Query protocol and keeps that wrapper too; S3 and EC2 are
 the only two carve-outs.
 
-The `<RequestID>` is the fixed string `SUBSTRATE` rather than a generated value, as it is
-in S3's document, so two replays of one recorded run produce byte-identical error bodies.
+The `<RequestID>` is the request's own ID, the one its event records, rather than a value
+minted per call, so a replay of one recorded run produces byte-identical error bodies; S3's
+document keeps the fixed `SUBSTRATE` so a pipeline error stays byte-identical to a plugin one.
+See [What an error response carries](#what-an-error-response-carries) (#1241).
 
 ### `probability` draws from a per-rule PRNG
 
