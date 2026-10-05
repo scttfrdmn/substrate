@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **ECR answers `imagePushedAt` and `expiresAt` as epoch seconds** (#1403). `DescribeImages`'
+  `imagePushedAt` and `GetAuthorizationToken`'s `expiresAt` rendered as RFC3339 strings, where both
+  pages type them as `Timestamp`, an epoch-seconds number under awsJson1_1, so a typed SDK refused
+  both responses. Both now answer `EpochSeconds` to three decimals, and the stored image record is
+  unchanged.
+- **SNS `Unsubscribe` refuses a string that is not a subscription ARN with `InvalidParameter`/400**
+  (#1259). It answered `NotFound`/404 for anything, so a topic ARN read as a missing subscription. It
+  now checks shape before existence, through `requireSubscription` (#1125), and only a well-formed ARN
+  naming no subscription is `NotFound`/404.
+- **CloudTrail and CodePipeline answer their not-found refusals at 400** (#1156). Both services
+  answered `TrailNotFoundException`, `PipelineNotFoundException` and
+  `PipelineExecutionNotFoundException` at 404, which neither publishes. All twelve sites now answer
+  400.
+  - `DescribeTrails` returns a store fault rather than swallowing it.
+  - `GetPipelineExecution` refuses an execution that belongs to another pipeline, as the code's gloss
+    states.
+- **KMS `DeleteAlias` refuses an alias that names nothing** (#1107). It answered 200 for any name,
+  where `API_DeleteAlias` publishes `NotFoundException`/400. CloudFormation teardown stays
+  idempotent, since its shared "already gone" rule reads `NotFoundException` as a deleted resource.
+- **CloudWatch Logs answers `ResourceAlreadyExistsException` at 400** (#1251). `CreateLogGroup` and
+  `CreateLogStream` answered 409, where both pages publish 400. A survey of every other Logs refusal
+  found no other divergence.
+- **AWS Backup's `DeleteBackupPlan` refuses a plan that still has selections, and a selection whose
+  plan is gone is not found** (#1178). `API_DeleteBackupPlan`: "A backup plan can only be deleted
+  after all associated selections of resources have been deleted."
+  - The plan was deleted regardless, and its selections kept answering 200. A plan with a selection
+    is now `InvalidRequestException`/400, and nothing changes.
+  - `GetBackupSelection` and `DeleteBackupSelection` load the plan first, so an orphaned selection is
+    `ResourceNotFoundException`/400.
+- **Kinesis `MergeShards` and `SplitShard` act on the shards they name, and `ListStreams` pages**
+  (#1399).
+  - Hash keys now run from 0 to 2^128-1, divided evenly between shards; they were a toy range.
+  - `MergeShards` closes the two named adjacent shards and opens one child covering their union.
+    `SplitShard` closes the named shard and opens two children at `NewStartingHashKey`. Each child
+    reports its parents, and closed shards stay listed.
+  - Non-adjacent merges, closed shards and out-of-range split keys are refused with the published
+    codes.
+  - `ListStreams` pages by `Limit` and `ExclusiveStartStreamName` with `HasMoreStreams`, and
+    `DeleteStream` returns its store errors.
+- **CodeBuild's `DeleteProject` is idempotent** (#1159). It refused a missing project with a code
+  `API_DeleteProject` does not publish, so a teardown that deleted twice failed. It now succeeds.
+- **CodeBuild's `BatchGetBuilds` and `BatchGetProjects` validate their list and report only absence as
+  not found** (#1186, #1159). An absent, empty, oversized or empty-string list is
+  `InvalidInputException`/400. A store read failure or corrupt record is returned as an error, where
+  it was reported in `buildsNotFound`/`projectsNotFound` with a 200.
+
 ## [v0.123.0] - 2026-10-04
 
 ### Changed

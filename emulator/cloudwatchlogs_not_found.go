@@ -135,3 +135,21 @@ func (p *CloudWatchLogsPlugin) requireLogStream(ctx context.Context, accountID, 
 	}
 	return nil
 }
+
+// cwLogsAlreadyExists refuses a create naming a log group or log stream that already exists (#1251).
+//
+// API_CreateLogGroup and API_CreateLogStream each publish ResourceAlreadyExistsException at HTTP 400.
+// Both creates used to answer 409, the status #1224 removed from this plugin's not-found refusals for
+// the same reason: CloudWatch Logs is a JSON-1.1 service whose code travels in the body's __type,
+// and every client error its pages publish shares one status line, 400. A consumer that classifies on
+// the status, as an SDK's retry logic does before it reads the code, saw a 409 AWS never sends.
+//
+// The message is substrate's: the published gloss is "The specified resource already exists.", and
+// naming the resource is what lets a caller that created both tell which one collided.
+func cwLogsAlreadyExists(message string) *AWSError {
+	return &AWSError{
+		Code:       "ResourceAlreadyExistsException",
+		Message:    message,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}

@@ -99,7 +99,7 @@ func (p *CloudWatchLogsPlugin) createLogGroup(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("logs createLogGroup state.Get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ResourceAlreadyExistsException", Message: "Log group already exists: " + body.LogGroupName, HTTPStatus: http.StatusConflict}
+		return nil, cwLogsAlreadyExists("Log group already exists: " + body.LogGroupName)
 	}
 
 	// The tags the request carries are persisted, so ListTagsForResource reports them. They were
@@ -415,7 +415,7 @@ func (p *CloudWatchLogsPlugin) createLogStream(ctx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("logs createLogStream state.Get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "ResourceAlreadyExistsException", Message: "Log stream already exists: " + body.LogStreamName, HTTPStatus: http.StatusConflict}
+		return nil, cwLogsAlreadyExists("Log stream already exists: " + body.LogStreamName)
 	}
 
 	now := p.tc.Now().UnixMilli()

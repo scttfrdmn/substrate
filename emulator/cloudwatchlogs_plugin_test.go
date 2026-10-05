@@ -97,11 +97,11 @@ func TestCWLogs_LogGroupLifecycle(t *testing.T) {
 	require.Len(t, result.LogGroups, 1)
 	assert.Equal(t, "/aws/lambda/my-function", result.LogGroups[0].LogGroupName)
 
-	// Create duplicate should fail.
+	// Create duplicate should fail, at the 400 API_CreateLogGroup publishes (#1251).
 	resp = cwLogsRequest(t, srv, "CreateLogGroup", map[string]string{
 		"logGroupName": "/aws/lambda/my-function",
 	})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 
 	// Delete log group.
 	resp = cwLogsRequest(t, srv, "DeleteLogGroup", map[string]string{

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -163,7 +164,7 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		StreamArn:            streamARN,
 		StreamStatus:         "ACTIVE",
 		ShardCount:           body.ShardCount,
-		Shards:               generateKinesisShards(body.ShardCount),
+		Shards:               kinesisUniformShards(0, body.ShardCount, "0"),
 		RetentionPeriodHours: 24,
 		Tags:                 tags,
 		EnhancedMonitoring:   []string{},
@@ -214,7 +215,9 @@ func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	goCtx := context.Background()
 	for _, shard := range stream.Shards {
 		rk := kinesisRecordKey(target.AccountID, target.Region, target.Name, shard.ShardID)
-		_ = p.state.Delete(goCtx, kinesisNamespace, rk)
+		if err := p.state.Delete(goCtx, kinesisNamespace, rk); err != nil {
+			return nil, fmt.Errorf("kinesis deleteStream state.Delete %s: %w", shard.ShardID, err)
+		}
 	}
 
 	stateKey := kinesisStreamKey(target.AccountID, target.Region, target.Name)
@@ -302,10 +305,45 @@ func (p *KinesisPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("kinesis listStreams loadIndex: %w", err)
 	}
 
+	page, more, refusal := kinesisListStreamsPage(names, body.ExclusiveStartStreamName, body.Limit)
+	if refusal != nil {
+		return nil, refusal
+	}
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamNames":    names,
-		"HasMoreStreams": false,
+		"StreamNames":    page,
+		"HasMoreStreams": more,
 	})
+}
+
+// kinesisListStreamsPage cuts one ListStreams page (#1399). API_ListStreams: Limit is 1 to 10000,
+// "the default value is 100", and "if you specify a value greater than 100, at most 100 results are
+// returned"; a caller continues "by using the name of the last stream returned … in the
+// ExclusiveStartStreamName parameter", and HasMoreStreams says whether there is more.
+//
+// The page publishes no order, so names are listed lexicographically, which is what makes "start
+// after this name" well defined, including for a name that no longer exists. A Limit outside 1 to
+// 10000 is InvalidArgumentException, the code the page publishes for a parameter that "exceeds its
+// restrictions". NextToken, the newer continuation, is not read.
+func kinesisListStreamsPage(names []string, exclusiveStart string, limit int) ([]string, bool, *AWSError) {
+	switch {
+	case limit == 0:
+		limit = 100
+	case limit < 1 || limit > 10000:
+		return nil, false, kinesisInvalidArgument(fmt.Sprintf("Limit %d is not between 1 and 10000.", limit))
+	case limit > 100:
+		limit = 100
+	}
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+	start := 0
+	if exclusiveStart != "" {
+		start = sort.Search(len(sorted), func(i int) bool { return sorted[i] > exclusiveStart })
+	}
+	rest := sorted[start:]
+	if len(rest) > limit {
+		return rest[:limit], true, nil
+	}
+	return rest, false, nil
 }
 
 func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -340,8 +378,10 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 		return nil, err
 	}
 
-	stream.ShardCount = *body.TargetShardCount
-	stream.Shards = generateKinesisShards(*body.TargetShardCount)
+	// UNIFORM_SCALING closes every open shard and opens the target count dividing the hash key space
+	// evenly, continuing the stream's shard IDs so none collides with a merge's or a split's (#1399).
+	closeSeq, openSeq := kinesisReshardSequences(p.tc.Now(), ctx.IDs)
+	kinesisReshardUniform(&stream, *body.TargetShardCount, closeSeq, openSeq)
 	// The record's StreamStatus is the settled ACTIVE the reshard ends on. What a describe reports
 	// in between — UPDATING, for as many observations as a seed holds it — is the progression's
 	// (#1119); unseeded, the stream is ACTIVE at once, as it always was.
@@ -387,9 +427,11 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 
+	// A record lands on an open shard: a parent a reshard closed takes no more data (#1399). It is the
+	// first open shard, not the one the partition key's MD5 hashes into; see docs/services.md.
 	shardID := "shardId-000000000000"
-	if len(stream.Shards) > 0 {
-		shardID = stream.Shards[0].ShardID
+	if open := kinesisOpenShards(stream); len(open) > 0 {
+		shardID = open[0].ShardID
 	}
 
 	seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
@@ -439,15 +481,14 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		SequenceNumber string `json:"SequenceNumber"`
 	}
 
+	// Records are spread over the open shards only: a parent a reshard closed takes no more data
+	// (#1399).
+	open := kinesisOpenShards(stream)
 	results := make([]recordResult, 0, len(body.Records))
 	for i, rec := range body.Records {
-		shardIdx := 0
-		if len(stream.Shards) > 1 {
-			shardIdx = i % len(stream.Shards)
-		}
 		shardID := "shardId-000000000000"
-		if len(stream.Shards) > 0 {
-			shardID = stream.Shards[shardIdx].ShardID
+		if len(open) > 0 {
+			shardID = open[i%len(open)].ShardID
 		}
 
 		seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
@@ -691,13 +732,12 @@ func (p *KinesisPlugin) mergeShards(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
 		return nil, err
 	}
-	if err := p.startStreamTransition(goCtx, &stream); err != nil {
+	closeSeq, openSeq := kinesisReshardSequences(p.tc.Now(), ctx.IDs)
+	if err := kinesisMergeShards(&stream, target, body.ShardToMerge, body.AdjacentShardToMerge, closeSeq, openSeq); err != nil {
 		return nil, err
 	}
-
-	if stream.ShardCount > 1 {
-		stream.ShardCount--
-		stream.Shards = generateKinesisShards(stream.ShardCount)
+	if err := p.startStreamTransition(goCtx, &stream); err != nil {
+		return nil, err
 	}
 
 	if err := p.saveStream(stream); err != nil {
@@ -731,12 +771,13 @@ func (p *KinesisPlugin) splitShard(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
 		return nil, err
 	}
+	closeSeq, openSeq := kinesisReshardSequences(p.tc.Now(), ctx.IDs)
+	if err := kinesisSplitShard(&stream, target, body.ShardToSplit, body.NewStartingHashKey, closeSeq, openSeq); err != nil {
+		return nil, err
+	}
 	if err := p.startStreamTransition(goCtx, &stream); err != nil {
 		return nil, err
 	}
-
-	stream.ShardCount++
-	stream.Shards = generateKinesisShards(stream.ShardCount)
 
 	if err := p.saveStream(stream); err != nil {
 		return nil, err
@@ -1107,20 +1148,6 @@ func (p *KinesisPlugin) appendRecord(target kinesisStreamTarget, shardID string,
 		return fmt.Errorf("kinesis appendRecord state.Put: %w", err)
 	}
 	return nil
-}
-
-// generateKinesisShards creates n evenly-partitioned KinesisShard descriptors.
-func generateKinesisShards(n int) []KinesisShard {
-	shards := make([]KinesisShard, n)
-	for i := range shards {
-		shards[i] = KinesisShard{
-			ShardID: fmt.Sprintf("shardId-%012d", i),
-		}
-		shards[i].HashKeyRange.StartingHashKey = fmt.Sprintf("%d", i*1000)
-		shards[i].HashKeyRange.EndingHashKey = fmt.Sprintf("%d", (i+1)*1000-1)
-		shards[i].SequenceNumberRange.StartingSequenceNumber = "0"
-	}
-	return shards
 }
 
 // generateKinesisSeqNo generates a unique Kinesis sequence number as of now.

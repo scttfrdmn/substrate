@@ -355,12 +355,17 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 		return nil, fmt.Errorf("codepipeline getPipelineExecution get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "PipelineExecutionNotFoundException", Message: "Execution " + input.PipelineExecutionID + " not found.", HTTPStatus: http.StatusNotFound}
+		return nil, codepipelineExecutionNotFound(input.PipelineExecutionID)
 	}
 
 	var exec CodePipelineExecution
 	if err := json.Unmarshal(data, &exec); err != nil {
 		return nil, fmt.Errorf("codepipeline getPipelineExecution unmarshal: %w", err)
+	}
+	// API_GetPipelineExecution glosses the code as covering "an execution ID does not belong to the
+	// specified pipeline", and executions are keyed by ID alone, so the pipeline is checked here.
+	if input.PipelineName != "" && exec.PipelineName != input.PipelineName {
+		return nil, codepipelineExecutionNotFound(input.PipelineExecutionID)
 	}
 
 	out, err := p.observedExecution(goCtx, exec)
@@ -384,7 +389,8 @@ func (p *CodePipelinePlugin) loadPipeline(acct, region, name string) (*CodePipel
 		return nil, fmt.Errorf("codepipeline loadPipeline get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "PipelineNotFoundException", Message: "Pipeline " + name + " not found.", HTTPStatus: http.StatusNotFound}
+		// HTTP 400, as every CodePipeline page that publishes the code states (#1156).
+		return nil, &AWSError{Code: "PipelineNotFoundException", Message: "Pipeline " + name + " not found.", HTTPStatus: http.StatusBadRequest}
 	}
 	var pl CodePipelineState
 	if err := json.Unmarshal(data, &pl); err != nil {
@@ -423,6 +429,12 @@ func codepipelineExecKey(acct, region, execID string) string {
 // validating this as a version-4 UUID would start failing if the `4` disappeared.
 func generateCodePipelineExecID(m *IDMint) string {
 	return m.UUID()
+}
+
+// codepipelineExecutionNotFound is the refusal for an execution that does not exist or belongs to
+// another pipeline. API_GetPipelineExecution publishes it at HTTP 400 (#1156); it was 404.
+func codepipelineExecutionNotFound(id string) *AWSError {
+	return &AWSError{Code: "PipelineExecutionNotFoundException", Message: "Execution " + id + " not found.", HTTPStatus: http.StatusBadRequest}
 }
 
 // codepipelineJSONResponse serializes v to JSON and returns an AWSResponse with

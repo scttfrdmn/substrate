@@ -45,7 +45,8 @@ func TestCWLogs_CreateStreamDuplicate(t *testing.T) {
 	cwLogsRequest(t, srv, "CreateLogGroup", map[string]string{"logGroupName": "/dup/group"})
 	cwLogsRequest(t, srv, "CreateLogStream", map[string]string{"logGroupName": "/dup/group", "logStreamName": "s1"})
 	resp := cwLogsRequest(t, srv, "CreateLogStream", map[string]string{"logGroupName": "/dup/group", "logStreamName": "s1"})
-	assert.Equal(t, http.StatusConflict, resp.StatusCode)
+	// ResourceAlreadyExistsException at the 400 API_CreateLogStream publishes, not 409 (#1251).
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestCWLogs_DeleteStreamNotFound(t *testing.T) {
