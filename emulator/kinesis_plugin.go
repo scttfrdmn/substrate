@@ -2,11 +2,9 @@ package emulator
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"net/http"
 	"strings"
 	"sync"
@@ -394,10 +392,7 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		shardID = stream.Shards[0].ShardID
 	}
 
-	seqNo, err := generateKinesisSeqNo(p.tc.Now())
-	if err != nil {
-		return nil, fmt.Errorf("kinesis putRecord generateSeqNo: %w", err)
-	}
+	seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
 
 	record := KinesisRecord{
 		SequenceNumber:              seqNo,
@@ -455,10 +450,7 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			shardID = stream.Shards[shardIdx].ShardID
 		}
 
-		seqNo, seqErr := generateKinesisSeqNo(p.tc.Now())
-		if seqErr != nil {
-			return nil, fmt.Errorf("kinesis putRecords generateSeqNo: %w", seqErr)
-		}
+		seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
 
 		record := KinesisRecord{
 			SequenceNumber:              seqNo,
@@ -1140,14 +1132,12 @@ func generateKinesisShards(n int) []KinesisShard {
 // replay sets (#904). Wiring the controller into the plugin does not reach a
 // package-level function, which is why this one takes the time it stamps.
 //
-// The random half is still crypto/rand, so the identifier as a whole is not yet
-// reproducible across two runs of one input; that half is #856's.
-func generateKinesisSeqNo(now time.Time) (string, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(99999999))
-	if err != nil {
-		return "", fmt.Errorf("generateKinesisSeqNo rand: %w", err)
-	}
-	return fmt.Sprintf("%d-%08d", now.UnixNano(), n.Int64()), nil
+// The suffix is eight digits from the request's [IDMint], so the identifier as a whole
+// is reproducible across two runs of one input, and a replay answers the sequence
+// numbers it recorded (#1396). It had still been drawn from crypto/rand, a site #856's
+// derivation missed.
+func generateKinesisSeqNo(now time.Time, ids *IDMint) string {
+	return fmt.Sprintf("%d-%s", now.UnixNano(), ids.Digits(8))
 }
 
 // kinesisIterator is the internal structure encoded into a shard iterator token.

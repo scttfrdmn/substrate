@@ -245,6 +245,51 @@ func recordRefusedGetObject(t *testing.T, opts ...emulator.TestServerOption) *em
 	return ts
 }
 
+// recordRefusedPutObject records a stream whose PutObject was refused by a fault and
+// whose fault is then cleared, so replaying it re-executes a *write* that now
+// succeeds. It returns the stream's server.
+//
+// This is the shape a state divergence needs. The replayed PutObject stores an object
+// the recording never stored, so the replay's after-hash at that event cannot match
+// the recorded one. A refused *read* would not do: a GetObject that succeeds on replay
+// writes nothing, so the state it leaves is the state the recording had. The two
+// ValidateState tests below used recordRefusedGetObject until #1396, and passed only
+// because the clock drifted between a live write and its replay. The bucket's stored
+// creation date differed, so every hash after the first CreateBucket did. With each
+// request now holding the clock for its duration, that drift is gone, and so was the
+// divergence those tests had been relying on.
+func recordRefusedPutObject(t *testing.T, opts ...emulator.TestServerOption) *emulator.TestServer {
+	t.Helper()
+	ts := emulator.StartTestServer(t, opts...)
+
+	const bucket = "refused-write"
+	replayPutBucket(t, ts, bucket)
+
+	replaySetFault(t, ts, &emulator.FaultRule{
+		Service:     "s3",
+		Operation:   "PutObject",
+		FaultType:   "error",
+		ErrorCode:   "ServiceUnavailable",
+		HTTPStatus:  http.StatusServiceUnavailable,
+		ErrorMsg:    "Reduce your request rate.",
+		Probability: 1.0,
+	})
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut,
+		ts.URL+"/"+bucket+"/refused.txt", bytes.NewReader([]byte("never stored")))
+	require.NoError(t, err)
+	req.Host = "s3.us-east-1.amazonaws.com"
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode,
+		"the seeded fault must refuse the write, or the recording is not of a refused write")
+
+	// Cleared for the reason recordRefusedGetObject gives: an ungated replay bypasses
+	// fault injection either way, and clearing keeps the reason the replay succeeds honest.
+	replaySetFault(t, ts, nil)
+	return ts
+}
+
 // TestReplayReporting_ARecordedRefusalReplayingAsSuccessIsCritical asserts the
 // second defect: a recorded error whose replay succeeds is reported.
 //
@@ -349,16 +394,16 @@ func TestReplayReporting_StateHashesAreAbsentWhenNotRequested(t *testing.T) {
 // the comparison: with hashes recorded, ValidateState now actually runs and reports
 // a state divergence.
 //
-// The divergence is produced deliberately and is the same scenario as the refusal
-// test: the recorded GetObject was refused and changed nothing, while the replayed
-// GetObject succeeds. Any state the replay reaches from there differs from what was
-// recorded, so the after-hash cannot match.
+// The divergence is produced deliberately. The recorded PutObject was refused and stored
+// nothing, while the replayed PutObject succeeds and stores the object, so the replay's
+// after-hash at that event cannot match the recorded one. See recordRefusedPutObject
+// for why a refused GetObject, which this test used until #1396, does not diverge state.
 //
 // This is the assertion the feature never had. Before #833 ValidateState was inert
 // on every recorded stream, and the only coverage of the comparison used a
 // hand-built event carrying a hash the recorder would never have written.
 func TestReplayReporting_ValidateStateReportsADivergence(t *testing.T) {
-	ts := recordRefusedGetObject(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	ts := recordRefusedPutObject(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
 
 	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
 		Replay(t.Context(), replayStreamID)
@@ -396,7 +441,7 @@ func TestReplayReporting_ValidateStateIsSilentWithoutRecordedHashes(t *testing.T
 // so `substrate replay`, which counts StateErrors, printed "MISMATCH (0 error(s))"
 // for a real divergence and listed none of them.
 func TestReplayReporting_StateErrorsDescribeEveryMismatch(t *testing.T) {
-	ts := recordRefusedGetObject(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	ts := recordRefusedPutObject(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
 
 	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).
 		Replay(t.Context(), replayStreamID)

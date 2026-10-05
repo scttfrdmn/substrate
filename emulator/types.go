@@ -273,6 +273,15 @@ type TimeController struct {
 	wallBaseline time.Time // real wall time at last SetTime/SetScale/Unfreeze call
 	scale        float64
 	frozen       bool // when set, Now returns simBaseline and ignores wall time
+
+	// held is set while a [TimeController.Hold] is in force: Now returns heldAt.
+	// Unlike frozen it does not touch the baselines, so the clock keeps advancing
+	// underneath and a release resumes exactly where an unheld clock would read.
+	held   bool
+	heldAt time.Time
+	// holdSeq identifies the hold in force, so only the release returned with it
+	// ends it; see [TimeController.Hold].
+	holdSeq uint64
 }
 
 // NewTimeController creates a TimeController whose simulated clock starts at t
@@ -292,14 +301,69 @@ func NewTimeController(t time.Time) *TimeController {
 // read between a [TimeController.Freeze] and the matching
 // [TimeController.Unfreeze] returns the same instant no matter how long the code
 // between them takes.
+//
+// While a [TimeController.Hold] is in force it returns the instant the hold took.
 func (c *TimeController) Now() time.Time {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if c.frozen {
 		return c.simBaseline
 	}
+	if c.held {
+		return c.heldAt
+	}
+	return c.running()
+}
+
+// running returns the time an unheld, unfrozen clock reads. The caller holds c.mu.
+func (c *TimeController) running() time.Time {
 	elapsed := time.Since(c.wallBaseline)
 	return c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+}
+
+// Hold makes every read of Now return one instant, the one it reads now, until the
+// returned release is called. It is how a request observes a single instant on a
+// running clock (#1396).
+//
+// [Server.handleAWSRequest] holds the clock for the duration of each top-level request,
+// so every read its handler makes and the timestamp its event is recorded with are the
+// same instant. A replay freezes the clock at that recorded timestamp (#1217), so the
+// handler reads on replay exactly what it read live, at any resolution. Without the
+// hold, the event was stamped after the handler ran, and on a running clock that stamp
+// was later than every instant the handler had rendered.
+//
+// A hold is not a freeze. It leaves the baselines alone, so the clock keeps advancing
+// underneath, and a release resumes where an unheld clock would read rather than behind
+// it by the held interval. Simulated time is not lost to request latency.
+//
+// Only the release returned by the hold that took the instant ends it. A Hold called
+// while another is in force shares that instant and returns a release that does nothing.
+// So overlapping requests cannot chain one hold indefinitely: it lasts as long as the
+// request that took it. The precise guarantee is therefore for requests that do not
+// overlap. A request that overlaps another reads the other's held instant for part of
+// its life and the running clock for the rest, which a replay, re-applying events one
+// at a time, cannot reproduce. That matches what replay can promise about overlapping
+// requests generally, since their interleaving is not recorded.
+//
+// On a frozen clock a hold changes nothing: a frozen clock already reads one instant. Calling
+// a release more than once is a no-op.
+func (c *TimeController) Hold() (release func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.frozen || c.held {
+		return func() {}
+	}
+	c.holdSeq++
+	seq := c.holdSeq
+	c.held = true
+	c.heldAt = c.running()
+	return func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if c.held && c.holdSeq == seq {
+			c.held = false
+		}
+	}
 }
 
 // SetTime sets the simulated clock to ts.  The scale factor is preserved and
@@ -309,6 +373,9 @@ func (c *TimeController) Now() time.Time {
 // The frozen state is preserved too, which is the combination a replay wants:
 // freeze, then SetTime to the recorded timestamp, and every read of the clock
 // returns that timestamp exactly rather than advancing from it.
+//
+// A [TimeController.Hold] in force is preserved as well: a request already holding the
+// clock keeps reading its one instant, and the new time applies from the release.
 func (c *TimeController) SetTime(ts time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -340,8 +407,15 @@ func (c *TimeController) Freeze() {
 		return
 	}
 	// Capture the time the clock currently reads, so freezing is not itself a jump.
-	elapsed := time.Since(c.wallBaseline)
-	c.simBaseline = c.simBaseline.Add(time.Duration(float64(elapsed) * c.scale))
+	// While held, that is the held instant (#1396), and the hold ends: a frozen clock
+	// reads one instant already, and leaving it set would make Unfreeze resume at the
+	// held instant instead of from the freeze.
+	if c.held {
+		c.simBaseline = c.heldAt
+		c.held = false
+	} else {
+		c.simBaseline = c.running()
+	}
 	c.wallBaseline = time.Now()
 	c.frozen = true
 }

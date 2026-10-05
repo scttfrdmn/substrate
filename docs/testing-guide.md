@@ -327,6 +327,23 @@ timestamp, and a run exported as a regression fixture no longer carries a one-in
 failure. The clock is restored afterwards, so replaying on a live emulator does not stop
 its clock — unless it was already frozen, in which case it is left that way.
 
+**…and the recorded timestamp is the instant the live request read, even on a running
+clock.** Freezing the replay at the recorded timestamp is exact only if that timestamp is
+the instant the live handler used. Until #1396 it was not: the event was stamped after the
+handler ran, so on a running clock a date rendered at millisecond precision replayed a
+millisecond or more late (`CreationTime` `…480` live, `…481` on replay). Each top-level
+request now holds the clock for its duration (`TimeController.Hold`): every read its
+handler, gates, nested dispatches and clock-driven work make, and its event's timestamp,
+are one instant. A replay therefore renders every recorded date byte-identically, at any
+resolution, on a running clock as on a frozen one.
+
+The guarantee is for requests that do not overlap. A hold lasts as long as the request
+that took it, and a request arriving during another's hold reads that instant until it is
+released, then the running clock. So two *concurrent* requests can render dates a serial
+replay cannot reproduce, which matches what a replay promises about concurrency
+generally, since the interleaving is not recorded. A hold is not a freeze: the clock keeps
+advancing underneath, so simulated time is not lost to request latency.
+
 **A replayed create reproduces the identifiers it minted.** An identifier substrate mints
 is derived from the request's own id, so the replayed `CreateVpc` answers with the
 recording's `vpc-…` and the recorded `CreateSubnet` that names it succeeds. This is what
