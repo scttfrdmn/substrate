@@ -6350,7 +6350,7 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | ListFunctions | |
 | Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
-| AddPermission | Adds a statement to the function's resource policy; the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up) |
+| AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up) |
 | RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
 | GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
 | PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
@@ -6688,6 +6688,33 @@ about container *identity*, which is observable either way.
 `LambdaFunction` declares `ever_tagged`, the flag that records a function was once tagged (#938), because the record is what `MemoryStateManager` snapshots and a replay reads back. It does not reach a body: every response is a configuration built member by member.
 `TestLambdaWire_FunctionResponsesCarryNoBookkeepingMember` in `emulator/lambda_wire_test.go` tags the function and reads the flag back first, since an unset `omitempty` member is absent for free, then drives every operation that answers the function and walks each decoded document for it at any depth
 ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `TagResource` answers 204 with no body, so it has nothing to walk.
+
+### A new role is not assumable for a seeded number of attempts
+
+IAM is eventually consistent, so a role is not assumable by Lambda for a short while after
+`CreateRole` returns. A `CreateFunction` naming it in that window is refused
+`InvalidParameterValueException`/400 with "The role defined for the function cannot be assumed by
+Lambda." The sentence is observed on a real account ([#1274](https://github.com/scttfrdmn/substrate/issues/1274));
+no page publishes it, though `API_CreateFunction` publishes the code at 400. A deployer that creates
+its own roles has to retry exactly that error, so the window is seedable, on the shared
+[progression](#how-a-progression-is-seeded):
+
+```
+POST   /v1/lambda/role-propagation   {"roleArn": "arn:aws:iam::123456789012:role/r", "refusedAttempts": 2}
+DELETE /v1/lambda/role-propagation   (all seeds; ?roleArn=… for one)
+```
+
+- **What counts as an attempt:** each `CreateFunction` naming the role, and each
+  `UpdateFunctionConfiguration` naming it as the new `Role`. Each spends one attempt of that role's
+  own counter. With `refusedAttempts` *n*, the first *n* attempts are refused and the next is admitted.
+- **The wildcard:** no `roleArn` (or `"*"`) governs every role, each with its own counter (#582).
+- **When counting starts:** at the seed, not at `CreateRole`, because the IAM and Lambda plugins share
+  no record of when a role was created. A test posts the seed, creates the role, and retries. A seed's
+  POST restarts the counters it governs.
+- **What spends nothing:** a request refused for another reason first (a body that does not parse, a
+  missing name, an existing function), and an update that names no `Role`.
+- **The default:** unseeded, a role is assumable the moment it exists, as before. The seed is a
+  control-plane write, so a replay re-issues it and reproduces the refusals.
 
 ### Cost
 
@@ -17154,11 +17181,11 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400); the registry-wide form [pages](#the-three-ecr-listings-page-three-different-ways), and the named form cannot |
 | DeleteRepository | Reports the deleted repository in the same shape; a repository holding images needs [`force`](#every-ecr-refusal-is-a-400), and its images go with it |
 | GetAuthorizationToken | Returns base64("AWS:password") |
-| PutImage | The digest is [the SHA-256 of the manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest); `imageManifest` is required; a repeat that changes nothing is `ImageAlreadyExistsException`, and a supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException` |
+| PutImage | The digest is [the SHA-256 of the manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest); `imageManifest` is required; a repeat that changes nothing is `ImageAlreadyExistsException`, a supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException`, and a tag that would move on an [immutable repository](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is `ImageTagAlreadyExistsException` |
 | BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages`; answers the image under the tag it was asked by |
 | BatchDeleteImage | [By tag removes that tag](#an-ecr-digest-is-the-sha-256-of-its-manifest), and the image only with its last; by digest removes the image and every tag, one `imageId` per tag; an entry that matches nothing is reported in `failures` |
-| DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException` |
-| ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member |
+| DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException`; describes [untagged images](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) and honors `filter` |
+| ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member; an [untagged image](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is one entry with its digest alone, and `filter` is honored |
 | TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
 | UntagResource | `tagKeys` is an array of strings, as published |
 | ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
@@ -17255,9 +17282,9 @@ published. The two `_WITH_EXCLUSION` forms are accepted even though the filters 
 unmodelled: those filters are `Required: No`, so a request naming one without them is a request AWS
 accepts, and refusing it would be substrate inventing a bound.
 
-Substrate does not act on the setting — an `IMMUTABLE` repository still accepts a `PutImage` that
-reuses a tag. That is a separate question from whether the response reports what the request set, and
-the setting is recorded intent until an issue models the refusal.
+Substrate acts on the setting since #1379: a push that would move a tag on an immutable repository
+is refused; see [An immutable tag cannot move, and an untagged image is
+listed](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed).
 
 ### Every ECR refusal is a 400
 
@@ -17375,6 +17402,42 @@ naming an unknown tag was dropped from the request and one naming an unknown dig
 the answer, so a caller naming one real and one imaginary image was answered 200 with a short list.
 As with `DescribeRepositories`, only an image the **caller** named is refused; a digest derived from
 substrate's own tag index with no record behind it is skipped as an internal inconsistency.
+
+### An immutable tag cannot move, and an untagged image is listed
+
+Until #1379 `imageTagMutability` was stored and never read, and every listing was built from the tag
+index. Both are now what the pages publish.
+
+**Tag immutability.** On a repository whose `imageTagMutability` is `IMMUTABLE`, a `PutImage` whose
+`imageTag` already names a different image is refused with `ImageTagAlreadyExistsException`/400, which
+`API_PutImage` publishes ("The specified image is tagged with a tag that already exists. The repository
+is configured for tag immutability."). That covers a new manifest under an existing tag, and an existing
+image re-pushed under another image's tag. A refused push stores nothing. A new tag is never a move, and
+the same tag on the same manifest is `ImageAlreadyExistsException` whatever the setting.
+`IMMUTABLE_WITH_EXCLUSION` reads as `IMMUTABLE` and `MUTABLE_WITH_EXCLUSION` as `MUTABLE`: the
+exclusion filters that distinguish them are unmodelled, and with no filter no tag is excluded.
+`PutImageTagMutability` is not routed, so the setting is fixed at create.
+
+**Untagged images.** `ListImages`, and `DescribeImages` without `imageIds`, enumerate the repository's
+image records rather than its tag index. So an image pushed without a tag, or left behind when its last
+tag was removed or moved to another image, is listed: `ListImages` reports it as one entry with its
+digest alone, and `DescribeImages` reports it with no `imageTags` member. That is the workflow
+`API_ListImages` describes: list the `UNTAGGED` images, then pipe them to `BatchDeleteImage`.
+
+**The filter.** Both operations read `filter`, whose `tagStatus` and `imageStatus` have the same Valid
+Values on `ListImagesFilter` and `DescribeImagesFilter`:
+
+| Member | Value | Selects |
+|---|---|---|
+| `tagStatus` | `TAGGED` | Images carrying a tag; `ListImages` reports every tag |
+| `tagStatus` | `UNTAGGED` | Images no tag names |
+| `tagStatus` | `ANY`, or absent | Every image. Neither page states a narrower default, and `ListImages`' sample lists all |
+| `imageStatus` | `ACTIVE`, `ANY`, or absent | Every image: substrate models no archiving, so every image is `ACTIVE` |
+| `imageStatus` | `ARCHIVED`, `ACTIVATING` | Nothing |
+
+A value outside either Valid Values set is `InvalidParameterException`/400. On `DescribeImages` the
+filter narrows the listing form; the enumerated form answers the images `imageIds` names, as the page
+sets no rule combining the two.
 
 ### CloudFormation resource types
 
@@ -21295,9 +21358,11 @@ each other. [#1172](https://github.com/scttfrdmn/substrate/issues/1172).
 
 ### Two backup plan responses carry the wrong members
 
-`UpdateBackupPlan` answers `BackupPlanId`, `BackupPlanArn`, `VersionId` and an `UpdatedAt` that is on
-no AWS Backup page, while `CreationDate` — published, and already held on the stored record — is
-absent. `DeleteBackupPlan` answered `{}` where the page publishes `BackupPlanArn`, `BackupPlanId`,
+`UpdateBackupPlan` answered `BackupPlanId`, `BackupPlanArn`, `VersionId` and an `UpdatedAt` that is on
+no AWS Backup page, while `CreationDate`, published and already held on the stored record, was
+absent. It now answers the four published members the record holds: `BackupPlanArn`, `BackupPlanId`,
+the plan's own `CreationDate` and the new `VersionId`. `AdvancedBackupSettings` and `ScanSettings` are
+absent, because the record carries neither. `DeleteBackupPlan` answered `{}` where the page publishes `BackupPlanArn`, `BackupPlanId`,
 `DeletionDate` and `VersionId`. `VersionId` is the only handle on the version that was deleted, so the
 member identifying what happened was the one missing. It answers all four now, from the plan it
 deletes, with `DeletionDate` as Unix seconds like every Backup date. #1206's survey found it, and it
@@ -21357,8 +21422,9 @@ no vault ever has a value for them:
 - **`SourceBackupVaultArn` and the four multi-party-approval members:** they belong to restore-access
   vaults and to MPA, neither of which is routed.
 
-`CreatorRequestId`'s retry semantics are not modeled: a second create of the same name answers
-`AlreadyExistsException` whatever it carries. `CreateBackupVault` is deliberately not projected
+A second create of the same name answers `AlreadyExistsException`, unless it carries the
+`CreatorRequestId` the vault was created with. That retry answers the first create's response; see
+*What a refusal reports* below (#1173). `CreateBackupVault` is deliberately not projected
 through `backupVaultOut`: `API_CreateBackupVault` publishes three members and no more, so it keeps
 its own map. The plan and selection handlers build their responses member by member, so no Backup
 record reaches the wire whole.
@@ -21413,26 +21479,41 @@ than as a sample, and a control confirms the walk catches a leak added at each o
 
 Backup publishes no RFC3339 date. Each page glosses its date as *"in Unix format and Coordinated
 Universal Time (UTC) … accurate to milliseconds. For example, the value 1516925490.087"*, and all
-eight sites that answer one render it that way, to exactly three decimals
-([#1324](https://github.com/scttfrdmn/substrate/issues/1324)). `UpdateBackupPlan`'s `UpdatedAt` is
-the one date still rendered as a string, which is deliberate: the member is on
-[no Backup page at all](#two-backup-plan-responses-carry-the-wrong-members), and giving it the
-published form would make a member that is owed deletion look more correct than it is.
+nine sites that answer one render it that way, to exactly three decimals
+([#1324](https://github.com/scttfrdmn/substrate/issues/1324)). `UpdateBackupPlan` is the ninth: it
+answers the plan's `CreationDate` now, where it answered an RFC3339 `UpdatedAt` that
+[no Backup page publishes](#two-backup-plan-responses-carry-the-wrong-members) (#1177).
 
 ### What a refusal reports
 
 | Condition | Code | Status |
 |-----------|------|--------|
 | a body that will not parse | `InvalidRequestException` | 400 |
-| `BackupVaultName`, `BackupPlanName` or `SelectionName` absent | `InvalidRequestException` | 400 |
-| a vault name already in use | `AlreadyExistsException` | 400 |
-| a vault, plan or selection that does not exist | `ResourceNotFoundException` | 404 |
+| `BackupVaultName`, `BackupPlanName` or `SelectionName` absent | `MissingParameterValueException` | 400 |
+| a `CreatorRequestId` outside 1–50 alphanumeric or `-_.` characters | `InvalidParameterValueException` | 400 |
+| a vault name already in use, without the vault's own `CreatorRequestId` | `AlreadyExistsException` | 400 |
+| a vault, plan or selection that does not exist | `ResourceNotFoundException` | 400 |
 
-`AlreadyExistsException`/400 is what `API_CreateBackupVault` publishes. The other two diverge, and
-both are [#1173](https://github.com/scttfrdmn/substrate/issues/1173): every Backup page publishes
-`ResourceNotFoundException` at **400**, not 404, and the published code for an absent required member
-is `MissingParameterValueException`. `InvalidRequestException` is published on the delete pages, for
-input that is wrong rather than missing, and on the create pages not at all.
+Every routed Backup page publishes `ResourceNotFoundException` and `MissingParameterValueException`,
+both at **400**. Each of the twelve was fetched for this table. Until
+[#1390](https://github.com/scttfrdmn/substrate/issues/1390) and
+[#1173](https://github.com/scttfrdmn/substrate/issues/1173), a missing resource answered 404, and a
+missing member answered `InvalidRequestException`, which only the vault and plan delete pages list,
+for input that is wrong rather than absent. The empty-identifier branches inside the three loaders are
+unreachable through the router, since a request with no vault name, plan ID or selection ID routes to
+the list or create operation instead, so they are not in the table.
+
+The required members still not checked are recorded rather than enforced:
+- `BackupPlanInput`'s `Rules`, and each `BackupRuleInput`'s `RuleName` and `TargetBackupVaultName`;
+- `BackupSelection`'s `IamRoleArn`.
+
+A create without them answers 200.
+
+**`CreatorRequestId` is the idempotency key on all three creates.** `API_CreateBackupPlan` states it:
+*"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is
+returned."* The vault and selection pages gloss the member the same way, as what lets a failed request
+be retried without running it twice. A retry carrying a recorded value answers the resource it first
+made, and `GetBackupPlan`, `ListBackupPlans` and `GetBackupSelection` answer the recorded value.
 
 `InvalidParameterValueException`, `LimitExceededException` and `ServiceUnavailableException`/500 are
 published across these pages and have no site here: Substrate enforces no vault or plan quota and has
@@ -23007,7 +23088,7 @@ It does: `v2-clusters.html` (`ListClustersV2`, `CreateClusterV2`) and `v2-cluste
 
 | Operation | Verified against the page | Not modelled |
 |-----------|---------------------------|--------------|
-| CreateClusterV2 | `POST /api/v2/clusters`. Request: `clusterName` (required, 1–64), `provisioned`, `serverless`, `tags`. Response: `clusterArn`, `clusterName`, `clusterType`, `state`, all four answered. A serverless create used to be ignored and stored as a provisioned cluster, and `clusterType` was not answered | `provisioned.loggingInfo`, `openMonitoring`, `rebalancing` and `brokerNodeGroupInfo.connectivityInfo` are accepted and not stored |
+| CreateClusterV2 | `POST /api/v2/clusters`. Request: `clusterName` (required, 1–64), `provisioned`, `serverless`, `tags`. Response: `clusterArn`, `clusterName`, `clusterType`, `state`, all four answered. A serverless create used to be ignored and stored as a provisioned cluster, and `clusterType` was not answered | — `loggingInfo`, `openMonitoring`, `rebalancing` and `brokerNodeGroupInfo.connectivityInfo` are stored and answered since [#1386](https://github.com/scttfrdmn/substrate/issues/1386); see [Logging, monitoring, rebalancing and connectivity](#logging-monitoring-rebalancing-and-connectivity) |
 | DescribeClusterV2 | `GET /api/v2/clusters/{clusterArn}` → `{clusterInfo}`, the `Cluster` shape: `clusterArn`, `clusterName`, `clusterType`, `creationTime`, `state`, `tags`, and `provisioned` or `serverless` | `activeOperationArn`; `serverless.kafkaVersion`, since a serverless create takes none. `currentVersion` and `stateInfo` are answered as v1's are (#1196) |
 | ListClustersV2 | `GET /api/v2/clusters`, query `clusterNameFilter`, `clusterTypeFilter`, `maxResults`, `nextToken`; response `{clusterInfoList, nextToken}` | — |
 
@@ -23016,22 +23097,51 @@ PascalCase CloudFormation sends decodes too. Responses use the published lowerCa
 
 ### What a cluster response reports
 
-`ClusterInfo` publishes twenty-one members. Substrate reports fourteen:
+`ClusterInfo` publishes twenty-one members. Substrate reports seventeen:
 - always: `clusterArn`, `clusterName`, `state`, `creationTime`, `currentVersion` (#1196),
   `brokerNodeGroupInfo`,
   `numberOfBrokerNodes` and `currentBrokerSoftwareInfo` (`kafkaVersion`, plus `configurationArn` and
   `configurationRevision` when the create named a configuration);
 - `encryptionInfo`, answered with `encryptionInTransit`'s stated defaults filled in (`clientBroker`
   "The default value is `TLS`", `inCluster` "The default value is true");
-- when the create sent them: `tags`, `clientAuthentication`, `enhancedMonitoring` and `storageMode`;
+- when the create sent them: `tags`, `clientAuthentication`, `enhancedMonitoring`, `storageMode`,
+  `loggingInfo`, `openMonitoring` and `rebalancing` (#1386), and `brokerNodeGroupInfo.connectivityInfo`;
 - `stateInfo`, when a seeded cluster settles `FAILED` (#1196).
 
 Absent, because nothing in substrate holds them:
 - `activeOperationArn` and `customerActionStatus`, since no cluster operation is modelled;
-- `loggingInfo`, `openMonitoring` and `rebalancing`;
 - the two ZooKeeper connect strings.
 
 `DescribeClusterV2`'s `provisioned` carries the same set ([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
+
+### Logging, monitoring, rebalancing and connectivity
+
+Both create pages accept `loggingInfo`, `openMonitoring`, `rebalancing` and, inside
+`brokerNodeGroupInfo`, `connectivityInfo`, and both describe shapes publish them back. Until
+[#1386](https://github.com/scttfrdmn/substrate/issues/1386) substrate decoded none of the four, so a
+cluster created with logging or monitoring described with neither. They are now stored as sent and
+answered by `DescribeCluster`, `ListClusters`, `DescribeClusterV2` and `ListClustersV2`. `connectivityInfo`
+belongs to the broker node group, not to `provisioned`, on both pages.
+
+Neither page states a default for any of the four, so a cluster created without one answers without
+it rather than with an invented value. The constraints the model states are enforced, on v1 and v2
+alike, each refusal `BadRequestException`/400 with `invalidParameter` naming the member:
+
+| Member | Constraint | `invalidParameter` |
+|--------|------------|--------------------|
+| `loggingInfo.brokerLogs` | Required when `loggingInfo` is sent | `brokerLogs` |
+| `cloudWatchLogs`/`firehose`/`s3` `.enabled` | Required when the target is sent, in `brokerLogs` or `authorizerLogs` | `enabled` |
+| `openMonitoring.prometheus` | Required when `openMonitoring` is sent | `prometheus` |
+| `jmxExporter`/`nodeExporter` `.enabledInBroker` | Required when the exporter is sent | `enabledInBroker` |
+| `rebalancing.status` | `PAUSED` or `ACTIVE` | `status` |
+| `connectivityInfo.networkType` | `IPV4` or `DUAL` | `networkType` |
+| `connectivityInfo.publicAccess.type` | `DISABLED` or `SERVICE_PROVIDED_EIPS`, the two values its description names | `type` |
+
+A delivery target's `logGroup`, `deliveryStream` or `bucket` is not checked: the pages mark each
+optional, and what an enabled target without one does is AWS's behaviour, not something the model
+states. `v2-clusters.html` would not render for verification, so these shapes and constraints are
+taken from the boto3 reference for `create_cluster_v2`, `create_cluster` and `describe_cluster_v2`,
+which is generated from the same service model.
 
 `GetBootstrapBrokers` answers the strings the cluster's configuration implies, in the page's host form
 `b-{n}.{clusterName}.{id}.c2.kafka.{region}.amazonaws.com`, where `{id}` is six hex digits of the ARN's
@@ -23872,7 +23982,7 @@ that deleting it takes its users with it.
 | StopServer | `ONLINE` (or a failed transition) to `OFFLINE`; answers `{}` ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)) |
 | CreateUser | Requires `Role`, `ServerId` and `UserName`, checked before the server is looked up; stores `SshPublicKeyBody` as the user's one key |
 | DescribeUser | All ten `DescribedUser` members; `SshPublicKeys` is an array, possibly empty |
-| UpdateUser | Reads `HomeDirectory` and `Role` only |
+| UpdateUser | Reads every published member with patch semantics; each sent member is held to CreateUser's constraint (#1391) |
 | DeleteUser | Answers `{}` |
 | ListUsers | Requires `ServerId` and an existing server; pages as `ListServers` does; each element is all six `ListedUser` members |
 
@@ -23956,11 +24066,13 @@ role was created and reported successful.
 Every member a routed operation reads is held to its own published Valid Values, Length
 Constraints and Pattern, and is refused `InvalidRequestException`/400 when it breaks them:
 
-- **CreateUser:** `Role` (20–2048, `arn:.*role/\S+`), `UserName` (`[\w][\w@.-]{2,99}`),
+- **CreateUser, UpdateUser:** `Role` (20–2048, `arn:.*role/\S+`), `UserName` (`[\w][\w@.-]{2,99}`),
   `HomeDirectory` (`(|/.*)`, ≤1024), `HomeDirectoryType` (`PATH | LOGICAL`), `Policy`
-  (≤2048), `SshPublicKeyBody` (the published key pattern, ≤2048). `HomeDirectoryMappings`
-  must be an array and `PosixProfile` an object.
-- **CreateServer, UpdateServer:** `Domain` (`S3 | EFS`, CreateServer only), `EndpointType`,
+  (≤2048), `SshPublicKeyBody` (the published key pattern, ≤2048, CreateUser only).
+  `HomeDirectoryMappings` must be an array of 1–50,000 entries and `PosixProfile` an object.
+  Both operations apply these through one function, so they cannot drift apart.
+- **CreateServer, UpdateServer:** `Domain` (`S3 | EFS`, CreateServer only), `Tags` (1–50
+  items, CreateServer only; `[]` is below the published minimum), `EndpointType`,
   `IdentityProviderType`, `IpAddressType`, `Protocols` (1–4 of `SFTP | FTP | FTPS | AS2`),
   `LoggingRole`, `SecurityPolicyName`, both login banners, `Certificate`, `HostKey`, and
   `StructuredLogDestinations` (0–1 entries, 20–1600, `arn:\S+`). Each nested member must be
@@ -24029,6 +24141,26 @@ omits is left alone. An empty `StructuredLogDestinations` clears the destination
 page documents. `Tags` is no longer read, since the page publishes no `Tags` member;
 tagging a server is `TagResource`, which is not routed. `Domain` is not an UpdateServer
 member either: the page says the domain cannot be changed after creation.
+
+### UpdateUser applies what it is sent
+
+`UpdateUser` reads every member `API_UpdateUser` publishes: `HomeDirectory`,
+`HomeDirectoryType`, `HomeDirectoryMappings`, `Policy`, `PosixProfile` and `Role`
+([#1391](https://github.com/scttfrdmn/substrate/issues/1391)). It used to read `HomeDirectory` and `Role` only, so a policy, a POSIX
+profile or a logical home directory sent in an update was answered 200 and dropped.
+
+- A member the request omits is left as it was, and one it sends replaces the stored value.
+- An empty `HomeDirectory` or `Policy` is a value inside each member's published minimum of 0,
+  so it clears the stored one.
+- `Role` (minimum 20) and `HomeDirectoryType` (`PATH | LOGICAL`) have no valid empty value, so an
+  empty one is refused `InvalidRequestException`/400 rather than read as a clear.
+- Each sent member is held to the constraint CreateUser enforces on it, and a refused update
+  changes nothing. An absent user is `ResourceNotFoundException`/400.
+- The prose cross-member rules (`HomeDirectoryMappings` only with `LOGICAL`, and not both
+  `HomeDirectory` and `HomeDirectoryMappings`) are recorded as sent, as CreateUser records
+  them, because the page publishes no code for a bad combination.
+
+The response is `ServerId` and `UserName`, as published.
 
 ### Server IDs are minted from the request
 

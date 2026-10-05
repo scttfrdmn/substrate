@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
@@ -138,6 +137,10 @@ func TestBackupDates_PublishedDatesAreUnixTimestamps(t *testing.T) {
 		{"CreateBackupSelection", "CreationDate", "", "", createdSelection},
 		{"GetBackupSelection", "CreationDate", "GET",
 			"/backup/plans/" + plan.BackupPlanID + "/selections/" + selection.SelectionID, nil},
+		// #1177: UpdateBackupPlan answers the plan's published CreationDate, where it answered an
+		// UpdatedAt no AWS Backup page publishes.
+		{"UpdateBackupPlan", "CreationDate", "", "", backupDatesRaw(t, p, ctx, "UpdateBackupPlan", "POST",
+			"/backup/plans/"+plan.BackupPlanID, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "dates-plan-renamed"}})},
 	} {
 		t.Run(tc.site, func(t *testing.T) {
 			body := tc.body
@@ -147,32 +150,6 @@ func TestBackupDates_PublishedDatesAreUnixTimestamps(t *testing.T) {
 			backupDatesRequireUnix(t, tc.site, tc.member, body)
 		})
 	}
-}
-
-func TestBackupDates_UpdateBackupPlanStillAnswersTheUnpublishedUpdatedAt(t *testing.T) {
-	t.Parallel()
-	p, ctx := setupBackupDatesPlugin(t)
-
-	created := backupDatesRaw(t, p, ctx, "CreateBackupPlan", "POST", "/backup/plans", map[string]any{
-		"BackupPlan": map[string]any{"BackupPlanName": "dates-plan"},
-	})
-	var plan struct {
-		BackupPlanID string `json:"BackupPlanId"`
-	}
-	require.NoError(t, json.Unmarshal(created, &plan), "decode CreateBackupPlan: %s", created)
-
-	updated := backupDatesRaw(t, p, ctx, "UpdateBackupPlan", "POST", "/backup/plans/"+plan.BackupPlanID,
-		map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "dates-plan-renamed"}})
-
-	// UpdatedAt keeps the RFC3339 form on purpose, and this pins that as a decision rather than an
-	// oversight: API_UpdateBackupPlan publishes no UpdatedAt at all — it publishes CreationDate —
-	// so converting the member would make one that is owed deletion look more correct. #1177 owns
-	// the deletion; when it lands, this test goes with it and UpdateBackupPlan joins the table
-	// above.
-	require.Contains(t, string(updated), `"UpdatedAt":"`+backupDatesClock.Format(time.RFC3339Nano)+`"`,
-		"UpdateBackupPlan still answers the unpublished UpdatedAt (#1177): %s", updated)
-	require.NotContains(t, string(updated), `"CreationDate"`,
-		"UpdateBackupPlan does not yet answer the published CreationDate (#1177): %s", updated)
 }
 
 func TestBackupDates_NoResponseRendersAnRFC3339Date(t *testing.T) {
@@ -217,9 +194,9 @@ func TestBackupDates_NoResponseRendersAnRFC3339Date(t *testing.T) {
 			"%s rendered a date as RFC3339; every Backup page publishes Unix: %s", site, body)
 	}
 
-	// UpdateBackupPlan is excluded above rather than passing it: its one date is the unpublished
-	// UpdatedAt, which TestBackupDates_UpdateBackupPlanStillAnswersTheUnpublishedUpdatedAt pins.
+	// UpdateBackupPlan answers the published CreationDate now (#1177), so it is swept like the rest
+	// and must not carry the unpublished UpdatedAt.
 	updated := backupDatesRaw(t, p, ctx, "UpdateBackupPlan", "POST", "/backup/plans/"+plan.BackupPlanID, nil)
-	require.True(t, strings.Contains(string(updated), rfc3339),
-		"the exclusion is only honest while UpdateBackupPlan is the one site still answering RFC3339: %s", updated)
+	require.NotContainsf(t, string(updated), rfc3339, "UpdateBackupPlan rendered a date as RFC3339: %s", updated)
+	require.NotContainsf(t, string(updated), `"UpdatedAt"`, "UpdateBackupPlan answered the unpublished UpdatedAt: %s", updated)
 }

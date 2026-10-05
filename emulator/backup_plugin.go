@@ -73,7 +73,7 @@ func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*
 
 func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
 	if name == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "BackupVaultName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("BackupVaultName")
 	}
 
 	var input struct {
@@ -87,9 +87,8 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 	}
 	// API_CreateBackupVault: CreatorRequestId is optional, and "If used, this parameter must contain 1
 	// to 50 alphanumeric or '-_.' characters." The refusal is the page's InvalidParameterValueException,
-	// "something is wrong with a parameter's value". The value is recorded and reported; the retry
-	// semantics the gloss describes are not modeled, so a second create of the same name answers
-	// AlreadyExistsException whatever its CreatorRequestId.
+	// "something is wrong with a parameter's value". The value is recorded, reported, and makes a retry
+	// of the create idempotent; see the existing-vault branch below.
 	if input.CreatorRequestID != "" && !backupCreatorRequestIDPattern.MatchString(input.CreatorRequestID) {
 		return nil, &AWSError{
 			Code:       "InvalidParameterValueException",
@@ -105,7 +104,21 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("backup createBackupVault get: %w", err)
 	}
 	if existing != nil {
-		return nil, &AWSError{Code: "AlreadyExistsException", Message: "Vault " + name + " already exists.", HTTPStatus: http.StatusBadRequest}
+		// API_CreateBackupVault glosses CreatorRequestId as what "allows failed requests to be retried
+		// without the risk of running the operation twice" (#1173). A retry carrying the value the vault
+		// was created with answers that vault; any other create of the name is AlreadyExistsException.
+		var prior BackupVault
+		if err := json.Unmarshal(existing, &prior); err != nil {
+			return nil, fmt.Errorf("backup createBackupVault unmarshal: %w", err)
+		}
+		if input.CreatorRequestID == "" || input.CreatorRequestID != prior.CreatorRequestID {
+			return nil, &AWSError{Code: "AlreadyExistsException", Message: "Vault " + name + " already exists.", HTTPStatus: http.StatusBadRequest}
+		}
+		return backupJSONResponse(http.StatusOK, map[string]interface{}{
+			"BackupVaultArn":  prior.BackupVaultArn,
+			"BackupVaultName": prior.BackupVaultName,
+			"CreationDate":    EpochSeconds(prior.CreationDate),
+		})
 	}
 
 	now := p.tc.Now()
@@ -146,6 +159,9 @@ func (p *BackupPlugin) describeBackupVault(reqCtx *RequestContext, name string) 
 	return backupJSONResponse(http.StatusOK, backupVaultToWire(*vault))
 }
 
+// deleteBackupVault handles DeleteBackupVault. Its `{}` is faithful: API_DeleteBackupVault publishes
+// "an HTTP 200 response with an empty HTTP body", unlike DeleteBackupPlan, which publishes members
+// (#1177).
 func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*AWSResponse, error) {
 	if _, err := p.loadVault(reqCtx.AccountID, reqCtx.Region, name); err != nil {
 		return nil, err
@@ -264,6 +280,7 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 			BackupPlanName string                   `json:"BackupPlanName"`
 			Rules          []map[string]interface{} `json:"Rules"`
 		} `json:"BackupPlan"`
+		CreatorRequestID string `json:"CreatorRequestId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -271,7 +288,26 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 	if input.BackupPlan.BackupPlanName == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "BackupPlanName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("BackupPlanName")
+	}
+	if err := backupValidateCreatorRequestID(input.CreatorRequestID); err != nil {
+		return nil, err
+	}
+	// "If the request includes a CreatorRequestId that matches an existing backup plan, that plan is
+	// returned" (API_CreateBackupPlan, #1173): the existing plan's create response, not a second plan.
+	if input.CreatorRequestID != "" {
+		prior, err := p.findPlanByCreatorRequestID(reqCtx, input.CreatorRequestID)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			return backupJSONResponse(http.StatusOK, map[string]interface{}{
+				"BackupPlanId":  prior.BackupPlanID,
+				"BackupPlanArn": prior.BackupPlanArn,
+				"CreationDate":  EpochSeconds(prior.CreationDate),
+				"VersionId":     prior.VersionID,
+			})
+		}
 	}
 
 	planID := generateBackupUUID(reqCtx.IDs)
@@ -279,14 +315,15 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 	now := p.tc.Now()
 
 	plan := BackupPlan{
-		BackupPlanID:   planID,
-		BackupPlanArn:  fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", reqCtx.Region, reqCtx.AccountID, planID),
-		BackupPlanName: input.BackupPlan.BackupPlanName,
-		Rules:          input.BackupPlan.Rules,
-		VersionID:      versionID,
-		CreationDate:   now,
-		AccountID:      reqCtx.AccountID,
-		Region:         reqCtx.Region,
+		BackupPlanID:     planID,
+		BackupPlanArn:    fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", reqCtx.Region, reqCtx.AccountID, planID),
+		BackupPlanName:   input.BackupPlan.BackupPlanName,
+		Rules:            input.BackupPlan.Rules,
+		VersionID:        versionID,
+		CreationDate:     now,
+		CreatorRequestID: input.CreatorRequestID,
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
 	}
 
 	goCtx := context.Background()
@@ -313,7 +350,7 @@ func (p *BackupPlugin) getBackupPlan(reqCtx *RequestContext, planID string) (*AW
 	if err != nil {
 		return nil, err
 	}
-	return backupJSONResponse(http.StatusOK, map[string]interface{}{
+	out := map[string]interface{}{
 		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
 		"VersionId":     plan.VersionID,
@@ -322,7 +359,11 @@ func (p *BackupPlugin) getBackupPlan(reqCtx *RequestContext, planID string) (*AW
 			"BackupPlanName": plan.BackupPlanName,
 			"Rules":          plan.Rules,
 		},
-	})
+	}
+	if plan.CreatorRequestID != "" {
+		out["CreatorRequestId"] = plan.CreatorRequestID
+	}
+	return backupJSONResponse(http.StatusOK, out)
 }
 
 func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest, planID string) (*AWSResponse, error) {
@@ -361,14 +402,15 @@ func (p *BackupPlugin) updateBackupPlan(reqCtx *RequestContext, req *AWSRequest,
 		return nil, fmt.Errorf("backup updateBackupPlan put: %w", err)
 	}
 
-	// UpdatedAt is left an RFC3339 string deliberately: API_UpdateBackupPlan publishes no such
-	// member, so giving it the epoch rendering the published dates now take would make a member
-	// that is owed deletion look more correct than it is.
-	// TODO(#1177): answer the published CreationDate instead of UpdatedAt.
+	// API_UpdateBackupPlan publishes AdvancedBackupSettings, BackupPlanArn, BackupPlanId,
+	// CreationDate, ScanSettings and VersionId. The record carries no advanced or scan settings, so
+	// those two are absent rather than empty. CreationDate is the plan's own, which an update does not
+	// move; until #1177 the handler answered an UpdatedAt that no AWS Backup page publishes, and
+	// dropped CreationDate.
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupPlanId":  plan.BackupPlanID,
 		"BackupPlanArn": plan.BackupPlanArn,
-		"UpdatedAt":     p.tc.Now(),
+		"BackupPlanId":  plan.BackupPlanID,
+		"CreationDate":  EpochSeconds(plan.CreationDate),
 		"VersionId":     plan.VersionID,
 	})
 }
@@ -410,13 +452,18 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, er
 		if err != nil {
 			continue
 		}
-		summaries = append(summaries, map[string]interface{}{
+		summary := map[string]interface{}{
 			"BackupPlanId":   plan.BackupPlanID,
 			"BackupPlanArn":  plan.BackupPlanArn,
 			"BackupPlanName": plan.BackupPlanName,
 			"VersionId":      plan.VersionID,
 			"CreationDate":   EpochSeconds(plan.CreationDate),
-		})
+		}
+		// BackupPlansListMember publishes CreatorRequestId; it is answered when the create sent one.
+		if plan.CreatorRequestID != "" {
+			summary["CreatorRequestId"] = plan.CreatorRequestID
+		}
+		summaries = append(summaries, summary)
 	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlansList": summaries,
@@ -434,6 +481,7 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 			IamRoleArn    string   `json:"IamRoleArn"`
 			Resources     []string `json:"Resources"`
 		} `json:"BackupSelection"`
+		CreatorRequestID string `json:"CreatorRequestId"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -441,20 +489,39 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 		}
 	}
 	if input.BackupSelection.SelectionName == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "SelectionName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("SelectionName")
+	}
+	if err := backupValidateCreatorRequestID(input.CreatorRequestID); err != nil {
+		return nil, err
+	}
+	// API_CreateBackupSelection glosses CreatorRequestId as what lets a failed request be retried
+	// without running it twice (#1173): a retry carrying a recorded value answers that selection.
+	if input.CreatorRequestID != "" {
+		prior, err := p.findSelectionByCreatorRequestID(reqCtx, planID, input.CreatorRequestID)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			return backupJSONResponse(http.StatusOK, map[string]interface{}{
+				"SelectionId":  prior.SelectionID,
+				"BackupPlanId": prior.BackupPlanID,
+				"CreationDate": EpochSeconds(prior.CreationDate),
+			})
+		}
 	}
 
 	selectionID := generateBackupUUID(reqCtx.IDs)
 	now := p.tc.Now()
 	selection := BackupSelection{
-		SelectionID:   selectionID,
-		SelectionName: input.BackupSelection.SelectionName,
-		BackupPlanID:  planID,
-		IamRoleArn:    input.BackupSelection.IamRoleArn,
-		Resources:     input.BackupSelection.Resources,
-		CreationDate:  now,
-		AccountID:     reqCtx.AccountID,
-		Region:        reqCtx.Region,
+		SelectionID:      selectionID,
+		SelectionName:    input.BackupSelection.SelectionName,
+		BackupPlanID:     planID,
+		IamRoleArn:       input.BackupSelection.IamRoleArn,
+		CreatorRequestID: input.CreatorRequestID,
+		Resources:        input.BackupSelection.Resources,
+		CreationDate:     now,
+		AccountID:        reqCtx.AccountID,
+		Region:           reqCtx.Region,
 	}
 
 	goCtx := context.Background()
@@ -480,7 +547,7 @@ func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, select
 	if err != nil {
 		return nil, err
 	}
-	return backupJSONResponse(http.StatusOK, map[string]interface{}{
+	out := map[string]interface{}{
 		"SelectionId":  selection.SelectionID,
 		"BackupPlanId": selection.BackupPlanID,
 		"CreationDate": EpochSeconds(selection.CreationDate),
@@ -489,9 +556,15 @@ func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, select
 			"IamRoleArn":    selection.IamRoleArn,
 			"Resources":     selection.Resources,
 		},
-	})
+	}
+	if selection.CreatorRequestID != "" {
+		out["CreatorRequestId"] = selection.CreatorRequestID
+	}
+	return backupJSONResponse(http.StatusOK, out)
 }
 
+// deleteBackupSelection handles DeleteBackupSelection. Its `{}` is faithful: API_DeleteBackupSelection
+// publishes "an HTTP 200 response with an empty HTTP body" (#1177).
 func (p *BackupPlugin) deleteBackupSelection(reqCtx *RequestContext, planID, selectionID string) (*AWSResponse, error) {
 	if _, err := p.loadSelection(reqCtx.AccountID, reqCtx.Region, planID, selectionID); err != nil {
 		return nil, err
@@ -508,7 +581,7 @@ func (p *BackupPlugin) deleteBackupSelection(reqCtx *RequestContext, planID, sel
 // loadVault loads a BackupVault from state or returns a not-found error.
 func (p *BackupPlugin) loadVault(acct, region, name string) (*BackupVault, error) {
 	if name == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "BackupVaultName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("BackupVaultName")
 	}
 	goCtx := context.Background()
 	key := backupVaultKey(acct, region, name)
@@ -517,7 +590,7 @@ func (p *BackupPlugin) loadVault(acct, region, name string) (*BackupVault, error
 		return nil, fmt.Errorf("backup loadVault get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Vault " + name + " does not exist.", HTTPStatus: http.StatusNotFound}
+		return nil, backupNotFound("Vault " + name + " does not exist.")
 	}
 	var vault BackupVault
 	if err := json.Unmarshal(data, &vault); err != nil {
@@ -529,7 +602,7 @@ func (p *BackupPlugin) loadVault(acct, region, name string) (*BackupVault, error
 // loadPlan loads a BackupPlan from state or returns a not-found error.
 func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error) {
 	if planID == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "BackupPlanId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("BackupPlanId")
 	}
 	goCtx := context.Background()
 	key := backupPlanKey(acct, region, planID)
@@ -538,7 +611,7 @@ func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error
 		return nil, fmt.Errorf("backup loadPlan get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Plan " + planID + " does not exist.", HTTPStatus: http.StatusNotFound}
+		return nil, backupNotFound("Plan " + planID + " does not exist.")
 	}
 	var plan BackupPlan
 	if err := json.Unmarshal(data, &plan); err != nil {
@@ -550,7 +623,7 @@ func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error
 // loadSelection loads a BackupSelection from state or returns a not-found error.
 func (p *BackupPlugin) loadSelection(acct, region, planID, selectionID string) (*BackupSelection, error) {
 	if selectionID == "" {
-		return nil, &AWSError{Code: "InvalidRequestException", Message: "SelectionId is required", HTTPStatus: http.StatusBadRequest}
+		return nil, backupMissingParameter("SelectionId")
 	}
 	goCtx := context.Background()
 	key := backupSelectionKey(acct, region, planID, selectionID)
@@ -559,7 +632,7 @@ func (p *BackupPlugin) loadSelection(acct, region, planID, selectionID string) (
 		return nil, fmt.Errorf("backup loadSelection get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Selection " + selectionID + " does not exist.", HTTPStatus: http.StatusNotFound}
+		return nil, backupNotFound("Selection " + selectionID + " does not exist.")
 	}
 	var selection BackupSelection
 	if err := json.Unmarshal(data, &selection); err != nil {
@@ -586,6 +659,20 @@ func (p *BackupPlugin) loadSelection(acct, region, planID, selectionID string) (
 // does not require, and changing it is a rendering change rather than part of deriving the value.
 func generateBackupUUID(m *IDMint) string {
 	return m.HexUUID()
+}
+
+// backupMissingParameter is the refusal every routed AWS Backup page publishes for an absent required
+// member: MissingParameterValueException, "Indicates that a required parameter is missing", HTTP 400.
+// It replaced InvalidRequestException (#1390), which only DeleteBackupVault's and DeleteBackupPlan's
+// pages list, and which they gloss as input of the wrong type rather than input that is missing.
+func backupMissingParameter(member string) *AWSError {
+	return &AWSError{Code: "MissingParameterValueException", Message: member + " is required", HTTPStatus: http.StatusBadRequest}
+}
+
+// backupNotFound is the refusal every routed AWS Backup page publishes for a resource that does not
+// exist: ResourceNotFoundException at HTTP 400, not 404 (#1390).
+func backupNotFound(message string) *AWSError {
+	return &AWSError{Code: "ResourceNotFoundException", Message: message, HTTPStatus: http.StatusBadRequest}
 }
 
 // backupJSONResponse serializes v to JSON and returns an AWSResponse with

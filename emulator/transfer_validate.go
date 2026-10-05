@@ -147,3 +147,60 @@ func transferRawJSONKind(member string, raw json.RawMessage, wantArray bool) (pr
 	}
 	return true, nil
 }
+
+// transferCheckUserProfile applies the published constraints of the four scalar user members CreateUser
+// and UpdateUser share, so the two operations cannot drift apart: Role (20–2048 characters,
+// arn:.*role/\S+), HomeDirectory (0–1024, (|/.*)), HomeDirectoryType (PATH | LOGICAL) and Policy
+// (0–2048). An empty value is one the request did not send, and is left to the caller.
+func transferCheckUserProfile(role, homeDirectory, homeDirectoryType, policy string) error {
+	if role != "" && len(role) < 20 {
+		return transferInvalidRequest("Role is shorter than 20 characters")
+	}
+	if err := transferCheckString("Role", role, 2048, transferRolePattern); err != nil {
+		return err
+	}
+	if err := transferCheckString("HomeDirectory", homeDirectory, 1024, transferHomeDirectoryPattern); err != nil {
+		return err
+	}
+	if err := transferCheckEnum("HomeDirectoryType", homeDirectoryType, transferHomeDirectoryTypes); err != nil {
+		return err
+	}
+	return transferCheckString("Policy", policy, 2048, nil)
+}
+
+// transferCheckHomeDirectoryMappings reports whether raw carries HomeDirectoryMappings, refusing anything
+// but an array of 1–50000 entries, the published Array Members of both CreateUser and UpdateUser.
+func transferCheckHomeDirectoryMappings(raw json.RawMessage) (present bool, err error) {
+	present, err = transferRawJSONKind("HomeDirectoryMappings", raw, true)
+	if err != nil || !present {
+		return present, err
+	}
+	var entries []json.RawMessage
+	if err := json.Unmarshal(raw, &entries); err != nil {
+		return false, transferInvalidRequest("HomeDirectoryMappings must be an array of objects")
+	}
+	if len(entries) < 1 || len(entries) > 50000 {
+		return false, transferInvalidRequest("HomeDirectoryMappings must hold between 1 and 50000 entries")
+	}
+	return true, nil
+}
+
+// transferCheckTags applies a Tags member's published Array Members, 1–50 items. A nil slice is a
+// request that sent no Tags; an empty one sent `[]`, which is below the published minimum.
+func transferCheckTags(tags []TransferTag) error {
+	if tags == nil {
+		return nil
+	}
+	if len(tags) < 1 || len(tags) > 50 {
+		return transferInvalidRequest("Tags must hold between 1 and 50 tags")
+	}
+	return nil
+}
+
+// transferDeref returns the string p points to, or "" for a member the request did not send.
+func transferDeref(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}

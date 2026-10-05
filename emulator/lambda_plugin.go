@@ -32,6 +32,9 @@ type LambdaPlugin struct {
 	esmActive map[string]struct{}
 	// pollMu serializes RunDue, so two concurrent requests cannot both run one due poll.
 	pollMu sync.Mutex
+	// seedMu serializes advancing a seeded role-propagation window (#1274); see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "lambda".
@@ -239,6 +242,10 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 	if existing != nil {
 		return nil, &AWSError{Code: "ResourceConflictException", Message: "Function already exists", HTTPStatus: http.StatusConflict}
+	}
+	// A role inside a seeded propagation window cannot be assumed yet (#1274).
+	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
+		return nil, err
 	}
 
 	timeout := body.Timeout
@@ -460,6 +467,10 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 
 	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
+		return nil, err
+	}
+	// A new Role is assumed as CreateFunction's is, so a seeded propagation window refuses it too.
+	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
 		return nil, err
 	}
 
@@ -779,7 +790,9 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 	if err != nil {
 		return nil, fmt.Errorf("lambda addPermission marshal: %w", err)
 	}
-	return lambdaJSONResponse(http.StatusCreated, map[string]json.RawMessage{"Statement": stmtData})
+	// API_AddPermission publishes Statement as a string holding the statement's JSON, not as a
+	// nested object, so a typed SDK's string field decodes it (#1382).
+	return lambdaJSONResponse(http.StatusCreated, map[string]string{"Statement": string(stmtData)})
 }
 
 func (p *LambdaPlugin) removePermission(ctx *RequestContext, name, statementID string) (*AWSResponse, error) {

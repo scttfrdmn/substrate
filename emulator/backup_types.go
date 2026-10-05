@@ -46,6 +46,11 @@ type BackupPlan struct {
 	CreationDate time.Time `json:"CreationDate"`
 	// LastExecutionDate is the last time the plan was executed.
 	LastExecutionDate *time.Time `json:"LastExecutionDate,omitempty"`
+
+	// CreatorRequestID is the CreateBackupPlan request's CreatorRequestId, recorded because
+	// API_CreateBackupPlan makes it the idempotency key: "If the request includes a CreatorRequestId
+	// that matches an existing backup plan, that plan is returned" (#1173).
+	CreatorRequestID string `json:"CreatorRequestId,omitempty"`
 	// AccountID is the AWS account that owns this plan.
 	AccountID string `json:"AccountID"`
 	// Region is the AWS region where the plan exists.
@@ -62,6 +67,10 @@ type BackupSelection struct {
 	BackupPlanID string `json:"BackupPlanId"`
 	// IamRoleArn is the ARN of the IAM role for the backup selection.
 	IamRoleArn string `json:"IamRoleArn,omitempty"`
+
+	// CreatorRequestID is the CreateBackupSelection request's CreatorRequestId, recorded so a retried
+	// create returns the selection it first made (#1173).
+	CreatorRequestID string `json:"CreatorRequestId,omitempty"`
 	// Resources is the list of ARNs for resources to back up.
 	Resources []string `json:"Resources,omitempty"`
 	// CreationDate is when the selection was created.

@@ -220,6 +220,11 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 	if err := input.validate(); err != nil {
 		return nil, err
 	}
+	// API_CreateServer: Tags, "Array Members: Minimum number of 1 item. Maximum number of 50 items"
+	// (#1391).
+	if err := transferCheckTags(input.Tags); err != nil {
+		return nil, err
+	}
 	if input.Domain == "" {
 		input.Domain = "S3"
 	}
@@ -504,25 +509,13 @@ func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	if !transferUserNamePattern.MatchString(input.UserName) {
 		return nil, transferInvalidRequest("UserName %q does not match the pattern %s", input.UserName, transferUserNamePattern.String())
 	}
-	if len(input.Role) < 20 {
-		return nil, transferInvalidRequest("Role is shorter than 20 characters")
-	}
-	if err := transferCheckString("Role", input.Role, 2048, transferRolePattern); err != nil {
-		return nil, err
-	}
-	if err := transferCheckString("HomeDirectory", input.HomeDirectory, 1024, transferHomeDirectoryPattern); err != nil {
-		return nil, err
-	}
-	if err := transferCheckEnum("HomeDirectoryType", input.HomeDirectoryType, transferHomeDirectoryTypes); err != nil {
-		return nil, err
-	}
-	if err := transferCheckString("Policy", input.Policy, 2048, nil); err != nil {
+	if err := transferCheckUserProfile(input.Role, input.HomeDirectory, input.HomeDirectoryType, input.Policy); err != nil {
 		return nil, err
 	}
 	if err := transferCheckString("SshPublicKeyBody", input.SSHPublicKeyBody, 2048, transferSSHPublicKeyPattern); err != nil {
 		return nil, err
 	}
-	hasMappings, err := transferRawJSONKind("HomeDirectoryMappings", input.HomeDirectoryMappings, true)
+	hasMappings, err := transferCheckHomeDirectoryMappings(input.HomeDirectoryMappings)
 	if err != nil {
 		return nil, err
 	}
@@ -610,30 +603,77 @@ func (p *TransferPlugin) describeUser(reqCtx *RequestContext, req *AWSRequest) (
 	})
 }
 
-// updateUser handles UpdateUser. It reads HomeDirectory and Role only; the other members
-// API_UpdateUser publishes are outside #1199's table and are not yet applied.
+// updateUser handles UpdateUser. It applies every member API_UpdateUser publishes with patch
+// semantics: a member the request omits is left as it was, and one it sends replaces the stored
+// value, so an empty HomeDirectory or Policy clears it. Each sent member is held to the constraint
+// CreateUser enforces on it (#1197), through the same [transferCheckUserProfile] and
+// [transferCheckHomeDirectoryMappings]. Role and HomeDirectoryType have no valid empty value, so an
+// empty one is refused rather than read as a clear. The prose cross-member rules (HomeDirectoryMappings
+// only with LOGICAL; not HomeDirectory and HomeDirectoryMappings together) are recorded as sent, as
+// CreateUser records them, since the page publishes no code for them. It used to read only
+// HomeDirectory and Role and drop the rest (#1391).
 func (p *TransferPlugin) updateUser(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		ServerID      string `json:"ServerId"`
-		UserName      string `json:"UserName"`
-		HomeDirectory string `json:"HomeDirectory"`
-		Role          string `json:"Role"`
+		ServerID              string          `json:"ServerId"`
+		UserName              string          `json:"UserName"`
+		HomeDirectory         *string         `json:"HomeDirectory"`
+		HomeDirectoryType     *string         `json:"HomeDirectoryType"`
+		HomeDirectoryMappings json.RawMessage `json:"HomeDirectoryMappings"`
+		Policy                *string         `json:"Policy"`
+		PosixProfile          json.RawMessage `json:"PosixProfile"`
+		Role                  *string         `json:"Role"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, transferInvalidBody()
 		}
 	}
-	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
+	if input.ServerID == "" || input.UserName == "" {
+		return nil, transferInvalidRequest("ServerId and UserName are required")
+	}
+	if !transferUserNamePattern.MatchString(input.UserName) {
+		return nil, transferInvalidRequest("UserName %q does not match the pattern %s", input.UserName, transferUserNamePattern.String())
+	}
+	if input.Role != nil && *input.Role == "" {
+		return nil, transferInvalidRequest("Role is shorter than 20 characters")
+	}
+	if input.HomeDirectoryType != nil && *input.HomeDirectoryType == "" {
+		return nil, transferInvalidRequest("HomeDirectoryType %q is not one of %v", "", transferHomeDirectoryTypes)
+	}
+	if err := transferCheckUserProfile(transferDeref(input.Role), transferDeref(input.HomeDirectory),
+		transferDeref(input.HomeDirectoryType), transferDeref(input.Policy)); err != nil {
+		return nil, err
+	}
+	hasMappings, err := transferCheckHomeDirectoryMappings(input.HomeDirectoryMappings)
+	if err != nil {
+		return nil, err
+	}
+	hasPosix, err := transferRawJSONKind("PosixProfile", input.PosixProfile, false)
 	if err != nil {
 		return nil, err
 	}
 
-	if input.HomeDirectory != "" {
-		user.HomeDirectory = input.HomeDirectory
+	user, err := p.loadUser(reqCtx.AccountID, reqCtx.Region, input.ServerID, input.UserName)
+	if err != nil {
+		return nil, err
 	}
-	if input.Role != "" {
-		user.Role = input.Role
+	if input.HomeDirectory != nil {
+		user.HomeDirectory = *input.HomeDirectory
+	}
+	if input.HomeDirectoryType != nil {
+		user.HomeDirectoryType = *input.HomeDirectoryType
+	}
+	if input.Policy != nil {
+		user.Policy = *input.Policy
+	}
+	if input.Role != nil {
+		user.Role = *input.Role
+	}
+	if hasMappings {
+		user.HomeDirectoryMappings = input.HomeDirectoryMappings
+	}
+	if hasPosix {
+		user.PosixProfile = input.PosixProfile
 	}
 
 	goCtx := context.Background()

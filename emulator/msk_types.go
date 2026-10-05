@@ -53,6 +53,131 @@ type MSKCluster struct {
 	StorageMode string `json:"StorageMode,omitempty"`
 	// ConfigurationInfo is the create request's configurationInfo, as received.
 	ConfigurationInfo *MSKConfigurationInfo `json:"ConfigurationInfo,omitempty"`
+
+	// The three members below were added by #1386. Each is omitempty, so a record written before them
+	// decodes unchanged and reads as a cluster that was sent none of them.
+
+	// LoggingInfo is the create request's loggingInfo, as received.
+	LoggingInfo *MSKLoggingInfo `json:"LoggingInfo,omitempty"`
+	// OpenMonitoring is the create request's openMonitoring, as received.
+	OpenMonitoring *MSKOpenMonitoring `json:"OpenMonitoring,omitempty"`
+	// Rebalancing is the create request's rebalancing, as received.
+	Rebalancing *MSKRebalancing `json:"Rebalancing,omitempty"`
+}
+
+// MSKLoggingInfo is a provisioned cluster's loggingInfo: where its broker and authorizer logs are
+// delivered. Both create pages mark brokerLogs Required when the object is sent and authorizerLogs
+// optional; the two share one shape.
+type MSKLoggingInfo struct {
+	// BrokerLogs is where broker logs go; Required on the page.
+	BrokerLogs *MSKLogDestinations `json:"BrokerLogs,omitempty"`
+	// AuthorizerLogs is where authorizer logs go.
+	AuthorizerLogs *MSKLogDestinations `json:"AuthorizerLogs,omitempty"`
+}
+
+// MSKLogDestinations is the BrokerLogs (and AuthorizerLogs) shape: up to one of each delivery target.
+type MSKLogDestinations struct {
+	// CloudWatchLogs delivers to a CloudWatch Logs group.
+	CloudWatchLogs *MSKCloudWatchLogs `json:"CloudWatchLogs,omitempty"`
+	// Firehose delivers to a Firehose delivery stream.
+	Firehose *MSKFirehoseLogs `json:"Firehose,omitempty"`
+	// S3 delivers to an S3 bucket.
+	S3 *MSKS3Logs `json:"S3,omitempty"`
+}
+
+// MSKCloudWatchLogs is a CloudWatch Logs delivery target. Enabled is Required on the page, so it is a
+// pointer: an absent one is refused rather than read as false.
+type MSKCloudWatchLogs struct {
+	// Enabled reports whether delivery is on.
+	Enabled *bool `json:"Enabled,omitempty"`
+	// LogGroup is the log group delivered to.
+	LogGroup string `json:"LogGroup,omitempty"`
+}
+
+// MSKFirehoseLogs is a Firehose delivery target; Enabled is Required on the page.
+type MSKFirehoseLogs struct {
+	// DeliveryStream is the delivery stream delivered to.
+	DeliveryStream string `json:"DeliveryStream,omitempty"`
+	// Enabled reports whether delivery is on.
+	Enabled *bool `json:"Enabled,omitempty"`
+}
+
+// MSKS3Logs is an S3 delivery target; Enabled is Required on the page.
+type MSKS3Logs struct {
+	// Bucket is the bucket delivered to.
+	Bucket string `json:"Bucket,omitempty"`
+	// Enabled reports whether delivery is on.
+	Enabled *bool `json:"Enabled,omitempty"`
+	// Prefix is the object-key prefix.
+	Prefix string `json:"Prefix,omitempty"`
+}
+
+// MSKOpenMonitoring is a provisioned cluster's openMonitoring. prometheus is Required on the page when
+// the object is sent.
+type MSKOpenMonitoring struct {
+	// Prometheus holds the Prometheus exporters.
+	Prometheus *MSKPrometheus `json:"Prometheus,omitempty"`
+}
+
+// MSKPrometheus is the Prometheus open-monitoring settings: the JMX and node exporters, each optional.
+type MSKPrometheus struct {
+	// JmxExporter is the JMX exporter.
+	JmxExporter *MSKExporter `json:"JmxExporter,omitempty"`
+	// NodeExporter is the node exporter.
+	NodeExporter *MSKExporter `json:"NodeExporter,omitempty"`
+}
+
+// MSKExporter is one Prometheus exporter; EnabledInBroker is Required on the page when it is sent.
+type MSKExporter struct {
+	// EnabledInBroker reports whether the exporter runs on the brokers.
+	EnabledInBroker *bool `json:"EnabledInBroker,omitempty"`
+}
+
+// MSKRebalancing is a provisioned cluster's rebalancing: its status, PAUSED or ACTIVE.
+type MSKRebalancing struct {
+	// Status is PAUSED or ACTIVE.
+	Status string `json:"Status,omitempty"`
+}
+
+// MSKConnectivityInfo is a broker node group's connectivityInfo: public access, multi-VPC private
+// connectivity and the network type. Every member is optional on both create pages.
+type MSKConnectivityInfo struct {
+	// PublicAccess is the brokers' public-access setting.
+	PublicAccess *MSKPublicAccess `json:"PublicAccess,omitempty"`
+	// VpcConnectivity is the multi-VPC private connectivity setting.
+	VpcConnectivity *MSKVpcConnectivity `json:"VpcConnectivity,omitempty"`
+	// NetworkType is IPV4 or DUAL.
+	NetworkType string `json:"NetworkType,omitempty"`
+}
+
+// MSKPublicAccess is the publicAccess setting. Type's description names its two values, DISABLED and
+// SERVICE_PROVIDED_EIPS.
+type MSKPublicAccess struct {
+	// Type is DISABLED or SERVICE_PROVIDED_EIPS.
+	Type string `json:"Type,omitempty"`
+}
+
+// MSKVpcConnectivity is the vpcConnectivity setting.
+type MSKVpcConnectivity struct {
+	// ClientAuthentication is the client authentication private connections use.
+	ClientAuthentication *MSKVpcClientAuthentication `json:"ClientAuthentication,omitempty"`
+}
+
+// MSKVpcClientAuthentication is vpcConnectivity's clientAuthentication: SASL (SCRAM and IAM) and
+// TLS, each an {enabled} object.
+type MSKVpcClientAuthentication struct {
+	// Sasl holds the SASL settings.
+	Sasl *MSKVpcSasl `json:"Sasl,omitempty"`
+	// TLS is TLS client authentication.
+	TLS *MSKEnabled `json:"Tls,omitempty"`
+}
+
+// MSKVpcSasl is vpcConnectivity's SASL settings.
+type MSKVpcSasl struct {
+	// Scram is SASL/SCRAM authentication.
+	Scram *MSKEnabled `json:"Scram,omitempty"`
+	// IAM is SASL/IAM authentication.
+	IAM *MSKEnabled `json:"Iam,omitempty"`
 }
 
 // MSKServerless is a serverless cluster's configuration: the ServerlessRequest members of
@@ -158,6 +283,9 @@ type MSKBrokerNodeGroupInfo struct {
 	SecurityGroups []string `json:"SecurityGroups"`
 	// StorageInfo holds the storage configuration for the brokers.
 	StorageInfo MSKStorageInfo `json:"StorageInfo"`
+	// ConnectivityInfo is the create request's brokerNodeGroupInfo.connectivityInfo, as received
+	// (#1386). omitempty, so a record written before it decodes unchanged.
+	ConnectivityInfo *MSKConnectivityInfo `json:"ConnectivityInfo,omitempty"`
 }
 
 // MSKStorageInfo holds storage configuration for MSK broker nodes.
@@ -229,10 +357,12 @@ type MSKBrokerSoftwareInfo struct {
 // It carries the published ClusterInfo members the record models (#1199): clusterArn, clusterName,
 // state, creationTime, tags, brokerNodeGroupInfo, numberOfBrokerNodes, currentBrokerSoftwareInfo,
 // encryptionInfo, clientAuthentication, enhancedMonitoring and storageMode, and since #1196
-// currentVersion and — when a seeded cluster settles FAILED — stateInfo. Absent, because nothing in
-// substrate holds them: activeOperationArn (no cluster operation is modeled), customerActionStatus,
-// loggingInfo, openMonitoring, rebalancing, and the two zookeeper connect strings (no ZooKeeper is
-// modeled). An absent member is omitted rather than sent empty.
+// currentVersion and — when a seeded cluster settles FAILED — stateInfo, and since #1386 loggingInfo,
+// openMonitoring and rebalancing as the create sent them. Absent, because nothing in substrate holds
+// them: activeOperationArn (no cluster operation is modeled), customerActionStatus, and the two
+// zookeeper connect strings (no ZooKeeper is modeled). An absent member is omitted rather than sent
+// empty, and the three #1386 members are answered only when the create sent them: the model states
+// no default for any of them.
 type mskClusterInfoOut struct {
 	ClusterARN                string                      `json:"clusterArn"`
 	ClusterName               string                      `json:"clusterName"`
@@ -246,6 +376,9 @@ type mskClusterInfoOut struct {
 	ClientAuthentication      *mskClientAuthenticationOut `json:"clientAuthentication,omitempty"`
 	EnhancedMonitoring        string                      `json:"enhancedMonitoring,omitempty"`
 	StorageMode               string                      `json:"storageMode,omitempty"`
+	LoggingInfo               *mskLoggingInfoOut          `json:"loggingInfo,omitempty"`
+	OpenMonitoring            *mskOpenMonitoringOut       `json:"openMonitoring,omitempty"`
+	Rebalancing               *mskRebalancingOut          `json:"rebalancing,omitempty"`
 	Tags                      map[string]string           `json:"tags,omitempty"`
 	CreationTime              time.Time                   `json:"creationTime"`
 }
@@ -269,8 +402,8 @@ type mskClusterOut struct {
 }
 
 // mskProvisionedOut is the Provisioned member of a v2 Cluster. Absent for the reasons
-// [mskClusterInfoOut] gives: customerActionStatus, loggingInfo, openMonitoring, rebalancing and the
-// zookeeper connect strings.
+// [mskClusterInfoOut] gives: customerActionStatus and the zookeeper connect strings. loggingInfo,
+// openMonitoring and rebalancing are answered as there (#1386).
 type mskProvisionedOut struct {
 	BrokerNodeGroupInfo       *mskBrokerNodeGroupInfoOut  `json:"brokerNodeGroupInfo,omitempty"`
 	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut    `json:"currentBrokerSoftwareInfo"`
@@ -279,6 +412,9 @@ type mskProvisionedOut struct {
 	ClientAuthentication      *mskClientAuthenticationOut `json:"clientAuthentication,omitempty"`
 	EnhancedMonitoring        string                      `json:"enhancedMonitoring,omitempty"`
 	StorageMode               string                      `json:"storageMode,omitempty"`
+	LoggingInfo               *mskLoggingInfoOut          `json:"loggingInfo,omitempty"`
+	OpenMonitoring            *mskOpenMonitoringOut       `json:"openMonitoring,omitempty"`
+	Rebalancing               *mskRebalancingOut          `json:"rebalancing,omitempty"`
 }
 
 // mskServerlessOut is the Serverless member of a v2 Cluster. kafkaVersion is published and absent:
@@ -381,6 +517,9 @@ func mskClusterInfoWire(c *MSKCluster) mskClusterInfoOut {
 		out.ClientAuthentication = mskClientAuthenticationWire(c.ClientAuthentication)
 		out.EnhancedMonitoring = c.EnhancedMonitoring
 		out.StorageMode = c.StorageMode
+		out.LoggingInfo = mskLoggingInfoWire(c.LoggingInfo)
+		out.OpenMonitoring = mskOpenMonitoringWire(c.OpenMonitoring)
+		out.Rebalancing = mskRebalancingWire(c.Rebalancing)
 	}
 	return out
 }
@@ -410,6 +549,9 @@ func mskClusterWire(c *MSKCluster) mskClusterOut {
 		ClientAuthentication:      mskClientAuthenticationWire(c.ClientAuthentication),
 		EnhancedMonitoring:        c.EnhancedMonitoring,
 		StorageMode:               c.StorageMode,
+		LoggingInfo:               mskLoggingInfoWire(c.LoggingInfo),
+		OpenMonitoring:            mskOpenMonitoringWire(c.OpenMonitoring),
+		Rebalancing:               mskRebalancingWire(c.Rebalancing),
 	}
 	return out
 }
@@ -492,10 +634,11 @@ func mskEnabledWire(e *MSKEnabled) *mskEnabledOut {
 // clientSubnets and instanceType are required in the model and so are always
 // present; the rest are optional and omitted when unset.
 type mskBrokerNodeGroupInfoOut struct {
-	InstanceType   string             `json:"instanceType"`
-	ClientSubnets  []string           `json:"clientSubnets"`
-	SecurityGroups []string           `json:"securityGroups,omitempty"`
-	StorageInfo    *mskStorageInfoOut `json:"storageInfo,omitempty"`
+	InstanceType     string                  `json:"instanceType"`
+	ClientSubnets    []string                `json:"clientSubnets"`
+	SecurityGroups   []string                `json:"securityGroups,omitempty"`
+	StorageInfo      *mskStorageInfoOut      `json:"storageInfo,omitempty"`
+	ConnectivityInfo *mskConnectivityInfoOut `json:"connectivityInfo,omitempty"`
 }
 
 // mskStorageInfoOut is the storageInfo member of a broker node group.
@@ -539,9 +682,10 @@ type mskBrokerNodeInfoOut struct {
 // API rejects and real MSK never returns.
 func mskBrokerNodeGroupInfoWire(b MSKBrokerNodeGroupInfo) mskBrokerNodeGroupInfoOut {
 	out := mskBrokerNodeGroupInfoOut{
-		InstanceType:   b.InstanceType,
-		ClientSubnets:  b.ClientSubnets,
-		SecurityGroups: b.SecurityGroups,
+		InstanceType:     b.InstanceType,
+		ClientSubnets:    b.ClientSubnets,
+		SecurityGroups:   b.SecurityGroups,
+		ConnectivityInfo: mskConnectivityInfoWire(b.ConnectivityInfo),
 	}
 	if b.StorageInfo.EbsStorageInfo.VolumeSize != 0 {
 		out.StorageInfo = &mskStorageInfoOut{
