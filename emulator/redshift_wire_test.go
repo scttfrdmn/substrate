@@ -216,7 +216,7 @@ func TestRedshiftWire_ClusterResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{"DescribeClusters", map[string]string{"ClusterIdentifier": "wire-cluster"}, "<MasterUsername>admin</MasterUsername>"},
 		{"ModifyCluster", map[string]string{"ClusterIdentifier": "wire-cluster", "NumberOfNodes": "4"}, "<NumberOfNodes>4</NumberOfNodes>"},
 		// Last: it deletes the record the two above read.
-		{"DeleteCluster", map[string]string{"ClusterIdentifier": "wire-cluster"}, "<DBName>wiredb</DBName>"},
+		{"DeleteCluster", map[string]string{"ClusterIdentifier": "wire-cluster", "SkipFinalClusterSnapshot": "true"}, "<DBName>wiredb</DBName>"},
 	} {
 		t.Run(tc.action, func(t *testing.T) {
 			body := created

@@ -123,7 +123,9 @@ func TestFSx_CreateDescribeDelete(t *testing.T) {
 	assert.Equal(t, "LUSTRE", createResp.FileSystem.FileSystemType)
 	assert.Equal(t, int32(1200), createResp.FileSystem.StorageCapacity)
 	assert.Equal(t, "SSD", createResp.FileSystem.StorageType)
-	assert.Equal(t, "AVAILABLE", createResp.FileSystem.Lifecycle)
+	// API_CreateFileSystem: the call "returns while the file system's lifecycle state is still
+	// CREATING" (#1196). DescribeFileSystems reports it AVAILABLE, unseeded, from the first describe.
+	assert.Equal(t, "CREATING", createResp.FileSystem.Lifecycle)
 	assert.Contains(t, createResp.FileSystem.DNSName, fsID)
 	assert.Contains(t, createResp.FileSystem.ResourceARN, fsID)
 	assert.Greater(t, createResp.FileSystem.CreationTime, float64(0))

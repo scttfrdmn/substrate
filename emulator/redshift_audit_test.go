@@ -181,7 +181,7 @@ func TestRedshiftAudit_FiltersNarrow(t *testing.T) {
 	// An orphan: a snapshot whose cluster has since been deleted.
 	redshiftAuditOK(t, p, ctx, "CreateCluster", redshiftAuditCluster("gone"))
 	redshiftAuditOK(t, p, ctx, "CreateClusterSnapshot", map[string]string{"ClusterIdentifier": "gone", "SnapshotIdentifier": "gone-snap"})
-	redshiftAuditOK(t, p, ctx, "DeleteCluster", map[string]string{"ClusterIdentifier": "gone"})
+	redshiftAuditOK(t, p, ctx, "DeleteCluster", map[string]string{"ClusterIdentifier": "gone", "SkipFinalClusterSnapshot": "true"})
 
 	for _, tc := range []struct {
 		name, describe string

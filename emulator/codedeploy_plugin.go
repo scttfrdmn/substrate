@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type CodeDeployPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the deployment progression's read-modify-write; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "codedeploy".
@@ -561,8 +564,12 @@ func (p *CodeDeployPlugin) getDeployment(reqCtx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("codedeploy getDeployment unmarshal: %w", err)
 	}
 
+	info, err := p.observeDeployment(deployment)
+	if err != nil {
+		return nil, err
+	}
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"deploymentInfo": codedeployDeploymentToWire(deployment),
+		"deploymentInfo": info,
 	})
 }
 

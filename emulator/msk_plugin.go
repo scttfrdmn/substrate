@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,9 @@ type MSKPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the read-modify-write of a cluster's observation counter; see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "msk".
@@ -292,23 +296,29 @@ func (p *MSKPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err := p.storeNewCluster(reqCtx, &cluster); err != nil {
 		return nil, err
 	}
+	obs, err := p.clusterObservation(&cluster, false)
+	if err != nil {
+		return nil, err
+	}
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
 		"clusterArn":  cluster.ClusterARN,
 		"clusterName": cluster.ClusterName,
-		"state":       cluster.State,
+		"state":       obs.State,
 	})
 }
 
 // newCluster builds the record a create writes, minting its ARN.
 func (p *MSKPlugin) newCluster(reqCtx *RequestContext, name string, tags map[string]string) MSKCluster {
+	arn := "arn:aws:kafka:" + reqCtx.Region + ":" + reqCtx.AccountID + ":cluster/" + name + "/" + mskClusterUUID(reqCtx.IDs)
 	return MSKCluster{
-		ClusterName: name,
-		ClusterARN:  "arn:aws:kafka:" + reqCtx.Region + ":" + reqCtx.AccountID + ":cluster/" + name + "/" + mskClusterUUID(reqCtx.IDs),
-		State:       "ACTIVE",
-		Tags:        tags,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
-		CreatedAt:   p.tc.Now(),
+		ClusterName:    name,
+		ClusterARN:     arn,
+		CurrentVersion: mskMintCurrentVersion(reqCtx.IDs),
+		State:          "ACTIVE",
+		Tags:           tags,
+		AccountID:      reqCtx.AccountID,
+		Region:         reqCtx.Region,
+		CreatedAt:      p.tc.Now(),
 	}
 }
 
@@ -343,12 +353,16 @@ func (p *MSKPlugin) describeCluster(_ *RequestContext, _ *AWSRequest, clusterARN
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
-	cluster, err := p.loadClusterByARN(clusterARN)
+	cluster, obs, err := p.observedCluster(clusterARN, true)
 	if err != nil {
 		return nil, err
 	}
+	shown := *cluster
+	shown.State = obs.State
+	info := mskClusterInfoWire(&shown)
+	info.StateInfo = obs.StateInfo
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"clusterInfo": mskClusterInfoWire(cluster),
+		"clusterInfo": info,
 	})
 }
 
@@ -358,7 +372,7 @@ func (p *MSKPlugin) getBootstrapBrokers(_ *RequestContext, _ *AWSRequest, cluste
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
-	cluster, err := p.loadClusterByARN(clusterARN)
+	cluster, _, err := p.observedCluster(clusterARN, false)
 	if err != nil {
 		return nil, err
 	}
@@ -455,16 +469,22 @@ func mskBootstrapBrokers(c *MSKCluster) map[string]string {
 // provisioned clusters", and v1's ClusterInfo has no member to describe a serverless one with, so a
 // serverless cluster is listed by ListClustersV2 only — substrate's reading of the contrast.
 func (p *MSKPlugin) listClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	clusters, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
+	listed, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
+	if err != nil {
+		return nil, err
+	}
+	clusters, stateInfos, err := p.observedListing(listed)
 	if err != nil {
 		return nil, err
 	}
 	infos := make([]mskClusterInfoOut, 0, len(clusters))
-	for _, c := range clusters {
+	for i, c := range clusters {
 		if mskClusterTypeOf(c) == mskClusterTypeServerless {
 			continue
 		}
-		infos = append(infos, mskClusterInfoWire(c))
+		info := mskClusterInfoWire(c)
+		info.StateInfo = stateInfos[i]
+		infos = append(infos, info)
 	}
 	page, next, err := mskPage(infos, req)
 	if err != nil {
@@ -541,30 +561,63 @@ func mskPage[T any](items []T, req *AWSRequest) ([]T, string, error) {
 	return items[offset:end], encodeOffsetPaginationToken(end), nil
 }
 
-func (p *MSKPlugin) deleteCluster(reqCtx *RequestContext, _ *AWSRequest, clusterARN string) (*AWSResponse, error) {
+// deleteCluster handles DeleteCluster.
+//
+// It reads the page's one query parameter, currentVersion, and refuses a version the cluster is not
+// at (see [mskCheckCurrentVersion]); until #1196 it was ignored. Unseeded, the record is removed at
+// once, as it always was, and the response's DELETING is the one observation of the deleting cluster
+// the call affords. Under a seed with pending observations the record is kept, marked DELETING, and
+// its countdown restarted: that many describes report DELETING, and the one after answers
+// NotFoundException. A second delete of a cluster already deleting answers DELETING again without
+// restarting its countdown.
+func (p *MSKPlugin) deleteCluster(_ *RequestContext, req *AWSRequest, clusterARN string) (*AWSResponse, error) {
 	// Reachable since #1009: DELETE /v1/clusters/ routes here rather than answering unknownRouteError,
 	// so a delete naming no cluster is refused for the reason it is wrong.
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
-	cluster, err := p.loadClusterByARN(clusterARN)
+	cluster, _, err := p.observedCluster(clusterARN, false)
 	if err != nil {
 		return nil, err
 	}
-	scope := reqCtx.AccountID + "/" + reqCtx.Region
-	stateKey := "cluster:" + scope + "/" + cluster.ClusterName
-
-	if err := p.state.Delete(context.Background(), mskNamespace, stateKey); err != nil {
-		return nil, fmt.Errorf("msk deleteCluster delete: %w", err)
+	if err := mskCheckCurrentVersion(cluster, req.Params["currentVersion"]); err != nil {
+		return nil, err
 	}
-	removeFromStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope, cluster.ClusterName)
 
-	// DeleteClusterResponse declares only clusterArn and state; clusterName is not
-	// a member of it, so it is not reported here.
-	return mskJSONResponse(http.StatusOK, map[string]interface{}{
+	// DeleteClusterResponse declares only clusterArn and state; clusterName is not a member of it, so
+	// it is not reported here.
+	answer := map[string]interface{}{
 		"clusterArn": cluster.ClusterARN,
-		"state":      "DELETING",
-	})
+		"state":      mskClusterTransitionDeleting,
+	}
+	if cluster.Transition == mskClusterTransitionDeleting {
+		return mskJSONResponse(http.StatusOK, answer)
+	}
+
+	seed, _, err := mskClusterProgressions.peek(context.Background(), p.state, cluster.ClusterARN)
+	if err != nil {
+		return nil, fmt.Errorf("msk deleteCluster: %w", err)
+	}
+	if seed == nil || seed.PendingObservations == 0 {
+		if err := p.removeCluster(cluster); err != nil {
+			return nil, err
+		}
+		return mskJSONResponse(http.StatusOK, answer)
+	}
+
+	cluster.Transition = mskClusterTransitionDeleting
+	data, err := json.Marshal(cluster)
+	if err != nil {
+		return nil, fmt.Errorf("msk deleteCluster marshal: %w", err)
+	}
+	scope := cluster.AccountID + "/" + cluster.Region
+	if err := p.state.Put(context.Background(), mskNamespace, "cluster:"+scope+"/"+cluster.ClusterName, data); err != nil {
+		return nil, fmt.Errorf("msk deleteCluster put: %w", err)
+	}
+	if err := mskClusterProgressions.reset(context.Background(), p.state, cluster.ClusterARN); err != nil {
+		return nil, fmt.Errorf("msk deleteCluster: %w", err)
+	}
+	return mskJSONResponse(http.StatusOK, answer)
 }
 
 // loadClusterByARN finds and deserializes a cluster by its ARN.
@@ -674,11 +727,15 @@ func (p *MSKPlugin) createClusterV2(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.storeNewCluster(reqCtx, &cluster); err != nil {
 		return nil, err
 	}
+	obs, err := p.clusterObservation(&cluster, false)
+	if err != nil {
+		return nil, err
+	}
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
 		"clusterArn":  cluster.ClusterARN,
 		"clusterName": cluster.ClusterName,
 		"clusterType": cluster.ClusterType,
-		"state":       cluster.State,
+		"state":       obs.State,
 	})
 }
 
@@ -690,12 +747,16 @@ func (p *MSKPlugin) describeClusterV2(_ *RequestContext, _ *AWSRequest, clusterA
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
-	cluster, err := p.loadClusterByARN(clusterARN)
+	cluster, obs, err := p.observedCluster(clusterARN, true)
 	if err != nil {
 		return nil, err
 	}
+	shown := *cluster
+	shown.State = obs.State
+	info := mskClusterWire(&shown)
+	info.StateInfo = obs.StateInfo
 	return mskJSONResponse(http.StatusOK, map[string]interface{}{
-		"clusterInfo": mskClusterWire(cluster),
+		"clusterInfo": info,
 	})
 }
 
@@ -710,16 +771,22 @@ func (p *MSKPlugin) listClustersV2(reqCtx *RequestContext, req *AWSRequest) (*AW
 	default:
 		return nil, mskBadRequest("clusterTypeFilter", "clusterTypeFilter must be PROVISIONED or SERVERLESS")
 	}
-	clusters, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
+	listed, err := p.listedClusters(reqCtx, req.Params["clusterNameFilter"])
+	if err != nil {
+		return nil, err
+	}
+	clusters, stateInfos, err := p.observedListing(listed)
 	if err != nil {
 		return nil, err
 	}
 	infos := make([]mskClusterOut, 0, len(clusters))
-	for _, c := range clusters {
+	for i, c := range clusters {
 		if typeFilter != "" && mskClusterTypeOf(c) != typeFilter {
 			continue
 		}
-		infos = append(infos, mskClusterWire(c))
+		info := mskClusterWire(c)
+		info.StateInfo = stateInfos[i]
+		infos = append(infos, info)
 	}
 	page, next, err := mskPage(infos, req)
 	if err != nil {
@@ -741,7 +808,7 @@ func (p *MSKPlugin) listNodes(_ *RequestContext, req *AWSRequest, clusterARN str
 	if clusterARN == "" {
 		return nil, mskBadRequest("clusterArn", "cluster ARN is required")
 	}
-	cluster, err := p.loadClusterByARN(clusterARN)
+	cluster, _, err := p.observedCluster(clusterARN, false)
 	if err != nil {
 		return nil, err
 	}

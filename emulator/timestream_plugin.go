@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,8 @@ type TimestreamPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the table progression's read-modify-write; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "timestream".
@@ -272,7 +275,14 @@ func (p *TimestreamPlugin) describeTable(reqCtx *RequestContext, req *AWSRequest
 	if err != nil {
 		return nil, err
 	}
-	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": timestreamTableToWire(tbl)})
+	observed, gone, err := p.observeTable(reqCtx.AccountID, reqCtx.Region, tbl)
+	if err != nil {
+		return nil, err
+	}
+	if gone {
+		return nil, timestreamTableNotFound(input.DatabaseName, input.TableName)
+	}
+	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": timestreamTableToWire(observed)})
 }
 
 func (p *TimestreamPlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -283,15 +293,25 @@ func (p *TimestreamPlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) 
 	if err := json.Unmarshal(req.Body, &input); err != nil || input.DatabaseName == "" || input.TableName == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "DatabaseName and TableName are required", HTTPStatus: http.StatusBadRequest}
 	}
-	if _, err := p.loadTable(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName); err != nil {
+	tbl, err := p.loadTable(reqCtx.AccountID, reqCtx.Region, input.DatabaseName, input.TableName)
+	if err != nil {
 		return nil, err
 	}
-	goCtx := context.Background()
 	acct, region := reqCtx.AccountID, reqCtx.Region
-	if err := p.state.Delete(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, input.TableName)); err != nil {
-		return nil, fmt.Errorf("delete timestream table: %w", err)
+	// Unseeded, the table is removed at once. Under a seed with observations to spend it is kept,
+	// marked DELETING, until the observation that ends the window removes it; a table already
+	// DELETING answers again without restarting the window (#1196; see timestream_progression.go).
+	if tbl.TableStatus != timestreamTableDeleting {
+		windowed, err := p.beginTableDelete(acct, region, tbl)
+		if err != nil {
+			return nil, err
+		}
+		if !windowed {
+			if err := p.finishTableDelete(acct, region, input.DatabaseName, input.TableName); err != nil {
+				return nil, err
+			}
+		}
 	}
-	removeFromStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName), input.TableName)
 	return timestreamJSONResponse(http.StatusOK, map[string]any{})
 }
 
@@ -351,7 +371,15 @@ func (p *TimestreamPlugin) listTables(reqCtx *RequestContext, req *AWSRequest) (
 			}
 			return nil, err
 		}
-		tables = append(tables, timestreamTableToWire(tbl))
+		// Each reported table is observed, as DescribeTable observes it (#1196); one whose deleting
+		// window this observation ends is gone, and is left out.
+		observed, gone, err := p.observeTable(acct, region, tbl)
+		if err != nil {
+			return nil, err
+		}
+		if !gone {
+			tables = append(tables, timestreamTableToWire(observed))
+		}
 	}
 	out := map[string]any{"Tables": tables}
 	if next != "" {
@@ -558,17 +586,23 @@ func (p *TimestreamPlugin) loadDatabase(acct, region, name string) (TimestreamDa
 	return db, nil
 }
 
+// timestreamTableNotFound is the ResourceNotFoundException/400 a table operation answers for a table
+// that does not exist.
+func timestreamTableNotFound(dbName, tableName string) *AWSError {
+	return &AWSError{
+		Code:       "ResourceNotFoundException",
+		Message:    fmt.Sprintf("Table not found: %s/%s", dbName, tableName),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 func (p *TimestreamPlugin) loadTable(acct, region, dbName, tableName string) (TimestreamTable, error) {
 	raw, err := p.state.Get(context.Background(), timestreamNamespace, timestreamTableKey(acct, region, dbName, tableName))
 	if err != nil {
 		return TimestreamTable{}, fmt.Errorf("timestream load table: %w", err)
 	}
 	if raw == nil {
-		return TimestreamTable{}, &AWSError{
-			Code:       "ResourceNotFoundException",
-			Message:    fmt.Sprintf("Table not found: %s/%s", dbName, tableName),
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return TimestreamTable{}, timestreamTableNotFound(dbName, tableName)
 	}
 	var tbl TimestreamTable
 	if err2 := json.Unmarshal(raw, &tbl); err2 != nil {

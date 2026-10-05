@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,9 @@ type TransferPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the read-modify-write of a server's observation counter; see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "transfer".
@@ -48,6 +52,10 @@ func (p *TransferPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) 
 		return p.deleteServer(reqCtx, req)
 	case "ListServers":
 		return p.listServers(reqCtx, req)
+	case "StartServer":
+		return p.startServer(reqCtx, req)
+	case "StopServer":
+		return p.stopServer(reqCtx, req)
 	case "CreateUser":
 		return p.createUser(reqCtx, req)
 	case "DescribeUser":
@@ -265,8 +273,12 @@ func (p *TransferPlugin) describeServer(reqCtx *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, err
 	}
+	shown := *server
+	if shown.State, err = p.serverObservation(server, true); err != nil {
+		return nil, err
+	}
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
-		"Server": transferServerToWire(*server, count),
+		"Server": transferServerToWire(shown, count),
 	})
 }
 
@@ -356,6 +368,9 @@ func (p *TransferPlugin) deleteServer(reqCtx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("transfer deleteServer delete: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), input.ServerID)
+	if err := transferServerProgressions.reset(goCtx, p.state, input.ServerID); err != nil {
+		return nil, fmt.Errorf("transfer deleteServer: %w", err)
+	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{})
 }
@@ -440,7 +455,11 @@ func (p *TransferPlugin) listServers(reqCtx *RequestContext, req *AWSRequest) (*
 		if err != nil {
 			return nil, err
 		}
-		summaries = append(summaries, transferServerToListed(*server, count))
+		shown := *server
+		if shown.State, err = p.serverObservation(server, true); err != nil {
+			return nil, err
+		}
+		summaries = append(summaries, transferServerToListed(shown, count))
 	}
 	return transferJSONResponse(http.StatusOK, transferListBody(map[string]interface{}{
 		"Servers": summaries,

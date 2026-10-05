@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -24,6 +25,9 @@ type EMRServerlessPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the job-run and application progressions' read-modify-write; see
+	// [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "emrserverless".
@@ -465,7 +469,11 @@ func (p *EMRServerlessPlugin) getApplication(ctx *RequestContext, _ *AWSRequest,
 	if app == nil {
 		return nil, emrNotFound("application " + appID + " not found")
 	}
-	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"application": emrServerlessAppToWire(*app)})
+	observed, err := p.observeApplication(*app)
+	if err != nil {
+		return nil, err
+	}
+	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"application": emrServerlessAppToWire(observed)})
 }
 
 func (p *EMRServerlessPlugin) deleteApplication(ctx *RequestContext, _ *AWSRequest, appID string) (*AWSResponse, error) {
@@ -612,15 +620,24 @@ func (p *EMRServerlessPlugin) getJobRun(ctx *RequestContext, _ *AWSRequest, appI
 	if run == nil {
 		return nil, emrNotFound("job run " + runID + " not found")
 	}
-	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRun": emrServerlessJobRunToWire(*run)})
+	observed, details, err := p.observeJobRun(*run)
+	if err != nil {
+		return nil, err
+	}
+	out := emrServerlessJobRunToWire(observed)
+	if details != "" {
+		out.StateDetails = details
+	}
+	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{"jobRun": out})
 }
 
 // cancelJobRun handles CancelJobRun.
 //
-// The run moves straight to CANCELLED, the spelling API_JobRun's state enum publishes; it used to be
+// The run is recorded CANCELLED, the spelling API_JobRun's state enum publishes; it used to be
 // CANCELED, which no page lists, so a typed-enum SDK read the state as unknown on the one operation
-// whose purpose is producing it (#1198). CANCELLING is not reported first: no run state progresses,
-// since every run is created SUCCESS.
+// whose purpose is producing it (#1198). The cancel restarts the run's progression countdown, so under
+// a seed the run reports CANCELLING for the seeded observations before CANCELLED (#1196; see
+// emrserverless_progression.go). Unseeded, it reports CANCELLED at once.
 func (p *EMRServerlessPlugin) cancelJobRun(ctx *RequestContext, _ *AWSRequest, appID, runID string) (*AWSResponse, error) {
 	goCtx := context.Background()
 	run, err := p.loadJobRun(goCtx, ctx, appID, runID)
@@ -639,6 +656,9 @@ func (p *EMRServerlessPlugin) cancelJobRun(ctx *RequestContext, _ *AWSRequest, a
 	runKey := "jobrun:" + ctx.AccountID + "/" + ctx.Region + "/" + appID + "/" + runID
 	if err := p.state.Put(goCtx, emrServerlessNamespace, runKey, updated); err != nil {
 		return nil, fmt.Errorf("cancelJobRun: put: %w", err)
+	}
+	if err := emrJobRunProgressions.reset(goCtx, p.state, runID); err != nil {
+		return nil, fmt.Errorf("cancelJobRun: %w", err)
 	}
 	return emrServerlessJSONResponse(http.StatusOK, map[string]string{
 		"applicationId": appID,
@@ -744,9 +764,20 @@ func (p *EMRServerlessPlugin) listJobRuns(ctx *RequestContext, req *AWSRequest, 
 		}
 		return runs[i].JobRunID < runs[j].JobRunID
 	})
+	// Each listed run is observed, as GetJobRun observes it, so the two agree on a run's state and a
+	// states filter narrows by the state the caller is shown (#1196). The observation is spent before
+	// the filter, because the state is what the filter compares.
 	var matched []emrJobRunSummaryOut
 	for _, run := range runs {
-		matched = append(matched, emrServerlessJobRunToSummary(run))
+		observed, details, err := p.observeJobRun(run)
+		if err != nil {
+			return nil, err
+		}
+		summary := emrServerlessJobRunToSummary(observed)
+		if details != "" {
+			summary.StateDetails = details
+		}
+		matched = append(matched, summary)
 	}
 	if len(states) > 0 {
 		var grouped []emrJobRunSummaryOut

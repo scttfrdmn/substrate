@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -82,6 +83,8 @@ type FSxPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the file-system progression's read-modify-write; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "fsx".
@@ -239,8 +242,14 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
+	// API_CreateFileSystem: the file system is created "with … an initial lifecycle state of
+	// CREATING", and "the CreateFileSystem call returns while the file system's lifecycle state is
+	// still CREATING". The record is the settled file system; DescribeFileSystems reports when it is
+	// AVAILABLE, immediately unless a seed holds it (#1196; see fsx_progression.go).
+	created := fsxToWire(fs)
+	created["Lifecycle"] = "CREATING"
 	return fsxJSONResponse(http.StatusOK, map[string]interface{}{
-		"FileSystem": fsxToWire(fs),
+		"FileSystem": created,
 	})
 }
 
@@ -306,12 +315,20 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 		result := make([]map[string]interface{}, 0, len(input.FileSystemIDs))
 		for _, id := range input.FileSystemIDs {
 			// loadFileSystem answers FileSystemNotFound for a deleted ID, as the page says, so an
-			// SDK deletion waiter completes on the first poll.
+			// SDK deletion waiter completes on the poll after a delete — or, under a seed, on the poll
+			// that ends the deleting window (#1196).
 			fs, err := p.loadFileSystem(ctx, id)
 			if err != nil {
 				return nil, err
 			}
-			result = append(result, fsxToWire(*fs))
+			obs, err := p.observeFileSystem(ctx, *fs)
+			if err != nil {
+				return nil, err
+			}
+			if obs.Gone {
+				return nil, fsxNotFound(id)
+			}
+			result = append(result, obs.Wire)
 		}
 		return fsxJSONResponse(http.StatusOK, map[string]interface{}{
 			"FileSystems": result,
@@ -342,10 +359,19 @@ func (p *FSxPlugin) describeFileSystems(ctx *RequestContext, req *AWSRequest) (*
 			live = append(live, fs)
 		}
 	}
+	// Only the file systems on this page are observed, so a page of three spends three observations
+	// and the ones on later pages spend none. One whose deleting window this observation ends is
+	// gone, and is left out of the page rather than reported.
 	page, next := pageByOffsetToken(live, offset, pageSize)
 	result := make([]map[string]interface{}, 0, len(page))
 	for _, fs := range page {
-		result = append(result, fsxToWire(fs))
+		obs, err := p.observeFileSystem(ctx, fs)
+		if err != nil {
+			return nil, err
+		}
+		if !obs.Gone {
+			result = append(result, obs.Wire)
+		}
 	}
 	out := map[string]interface{}{"FileSystems": result}
 	if next != "" {
@@ -453,11 +479,21 @@ func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("fsx deleteFileSystem marshal: %w", err)
 	}
 
-	goCtx := context.Background()
-	if err := p.state.Delete(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, input.FileSystemID)); err != nil {
-		return nil, fmt.Errorf("fsx deleteFileSystem delete: %w", err)
+	// Unseeded, the file system is gone from the next describe. Under a seed with observations to
+	// spend it is kept, marked DELETING, until the observation that ends the window removes it; a
+	// second delete of a file system already DELETING answers DELETING again and leaves the window
+	// running (#1196; see fsx_progression.go).
+	if fs.Lifecycle != fsxLifecycleDeleting {
+		windowed, err := p.beginDelete(ctx, *fs)
+		if err != nil {
+			return nil, err
+		}
+		if !windowed {
+			if err := p.finishDelete(ctx, input.FileSystemID); err != nil {
+				return nil, err
+			}
+		}
 	}
-	removeFromStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), input.FileSystemID)
 	if input.ClientRequestToken != "" {
 		rec := fsxTokenRecord{FileSystemID: input.FileSystemID, Fingerprint: fingerprint, Response: body}
 		if err := p.fsxRecordToken(ctx, "DeleteFileSystem", input.ClientRequestToken, rec); err != nil {
@@ -472,18 +508,24 @@ func (p *FSxPlugin) deleteFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	}, nil
 }
 
+// fsxNotFound is the FileSystemNotFound/400 every FSx operation answers for an ID naming nothing.
+func fsxNotFound(id string) *AWSError {
+	return &AWSError{
+		Code:       "FileSystemNotFound",
+		Message:    fmt.Sprintf("File system '%s' does not exist.", id),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // loadFileSystem reads one file system, answering FileSystemNotFound when it does not exist or was
-// soft-deleted by a recording made before #1210.
+// soft-deleted by a recording made before #1210. A file system inside a seeded deleting window
+// (#1196) is returned, marked DELETING.
 func (p *FSxPlugin) loadFileSystem(ctx *RequestContext, id string) (*FSxFileSystem, error) {
 	data, err := p.state.Get(context.Background(), fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, id))
 	if err != nil {
 		return nil, fmt.Errorf("fsx loadFileSystem get: %w", err)
 	}
-	notFound := &AWSError{
-		Code:       "FileSystemNotFound",
-		Message:    fmt.Sprintf("File system '%s' does not exist.", id),
-		HTTPStatus: http.StatusBadRequest,
-	}
+	notFound := fsxNotFound(id)
 	if data == nil {
 		return nil, notFound
 	}

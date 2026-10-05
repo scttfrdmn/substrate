@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1034 operations**. This
+Substrate ships **67 built-in service plugins** routing **1036 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -84,7 +84,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 63 | STS | `sts` | Query | 3 |
 | 64 | Resource Groups Tagging | `tagging` | JSON | 3 |
 | 65 | Timestream | `timestream` | JSON | 12 |
-| 66 | Transfer Family | `transfer` | JSON | 10 |
+| 66 | Transfer Family | `transfer` | JSON | 12 |
 | 67 | WAFv2 | `wafv2` | JSON | 13 |
 <!-- END GENERATED COVERAGE MATRIX -->
 
@@ -21930,7 +21930,7 @@ groups, and a deployment. Every record is keyed by account and Region, so two ac
 in two Regions, never see each other's applications. Nothing is ever deployed. The revision, the tag
 filters, the traffic-shifting configuration and the alarms a request names are **recorded as sent and
 answered back**, but no instance is targeted and no hook is installed, and a deployment is
-[`Succeeded` before `CreateDeployment` returns](#a-deployment-is-succeeded-before-createdeployment-returns).
+[`Succeeded` before `CreateDeployment` returns](#a-deployments-status-progresses-under-a-seed).
 Each of the three records is projected onto its published shape before it is answered, so no response
 carries a field of Substrate's own and [every date is epoch
 seconds](#every-published-date-is-epoch-seconds) rather than an RFC3339 string.
@@ -21947,7 +21947,7 @@ seconds](#every-published-date-is-epoch-seconds) rather than an RFC3339 string.
 | GetDeploymentGroup | All twenty-three published `deploymentGroupInfo` members once they have values; `lastAttemptedDeployment`, `lastSuccessfulDeployment` and `targetRevision` follow the group's deployments ([which members](#what-each-codedeploy-record-answers)) |
 | DeleteDeploymentGroup | Answers the published `hooksNotCleanedUp` as an empty array, and [succeeds for a group that does not exist](#a-delete-of-something-absent-succeeds) |
 | CreateDeployment | Verifies the application, and the deployment group when one is named. The request members `DeploymentInfo` answers back are recorded; `fileExistsBehavior` and `deploymentMode` are checked against their Valid Values. Answers the published `deploymentId` in the `d-XXXXXXXXX` shape AWS's own sample response shows — the page publishes no pattern for it — derived from the request ID (#856) |
-| GetDeployment | Twenty-one of the thirty-one published `deploymentInfo` members ([which members](#what-each-codedeploy-record-answers)); an absent `deploymentId` is `DeploymentIdRequiredException` |
+| GetDeployment | Twenty-one of the thirty-one published `deploymentInfo` members ([which members](#what-each-codedeploy-record-answers)); an absent `deploymentId` is `DeploymentIdRequiredException`. `status` [progresses under a seed](#a-deployments-status-progresses-under-a-seed) |
 
 The thirty-nine unrouted operations include everything that would let a consumer observe a deployment
 in progress or intervene in one: `ListDeployments`, `StopDeployment`, `ContinueDeployment`,
@@ -22029,17 +22029,31 @@ written from one clock read. That is a separate defect and belongs to
 [#1196](https://github.com/scttfrdmn/substrate/issues/1196): the fractional precision is preserved, so
 two genuinely distinct instants would be orderable.
 
-### A deployment is Succeeded before CreateDeployment returns
+### A deployment's status progresses under a seed
 
-`CreateDeployment` stores the deployment with `status: "Succeeded"`, and `startTime`, `createTime` and
-`completeTime` are one instant. `DeploymentInfo` publishes `Valid Values: Created | Queued | InProgress
-| Baking | Succeeded | Failed | Stopped | Ready`, and seven of those eight cannot be produced by any
-input or seed. Running the deployment is workload-internal and out of scope, but the observable
-progression is not: a consumer's wait loop over `GetDeployment` passes on its first poll,
-`errorInformation` and `rollbackInfo` are never populated, and the `autoRollbackConfiguration` a
-template supplies has no failure to react to. `deploymentOverview` is not emitted, because it counts
-the targets a deployment ran on and Substrate runs on none: assert on `status` instead.
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+`CreateDeployment` records the deployment `Succeeded`, because running a deployment is
+workload-internal and out of scope, and it answers only `deploymentId`, so there is no status on
+create to report. What a consumer's wait loop observes is `GetDeployment`'s `status`, and that can be
+seeded ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```
+POST   /v1/codedeploy/deployment-status
+       {"deploymentId":"d-…"|"*","pendingObservations":2,"state":"InProgress","finalState":"Failed",
+        "errorCode":"HEALTH_CONSTRAINTS","errorMessage":"…"}
+DELETE /v1/codedeploy/deployment-status            (all; ?deploymentId=… for one)
+```
+
+For `pendingObservations` observations `GetDeployment` reports `state` (default `InProgress`) and
+answers no `completeTime`, "when the deployment was complete". It then reports `finalState` (default
+the record's `Succeeded`). Any of `DeploymentInfo`'s eight published statuses is seedable: `Created`,
+`Queued`, `InProgress`, `Baking` and `Ready` as the transient state, and `Succeeded`, `Failed` and
+`Stopped` as the final one. A `Failed` or `Stopped` final status may carry `errorInformation` — the
+code held to `API_ErrorInformation`'s Valid Values — which is how a consumer's failure and rollback
+handling is exercised. Unseeded, a deployment reads `Succeeded` from the first `GetDeployment`, as
+before. The deployment group's `lastAttemptedDeployment` and `lastSuccessfulDeployment` keep the
+record's `Succeeded`; they are not observations. `deploymentOverview` is not emitted, because it counts
+the targets a deployment ran on and Substrate runs on none: assert on `status` instead
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
 
 ### What each CodeDeploy request requires
 
@@ -22204,19 +22218,19 @@ matches no published URI answers `UnknownOperationException`/404
 Seven of the twenty-three published operations, over two resources: an application and its job runs.
 Every record is keyed by account and Region. No Spark or Hive work is executed — that is the boundary
 in `doc.go` — so a job run reports [`SUCCESS` from the instant it is
-submitted](#a-job-run-is-success-the-moment-it-is-started). The `jobDriver` that says what would have
+submitted](#a-job-runs-state-progresses-under-a-seed). The `jobDriver` that says what would have
 run is recorded and answered back, so a test can confirm what was submitted.
 
 ### Supported operations
 
 | Operation | Published path | Notes |
 |-----------|----------------|-------|
-| CreateApplication | `POST /applications` | `clientToken`, `releaseLabel` and `type` are [`Required: Yes` and checked](#the-required-inputs-are-checked-and-clienttoken-is-idempotent), with their published patterns; a resubmitted `clientToken` answers the application it created. The application is `CREATED` and [stays there](#an-emr-serverless-application-never-leaves-created). Answers `applicationId`, `arn` and `name`, the three published members |
+| CreateApplication | `POST /applications` | `clientToken`, `releaseLabel` and `type` are [`Required: Yes` and checked](#the-required-inputs-are-checked-and-clienttoken-is-idempotent), with their published patterns; a resubmitted `clientToken` answers the application it created. The application is `CREATED` and [stays there](#an-applications-state-progresses-under-a-seed). Answers `applicationId`, `arn` and `name`, the three published members |
 | GetApplication | `GET /applications/{applicationId}` | [All seven published `Required: Yes` `Application` members](#the-records-answer-every-required-member), plus the optional members the create sent |
 | DeleteApplication | `DELETE /applications/{applicationId}` | Answers `{}` where the page publishes an empty body, and [cannot fail](#deleteapplication-cannot-fail) |
-| StartJobRun | `POST /applications/{applicationId}/jobruns` | `clientToken` and `executionRoleArn` are [`Required: Yes` and checked](#the-required-inputs-are-checked-and-clienttoken-is-idempotent); `jobDriver`, `mode`, `name` and `tags` are recorded. The application must exist (`ResourceNotFoundException`/404). The run is [`SUCCESS` immediately](#a-job-run-is-success-the-moment-it-is-started). The `jobRunId` it mints [satisfies its published pattern](#an-emr-serverless-job-run-id-is-sixteen-lowercase-hex-characters). `configurationOverrides`, `retryPolicy` and `executionTimeoutMinutes` are not read |
+| StartJobRun | `POST /applications/{applicationId}/jobruns` | `clientToken` and `executionRoleArn` are [`Required: Yes` and checked](#the-required-inputs-are-checked-and-clienttoken-is-idempotent); `jobDriver`, `mode`, `name` and `tags` are recorded. The application must exist (`ResourceNotFoundException`/404). The run is [`SUCCESS` immediately](#a-job-runs-state-progresses-under-a-seed). The `jobRunId` it mints [satisfies its published pattern](#an-emr-serverless-job-run-id-is-sixteen-lowercase-hex-characters). `configurationOverrides`, `retryPolicy` and `executionTimeoutMinutes` are not read |
 | GetJobRun | `GET /applications/{applicationId}/jobruns/{jobRunId}` | [All eleven published `Required: Yes` `JobRun` members](#the-records-answer-every-required-member); `attempt` is not read |
-| CancelJobRun | `DELETE /applications/{applicationId}/jobruns/{jobRunId}` | Answers the two published members, and leaves the run [`CANCELLED`](#a-cancelled-job-run-reports-cancelled); `shutdownGracePeriodInSeconds` is not read |
+| CancelJobRun | `DELETE /applications/{applicationId}/jobruns/{jobRunId}` | Answers the two published members, and leaves the run [`CANCELLED`](#a-cancelled-job-run-reports-cancelling-then-cancelled); `shutdownGracePeriodInSeconds` is not read |
 | ListJobRuns | `GET /applications/{applicationId}/jobruns` | [Every published member is read](#listjobruns-pages-and-filters): `maxResults`, `nextToken`, `states`, `mode`, `createdAtAfter` and `createdAtBefore`. Each element is the ten-required-member `JobRunSummary`, [the ID as `id`](#listjobruns-names-the-job-run-id-id) |
 
 The sixteen unrouted operations include the whole application lifecycle beyond create and delete —
@@ -22227,25 +22241,38 @@ dashboard reads (`GetDashboardForJobRun`, `GetResourceDashboard`), `ListJobRunAt
 tag operations. Each answers `UnknownOperationException` / 404. Tags sent on a create are stored and
 answered by `GetApplication` and `GetJobRun`, but no tag operation can change them.
 
-### A job run is SUCCESS the moment it is started
+### A job run's state progresses under a seed
 
-`StartJobRun` stores the run with `state: "SUCCESS"`. `JobRun` publishes `state` as `Required: Yes`
-with `Valid Values: SUBMITTED | PENDING | SCHEDULED | RUNNING | SUCCESS | FAILED | CANCELLING |
-CANCELLED | QUEUED`, and seven of those nine cannot be produced by any input; `CancelJobRun` produces
-`CANCELLED`. Executing the Spark or Hive work is out of scope, but the progression a consumer polls
-for is not: a wait loop over `GetJobRun` passes on its first observation, and the `retryPolicy` the
-request carried has no failure to retry. `billedResourceUtilization`, `totalResourceUtilization`,
-`totalExecutionDurationSeconds`, `queuedDurationMilliseconds`, `startedAt` and `endedAt` describe a
-workload substrate does not run, and are absent.
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+`StartJobRun` records the run `SUCCESS` — executing the Spark or Hive work is out of scope — and answers
+no state. `GetJobRun` and `ListJobRuns` report the run's state through a seed ([How a progression is seeded](#how-a-progression-is-seeded)):
 
-### A cancelled job run reports CANCELLED
+```
+POST   /v1/emr-serverless/job-run-status
+       {"jobRunId":"…"|"*","pendingObservations":2,"state":"PENDING","finalState":"FAILED",
+        "stateDetails":"…"}
+DELETE /v1/emr-serverless/job-run-status           (all; ?jobRunId=… for one)
+```
 
-`CancelJobRun` leaves the run `CANCELLED`, with two Ls, the spelling both places EMR Serverless
+For `pendingObservations` observations the run reports `state` (default `RUNNING`; `SUBMITTED`,
+`PENDING`, `SCHEDULED`, `QUEUED` may be named), then `finalState` (default the record's `SUCCESS`, or
+`FAILED` or `CANCELLED`) with the seed's `stateDetails`, held to `JobRun`'s 1–256-character, non-blank
+constraint. `GetJobRun` and `ListJobRuns` both observe, so they agree: a run a list shows `PENDING` is
+`PENDING` on the next `GetJobRun` too, and a `states` filter narrows by the state the caller is
+shown. Unseeded, a run reads `SUCCESS` from its first observation, as before.
+`billedResourceUtilization`, `totalResourceUtilization`, `totalExecutionDurationSeconds`,
+`queuedDurationMilliseconds`, `startedAt` and `endedAt` describe a workload substrate does not run,
+and are absent ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+### A cancelled job run reports CANCELLING, then CANCELLED
+
+`CancelJobRun` records the run `CANCELLED`, with two Ls, the spelling both places EMR Serverless
 publishes the enum use: `JobRun`'s `state` member and `ListJobRuns`'s `states` filter. Until
 [#1198](https://github.com/scttfrdmn/substrate/issues/1198) it wrote `CANCELED`, which a typed-enum SDK
-resolved to an unknown value, on the one operation whose only observable effect is producing that
-state. `CANCELLING`, published as the transitional state, is not reported: no run state progresses.
+resolved to an unknown value. The cancel restarts the run's countdown, so under a job-run seed the run
+reports `CANCELLING`, the published transitional state, for the seeded observations before
+`CANCELLED`, whatever the seed's own transient state; a cancelled run never ends `SUCCESS` or
+`FAILED`. Unseeded, it reports `CANCELLED` at once
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
 
 ### ListJobRuns names the job run id id
 
@@ -22379,15 +22406,24 @@ answers the same `applicationId`, and `StartJobRun` the same `jobRunId`, which `
 once. The same token with different parameters is `ConflictException`/409. A `StartJobRun` token is
 scoped to its application.
 
-### An EMR Serverless application never leaves CREATED
+### An application's state progresses under a seed
 
-`CreateApplication` stores `state: "CREATED"` and nothing routed changes it. `Application` publishes
-`Valid Values: CREATING | CREATED | STARTING | STARTED | STOPPING | STOPPED | TERMINATED`, and six of
-the seven are unreachable because `StartApplication`, `StopApplication` and `UpdateApplication` are
-not routed. `autoStartConfiguration` and `autoStopConfiguration` are stored nowhere, so neither the
-start-on-submission path nor the idle-timeout path can be observed, and `StartJobRun` succeeds against
-a `CREATED` application regardless.
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+`CreateApplication` records `state: "CREATED"` and answers no state. `GetApplication` reports it
+through a seed ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```
+POST   /v1/emr-serverless/application-status
+       {"applicationId":"…"|"*","pendingObservations":1,"state":"CREATING","finalState":"CREATED"}
+DELETE /v1/emr-serverless/application-status       (all; ?applicationId=… for one)
+```
+
+The application reports `state` (default `CREATING`) for `pendingObservations` observations, then
+`finalState` (default `CREATED`). Any of `Application`'s seven published states may be named, so
+`STARTED`, `STOPPED` and `TERMINATED` are reachable as a final state. `StartApplication`,
+`StopApplication` and `UpdateApplication` are still not routed, so no request moves an application,
+and `autoStartConfiguration` and `autoStopConfiguration` are stored nowhere; `StartJobRun` succeeds
+against an application in any state. The application publishes no failure state
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
 
 ### The jobruns route is matched by segment
 
@@ -22466,7 +22502,7 @@ Substrate has never seen reports an empty `VpcId`.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFileSystem | Answers `{"FileSystem"}` as published. [Both `Required: Yes` members are required, and `FileSystemType` and `StorageType` must be published values](#createfilesystem-requires-filesystemtype-and-subnetids), each refused `BadRequest`/400; [the file system is `AVAILABLE` immediately](#a-new-file-system-is-available-and-was-never-creating); [`ClientRequestToken` makes a retry answer the file system it first created](#clientrequesttoken-makes-create-and-delete-idempotent) |
+| CreateFileSystem | Answers `{"FileSystem"}` as published. [Both `Required: Yes` members are required, and `FileSystemType` and `StorageType` must be published values](#createfilesystem-requires-filesystemtype-and-subnetids), each refused `BadRequest`/400; [the file system is `AVAILABLE` immediately](#a-new-file-system-is-creating-and-its-lifecycle-progresses-under-a-seed); [`ClientRequestToken` makes a retry answer the file system it first created](#clientrequesttoken-makes-create-and-delete-idempotent) |
 | DescribeFileSystems | Describes the IDs given, or every non-deleted file system when `FileSystemIds` is absent, which is what the page publishes. [Pages by `MaxResults` and `NextToken`, at most 50 per page, and refuses an unissued token](#describefilesystems-pages-by-maxresults-and-nexttoken) `BadRequest`/400 |
 | DeleteFileSystem | [Answers the published flat shape with `Lifecycle` `DELETING`, and removes the file system](#deletefilesystem-answers-the-published-flat-shape-and-reports-deleting); [`ClientRequestToken` makes a retry answer the first delete](#clientrequesttoken-makes-create-and-delete-idempotent) |
 
@@ -22494,29 +22530,42 @@ The per-type object carries `FinalBackupId` and `FinalBackupTags`. Substrate mod
 type whose delete takes a final backup by default. `LustreResponse` and `OpenZFSResponse` are answered
 when the request carried that type's configuration. Each echoes the `FinalBackupTags` it was sent.
 
-**A deleted file system is removed at once.** The page says the delete "returns while the file system
-has the `DELETING` status", and that `DescribeFileSystems` on a deleted ID "returns a
-`FileSystemNotFound` error". Substrate removes the record in the delete, so the next describe answers
-`FileSystemNotFound`, and an SDK's deletion waiter completes on its first poll. A second delete of the
-same ID answers `FileSystemNotFound` too. Making `DELETING` observable to `DescribeFileSystems` for a
-seeded number of observations is the progression
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196) owns, for `CREATING` as well.
+**A deleted file system is removed — at once, or after a seeded deleting window.** The page says the
+delete "returns while the file system has the `DELETING` status", and that `DescribeFileSystems` on a
+deleted ID "returns a `FileSystemNotFound` error". Unseeded, Substrate removes the record in the
+delete, so the next describe answers `FileSystemNotFound`, and an SDK's deletion waiter completes on
+its first poll; a second delete answers `FileSystemNotFound` too. Under a file-system seed with
+observations to spend (see the next section), the delete keeps the record marked `DELETING` and
+restarts its countdown: the next `pendingObservations` describes report `DELETING`, and the one after
+completes the delete and answers `FileSystemNotFound`. A delete of a file system already `DELETING`
+answers `DELETING` again and leaves the window running
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
 
-The lifecycle values FSx reports are therefore `AVAILABLE`, on every file system that exists, and
-`DELETING`, on the delete response. A record a recording made before #1210 soft-deleted with
-`DELETED` still reads back as absent.
+A record a recording made before #1210 soft-deleted with `DELETED` still reads back as absent.
 
-### A new file system is AVAILABLE and was never CREATING
+### A new file system is CREATING, and its lifecycle progresses under a seed
 
 `API_CreateFileSystem` publishes that it "Creates a new, empty Amazon FSx file system with an assigned
-ID, and an initial lifecycle state of `CREATING`", and notes that "The `CreateFileSystem` call returns
-while the file system's lifecycle state is still `CREATING`. You can check the file-system creation
-status by calling the `DescribeFileSystems` operation." Substrate records `AVAILABLE` at creation, so
-the SDK's file-system-available waiter succeeds on its first poll and the polling code a consumer
-wrote for a real create is never exercised. A seedable observation count, the pattern the snapshot and
-job-status surfaces already use, would let a test assert the `CREATING` path without depending on
-wall-clock time.
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+ID, and an initial lifecycle state of `CREATING`", and that "The `CreateFileSystem` call returns while
+the file system's lifecycle state is still `CREATING`." `CreateFileSystem` answers `CREATING`, whatever
+is seeded; the record itself is the settled file system. `DescribeFileSystems` reports the lifecycle
+through a seed ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```
+POST   /v1/fsx/file-system-status
+       {"fileSystemId":"fs-…"|"*","pendingObservations":2,"state":"CREATING","finalState":"FAILED",
+        "failureMessage":"…"}
+DELETE /v1/fsx/file-system-status                  (all; ?fileSystemId=… for one)
+```
+
+For `pendingObservations` describes the file system reports `state` (default `CREATING`; `UPDATING`
+may be named), then `finalState`: the record's `AVAILABLE` by default, or `FAILED`, `MISCONFIGURED` or
+`MISCONFIGURED_UNAVAILABLE`, with `FailureDetails.Message` when the seed gives `failureMessage`. The
+same seed governs the deleting window above. Every one of `FileSystem`'s seven published `Lifecycle`
+values is reachable. Unseeded, a file system reads `AVAILABLE` from its first describe, as before, so
+the SDK's file-system-available waiter still succeeds on its first poll. A describe listing several
+file systems observes only the ones on the page it answers
+([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
 
 ### CreateFileSystem requires FileSystemType and SubnetIds
 
@@ -22706,10 +22755,10 @@ string here resolves to nothing and a producer cannot connect.
 
 | Operation | Route, and what it answers |
 |-----------|----------------------------|
-| CreateCluster | `POST /v1/clusters` → `{clusterArn, clusterName, state}` as published. [Every member the page marks required is checked](#what-a-create-requires); [the cluster is `ACTIVE` at once](#a-cluster-is-active-from-the-moment-it-is-created) |
+| CreateCluster | `POST /v1/clusters` → `{clusterArn, clusterName, state}` as published. [Every member the page marks required is checked](#what-a-create-requires); [`ACTIVE` unseeded, `CREATING` under a seed](#a-clusters-lifecycle-is-seeded) |
 | ListClusters | `GET /v1/clusters` → `{clusterInfoList, nextToken}`. [Pages, and applies `clusterNameFilter`](#the-list-operations-page-and-filter); provisioned clusters only |
-| DescribeCluster | `GET /v1/clusters/{clusterArn}` → `{clusterInfo}`. [The ARN must be the cluster's own, UUID included](#a-cluster-arn-resolves-by-name-and-uuid); [twelve of twenty-one members are reported](#what-a-cluster-response-reports) |
-| DeleteCluster | `DELETE /v1/clusters/{clusterArn}` → `{clusterArn, state}`. [The record is removed while the state says `DELETING`](#deletecluster-removes-the-cluster-while-reporting-it-deleting) |
+| DescribeCluster | `GET /v1/clusters/{clusterArn}` → `{clusterInfo}`. [The ARN must be the cluster's own, UUID included](#a-cluster-arn-resolves-by-name-and-uuid); [fourteen of twenty-one members are reported](#what-a-cluster-response-reports); [observes the seeded lifecycle](#a-clusters-lifecycle-is-seeded) |
+| DeleteCluster | `DELETE /v1/clusters/{clusterArn}` → `{clusterArn, state}` with state `DELETING`. Reads `currentVersion`; [removed at once unseeded, `DELETING` for the seeded observations otherwise](#a-clusters-lifecycle-is-seeded) |
 | GetBootstrapBrokers | `GET /v1/clusters/{clusterArn}/bootstrap-brokers` → [the broker strings the cluster's encryption and authentication imply](#what-a-cluster-response-reports), in the page's host form. [Anchored at `/v1/clusters/`](#the-nodes-and-bootstrap-brokers-arms-are-anchored-at-v1clusters) |
 | ListNodes | `GET /v1/clusters/{clusterArn}/nodes` → `{nodeInfoList, nextToken}`, one node per broker with its endpoint. [Anchored at `/v1/clusters/`](#the-nodes-and-bootstrap-brokers-arms-are-anchored-at-v1clusters); [pages](#the-list-operations-page-and-filter) |
 | CreateClusterV2 | `POST /api/v2/clusters` → `{clusterArn, clusterName, clusterType, state}`. [Provisioned or serverless, verified against its page](#the-v2-surface-verified-against-its-pages) |
@@ -22739,16 +22788,38 @@ both sub-resources under `/v1` only, so the same suffixes under `/v2/` or `/api/
 routed. Every path that matches no published URI now answers `UnknownOperationException`/404.
 `emulator/rest_routing_near_miss_test.go` enumerates the near-misses.
 
-### A cluster is ACTIVE from the moment it is created
+### A cluster's lifecycle is seeded
 
 The published `ClusterState` is `ACTIVE`, `CREATING`, `UPDATING`, `DELETING`, `FAILED`, `MAINTENANCE`,
-`REBOOTING_BROKER` and `HEALING`, and a real cluster takes tens of minutes to leave `CREATING`.
-Substrate writes `ACTIVE` in `CreateCluster` and never writes anything else, so `CREATING` is
-unreachable and a consumer's wait-for-active loop returns on its first poll. That is the one MSK
-observable a test most wants to drive, because a cluster create is the slowest step in a streaming
-stack's deployment: a seeded observation count would let the `CREATING` path be asserted without
-waiting on anything.
-[#1196](https://github.com/scttfrdmn/substrate/issues/1196).
+`REBOOTING_BROKER` and `HEALING`, and a real cluster takes tens of minutes to leave `CREATING`. Until
+[#1196](https://github.com/scttfrdmn/substrate/issues/1196) substrate wrote `ACTIVE` at create and nothing else, so a consumer's wait-for-active loop
+returned on its first poll. A cluster's lifecycle is now a [seeded progression](#how-a-progression-is-seeded):
+
+```
+POST   /v1/msk/cluster-status   {"clusterArn":"*","pendingObservations":2,"state":"CREATING","finalState":"FAILED","stateInfo":{"code":"…","message":"…"}}
+DELETE /v1/msk/cluster-status   (all seeds; ?clusterArn=… for one)
+```
+
+- **Unseeded, nothing changes.** A create answers and describes `ACTIVE`, and `DeleteCluster` removes
+  the record at once, answering `DELETING`. No MSK page publishes the state a fresh create answers, so
+  the record's own state is kept rather than guessed.
+- **A create** under a seed answers `CREATING` (or the seed's `state`), and `DescribeCluster`,
+  `DescribeClusterV2`, `ListClusters` and `ListClustersV2` report it for `pendingObservations` observations
+  of that cluster. It then settles in the seed's `finalState` (default the record's `ACTIVE`). A
+  `FAILED` final state answers the seed's `stateInfo` (`code`, `message`), which is how a test reaches a
+  failed cluster. `finalState` may be any published state but `CREATING` and `DELETING`.
+- **A delete** under a seed with pending observations keeps the record, marked deleting, and restarts
+  the countdown. That many describes and lists report `DELETING`, and the observation after them
+  removes the record and answers `NotFoundException`/404, as a describe of a deleted cluster does. A
+  second delete of a deleting cluster answers `DELETING` again without restarting it.
+- `GetBootstrapBrokers`, `ListNodes`, the create and the delete peek rather than observe: none is a
+  poll of the cluster's state.
+
+`DeleteCluster` reads its published `currentVersion` query parameter. Every cluster carries a
+`currentVersion`, minted at create in the form of the page's one example (`KTVPDKIKX0DER`: thirteen
+upper-case letters and digits, derived from the request ID as every minted value is). A delete naming
+another version is `BadRequestException`/400 with `invalidParameter` `currentVersion`, substrate's
+reading, since MSK publishes no codes (#671). A record from before #1196 carries none and accepts any.
 
 ### What a create requires
 
@@ -22822,16 +22893,11 @@ says it returns "all the MSK clusters", while `ListClustersV2`'s says "all serve
 clusters", and v1's `ClusterInfo` has no member to describe a serverless cluster with, so this is
 substrate's reading of the contrast.
 
-### DeleteCluster removes the cluster while reporting it DELETING
+### DeleteCluster's response
 
-The response body is right — `DeleteClusterResponse` publishes exactly `clusterArn` and `state`, and
-`clusterName` is deliberately not reported because it is not a member — and `DELETING` is a published
-state. What diverges is what the state describes: the record and its index entry are removed before the
-response is written, so the very next `DescribeCluster` answers not-found rather than a cluster in
-`DELETING`, and the published deletion window is unobservable. The `currentVersion` query parameter
-`DELETE /v1/clusters/{clusterArn}` publishes is also never read, so a delete that names a stale version
-cannot be exercised.
-[#1197](https://github.com/scttfrdmn/substrate/issues/1197).
+`DeleteClusterResponse` publishes exactly `clusterArn` and `state`, and `clusterName` is deliberately
+not reported because it is not a member. The state is `DELETING`. Whether the deleting cluster stays
+observable afterwards is the seed's to say; see [A cluster's lifecycle is seeded](#a-clusters-lifecycle-is-seeded).
 
 ### The v2 surface, verified against its pages
 
@@ -22842,7 +22908,7 @@ It does: `v2-clusters.html` (`ListClustersV2`, `CreateClusterV2`) and `v2-cluste
 | Operation | Verified against the page | Not modelled |
 |-----------|---------------------------|--------------|
 | CreateClusterV2 | `POST /api/v2/clusters`. Request: `clusterName` (required, 1–64), `provisioned`, `serverless`, `tags`. Response: `clusterArn`, `clusterName`, `clusterType`, `state`, all four answered. A serverless create used to be ignored and stored as a provisioned cluster, and `clusterType` was not answered | `provisioned.loggingInfo`, `openMonitoring`, `rebalancing` and `brokerNodeGroupInfo.connectivityInfo` are accepted and not stored |
-| DescribeClusterV2 | `GET /api/v2/clusters/{clusterArn}` → `{clusterInfo}`, the `Cluster` shape: `clusterArn`, `clusterName`, `clusterType`, `creationTime`, `state`, `tags`, and `provisioned` or `serverless` | `activeOperationArn`, `currentVersion`, `stateInfo`; `serverless.kafkaVersion`, since a serverless create takes none |
+| DescribeClusterV2 | `GET /api/v2/clusters/{clusterArn}` → `{clusterInfo}`, the `Cluster` shape: `clusterArn`, `clusterName`, `clusterType`, `creationTime`, `state`, `tags`, and `provisioned` or `serverless` | `activeOperationArn`; `serverless.kafkaVersion`, since a serverless create takes none. `currentVersion` and `stateInfo` are answered as v1's are (#1196) |
 | ListClustersV2 | `GET /api/v2/clusters`, query `clusterNameFilter`, `clusterTypeFilter`, `maxResults`, `nextToken`; response `{clusterInfoList, nextToken}` | — |
 
 Request members arrive in the published lowerCamel spelling and are decoded case-insensitively, so the
@@ -22850,19 +22916,19 @@ PascalCase CloudFormation sends decodes too. Responses use the published lowerCa
 
 ### What a cluster response reports
 
-`ClusterInfo` publishes twenty-one members. Substrate reports twelve:
-- always: `clusterArn`, `clusterName`, `state`, `creationTime`, `brokerNodeGroupInfo`,
+`ClusterInfo` publishes twenty-one members. Substrate reports fourteen:
+- always: `clusterArn`, `clusterName`, `state`, `creationTime`, `currentVersion` (#1196),
+  `brokerNodeGroupInfo`,
   `numberOfBrokerNodes` and `currentBrokerSoftwareInfo` (`kafkaVersion`, plus `configurationArn` and
   `configurationRevision` when the create named a configuration);
 - `encryptionInfo`, answered with `encryptionInTransit`'s stated defaults filled in (`clientBroker`
   "The default value is `TLS`", `inCluster` "The default value is true");
-- when the create sent them: `tags`, `clientAuthentication`, `enhancedMonitoring` and `storageMode`.
+- when the create sent them: `tags`, `clientAuthentication`, `enhancedMonitoring` and `storageMode`;
+- `stateInfo`, when a seeded cluster settles `FAILED` (#1196).
 
 Absent, because nothing in substrate holds them:
 - `activeOperationArn` and `customerActionStatus`, since no cluster operation is modelled;
-- `currentVersion`, MSK's own opaque version string;
 - `loggingInfo`, `openMonitoring` and `rebalancing`;
-- `stateInfo`, since a cluster never fails;
 - the two ZooKeeper connect strings.
 
 `DescribeClusterV2`'s `provisioned` carries the same set ([#1199](https://github.com/scttfrdmn/substrate/issues/1199)).
@@ -22941,8 +23007,9 @@ then reports two nodes, and a template's broker count is unassertable. `ClientAu
 `Rebalancing`, `StorageMode`, `Tags` and `ZookeeperAccess` are all dropped.
 
 `Ref` returns the cluster ARN, which is what the resource publishes. Of the two published `Fn::GetAtt`
-attributes, `Arn` resolves; `CurrentVersion` has no stored value, because `currentVersion` is not a
-member of the cluster record, so a template that reads it to drive an update gets nothing.
+attributes, `Arn` resolves; `CurrentVersion` does not, so a template that reads it to drive an update
+gets nothing. Since #1196 the cluster record holds a `currentVersion`, but the deployer does not resolve
+the attribute from it.
 [#1203](https://github.com/scttfrdmn/substrate/issues/1203).
 
 ### Cost
@@ -23058,33 +23125,65 @@ than the wire codes, so a consumer branching on the published code never took th
 text gave the not-found status as 400; the pages give 404, which is what substrate answers
 ([#1208](https://github.com/scttfrdmn/substrate/issues/1208)).
 
-### A cluster and its snapshots are available the moment they are asked for
+### A cluster's and a snapshot's lifecycles are seeded
 
-`createCluster` stores `ClusterStatus: "available"`
-(`emulator/redshift_plugin.go:163`) and `createClusterSnapshot` stores
-`Status: "available"` (`:470`). The reference's `CreateCluster` sample publishes
-`<ClusterStatus>creating</ClusterStatus>` and its `CreateClusterSnapshot` sample
-publishes `<Status>creating</Status>`. `Cluster` publishes twenty valid status
-values, from `creating` and `modifying` through `resizing`, `paused`,
-`storage-full` and `incompatible-parameters`, and substrate emits exactly one of
-them. A consumer's wait-until-available loop therefore exits on its first poll,
-which is the one thing such a loop exists to make testable, and there is no seed
-that would make it poll. A seedable status progression, following the pattern the
-Bedrock and SageMaker job-status seeds establish, is what would make it assertable
-([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+`Cluster` publishes twenty `ClusterStatus` values, from `creating` and `modifying` through `resizing`,
+`paused`, `storage-full` and `incompatible-parameters`. Until [#1196](https://github.com/scttfrdmn/substrate/issues/1196) substrate emitted one of
+them, `available`: a cluster and a snapshot were born available, a resize took effect in place, and a
+delete erased the record. So a consumer's wait-until-available loop exited on its first poll, a
+modify-then-poll loop had nothing to poll, and a wait-until-deleted loop had no deleting cluster.
+Both lifecycles are now [seeded progressions](#how-a-progression-is-seeded):
 
-### Deleting a cluster erases it instead of reporting deleting
+```
+POST   /v1/redshift/cluster-status    {"clusterIdentifier":"*","pendingObservations":2,"state":"…","finalState":"hardware-failure"}
+DELETE /v1/redshift/cluster-status    (all seeds; ?clusterIdentifier=… for one)
+POST   /v1/redshift/snapshot-status   {"snapshotIdentifier":"*","pendingObservations":2,"finalState":"failed"}
+DELETE /v1/redshift/snapshot-status   (all seeds; ?snapshotIdentifier=… for one)
+```
 
-`deleteCluster` calls `state.Delete` and `removeFromStringIndex` and then returns
-the record it loaded before the delete, with its `available` status intact
-(`emulator/redshift_plugin.go:252`). The reference's `DeleteCluster` sample
-publishes `<ClusterStatus>deleting</ClusterStatus>` on a cluster that remains
-describable while the deletion proceeds. In substrate the following
-`DescribeClusters` refuses with `ClusterNotFound` at 404 instead, so a
-consumer that polls for the transition cannot observe it.
-`SkipFinalClusterSnapshot` and `FinalClusterSnapshotIdentifier` are read by
-nothing, so no final snapshot appears in `DescribeClusterSnapshots` either
-([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+**What the create answers is published, and does not depend on a seed.** `API_CreateCluster`'s
+sample answers `<ClusterStatus>creating</ClusterStatus>`, and `API_Snapshot` states that
+`CreateClusterSnapshot` "returns status as 'creating'", so both creates answer `creating`. A describe
+then reports the countdown. Unseeded, it reports the record's own `available` from the first
+describe, the zero default every existing describe relies on.
+
+One seed covers each transition of a cluster, because every transition restarts its countdown:
+
+| Transition | While the countdown runs, `DescribeClusters` reports | Once it is spent |
+|------------|------------------------------------------------------|------------------|
+| `CreateCluster` | `creating` (or the seed's `state`) | the seed's `finalState`, default `available`. `hardware-failure`, `incompatible-network` and the other settled statuses are reachable this way; `creating`, `deleting` and `final-snapshot` are refused as final states |
+| `ModifyCluster` changing `NodeType` or `NumberOfNodes` | `resizing` (or the seed's `state`), with the previous `NodeType` and `NumberOfNodes` and the new ones under `PendingModifiedValues` | the new values, and no `PendingModifiedValues` |
+| `DeleteCluster` | `final-snapshot` for the first observation when a final snapshot was requested, `deleting` otherwise | the record is removed and the describe answers `ClusterNotFound`/404 |
+
+A snapshot reports `creating` (or the seed's `state`) for the countdown, then the seed's `finalState`,
+default `available`. `failed` reaches a failed snapshot. The four statuses `API_Snapshot` names are
+accepted.
+
+Unseeded, `ModifyCluster` applies a resize in place and `DeleteCluster` removes the record at once,
+as before. `ModifyCluster` and `DeleteCluster` refuse a cluster whose resize or delete is still
+counting down with the pages' `InvalidClusterState`/400, "The specified cluster is not in the available
+state". A create counting down is not refused, because a seed posted after a create restarts its
+countdown too (a POST resets every counter it governs) and is usually meant for the next transition.
+Nor is a cluster that settled in a failure status, so a test that seeded `hardware-failure` can still
+delete it.
+
+### Deleting a cluster reads its final-snapshot parameters
+
+`API_DeleteCluster`'s response answers `deleting`, as its sample does, or `final-snapshot` when a final
+snapshot was requested, as its text says ("the status of the cluster will be 'final-snapshot' while the
+snapshot is being taken, then it's 'deleting'"). Until #1196 all three of its final-snapshot parameters
+were discarded:
+
+| Parameter | Published rule | What substrate answers |
+|-----------|----------------|------------------------|
+| `SkipFinalClusterSnapshot` | Default `false`; `FinalClusterSnapshotIdentifier` "must be specified if SkipFinalClusterSnapshot is false" | Neither sent is `InvalidParameterCombination`/400; not `true` or `false` is `InvalidParameterValue`/400 |
+| `FinalClusterSnapshotIdentifier` | "If this parameter is provided, SkipFinalClusterSnapshot must be false"; 1 to 255 alphanumeric characters, a letter first, no two consecutive hyphens or trailing hyphen | Sent with skip `true` is `InvalidParameterCombination`/400; malformed is `InvalidParameterValue`/400; taken is the page's `ClusterSnapshotAlreadyExists`/400. Otherwise a manual snapshot of the cluster is written, and `DescribeClusterSnapshots` reports it |
+| `FinalClusterSnapshotRetentionPeriod` | -1, or 1 to 3,653 | Otherwise the page's `InvalidRetentionPeriodFault`/400. The period is not stored |
+
+Neither combination rule has a code on the page, so both answer `InvalidParameterCombination`, Redshift's
+Common Errors code for parameters that must not be used together — substrate's reading. A consumer
+that deleted a cluster with only `ClusterIdentifier` must now send `SkipFinalClusterSnapshot=true` or
+name a final snapshot, as AWS requires.
 
 ### The cluster record carries ten of sixty-three members
 
@@ -23182,14 +23281,13 @@ Three published filters are **not** applied, each named in its handler's doc com
 `DescribeClusterParameterGroups` also lists only the groups a caller created. The page says the listing
 includes "the default parameter group", which substrate does not model.
 
-### A resize takes effect before the call returns
+### What ModifyCluster applies
 
-`modifyCluster` writes `NodeType` and `NumberOfNodes` onto the stored record and
-returns it (`emulator/redshift_plugin.go:222`), so the new shape is visible on the
-response to the modify call itself. The reference states that a resize sets the
-cluster status to `resizing` and publishes a `PendingModifiedValues` member for
-the values not yet applied; substrate sets neither. The other modifiable
-parameters the page publishes — among them `ClusterType`, `MasterUserPassword`,
+A change of `NodeType` or `NumberOfNodes` is a resize: applied in place unseeded, and reported as
+`resizing` with `PendingModifiedValues` under a seed (see
+[A cluster's and a snapshot's lifecycles are seeded](#a-clusters-and-a-snapshots-lifecycles-are-seeded)).
+The page's rule that a resize names both members "even if one of the parameters does not change" is
+not enforced. The other modifiable parameters the page publishes — among them `ClusterType`, `MasterUserPassword`,
 `ClusterVersion`, `AllowVersionUpgrade`, `PreferredMaintenanceWindow`,
 `AutomatedSnapshotRetentionPeriod`, `Encrypted` and `PubliclyAccessible` — are
 discarded without a refusal, so a call that modifies only those appears to
@@ -23316,8 +23414,8 @@ an earlier test will answer a later one.
 | DeleteDatabase | `Timestream_20181101.DeleteDatabase` | Answers `{}`; see *The two deletes answer an empty object* |
 | ListDatabases | `Timestream_20181101.ListDatabases` | Pages by `MaxResults` (1–20) and `NextToken` |
 | CreateTable | `Timestream_20181101.CreateTable` | A duplicate is `ConflictException`/400 |
-| DescribeTable | `Timestream_20181101.DescribeTable` | |
-| DeleteTable | `Timestream_20181101.DeleteTable` | Answers `{}`; see *The two deletes answer an empty object* |
+| DescribeTable | `Timestream_20181101.DescribeTable` | `TableStatus` [progresses under a seed](#a-tables-status-progresses-under-a-seed-and-tablecount-never-moves) |
+| DeleteTable | `Timestream_20181101.DeleteTable` | Answers `{}`; see *The two deletes answer an empty object*. [Under a seed the table is `DELETING` for a counted window first](#a-tables-status-progresses-under-a-seed-and-tablecount-never-moves) |
 | ListTables | `Timestream_20181101.ListTables` | Pages by `MaxResults` (1–20) and `NextToken`; `DatabaseName` narrows, and absent lists every database's tables |
 | WriteRecords | `Timestream_20181101.WriteRecords` | `Records` must hold 1–100 records |
 | DescribeEndpoints | `Timestream_20181101.DescribeEndpoints` | |
@@ -23464,12 +23562,27 @@ same result. `QueryString` is "Required: Yes" and at most 262,144 characters, an
 `TestTimestreamAudit_ListTablesDatabaseNameNarrows` and `TestTimestreamAudit_QueryMaxRowsPagesTheResult`
 walk each collection past one page.
 
-### A table is ACTIVE at birth and TableCount never moves
+### A table's status progresses under a seed, and TableCount never moves
 
-`createTable` stores `TableStatus: "ACTIVE"`
-(`emulator/timestream_plugin.go:207`) where the page publishes the valid values
-`ACTIVE | DELETING | RESTORING`, so the transition a consumer polls for is never
-observable and there is no seed that would produce one. `createDatabase` stores
+`API_Table` publishes `TableStatus` as `ACTIVE | DELETING | RESTORING` and no creating state, so
+`CreateTable` answers and records `ACTIVE`. `DescribeTable` and each table `ListTables` reports
+observe the status through a seed ([How a progression is seeded](#how-a-progression-is-seeded)):
+
+```
+POST   /v1/timestream-write/table-status
+       {"databaseName":"…","tableName":"…","pendingObservations":2,"state":"RESTORING"}
+DELETE /v1/timestream-write/table-status           (all; ?table=database/table for one)
+```
+
+Naming both `databaseName` and `tableName` targets one table, and naming neither targets every table.
+A live table reports `state` — `RESTORING`, the one transient status — for `pendingObservations`
+observations, then `ACTIVE`; with no `state` it reads `ACTIVE`. Under a seed with observations to
+spend, `DeleteTable` keeps the table marked `DELETING` and restarts its countdown: the next
+`pendingObservations` observations report `DELETING`, and the one after completes the delete and
+answers `ResourceNotFoundException`. Unseeded, `DeleteTable` removes the table at once, as before. The
+table publishes no failure state ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+Separately, `createDatabase` stores
 `TableCount: 0` (`:110`) and nothing increments it, so after creating three
 tables `DescribeDatabase` still reports zero against a member the reference
 defines as "The total number of tables found within a Timestream database".
@@ -23478,8 +23591,8 @@ defines as "The total number of tables found within a Timestream database".
 ValidationException error will be thrown", and substrate deletes the database
 record while leaving every table in the store, still reachable by
 `DescribeTable`, under a database that no longer exists. `ValidationException` at
-400 is published on that page, so the refusal has a site
-([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+400 is published on that page, so the refusal has a site. Neither is a status progression, and both
+remain open.
 
 ### WriteRecords accepts any batch and rejects nothing
 
@@ -23654,7 +23767,9 @@ that deleting it takes its users with it.
 | DescribeServer | Every modelled `DescribedServer` member; `UserCount` is counted; no `HostKeyFingerprint` or `As2ServiceManagedEgressIpAddresses` |
 | UpdateServer | Reads every published member; a member sent replaces the server's value, one omitted is left alone; `Tags` is not an UpdateServer member and is not read |
 | DeleteServer | Cascade-deletes the server's users and their index; answers `{}` |
-| ListServers | Pages by `MaxResults` (1–1000, default 1000) and `NextToken`; each element is all eight `ListedServer` members |
+| ListServers | Pages by `MaxResults` (1–1000, default 1000) and `NextToken`; each element is all eight `ListedServer` members; [observes the seeded lifecycle](#a-servers-lifecycle-is-seeded) |
+| StartServer | `OFFLINE` (or a failed transition) to `ONLINE`; no impact on a server already `ONLINE`, as the page states; answers `{}` ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)) |
+| StopServer | `ONLINE` (or a failed transition) to `OFFLINE`; answers `{}` ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)) |
 | CreateUser | Requires `Role`, `ServerId` and `UserName`, checked before the server is looked up; stores `SshPublicKeyBody` as the user's one key |
 | DescribeUser | All ten `DescribedUser` members; `SshPublicKeys` is an array, possibly empty |
 | UpdateUser | Reads `HomeDirectory` and `Role` only |
@@ -23675,21 +23790,39 @@ default for it. `PUBLIC` is the first of its three Valid Values, and it was alre
 value substrate recorded, so it is kept rather than changed along with `Domain`.
 `Protocols` and `SecurityPolicyName` publish no default and are absent unless sent.
 
-### A server is ONLINE from birth and no other state is reachable
+### A server's lifecycle is seeded
 
-`CreateServer` records `State: "ONLINE"` and nothing ever writes the field again.
-`API_DescribedServer` publishes `Valid Values: OFFLINE | ONLINE | STARTING |
-STOPPING | START_FAILED | STOP_FAILED`, and the two operations that would move a
-server between them, `StartServer` and `StopServer`, are not routed. Five of the
-six published values are therefore unobservable, and no transition can be
-asserted: a wait-until-`ONLINE` loop exits on its first poll, and a
-wait-until-`OFFLINE` loop cannot exit at all. A state progression is the kind of
-thing substrate models well — an observation countdown or a simulated-clock
-deadline, seeded per server — so the gap is the absence of a seed, not a scope
-boundary
-([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
-What real AWS reports on the first `DescribeServer` after a `CreateServer` is not
-published on either operation's page and is recorded here as unverified.
+`API_DescribedServer` publishes `Valid Values: OFFLINE | ONLINE | STARTING | STOPPING | START_FAILED |
+STOP_FAILED`. Until [#1196](https://github.com/scttfrdmn/substrate/issues/1196) `CreateServer` recorded `ONLINE` and nothing wrote the field again,
+because `StartServer` and `StopServer` were unrouted: five of the six values were unobservable, a
+wait-until-`ONLINE` loop exited on its first poll, and a wait-until-`OFFLINE` loop could not exit.
+
+Both operations are now routed, and a server's lifecycle is a [seeded progression](#how-a-progression-is-seeded):
+
+```
+POST   /v1/transfer/server-status   {"serverId":"*","pendingObservations":2,"state":"…","finalState":"START_FAILED"}
+DELETE /v1/transfer/server-status   (all seeds; ?serverId=… for one)
+```
+
+- **The operations.** `StopServer` "changes the state … from `ONLINE` to `OFFLINE`", and `StartServer`
+  "from `OFFLINE` to `ONLINE`. It has no impact on a server that is already `ONLINE`." Both also move a
+  server out of `START_FAILED` or `STOP_FAILED`.
+  - Both pages say the response is "an HTTP 200 response with an empty HTTP body", while their examples
+    show `{"ServerId": …}`. Substrate answers `{}`, for the reason the deletes do (#1206).
+  - A missing server is `ResourceNotFoundException`/400, as on every server operation.
+- **Unseeded**, a transition takes effect at once: a new or started server is `ONLINE`, a stopped one
+  `OFFLINE`, from the first describe.
+- **Under a seed**, `DescribeServer` and `ListServers` report the intermediate state for
+  `pendingObservations` observations of that server: `STARTING` when it is moving to `ONLINE`,
+  `STOPPING` when moving to `OFFLINE`, or the seed's `state`. Each create, start and stop restarts the
+  countdown, so one seed covers them all.
+  - Once the countdown is spent, the server reports the state it moved to, or the seed's `finalState`
+    when that is this transition's failure: `START_FAILED` for a create or a start, `STOP_FAILED` for a
+    stop. Any other `finalState` is refused.
+- **What is unverified.** `CreateServer`'s response carries no state, and no page says what a new server
+  reports while it comes up. A seeded new server reporting `STARTING` before `ONLINE` is therefore
+  substrate's reading. No page publishes a deleting state either, so `DeleteServer` still removes the
+  server and its users at once.
 
 ### Both collections page, and refuse a token substrate did not issue
 

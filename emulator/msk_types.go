@@ -31,6 +31,13 @@ type MSKCluster struct {
 	// The members below were added by #1199 and #1211. Each is omitempty, so a record written before
 	// them decodes unchanged and reads as a provisioned cluster with none of them set.
 
+	// CurrentVersion is the cluster's currentVersion, minted at create (#1196) and checked by
+	// DeleteCluster. Empty on a record from before #1196, which accepts any version.
+	CurrentVersion string `json:"CurrentVersion,omitempty"`
+	// Transition is DELETING once a seeded DeleteCluster keeps the record for its countdown, and empty
+	// otherwise. See emulator/msk_progression.go.
+	Transition string `json:"Transition,omitempty"`
+
 	// ClusterType is PROVISIONED or SERVERLESS, the published ClusterType values. Empty means
 	// PROVISIONED, which is every cluster a record from before #1211 describes.
 	ClusterType string `json:"ClusterType,omitempty"`
@@ -221,15 +228,17 @@ type MSKBrokerSoftwareInfo struct {
 //
 // It carries the published ClusterInfo members the record models (#1199): clusterArn, clusterName,
 // state, creationTime, tags, brokerNodeGroupInfo, numberOfBrokerNodes, currentBrokerSoftwareInfo,
-// encryptionInfo, clientAuthentication, enhancedMonitoring and storageMode. Absent, because nothing
-// in substrate holds them: activeOperationArn (no cluster operation is modeled), currentVersion
-// (MSK's own opaque version string), customerActionStatus, loggingInfo, openMonitoring, rebalancing,
-// stateInfo (a cluster never reaches a failed state), and the two zookeeper connect strings (no
-// ZooKeeper is modeled). An absent member is omitted rather than sent empty.
+// encryptionInfo, clientAuthentication, enhancedMonitoring and storageMode, and since #1196
+// currentVersion and — when a seeded cluster settles FAILED — stateInfo. Absent, because nothing in
+// substrate holds them: activeOperationArn (no cluster operation is modeled), customerActionStatus,
+// loggingInfo, openMonitoring, rebalancing, and the two zookeeper connect strings (no ZooKeeper is
+// modeled). An absent member is omitted rather than sent empty.
 type mskClusterInfoOut struct {
 	ClusterARN                string                      `json:"clusterArn"`
 	ClusterName               string                      `json:"clusterName"`
 	State                     string                      `json:"state"`
+	StateInfo                 *mskStateInfoOut            `json:"stateInfo,omitempty"`
+	CurrentVersion            string                      `json:"currentVersion,omitempty"`
 	BrokerNodeGroupInfo       *mskBrokerNodeGroupInfoOut  `json:"brokerNodeGroupInfo,omitempty"`
 	CurrentBrokerSoftwareInfo mskBrokerSoftwareInfoOut    `json:"currentBrokerSoftwareInfo"`
 	NumberOfBrokerNodes       int                         `json:"numberOfBrokerNodes,omitempty"`
@@ -243,17 +252,20 @@ type mskClusterInfoOut struct {
 
 // mskClusterOut is the Cluster element of the v2 DescribeClusterV2 and ListClustersV2 responses,
 // checked against v2-clusters.html and v2-clusters-clusterarn.html (#1211). A provisioned cluster
-// answers provisioned; a serverless one answers serverless. The Cluster members absent here are
-// activeOperationArn, currentVersion and stateInfo, for the reasons [mskClusterInfoOut] gives.
+// answers provisioned; a serverless one answers serverless. The Cluster member absent here is
+// activeOperationArn, for the reason [mskClusterInfoOut] gives; currentVersion and stateInfo are
+// answered as there (#1196).
 type mskClusterOut struct {
-	ClusterARN   string             `json:"clusterArn"`
-	ClusterName  string             `json:"clusterName"`
-	ClusterType  string             `json:"clusterType"`
-	State        string             `json:"state"`
-	CreationTime time.Time          `json:"creationTime"`
-	Tags         map[string]string  `json:"tags,omitempty"`
-	Provisioned  *mskProvisionedOut `json:"provisioned,omitempty"`
-	Serverless   *mskServerlessOut  `json:"serverless,omitempty"`
+	ClusterARN     string             `json:"clusterArn"`
+	ClusterName    string             `json:"clusterName"`
+	ClusterType    string             `json:"clusterType"`
+	State          string             `json:"state"`
+	StateInfo      *mskStateInfoOut   `json:"stateInfo,omitempty"`
+	CurrentVersion string             `json:"currentVersion,omitempty"`
+	CreationTime   time.Time          `json:"creationTime"`
+	Tags           map[string]string  `json:"tags,omitempty"`
+	Provisioned    *mskProvisionedOut `json:"provisioned,omitempty"`
+	Serverless     *mskServerlessOut  `json:"serverless,omitempty"`
 }
 
 // mskProvisionedOut is the Provisioned member of a v2 Cluster. Absent for the reasons
@@ -355,6 +367,7 @@ func mskClusterInfoWire(c *MSKCluster) mskClusterInfoOut {
 		ClusterARN:                c.ClusterARN,
 		ClusterName:               c.ClusterName,
 		State:                     c.State,
+		CurrentVersion:            c.CurrentVersion,
 		CurrentBrokerSoftwareInfo: mskBrokerSoftwareInfoWire(c),
 		NumberOfBrokerNodes:       c.NumberOfBrokerNodes,
 		Tags:                      c.Tags,
@@ -375,12 +388,13 @@ func mskClusterInfoWire(c *MSKCluster) mskClusterInfoOut {
 // mskClusterWire projects a stored cluster onto the v2 Cluster wire shape.
 func mskClusterWire(c *MSKCluster) mskClusterOut {
 	out := mskClusterOut{
-		ClusterARN:   c.ClusterARN,
-		ClusterName:  c.ClusterName,
-		ClusterType:  mskClusterTypeOf(c),
-		State:        c.State,
-		CreationTime: c.CreatedAt,
-		Tags:         c.Tags,
+		ClusterARN:     c.ClusterARN,
+		ClusterName:    c.ClusterName,
+		ClusterType:    mskClusterTypeOf(c),
+		State:          c.State,
+		CurrentVersion: c.CurrentVersion,
+		CreationTime:   c.CreatedAt,
+		Tags:           c.Tags,
 	}
 	if out.ClusterType == mskClusterTypeServerless && c.Serverless != nil {
 		out.Serverless = mskServerlessWire(c.Serverless)
