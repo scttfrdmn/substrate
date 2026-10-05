@@ -110,7 +110,9 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, shareArn), d); err != nil {
 		return nil, fmt.Errorf("ram createResourceShare put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn)
+	if err := updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn); err != nil {
+		return nil, fmt.Errorf("ram createResourceShare index: %w", err)
+	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
 		"resourceShare": ramResourceShareToWire(share),
@@ -224,7 +226,9 @@ func (p *RAMPlugin) deleteResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Delete(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)); err != nil {
 		return nil, fmt.Errorf("ram deleteResourceShare delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), input.ResourceShareArn)
+	if err := removeFromStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), input.ResourceShareArn); err != nil {
+		return nil, fmt.Errorf("ram deleteResourceShare index: %w", err)
+	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
 		"returnValue": true,

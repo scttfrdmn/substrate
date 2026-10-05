@@ -22,26 +22,14 @@ cd "$(dirname "$0")/.."
 # `file:function`, the function enclosing the marshal, so an entry exempts one reviewed
 # site rather than every marshal in its file.
 #
-# The string-index helpers below all marshal a []string or a map[string]string, which
-# encoding/json cannot fail to encode: no element type has a MarshalJSON, a channel, a
-# func or a float. Each helper also discards its state.Get, json.Unmarshal and
-# state.Put errors, which is #1175's defect, not this one. Changing their signatures to
-# return an error is #1175's fix, and touches every caller; until then the marshal is
-# the one step in them that cannot fail.
+# The eight string-index helpers #1365 listed here for #1175 now return their marshal
+# errors with the rest of their failures, so they need no entry.
 #
 # openSearchError marshals a literal map of strings and an int; s3ErrorResponseWith
 # marshals an s3ErrorXML of strings with element names taken from non-empty detail
 # names, which encoding/xml cannot fail to encode. Both return a bare *AWSResponse to
 # error paths that have no error of their own to return.
 ALLOWED=(
-  "emulator/athena_plugin.go:athenaRemoveStringIndex"
-  "emulator/cloudwatchlogs_plugin.go:updateStringIndex"
-  "emulator/cloudwatchlogs_plugin.go:removeFromStringIndex"
-  "emulator/ecr_plugin.go:saveImageTagsMap"
-  "emulator/elasticache_plugin.go:removeFromIndex"
-  "emulator/elb_plugin.go:removeFromList"
-  "emulator/rds_plugin.go:removeFromIndex"
-  "emulator/route53_plugin.go:removeFromList"
   "emulator/opensearch_plugin.go:openSearchError"
   "emulator/s3_plugin.go:s3ErrorResponseWith"
 )

@@ -371,7 +371,9 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, schedulerNamespace, recKey, data); err != nil {
 		return nil, fmt.Errorf("scheduler createSchedule state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name)
+	if err := updateStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name); err != nil {
+		return nil, fmt.Errorf("scheduler createSchedule index: %w", err)
+	}
 
 	type response struct {
 		ScheduleArn string `json:"ScheduleArn"`
@@ -488,7 +490,9 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Delete(goCtx, schedulerNamespace, recKey); err != nil {
 		return nil, fmt.Errorf("scheduler deleteSchedule state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name)
+	if err := removeFromStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name); err != nil {
+		return nil, fmt.Errorf("scheduler deleteSchedule index: %w", err)
+	}
 
 	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{"Content-Type": "application/json"}, Body: []byte("{}")}, nil
 }

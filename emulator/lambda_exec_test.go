@@ -238,7 +238,9 @@ func TestInvoke_RecordedReplay(t *testing.T) {
 	// Pre-populate the replay cache.
 	cachedResponse := []byte(`{"statusCode":200,"body":"cached"}`)
 	payload := []byte(`{"key":"val"}`)
-	p.SaveReplayForTest(fnARN, payload, cachedResponse)
+	if err := p.SaveReplayForTest(fnARN, payload, cachedResponse); err != nil {
+		t.Fatalf("SaveReplayForTest: %v", err)
+	}
 
 	// Invoke — should return the cached response without starting Docker.
 	req := &emulator.AWSRequest{
@@ -279,7 +281,9 @@ func TestReplayCache_RoundTrip(t *testing.T) {
 	payload := []byte(`{"input":"hello"}`)
 	response := []byte(`{"statusCode":200,"body":"world"}`)
 
-	p.SaveReplayForTest(arn, payload, response)
+	if err := p.SaveReplayForTest(arn, payload, response); err != nil {
+		t.Fatalf("SaveReplayForTest: %v", err)
+	}
 
 	got, ok := p.LoadReplayForTest(arn, payload)
 	if !ok {

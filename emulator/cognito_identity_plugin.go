@@ -105,7 +105,9 @@ func (p *CognitoIdentityPlugin) createIdentityPool(ctx *RequestContext, req *AWS
 	if err := p.state.Put(goCtx, cognitoIdentityNamespace, safeKey, data); err != nil {
 		return nil, fmt.Errorf("cognito-identity createIdentityPool state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIdentityNamespace, cognitoIdentityPoolIDsKey(ctx.AccountID, ctx.Region), poolID)
+	if err := updateStringIndex(goCtx, p.state, cognitoIdentityNamespace, cognitoIdentityPoolIDsKey(ctx.AccountID, ctx.Region), poolID); err != nil {
+		return nil, fmt.Errorf("cognito createIdentityPool index: %w", err)
+	}
 
 	type response struct {
 		IdentityPoolID                 string            `json:"IdentityPoolId"`
@@ -164,7 +166,9 @@ func (p *CognitoIdentityPlugin) deleteIdentityPool(ctx *RequestContext, req *AWS
 	}
 	goCtx := context.Background()
 	_ = p.state.Delete(goCtx, cognitoIdentityNamespace, cognitoIdentityPoolKey(ctx.AccountID, ctx.Region, body.IdentityPoolID))
-	removeFromStringIndex(goCtx, p.state, cognitoIdentityNamespace, cognitoIdentityPoolIDsKey(ctx.AccountID, ctx.Region), body.IdentityPoolID)
+	if err := removeFromStringIndex(goCtx, p.state, cognitoIdentityNamespace, cognitoIdentityPoolIDsKey(ctx.AccountID, ctx.Region), body.IdentityPoolID); err != nil {
+		return nil, fmt.Errorf("cognito deleteIdentityPool index: %w", err)
+	}
 	return cognitoIdentityJSONResponse(http.StatusOK, struct{}{})
 }
 

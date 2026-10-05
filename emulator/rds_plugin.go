@@ -195,7 +195,9 @@ func (p *RDSPlugin) createDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 				return nil, fmt.Errorf("rds createDBInstance marshal: %w", err)
 			}
 			scope := reqCtx.AccountID + "/" + reqCtx.Region
-			_ = p.state.Put(context.Background(), rdsNamespace, "dbinstance_container:"+scope+"/"+id, handleData)
+			if err := p.state.Put(context.Background(), rdsNamespace, "dbinstance_container:"+scope+"/"+id, handleData); err != nil {
+				return nil, fmt.Errorf("rds createDBInstance state.Put: %w", err)
+			}
 		}
 	}
 
@@ -364,7 +366,9 @@ func (p *RDSPlugin) deleteDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Delete(context.Background(), rdsNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("rds deleteDBInstance delete: %w", err)
 	}
-	p.removeFromIndex(scope, "dbinstance_ids", id)
+	if err := p.removeFromIndex(scope, "dbinstance_ids", id); err != nil {
+		return nil, fmt.Errorf("rds deleteDBInstance removeFromIndex: %w", err)
+	}
 
 	// Stop the container if the executor is configured.
 	if p.executor != nil {
@@ -614,7 +618,9 @@ func (p *RDSPlugin) deleteDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Delete(context.Background(), rdsNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("rds deleteDBCluster delete: %w", err)
 	}
-	p.removeFromIndex(scope, "dbcluster_ids", id)
+	if err := p.removeFromIndex(scope, "dbcluster_ids", id); err != nil {
+		return nil, fmt.Errorf("rds deleteDBCluster removeFromIndex: %w", err)
+	}
 
 	// Through the same projection the other two cluster sites use, so DeleteDBCluster answers the
 	// full published DBCluster rather than the three members its own inline struct used to declare
@@ -857,7 +863,9 @@ func (p *RDSPlugin) deleteDBSnapshot(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Delete(context.Background(), rdsNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("rds deleteDBSnapshot delete: %w", err)
 	}
-	p.removeFromIndex(scope, "dbsnapshot_ids", id)
+	if err := p.removeFromIndex(scope, "dbsnapshot_ids", id); err != nil {
+		return nil, fmt.Errorf("rds deleteDBSnapshot removeFromIndex: %w", err)
+	}
 
 	type result struct {
 		DBSnapshot xmlDBSnapshotItem `xml:"DBSnapshot"`
@@ -988,7 +996,9 @@ func (p *RDSPlugin) deleteDBSubnetGroup(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Delete(context.Background(), rdsNamespace, "dbsubnetgroup:"+scope+"/"+name); err != nil {
 		return nil, fmt.Errorf("rds deleteDBSubnetGroup delete: %w", err)
 	}
-	p.removeFromIndex(scope, "dbsubnetgroup_names", name)
+	if err := p.removeFromIndex(scope, "dbsubnetgroup_names", name); err != nil {
+		return nil, fmt.Errorf("rds deleteDBSubnetGroup removeFromIndex: %w", err)
+	}
 
 	type response struct {
 		XMLName xml.Name `xml:"DeleteDBSubnetGroupResponse"`
@@ -1115,7 +1125,9 @@ func (p *RDSPlugin) deleteDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 	if err := p.state.Delete(context.Background(), rdsNamespace, "dbparamgroup:"+scope+"/"+name); err != nil {
 		return nil, fmt.Errorf("rds deleteDBParameterGroup delete: %w", err)
 	}
-	p.removeFromIndex(scope, "dbparamgroup_names", name)
+	if err := p.removeFromIndex(scope, "dbparamgroup_names", name); err != nil {
+		return nil, fmt.Errorf("rds deleteDBParameterGroup removeFromIndex: %w", err)
+	}
 
 	type response struct {
 		XMLName xml.Name `xml:"DeleteDBParameterGroupResponse"`
@@ -1154,15 +1166,18 @@ func (p *RDSPlugin) appendToIndex(scope, indexName, id string) error {
 	return p.state.Put(context.Background(), rdsNamespace, key, newData)
 }
 
-func (p *RDSPlugin) removeFromIndex(scope, indexName, id string) {
+func (p *RDSPlugin) removeFromIndex(scope, indexName, id string) error {
 	key := indexName + ":" + scope
 	data, err := p.state.Get(context.Background(), rdsNamespace, key)
-	if err != nil || data == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("rds removeFromIndex %s state.Get: %w", key, err)
+	}
+	if data == nil {
+		return nil
 	}
 	var ids []string
-	if json.Unmarshal(data, &ids) != nil {
-		return
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return fmt.Errorf("rds removeFromIndex %s unmarshal: %w", key, err)
 	}
 	filtered := ids[:0]
 	for _, v := range ids {
@@ -1170,8 +1185,14 @@ func (p *RDSPlugin) removeFromIndex(scope, indexName, id string) {
 			filtered = append(filtered, v)
 		}
 	}
-	newData, _ := json.Marshal(filtered)
-	_ = p.state.Put(context.Background(), rdsNamespace, key, newData)
+	newData, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("rds removeFromIndex %s marshal: %w", key, err)
+	}
+	if err := p.state.Put(context.Background(), rdsNamespace, key, newData); err != nil {
+		return fmt.Errorf("rds removeFromIndex %s state.Put: %w", key, err)
+	}
+	return nil
 }
 
 // --- ARN helpers ---

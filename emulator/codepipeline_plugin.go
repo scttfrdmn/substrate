@@ -108,7 +108,9 @@ func (p *CodePipelinePlugin) createPipeline(reqCtx *RequestContext, req *AWSRequ
 	if err := p.state.Put(goCtx, codepipelineNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codepipeline createPipeline put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Pipeline.Name)
+	if err := updateStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Pipeline.Name); err != nil {
+		return nil, fmt.Errorf("codepipeline createPipeline index: %w", err)
+	}
 
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
 		"pipeline": map[string]interface{}{
@@ -224,7 +226,9 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 	if err := p.state.Delete(goCtx, codepipelineNamespace, key); err != nil {
 		return nil, fmt.Errorf("codepipeline deletePipeline delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	if err := removeFromStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
+		return nil, fmt.Errorf("codepipeline deletePipeline index: %w", err)
+	}
 
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{})
 }

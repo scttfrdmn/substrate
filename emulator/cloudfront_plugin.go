@@ -364,7 +364,9 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfCon
 	}
 
 	idxKey := cfDistIDsKey(ctx.AccountID)
-	updateStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID)
+	if err := updateStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID); err != nil {
+		return nil, fmt.Errorf("cloudfront createDistributionFrom index: %w", err)
+	}
 
 	type xmlDist struct {
 		XMLName    xml.Name `xml:"Distribution"`
@@ -554,7 +556,9 @@ func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSReque
 	}
 
 	idxKey := cfDistIDsKey(ctx.AccountID)
-	removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID)
+	if err := removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID); err != nil {
+		return nil, fmt.Errorf("cloudfront deleteDistribution index: %w", err)
+	}
 	// A deleted distribution's seeded countdown goes with it (#1381).
 	if err := cfDistributionProgressions.reset(goCtx, p.state, distID); err != nil {
 		return nil, fmt.Errorf("cloudfront deleteDistribution reset status: %w", err)
@@ -750,7 +754,9 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, req *AWSReque
 	if err := p.state.Put(goCtx, cloudfrontNamespace, cfInvalKey(ctx.AccountID, distID, invID), invData); err != nil {
 		return nil, fmt.Errorf("cloudfront createInvalidation state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cloudfrontNamespace, idsKey, invID)
+	if err := updateStringIndex(goCtx, p.state, cloudfrontNamespace, idsKey, invID); err != nil {
+		return nil, fmt.Errorf("cloudfront createInvalidation index: %w", err)
+	}
 
 	return cloudfrontXMLResponse(http.StatusCreated, cfInvalidationToXML(inv))
 }

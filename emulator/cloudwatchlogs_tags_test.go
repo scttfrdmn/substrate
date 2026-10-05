@@ -7,9 +7,7 @@ package emulator_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -477,35 +475,6 @@ func TestCWLogsTags_DescribeLogGroupsMatchesAPrefixAndNotAName(t *testing.T) {
 	assert.Equal(t, "ResourceNotFoundException", cwLogsErrorType(t, resp))
 }
 
-// cwlFailingPutStateManager is a StateManager whose writes fail once armed, so a tagging
-// operation's read-modify-*write* can be made to fail after the read has already succeeded.
-type cwlFailingPutStateManager struct {
-	inner emulator.StateManager
-	fail  bool
-}
-
-func (m *cwlFailingPutStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
-	return m.inner.Get(ctx, namespace, key)
-}
-
-func (m *cwlFailingPutStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
-	if m.fail {
-		return errCWLStoreFault
-	}
-	return m.inner.Put(ctx, namespace, key, value)
-}
-
-func (m *cwlFailingPutStateManager) Delete(ctx context.Context, namespace, key string) error {
-	return m.inner.Delete(ctx, namespace, key)
-}
-
-func (m *cwlFailingPutStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
-	return m.inner.List(ctx, namespace, prefix)
-}
-
-// errCWLStoreFault is the store failure cwlFailingPutStateManager injects.
-var errCWLStoreFault = errors.New("cwl store fault")
-
 // cwlPluginOn builds a logs server over a caller-supplied state manager, which
 // newCWLogsTestServerWithState does not allow.
 func cwlPluginOn(t *testing.T, state emulator.StateManager) *emulator.Server {
@@ -530,10 +499,10 @@ func cwlPluginOn(t *testing.T, state emulator.StateManager) *emulator.Server {
 // error and carries no AWS error code, so a caller retrying on `TooManyTagsException` or giving up
 // on `ValidationException` cannot mistake a broken store for either.
 func TestCWLogsTags_AStoreFailureIsNotAPublishedRefusal(t *testing.T) {
-	state := &cwlFailingPutStateManager{inner: emulator.NewMemoryStateManager()}
+	state := newFailingPutStateManager()
 	srv := cwlPluginOn(t, state)
 	cwlCreateTaggedGroup(t, srv, map[string]string{"Project": "foray"})
-	state.fail = true
+	state.failEvery()
 
 	cases := []struct {
 		op   string

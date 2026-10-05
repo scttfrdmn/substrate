@@ -1385,7 +1385,9 @@ func (p *EC2Plugin) stopInstances(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if err != nil {
 			return nil, fmt.Errorf("ec2 stopInstances marshal: %w", err)
 		}
-		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+		if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+			return nil, fmt.Errorf("ec2 stopInstances state.Put: %w", err)
+		}
 		if err := p.resetInstanceObservations(id); err != nil {
 			return nil, err
 		}
@@ -1442,7 +1444,9 @@ func (p *EC2Plugin) startInstances(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if err != nil {
 			return nil, fmt.Errorf("ec2 startInstances marshal: %w", err)
 		}
-		_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+		if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+			return nil, fmt.Errorf("ec2 startInstances state.Put: %w", err)
+		}
 		if err := p.resetInstanceObservations(id); err != nil {
 			return nil, err
 		}
@@ -2171,7 +2175,9 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 	if err != nil {
 		return nil, fmt.Errorf("ec2 modifySGRules marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 modifySGRules state.Put: %w", err)
+	}
 
 	opName := "AuthorizeSecurityGroupIngressResponse"
 	if direction == "egress" && add {
@@ -2362,7 +2368,9 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	if err != nil {
 		return nil, fmt.Errorf("ec2 attachInternetGateway marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 attachInternetGateway state.Put: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"AttachInternetGatewayResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -2397,7 +2405,9 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	if err != nil {
 		return nil, fmt.Errorf("ec2 detachInternetGateway marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 detachInternetGateway state.Put: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DetachInternetGatewayResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -2613,7 +2623,9 @@ func (p *EC2Plugin) associateRouteTable(reqCtx *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 associateRouteTable marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 associateRouteTable state.Put: %w", err)
+	}
 	type response struct {
 		XMLName       xml.Name `xml:"AssociateRouteTableResponse"`
 		XMLNS         string   `xml:"xmlns,attr"`
@@ -2652,7 +2664,9 @@ func (p *EC2Plugin) disassociateRouteTable(reqCtx *RequestContext, req *AWSReque
 			if err != nil {
 				return nil, fmt.Errorf("ec2 disassociateRouteTable marshal: %w", err)
 			}
-			_ = p.state.Put(context.Background(), ec2Namespace, k, newData)
+			if err := p.state.Put(context.Background(), ec2Namespace, k, newData); err != nil {
+				return nil, fmt.Errorf("ec2 disassociateRouteTable state.Put: %w", err)
+			}
 			break
 		}
 	}
@@ -2685,7 +2699,9 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if err != nil {
 		return nil, fmt.Errorf("ec2 createRoute marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 createRoute state.Put: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"CreateRouteResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -2739,7 +2755,9 @@ func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err != nil {
 		return nil, fmt.Errorf("ec2 replaceRoute marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 replaceRoute state.Put: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"ReplaceRouteResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -2894,7 +2912,9 @@ func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if err != nil {
 		return nil, fmt.Errorf("ec2 deleteRoute marshal: %w", err)
 	}
-	_ = p.state.Put(context.Background(), ec2Namespace, key, newData)
+	if err := p.state.Put(context.Background(), ec2Namespace, key, newData); err != nil {
+		return nil, fmt.Errorf("ec2 deleteRoute state.Put: %w", err)
+	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteRouteResponse"`
 		XMLNS   string   `xml:"xmlns,attr"`
@@ -3937,9 +3957,11 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	}
 	sgKey := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
 	if err := p.state.Put(ctx, ec2Namespace, sgKey, sgData); err != nil {
-		p.logger.Warn("ec2: failed to create default sg", "err", err)
+		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create default sg: %w", err)
 	}
-	_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "sg_ids", sgID)
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "sg_ids", sgID); err != nil {
+		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC index default sg: %w", err)
+	}
 
 	// Create and attach a default internet gateway so the main route table can
 	// carry a 0.0.0.0/0 → igw route, matching a real default VPC.
@@ -3956,15 +3978,15 @@ func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext
 	}
 	igwKey := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
 	if err := p.state.Put(ctx, ec2Namespace, igwKey, igwData); err != nil {
-		p.logger.Warn("ec2: failed to create default internet gateway", "err", err)
-		igwID = ""
-	} else {
-		_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "igw_ids", igwID)
+		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create default internet gateway: %w", err)
+	}
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "igw_ids", igwID); err != nil {
+		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC index default internet gateway: %w", err)
 	}
 
 	// Create main route table with local route + default IGW route.
-	if _, rtErr := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true, igwID); rtErr != nil {
-		p.logger.Warn("ec2: failed to create default route table", "err", rtErr)
+	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true, igwID); err != nil {
+		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create main route table: %w", err)
 	}
 
 	subnet, err = p.createDefaultSubnet(ctx, reqCtx, &created)
@@ -3995,7 +4017,9 @@ func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestCont
 	if err := p.state.Put(ctx, ec2Namespace, key, data); err != nil {
 		return nil, fmt.Errorf("ec2 createDefaultSubnet: %w", err)
 	}
-	_ = p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "subnet_ids", subnetID)
+	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "subnet_ids", subnetID); err != nil {
+		return nil, fmt.Errorf("ec2 createDefaultSubnet index: %w", err)
+	}
 	return &subnet, nil
 }
 
@@ -5513,7 +5537,9 @@ func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*
 				if err != nil {
 					return nil, fmt.Errorf("ec2 associateAddress marshal: %w", err)
 				}
-				_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
+				if err := p.state.Put(context.Background(), ec2Namespace, instKey, newInstData); err != nil {
+					return nil, fmt.Errorf("ec2 associateAddress state.Put: %w", err)
+				}
 			}
 		}
 	}
@@ -5567,7 +5593,9 @@ func (p *EC2Plugin) disassociateAddress(reqCtx *RequestContext, req *AWSRequest)
 					if err != nil {
 						return nil, fmt.Errorf("ec2 disassociateAddress marshal: %w", err)
 					}
-					_ = p.state.Put(context.Background(), ec2Namespace, instKey, newInstData)
+					if err := p.state.Put(context.Background(), ec2Namespace, instKey, newInstData); err != nil {
+						return nil, fmt.Errorf("ec2 disassociateAddress state.Put: %w", err)
+					}
 				}
 			}
 		}
@@ -5579,7 +5607,9 @@ func (p *EC2Plugin) disassociateAddress(reqCtx *RequestContext, req *AWSRequest)
 		if err != nil {
 			return nil, fmt.Errorf("ec2 disassociateAddress marshal: %w", err)
 		}
-		_ = p.state.Put(context.Background(), ec2Namespace, k, newData)
+		if err := p.state.Put(context.Background(), ec2Namespace, k, newData); err != nil {
+			return nil, fmt.Errorf("ec2 disassociateAddress state.Put: %w", err)
+		}
 		break
 	}
 	type response struct {
@@ -6709,7 +6739,9 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("createLaunchTemplate: put lt_by_name: %w", err)
 	}
 	idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, ec2Namespace, idsKey, ltID)
+	if err := updateStringIndex(goCtx, p.state, ec2Namespace, idsKey, ltID); err != nil {
+		return nil, fmt.Errorf("ec2 createLaunchTemplate index: %w", err)
+	}
 
 	// The warning goes on this outer struct rather than on ec2LaunchTemplateXML, which
 	// ModifyLaunchTemplate and DescribeLaunchTemplates share: neither documents the
@@ -6969,7 +7001,9 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Delete(goCtx, ec2Namespace, nameKey); err != nil {
 		return nil, fmt.Errorf("deleteLaunchTemplate: delete lt_by_name: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, ec2Namespace, idsKey, lt.LaunchTemplateID)
+	if err := removeFromStringIndex(goCtx, p.state, ec2Namespace, idsKey, lt.LaunchTemplateID); err != nil {
+		return nil, fmt.Errorf("ec2 deleteLaunchTemplate index: %w", err)
+	}
 
 	type ltItem struct {
 		LaunchTemplateID   string `xml:"launchTemplateId"`
@@ -7426,7 +7460,9 @@ func (p *EC2Plugin) deleteVolume(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteVolume delete: %w", err)
 	}
-	removeFromStringIndex(context.Background(), p.state, ec2Namespace, "volume_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, volID)
+	if err := removeFromStringIndex(context.Background(), p.state, ec2Namespace, "volume_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, volID); err != nil {
+		return nil, fmt.Errorf("ec2 deleteVolume index: %w", err)
+	}
 
 	type response struct {
 		XMLName xml.Name `xml:"DeleteVolumeResponse"`

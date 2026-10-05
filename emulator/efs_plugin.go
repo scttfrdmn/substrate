@@ -132,7 +132,9 @@ func (p *EFSPlugin) createFileSystem(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Put(goCtx, efsNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("efs createFileSystem put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, efsNamespace, "filesystem_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, fsID)
+	if err := updateStringIndex(goCtx, p.state, efsNamespace, "filesystem_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, fsID); err != nil {
+		return nil, fmt.Errorf("efs createFileSystem index: %w", err)
+	}
 
 	return efsJSONResponse(http.StatusCreated, efsFileSystemToWire(fs))
 }
@@ -234,7 +236,9 @@ func (p *EFSPlugin) deleteFileSystem(reqCtx *RequestContext, _ *AWSRequest, fsID
 	if err := p.state.Delete(goCtx, efsNamespace, key); err != nil {
 		return nil, fmt.Errorf("efs deleteFileSystem delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, efsNamespace, "filesystem_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, fsID)
+	if err := removeFromStringIndex(goCtx, p.state, efsNamespace, "filesystem_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, fsID); err != nil {
+		return nil, fmt.Errorf("efs deleteFileSystem index: %w", err)
+	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
@@ -290,7 +294,9 @@ func (p *EFSPlugin) createAccessPoint(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, efsNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("efs createAccessPoint put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, efsNamespace, "accesspoint_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, apID)
+	if err := updateStringIndex(goCtx, p.state, efsNamespace, "accesspoint_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, apID); err != nil {
+		return nil, fmt.Errorf("efs createAccessPoint index: %w", err)
+	}
 
 	return efsJSONResponse(http.StatusOK, efsAccessPointToWire(ap))
 }
@@ -356,7 +362,9 @@ func (p *EFSPlugin) deleteAccessPoint(reqCtx *RequestContext, _ *AWSRequest, apI
 	if err := p.state.Delete(goCtx, efsNamespace, key); err != nil {
 		return nil, fmt.Errorf("efs deleteAccessPoint delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, efsNamespace, "accesspoint_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, apID)
+	if err := removeFromStringIndex(goCtx, p.state, efsNamespace, "accesspoint_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, apID); err != nil {
+		return nil, fmt.Errorf("efs deleteAccessPoint index: %w", err)
+	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
@@ -397,8 +405,12 @@ func (p *EFSPlugin) createMountTarget(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, efsNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("efs createMountTarget put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID)
-	updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.FileSystemID, mtID)
+	if err := updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID); err != nil {
+		return nil, fmt.Errorf("efs createMountTarget index: %w", err)
+	}
+	if err := updateStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.FileSystemID, mtID); err != nil {
+		return nil, fmt.Errorf("efs createMountTarget index: %w", err)
+	}
 	if err := p.incrementMountTargetCount(goCtx, reqCtx, input.FileSystemID); err != nil {
 		return nil, err
 	}
@@ -485,9 +497,13 @@ func (p *EFSPlugin) deleteMountTarget(reqCtx *RequestContext, _ *AWSRequest, mtI
 	if err := p.state.Delete(goCtx, efsNamespace, key); err != nil {
 		return nil, fmt.Errorf("efs deleteMountTarget delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID)
+	if err := removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, mtID); err != nil {
+		return nil, fmt.Errorf("efs deleteMountTarget index: %w", err)
+	}
 	if fsID != "" {
-		removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+fsID, mtID)
+		if err := removeFromStringIndex(goCtx, p.state, efsNamespace, "mounttarget_by_fs:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+fsID, mtID); err != nil {
+			return nil, fmt.Errorf("efs deleteMountTarget index: %w", err)
+		}
 		if err := p.decrementMountTargetCount(goCtx, reqCtx, fsID); err != nil {
 			return nil, err
 		}

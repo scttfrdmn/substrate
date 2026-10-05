@@ -142,7 +142,9 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 	if err := p.state.Put(goCtx, sesv2Namespace, key, data); err != nil {
 		return nil, fmt.Errorf("sesv2 createEmailIdentity put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, sesv2Namespace, "identity_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.EmailIdentity)
+	if err := updateStringIndex(goCtx, p.state, sesv2Namespace, "identity_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.EmailIdentity); err != nil {
+		return nil, fmt.Errorf("sesv2 createEmailIdentity index: %w", err)
+	}
 
 	return sesv2JSONResponse(http.StatusOK, map[string]interface{}{})
 }
@@ -258,7 +260,9 @@ func (p *SESv2Plugin) deleteEmailIdentity(reqCtx *RequestContext, _ *AWSRequest,
 	if err := p.state.Delete(goCtx, sesv2Namespace, key); err != nil {
 		return nil, fmt.Errorf("sesv2 deleteEmailIdentity delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, sesv2Namespace, "identity_names:"+reqCtx.AccountID+"/"+reqCtx.Region, identityName)
+	if err := removeFromStringIndex(goCtx, p.state, sesv2Namespace, "identity_names:"+reqCtx.AccountID+"/"+reqCtx.Region, identityName); err != nil {
+		return nil, fmt.Errorf("sesv2 deleteEmailIdentity index: %w", err)
+	}
 	return sesv2JSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -316,8 +320,10 @@ func (p *SESv2Plugin) sendEmail(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		if putErr := p.state.Put(goCtx, sesv2Namespace, stateKey, data); putErr != nil {
 			p.logger.Warn("sesv2 sendEmail: failed to capture email", "err", putErr)
 		} else {
-			updateStringIndex(goCtx, p.state, sesv2Namespace,
-				"captured_email_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, messageID)
+			if err := updateStringIndex(goCtx, p.state, sesv2Namespace,
+				"captured_email_ids:"+reqCtx.AccountID+"/"+reqCtx.Region, messageID); err != nil {
+				return nil, fmt.Errorf("sesv2 sendEmail index: %w", err)
+			}
 		}
 	}
 

@@ -291,7 +291,9 @@ func (p *ElastiCachePlugin) deleteCacheCluster(reqCtx *RequestContext, req *AWSR
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("elasticache deleteCacheCluster delete: %w", err)
 	}
-	p.removeFromIndex(scope, "cachecluster_ids", id)
+	if err := p.removeFromIndex(scope, "cachecluster_ids", id); err != nil {
+		return nil, fmt.Errorf("elasticache deleteCacheCluster removeFromIndex: %w", err)
+	}
 
 	type result struct {
 		CacheCluster xmlCacheClusterItem `xml:"CacheCluster"`
@@ -513,7 +515,9 @@ func (p *ElastiCachePlugin) deleteReplicationGroup(reqCtx *RequestContext, req *
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("elasticache deleteReplicationGroup delete: %w", err)
 	}
-	p.removeFromIndex(scope, "replgroup_ids", id)
+	if err := p.removeFromIndex(scope, "replgroup_ids", id); err != nil {
+		return nil, fmt.Errorf("elasticache deleteReplicationGroup removeFromIndex: %w", err)
+	}
 
 	type result struct {
 		ReplicationGroup xmlReplicationGroupItem `xml:"ReplicationGroup"`
@@ -646,7 +650,9 @@ func (p *ElastiCachePlugin) deleteCacheSubnetGroup(reqCtx *RequestContext, req *
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, "cachesubnetgroup:"+scope+"/"+name); err != nil {
 		return nil, fmt.Errorf("elasticache deleteCacheSubnetGroup delete: %w", err)
 	}
-	p.removeFromIndex(scope, "cachesubnetgroup_names", name)
+	if err := p.removeFromIndex(scope, "cachesubnetgroup_names", name); err != nil {
+		return nil, fmt.Errorf("elasticache deleteCacheSubnetGroup removeFromIndex: %w", err)
+	}
 
 	type response struct {
 		XMLName xml.Name `xml:"DeleteCacheSubnetGroupResponse"`
@@ -772,7 +778,9 @@ func (p *ElastiCachePlugin) deleteCacheParameterGroup(reqCtx *RequestContext, re
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, "cacheparamgroup:"+scope+"/"+name); err != nil {
 		return nil, fmt.Errorf("elasticache deleteCacheParameterGroup delete: %w", err)
 	}
-	p.removeFromIndex(scope, "cacheparamgroup_names", name)
+	if err := p.removeFromIndex(scope, "cacheparamgroup_names", name); err != nil {
+		return nil, fmt.Errorf("elasticache deleteCacheParameterGroup removeFromIndex: %w", err)
+	}
 
 	type response struct {
 		XMLName xml.Name `xml:"DeleteCacheParameterGroupResponse"`
@@ -933,15 +941,18 @@ func (p *ElastiCachePlugin) appendToIndex(scope, indexName, id string) error {
 	return p.state.Put(context.Background(), elasticacheNamespace, key, newData)
 }
 
-func (p *ElastiCachePlugin) removeFromIndex(scope, indexName, id string) {
+func (p *ElastiCachePlugin) removeFromIndex(scope, indexName, id string) error {
 	key := indexName + ":" + scope
 	data, err := p.state.Get(context.Background(), elasticacheNamespace, key)
-	if err != nil || data == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("elasticache removeFromIndex %s state.Get: %w", key, err)
+	}
+	if data == nil {
+		return nil
 	}
 	var ids []string
-	if json.Unmarshal(data, &ids) != nil {
-		return
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return fmt.Errorf("elasticache removeFromIndex %s unmarshal: %w", key, err)
 	}
 	filtered := ids[:0]
 	for _, v := range ids {
@@ -949,8 +960,14 @@ func (p *ElastiCachePlugin) removeFromIndex(scope, indexName, id string) {
 			filtered = append(filtered, v)
 		}
 	}
-	newData, _ := json.Marshal(filtered)
-	_ = p.state.Put(context.Background(), elasticacheNamespace, key, newData)
+	newData, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("elasticache removeFromIndex %s marshal: %w", key, err)
+	}
+	if err := p.state.Put(context.Background(), elasticacheNamespace, key, newData); err != nil {
+		return fmt.Errorf("elasticache removeFromIndex %s state.Put: %w", key, err)
+	}
+	return nil
 }
 
 // --- ARN and endpoint helpers ---

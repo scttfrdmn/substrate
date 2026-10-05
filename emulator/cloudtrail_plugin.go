@@ -131,7 +131,9 @@ func (p *CloudTrailPlugin) createTrail(reqCtx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, cloudtrailNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("cloudtrail createTrail put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cloudtrailNamespace, cloudtrailTrailNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	if err := updateStringIndex(goCtx, p.state, cloudtrailNamespace, cloudtrailTrailNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
+		return nil, fmt.Errorf("cloudtrail createTrail index: %w", err)
+	}
 
 	return cloudtrailJSONResponse(http.StatusOK, cloudtrailTrailWriteToWire(trail))
 }
@@ -255,7 +257,9 @@ func (p *CloudTrailPlugin) deleteTrail(reqCtx *RequestContext, req *AWSRequest) 
 	if err := p.state.Delete(goCtx, cloudtrailNamespace, key); err != nil {
 		return nil, fmt.Errorf("cloudtrail deleteTrail delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, cloudtrailNamespace, cloudtrailTrailNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	if err := removeFromStringIndex(goCtx, p.state, cloudtrailNamespace, cloudtrailTrailNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
+		return nil, fmt.Errorf("cloudtrail deleteTrail index: %w", err)
+	}
 
 	return cloudtrailJSONResponse(http.StatusOK, map[string]interface{}{})
 }

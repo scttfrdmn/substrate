@@ -185,7 +185,9 @@ func (p *CloudFrontPlugin) createOriginAccessControl(ctx *RequestContext, req *A
 		return nil, err
 	}
 	goCtx := context.Background()
-	updateStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID), oac.ID)
+	if err := updateStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID), oac.ID); err != nil {
+		return nil, fmt.Errorf("cloudfront createOriginAccessControl index: %w", err)
+	}
 
 	resp, err := cfOACResponse(http.StatusCreated, oac)
 	if err != nil {
@@ -302,7 +304,9 @@ func (p *CloudFrontPlugin) deleteOriginAccessControl(ctx *RequestContext, req *A
 	if err := p.state.Delete(goCtx, cloudfrontNamespace, cfOACKey(ctx.AccountID, oacID)); err != nil {
 		return nil, fmt.Errorf("cloudfront deleteOriginAccessControl state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID), oacID)
+	if err := removeFromStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID), oacID); err != nil {
+		return nil, fmt.Errorf("cloudfront deleteOriginAccessControl index: %w", err)
+	}
 
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }

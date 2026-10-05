@@ -234,7 +234,9 @@ func (p *RedshiftPlugin) removeCluster(c *RedshiftCluster) error {
 	if err := p.state.Delete(ctx, redshiftNamespace, redshiftClusterKey(c.AccountID, c.Region, c.ClusterIdentifier)); err != nil {
 		return fmt.Errorf("redshift remove cluster: %w", err)
 	}
-	removeFromStringIndex(ctx, p.state, redshiftNamespace, redshiftClusterIDsKey(c.AccountID, c.Region), c.ClusterIdentifier)
+	if err := removeFromStringIndex(ctx, p.state, redshiftNamespace, redshiftClusterIDsKey(c.AccountID, c.Region), c.ClusterIdentifier); err != nil {
+		return fmt.Errorf("redshift removeCluster index: %w", err)
+	}
 	if err := redshiftClusterProgressions.reset(ctx, p.state, c.ClusterIdentifier); err != nil {
 		return fmt.Errorf("redshift remove cluster: %w", err)
 	}

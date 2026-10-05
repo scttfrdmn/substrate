@@ -180,15 +180,19 @@ jobs:
       - name: Check no bookkeeping field has gained wire-visible ground
         run: make wire-bookkeeping-check
 
-      # The two discarded-error gates are lexical too, which is why they share this job.
-      # errcheck treats `x, _ :=` as handled, so neither rule can be stated to a linter.
-      # The unmarshal gate (#1007) predates this step and was run only through `make`;
-      # the marshal gate (#1365) is new.
+      # The three discarded-error gates are lexical too, which is why they share this job.
+      # errcheck treats `x, _ :=` and `_ =` as handled, so none of the rules can be stated
+      # to a linter. The unmarshal gate (#1007) predates this step and was run only
+      # through `make`; the marshal gate (#1365) and the state-write gate (#1175, #1192)
+      # followed it.
       - name: Check no request body is decoded with its error discarded
         run: make discarded-unmarshal-check
 
       - name: Check no value is encoded with its error discarded
         run: make discarded-marshal-check
+
+      - name: Check no state write has its error discarded
+        run: make discarded-state-check
 
   python:
     name: Python (pytest-substrate)

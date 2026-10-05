@@ -103,7 +103,9 @@ func (p *FirehosePlugin) createDeliveryStream(reqCtx *RequestContext, req *AWSRe
 	if err := p.state.Put(goCtx, firehoseNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("firehose createDeliveryStream put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, firehoseNamespace, "stream_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.DeliveryStreamName)
+	if err := updateStringIndex(goCtx, p.state, firehoseNamespace, "stream_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.DeliveryStreamName); err != nil {
+		return nil, fmt.Errorf("firehose createDeliveryStream index: %w", err)
+	}
 
 	return firehoseJSONResponse(http.StatusOK, map[string]string{
 		"DeliveryStreamARN": arn,
@@ -250,7 +252,9 @@ func (p *FirehosePlugin) deleteDeliveryStream(reqCtx *RequestContext, req *AWSRe
 	if err := p.state.Delete(goCtx, firehoseNamespace, key); err != nil {
 		return nil, fmt.Errorf("firehose deleteDeliveryStream delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, firehoseNamespace, "stream_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.DeliveryStreamName)
+	if err := removeFromStringIndex(goCtx, p.state, firehoseNamespace, "stream_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.DeliveryStreamName); err != nil {
+		return nil, fmt.Errorf("firehose deleteDeliveryStream index: %w", err)
+	}
 
 	return firehoseJSONResponse(http.StatusOK, map[string]interface{}{})
 }

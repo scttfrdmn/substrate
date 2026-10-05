@@ -130,7 +130,9 @@ func (p *TimestreamPlugin) createDatabase(reqCtx *RequestContext, req *AWSReques
 	if err := p.state.Put(goCtx, timestreamNamespace, timestreamDBKey(acct, region, input.DatabaseName), data); err != nil {
 		return nil, fmt.Errorf("put timestream database: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region), input.DatabaseName)
+	if err := updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region), input.DatabaseName); err != nil {
+		return nil, fmt.Errorf("timestream createDatabase index: %w", err)
+	}
 	return timestreamJSONResponse(http.StatusOK, map[string]any{"Database": timestreamDatabaseToWire(db)})
 }
 
@@ -163,7 +165,9 @@ func (p *TimestreamPlugin) deleteDatabase(reqCtx *RequestContext, req *AWSReques
 	if err := p.state.Delete(goCtx, timestreamNamespace, timestreamDBKey(acct, region, input.DatabaseName)); err != nil {
 		return nil, fmt.Errorf("delete timestream database: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region), input.DatabaseName)
+	if err := removeFromStringIndex(goCtx, p.state, timestreamNamespace, timestreamDBNamesKey(acct, region), input.DatabaseName); err != nil {
+		return nil, fmt.Errorf("timestream deleteDatabase index: %w", err)
+	}
 	return timestreamJSONResponse(http.StatusOK, map[string]any{})
 }
 
@@ -259,7 +263,9 @@ func (p *TimestreamPlugin) createTable(reqCtx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, timestreamNamespace, timestreamTableKey(acct, region, input.DatabaseName, input.TableName), data); err != nil {
 		return nil, fmt.Errorf("put timestream table: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName), input.TableName)
+	if err := updateStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, input.DatabaseName), input.TableName); err != nil {
+		return nil, fmt.Errorf("timestream createTable index: %w", err)
+	}
 	return timestreamJSONResponse(http.StatusOK, map[string]any{"Table": timestreamTableToWire(tbl)})
 }
 

@@ -728,8 +728,10 @@ func (p *EC2Plugin) ec2DeleteInstanceVolumes(accountID, region, instanceID strin
 			if err := p.state.Delete(ctx, ec2Namespace, key); err != nil {
 				return fmt.Errorf("ec2 terminateInstances volume delete: %w", err)
 			}
-			removeFromStringIndex(ctx, p.state, ec2Namespace,
-				"volume_ids:"+accountID+"/"+region, vol.VolumeID)
+			if err := removeFromStringIndex(ctx, p.state, ec2Namespace,
+				"volume_ids:"+accountID+"/"+region, vol.VolumeID); err != nil {
+				return fmt.Errorf("ec2 ec2DeleteInstanceVolumes index: %w", err)
+			}
 			continue
 		}
 		vol.State = "available"

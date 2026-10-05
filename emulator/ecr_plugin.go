@@ -205,7 +205,9 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName)
+	if err := updateStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName); err != nil {
+		return nil, fmt.Errorf("ecr createRepository index: %w", err)
+	}
 
 	type response struct {
 		Repository ecrRepositoryOut `json:"repository"`
@@ -365,7 +367,9 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
-	removeFromStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName)
+	if err := removeFromStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName); err != nil {
+		return nil, fmt.Errorf("ecr deleteRepository index: %w", err)
+	}
 
 	type response struct {
 		Repository ecrRepositoryOut `json:"repository"`
@@ -441,7 +445,9 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 			return nil, ecrImageAlreadyExists(body.RepositoryName, digest, body.ImageTag)
 		}
 		tagsMap[body.ImageTag] = digest
-		p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
+		if err := p.saveImageTagsMap(goCtx, tagsKey, tagsMap); err != nil {
+			return nil, fmt.Errorf("ecr putImage saveImageTagsMap: %w", err)
+		}
 		return ecrPutImageResponse(body.RepositoryName, digest, body.ImageTag, body.ImageManifest)
 	}
 
@@ -467,7 +473,9 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	// one, which is what a push to a mutable repository does.
 	if body.ImageTag != "" {
 		tagsMap[body.ImageTag] = digest
-		p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
+		if err := p.saveImageTagsMap(goCtx, tagsKey, tagsMap); err != nil {
+			return nil, fmt.Errorf("ecr putImage saveImageTagsMap: %w", err)
+		}
 	}
 
 	return ecrPutImageResponse(body.RepositoryName, digest, body.ImageTag, body.ImageManifest)
@@ -839,7 +847,9 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 			deleted = append(deleted, imageID{ImageDigest: digest, ImageTag: t})
 		}
 	}
-	p.saveImageTagsMap(goCtx, tagsKey, tagsMap)
+	if err := p.saveImageTagsMap(goCtx, tagsKey, tagsMap); err != nil {
+		return nil, fmt.Errorf("ecr batchDeleteImage saveImageTagsMap: %w", err)
+	}
 
 	type response struct {
 		ImageIDs []imageID `json:"imageIds"`
@@ -1313,9 +1323,15 @@ func (p *ECRPlugin) loadImageTagsMap(goCtx context.Context, tagsKey string) map[
 }
 
 // saveImageTagsMap persists the tag→digest map for a repository.
-func (p *ECRPlugin) saveImageTagsMap(goCtx context.Context, tagsKey string, m map[string]string) {
-	b, _ := json.Marshal(m)
-	_ = p.state.Put(goCtx, ecrNamespace, tagsKey, b)
+func (p *ECRPlugin) saveImageTagsMap(goCtx context.Context, tagsKey string, m map[string]string) error {
+	b, err := json.Marshal(m)
+	if err != nil {
+		return fmt.Errorf("ecr saveImageTagsMap %s marshal: %w", tagsKey, err)
+	}
+	if err := p.state.Put(goCtx, ecrNamespace, tagsKey, b); err != nil {
+		return fmt.Errorf("ecr saveImageTagsMap %s state.Put: %w", tagsKey, err)
+	}
+	return nil
 }
 
 // ecrManifestDigest is an image's digest: "sha256:" and the hex SHA-256 of its manifest bytes,

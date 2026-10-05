@@ -168,7 +168,9 @@ func (p *FSxPlugin) finishDelete(ctx *RequestContext, id string) error {
 	if err := p.state.Delete(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, id)); err != nil {
 		return fmt.Errorf("fsx delete %s: %w", id, err)
 	}
-	removeFromStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), id)
+	if err := removeFromStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), id); err != nil {
+		return fmt.Errorf("fsx finishDelete index: %w", err)
+	}
 	return nil
 }
 

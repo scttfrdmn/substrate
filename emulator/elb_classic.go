@@ -658,7 +658,9 @@ func (p *ELBPlugin) deleteClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 		if err := p.state.Delete(goCtx, elbNamespace, key); err != nil {
 			return nil, fmt.Errorf("elb deleteClassicLoadBalancer delete: %w", err)
 		}
-		p.removeFromList(scope, elbClassicLBNamesList, name)
+		if err := p.removeFromList(scope, elbClassicLBNamesList, name); err != nil {
+			return nil, fmt.Errorf("elb deleteClassicLoadBalancer removeFromList: %w", err)
+		}
 	}
 	return elbClassicEmptyOKResponse(reqCtx, "DeleteLoadBalancer")
 }

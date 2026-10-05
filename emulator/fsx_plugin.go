@@ -235,7 +235,9 @@ func (p *FSxPlugin) createFileSystem(ctx *RequestContext, req *AWSRequest) (*AWS
 	if err := p.state.Put(goCtx, fsxNamespace, fsxKey(ctx.AccountID, ctx.Region, fsID), data); err != nil {
 		return nil, fmt.Errorf("fsx createFileSystem put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), fsID)
+	if err := updateStringIndex(goCtx, p.state, fsxNamespace, fsxIDsKey(ctx.AccountID, ctx.Region), fsID); err != nil {
+		return nil, fmt.Errorf("fsx createFileSystem index: %w", err)
+	}
 	if input.ClientRequestToken != "" {
 		if err := p.fsxRecordToken(ctx, "CreateFileSystem", input.ClientRequestToken, fsxTokenRecord{FileSystemID: fsID, Fingerprint: fingerprint}); err != nil {
 			return nil, err

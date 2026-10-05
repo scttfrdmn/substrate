@@ -720,7 +720,9 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if oldItem == nil {
 		eventName = "INSERT"
 	}
-	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, eventName, oldItem, input.Item)
+	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, eventName, oldItem, input.Item); err != nil {
+		return nil, fmt.Errorf("dynamodb putItem appendStreamRecord: %w", err)
+	}
 
 	result := map[string]interface{}{}
 	if input.ReturnValues == "ALL_OLD" && oldItem != nil {
@@ -830,7 +832,9 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 			return nil, fmt.Errorf("dynamodb deleteItem saveItemKeys: %w", err)
 		}
 		// Append stream record.
-		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, "REMOVE", oldItem, nil)
+		if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, "REMOVE", oldItem, nil); err != nil {
+			return nil, fmt.Errorf("dynamodb deleteItem appendStreamRecord: %w", err)
+		}
 	}
 
 	result := map[string]interface{}{}
@@ -922,7 +926,9 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if isNew {
 		updateEventName = "INSERT"
 	}
-	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, updateEventName, oldItem, item)
+	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, updateEventName, oldItem, item); err != nil {
+		return nil, fmt.Errorf("dynamodb updateItem appendStreamRecord: %w", err)
+	}
 
 	result := map[string]interface{}{}
 	switch input.ReturnValues {
@@ -1268,7 +1274,9 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 			if old == nil {
 				eventName = "INSERT"
 			}
-			p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, eventName, old, put.Item)
+			if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, eventName, old, put.Item); err != nil {
+				return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
+			}
 
 		case ti.Update != nil:
 			upd := ti.Update
@@ -1305,7 +1313,9 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName)
 				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, append(keys, ik))
 			}
-			p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, "MODIFY", old, item)
+			if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, "MODIFY", old, item); err != nil {
+				return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
+			}
 
 		case ti.Delete != nil:
 			del := ti.Delete
@@ -1334,7 +1344,9 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 					}
 				}
 				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, newKeys)
-				p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, "REMOVE", old, nil)
+				if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, "REMOVE", old, nil); err != nil {
+					return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
+				}
 			}
 		}
 	}
@@ -1724,16 +1736,20 @@ func (p *DynamoDBPlugin) streamRecordsKey(accountID, region, tableName string) s
 }
 
 // appendStreamRecord adds a CDC record to a table's stream ring buffer if
-// streams are enabled for that table. Errors are logged and suppressed so
-// that main item operations never fail due to stream problems.
+// streams are enabled for that table. A table without a stream is a no-op. A failed write of
+// the record is returned: the item has already been written, so the caller reports the
+// operation failed rather than leaving a stream that silently misses a change (#1192).
 func (p *DynamoDBPlugin) appendStreamRecord(
 	ctx context.Context,
 	accountID, region, tableName, eventName string,
 	oldImage, newImage map[string]*AttributeValue,
-) {
+) error {
 	tbl, err := p.loadTable(ctx, accountID, region, tableName)
-	if err != nil || tbl == nil || tbl.LatestStreamARN == "" {
-		return // streams not enabled
+	if err != nil {
+		return fmt.Errorf("dynamodb appendStreamRecord %s: %w", tableName, err)
+	}
+	if tbl == nil || tbl.LatestStreamARN == "" {
+		return nil // streams not enabled
 	}
 
 	rk := p.streamRecordsKey(accountID, region, tableName)
@@ -1762,9 +1778,14 @@ func (p *DynamoDBPlugin) appendStreamRecord(
 		records = records[len(records)-dynamodbMaxStreamRecords:]
 	}
 
-	if b, marshalErr := json.Marshal(records); marshalErr == nil {
-		_ = p.state.Put(ctx, dynamodbNamespace, rk, b)
+	b, err := json.Marshal(records)
+	if err != nil {
+		return fmt.Errorf("dynamodb appendStreamRecord %s marshal: %w", tableName, err)
 	}
+	if err := p.state.Put(ctx, dynamodbNamespace, rk, b); err != nil {
+		return fmt.Errorf("dynamodb appendStreamRecord %s state.Put: %w", tableName, err)
+	}
+	return nil
 }
 
 func (p *DynamoDBPlugin) listStreams(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -3551,7 +3572,9 @@ func (p *DynamoDBPlugin) partiQLInsert(
 	keys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	keys = append(keys, ik)
 	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, keys)
-	p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "INSERT", nil, item)
+	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "INSERT", nil, item); err != nil {
+		return nil, fmt.Errorf("dynamodb partiQLInsert appendStreamRecord: %w", err)
+	}
 	return nil, nil
 }
 
@@ -3592,7 +3615,9 @@ func (p *DynamoDBPlugin) partiQLUpdate(
 		if saveErr := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k, item); saveErr != nil {
 			return nil, fmt.Errorf("partiQL update saveItem: %w", saveErr)
 		}
-		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "MODIFY", oldItem, item)
+		if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "MODIFY", oldItem, item); err != nil {
+			return nil, fmt.Errorf("dynamodb partiQLUpdate appendStreamRecord: %w", err)
+		}
 	}
 	return nil, nil
 }
@@ -3623,7 +3648,9 @@ func (p *DynamoDBPlugin) partiQLDelete(
 			}
 		}
 		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
-		p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "REMOVE", item, nil)
+		if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "REMOVE", item, nil); err != nil {
+			return nil, fmt.Errorf("dynamodb partiQLDelete appendStreamRecord: %w", err)
+		}
 	}
 	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, remaining)
 	return nil, nil

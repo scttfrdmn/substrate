@@ -337,7 +337,9 @@ func (p *BatchPlugin) putBatchRecord(ctx *RequestContext, resource, name string,
 	if err := p.state.Put(goCtx, batchNamespace, batchRecordKey(ctx, resource, name), data); err != nil {
 		return fmt.Errorf("batch %s put: %w", resource, err)
 	}
-	updateStringIndex(goCtx, p.state, batchNamespace, batchIndexKey(ctx, resource), name)
+	if err := updateStringIndex(goCtx, p.state, batchNamespace, batchIndexKey(ctx, resource), name); err != nil {
+		return fmt.Errorf("batch putBatchRecord index: %w", err)
+	}
 	return nil
 }
 
@@ -610,7 +612,9 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return nil, fmt.Errorf("submitJob: put: %w", err)
 	}
 	idsKey := "job_ids:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, batchNamespace, idsKey, jobID)
+	if err := updateStringIndex(goCtx, p.state, batchNamespace, idsKey, jobID); err != nil {
+		return nil, fmt.Errorf("batch submitJob index: %w", err)
+	}
 
 	jobArn := fmt.Sprintf("arn:aws:batch:%s:%s:job/%s", ctx.Region, ctx.AccountID, jobID)
 	return batchJSONResponse(http.StatusOK, map[string]string{

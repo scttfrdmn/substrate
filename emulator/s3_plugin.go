@@ -1062,7 +1062,9 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		// Prepend version ID to the version list.
 		vids := p.loadVersionIDs(ctx, bucket, key)
 		vids = append([]string{versionID}, vids...)
-		p.saveVersionIDs(ctx, bucket, key, vids)
+		if err := p.saveVersionIDs(ctx, bucket, key, vids); err != nil {
+			return nil, fmt.Errorf("s3 putObject saveVersionIDs: %w", err)
+		}
 		respHeaders["x-amz-version-id"] = versionID
 	}
 
@@ -1300,7 +1302,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 				filtered = append(filtered, vid)
 			}
 		}
-		p.saveVersionIDs(ctx, bucket, key, filtered)
+		if err := p.saveVersionIDs(ctx, bucket, key, filtered); err != nil {
+			return nil, fmt.Errorf("s3 deleteObject saveVersionIDs: %w", err)
+		}
 		if err := p.promoteCurrentVersion(ctx, bucket, key, filtered); err != nil {
 			return nil, err
 		}
@@ -1334,7 +1338,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 		}
 		vids := p.loadVersionIDs(ctx, bucket, key)
 		vids = append([]string{markerVersionID}, vids...)
-		p.saveVersionIDs(ctx, bucket, key, vids)
+		if err := p.saveVersionIDs(ctx, bucket, key, vids); err != nil {
+			return nil, fmt.Errorf("s3 deleteObject saveVersionIDs: %w", err)
+		}
 		p.fireNotifications(reqCtx, bucket, key, "s3:ObjectRemoved:DeleteMarkerCreated", 0, "")
 		return &AWSResponse{
 			StatusCode: http.StatusNoContent,
@@ -4232,12 +4238,15 @@ func (p *S3Plugin) loadVersionIDs(ctx context.Context, bucket, key string) []str
 }
 
 // saveVersionIDs persists the version ID list for bucket/key.
-func (p *S3Plugin) saveVersionIDs(ctx context.Context, bucket, key string, ids []string) {
+func (p *S3Plugin) saveVersionIDs(ctx context.Context, bucket, key string, ids []string) error {
 	data, err := json.Marshal(ids)
 	if err != nil {
-		return
+		return fmt.Errorf("s3 saveVersionIDs %s/%s marshal: %w", bucket, key, err)
 	}
-	_ = p.state.Put(ctx, s3Namespace, "object_versions:"+bucket+"/"+key, data)
+	if err := p.state.Put(ctx, s3Namespace, "object_versions:"+bucket+"/"+key, data); err != nil {
+		return fmt.Errorf("s3 saveVersionIDs %s/%s state.Put: %w", bucket, key, err)
+	}
+	return nil
 }
 
 // --- Versioning operations ---------------------------------------------------

@@ -277,7 +277,9 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 	if err := p.state.Delete(context.Background(), route53Namespace, "hostedzone:"+id); err != nil {
 		return nil, fmt.Errorf("route53 deleteHostedZone delete: %w", err)
 	}
-	p.removeFromList(reqCtx.AccountID, "hostedzone_ids", id)
+	if err := p.removeFromList(reqCtx.AccountID, "hostedzone_ids", id); err != nil {
+		return nil, fmt.Errorf("route53 deleteHostedZone removeFromList: %w", err)
+	}
 
 	changeInfo := Route53ChangeInfo{
 		ID:          generateChangeID(reqCtx.IDs),
@@ -375,7 +377,9 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 			if err := p.state.Delete(context.Background(), route53Namespace, fullKey); err != nil {
 				return nil, fmt.Errorf("route53 changeRRSet delete: %w", err)
 			}
-			p.removeFromList(id, "rrset_keys", key)
+			if err := p.removeFromList(id, "rrset_keys", key); err != nil {
+				return nil, fmt.Errorf("route53 changeResourceRecordSets removeFromList: %w", err)
+			}
 		}
 	}
 
@@ -496,15 +500,18 @@ func (p *Route53Plugin) appendToList(scope, listName, id string) error {
 	return p.state.Put(context.Background(), route53Namespace, key, newData)
 }
 
-func (p *Route53Plugin) removeFromList(scope, listName, id string) {
+func (p *Route53Plugin) removeFromList(scope, listName, id string) error {
 	key := listName + ":" + scope
 	data, err := p.state.Get(context.Background(), route53Namespace, key)
-	if err != nil || data == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("route53 removeFromList %s state.Get: %w", key, err)
+	}
+	if data == nil {
+		return nil
 	}
 	var ids []string
-	if json.Unmarshal(data, &ids) != nil {
-		return
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return fmt.Errorf("route53 removeFromList %s unmarshal: %w", key, err)
 	}
 	filtered := ids[:0]
 	for _, v := range ids {
@@ -512,8 +519,14 @@ func (p *Route53Plugin) removeFromList(scope, listName, id string) {
 			filtered = append(filtered, v)
 		}
 	}
-	newData, _ := json.Marshal(filtered)
-	_ = p.state.Put(context.Background(), route53Namespace, key, newData)
+	newData, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("route53 removeFromList %s marshal: %w", key, err)
+	}
+	if err := p.state.Put(context.Background(), route53Namespace, key, newData); err != nil {
+		return fmt.Errorf("route53 removeFromList %s state.Put: %w", key, err)
+	}
+	return nil
 }
 
 func (p *Route53Plugin) loadList(scope, listName string) ([]string, error) {

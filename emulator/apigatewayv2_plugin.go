@@ -325,7 +325,9 @@ func (p *APIGatewayV2Plugin) createAPI(ctx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2APIKey(ctx.AccountID, ctx.Region, apiID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createApi state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createAPI index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2APIWire(api))
 }
@@ -384,7 +386,9 @@ func (p *APIGatewayV2Plugin) deleteAPI(ctx *RequestContext, apiID string) (*AWSR
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2APITaggedKey(apigwv2APIKey(ctx.AccountID, ctx.Region, apiID))); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteApi tag history state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteAPI index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -460,7 +464,9 @@ func (p *APIGatewayV2Plugin) createRoute(ctx *RequestContext, req *AWSRequest, a
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2RouteKey(ctx.AccountID, ctx.Region, apiID, route.RouteID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createRoute state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID), route.RouteID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID), route.RouteID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createRoute index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2RouteWire(route))
 }
@@ -508,7 +514,9 @@ func (p *APIGatewayV2Plugin) deleteRoute(ctx *RequestContext, apiID, routeID str
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2RouteKey(ctx.AccountID, ctx.Region, apiID, routeID)); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteRoute state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID), routeID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID), routeID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteRoute index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -544,7 +552,9 @@ func (p *APIGatewayV2Plugin) createIntegration(ctx *RequestContext, req *AWSRequ
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2IntegrationKey(ctx.AccountID, ctx.Region, apiID, integ.IntegrationID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createIntegration state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID), integ.IntegrationID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID), integ.IntegrationID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createIntegration index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2IntegrationWire(integ))
 }
@@ -592,7 +602,9 @@ func (p *APIGatewayV2Plugin) deleteIntegration(ctx *RequestContext, apiID, intID
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2IntegrationKey(ctx.AccountID, ctx.Region, apiID, intID)); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteIntegration state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID), intID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID), intID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteIntegration index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -633,7 +645,9 @@ func (p *APIGatewayV2Plugin) createStageV2(ctx *RequestContext, req *AWSRequest,
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, stage.StageName), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createStage state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createStageV2 index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2StageWire(stage))
 }
@@ -681,7 +695,9 @@ func (p *APIGatewayV2Plugin) deleteStageV2(ctx *RequestContext, apiID, stageName
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, stageName)); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteStage state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID), stageName)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID), stageName); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteStageV2 index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -719,7 +735,9 @@ func (p *APIGatewayV2Plugin) createAuthorizerV2(ctx *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2AuthorizerKey(ctx.AccountID, ctx.Region, apiID, auth.AuthorizerID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createAuthorizer state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.AuthorizerID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.AuthorizerID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createAuthorizerV2 index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2AuthorizerWire(auth))
 }
@@ -767,7 +785,9 @@ func (p *APIGatewayV2Plugin) deleteAuthorizerV2(ctx *RequestContext, apiID, auth
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2AuthorizerKey(ctx.AccountID, ctx.Region, apiID, authID)); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteAuthorizer state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), authID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), authID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteAuthorizerV2 index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -801,7 +821,9 @@ func (p *APIGatewayV2Plugin) createDeploymentV2(ctx *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2DeploymentKey(ctx.AccountID, ctx.Region, apiID, dep.DeploymentID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createDeployment state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2DeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.DeploymentID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2DeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.DeploymentID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createDeploymentV2 index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, v2DeploymentWire(dep))
 }

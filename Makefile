@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions authz-reference authz-reference-check authz-reference-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -81,6 +81,9 @@ discarded-unmarshal-check: ## Fail if a plugin decodes a request body and discar
 
 discarded-marshal-check: ## Fail if non-test code encodes a value and discards the error
 	./scripts/check-discarded-marshal.sh
+
+discarded-state-check: ## Fail if non-test code writes to state and discards the error
+	./scripts/check-discarded-state.sh
 
 wire-bookkeeping-check: ## Fail if substrate's own bookkeeping fields gain new wire-visible ground
 	./scripts/check-wire-bookkeeping.sh

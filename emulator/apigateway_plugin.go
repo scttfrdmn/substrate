@@ -422,7 +422,9 @@ func (p *APIGatewayPlugin) createRestAPI(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwAPIKey(ctx.AccountID, ctx.Region, apiID), apiData); err != nil {
 		return nil, fmt.Errorf("apigateway createRestApi state.Put api: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIIDsKey(ctx.AccountID, ctx.Region), apiID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIIDsKey(ctx.AccountID, ctx.Region), apiID); err != nil {
+		return nil, fmt.Errorf("apigateway createRestAPI index: %w", err)
+	}
 
 	resData, err := json.Marshal(rootRes)
 	if err != nil {
@@ -431,7 +433,9 @@ func (p *APIGatewayPlugin) createRestAPI(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwResourceKey(ctx.AccountID, ctx.Region, apiID, rootResID), resData); err != nil {
 		return nil, fmt.Errorf("apigateway createRestApi state.Put root resource: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), rootResID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), rootResID); err != nil {
+		return nil, fmt.Errorf("apigateway createRestAPI index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, restAPIWire(api))
 }
@@ -508,7 +512,9 @@ func (p *APIGatewayPlugin) deleteRestAPI(ctx *RequestContext, apiID string) (*AW
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwAPIKey(ctx.AccountID, ctx.Region, apiID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteRestApi state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIIDsKey(ctx.AccountID, ctx.Region), apiID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIIDsKey(ctx.AccountID, ctx.Region), apiID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteRestAPI index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusAccepted, struct{}{})
 }
 
@@ -584,7 +590,9 @@ func (p *APIGatewayPlugin) createResource(ctx *RequestContext, req *AWSRequest, 
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwResourceKey(ctx.AccountID, ctx.Region, apiID, resID), resData); err != nil {
 		return nil, fmt.Errorf("apigateway createResource state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), resID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), resID); err != nil {
+		return nil, fmt.Errorf("apigateway createResource index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, resourceWire(res))
 }
@@ -663,7 +671,9 @@ func (p *APIGatewayPlugin) deleteResource(ctx *RequestContext, apiID, resID stri
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwResourceKey(ctx.AccountID, ctx.Region, apiID, resID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteResource state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), resID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwResourceIDsKey(ctx.AccountID, ctx.Region, apiID), resID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteResource index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -852,7 +862,9 @@ func (p *APIGatewayPlugin) createDeployment(ctx *RequestContext, req *AWSRequest
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwDeploymentKey(ctx.AccountID, ctx.Region, apiID, dep.ID), data); err != nil {
 		return nil, fmt.Errorf("apigateway createDeployment state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.ID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), dep.ID); err != nil {
+		return nil, fmt.Errorf("apigateway createDeployment index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, deploymentWire(dep))
 }
@@ -916,7 +928,9 @@ func (p *APIGatewayPlugin) deleteDeployment(ctx *RequestContext, apiID, deployID
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwDeploymentKey(ctx.AccountID, ctx.Region, apiID, deployID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteDeployment state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), deployID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwDeploymentIDsKey(ctx.AccountID, ctx.Region, apiID), deployID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteDeployment index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -957,7 +971,9 @@ func (p *APIGatewayPlugin) createStage(ctx *RequestContext, req *AWSRequest, api
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwStageKey(ctx.AccountID, ctx.Region, apiID, stage.StageName), data); err != nil {
 		return nil, fmt.Errorf("apigateway createStage state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwStageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwStageNamesKey(ctx.AccountID, ctx.Region, apiID), stage.StageName); err != nil {
+		return nil, fmt.Errorf("apigateway createStage index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, stageWire(stage, apigwInvokeURL(apiID, ctx.Region, stage.StageName)))
 }
@@ -1018,7 +1034,9 @@ func (p *APIGatewayPlugin) deleteStage(ctx *RequestContext, apiID, stageName str
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwStageKey(ctx.AccountID, ctx.Region, apiID, stageName)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteStage state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwStageNamesKey(ctx.AccountID, ctx.Region, apiID), stageName)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwStageNamesKey(ctx.AccountID, ctx.Region, apiID), stageName); err != nil {
+		return nil, fmt.Errorf("apigateway deleteStage index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -1079,7 +1097,9 @@ func (p *APIGatewayPlugin) createAuthorizer(ctx *RequestContext, req *AWSRequest
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwAuthorizerKey(ctx.AccountID, ctx.Region, apiID, auth.ID), data); err != nil {
 		return nil, fmt.Errorf("apigateway createAuthorizer state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.ID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), auth.ID); err != nil {
+		return nil, fmt.Errorf("apigateway createAuthorizer index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, authorizerWire(auth))
 }
@@ -1144,7 +1164,9 @@ func (p *APIGatewayPlugin) deleteAuthorizer(ctx *RequestContext, apiID, authID s
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwAuthorizerKey(ctx.AccountID, ctx.Region, apiID, authID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteAuthorizer state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), authID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID), authID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteAuthorizer index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -1184,7 +1206,9 @@ func (p *APIGatewayPlugin) createAPIKey(ctx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwAPIKeyKey(ctx.AccountID, ctx.Region, key.ID), data); err != nil {
 		return nil, fmt.Errorf("apigateway createApiKey state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region), key.ID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region), key.ID); err != nil {
+		return nil, fmt.Errorf("apigateway createAPIKey index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, apiKeyWire(key))
 }
@@ -1255,7 +1279,9 @@ func (p *APIGatewayPlugin) deleteAPIKey(ctx *RequestContext, keyID string) (*AWS
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwAPIKeyKey(ctx.AccountID, ctx.Region, keyID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteApiKey state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region), keyID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwAPIKeyIDsKey(ctx.AccountID, ctx.Region), keyID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteAPIKey index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 
@@ -1293,7 +1319,9 @@ func (p *APIGatewayPlugin) createUsagePlan(ctx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, apigatewayNamespace, apigwUsagePlanKey(ctx.AccountID, ctx.Region, plan.ID), data); err != nil {
 		return nil, fmt.Errorf("apigateway createUsagePlan state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region), plan.ID)
+	if err := updateStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region), plan.ID); err != nil {
+		return nil, fmt.Errorf("apigateway createUsagePlan index: %w", err)
+	}
 
 	return apigwJSONResponse(http.StatusCreated, usagePlanWire(plan))
 }
@@ -1356,7 +1384,9 @@ func (p *APIGatewayPlugin) deleteUsagePlan(ctx *RequestContext, planID string) (
 	if err := p.state.Delete(goCtx, apigatewayNamespace, apigwUsagePlanKey(ctx.AccountID, ctx.Region, planID)); err != nil {
 		return nil, fmt.Errorf("apigateway deleteUsagePlan state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region), planID)
+	if err := removeFromStringIndex(goCtx, p.state, apigatewayNamespace, apigwUsagePlanIDsKey(ctx.AccountID, ctx.Region), planID); err != nil {
+		return nil, fmt.Errorf("apigateway deleteUsagePlan index: %w", err)
+	}
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})
 }
 

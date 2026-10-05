@@ -206,7 +206,9 @@ func (p *ECSPlugin) createCluster(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Put(goCtx, ecsNamespace, stateKey, data); err != nil {
 		return nil, fmt.Errorf("ecs createCluster state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), body.ClusterName)
+	if err := updateStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), body.ClusterName); err != nil {
+		return nil, fmt.Errorf("ecs createCluster index: %w", err)
+	}
 
 	type response struct {
 		Cluster ecsClusterOut `json:"cluster"`
@@ -304,7 +306,9 @@ func (p *ECSPlugin) deleteCluster(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Delete(goCtx, ecsNamespace, stateKey); err != nil {
 		return nil, fmt.Errorf("ecs deleteCluster state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), name)
+	if err := removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsClusterNamesKey(ctx.AccountID, ctx.Region), name); err != nil {
+		return nil, fmt.Errorf("ecs deleteCluster index: %w", err)
+	}
 
 	type response struct {
 		Cluster ecsClusterOut `json:"cluster"`
@@ -390,8 +394,12 @@ func (p *ECSPlugin) registerTaskDefinition(ctx *RequestContext, req *AWSRequest)
 	}
 
 	// Update indexes.
-	updateStringIndex(goCtx, p.state, ecsNamespace, revKey, strconv.Itoa(revision))
-	updateStringIndex(goCtx, p.state, ecsNamespace, ecsTaskDefFamiliesKey(ctx.AccountID, ctx.Region), body.Family)
+	if err := updateStringIndex(goCtx, p.state, ecsNamespace, revKey, strconv.Itoa(revision)); err != nil {
+		return nil, fmt.Errorf("ecs registerTaskDefinition index: %w", err)
+	}
+	if err := updateStringIndex(goCtx, p.state, ecsNamespace, ecsTaskDefFamiliesKey(ctx.AccountID, ctx.Region), body.Family); err != nil {
+		return nil, fmt.Errorf("ecs registerTaskDefinition index: %w", err)
+	}
 
 	// tags is a top-level response element on RegisterTaskDefinition, not a member of
 	// TaskDefinition; see emulator/ecs_wire.go.
@@ -634,7 +642,9 @@ func (p *ECSPlugin) createService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Put(goCtx, ecsNamespace, svcKey, data); err != nil {
 		return nil, fmt.Errorf("ecs createService state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), body.ServiceName)
+	if err := updateStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), body.ServiceName); err != nil {
+		return nil, fmt.Errorf("ecs createService index: %w", err)
+	}
 
 	type response struct {
 		Service ecsServiceOut `json:"service"`
@@ -772,7 +782,9 @@ func (p *ECSPlugin) deleteService(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Delete(goCtx, ecsNamespace, svcKey); err != nil {
 		return nil, fmt.Errorf("ecs deleteService state.Delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), serviceName)
+	if err := removeFromStringIndex(goCtx, p.state, ecsNamespace, ecsServiceNamesKey(ctx.AccountID, ctx.Region, clusterName), serviceName); err != nil {
+		return nil, fmt.Errorf("ecs deleteService index: %w", err)
+	}
 
 	type response struct {
 		Service ecsServiceOut `json:"service"`
@@ -874,7 +886,9 @@ func (p *ECSPlugin) runTask(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 		if err := p.state.Put(goCtx, ecsNamespace, taskKey, data); err != nil {
 			return nil, fmt.Errorf("ecs runTask state.Put: %w", err)
 		}
-		updateStringIndex(goCtx, p.state, ecsNamespace, ecsTaskIDsKey(ctx.AccountID, ctx.Region, clusterName), taskID)
+		if err := updateStringIndex(goCtx, p.state, ecsNamespace, ecsTaskIDsKey(ctx.AccountID, ctx.Region, clusterName), taskID); err != nil {
+			return nil, fmt.Errorf("ecs runTask index: %w", err)
+		}
 
 		tasks = append(tasks, task)
 	}

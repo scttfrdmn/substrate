@@ -307,8 +307,10 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 			fn.CodeSize = int64(len(decoded))
 			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
-			_ = p.state.Put(context.Background(), lambdaNamespace,
-				lambdaZipStateKey(ctx.AccountID, ctx.Region, body.FunctionName), decoded)
+			if err := p.state.Put(context.Background(), lambdaNamespace,
+				lambdaZipStateKey(ctx.AccountID, ctx.Region, body.FunctionName), decoded); err != nil {
+				return nil, fmt.Errorf("lambda createFunction state.Put: %w", err)
+			}
 		}
 	} else if body.Code.S3Bucket != "" {
 		// The bytes are not staged for execution — that is what ZipStored records and
@@ -335,7 +337,9 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 	// Auto-create the /aws/lambda/{name} log group to match real AWS behavior.
 	// We write directly to state (no registry call) to avoid a circular dependency
 	// on the CloudWatchLogsPlugin. See issue #73.
-	p.autoCreateLambdaLogGroup(ctx, body.FunctionName)
+	if err := p.autoCreateLambdaLogGroup(ctx, body.FunctionName); err != nil {
+		return nil, fmt.Errorf("lambda createFunction autoCreateLambdaLogGroup: %w", err)
+	}
 
 	return lambdaJSONResponse(http.StatusCreated, buildFunctionConfig(fn))
 }
@@ -415,8 +419,10 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 			fn.CodeSize = int64(len(decoded))
 			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
-			_ = p.state.Put(context.Background(), lambdaNamespace,
-				lambdaZipStateKey(ctx.AccountID, ctx.Region, name), decoded)
+			if err := p.state.Put(context.Background(), lambdaNamespace,
+				lambdaZipStateKey(ctx.AccountID, ctx.Region, name), decoded); err != nil {
+				return nil, fmt.Errorf("lambda updateFunctionCode state.Put: %w", err)
+			}
 		}
 	case body.S3Bucket != "":
 		// The bytes are not staged for execution — that is what ZipStored records and
@@ -699,7 +705,9 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 	}
 
 	// Cache result for future "recorded" replays.
-	p.saveReplay(fn.FunctionArn, payload, result)
+	if err := p.saveReplay(fn.FunctionArn, payload, result); err != nil {
+		return nil, fmt.Errorf("lambda invoke saveReplay: %w", err)
+	}
 
 	return invokeResponse(result, funcErr, lambdaLogTail(req, fn, ctx.RequestID, funcErr != "")), nil
 }
@@ -1070,12 +1078,12 @@ func lambdaJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 // autoCreateLambdaLogGroup creates the /aws/lambda/{name} CloudWatch Logs log
 // group in state without going through the plugin registry, avoiding a circular
 // dependency on CloudWatchLogsPlugin. It is a no-op when the group already exists.
-func (p *LambdaPlugin) autoCreateLambdaLogGroup(ctx *RequestContext, name string) {
+func (p *LambdaPlugin) autoCreateLambdaLogGroup(ctx *RequestContext, name string) error {
 	goCtx := context.Background()
 	lgName := "/aws/lambda/" + name
 	lgKey := cwLogGroupKey(ctx.AccountID, ctx.Region, lgName)
 	if existing, _ := p.state.Get(goCtx, cloudwatchLogsNamespace, lgKey); existing != nil {
-		return
+		return nil
 	}
 	lg := CWLogGroup{
 		LogGroupName: lgName,
@@ -1084,13 +1092,16 @@ func (p *LambdaPlugin) autoCreateLambdaLogGroup(ctx *RequestContext, name string
 	}
 	b, err := json.Marshal(lg)
 	if err != nil {
-		return
+		return fmt.Errorf("lambda autoCreateLambdaLogGroup %s marshal: %w", lgName, err)
 	}
-	if putErr := p.state.Put(goCtx, cloudwatchLogsNamespace, lgKey, b); putErr != nil {
-		return
+	if err := p.state.Put(goCtx, cloudwatchLogsNamespace, lgKey, b); err != nil {
+		return fmt.Errorf("lambda autoCreateLambdaLogGroup %s state.Put: %w", lgName, err)
 	}
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, lgName)
+	if err := updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, lgName); err != nil {
+		return fmt.Errorf("lambda autoCreateLambdaLogGroup %s index: %w", lgName, err)
+	}
+	return nil
 }
 
 // lambdaCodeSha256 reports the CodeSha256 for a deployment package: "the SHA256 hash

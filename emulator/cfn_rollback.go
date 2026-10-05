@@ -384,7 +384,9 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 		result.Status = cfnStackCreateFailed
 		result.StatusReason = state.StatusReason
 		if d.state != nil {
-			d.persistStack(ctx, state)
+			if err := d.persistStack(ctx, state); err != nil {
+				return nil, err
+			}
 		}
 		d.logger.Warn("cfn: stack create failed and rollback is disabled",
 			"stack", fc.stackName, "failures", len(fc.failures))
@@ -397,7 +399,9 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 	state.Status = cfnStackRollbackInProgress
 	state.StatusReason = strings.Join(fc.failures, "; ")
 	if d.state != nil {
-		d.persistStack(ctx, state)
+		if err := d.persistStack(ctx, state); err != nil {
+			return nil, err
+		}
 	}
 
 	// Only the resources that were created are swept, and with cfnCreateRollbackOp:
@@ -417,7 +421,9 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 		result.Status = cfnStackRollbackFailed
 		result.StatusReason = state.StatusReason
 		if d.state != nil {
-			d.persistStack(ctx, state)
+			if err := d.persistStack(ctx, state); err != nil {
+				return nil, err
+			}
 		}
 		d.logger.Warn("cfn: stack rollback failed",
 			"stack", fc.stackName, "undeleted", len(failed))
@@ -448,7 +454,9 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 	result.Status = cfnStackRollbackComplete
 	result.StatusReason = state.StatusReason
 	if d.state != nil {
-		d.persistStack(ctx, state)
+		if err := d.persistStack(ctx, state); err != nil {
+			return nil, err
+		}
 	}
 	d.logger.Warn("cfn: stack create failed and was rolled back",
 		"stack", fc.stackName, "failures", len(fc.failures))
@@ -494,26 +502,29 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	}
 	result.Status = status
 	result.StatusReason = reason
-	d.setStackStatus(ctx, prev.StackName, status, reason)
+	if err := d.setStackStatus(ctx, prev.StackName, status, reason); err != nil {
+		return nil, err
+	}
 	return result, nil
 }
 
 // setStackStatus overwrites a persisted stack's status and reason, leaving the rest
-// of the record as the deploy wrote it.
-func (d *StackDeployer) setStackStatus(ctx context.Context, stackName, status, reason string) {
+// of the record as the deploy wrote it. A stack that cannot be read is logged and skipped, as
+// before #1192; a write that fails is returned.
+func (d *StackDeployer) setStackStatus(ctx context.Context, stackName, status, reason string) error {
 	if d.state == nil {
-		return
+		return nil
 	}
 	stack, err := d.loadStack(ctx, stackName)
 	if err != nil || stack == nil {
 		d.logger.Warn("cfn: cannot set stack status; stack not readable",
 			"stack", stackName, "status", status)
-		return
+		return nil //nolint:nilerr // an unreadable stack is logged and skipped, as it was before #1192.
 	}
 	stack.Status = status
 	stack.StatusReason = reason
 	stack.UpdatedAt = d.tc.Now()
-	d.persistStack(ctx, *stack)
+	return d.persistStack(ctx, *stack)
 }
 
 // removeStackRecord deletes a stack's record and its entry in the names index.

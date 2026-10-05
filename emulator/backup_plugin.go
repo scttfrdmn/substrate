@@ -140,7 +140,9 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 	if err := p.state.Put(goCtx, backupNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("backup createBackupVault put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region), name)
+	if err := updateStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region), name); err != nil {
+		return nil, fmt.Errorf("backup createBackupVault index: %w", err)
+	}
 
 	// The three members API_CreateBackupVault publishes, and not backupVaultOut's five:
 	// the create response is a narrower shape than the describe one.
@@ -171,7 +173,9 @@ func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*
 	if err := p.state.Delete(goCtx, backupNamespace, key); err != nil {
 		return nil, fmt.Errorf("backup deleteBackupVault delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region), name)
+	if err := removeFromStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region), name); err != nil {
+		return nil, fmt.Errorf("backup deleteBackupVault index: %w", err)
+	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -335,7 +339,9 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, backupNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("backup createBackupPlan put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region), planID)
+	if err := updateStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region), planID); err != nil {
+		return nil, fmt.Errorf("backup createBackupPlan index: %w", err)
+	}
 
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlanId":  planID,
@@ -438,7 +444,9 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 	if err := p.state.Delete(goCtx, backupNamespace, key); err != nil {
 		return nil, fmt.Errorf("backup deleteBackupPlan delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region), planID)
+	if err := removeFromStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region), planID); err != nil {
+		return nil, fmt.Errorf("backup deleteBackupPlan index: %w", err)
+	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"BackupPlanArn": plan.BackupPlanArn,
 		"BackupPlanId":  plan.BackupPlanID,
@@ -540,7 +548,9 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, backupNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("backup createBackupSelection put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, backupNamespace, backupSelectionIDsKey(reqCtx.AccountID, reqCtx.Region, planID), selectionID)
+	if err := updateStringIndex(goCtx, p.state, backupNamespace, backupSelectionIDsKey(reqCtx.AccountID, reqCtx.Region, planID), selectionID); err != nil {
+		return nil, fmt.Errorf("backup createBackupSelection index: %w", err)
+	}
 
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{
 		"SelectionId":  selectionID,
@@ -581,7 +591,9 @@ func (p *BackupPlugin) deleteBackupSelection(reqCtx *RequestContext, planID, sel
 	if err := p.state.Delete(goCtx, backupNamespace, key); err != nil {
 		return nil, fmt.Errorf("backup deleteBackupSelection delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, backupNamespace, backupSelectionIDsKey(reqCtx.AccountID, reqCtx.Region, planID), selectionID)
+	if err := removeFromStringIndex(goCtx, p.state, backupNamespace, backupSelectionIDsKey(reqCtx.AccountID, reqCtx.Region, planID), selectionID); err != nil {
+		return nil, fmt.Errorf("backup deleteBackupSelection index: %w", err)
+	}
 	return backupJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 

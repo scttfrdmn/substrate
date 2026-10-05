@@ -158,7 +158,9 @@ func (p *MSKPlugin) removeCluster(c *MSKCluster) error {
 	if err := p.state.Delete(context.Background(), mskNamespace, "cluster:"+scope+"/"+c.ClusterName); err != nil {
 		return fmt.Errorf("msk remove cluster: %w", err)
 	}
-	removeFromStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope, c.ClusterName)
+	if err := removeFromStringIndex(context.Background(), p.state, mskNamespace, "cluster_ids:"+scope, c.ClusterName); err != nil {
+		return fmt.Errorf("msk removeCluster index: %w", err)
+	}
 	if err := mskClusterProgressions.reset(context.Background(), p.state, c.ClusterARN); err != nil {
 		return fmt.Errorf("msk remove cluster: %w", err)
 	}

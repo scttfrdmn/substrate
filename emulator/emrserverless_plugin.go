@@ -412,7 +412,9 @@ func (p *EMRServerlessPlugin) createApplication(ctx *RequestContext, req *AWSReq
 		return nil, fmt.Errorf("createApplication: put token: %w", err)
 	}
 	idsKey := "app_ids:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, emrServerlessNamespace, idsKey, appID)
+	if err := updateStringIndex(goCtx, p.state, emrServerlessNamespace, idsKey, appID); err != nil {
+		return nil, fmt.Errorf("emrserverless createApplication index: %w", err)
+	}
 	return emrServerlessJSONResponse(http.StatusOK, emrCreateApplicationOut(app))
 }
 
@@ -483,7 +485,9 @@ func (p *EMRServerlessPlugin) deleteApplication(ctx *RequestContext, _ *AWSReque
 		return nil, fmt.Errorf("deleteApplication: %w", err)
 	}
 	idsKey := "app_ids:" + ctx.AccountID + "/" + ctx.Region
-	removeFromStringIndex(goCtx, p.state, emrServerlessNamespace, idsKey, appID)
+	if err := removeFromStringIndex(goCtx, p.state, emrServerlessNamespace, idsKey, appID); err != nil {
+		return nil, fmt.Errorf("emrserverless deleteApplication index: %w", err)
+	}
 	return emrServerlessJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -594,7 +598,9 @@ func (p *EMRServerlessPlugin) startJobRun(ctx *RequestContext, req *AWSRequest, 
 		return nil, fmt.Errorf("startJobRun: put token: %w", err)
 	}
 	runIDsKey := "jobrun_ids:" + ctx.AccountID + "/" + ctx.Region + "/" + appID
-	updateStringIndex(goCtx, p.state, emrServerlessNamespace, runIDsKey, runID)
+	if err := updateStringIndex(goCtx, p.state, emrServerlessNamespace, runIDsKey, runID); err != nil {
+		return nil, fmt.Errorf("emrserverless startJobRun index: %w", err)
+	}
 	return emrServerlessJSONResponse(http.StatusOK, map[string]string{
 		"applicationId": appID,
 		"jobRunId":      runID,
