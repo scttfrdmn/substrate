@@ -75,12 +75,13 @@ func TestSMPlugin_CreateSecret(t *testing.T) {
 	assert.Equal(t, "my-secret", body["Name"])
 	assert.Contains(t, body["ARN"], "my-secret")
 
-	// Duplicate create should return conflict.
+	// A duplicate create is ResourceExistsException at 400, as API_CreateSecret publishes (#1376; it
+	// answered 409 before).
 	resp2 := smRequest(t, srv, "CreateSecret", map[string]interface{}{
 		"Name":         "my-secret",
 		"SecretString": "duplicate",
 	})
-	assert.Equal(t, http.StatusConflict, resp2.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
 	body2 := readSMBody(t, resp2)
 	assert.Equal(t, "ResourceExistsException", body2["Code"])
 }

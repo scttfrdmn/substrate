@@ -61,16 +61,27 @@ func smVersionID(token string, m *IDMint) string {
 }
 
 // smExistingVersion reports whether the secret already holds a version under versionID and, if so,
-// whether that version's value equals value. It is how a resubmitted token is told from a new one.
-func (p *SecretsManagerPlugin) smExistingVersion(ctx context.Context, acct, region, name, versionID, value string) (exists, same bool, err error) {
-	data, err := p.state.Get(ctx, secretsManagerNamespace, smSecretVersionStateKey(acct, region, name, versionID))
+// whether that version holds the same value of the same kind. It is how a resubmitted token is told
+// from a new one. A SecretString and a SecretBinary with identical text are different values (#1376):
+// the pages compare "the version SecretString and SecretBinary values", and a version holds one or the
+// other.
+func (p *SecretsManagerPlugin) smExistingVersion(ctx context.Context, secret *SecretState, versionID, value string, binary bool) (exists, same bool, err error) {
+	data, err := p.state.Get(ctx, secretsManagerNamespace, smSecretVersionStateKey(secret.AccountID, secret.Region, secret.Name, versionID))
 	if err != nil {
 		return false, false, fmt.Errorf("sm load version %s: %w", versionID, err)
 	}
 	if data == nil {
 		return false, false, nil
 	}
-	return true, bytes.Equal(data, []byte(value)), nil
+	versions, err := p.smVersions(ctx, secret)
+	if err != nil {
+		return false, false, err
+	}
+	storedBinary := false
+	if v := smFindVersion(versions, versionID); v != nil {
+		storedBinary = v.Binary
+	}
+	return true, storedBinary == binary && bytes.Equal(data, []byte(value)), nil
 }
 
 // smVersionAlreadyExists is the published refusal for a resubmitted token carrying a different value.

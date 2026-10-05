@@ -27,6 +27,11 @@ type SecretState struct {
 	// CurrentVersionID is the current version identifier.
 	CurrentVersionID string `json:"CurrentVersionId"`
 
+	// Versions are the secret's versions and their staging labels, in creation order (#1376). A secret
+	// written before #1376 has none recorded; [SecretsManagerPlugin.smVersions] reads its one version
+	// from CurrentVersionID.
+	Versions []SMSecretVersion `json:"Versions,omitempty"`
+
 	// AccountID is the owning AWS account.
 	AccountID string `json:"AccountID"`
 

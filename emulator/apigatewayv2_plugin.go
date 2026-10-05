@@ -40,6 +40,12 @@ func (p *APIGatewayV2Plugin) Shutdown(_ context.Context) error { return nil }
 func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	op, params := parseAPIGatewayV2Operation(requestMethod(req), req.Path)
 	switch op {
+	case "TagResource":
+		return p.tagResource(ctx, req, params["resourceArn"])
+	case "GetTags":
+		return p.getTags(ctx, params["resourceArn"])
+	case "UntagResource":
+		return p.untagResource(ctx, req, params["resourceArn"])
 	case "CreateApi":
 		return p.createAPI(ctx, req)
 	case "GetApi":
@@ -111,6 +117,22 @@ func parseAPIGatewayV2Operation(method, path string) (string, map[string]string)
 	if p == "" {
 		p = "/"
 	}
+	// /tags/{resource-arn}: matched on the prefix before the path is split, because the decoded ARN
+	// itself contains slashes (arn:aws:apigateway:{region}::/apis/{id}) and a segment split would
+	// cut it apart (#1378).
+	if rest, ok := strings.CutPrefix(p, "/tags/"); ok && rest != "" {
+		params["resourceArn"] = rest
+		switch method {
+		case "POST":
+			return "TagResource", params
+		case "GET":
+			return "GetTags", params
+		case "DELETE":
+			return "UntagResource", params
+		}
+		return "", params
+	}
+
 	parts := splitPath(p)
 
 	switch {
@@ -357,6 +379,10 @@ func (p *APIGatewayV2Plugin) deleteAPI(ctx *RequestContext, apiID string) (*AWSR
 	}
 	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2APIKey(ctx.AccountID, ctx.Region, apiID)); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 deleteApi state.Delete: %w", err)
+	}
+	// The tag history goes with the API, so one re-created under the same ID starts never-tagged.
+	if err := p.state.Delete(goCtx, apigatewayv2Namespace, apigwv2APITaggedKey(apigwv2APIKey(ctx.AccountID, ctx.Region, apiID))); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 deleteApi tag history state.Delete: %w", err)
 	}
 	removeFromStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region), apiID)
 	return apigwJSONResponse(http.StatusNoContent, struct{}{})

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"time"
 )
@@ -153,9 +154,9 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 	if tokenErr := smValidClientRequestToken(input.Token); tokenErr != nil {
 		return nil, tokenErr
 	}
-	value := input.SecretString
-	if value == "" {
-		value = input.SecretBinary
+	value, binary, valueErr := smRequestValue(input.SecretString, input.SecretBinary)
+	if valueErr != nil {
+		return nil, valueErr
 	}
 
 	goCtx := context.Background()
@@ -168,7 +169,7 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		// token names an existing version holding the same value, and refuses one whose version holds
 		// a different value (#1285). Any other create of an existing name is the name collision.
 		if input.Token != "" && existing.DeletionDate.IsZero() {
-			found, same, verErr := p.smExistingVersion(goCtx, ctx.AccountID, ctx.Region, input.Name, input.Token, value)
+			found, same, verErr := p.smExistingVersion(goCtx, existing, input.Token, value, binary)
 			if verErr != nil {
 				return nil, verErr
 			}
@@ -181,10 +182,12 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 				return nil, smVersionAlreadyExists(input.Token)
 			}
 		}
+		// 400, as API_CreateSecret's Errors list publishes ResourceExistsException ("A resource with the
+		// ID you requested already exists"). It answered 409 until #1376.
 		return nil, &AWSError{
 			Code:       "ResourceExistsException",
 			Message:    fmt.Sprintf("A resource with the ID %q already exists", input.Name),
-			HTTPStatus: http.StatusConflict,
+			HTTPStatus: http.StatusBadRequest,
 		}
 	}
 
@@ -207,6 +210,11 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 		Region:           ctx.Region,
 		CreatedDate:      now,
 		LastChangedDate:  now,
+	}
+	// "If you include SecretString or SecretBinary then Secrets Manager creates an initial secret version
+	// and automatically attaches the staging label AWSCURRENT to it." With neither, there is no version.
+	if value != "" {
+		smAttachVersion(secret, nil, SMSecretVersion{VersionID: versionID, Stages: []string{smStageCurrent}, CreatedDate: now, Binary: binary})
 	}
 
 	if err := p.saveSecret(goCtx, secret); err != nil {
@@ -239,8 +247,9 @@ func (p *SecretsManagerPlugin) createSecret(ctx *RequestContext, req *AWSRequest
 
 func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		SecretID  string `json:"SecretId"`
-		VersionID string `json:"VersionId"`
+		SecretID     string `json:"SecretId"`
+		VersionID    string `json:"VersionId"`
+		VersionStage string `json:"VersionStage"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
@@ -266,9 +275,40 @@ func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
 
+	// "If you don't specify either a VersionStage or VersionId, then Secrets Manager returns the
+	// AWSCURRENT version", and "if you include both … the two parameters must refer to the same secret
+	// version" (#1376).
+	versions, err := p.smVersions(goCtx, secret)
+	if err != nil {
+		return nil, err
+	}
+	var version *SMSecretVersion
 	versionID := input.VersionID
+	if input.VersionStage != "" {
+		version = smVersionWithStage(versions, input.VersionStage)
+		if version == nil {
+			return nil, &AWSError{
+				Code:       "ResourceNotFoundException",
+				Message:    fmt.Sprintf("Secrets Manager can't find the specified secret version with staging label %q", input.VersionStage),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		if versionID != "" && versionID != version.VersionID {
+			// The page states the rule and publishes no code for breaking it; InvalidParameterException
+			// is its gloss for an invalid parameter value — substrate's reading.
+			return nil, &AWSError{
+				Code:       "InvalidParameterException",
+				Message:    fmt.Sprintf("VersionId %q and VersionStage %q refer to different versions", versionID, input.VersionStage),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		versionID = version.VersionID
+	}
 	if versionID == "" {
 		versionID = secret.CurrentVersionID
+	}
+	if version == nil {
+		version = smFindVersion(versions, versionID)
 	}
 
 	valueData, err := p.state.Get(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID))
@@ -276,31 +316,58 @@ func (p *SecretsManagerPlugin) getSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("sm getSecretValue get value: %w", err)
 	}
 
+	// CreatedDate is "the date and time that this version of the secret was created".
+	created := secret.CreatedDate
+	if version != nil && !version.CreatedDate.IsZero() {
+		created = version.CreatedDate
+	}
 	out := map[string]interface{}{
 		"ARN":          secret.ARN,
 		"Name":         secret.Name,
 		"VersionId":    versionID,
-		"CreatedDate":  secret.CreatedDate.Unix(),
+		"CreatedDate":  created.Unix(),
 		"SecretString": "",
 	}
 	if valueData != nil {
 		out["SecretString"] = string(valueData)
+	}
+	if version != nil {
+		// SecretBinary: "If … the secret value was originally provided as a string, then this field is
+		// omitted. The secret value appears in SecretString instead." A binary version is the converse.
+		if version.Binary && valueData != nil {
+			delete(out, "SecretString")
+			out["SecretBinary"] = string(valueData)
+		}
+		if len(version.Stages) > 0 {
+			out["VersionStages"] = version.Stages
+		}
 	}
 	return smJSONResponse(http.StatusOK, out)
 }
 
 func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		SecretID     string `json:"SecretId"`
-		SecretString string `json:"SecretString"`
-		SecretBinary string `json:"SecretBinary"`
-		VersionID    string `json:"ClientRequestToken"`
+		SecretID      string   `json:"SecretId"`
+		SecretString  string   `json:"SecretString"`
+		SecretBinary  string   `json:"SecretBinary"`
+		VersionID     string   `json:"ClientRequestToken"`
+		VersionStages []string `json:"VersionStages"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
 	}
 	if tokenErr := smValidClientRequestToken(input.VersionID); tokenErr != nil {
 		return nil, tokenErr
+	}
+	value, binary, valueErr := smRequestValue(input.SecretString, input.SecretBinary)
+	if valueErr != nil {
+		return nil, valueErr
+	}
+	if value == "" {
+		return nil, smMissingValue()
+	}
+	if stagesErr := smValidateVersionStages(input.VersionStages); stagesErr != nil {
+		return nil, stagesErr
 	}
 
 	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
@@ -324,23 +391,25 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, smSecretScheduledForDeletion(input.SecretID, secret.DeletionDate)
 	}
 
-	value := input.SecretString
-	if value == "" {
-		value = input.SecretBinary
-	}
 	// "This value becomes the VersionId of the new version" (#1285). A token naming an existing version
 	// is a retry: the same value "succeeds but does nothing", reporting that version and moving no
 	// pointer, and a different value is refused because an existing version cannot be modified.
 	versionID := smVersionID(input.VersionID, ctx.IDs)
+	versions, err := p.smVersions(goCtx, secret)
+	if err != nil {
+		return nil, err
+	}
 	if input.VersionID != "" {
-		found, same, verErr := p.smExistingVersion(goCtx, target.AccountID, target.Region, target.Name, versionID, value)
+		found, same, verErr := p.smExistingVersion(goCtx, secret, versionID, value, binary)
 		if verErr != nil {
 			return nil, verErr
 		}
 		if found && same {
-			return smJSONResponse(http.StatusOK, map[string]interface{}{
-				"ARN": secret.ARN, "Name": secret.Name, "VersionId": versionID,
-			})
+			out := map[string]interface{}{"ARN": secret.ARN, "Name": secret.Name, "VersionId": versionID}
+			if v := smFindVersion(versions, versionID); v != nil && len(v.Stages) > 0 {
+				out["VersionStages"] = v.Stages
+			}
+			return smJSONResponse(http.StatusOK, out)
 		}
 		if found {
 			return nil, smVersionAlreadyExists(versionID)
@@ -350,16 +419,24 @@ func (p *SecretsManagerPlugin) putSecretValue(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("sm putSecretValue store value: %w", err)
 	}
 
-	secret.CurrentVersionID = versionID
-	secret.LastChangedDate = p.tc.Now()
+	// "If you don't include VersionStages, then Secrets Manager automatically moves the staging label
+	// AWSCURRENT to this version" — and a named label moves off whichever version held it (#1376).
+	stages := []string{smStageCurrent}
+	if input.VersionStages != nil {
+		stages = slices.Compact(slices.Sorted(slices.Values(input.VersionStages)))
+	}
+	now := p.tc.Now()
+	smAttachVersion(secret, versions, SMSecretVersion{VersionID: versionID, Stages: stages, CreatedDate: now, Binary: binary})
+	secret.LastChangedDate = now
 	if err := p.saveSecret(goCtx, secret); err != nil {
 		return nil, fmt.Errorf("sm putSecretValue saveSecret: %w", err)
 	}
 
 	out := map[string]interface{}{
-		"ARN":       secret.ARN,
-		"Name":      secret.Name,
-		"VersionId": versionID,
+		"ARN":           secret.ARN,
+		"Name":          secret.Name,
+		"VersionId":     versionID,
+		"VersionStages": stages,
 	}
 	return smJSONResponse(http.StatusOK, out)
 }
@@ -478,9 +555,17 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 		KmsKeyID     string `json:"KmsKeyId"`
 		SecretString string `json:"SecretString"`
 		SecretBinary string `json:"SecretBinary"`
+		Token        string `json:"ClientRequestToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+	}
+	if tokenErr := smValidClientRequestToken(input.Token); tokenErr != nil {
+		return nil, tokenErr
+	}
+	value, binary, valueErr := smRequestValue(input.SecretString, input.SecretBinary)
+	if valueErr != nil {
+		return nil, valueErr
 	}
 
 	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
@@ -511,28 +596,53 @@ func (p *SecretsManagerPlugin) updateSecret(ctx *RequestContext, req *AWSRequest
 		secret.KMSKeyID = input.KmsKeyID
 	}
 
-	versionID := secret.CurrentVersionID
-	value := input.SecretString
-	if value == "" {
-		value = input.SecretBinary
+	// A value creates a new version, whose identifier is the request's ClientRequestToken when it sent
+	// one (#1376, following #1285's PutSecretValue and CreateSecret). UpdateSecret's page is stricter
+	// than theirs about a token already in use: "If you call this operation with a ClientRequestToken
+	// that matches an existing version's VersionId, the operation results in an error. You can't modify
+	// an existing version, you can only create a new version." So there is no idempotent resubmission
+	// here, whatever the value — the refusal is ResourceExistsException, 400, from the page's Errors
+	// list. With no value, no version is created and the token names nothing.
+	now := p.tc.Now()
+	out := map[string]interface{}{
+		"ARN":  secret.ARN,
+		"Name": secret.Name,
 	}
 	if value != "" {
-		versionID = generateVersionID(ctx.IDs)
+		versionID := smVersionID(input.Token, ctx.IDs)
+		versions, verErr := p.smVersions(goCtx, secret)
+		if verErr != nil {
+			return nil, verErr
+		}
+		if input.Token != "" {
+			found, _, existErr := p.smExistingVersion(goCtx, secret, versionID, value, binary)
+			if existErr != nil {
+				return nil, existErr
+			}
+			if found || smFindVersion(versions, versionID) != nil {
+				return nil, &AWSError{
+					Code: "ResourceExistsException",
+					Message: fmt.Sprintf("a version with the ClientRequestToken %q already exists; UpdateSecret cannot "+
+						"modify an existing version", versionID),
+					HTTPStatus: http.StatusBadRequest,
+				}
+			}
+		}
 		if err := p.state.Put(goCtx, secretsManagerNamespace, smSecretVersionStateKey(target.AccountID, target.Region, target.Name, versionID), []byte(value)); err != nil {
 			return nil, fmt.Errorf("sm updateSecret store value: %w", err)
 		}
-		secret.CurrentVersionID = versionID
+		// "Secrets Manager automatically moves the staging label AWSCURRENT to the new version. Then it
+		// attaches the label AWSPREVIOUS to the version that AWSCURRENT was removed from."
+		smAttachVersion(secret, versions, SMSecretVersion{VersionID: versionID, Stages: []string{smStageCurrent}, CreatedDate: now, Binary: binary})
+		// "If Secrets Manager created a new version of the secret during this operation, then VersionId
+		// contains the unique identifier of the new version" — and is absent otherwise, as the page's
+		// metadata-only examples answer.
+		out["VersionId"] = versionID
 	}
 
-	secret.LastChangedDate = p.tc.Now()
+	secret.LastChangedDate = now
 	if err := p.saveSecret(goCtx, secret); err != nil {
 		return nil, fmt.Errorf("sm updateSecret saveSecret: %w", err)
-	}
-
-	out := map[string]interface{}{
-		"ARN":       secret.ARN,
-		"Name":      secret.Name,
-		"VersionId": versionID,
 	}
 	return smJSONResponse(http.StatusOK, out)
 }
@@ -619,33 +729,71 @@ func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest)
 
 func (p *SecretsManagerPlugin) listSecretVersionIDs(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		SecretID string `json:"SecretId"`
+		SecretID          string `json:"SecretId"`
+		IncludeDeprecated bool   `json:"IncludeDeprecated"`
+		MaxResults        *int   `json:"MaxResults"`
+		NextToken         string `json:"NextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "InvalidRequestException", Message: "invalid JSON body", HTTPStatus: http.StatusBadRequest}
+	}
+	// MaxResults: "Valid Range: Minimum value of 1. Maximum value of 100." The page states no default;
+	// 100, the maximum, is substrate's reading, as ListSecrets' is.
+	pageSize := 100
+	if input.MaxResults != nil {
+		if *input.MaxResults < 1 || *input.MaxResults > 100 {
+			return nil, &AWSError{
+				Code:       "InvalidParameterException",
+				Message:    fmt.Sprintf("MaxResults must be from 1 to 100, not %d", *input.MaxResults),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		pageSize = *input.MaxResults
+	}
+	offset, ok := decodeOffsetPaginationToken(input.NextToken)
+	if !ok {
+		return nil, smInvalidNextToken()
 	}
 
 	target, idErr := smResolveSecretID(input.SecretID, ctx.AccountID, ctx.Region)
 	if idErr != nil {
 		return nil, idErr
 	}
-	secret, err := p.loadSecret(context.Background(), target.AccountID, target.Region, target.Name)
+	goCtx := context.Background()
+	secret, err := p.loadSecret(goCtx, target.AccountID, target.Region, target.Name)
 	if err != nil {
 		return nil, err
 	}
 	if secret == nil {
 		return nil, smSecretNotFound(input.SecretID)
 	}
-
-	// Stub: return only the current version.
-	type versionEntry struct {
-		VersionID string   `json:"VersionId"`
-		Stages    []string `json:"VersionStages"`
+	versions, err := p.smVersions(goCtx, secret)
+	if err != nil {
+		return nil, err
 	}
+
+	// Every version, in creation order, with the labels it carries (#1376). "Versions without staging
+	// labels are considered deprecated … By default, versions without staging labels aren't included."
+	type versionEntry struct {
+		CreatedDate int64    `json:"CreatedDate"`
+		VersionID   string   `json:"VersionId"`
+		Stages      []string `json:"VersionStages,omitempty"`
+	}
+	listed := make([]versionEntry, 0, len(versions))
+	for _, v := range versions {
+		if len(v.Stages) == 0 && !input.IncludeDeprecated {
+			continue
+		}
+		listed = append(listed, versionEntry{CreatedDate: v.CreatedDate.Unix(), VersionID: v.VersionID, Stages: v.Stages})
+	}
+	page, nextToken := pageByOffsetToken(listed, offset, pageSize)
 	out := map[string]interface{}{
 		"ARN":      secret.ARN,
 		"Name":     secret.Name,
-		"Versions": []versionEntry{{VersionID: secret.CurrentVersionID, Stages: []string{"AWSCURRENT"}}},
+		"Versions": page,
+	}
+	if nextToken != "" {
+		out["NextToken"] = nextToken
 	}
 	return smJSONResponse(http.StatusOK, out)
 }

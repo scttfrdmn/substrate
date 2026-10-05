@@ -114,10 +114,13 @@ func (p *CloudTrailPlugin) createTrail(reqCtx *RequestContext, req *AWSRequest) 
 		KMSKeyID:                   input.KMSKeyID,
 		TrailARN:                   arn,
 		HomeRegion:                 reqCtx.Region,
-		IsLogging:                  true,
-		CreatedAt:                  p.tc.Now(),
-		AccountID:                  reqCtx.AccountID,
-		Region:                     reqCtx.Region,
+		// Not logging until StartLogging, as AWS creates a trail: API_StartLogging "starts the
+		// recording of AWS API calls and log file delivery for a trail", and CreateTrail's response
+		// publishes no IsLogging at all (#1157).
+		IsLogging: false,
+		CreatedAt: p.tc.Now(),
+		AccountID: reqCtx.AccountID,
+		Region:    reqCtx.Region,
 	}
 
 	data, err := json.Marshal(trail)
@@ -162,22 +165,11 @@ func (p *CloudTrailPlugin) getTrailStatus(reqCtx *RequestContext, req *AWSReques
 		}
 	}
 
-	// Verify the trail exists.
-	if _, err := p.loadTrail(reqCtx.AccountID, reqCtx.Region, input.Name); err != nil {
+	trail, err := p.loadTrail(reqCtx.AccountID, reqCtx.Region, input.Name)
+	if err != nil {
 		return nil, err
 	}
-
-	now := p.tc.Now().Unix()
-	return cloudtrailJSONResponse(http.StatusOK, map[string]interface{}{
-		"IsLogging":                          true,
-		"LatestDeliveryTime":                 now,
-		"LatestDeliveryAttemptTime":          "",
-		"LatestDeliveryAttemptSucceeded":     "",
-		"LatestNotificationAttemptTime":      "",
-		"LatestNotificationAttemptSucceeded": "",
-		"TimeLoggingStarted":                 "",
-		"TimeLoggingStopped":                 "",
-	})
+	return cloudtrailJSONResponse(http.StatusOK, cloudtrailTrailStatusToWire(*trail))
 }
 
 func (p *CloudTrailPlugin) updateTrail(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -330,6 +322,17 @@ func (p *CloudTrailPlugin) setLogging(reqCtx *RequestContext, req *AWSRequest, e
 		return nil, err
 	}
 
+	// The two times record transitions, so a StartLogging on a trail already logging (or a
+	// StopLogging on one already stopped) succeeds and moves neither. That is substrate's reading:
+	// API_GetTrailStatus describes StartLoggingTime as "the most recent date and time when CloudTrail
+	// started recording", and a repeated start does not start recording again.
+	if enabled != trail.IsLogging {
+		if enabled {
+			trail.StartLoggingTime = p.tc.Now()
+		} else {
+			trail.StopLoggingTime = p.tc.Now()
+		}
+	}
 	trail.IsLogging = enabled
 
 	data, err := json.Marshal(trail)

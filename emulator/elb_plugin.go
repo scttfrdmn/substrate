@@ -336,6 +336,9 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "TargetGroupArns.member")
+	if err := p.elbRequireHeld(scope, elbLBKeyPrefix, req.Params["LoadBalancerArn"], elbKindLoadBalancer); err != nil {
+		return nil, err
+	}
 
 	allKeys, err := p.state.List(context.Background(), elbNamespace, "tg:"+scope+"/")
 	if err != nil {
@@ -346,6 +349,7 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 	}
 	var result tgResult
 	held := make(map[string]bool, len(allKeys))
+	heldNames := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
 		if getErr != nil {
@@ -359,6 +363,7 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 			continue
 		}
 		held[tg.ARN] = true
+		heldNames[tg.Name] = true
 		if len(names) > 0 && !containsStr(names, tg.Name) {
 			continue
 		}
@@ -368,6 +373,11 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 		result.TargetGroups = append(result.TargetGroups, tgToItem(tg))
 	}
 	if err := elbRequireEveryARN(arns, held, elbKindTargetGroup); err != nil {
+		return nil, err
+	}
+	// A Names entry naming no target group is the same refusal (#1375): the page publishes
+	// TargetGroupNotFound against the request, whichever member named the group.
+	if err := elbRequireEveryARN(names, heldNames, elbKindTargetGroup); err != nil {
 		return nil, err
 	}
 	return elbOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS, result)
@@ -652,6 +662,9 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	listenerARNs := extractIndexedParams(req.Params, "ListenerArns.member")
 	lbARN := req.Params["LoadBalancerArn"]
+	if err := p.elbRequireHeld(scope, elbLBKeyPrefix, lbARN, elbKindLoadBalancer); err != nil {
+		return nil, err
+	}
 
 	allKeys, err := p.state.List(context.Background(), elbNamespace, "listener:"+scope+"/")
 	if err != nil {
@@ -841,6 +854,9 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	ruleARNs := extractIndexedParams(req.Params, "RuleArns.member")
 	listenerARN := req.Params["ListenerArn"]
+	if err := p.elbRequireHeld(scope, elbListenerKeyPrefix, listenerARN, elbKindListener); err != nil {
+		return nil, err
+	}
 
 	allKeys, err := p.state.List(context.Background(), elbNamespace, "rule:"+scope+"/")
 	if err != nil {
@@ -976,13 +992,17 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 // the one-line description below as its text: API_ModifyTargetGroup, API_RegisterTargets,
 // API_DeregisterTargets and API_DescribeTargetHealth for TargetGroupNotFound; API_ModifyListener and
 // API_DeleteListener for ListenerNotFound; API_SetRulePriorities and API_DeleteRule for RuleNotFound.
+// The three describes add their filters (#1370, #1375): API_DescribeTargetGroups for
+// TargetGroupNotFound and LoadBalancerNotFound, API_DescribeListeners for ListenerNotFound and
+// LoadBalancerNotFound, and API_DescribeRules for RuleNotFound and ListenerNotFound.
 // Unlike [elbNotFoundError], which the tagging operations answer naming the ARN, these carry the
 // published sentence verbatim.
 func elbPublishedNotFound(kind string) *AWSError {
 	msg := map[string]string{
-		elbKindTargetGroup: "The specified target group does not exist.",
-		elbKindListener:    "The specified listener does not exist.",
-		elbKindRule:        "The specified rule does not exist.",
+		elbKindLoadBalancer: "The specified load balancer does not exist.",
+		elbKindTargetGroup:  "The specified target group does not exist.",
+		elbKindListener:     "The specified listener does not exist.",
+		elbKindRule:         "The specified rule does not exist.",
 	}[kind]
 	return &AWSError{Code: elbNotFoundCodes[kind], Message: msg, HTTPStatus: http.StatusBadRequest}
 }
@@ -1003,6 +1023,49 @@ func elbRequireEveryARN(arns []string, held map[string]bool, kind string) error 
 		}
 	}
 	return nil
+}
+
+// elbRequireHeld refuses a describe whose single-ARN filter names a record of kind the caller does
+// not hold, with that kind's published not-found code (#1375).
+//
+// DescribeTargetGroups and DescribeListeners publish LoadBalancerNotFound, and DescribeRules
+// ListenerNotFound; until #1375 a LoadBalancerArn or ListenerArn naming nothing matched nothing and
+// the call answered 200 with an empty list. An empty arn is no filter and passes. prefix is the
+// state-key prefix records of kind are stored under; each record's ARN is read from its own
+// "LoadBalancerArn" or "ListenerArn" member, the json names ELBLoadBalancer and ELBListener declare.
+// A store read error is returned, never read as "not held".
+func (p *ELBPlugin) elbRequireHeld(scope, prefix, arn, kind string) error {
+	if arn == "" {
+		return nil
+	}
+	keys, err := p.state.List(context.Background(), elbNamespace, prefix+scope+"/")
+	if err != nil {
+		return fmt.Errorf("elb %s lookup list: %w", kind, err)
+	}
+	for _, k := range keys {
+		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
+		if getErr != nil {
+			return fmt.Errorf("elb %s lookup get: %w", kind, getErr)
+		}
+		if data == nil {
+			continue
+		}
+		var rec struct {
+			LoadBalancerARN string `json:"LoadBalancerArn"`
+			ListenerARN     string `json:"ListenerArn"`
+		}
+		if json.Unmarshal(data, &rec) != nil {
+			continue
+		}
+		held := rec.LoadBalancerARN
+		if kind == elbKindListener {
+			held = rec.ListenerARN
+		}
+		if held == arn {
+			return nil
+		}
+	}
+	return elbPublishedNotFound(kind)
 }
 
 // elbXMLNS is the XML namespace ELBv2 (2015-12-01) responses carry.
