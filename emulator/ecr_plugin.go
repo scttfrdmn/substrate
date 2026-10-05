@@ -680,12 +680,12 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	type imageDetail struct {
-		RegistryID       string    `json:"registryId"`
-		RepositoryName   string    `json:"repositoryName"`
-		ImageDigest      string    `json:"imageDigest"`
-		ImageTags        []string  `json:"imageTags,omitempty"`
-		ImageSizeInBytes int64     `json:"imageSizeInBytes"`
-		ImagePushedAt    time.Time `json:"imagePushedAt"`
+		RegistryID       string       `json:"registryId"`
+		RepositoryName   string       `json:"repositoryName"`
+		ImageDigest      string       `json:"imageDigest"`
+		ImageTags        []string     `json:"imageTags,omitempty"`
+		ImageSizeInBytes int64        `json:"imageSizeInBytes"`
+		ImagePushedAt    EpochSeconds `json:"imagePushedAt"`
 	}
 
 	digestToTags := ecrTagsByDigest(tagsMap)
@@ -715,7 +715,7 @@ func (p *ECRPlugin) describeImages(ctx *RequestContext, req *AWSRequest) (*AWSRe
 			ImageDigest:      img.ImageDigest,
 			ImageTags:        digestToTags[img.ImageDigest],
 			ImageSizeInBytes: img.ImageSizeInBytes,
-			ImagePushedAt:    img.ImagePushedAt,
+			ImagePushedAt:    EpochSeconds(img.ImagePushedAt),
 		})
 	}
 
@@ -939,9 +939,9 @@ func (p *ECRPlugin) getAuthorizationToken(ctx *RequestContext) (*AWSResponse, er
 	expiresAt := p.tc.Now().Add(12 * time.Hour)
 
 	type authData struct {
-		AuthorizationToken string    `json:"authorizationToken"`
-		ExpiresAt          time.Time `json:"expiresAt"`
-		ProxyEndpoint      string    `json:"proxyEndpoint"`
+		AuthorizationToken string       `json:"authorizationToken"`
+		ExpiresAt          EpochSeconds `json:"expiresAt"`
+		ProxyEndpoint      string       `json:"proxyEndpoint"`
 	}
 	type response struct {
 		AuthorizationData []authData `json:"authorizationData"`
@@ -949,7 +949,7 @@ func (p *ECRPlugin) getAuthorizationToken(ctx *RequestContext) (*AWSResponse, er
 	return ecrJSONResponse(http.StatusOK, response{
 		AuthorizationData: []authData{{
 			AuthorizationToken: token,
-			ExpiresAt:          expiresAt,
+			ExpiresAt:          EpochSeconds(expiresAt),
 			ProxyEndpoint:      fmt.Sprintf("https://%s.dkr.ecr.%s.amazonaws.com", ctx.AccountID, ctx.Region),
 		}},
 	})

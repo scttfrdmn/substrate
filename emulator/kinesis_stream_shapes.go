@@ -66,10 +66,9 @@ func buildStreamDescription(stream KinesisStream) map[string]interface{} {
 
 // buildStreamDescriptionSummary builds the body DescribeStreamSummary answers.
 //
-// OpenShardCount is the summary's own member and is read from the stored ShardCount. Substrate
-// closes no shard, so every shard it holds is open and the two counts are the same number; that
-// they are the same is a property of substrate's model rather than of the API, which is why the
-// member is named here and not derived from len(Shards) as if it were a synonym.
+// OpenShardCount is the summary's own member and is read from the stored ShardCount, which every
+// reshard keeps equal to the number of open shards. It is not len(Shards): a merge, a split and an
+// UpdateShardCount close their parents and leave them listed (#1399).
 func buildStreamDescriptionSummary(stream KinesisStream) map[string]interface{} {
 	return map[string]interface{}{
 		"StreamName":              stream.StreamName,

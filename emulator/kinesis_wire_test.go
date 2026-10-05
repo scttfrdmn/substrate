@@ -197,9 +197,8 @@ func TestKinesisWire_ShardOperationsCarryNoBookkeepingMember(t *testing.T) {
 	first, second := desc.StreamDescription.Shards[0], desc.StreamDescription.Shards[1]
 
 	// Merge the two shards, then split the shard that is still open afterwards: splitting a shard the
-	// merge has just closed would be a sequence AWS refuses, whatever substrate does with it. Substrate
-	// widens the surviving shard in place rather than minting a child, so "open" is the test, not
-	// "has a parent".
+	// merge has just closed would be a sequence AWS refuses, and substrate refuses it too (#1399). The
+	// merge closes both parents and mints a child, so the one open shard is that child.
 	merged := kinesisWire(t, p, ctx, "MergeShards", map[string]any{
 		"StreamName": name, "ShardToMerge": first.ShardID, "AdjacentShardToMerge": second.ShardID,
 	})

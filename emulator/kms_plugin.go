@@ -1328,15 +1328,22 @@ func (p *KMSPlugin) deleteAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	// half. The page also publishes no code for a name at all — no InvalidAliasNameException and no
 	// LimitExceededException — so there is nothing here to refuse with (#1085).
 	//
-	// The one refusal this page does publish, NotFoundException for an alias that is not there, is
-	// #1107 rather than part of #1085: it turns an idempotent teardown into a failing one, because
-	// cfn_delete.go calls this for an alias that may already be gone.
+	// The one refusal this page does publish is NotFoundException/400 for an alias the account and
+	// Region do not hold, and it is answered (#1107). The page's key-state table permits DeleteAlias in
+	// every key state, so that is the only refusal the operation can give. CloudFormation's teardown
+	// calls this for an alias that may already be gone, and stays idempotent because
+	// cfnDeleteAbsentCodes treats NotFoundException as a resource already deleted.
 	if !strings.HasPrefix(input.AliasName, kmsAliasNamePrefix) {
 		input.AliasName = kmsAliasNamePrefix + input.AliasName
 	}
 
 	goCtx := context.Background()
-	_ = p.state.Delete(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName))
+	if _, err := p.followAlias(goCtx, ctx.AccountID, ctx.Region, input.AliasName); err != nil {
+		return nil, err
+	}
+	if err := p.state.Delete(goCtx, kmsNamespace, kmsAliasKey(ctx.AccountID, ctx.Region, input.AliasName)); err != nil {
+		return nil, fmt.Errorf("kms deleteAlias delete: %w", err)
+	}
 
 	names, err := p.loadAliasNames(goCtx, ctx.AccountID, ctx.Region)
 	if err != nil {

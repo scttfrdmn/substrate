@@ -427,6 +427,13 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 		return nil, err
 	}
 	goCtx := context.Background()
+	held, err := p.planHasSelections(goCtx, reqCtx.AccountID, reqCtx.Region, planID)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		return nil, backupPlanHasSelections(planID)
+	}
 	key := backupPlanKey(reqCtx.AccountID, reqCtx.Region, planID)
 	if err := p.state.Delete(goCtx, backupNamespace, key); err != nil {
 		return nil, fmt.Errorf("backup deleteBackupPlan delete: %w", err)
@@ -621,9 +628,17 @@ func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error
 }
 
 // loadSelection loads a BackupSelection from state or returns a not-found error.
+//
+// The plan is loaded first, so a selection is reachable only while its plan exists (#1178). Before
+// #1178 a plan could be deleted while it held selections, and those selections kept answering 200
+// with the deleted plan's ID. State written by such a Substrate still holds them; checking the plan
+// here makes them unreachable rather than resurrecting them.
 func (p *BackupPlugin) loadSelection(acct, region, planID, selectionID string) (*BackupSelection, error) {
 	if selectionID == "" {
 		return nil, backupMissingParameter("SelectionId")
+	}
+	if _, err := p.loadPlan(acct, region, planID); err != nil {
+		return nil, err
 	}
 	goCtx := context.Background()
 	key := backupSelectionKey(acct, region, planID, selectionID)
@@ -667,6 +682,43 @@ func generateBackupUUID(m *IDMint) string {
 // pages list, and which they gloss as input of the wrong type rather than input that is missing.
 func backupMissingParameter(member string) *AWSError {
 	return &AWSError{Code: "MissingParameterValueException", Message: member + " is required", HTTPStatus: http.StatusBadRequest}
+}
+
+// planHasSelections reports whether any selection of the plan still exists. It reads each indexed
+// selection's record rather than trusting the index alone, so an index entry whose record is gone
+// does not keep a plan undeletable.
+func (p *BackupPlugin) planHasSelections(ctx context.Context, acct, region, planID string) (bool, error) {
+	ids, err := loadStringIndex(ctx, p.state, backupNamespace, backupSelectionIDsKey(acct, region, planID))
+	if err != nil {
+		return false, fmt.Errorf("backup planHasSelections load index: %w", err)
+	}
+	for _, id := range ids {
+		data, err := p.state.Get(ctx, backupNamespace, backupSelectionKey(acct, region, planID, id))
+		if err != nil {
+			return false, fmt.Errorf("backup planHasSelections get: %w", err)
+		}
+		if data != nil {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// backupPlanHasSelections is DeleteBackupPlan's refusal for a plan that still has selections (#1178).
+//
+// API_DeleteBackupPlan's first sentence states the precondition — "A backup plan can only be deleted
+// after all associated selections of resources have been deleted" — and names no code for breaking
+// it. Of the codes the page publishes, InvalidRequestException ("something is wrong with the input to
+// the request", HTTP 400) is the only one that describes it: the request is well-formed and names a
+// plan that exists, so neither InvalidParameterValueException, MissingParameterValueException nor
+// ResourceNotFoundException fits, and no code is borrowed from a sibling page (#671). The message is
+// substrate's own.
+func backupPlanHasSelections(planID string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidRequestException",
+		Message:    "Backup plan " + planID + " has selections; delete its selections before deleting the plan.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // backupNotFound is the refusal every routed AWS Backup page publishes for a resource that does not

@@ -484,7 +484,7 @@ func TestKinesisPlugin_MergeAndSplitShards(t *testing.T) {
 		t.Fatalf("CreateStream: %v", err)
 	}
 
-	// MergeShards — stub that returns OK.
+	// MergeShards of the stream's two adjacent shards.
 	mergeResp, err := p.HandleRequest(ctx, kinesisRequest(t, "MergeShards", map[string]any{
 		"StreamName":           "split-merge-stream",
 		"ShardToMerge":         "shardId-000000000000",
@@ -497,10 +497,11 @@ func TestKinesisPlugin_MergeAndSplitShards(t *testing.T) {
 		t.Errorf("want 200, got %d", mergeResp.StatusCode)
 	}
 
-	// SplitShard — stub that returns OK.
+	// SplitShard of the merge's child, shardId-000000000002, which covers the whole hash key space.
+	// The two parents are closed now, and splitting a closed shard is refused (#1399).
 	splitResp, err := p.HandleRequest(ctx, kinesisRequest(t, "SplitShard", map[string]any{
 		"StreamName":         "split-merge-stream",
-		"ShardToSplit":       "shardId-000000000000",
+		"ShardToSplit":       "shardId-000000000002",
 		"NewStartingHashKey": "170141183460469231731687303715884105728",
 	}))
 	if err != nil {

@@ -638,18 +638,15 @@ func (p *SNSPlugin) subscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	subARN := req.Params["SubscriptionArn"]
 
-	goCtx := context.Background()
-	sub, err := p.loadSub(goCtx, ctx.AccountID, ctx.Region, subARN)
+	// Shape, then existence (#1259): a string that is not a subscription ARN — a topic ARN is the
+	// plausible one a caller sends — is InvalidParameter/400, and only a well-formed ARN naming no
+	// subscription is NotFound/404. API_Unsubscribe publishes both.
+	sub, err := p.requireSubscription(ctx, subARN)
 	if err != nil {
 		return nil, err
 	}
-	if sub == nil {
-		return nil, &AWSError{
-			Code:       "NotFound",
-			Message:    fmt.Sprintf("no subscription found for the ARN %q", subARN),
-			HTTPStatus: http.StatusNotFound,
-		}
-	}
+
+	goCtx := context.Background()
 
 	if err := p.state.Delete(goCtx, snsNamespace, snsSubStateKey(ctx.AccountID, ctx.Region, subARN)); err != nil {
 		return nil, fmt.Errorf("sns unsubscribe state.Delete: %w", err)
@@ -666,7 +663,9 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			newAll = append(newAll, id)
 		}
 	}
-	_ = p.saveSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region), newAll)
+	if err := p.saveSubIDs(goCtx, snsSubAllIDsStateKey(ctx.AccountID, ctx.Region), newAll); err != nil {
+		return nil, fmt.Errorf("sns unsubscribe save subscription index: %w", err)
+	}
 
 	// Remove from per-topic list. The topic name comes from the stored subscription's own TopicArn,
 	// which substrate minted, so the parse cannot fail on a caller's input — but it is parsed rather
@@ -686,7 +685,9 @@ func (p *SNSPlugin) unsubscribe(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			newTopic = append(newTopic, id)
 		}
 	}
-	_ = p.saveSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName), newTopic)
+	if err := p.saveSubIDs(goCtx, snsSubTopicIDsStateKey(ctx.AccountID, ctx.Region, topicName), newTopic); err != nil {
+		return nil, fmt.Errorf("sns unsubscribe save topic subscription index: %w", err)
+	}
 
 	return snsUnitResponse("Unsubscribe", ctx.RequestID)
 }

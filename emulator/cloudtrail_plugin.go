@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -289,7 +290,13 @@ func (p *CloudTrailPlugin) describeTrails(reqCtx *RequestContext, req *AWSReques
 		}
 		trail, err := p.loadTrail(reqCtx.AccountID, reqCtx.Region, name)
 		if err != nil {
-			continue
+			// A name the index holds and the store does not is skipped, as DescribeTrails' page
+			// publishes no not-found refusal; any other failure is a store fault and is returned.
+			var awsErr *AWSError
+			if errors.As(err, &awsErr) && awsErr.Code == "TrailNotFoundException" {
+				continue
+			}
+			return nil, err
 		}
 		trails = append(trails, cloudtrailTrailToWire(*trail))
 	}
@@ -361,7 +368,9 @@ func (p *CloudTrailPlugin) loadTrail(acct, region, name string) (*CloudTrailTrai
 		return nil, fmt.Errorf("cloudtrail loadTrail get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "TrailNotFoundException", Message: "Trail " + name + " does not exist for account " + acct, HTTPStatus: http.StatusNotFound}
+		// 400, as every CloudTrail page publishes TrailNotFoundException; no CloudTrail page publishes
+		// a 404 anywhere (#1156).
+		return nil, &AWSError{Code: "TrailNotFoundException", Message: "Trail " + name + " does not exist for account " + acct, HTTPStatus: http.StatusBadRequest}
 	}
 	var trail CloudTrailTrail
 	if err := json.Unmarshal(data, &trail); err != nil {

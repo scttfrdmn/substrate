@@ -58,6 +58,10 @@ type KinesisShard struct {
 	// ParentShardID is the shard ID of the parent shard, if any.
 	ParentShardID string `json:"ParentShardId,omitempty"`
 
+	// AdjacentParentShardID is the shard ID of a merge's second parent, the AdjacentShardToMerge of
+	// the MergeShards that made this shard (#1399). Empty for a shard a split or a create made.
+	AdjacentParentShardID string `json:"AdjacentParentShardId,omitempty"`
+
 	// HashKeyRange defines the range of partition keys that map to this shard.
 	HashKeyRange struct {
 		// StartingHashKey is the first hash key in the range.

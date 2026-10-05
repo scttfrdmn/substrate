@@ -1720,11 +1720,11 @@ helpers and cannot drift. `GetLogEvents` also resolves the **stream**, since its
 Required: Yes and a stream is what it reads; the group is checked first, because a caller told the
 stream is missing would create it and be refused again.
 
-**The one status left as it was** is `CreateLogStream`'s and `CreateLogGroup`'s
-`ResourceAlreadyExistsException`, which substrate answers at **409** where both pages publish 400. That
-is the same class of defect, but it is a different code with its own consumers, so it is filed as
-[#1251](https://github.com/scttfrdmn/substrate/issues/1251) rather than swept in here under a
-not-found heading.
+**The one status this left as it was** has since been fixed too. `CreateLogStream`'s and
+`CreateLogGroup`'s `ResourceAlreadyExistsException` answered **409** where both pages publish 400, and
+now answer 400 ([#1251](https://github.com/scttfrdmn/substrate/issues/1251)). That fix surveyed every
+status the plugin answers; see [Every refusal answers the status its page
+publishes](#every-refusal-answers-the-status-its-page-publishes).
 
 **Against the token refusal above, the resource wins.** No page publishes the order, so the reading is
 the one SNS `ListSubscriptionsByTopic` already records: a token is a continuation of a listing over the
@@ -12957,7 +12957,7 @@ Resource Groups Tagging API operations are free.
 | DeleteTopic | |
 | ListTopics | Base64 pagination token |
 | Subscribe | Supports lambda, sqs, http, https, email protocols |
-| Unsubscribe | Idempotent |
+| Unsubscribe | A string that is not a subscription ARN is `InvalidParameter`/400; a well-formed ARN naming no subscription is `NotFound`/404, in that order (#1259) |
 | ListSubscriptions | |
 | ListSubscriptionsByTopic | |
 | GetSubscriptionAttributes | Seven members derived, the rest passed through as stored; `InvalidParameter`/400 for an ARN that is not a subscription's |
@@ -13090,7 +13090,9 @@ about an individual message. That reading is **substrate's**.
 where substrate answered `200` behind an unsourced *"idempotent"* comment.
 `API_Unsubscribe` publishes the code and states no idempotence, and
 `SubscriptionArn` is the operation's only request parameter and only named resource,
-so the published code can only be about the subscription.
+so the published code can only be about the subscription. A string that is not a
+subscription ARN at all, a topic ARN included, is `InvalidParameter`/400, which the
+same page publishes; it is checked first, so the two refusals are distinguishable (#1259).
 
 `DeleteTopic` is the one topic operation that goes the other way, and substrate had
 it backwards (#992). `API_DeleteTopic`'s description states that *"this action is
@@ -13325,8 +13327,7 @@ see it delivered here, which is the deliberate divergence.
 subscription ARN and `NotFound`/404 for one that names no subscription, in that order.
 Before #1125 neither had a site for the first: a topic ARN — a perfectly good SNS ARN
 naming no subscription — was reported as a subscription that did not exist. `Unsubscribe`
-still answers `NotFound`/404 rather than `InvalidParameter`/400 for a malformed ARN; that
-remainder is #1259.
+follows the same order since #1259, through the same `requireSubscription` helper.
 
 ### An empty result element is not the same as no result element
 
@@ -13955,7 +13956,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | UntagResource | |
 | ListResourceTags | |
 | CreateAlias | Refuses a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; enforces its own published `AliasName` pattern and the reserved `alias/aws/` prefix; refuses a name the account and Region already hold — see below |
-| DeleteAlias | Accepts a name with or without the `alias/` prefix, because its published pattern — unlike the other two — does not require it; answers 200 for an alias that does not exist — see below |
+| DeleteAlias | Accepts a name with or without the `alias/` prefix, because its published pattern — unlike the other two — does not require it; an alias the account and Region do not hold is `NotFoundException`/400, its page's one reachable refusal (#1107) — see below |
 | UpdateAlias | Refuses an alias that does not exist, a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; refuses a move between two key types or two key usages. The alias's **current** key may be pending deletion — see below |
 | ListAliases | Reports one entry per alias, so a repeated `CreateAlias` no longer duplicates a row |
 | Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each; refuses a `Plaintext` outside the published 1–4096 bytes before the key is read, and one past the smaller per-spec maximum after — see below |
@@ -14072,15 +14073,25 @@ the code cannot: a deploy that moved an alias across types needs to know whether
 was the family or the usage. The three families are derived from the algorithm
 tables the rest of the plugin already reads, not listed a fourth time.
 
-Two divergences recorded rather than fixed here. `TargetKeyId` is published as
+One divergence is recorded rather than fixed here. `TargetKeyId` is published as
 *"Specify the key ID or key ARN"*, and substrate additionally accepts an alias
 there, because the shared resolver handles all four `KeyId` forms; a caller
-relying on that is relying on something AWS does not publish. And `DeleteAlias`
-answers 200 for an alias that does not exist where its page publishes
-`NotFoundException`/400. That one is #1107 rather than part of this change,
-because it turns an idempotent teardown into a failing one: CloudFormation stack
-deletion calls it for an alias that may already be gone, so the refusal needs a
-tolerance on the teardown path before it can land.
+relying on that is relying on something AWS does not publish.
+
+**`DeleteAlias` refuses an alias that names nothing** (#1107). `API_DeleteAlias`
+publishes `NotFoundException`/400 and `KMSInvalidStateException`/400, and the
+key-state table permits `DeleteAlias` in every key state, so the not-found refusal
+is the only one the operation can give. It used to answer 200 for any name. The
+name resolves as before, with or without the `alias/` prefix, so a bare name gets
+the same refusal. A second delete of the same alias is refused too, because the
+first removed it.
+
+CloudFormation's teardown stays idempotent. A stack delete calls `DeleteAlias` for
+an alias that may already be gone, deleted out of band or by a retried teardown,
+and the sweep reads `NotFoundException` as "already deleted" through the shared
+`cfnDeleteAbsentCodes` rule in `emulator/cfn_delete.go`. That rule already covered
+every type whose delete answers `NotFoundException`, so the alias needed no
+special case. `TestCFN_AStackWhoseAliasWasDeletedOutOfBandStillDeletes` pins it.
 
 ### Every KMS refusal is a 400, because KMS publishes no 404
 
@@ -15543,9 +15554,30 @@ the error code travels in the body's `__type`, not the status line. Every
 group- and stream-level not-found in the plugin answers that 400, and the three
 reads that answered an empty `200` for an absent log group now refuse it too —
 see [a log group that does not exist is not an empty log
-group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group), which also
-records the one status deliberately left as it was
-([#1251](https://github.com/scttfrdmn/substrate/issues/1251)).
+group](#a-log-group-that-does-not-exist-is-not-an-empty-log-group).
+
+### Every refusal answers the status its page publishes
+
+CloudWatch Logs is a JSON-1.1 service. The error code travels in the body's `__type`, and every client
+error its pages publish shares the status line **400**. A consumer that classifies on the status, as
+an SDK's retry logic does before it reads the code, must see that 400.
+
+[#1251](https://github.com/scttfrdmn/substrate/issues/1251) checked every refusal the plugin answers
+against its operation's page:
+
+| Operation | Code | Substrate | Page |
+|-----------|------|-----------|------|
+| `CreateLogGroup` | `ResourceAlreadyExistsException` | 400 (was 409) | 400 |
+| `CreateLogStream` | `ResourceAlreadyExistsException` | 400 (was 409) | 400 |
+| `DeleteLogGroup`, `DeleteLogStream`, `CreateLogStream`, `PutLogEvents`, `GetLogEvents`, `DescribeLogStreams`, `FilterLogEvents`, `PutRetentionPolicy`, `DeleteRetentionPolicy` | `ResourceNotFoundException` | 400 | 400 (#1224) |
+| every routed operation | `InvalidParameterException` (missing member, bad body, retention days, unissued token) | 400 | 400 |
+| `TagResource` | `TooManyTagsException` | 400 | 400 |
+| `TagResource`, `UntagResource`, `ListTagsForResource` | `ValidationException` (the `:*` ARN form) | 400 | observed (#1273) |
+
+Both creates refuse through one constructor, `cwLogsAlreadyExists`, so they cannot drift.
+`TestCWLogs_ACreateOfAnExistingResourceIsRefusedAt400` asserts the status and the `__type` code over
+the wire, and that the refused create leaves the existing resource in place. No refusal in the plugin
+answers any status but 400 now.
 
 All four paginating operations refuse a `nextToken` substrate could not have issued with
 `InvalidParameterException` / 400, rather than answering a well-formed page one — see
@@ -17491,6 +17523,29 @@ A value outside either Valid Values set is `InvalidParameterException`/400. On `
 filter narrows the listing form; the enumerated form answers the images `imageIds` names, as the page
 sets no rule combining the two.
 
+
+### Every ECR date is epoch seconds
+
+ECR speaks awsJson1_1, where a `Timestamp` is a JSON number of epoch seconds with a fraction, and an
+SDK's timestamp deserializer refuses a string. Every date an ECR response renders answers that way,
+to three decimals:
+
+| Operation | Member | Page |
+|-----------|--------|------|
+| `CreateRepository`, `DescribeRepositories`, `DeleteRepository` | `createdAt` | `API_Repository` |
+| `DescribeImages` | `imageDetails[].imagePushedAt` | `API_ImageDetail` |
+| `GetAuthorizationToken` | `authorizationData[].expiresAt`, 12 hours after the request | `API_AuthorizationData` |
+
+`imagePushedAt` and `expiresAt` rendered as RFC3339 strings until
+[#1403](https://github.com/scttfrdmn/substrate/issues/1403), so `DescribeImages` and
+`GetAuthorizationToken` failed to decode in a typed SDK. The stored image record keeps its encoding;
+the response structs convert on the way out. `TestECRDates_EveryRenderedDateIsEpochSeconds` in
+`emulator/ecr_dates_test.go` asserts all three on the raw bytes, at a sub-second instant.
+
+Published dates substrate does not render, because nothing it models produces them:
+`ImageDetail`'s `lastRecordedPullTime`, `lastArchivedAt` and `lastActivatedAt` (no pull is recorded
+and no archive is modeled), and `GetLifecyclePolicy`'s `lastEvaluatedAt` (a lifecycle policy is
+stored, never run).
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
@@ -17803,11 +17858,11 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 | CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written |
 | DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard) |
 | DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
-| DeleteStream | |
-| ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region |
+| DeleteStream | A store fault deleting a shard's records is an error, not a stream reported deleted (#1399) |
+| ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region. Pages by `Limit` (1–10 000, default 100, at most 100 returned) and `ExclusiveStartStreamName`, reporting `HasMoreStreams`; names are listed lexicographically; `NextToken` is not read — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) |
 | UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
-| MergeShards | Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
-| SplitShard | As `MergeShards` |
+| MergeShards | Merges the two named adjacent shards: both close, and one child covering their union reports them as `ParentShardId`/`AdjacentParentShardId`. Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) and [A stream's status progresses](#a-streams-status-progresses) |
+| SplitShard | Splits the named shard at `NewStartingHashKey`: it closes, and two children report it as `ParentShardId`. Otherwise as `MergeShards` |
 | PutRecord | |
 | PutRecords | Batch put |
 | GetShardIterator | Returns base64-encoded cursor |
@@ -18165,6 +18220,48 @@ DELETE /v1/kinesis/stream-status   (every seed; ?stream=<name or ARN> for one)
   deleted answers `ResourceNotFoundException` at once, which is what a completed delete answers.
 - **Replay.** The seed is a control-plane write, recorded and re-applied in position (#1140), so a
   recorded `CREATING`, `UPDATING`, `ACTIVE` sequence replays identically.
+
+### Resharding acts on the shards it names
+
+Until [#1399](https://github.com/scttfrdmn/substrate/issues/1399), `MergeShards` and `SplitShard`
+decremented or incremented the shard count and regenerated the whole shard list, so the shards a
+caller named were never the ones that changed. Each now follows its page:
+
+- **Hash key space.** A stream's hash keys run from 0 to 2^128−1, divided evenly between the shards a
+  `CreateStream` or an `UpdateShardCount` makes. Substrate used to give each shard a toy range of a
+  thousand keys, against which a published split key such as 2^127 fell outside every shard.
+- **MergeShards.** The two shards must be *"adjacent if the union of the hash key ranges for the two
+  shards form a contiguous set with no gaps"*. Both parents close (their `SequenceNumberRange` gains an
+  `EndingSequenceNumber`) and one child covering the union opens, reporting `ShardToMerge` as its
+  `ParentShardId` and `AdjacentShardToMerge` as its `AdjacentParentShardId`.
+- **SplitShard.** `NewStartingHashKey` *"must be in the range of hash keys being mapped into the
+  shard"*. The parent closes and two children open, both reporting it as `ParentShardId`: one holds the
+  keys below `NewStartingHashKey`, the other the key and everything above it.
+- **UpdateShardCount.** `UNIFORM_SCALING` closes every open shard and opens the target number dividing
+  the hash key space evenly.
+- **IDs and closed shards.** New shards continue the stream's own sequence (`shardId-000000000000`
+  upward), so an ID is never reused. A closed shard stays listed in `DescribeStream`, as it does in
+  AWS until it ages out of retention, which is not modeled. `OpenShardCount` counts open shards only.
+- **Records.** `PutRecord` and `PutRecords` write only to open shards. A record goes to the first open
+  shard (`PutRecords` spreads a batch across them), not to the shard its partition key's MD5 falls in.
+- **Refusals,** each at HTTP 400:
+
+  | Condition | Code |
+  |---|---|
+  | A shard the stream does not hold | `ResourceNotFoundException` |
+  | Two shards that are not adjacent, or one shard named twice | `InvalidArgumentException` |
+  | A closed shard | `InvalidArgumentException` |
+  | A split key outside the shard's range, or equal to its starting key | `InvalidArgumentException` |
+  | A split key not matching `^(0\|([1-9]\d{0,38}))$` | `InvalidArgumentException` |
+  | A missing `ShardToMerge`, `AdjacentShardToMerge`, `ShardToSplit` or `NewStartingHashKey` | `InvalidArgumentException` |
+
+  Both codes are the ones the two pages publish. The messages are substrate's own wording, and so is
+  refusing a split key equal to the shard's starting key: it is *"in the range"*, but it would leave
+  one child with no hash keys at all.
+- **ListStreams** pages by `Limit` (1–10 000, default 100, and *"at most 100 results are returned"*) and
+  `ExclusiveStartStreamName`, reporting `HasMoreStreams`. The page publishes no order, so names are
+  listed lexicographically, which is what makes "start after this name" well defined. A `Limit` outside
+  1–10 000 is `InvalidArgumentException`. `NextToken` is not read.
 
 ### The account and Region a record carries reach no response
 
@@ -20711,17 +20808,22 @@ partition-agnostic.
 
 | Condition | Code | Status |
 |-----------|------|--------|
-| a body that will not parse | `InvalidTrailNameException` | 400 |
+| a body that will not parse | `ValidationError` | 400 |
 | `Name` absent or empty | `InvalidTrailNameException` | 400 |
 | a trail name already in use | `TrailAlreadyExistsException` | 400 |
-| a trail that does not exist | `TrailNotFoundException` | **404** |
+| a trail that does not exist | `TrailNotFoundException` | 400 |
 
-The 404 is a divergence: CloudTrail publishes every error at 400, `TrailNotFoundException` included,
-and no CloudTrail page publishes a 404 anywhere. Six operations propagate it — `GetTrail`,
-`GetTrailStatus`, `UpdateTrail`, `DeleteTrail`, `StartLogging` and `StopLogging`; `DescribeTrails`
-swallows it and reports a short list, which is what its page publishes.
-[#1156](https://github.com/scttfrdmn/substrate/issues/1156) covers it together with CodePipeline,
-which has the same defect at the same scale.
+Every status is the one CloudTrail publishes: each page lists every error at HTTP 400, and no
+CloudTrail page publishes a 404 anywhere. `TrailNotFoundException` answered 404 until
+[#1156](https://github.com/scttfrdmn/substrate/issues/1156). Six operations raise it: `GetTrail`,
+`GetTrailStatus`, `UpdateTrail`, `DeleteTrail`, `StartLogging` and `StopLogging`.
+
+`DescribeTrails` publishes no not-found refusal, so a `trailNameList` entry that names nothing is
+left out of the list, and the call answers 200. A store fault while it reads a listed trail is an
+error, not a shorter list.
+
+`ValidationError`, which an unparseable body answers, is substrate's shared invalid-body code. No
+CloudTrail page publishes it; its status, 400, matches every page.
 
 `InvalidTrailNameException` is published, and its gloss covers a name that violates the published
 pattern — which Substrate does not check, so the code fires only for an absent name and an unparseable
@@ -20752,12 +20854,12 @@ management events and $2.00 per 100,000 events for additional copies; Substrate 
 | Operation | Notes |
 |-----------|-------|
 | CreateProject | `name` required; `source`, `artifacts` and `environment` are stored as opaque objects and never inspected |
-| BatchGetProjects | An empty `names` array reports an empty list; an empty-string member is reported in `projectsNotFound` rather than refused |
+| BatchGetProjects | `names` must hold 1–100 non-empty names, else `InvalidInputException`/400; a well-formed name naming nothing is reported in `projectsNotFound` ([#1159](https://github.com/scttfrdmn/substrate/issues/1159)) |
 | UpdateProject | [Reads a `project` wrapper AWS does not send](#updateproject-cannot-be-reached-from-an-sdk) |
-| DeleteProject | [Refuses an absent project](#deleteproject-is-not-idempotent) |
+| DeleteProject | [Idempotent](#deleteproject-is-idempotent): a project that does not exist is deleted successfully |
 | ListProjects | Reports names only; `sortBy`, `sortOrder` and `nextToken` are not read |
 | StartBuild | Only `projectName` is read; the build is `SUCCEEDED` before the call returns unless [a seed makes it progress](#a-build-progresses-under-a-seed) |
-| BatchGetBuilds | Each build is [one observation of its own seeded progression](#a-build-progresses-under-a-seed); an unreadable stored record is reported in `buildsNotFound`, so a store failure is indistinguishable from an absent build |
+| BatchGetBuilds | Each build is [one observation of its own seeded progression](#a-build-progresses-under-a-seed); `ids` must hold 1–100 non-empty IDs, else `InvalidInputException`/400; [`buildsNotFound` means absence only](#what-buildsnotfound-and-projectsnotfound-mean) ([#1186](https://github.com/scttfrdmn/substrate/issues/1186)) |
 
 ### UpdateProject cannot be reached from an SDK
 
@@ -20773,14 +20875,29 @@ The operation's *response* is correctly wrapped, which is presumably where the i
 update **merges** member by member, so an optional member such as `description` can never be cleared,
 where AWS replaces the project configuration.
 
-### DeleteProject is not idempotent
+### DeleteProject is idempotent
 
-`DeleteProject` loads the project first and propagates a `ResourceNotFoundException`, so deleting
-something that is not there is refused. AWS publishes exactly one error on that page,
-`InvalidInputException`/400 — no not-found at all — and an empty successful response, which is the
-shape of an idempotent delete. A teardown path that runs twice succeeds against AWS and raises here,
-under a code the SDK's own model does not associate with the operation.
-[#1159](https://github.com/scttfrdmn/substrate/issues/1159).
+`API_DeleteProject` publishes exactly one error, `InvalidInputException`/400, and no not-found at
+all, with "an HTTP 200 response with an empty HTTP body": the shape of a delete that succeeds whether
+or not the project existed. So a delete of a project that does not exist answers 200, and a teardown
+path that runs twice succeeds, as it does against AWS. An absent or empty `name` is still
+`InvalidInputException`/400, the operation's one published error. The body is `{}`, the form
+substrate's JSON-protocol deletes answer
+([#1206](https://github.com/scttfrdmn/substrate/issues/1206)'s recorded decision), which every SDK
+decodes as an empty response. Until
+[#1159](https://github.com/scttfrdmn/substrate/issues/1159) a missing project was refused with
+`ResourceNotFoundException`, a code the operation's page does not publish.
+
+### What buildsNotFound and projectsNotFound mean
+
+`API_BatchGetBuilds` glosses `buildsNotFound` as "the IDs of builds for which information could not
+be found", and `projectsNotFound` means the same for projects. Both report **absence only**: a
+well-formed ID or name that names nothing. A request whose list is absent, empty, longer than 100 or
+holds an empty string is refused with `InvalidInputException`/400, the one error both pages publish.
+A failure of substrate's own state store, or a stored record that will not decode, is substrate's
+failure, not an AWS condition: it answers an error rather than reporting the ID as missing. Until
+[#1186](https://github.com/scttfrdmn/substrate/issues/1186) both were folded into `buildsNotFound`
+with a 200, which made a broken store indistinguishable from a build that was never created.
 
 ### A build progresses under a seed
 
@@ -20828,8 +20945,7 @@ DELETE /v1/codebuild/build-status   (all seeds; ?buildId=… for one)
 | a project that does not exist | `ResourceNotFoundException` | 400 |
 
 All four are 400, which is what every CodeBuild page publishes — `StartBuild`'s
-`ResourceNotFoundException` included, so CodeBuild is not part of the 404 divergence CloudTrail and
-CodePipeline share. `AccountLimitExceededException` and `OAuthProviderException` are published and
+`ResourceNotFoundException` included. `DeleteProject` no longer reaches the not-found row (#1159). `AccountLimitExceededException` and `OAuthProviderException` are published and
 have no site.
 
 ### The account and Region a record carries reach no response
@@ -20879,13 +20995,13 @@ has nothing to multiply.
 | Operation | Notes |
 |-----------|-------|
 | CreatePipeline | `pipeline.name` required; `stages` are stored as opaque objects and never validated |
-| GetPipeline | `version` is [decoded and ignored](#getpipelineexecution-and-getpipeline-answer-for-the-wrong-resource) |
+| GetPipeline | `version` is [decoded and ignored](#getpipelineexecution-checks-the-executions-pipeline-and-getpipeline-answers-the-current-version) |
 | UpdatePipeline | Merges `roleArn` and `stages`, increments `version`; reports no `metadata` |
 | DeletePipeline | |
 | ListPipelines | Reports name, version and timestamps; `maxResults` and `nextToken` are not read. A pipeline whose record cannot be loaded is skipped |
 | StartPipelineExecution | The execution is `Succeeded` before the call returns unless [a seed makes it progress](#an-execution-progresses-under-a-seed); `clientRequestToken` and `variables` are not read |
 | GetPipelineState | Reports every stage as `Succeeded` with an [empty `pipelineExecutionId`](#getpipelinestate-reports-a-shape-no-execution-produced) |
-| GetPipelineExecution | `pipelineName` is [decoded and ignored](#getpipelineexecution-and-getpipeline-answer-for-the-wrong-resource) |
+| GetPipelineExecution | An execution belonging to another pipeline is `PipelineExecutionNotFoundException`, as the page glosses the code ([#1156](https://github.com/scttfrdmn/substrate/issues/1156)) |
 
 ### An execution progresses under a seed
 
@@ -20913,12 +21029,14 @@ stored. `ListPipelineExecutions` is not routed, so `GetPipelineExecution` is the
 `clientRequestToken` is the published idempotency member and is not read, so a retried start mints a
 second execution where AWS would return the first.
 
-### GetPipelineExecution and GetPipeline answer for the wrong resource
+### GetPipelineExecution checks the execution's pipeline, and GetPipeline answers the current version
 
-`getPipelineExecution` keys state on the execution ID alone and never reads `pipelineName`, which is
-`Required: Yes` — so a request that omits it succeeds, and an execution ID belonging to pipeline A is
-reported successfully when asked for under pipeline B. AWS's own error text states the cross-check as
-part of the contract: *"…or an execution ID does not belong to the specified pipeline."*
+Executions are keyed by ID alone, so `getPipelineExecution` now compares the execution's pipeline with
+the request's `pipelineName`. An execution that belongs to another pipeline answers
+`PipelineExecutionNotFoundException`/400, as the page's own gloss of the code states: *"…or an
+execution ID does not belong to the specified pipeline."* A request that omits `pipelineName`, which is
+`Required: Yes`, is still answered, rather than refused; that is
+[#1160](https://github.com/scttfrdmn/substrate/issues/1160)'s.
 
 `getPipeline` decodes `version` and always reports the current one, so a request for version 1 of a
 pipeline updated three times answers version 4 at HTTP 200 rather than the published
@@ -20963,13 +21081,14 @@ has ever run. A pipeline created and never started reports every stage succeeded
 | a body that will not parse | `InvalidStructureException` | 400 |
 | a required name absent or empty | `InvalidStructureException` | 400 |
 | a pipeline name already in use | `PipelineNameInUseException` | 400 |
-| a pipeline that does not exist | `PipelineNotFoundException` | **404** |
-| a pipeline execution that does not exist | `PipelineExecutionNotFoundException` | **404** |
+| a pipeline that does not exist | `PipelineNotFoundException` | 400 |
+| a pipeline execution that does not exist, or belongs to another pipeline | `PipelineExecutionNotFoundException` | 400 |
 
-Both 404s are divergences — CodePipeline publishes every error at 400 — and six operations propagate
-one of them: `GetPipeline`, `UpdatePipeline`, `DeletePipeline`, `StartPipelineExecution`,
-`GetPipelineState` and `GetPipelineExecution`. `ListPipelines` swallows the refusal and reports a short
-list. [#1156](https://github.com/scttfrdmn/substrate/issues/1156) covers it together with CloudTrail.
+Every row is 400, the status every CodePipeline page publishes. Until
+[#1156](https://github.com/scttfrdmn/substrate/issues/1156) both not-found codes answered 404, which no
+CodePipeline page publishes, across six operations: `GetPipeline`, `UpdatePipeline`, `DeletePipeline`,
+`StartPipelineExecution`, `GetPipelineState` and `GetPipelineExecution`. `ListPipelines` still swallows
+the refusal and reports a short list, as its page publishes.
 
 `InvalidStructureException` is published, glossed *"The structure was specified in an invalid format"* —
 but `GetPipeline` does not publish it at all (its three errors are `PipelineNotFoundException`,
@@ -21365,14 +21484,14 @@ The published path is given for every operation because one of them cannot be re
 | DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Nine of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), including `VaultState`, `VaultType` and `Locked`, and nothing Substrate does not publish |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
 | ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [nine of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault. [Pages by `maxResults` and `nextToken`, and applies `vaultType` and `shared`](#listbackupvaults-pages-and-filters); a bad value is `InvalidParameterValueException`/400 |
-| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated, `AdvancedBackupSettings` is not read, and `CreatorRequestId` is ignored, so the published idempotency — *"If the request includes a `CreatorRequestId` that matches an existing backup plan, that plan is returned"* — does not hold. The plan ARN [uses the wrong resource segment](#arn-shapes) |
+| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read. A repeated `CreatorRequestId` returns the existing plan, as published (#1173). The plan ARN [uses the wrong resource segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Reachable over that path since #1176](#getbackupplan-is-reachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
-| DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId` — and ignores [the plan's selections](#which-backup-preconditions-are-enforced) |
+| DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId`. A plan that still has selections is [refused](#which-backup-preconditions-are-enforced) with `InvalidRequestException`/400 |
 | ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; `includeDeleted`, `maxResults` and `nextToken` are ignored |
 | CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
-| GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`; `CreatorRequestId` is not recorded |
-| DeleteBackupSelection | `DELETE /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `{}`, which is the published empty body |
+| GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`. A selection whose plan is gone is `ResourceNotFoundException` |
+| DeleteBackupSelection | `DELETE /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `{}`, which is the published empty body. A selection whose plan is gone is `ResourceNotFoundException` |
 
 Every other AWS Backup operation is unrouted, including the whole job surface —
 `StartBackupJob`, `DescribeBackupJob`, `ListBackupJobs`, `StartRestoreJob`,
@@ -21430,11 +21549,18 @@ does not drop it here.
 ### Which backup preconditions are enforced
 
 `API_DeleteBackupPlan` opens with *"A backup plan can only be deleted after all associated selections
-of resources have been deleted."* That is not enforced: a plan with selections is deleted, and
-`GetBackupSelection` then answers HTTP 200 for a selection of a plan that no longer exists, reporting
-the deleted plan's ID. `CreateBackupSelection` does check the plan, so the selection namespace
-accepts reads for a parent it will not accept writes for.
-[#1178](https://github.com/scttfrdmn/substrate/issues/1178).
+of resources have been deleted."* That is enforced: `DeleteBackupPlan` on a plan that still has a
+selection is refused, and changes nothing. The page names no code for the condition. Of the codes it
+publishes, `InvalidRequestException` ("something is wrong with the input to the request", HTTP 400)
+is the only one that describes it, since the request is well-formed and names a plan that exists, so
+that is the code. The message is substrate's own. The published teardown order, deleting the
+selections and then the plan, succeeds end to end
+([#1178](https://github.com/scttfrdmn/substrate/issues/1178)).
+
+A selection is reachable only while its plan exists. `GetBackupSelection` and `DeleteBackupSelection`
+load the plan first, so a selection whose plan is gone answers `ResourceNotFoundException`, including
+one an older Substrate left behind when it deleted a plan without checking. Before #1178, such a
+selection answered HTTP 200, reporting a plan ID no other operation would accept.
 
 `API_DeleteBackupVault`'s mirror precondition — *"A vault can be deleted only if it is empty"* — is
 **vacuous** rather than unenforced. No operation creates a recovery point, so

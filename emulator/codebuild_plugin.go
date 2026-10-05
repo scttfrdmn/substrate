@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -127,13 +128,23 @@ func (p *CodeBuildPlugin) batchGetProjects(reqCtx *RequestContext, req *AWSReque
 		}
 	}
 
+	if err := codebuildCheckBatch("names", input.Names); err != nil {
+		return nil, err
+	}
+
 	projects := make([]CodeBuildProject, 0)
 	notFound := make([]string, 0)
 	for _, name := range input.Names {
 		proj, err := p.loadProject(reqCtx.AccountID, reqCtx.Region, name)
 		if err != nil {
-			notFound = append(notFound, name)
-			continue
+			// Only absence belongs in projectsNotFound. A store failure is substrate's, not a
+			// project that does not exist, and is returned (#1186's rule, applied to the sibling).
+			var awsErr *AWSError
+			if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+				notFound = append(notFound, name)
+				continue
+			}
+			return nil, err
 		}
 		projects = append(projects, *proj)
 	}
@@ -209,17 +220,27 @@ func (p *CodeBuildPlugin) deleteProject(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 
-	if _, err := p.loadProject(reqCtx.AccountID, reqCtx.Region, input.Name); err != nil {
-		return nil, err
+	// API_DeleteProject publishes one error, InvalidInputException, for an invalid name, and no
+	// not-found code: a delete of a project that does not exist succeeds (#1159).
+	if input.Name == "" {
+		return nil, &AWSError{Code: "InvalidInputException", Message: "name is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	goCtx := context.Background()
 	key := codebuildProjectKey(reqCtx.AccountID, reqCtx.Region, input.Name)
-	if err := p.state.Delete(goCtx, codebuildNamespace, key); err != nil {
-		return nil, fmt.Errorf("codebuild deleteProject delete: %w", err)
+	data, err := p.state.Get(goCtx, codebuildNamespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("codebuild deleteProject get: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	if data != nil {
+		if err := p.state.Delete(goCtx, codebuildNamespace, key); err != nil {
+			return nil, fmt.Errorf("codebuild deleteProject delete: %w", err)
+		}
+		removeFromStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	}
 
+	// The page publishes "an empty HTTP body"; substrate answers {}, the form its JSON-protocol
+	// deletes answer (#1206's recorded decision), which every SDK decodes as an empty response.
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -302,20 +323,29 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 		}
 	}
 
+	if err := codebuildCheckBatch("ids", input.IDs); err != nil {
+		return nil, err
+	}
+
 	builds := make([]codebuildBuildOut, 0)
 	notFound := make([]string, 0)
 	goCtx := context.Background()
 	for _, id := range input.IDs {
 		key := codebuildBuildKey(reqCtx.AccountID, reqCtx.Region, id)
 		data, err := p.state.Get(goCtx, codebuildNamespace, key)
-		if err != nil || data == nil {
+		if err != nil {
+			// A store failure is not a build "for which information could not be found"; it is
+			// substrate's own failure, and is returned rather than reported as absence (#1186).
+			return nil, fmt.Errorf("codebuild batchGetBuilds get: %w", err)
+		}
+		if data == nil {
 			notFound = append(notFound, id)
 			continue
 		}
 		var b CodeBuildBuild
 		if err := json.Unmarshal(data, &b); err != nil {
-			notFound = append(notFound, id)
-			continue
+			// A record that will not decode is corrupt state, not an absent build (#1186).
+			return nil, fmt.Errorf("codebuild batchGetBuilds unmarshal %s: %w", id, err)
 		}
 		// Each build is one observation of its own countdown, so one call over several builds
 		// spends one from each, never several from a shared wildcard (#582).
@@ -330,6 +360,24 @@ func (p *CodeBuildPlugin) batchGetBuilds(reqCtx *RequestContext, req *AWSRequest
 		"builds":         builds,
 		"buildsNotFound": notFound,
 	})
+}
+
+// codebuildCheckBatch holds a batch read's list member to what both pages publish: Required: Yes,
+// Array Members 1 to 100, each member at least one character. The pages' one published error,
+// InvalidInputException/400, answers each violation (#1159, #1186).
+func codebuildCheckBatch(member string, values []string) error {
+	if len(values) == 0 {
+		return &AWSError{Code: "InvalidInputException", Message: member + " is required and must name at least one item", HTTPStatus: http.StatusBadRequest}
+	}
+	if len(values) > 100 {
+		return &AWSError{Code: "InvalidInputException", Message: fmt.Sprintf("%s may name at most 100 items; %d were given", member, len(values)), HTTPStatus: http.StatusBadRequest}
+	}
+	for _, v := range values {
+		if v == "" {
+			return &AWSError{Code: "InvalidInputException", Message: member + " may not contain an empty string", HTTPStatus: http.StatusBadRequest}
+		}
+	}
+	return nil
 }
 
 // loadProject loads a CodeBuildProject from state by name or returns a not-found error.
