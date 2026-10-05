@@ -173,3 +173,75 @@ func TestXMLErrorResponse_CarriesTheRecordedRequestID(t *testing.T) {
 	require.Zero(t, results.SkippedEvents, "every refusal must be re-executed, not skipped")
 	assert.Empty(t, results.Differences, "a replayed refusal reproduces its recording: %s", replayDifferenceSummary(results))
 }
+
+// TestQueryError_TypeNamesTheFault pins the Query error document's <Type> per status
+// (#1413). The smithy awsQuery specification defines it as "One of 'Sender' or
+// 'Receiver'; whomever is at fault from the service perspective". Until #1413 both the
+// server's shared writer and IAM's handler-built document answered "Sender" for a 5xx
+// as well.
+func TestQueryError_TypeNamesTheFault(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"a 400 is the sender's", http.StatusBadRequest, "<Type>Sender</Type>"},
+		{"a 404 is the sender's", http.StatusNotFound, "<Type>Sender</Type>"},
+		{"a 500 is the receiver's", http.StatusInternalServerError, "<Type>Receiver</Type>"},
+		{"a 503 is the receiver's", http.StatusServiceUnavailable, "<Type>Receiver</Type>"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			body, _, _ := emulator.MarshalAWSErrorWithRequestIDForTest("Code", "msg", emulator.ErrProtoQueryXMLForTest, "", "", "req", false, tc.status)
+			assert.Contains(t, string(body), "<Error>"+tc.want, "shared Query writer: %s", body)
+			assert.Contains(t, string(emulator.IAMErrorResponseForTest("Code", "msg", tc.status)), "<Error>"+tc.want, "IAM document")
+		})
+	}
+}
+
+// TestIAMSuccessResponse_CarriesTheRecordedRequestID asserts that IAM success documents,
+// with a result and without one, carry the request's own id in ResponseMetadata
+// (#1413). Until then both builders rendered the literal "stub-request-id", although
+// #1149 had made ELB, Redshift and the other Query plugins render the request's id.
+// The stream is then replayed, and the bodies must be byte-identical.
+func TestIAMSuccessResponse_CarriesTheRecordedRequestID(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
+
+	type successDoc struct {
+		RequestID string `xml:"ResponseMetadata>RequestId"`
+	}
+	for _, tc := range []struct {
+		name string
+		form url.Values
+	}{
+		{"a result-bearing create", url.Values{"Action": {"CreateUser"}, "UserName": {"rid-user"}}},
+		{"a result-bearing read", url.Values{"Action": {"GetUser"}, "UserName": {"rid-user"}}},
+		{"a memberless response", url.Values{"Action": {"DeleteUser"}, "UserName": {"rid-user"}}},
+	} {
+		status, body := errorRequestIDCall(t, ts, "iam.amazonaws.com", tc.form)
+		require.Equal(t, http.StatusOK, status, "%s: %s", tc.name, body)
+
+		events, err := ts.Store().GetStream(t.Context(), "default")
+		require.NoError(t, err)
+		require.NotEmpty(t, events)
+		recorded := events[len(events)-1].RequestID
+		require.NotEmpty(t, recorded, "%s: the event must carry the id the request was served under", tc.name)
+
+		var doc successDoc
+		require.NoError(t, xml.Unmarshal(body, &doc), "%s body was %s", tc.name, body)
+		assert.Equal(t, recorded, doc.RequestID, "%s: the response must carry the recorded request id", tc.name)
+		assert.NotContains(t, string(body), "stub-request-id", "%s", tc.name)
+		assert.True(t, strings.HasSuffix(string(body),
+			"<ResponseMetadata><RequestId>"+recorded+"</RequestId></ResponseMetadata></"+tc.form.Get("Action")+"Response>"),
+			"%s body was %s", tc.name, body)
+	}
+
+	engine := emulator.NewReplayEngine(ts.Store(), ts.StateManager(), ts.TimeController(), ts.Registry(),
+		emulator.ReplayConfig{}, emulator.NewDefaultLogger(slog.LevelError, false))
+	results, err := engine.Replay(t.Context(), "default")
+	require.NoError(t, err)
+	require.Zero(t, results.SkippedEvents, "every request must be re-executed, not skipped")
+	assert.Empty(t, results.Differences, "a replayed success reproduces its recording: %s", replayDifferenceSummary(results))
+}

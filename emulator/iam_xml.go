@@ -31,7 +31,7 @@ func iamXMLResponse(status int, op, resultXML string) (*AWSResponse, error) {
 		buf.WriteString(op)
 		buf.WriteString("Result>")
 	}
-	buf.WriteString("<ResponseMetadata><RequestId>stub-request-id</RequestId></ResponseMetadata></")
+	buf.WriteString("<ResponseMetadata>" + iamRequestIDPlaceholder + "</ResponseMetadata></")
 	buf.WriteString(op)
 	buf.WriteString("Response>")
 	return &AWSResponse{
@@ -44,7 +44,7 @@ func iamXMLResponse(status int, op, resultXML string) (*AWSResponse, error) {
 // iamXMLEmptyResponse builds a successful XML response with no result element.
 // Used for void operations such as DeleteUser, AttachUserPolicy, etc.
 func iamXMLEmptyResponse(op string) *AWSResponse {
-	body := `<` + op + `Response xmlns="` + iamXMLNS + `"><ResponseMetadata><RequestId>stub-request-id</RequestId></ResponseMetadata></` + op + `Response>`
+	body := `<` + op + `Response xmlns="` + iamXMLNS + `"><ResponseMetadata>` + iamRequestIDPlaceholder + `</ResponseMetadata></` + op + `Response>`
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{"Content-Type": "text/xml"},
@@ -52,20 +52,22 @@ func iamXMLEmptyResponse(op string) *AWSResponse {
 	}
 }
 
-// iamErrorRequestIDElement is the request-id element [iamErrorResponse] renders, which
-// [iamStampErrorRequestID] replaces with the request's own id before the response
-// leaves the plugin.
-const iamErrorRequestIDElement = "<RequestId>stub-request-id</RequestId>"
+// iamRequestIDPlaceholder is the request-id element every IAM document renders:
+// [iamXMLResponse] and [iamXMLEmptyResponse] put it in ResponseMetadata, and
+// [iamErrorResponse] puts it beside Error. [iamStampRequestID] replaces it with the
+// request's own id before the response leaves the plugin.
+const iamRequestIDPlaceholder = "<RequestId>stub-request-id</RequestId>"
 
 // iamErrorResponse builds an IAM XML error response.
 // The returned response matches the IAM ErrorResponse envelope format.
 //
 // Its RequestId is a placeholder: hundreds of call sites build an error document with no
 // request context in hand, so the id is stamped once, at [IAMPlugin.HandleRequest],
-// rather than threaded through each of them.
+// rather than threaded through each of them. Its Type is the query protocol's fault
+// name for status: "Receiver" for a 5xx and "Sender" otherwise (#1413).
 func iamErrorResponse(code, message string, status int) *AWSResponse {
-	body := fmt.Sprintf(`<ErrorResponse xmlns="`+iamXMLNS+`"><Error><Type>Sender</Type><Code>%s</Code><Message>%s</Message></Error>`+iamErrorRequestIDElement+`</ErrorResponse>`,
-		xmlEsc(code), xmlEsc(message))
+	body := fmt.Sprintf(`<ErrorResponse xmlns="`+iamXMLNS+`"><Error><Type>%s</Type><Code>%s</Code><Message>%s</Message></Error>`+iamRequestIDPlaceholder+`</ErrorResponse>`,
+		queryFaultType(status >= http.StatusInternalServerError), xmlEsc(code), xmlEsc(message))
 	return &AWSResponse{
 		StatusCode: status,
 		Headers:    map[string]string{"Content-Type": "text/xml"},
@@ -73,20 +75,29 @@ func iamErrorResponse(code, message string, status int) *AWSResponse {
 	}
 }
 
-// iamStampErrorRequestID puts ctx.RequestID into the RequestId of an error document
-// [iamErrorResponse] built, so an IAM refusal a handler answers as a response carries
-// the same id as one the server's shared Query writer renders from an [AWSError] —
-// the id [Event.RequestID] records and a replay is dispatched with (#1241).
+// iamStampRequestID puts ctx.RequestID into the RequestId of a document
+// [iamXMLResponse], [iamXMLEmptyResponse] or [iamErrorResponse] built, so every IAM
+// response carries the id [Event.RequestID] records and a replay is dispatched with.
+// #1241 stamped error documents. Success documents kept the literal "stub-request-id"
+// until #1413, while ELB, Redshift and the other Query plugins rendered the request's
+// own id in ResponseMetadata (#1149).
 //
-// Only an error status is touched, and only the placeholder element: the message is
-// escaped by [xmlEsc], so the element cannot occur inside it. A success body's
-// RequestId is left as it is.
-func iamStampErrorRequestID(resp *AWSResponse, ctx *RequestContext) *AWSResponse {
-	if resp == nil || ctx == nil || ctx.RequestID == "" || resp.StatusCode < http.StatusBadRequest {
+// Only the last placeholder element is replaced, because the envelope's RequestId
+// closes every IAM document after the result or the Error. The result's members and
+// the error message are escaped by [xmlEsc], so the element cannot occur inside them.
+func iamStampRequestID(resp *AWSResponse, ctx *RequestContext) *AWSResponse {
+	if resp == nil || ctx == nil || ctx.RequestID == "" {
 		return resp
 	}
-	resp.Body = bytes.Replace(resp.Body, []byte(iamErrorRequestIDElement),
-		[]byte("<RequestId>"+xmlEsc(ctx.RequestID)+"</RequestId>"), 1)
+	i := bytes.LastIndex(resp.Body, []byte(iamRequestIDPlaceholder))
+	if i < 0 {
+		return resp
+	}
+	stamped := make([]byte, 0, len(resp.Body)+len(ctx.RequestID))
+	stamped = append(stamped, resp.Body[:i]...)
+	stamped = append(stamped, "<RequestId>"+xmlEsc(ctx.RequestID)+"</RequestId>"...)
+	stamped = append(stamped, resp.Body[i+len(iamRequestIDPlaceholder):]...)
+	resp.Body = stamped
 	return resp
 }
 

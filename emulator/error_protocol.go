@@ -531,12 +531,16 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 			Code    string `xml:"Code"`
 			Message string `xml:"Message"`
 		}
+		// <Type> was always "Sender", a 5xx included (#1413). A modeled server fault or a
+		// 5xx status is the service's fault, which the protocol names "Receiver".
+		serverFault := errorShapeFor(wire.Service, e.Code, e.HTTPStatus).ServerFault ||
+			e.HTTPStatus >= http.StatusInternalServerError
 		payload, err := xml.Marshal(struct {
 			XMLName   xml.Name   `xml:"ErrorResponse"`
 			Error     queryError `xml:"Error"`
 			RequestID string     `xml:"RequestId"`
 		}{
-			Error:     queryError{Type: "Sender", Code: e.Code, Message: e.Message},
+			Error:     queryError{Type: queryFaultType(serverFault), Code: e.Code, Message: e.Message},
 			RequestID: wire.requestID(),
 		})
 		if err != nil {

@@ -213,15 +213,22 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
 	}
 	var result lbResult
+	held := map[string]bool{}
+	heldNames := map[string]bool{}
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("elb describeLoadBalancers get: %w", getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var lb ELBLoadBalancer
 		if json.Unmarshal(data, &lb) != nil {
 			continue
 		}
+		held[lb.ARN] = true
+		heldNames[lb.Name] = true
 		if len(names) > 0 && !containsStr(names, lb.Name) {
 			continue
 		}
@@ -229,6 +236,15 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 			continue
 		}
 		result.LoadBalancers = append(result.LoadBalancers, lbToItem(lb))
+	}
+	// API_DescribeLoadBalancers publishes LoadBalancerNotFound at 400. Until #1413 a
+	// LoadBalancerArns or Names entry naming nothing matched nothing and the call answered
+	// 200 with a shorter or empty list, as the other describes did before #1370 and #1375.
+	if err := elbRequireEveryARN(arns, held, elbKindLoadBalancer); err != nil {
+		return nil, err
+	}
+	if err := elbRequireEveryARN(names, heldNames, elbKindLoadBalancer); err != nil {
+		return nil, err
 	}
 	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS, result)
 }
@@ -996,7 +1012,8 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 // the one-line description below as its text: API_ModifyTargetGroup, API_RegisterTargets,
 // API_DeregisterTargets and API_DescribeTargetHealth for TargetGroupNotFound; API_ModifyListener and
 // API_DeleteListener for ListenerNotFound; API_SetRulePriorities and API_DeleteRule for RuleNotFound.
-// The three describes add their filters (#1370, #1375): API_DescribeTargetGroups for
+// The describes add their filters (#1370, #1375, #1413): API_DescribeLoadBalancers for
+// LoadBalancerNotFound, API_DescribeTargetGroups for
 // TargetGroupNotFound and LoadBalancerNotFound, API_DescribeListeners for ListenerNotFound and
 // LoadBalancerNotFound, and API_DescribeRules for RuleNotFound and ListenerNotFound.
 // Unlike [elbNotFoundError], which the tagging operations answer naming the ARN, these carry the

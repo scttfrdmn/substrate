@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **IAM success responses carry the request's own ID, a Query 5xx error reads `Receiver`, and ELBv2 `DescribeLoadBalancers` refuses an absent load balancer (#1413).**
+  - **IAM request IDs.** Every IAM success document carried the literal `<RequestId>stub-request-id</RequestId>`. It now carries the request's own ID, the one `Event.RequestID` records, as the other Query plugins have done since #1149. So a replayed IAM success is byte-identical. The deferred stamp from #1241 now covers success documents too, and replaces only the envelope's placeholder.
+  - **Query error `<Type>`.** It was always `Sender`, even on a 5xx. The smithy awsQuery specification defines it as whoever is at fault from the service's perspective. A 5xx, or a modeled server fault, now reads `Receiver`, in both the shared Query writer and IAM's error document. The `x-amzn-query-error` header and the body share one spelling.
+  - **`DescribeLoadBalancers`.** A `Names.member.N` or `LoadBalancerArns.member.N` entry that names no load balancer answered 200 with a shorter list. It is now refused with `LoadBalancerNotFound` (400), as API_DescribeLoadBalancers publishes and as #1370/#1375 do for the other describes. A store read failure in this describe now answers an error instead of being skipped.
+  - **Compatibility.** A Query error at 5xx now reads `<Type>Receiver</Type>`, and a `DescribeLoadBalancers` naming an absent load balancer is now a 400.
+
 ## [v0.124.0] - 2026-10-05
 
 ### Fixed

@@ -51,11 +51,11 @@ func (p *IAMPlugin) now() time.Time {
 func (p *IAMPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches the IAM API operation to the appropriate handler, and stamps
-// the request's id into any error document a handler answered with (see
-// [iamStampErrorRequestID]). The stamp is deferred rather than the switch moved into a
+// the request's id into the document a handler answered with, success or error (see
+// [iamStampRequestID]). The stamp is deferred rather than the switch moved into a
 // helper so the dispatch stays where the operation catalog reads it.
 func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *AWSResponse, err error) {
-	defer func() { resp = iamStampErrorRequestID(resp, ctx) }()
+	defer func() { resp = iamStampRequestID(resp, ctx) }()
 	switch req.Operation {
 	case "CreateUser":
 		return p.createUser(ctx, req)

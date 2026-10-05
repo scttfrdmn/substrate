@@ -1005,11 +1005,13 @@ error document carries the **request's own ID** — the value `Event.RequestID` 
 `replayRequestID` reproduces — exactly as a success envelope does
 ([#1149](https://github.com/scttfrdmn/substrate/issues/1149) for ELB, #866 for the rule). Until
 [#1241](https://github.com/scttfrdmn/substrate/issues/1241) no Query error carried an ID at all, and
-EC2's carried the fixed string `SUBSTRATE`.
+EC2's carried the fixed string `SUBSTRATE`. IAM's success envelopes carried the literal
+`stub-request-id` until [#1413](https://github.com/scttfrdmn/substrate/issues/1413), and now carry
+the request's ID.
 
 | Family | Plugins | Document | Source |
 |---|---|---|---|
-| Query (and REST-XML) | CloudFormation, CloudFront, CloudWatch (Query), ElastiCache, ELB, IAM, RDS, Redshift, Route 53, SNS, STS | `<ErrorResponse><Error><Type>Sender</Type><Code>…</Code><Message>…</Message></Error><RequestId>…</RequestId></ErrorResponse>` | smithy [awsQuery](https://smithy.io/2.0/aws/protocols/aws-query-protocol.html) and [restXml](https://smithy.io/2.0/aws/protocols/aws-restxml-protocol.html) error serialization; the SQS developer guide's [XML error response](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-api-responses.html) quotes the same document from the service |
+| Query (and REST-XML) | CloudFormation, CloudFront, CloudWatch (Query), ElastiCache, ELB, IAM, RDS, Redshift, Route 53, SNS, STS | `<ErrorResponse><Error><Type>Sender</Type><Code>…</Code><Message>…</Message></Error><RequestId>…</RequestId></ErrorResponse>`. `Type` is `Receiver` for a 5xx or a modeled server fault ([#1413](https://github.com/scttfrdmn/substrate/issues/1413)) | smithy [awsQuery](https://smithy.io/2.0/aws/protocols/aws-query-protocol.html) and [restXml](https://smithy.io/2.0/aws/protocols/aws-restxml-protocol.html) error serialization; the SQS developer guide's [XML error response](https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-api-responses.html) quotes the same document from the service |
 | EC2 | EC2 | `<Response><Errors><Error><Code>…</Code><Message>…</Message></Error></Errors><RequestID>…</RequestID></Response>` — plural `Errors`, capital-D `RequestID` | [Error codes for the Amazon EC2 API](https://docs.aws.amazon.com/AWSEC2/latest/APIReference/errors-overview.html), "Example error response"; smithy [ec2Query](https://smithy.io/2.0/aws/protocols/aws-ec2-query-protocol.html) |
 | S3 | S3 | bare `<Error>…<RequestId>SUBSTRATE</RequestId></Error>` | unchanged — see below |
 | JSON, REST-JSON, RPC v2 CBOR | the rest | no request ID in the body | — |

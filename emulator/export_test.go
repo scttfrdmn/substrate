@@ -509,6 +509,12 @@ func MarshalAWSErrorWireForTest(code, message, proto, jsonContentType, service s
 	return MarshalAWSErrorWithRequestIDForTest(code, message, proto, jsonContentType, service, "", queryMode, status)
 }
 
+// IAMErrorResponseForTest exposes iamErrorResponse, the document IAM's handlers answer
+// a refusal with, so a test can pin its fault Type for a given status.
+func IAMErrorResponseForTest(code, message string, status int) []byte {
+	return iamErrorResponse(code, message, status).Body
+}
+
 // MarshalAWSErrorWithRequestIDForTest is [MarshalAWSErrorWireForTest] with the id the
 // request was served under, which the two XML arms render (#1241). An empty requestID
 // is the in-process case, which renders the fixed fallback.
