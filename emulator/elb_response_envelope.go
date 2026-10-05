@@ -55,10 +55,9 @@ import (
 // # The error envelope is not here
 //
 // An ELB error answers the shared Query document `error_protocol.go` builds —
-// `<ErrorResponse><Error><Code>…` — which carries no request ID either, for any of the plugins that
-// share it. No ELB page publishes a sample error response, so what belongs inside an ELB
-// `ErrorResponse` is not readable off an ELB page, and the fix is one envelope shared by every Query
-// plugin rather than an ELB change. Filed as #1241 rather than widened into this one.
+// `<ErrorResponse><Error><Code>…</Error><RequestId>…` — whose RequestId is the same reqCtx.RequestID
+// (#1241). No ELB page publishes a sample error response, so the document is the protocol's, shared by
+// every Query plugin, rather than one read off an ELB page.
 
 // elbResultElement renders an operation's result under `<{Operation}Result>`.
 //

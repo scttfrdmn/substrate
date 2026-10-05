@@ -7,17 +7,22 @@ import (
 	"strings"
 )
 
-// substrateRequestID is the request id every error document carries. It is a fixed
-// string rather than generateRequestID(), which derives from time.Now().UnixNano():
-// an error body has to be byte-identical across two replays of one recorded run, and
-// a caller diffing responses must not see a field that changes on its own.
+// substrateRequestID is the request id an error document carries when there is no
+// request id to carry: an in-process caller of [marshalAWSError] with no request, and
+// every S3 error document, which [s3ErrorResponseWith] builds without a request
+// context. It is a fixed string rather than generateRequestID(), which derives from
+// time.Now().UnixNano(): an error body has to be byte-identical across two replays of
+// one recorded run, and a caller diffing responses must not see a field that changes
+// on its own.
 //
-// A success body cannot take this route, because a caller correlating a response
-// with a log line needs the id to identify the request rather than the emulator.
-// The same rule is met there by recording the value instead: [Event.RequestID]
-// carries the id the request was served under and a replay is dispatched with it,
-// so the bytes reproduce (#866). This constant is the fixed-value half of one rule,
-// not a separate decision.
+// Everywhere else a body carries the request's own id, because a caller correlating
+// a response with a log line needs the id to identify the request rather than the
+// emulator — and a failed call is the one a consumer logs and quotes in a support
+// case. A success body has done so since #866, and a Query or EC2 error document
+// since #1241 ([errorWireContext.RequestID]). The replay rule is met there by
+// recording the value instead: [Event.RequestID] carries the id the request was
+// served under and a replay is dispatched with it, so the bytes reproduce. This
+// constant is the fixed-value half of one rule, not a separate decision.
 const substrateRequestID = "SUBSTRATE"
 
 // awsErrorProtocol identifies how a service serializes an error response on the
@@ -28,7 +33,7 @@ type awsErrorProtocol int
 
 const (
 	// errProtoQueryXML is the AWS Query and REST-XML protocols. The code lives in
-	// an <ErrorResponse><Error><Code> document.
+	// an <ErrorResponse><Error><Code> document, with a <RequestId> beside <Error>.
 	errProtoQueryXML awsErrorProtocol = iota
 
 	// errProtoJSONRPC is the AWS JSON 1.0/1.1 RPC protocol. The code lives in the
@@ -295,12 +300,29 @@ type errorWireContext struct {
 	// QueryMode reports whether the caller sent X-Amzn-Query-Mode: true and therefore
 	// needs the Query protocol's error code in a response header.
 	QueryMode bool
+
+	// RequestID is the id the request was served under — reqCtx.RequestID, the value
+	// [Event.RequestID] records and a replay is dispatched with — which the Query and
+	// EC2 arms render into the document. Empty for a caller with no request, which
+	// renders [substrateRequestID] instead; see requestID.
+	RequestID string
 }
 
-// errorWireContextFor builds the serializer's context from a service and the request
-// that provoked the error. A nil r yields the per-service protocol with no query-mode
-// bridging, which is the right answer for an in-process caller.
-func errorWireContextFor(service string, r *http.Request) errorWireContext {
+// requestID is the id the XML arms render: the request's own, or [substrateRequestID]
+// when the caller had none to give. Never a freshly minted one, which would differ
+// between a recording and its replay (#1241).
+func (w errorWireContext) requestID() string {
+	if w.RequestID == "" {
+		return substrateRequestID
+	}
+	return w.RequestID
+}
+
+// errorWireContextFor builds the serializer's context from a service, the request that
+// provoked the error and the id that request was served under. A nil r yields the
+// per-service protocol with no query-mode bridging, which is the right answer for an
+// in-process caller.
+func errorWireContextFor(service string, r *http.Request, requestID string) errorWireContext {
 	ct := ""
 	if r != nil {
 		ct = r.Header.Get("Content-Type")
@@ -310,6 +332,7 @@ func errorWireContextFor(service string, r *http.Request) errorWireContext {
 		JSONContentType: ct,
 		Service:         service,
 		QueryMode:       detectQueryMode(r),
+		RequestID:       requestID,
 	}
 }
 
@@ -368,13 +391,22 @@ func accessDeniedCodeFor(service, contentType string) string {
 //
 // The shapes are what the AWS SDKs actually parse:
 //
-//   - Query/REST-XML: <ErrorResponse><Error><Code>…</Code></Error></ErrorResponse>
+//   - Query/REST-XML: <ErrorResponse><Error><Type/><Code/><Message/></Error>
+//     <RequestId>…</RequestId></ErrorResponse> — RequestId a sibling of <Error>,
+//     not a child. That is the document the smithy awsQuery and restXml protocol
+//     specifications publish, and the one SQS's developer guide quotes ("Interpreting
+//     Amazon SQS XML API responses"); no Query service's API reference publishes a
+//     sample error response of its own (#1241).
 //   - S3: a bare <Error><Code>…</Code><RequestId>…</RequestId></Error> document
 //     with an XML declaration, built by the same function the S3 plugin uses so
-//     an error the pipeline raises is byte-identical to one the plugin raises.
+//     an error the pipeline raises is byte-identical to one the plugin raises —
+//     which is why it carries [substrateRequestID], as the plugin's own errors do.
 //   - ec2: <Response><Errors><Error><Code>…</Code></Error></Errors>
 //     <RequestID>…</RequestID></Response> — plural <Errors>, and <RequestID> with
 //     a capital D. See errProtoEC2XML for why neither detail is cosmetic.
+//
+// The two request-id elements carry wire.RequestID, the id the request was served
+// under, so a replayed refusal renders the bytes its recording did.
 //   - JSON RPC: {"__type":"Shape","message":"…"} — "__type" is the member
 //     botocore reads; a body carrying only "Code" leaves the SDK to fall back to
 //     the stringified HTTP status.
@@ -427,7 +459,7 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 					Message string `xml:"Message"`
 				}{Code: e.Code, Message: e.Message},
 			},
-			RequestID: substrateRequestID,
+			RequestID: wire.requestID(),
 		})
 		if err != nil {
 			return nil, "text/xml; charset=UTF-8", nil
@@ -494,19 +526,18 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 		return payload, "application/json", map[string]string{"x-amzn-ErrorType": e.Code}
 
 	default:
+		type queryError struct {
+			Type    string `xml:"Type"`
+			Code    string `xml:"Code"`
+			Message string `xml:"Message"`
+		}
 		payload, err := xml.Marshal(struct {
-			XMLName xml.Name `xml:"ErrorResponse"`
-			Error   struct {
-				Type    string `xml:"Type"`
-				Code    string `xml:"Code"`
-				Message string `xml:"Message"`
-			} `xml:"Error"`
+			XMLName   xml.Name   `xml:"ErrorResponse"`
+			Error     queryError `xml:"Error"`
+			RequestID string     `xml:"RequestId"`
 		}{
-			Error: struct {
-				Type    string `xml:"Type"`
-				Code    string `xml:"Code"`
-				Message string `xml:"Message"`
-			}{Type: "Sender", Code: e.Code, Message: e.Message},
+			Error:     queryError{Type: "Sender", Code: e.Code, Message: e.Message},
+			RequestID: wire.requestID(),
 		})
 		if err != nil {
 			return nil, "text/xml; charset=UTF-8", nil

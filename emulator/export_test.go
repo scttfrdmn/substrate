@@ -506,6 +506,13 @@ func MarshalAWSErrorForTest(code, message, proto, jsonContentType string, status
 // a test can pin the shape-ID translation and the query-compatibility header — the two
 // things that depend on which service raised the error and on what the caller asked for.
 func MarshalAWSErrorWireForTest(code, message, proto, jsonContentType, service string, queryMode bool, status int) (body []byte, contentType string, headers map[string]string) {
+	return MarshalAWSErrorWithRequestIDForTest(code, message, proto, jsonContentType, service, "", queryMode, status)
+}
+
+// MarshalAWSErrorWithRequestIDForTest is [MarshalAWSErrorWireForTest] with the id the
+// request was served under, which the two XML arms render (#1241). An empty requestID
+// is the in-process case, which renders the fixed fallback.
+func MarshalAWSErrorWithRequestIDForTest(code, message, proto, jsonContentType, service, requestID string, queryMode bool, status int) (body []byte, contentType string, headers map[string]string) {
 	p := errProtoQueryXML
 	switch proto {
 	case ErrProtoJSONRPCForTest:
@@ -524,6 +531,7 @@ func MarshalAWSErrorWireForTest(code, message, proto, jsonContentType, service s
 		JSONContentType: jsonContentType,
 		Service:         service,
 		QueryMode:       queryMode,
+		RequestID:       requestID,
 	})
 }
 

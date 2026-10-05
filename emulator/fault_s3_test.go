@@ -169,7 +169,7 @@ func TestFault_OtherProtocolsAreUnchanged(t *testing.T) {
 		require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
 		assert.Equal(t, "RequestLimitExceeded", doc.Code)
 		assert.Equal(t, "Request limit exceeded.", doc.Message)
-		assert.Equal(t, "SUBSTRATE", doc.RequestID)
+		assert.True(t, strings.HasPrefix(doc.RequestID, "req-"), "the request's own id, not a fixed one (#1241): %q", doc.RequestID)
 	})
 
 	t.Run("sqs stays json rpc", func(t *testing.T) {
