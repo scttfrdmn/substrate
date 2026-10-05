@@ -20,18 +20,6 @@ const (
 	sseBucketKeyHeader = "x-amz-server-side-encryption-bucket-key-enabled"
 )
 
-// assertNoSSE asserts the response carries none of the family. Absence is checked on
-// the header map rather than through Get, because Get cannot tell an absent header
-// from an empty one and "no encryption" versus "encryption with an empty value" is
-// exactly the distinction #492's fourth criterion exists to preserve.
-func assertNoSSE(t *testing.T, got http.Header, context string) {
-	t.Helper()
-	for _, h := range []string{sseAlgorithmHeader, sseKeyIDHeader, sseBucketKeyHeader} {
-		_, present := got[http.CanonicalHeaderKey(h)]
-		assert.False(t, present, "%s: %s must be absent, not empty", context, h)
-	}
-}
-
 // getStoredObject reads an object's stored metadata straight out of the state store,
 // bypassing every response path.
 //
@@ -118,12 +106,12 @@ func TestS3_SSE_KMSKeyIDVerbatim(t *testing.T) {
 	}
 }
 
-// TestS3_SSE_AlgorithmValuesRecordedVerbatim asserts each documented algorithm token
-// is recorded as sent. The valid values are AES256, aws:fsx, aws:kms and aws:kms:dsse;
-// substrate validates none of them, since rejecting an unrecognized token is #493's,
-// and the two colon-bearing tokens are the ones a naive normalizer would mangle.
+// TestS3_SSE_AlgorithmValuesRecordedVerbatim asserts each published algorithm token is
+// recorded as sent. The Valid Values are AES256, aws:fsx, aws:backup, aws:kms and
+// aws:kms:dsse; any other is refused (TestS3_SSE_RefusesTheFourInvalidCombinations), and
+// the colon-bearing tokens are the ones a naive normalizer would mangle.
 func TestS3_SSE_AlgorithmValuesRecordedVerbatim(t *testing.T) {
-	for _, algorithm := range []string{"AES256", "aws:fsx", "aws:kms", "aws:kms:dsse"} {
+	for _, algorithm := range []string{"AES256", "aws:fsx", "aws:backup", "aws:kms", "aws:kms:dsse"} {
 		t.Run(algorithm, func(t *testing.T) {
 			srv, _ := newS3TestServer(t)
 			require.Equal(t, http.StatusOK,
@@ -182,46 +170,60 @@ func TestS3_SSE_BucketKeyEnabled(t *testing.T) {
 	}
 }
 
-// TestS3_SSE_AbsentNotEmitted asserts an object written with no SSE headers reads back
-// with none. This is the regression guard on every object written before #492 existed,
-// and the property that makes recording worth anything: "no header sent" has to stay
-// distinguishable from "header sent". A default applied here would erase it, which is
-// why bucket default encryption is #493's decision to make deliberately.
-func TestS3_SSE_AbsentNotEmitted(t *testing.T) {
+// assertSSES3Default asserts the response reports the SSE-S3 default every bucket has:
+// AES256, with no key ID and no Bucket Key header.
+func assertSSES3Default(t *testing.T, got http.Header, context string) {
+	t.Helper()
+	assert.Equal(t, "AES256", got.Get(sseAlgorithmHeader), "%s: a write naming nothing takes the SSE-S3 default", context)
+	for _, h := range []string{sseKeyIDHeader, sseBucketKeyHeader} {
+		_, present := got[http.CanonicalHeaderKey(h)]
+		assert.False(t, present, "%s: %s must be absent under SSE-S3", context, h)
+	}
+}
+
+// TestS3_SSE_NamingNothingResolvesToTheSSES3Default asserts an object written with no SSE
+// headers reads back as SSE-S3. Until #493 it read back with none, which #492 kept
+// deliberately so that "no header sent" stayed distinguishable. #493 reverses that, also
+// deliberately: "By default, all buckets have a default encryption configuration that uses
+// server-side encryption with Amazon S3 managed keys (SSE-S3)", so a real bucket never
+// reports an object as unencrypted. The distinction a test can still draw is between the
+// encryption it chose and the one it inherited; see TestS3_SSE_BucketDefault*.
+func TestS3_SSE_NamingNothingResolvesToTheSSES3Default(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	require.Equal(t, http.StatusOK,
 		s3Request(t, srv, http.MethodPut, "/sse-bare", nil, nil).Code)
 
 	pw := s3Request(t, srv, http.MethodPut, "/sse-bare/obj", []byte("plain"), nil)
 	require.Equal(t, http.StatusOK, pw.Code)
-	assertNoSSE(t, pw.Header(), "PutObject")
+	assertSSES3Default(t, pw.Header(), "PutObject")
 
 	gw := s3Request(t, srv, http.MethodGet, "/sse-bare/obj", nil, nil)
 	require.Equal(t, http.StatusOK, gw.Code)
-	assertNoSSE(t, gw.Header(), "GetObject")
+	assertSSES3Default(t, gw.Header(), "GetObject")
 
 	hw := s3Request(t, srv, http.MethodHead, "/sse-bare/obj", nil, nil)
 	require.Equal(t, http.StatusOK, hw.Code)
-	assertNoSSE(t, hw.Header(), "HeadObject")
+	assertSSES3Default(t, hw.Header(), "HeadObject")
 }
 
-// TestS3_SSE_KeyIDWithoutAlgorithmNotEmitted asserts a key ID sent with no algorithm
-// emits nothing. There is no such thing as a KMS key ID on an unencrypted object, and
-// #493 rejects the combination outright; until then the write must not report an
-// encryption the caller never named.
-func TestS3_SSE_KeyIDWithoutAlgorithmNotEmitted(t *testing.T) {
+// TestS3_SSE_KeyIDWithoutAKMSAlgorithmIsRefused asserts a key ID and a Bucket Key sent
+// with no algorithm, in a bucket whose default is SSE-S3, are refused rather than recorded.
+// Until #493 the write succeeded and reported no encryption; now the combination resolves
+// to AES256, where neither header applies, so it answers InvalidArgument/400 and writes
+// nothing.
+func TestS3_SSE_KeyIDWithoutAKMSAlgorithmIsRefused(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	require.Equal(t, http.StatusOK,
 		s3Request(t, srv, http.MethodPut, "/sse-orphan", nil, nil).Code)
-	require.Equal(t, http.StatusOK,
-		s3Request(t, srv, http.MethodPut, "/sse-orphan/obj", []byte("x"), map[string]string{
-			sseKeyIDHeader:     "alias/orphan",
-			sseBucketKeyHeader: "true",
-		}).Code)
+	w := s3Request(t, srv, http.MethodPut, "/sse-orphan/obj", []byte("x"), map[string]string{
+		sseKeyIDHeader:     "alias/orphan",
+		sseBucketKeyHeader: "true",
+	})
+	require.Equal(t, http.StatusBadRequest, w.Code, "%s", w.Body.String())
+	assert.Contains(t, w.Body.String(), "<Code>InvalidArgument</Code>")
 
 	hw := s3Request(t, srv, http.MethodHead, "/sse-orphan/obj", nil, nil)
-	require.Equal(t, http.StatusOK, hw.Code)
-	assertNoSSE(t, hw.Header(), "HeadObject")
+	assert.Equal(t, http.StatusNotFound, hw.Code, "a refused write stores nothing")
 }
 
 // TestS3_SSE_AlgorithmWithoutKeyIDEmitsAlgorithmOnly asserts an SSE-KMS write naming
@@ -269,11 +271,11 @@ func TestS3_SSE_StoredOnObject(t *testing.T) {
 	assert.True(t, obj.BucketKeyEnabled)
 }
 
-// TestS3_SSE_StoredAbsentOnUnencryptedObject asserts an unencrypted write stores the
-// zero value, so an object written before this field existed reads back with no
-// encryption rather than a fabricated default. That is the state half of
-// TestS3_SSE_AbsentNotEmitted, and the reason the fields are omitempty.
-func TestS3_SSE_StoredAbsentOnUnencryptedObject(t *testing.T) {
+// TestS3_SSE_StoredResolvedOnAnObjectNamingNothing asserts a write naming no encryption
+// stores the encryption it resolved to, AES256, rather than the zero value. The state half
+// of TestS3_SSE_NamingNothingResolvesToTheSSES3Default: the resolution happens once, at
+// write time, so a later change to the bucket default does not rewrite the object, as in S3.
+func TestS3_SSE_StoredResolvedOnAnObjectNamingNothing(t *testing.T) {
 	state := emulator.NewMemoryStateManager()
 	srv, _ := newS3TestServerWithFS(t, state)
 	require.Equal(t, http.StatusOK,
@@ -282,9 +284,31 @@ func TestS3_SSE_StoredAbsentOnUnencryptedObject(t *testing.T) {
 		s3Request(t, srv, http.MethodPut, "/sse-state-bare/obj", []byte("x"), nil).Code)
 
 	obj := getStoredObject(t, state, "sse-state-bare", "obj")
-	assert.Empty(t, obj.Algorithm)
+	assert.Equal(t, "AES256", obj.Algorithm)
 	assert.Empty(t, obj.KMSKeyID)
 	assert.False(t, obj.BucketKeyEnabled)
+}
+
+// TestS3_SSE_ARecordWrittenBeforeTheDefaultReadsAsSSES3 asserts a stored object with no
+// algorithm, as every object written before #493 is, reads back as SSE-S3 rather than as
+// unencrypted, the encryption S3 reports for an object that names none.
+func TestS3_SSE_ARecordWrittenBeforeTheDefaultReadsAsSSES3(t *testing.T) {
+	state := emulator.NewMemoryStateManager()
+	srv, _ := newS3TestServerWithFS(t, state)
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPut, "/sse-legacy", nil, nil).Code)
+	require.Equal(t, http.StatusOK,
+		s3Request(t, srv, http.MethodPut, "/sse-legacy/obj", []byte("x"), nil).Code)
+
+	obj := getStoredObject(t, state, "sse-legacy", "obj")
+	obj.Algorithm = ""
+	data, err := json.Marshal(obj)
+	require.NoError(t, err)
+	require.NoError(t, state.Put(t.Context(), "s3", "object:sse-legacy/obj", data))
+
+	hw := s3Request(t, srv, http.MethodHead, "/sse-legacy/obj", nil, nil)
+	require.Equal(t, http.StatusOK, hw.Code)
+	assertSSES3Default(t, hw.Header(), "HeadObject of a pre-#493 record")
 }
 
 // TestS3_SSE_NonCanonicalHeaderNames asserts the headers are read case-insensitively.
@@ -372,17 +396,17 @@ func TestS3_SSE_MultipartRoundTrip(t *testing.T) {
 	assert.Equal(t, "true", hw.Header().Get(sseBucketKeyHeader), "HeadObject after Complete")
 }
 
-// TestS3_SSE_MultipartAbsentNotEmitted asserts a multipart object created without
-// encryption emits none, so the carry through Complete cannot smuggle in empty
-// headers.
-func TestS3_SSE_MultipartAbsentNotEmitted(t *testing.T) {
+// TestS3_SSE_MultipartNamingNothingResolvesToTheSSES3Default asserts a multipart upload
+// created without encryption takes the bucket default at Create, and that the carry
+// through Complete reports it rather than nothing.
+func TestS3_SSE_MultipartNamingNothingResolvesToTheSSES3Default(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	require.Equal(t, http.StatusOK,
 		s3Request(t, srv, http.MethodPut, "/sse-mpu-bare", nil, nil).Code)
 
 	iw := s3Request(t, srv, http.MethodPost, "/sse-mpu-bare/big?uploads", nil, nil)
 	require.Equal(t, http.StatusOK, iw.Code)
-	assertNoSSE(t, iw.Header(), "CreateMultipartUpload")
+	assertSSES3Default(t, iw.Header(), "CreateMultipartUpload")
 	var ir struct {
 		UploadID string `xml:"UploadId"`
 	}
@@ -391,21 +415,17 @@ func TestS3_SSE_MultipartAbsentNotEmitted(t *testing.T) {
 	etag := uploadPart(t, srv, "sse-mpu-bare", "big", ir.UploadID, 1, []byte("body"))
 	cw := s3Request(t, srv, http.MethodPost, "/sse-mpu-bare/big?uploadId="+ir.UploadID, completeBody(etag), nil)
 	require.Equal(t, http.StatusOK, cw.Code)
-	assertNoSSE(t, cw.Header(), "CompleteMultipartUpload")
+	assertSSES3Default(t, cw.Header(), "CompleteMultipartUpload")
 
 	hw := s3Request(t, srv, http.MethodHead, "/sse-mpu-bare/big", nil, nil)
 	require.Equal(t, http.StatusOK, hw.Code)
-	assertNoSSE(t, hw.Header(), "HeadObject after Complete")
+	assertSSES3Default(t, hw.Header(), "HeadObject after Complete")
 }
 
-// TestS3_SSE_CopyObjectDoesNotInherit pins the scope boundary against #493: a copy
-// records no encryption, not the source's.
-//
-// A copy's encryption comes from the request and, failing that, from the bucket
-// default — never from the source. Neither of those exists yet, so a copy reports
-// none, which is a stated gap rather than a wrong answer. The test is here so #493
-// changes this deliberately: silently inheriting is the live bug #475 found twice, and
-// it would otherwise be the easiest thing for a later change to introduce.
+// TestS3_SSE_CopyObjectDoesNotInherit asserts a copy naming no encryption takes the
+// destination bucket's default, not the source's (#493). Silently inheriting is the live
+// bug #475's reporter found twice. Before #493 a copy recorded no encryption at all, a
+// stated gap; it now reports SSE-S3, the default of a bucket with none configured.
 func TestS3_SSE_CopyObjectDoesNotInherit(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	require.Equal(t, http.StatusOK,
@@ -423,7 +443,7 @@ func TestS3_SSE_CopyObjectDoesNotInherit(t *testing.T) {
 
 	hw := s3Request(t, srv, http.MethodHead, "/sse-copy/dst", nil, nil)
 	require.Equal(t, http.StatusOK, hw.Code)
-	assertNoSSE(t, hw.Header(), "CopyObject destination")
+	assertSSES3Default(t, hw.Header(), "CopyObject destination")
 
 	sw := s3Request(t, srv, http.MethodHead, "/sse-copy/src", nil, nil)
 	require.Equal(t, http.StatusOK, sw.Code)

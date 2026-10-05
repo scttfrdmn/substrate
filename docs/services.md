@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1039 operations**. This
+Substrate ships **67 built-in service plugins** routing **1042 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -70,7 +70,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 49 | Redshift | `redshift` | Query | 10 |
 | 50 | Redshift Data API | `redshift-data` | JSON | 3 |
 | 51 | Route 53 | `route53` | REST/XML | 6 |
-| 52 | S3 | `s3` | REST/XML | 47 |
+| 52 | S3 | `s3` | REST/XML | 50 |
 | 53 | SageMaker | `sagemaker` | JSON | 10 |
 | 54 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
 | 55 | Secrets Manager | `secretsmanager` | JSON | 12 |
@@ -5194,7 +5194,7 @@ STS operations are free.
 | HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
 | DeleteObject | Fires S3 notifications if configured |
 | DeleteObjects | `POST /{bucket}?delete`; deletes each `<Object>` through the same path as `DeleteObject`, so notifications, versioning and delete markers behave identically; honours `<Quiet>`; an `<Object>` with an empty `<Key>` is skipped rather than reported; a key that fails is reported per-key as `<Error><Code>InternalError</Code>` and does not abort the rest |
-| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); records **no** encryption, deliberately — see [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
+| CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); takes its encryption from the request or the **destination** bucket's default, never the source's — see [Copying objects](#copying-objects) and [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; refuses an undecodable `continuation-token` with `400 InvalidArgument` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one); emits `<StorageClass>` per object |
 | ListObjectVersions | `GET /{bucket}?versions`; honours `prefix`, and reports every version in one response — `max-keys` is echoed as 1000 and `key-marker` / `version-id-marker` are not read, so the result is never truncated. Keys come out lexicographically and versions within a key newest-first; a key in a bucket that was never versioned is reported as one version with `VersionId` `null`; a delete marker is reported under `<DeleteMarker>` rather than `<Version>` |
@@ -5231,6 +5231,9 @@ STS operations are free.
 | PutBucketCors | `PUT /{bucket}?cors`; records the `CORSConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse, has no `CORSRule`, or has a rule without `AllowedMethod` or `AllowedOrigin` — see [CORS configuration](#cors-configuration) |
 | GetBucketCors | `GET /{bucket}?cors`; answers the recorded rules, every `CORSRule` member round-tripping; `404 NoSuchCORSConfiguration` when none is set, which is not an empty configuration — see [CORS configuration](#cors-configuration) |
 | DeleteBucketCors | `DELETE /{bucket}?cors`; `204`, idempotent, and removes only the configuration, never the bucket — see [CORS configuration](#cors-configuration) |
+| PutBucketEncryption | `PUT /{bucket}?encryption`; records the default `ServerSideEncryptionConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse or has no `Rule`, `400 InvalidArgument` for an unpublished `SSEAlgorithm` or a `KMSMasterKeyID` beside a non-KMS algorithm — see [Bucket default encryption](#bucket-default-encryption) |
+| GetBucketEncryption | `GET /{bucket}?encryption`; answers the recorded configuration, or the SSE-S3 default every bucket has — see [Bucket default encryption](#bucket-default-encryption) |
+| DeleteBucketEncryption | `DELETE /{bucket}?encryption`; `204`, idempotent, resets the default to SSE-S3 and never deletes the bucket — see [Bucket default encryption](#bucket-default-encryption) |
 | SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
 
 ### Listing buckets
@@ -5405,9 +5408,68 @@ Three headers are recorded on write and returned on every read:
 
 | Header | Recorded | Echoed |
 |---|---|---|
-| `x-amz-server-side-encryption` | Verbatim — `AES256`, `aws:fsx`, `aws:kms`, `aws:kms:dsse`, or any other token | Whenever set |
-| `x-amz-server-side-encryption-aws-kms-key-id` | Verbatim, in whichever form was sent | Only alongside an algorithm, and only when a key was named |
+| `x-amz-server-side-encryption` | Verbatim, one of the published `AES256`, `aws:fsx`, `aws:backup`, `aws:kms`, `aws:kms:dsse` | Always — every object has an algorithm, `AES256` when nothing else applied |
+| `x-amz-server-side-encryption-aws-kms-key-id` | Verbatim, in whichever form was sent | Only alongside a KMS algorithm, and only when a key was named |
 | `x-amz-server-side-encryption-bucket-key-enabled` | As a boolean; only `true` (any case) enables it | Only when enabled |
+
+#### How a write resolves its encryption
+
+Every write resolves the encryption it records **once, at write time**: from the request when it
+names an algorithm, otherwise from the **destination bucket's default**
+([#493](https://github.com/scttfrdmn/substrate/issues/493)). Nothing else contributes, and a later
+change to the bucket default does not rewrite objects already written.
+
+- **Every bucket has a default.** "By default, all buckets have a default encryption configuration
+  that uses server-side encryption with Amazon S3 managed keys (SSE-S3)." So a bucket with nothing
+  configured resolves a write naming nothing to `AES256`. That reverses #492's earlier rule that an
+  object written with no headers echoes none, deliberately: a real bucket never reports an object as
+  unencrypted. A record stored before #493, with no algorithm, reads back as `AES256` for the same
+  reason. What a test can still tell apart is the encryption it *chose* from the one it *inherited*:
+  set a bucket default, write without headers, and read the default back.
+- **A request naming an algorithm takes nothing from the default.** `aws:kms` with no key is the AWS
+  managed key and reports no key ID, as `PutObject`'s page states, even when the bucket default names
+  a key. The one exception is the S3 Bucket Key flag: a request naming `aws:kms` without the flag, in
+  a bucket whose default is SSE-KMS, takes the default's `BucketKeyEnabled`.
+- **`CopyObject` takes the destination bucket's default, never the source's.** See
+  [Copying objects](#copying-objects).
+- **Multipart:** `CreateMultipartUpload` resolves the encryption for the whole upload. `UploadPart`
+  and `UploadPartCopy` echo it and refuse to restate it, and `CompleteMultipartUpload` reports it on
+  the assembled object.
+
+#### Bucket default encryption
+
+`PutBucketEncryption`, `GetBucketEncryption` and `DeleteBucketEncryption` round-trip a bucket's
+`ServerSideEncryptionConfiguration`: each `Rule`'s `ApplyServerSideEncryptionByDefault`
+(`SSEAlgorithm`, `KMSMasterKeyID`), `BucketKeyEnabled` and `BlockedEncryptionTypes`.
+
+- `GetBucketEncryption` on a bucket with nothing configured answers the SSE-S3 default
+  (`AES256`, `BucketKeyEnabled` `false`), not the `ServerSideEncryptionConfigurationNotFoundError`
+  S3 answered before January 2023, which therefore has no site.
+- `DeleteBucketEncryption` answers 204 and "resets the default encryption for the bucket" to SSE-S3.
+  It is idempotent.
+- All three answer `NoSuchBucket`/404 for a missing bucket, and `DeleteBucket` removes the
+  configuration with the bucket, so a re-created bucket does not inherit it.
+- The pages' examples spell the key member `KMSKeyID`; its name is `KMSMasterKeyID`. Both are
+  accepted, and `KMSMasterKeyID` is answered.
+- **Recorded, not enforced:** `BlockedEncryptionTypes`, because SSE-C is out of scope. As in S3, the
+  KMS key ID is not validated ("Amazon S3 doesn't validate the KMS key ID provided in
+  PutBucketEncryption requests").
+
+#### What is refused
+
+| Request | Answer | Provenance |
+|---|---|---|
+| `x-amz-server-side-encryption` outside the published values (including a case variant such as `aes256`) | `400 InvalidArgument` | `API_CopyObject`: "Unrecognized or unsupported values won't write a destination object and will receive a 400 Bad Request response". The code is #493's; the message is substrate's own |
+| A key ID beside an algorithm other than `aws:kms` or `aws:kms:dsse` | `400 InvalidArgument` | `PutObject`'s page names those two as the ones the header applies to. Code from #493; message substrate's own |
+| `x-amz-server-side-encryption-bucket-key-enabled: true` beside an algorithm other than `aws:kms` | `400 InvalidArgument` | An S3 Bucket Key serves SSE-KMS only. Code from #493; message substrate's own |
+| `UploadPart` or `UploadPartCopy` carrying an SSE-S3/SSE-KMS header | `400 InvalidArgument` | `API_UploadPart`: "you only need to specify the server-side encryption parameters in the initial Initiate Multipart request", and its Request Syntax carries only the SSE-C headers. Code from #493; message substrate's own |
+| `PutBucketEncryption` with a body that does not parse, or no `Rule` | `400 MalformedXML` | S3's code for XML that "did not validate against our published schema" |
+| `PutBucketEncryption` with an unpublished `SSEAlgorithm`, or a `KMSMasterKeyID` beside one that is not `aws:kms`/`aws:kms:dsse` | `400 InvalidArgument` | The member's Valid Values and its "allowed if and only if"; code and message substrate's own |
+
+The key-ID and Bucket Key rules are evaluated against the algorithm the write **resolves** to, so a
+request naming only a key ID is accepted in a bucket whose default is SSE-KMS, and refused in one
+whose default is SSE-S3. No capture corroborates S3's wording for any of these messages (#487), so
+each is substrate's own text, and the code is the one #493 names.
 
 **No cryptography is performed.** The object body is stored exactly as it arrived.
 Encryption at rest is not observable through an API call, but *the encryption S3
@@ -5417,17 +5479,15 @@ with encryption read back byte-identical to one written without it: a test could
 assert on what its own request carried, which proves the line that filled in the
 request and nothing about the stored object.
 
-They are recorded on `PutObject` and on `CreateMultipartUpload`, and echoed on those
-two responses plus `GetObject`, `HeadObject` and `CompleteMultipartUpload`.
-`CreateMultipartUpload` is the only place a multipart upload's encryption can be
-supplied — Complete's request accepts only the SSE-C headers — so it is fixed for the
-whole upload at creation and carried onto the assembled object.
+They are recorded on `PutObject`, `CopyObject` and `CreateMultipartUpload`, and echoed on those
+responses plus `GetObject`, `HeadObject`, `UploadPart`, `UploadPartCopy` and
+`CompleteMultipartUpload`. `CreateMultipartUpload` is the only place a multipart upload's encryption
+can be supplied — Complete's request accepts only the SSE-C headers — so it is fixed for the whole
+upload at creation and carried onto the assembled object.
 
-An absent header is **absent on the response, not `false` or empty**. A write that
-never mentioned the bucket-key header produces no bucket-key header, since an SDK
-distinguishing a nil `*bool` from a `false` one would otherwise report the wrong
-answer. The same rule keeps "no encryption named" distinguishable from "encryption
-named", which is the observation that makes recording worth anything.
+An absent key ID or Bucket Key is **absent on the response, not `false` or empty**. A write that
+never enabled the Bucket Key produces no Bucket Key header, since an SDK distinguishing a nil
+`*bool` from a `false` one would otherwise report the wrong answer.
 
 **The KMS key ID round-trips verbatim, which is a deliberate divergence.** KMS accepts
 four forms — a bare UUID, `alias/name`, a key ARN and an alias ARN — and real S3
@@ -5438,27 +5498,8 @@ aliases and cross-account ARNs to answer a question no consumer has asked. The
 difference is observable: if key resolution is ever modeled, this decision has to be
 revisited rather than silently overtaken.
 
-Nothing is validated. A key ID sent with `AES256`, a bucket-key flag without
-`aws:kms`, and an unrecognized algorithm token are all accepted and recorded, where
-real S3 answers `400 InvalidArgument`; `UploadPart` restating an encryption header is
-likewise accepted rather than refused. Those four rejections are
-[#493](https://github.com/scttfrdmn/substrate/issues/493).
-
-Also out of scope there, and worth knowing before relying on this:
-
-- **Bucket default encryption.** `PutBucketEncryption` and its siblings are not
-  modeled, so a write naming no encryption records none. Real S3 has applied SSE-S3 to
-  every new object unconditionally since January 2023, so a real bucket never stores an
-  unencrypted object — modeling that default would remove the absent-versus-set
-  distinction above, which is why it is a deliberate decision rather than a side effect.
-- **`CopyObject` records no encryption at all.** A copy's encryption comes from the
-  request and, failing that, from the bucket default — never from the source. Neither
-  exists yet, so substrate reports none for a copy rather than inheriting the source's.
-  That is a stated gap, not a wrong answer: silently inheriting would hide exactly the
-  bug this half exists to expose, where an in-place metadata copy or a storage-tier
-  transition moves an SSE-KMS object off its customer managed key.
-- **SSE-C** (`x-amz-server-side-encryption-customer-*`) is out of scope entirely; its
-  key material would have to be discarded rather than recorded.
+**SSE-C** (`x-amz-server-side-encryption-customer-*`) is out of scope entirely; its key material
+would have to be discarded rather than recorded.
 
 ### Copying objects
 
@@ -5504,6 +5545,16 @@ what makes an in-place `CopyObject` onto an object's own key with a new
 `x-amz-storage-class` the tier-transition mechanism, and it is also the trap: a
 transition that means to change only the class must restate the metadata it wants to
 keep if it uses `REPLACE`.
+
+**Nor is encryption, and here the asymmetry runs the other way from `x-amz-metadata-directive`.**
+Metadata defaults to the source's (`COPY`); encryption never does. "If you don't specify encryption
+information in your copy request, the encryption setting of the target object is set to the default
+encryption configuration of the destination bucket" — so an in-place copy for a metadata change, or a
+storage-tier transition, moves an SSE-KMS object off its customer managed key and onto the bucket
+default, `AES256` unless one is configured, unless the request restates the encryption
+([#493](https://github.com/scttfrdmn/substrate/issues/493), the bug #475's reporter found twice).
+The copy's response reports the encryption the destination recorded. See
+[Server-side encryption](#server-side-encryption).
 
 Every request-derived value — storage class, both directives, both precondition sets
 — is resolved before the first write, so a rejected copy leaves the destination
@@ -6257,11 +6308,12 @@ therefore warns earlier than the gate would refuse.
 
 Every published S3 sub-resource that substrate does not implement is named for the operation it is,
 and refused with `NotImplemented`/501. That is the code S3 publishes for functionality a server does
-not implement. It covers `?encryption`, `?website`, `?location`, `?logging`,
+not implement. It covers `?website`, `?location`, `?logging`,
 `?ownershipControls`, `?replication`, the four id-keyed configuration families (analytics, inventory,
 metrics, intelligent-tiering), object lock, the metadata-table configurations and `CreateSession` at
 bucket level. At object level it covers `?retention`, `?legal-hold`, `?attributes`, `?torrent` and
-`?restore`. The tables are in `emulator/s3_subresources.go`.
+`?restore`. The tables are in `emulator/s3_subresources.go`. `?cors` left them with #1278 and
+`?encryption` with [#493](https://github.com/scttfrdmn/substrate/issues/493).
 
 Until [#1349](https://github.com/scttfrdmn/substrate/issues/1349), the router reached each method's
 default by *absence*, so an unrouted sub-resource became a different, routed operation:

@@ -39,7 +39,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	"GET": {
 		"accelerate":            {name: "GetBucketAccelerateConfiguration"},
 		"analytics":             {name: "GetBucketAnalyticsConfiguration", listName: "ListBucketAnalyticsConfigurations"},
-		"encryption":            {name: "GetBucketEncryption"},
 		"intelligent-tiering":   {name: "GetBucketIntelligentTieringConfiguration", listName: "ListBucketIntelligentTieringConfigurations"},
 		"inventory":             {name: "GetBucketInventoryConfiguration", listName: "ListBucketInventoryConfigurations"},
 		"location":              {name: "GetBucketLocation"},
@@ -58,7 +57,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	"PUT": {
 		"accelerate":             {name: "PutBucketAccelerateConfiguration"},
 		"analytics":              {name: "PutBucketAnalyticsConfiguration"},
-		"encryption":             {name: "PutBucketEncryption"},
 		"intelligent-tiering":    {name: "PutBucketIntelligentTieringConfiguration"},
 		"inventory":              {name: "PutBucketInventoryConfiguration"},
 		"logging":                {name: "PutBucketLogging"},
@@ -73,7 +71,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	},
 	"DELETE": {
 		"analytics":             {name: "DeleteBucketAnalyticsConfiguration"},
-		"encryption":            {name: "DeleteBucketEncryption"},
 		"intelligent-tiering":   {name: "DeleteBucketIntelligentTieringConfiguration"},
 		"inventory":             {name: "DeleteBucketInventoryConfiguration"},
 		"metadataConfiguration": {name: "DeleteBucketMetadataConfiguration"},

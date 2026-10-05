@@ -20,7 +20,6 @@ import (
 // route. Each one used to reach DeleteBucket.
 var s3UnroutedBucketDeletes = map[string]string{
 	"analytics":             "DeleteBucketAnalyticsConfiguration",
-	"encryption":            "DeleteBucketEncryption",
 	"intelligent-tiering":   "DeleteBucketIntelligentTieringConfiguration",
 	"inventory":             "DeleteBucketInventoryConfiguration",
 	"metadataConfiguration": "DeleteBucketMetadataConfiguration",
@@ -100,11 +99,9 @@ func TestS3Subresource_UnroutedRequestsAreRefused(t *testing.T) {
 		op, method, path string
 	}{
 		{"GetBucketLocation", http.MethodGet, "/" + bucket + "?location"},
-		{"GetBucketEncryption", http.MethodGet, "/" + bucket + "?encryption"},
 		{"ListBucketInventoryConfigurations", http.MethodGet, "/" + bucket + "?inventory"},
 		{"GetBucketInventoryConfiguration", http.MethodGet, "/" + bucket + "?inventory&id=one"},
 		{"CreateSession", http.MethodGet, "/" + bucket + "?session"},
-		{"PutBucketEncryption", http.MethodPut, "/" + bucket + "?encryption"},
 		{"PutBucketWebsite", http.MethodPut, "/" + bucket + "?website"},
 		{"CreateBucketMetadataTableConfiguration", http.MethodPost, "/" + bucket + "?metadataTable"},
 		{"GetObjectAttributes", http.MethodGet, "/" + bucket + "/key?attributes"},
@@ -131,7 +128,7 @@ func TestS3Subresource_ResolvesTheRealOperationName(t *testing.T) {
 		method, target, want string
 	}{
 		// Unrouted: named for what they are.
-		{http.MethodDelete, "/b?encryption", "DeleteBucketEncryption"},
+		{http.MethodDelete, "/b?website", "DeleteBucketWebsite"},
 		{http.MethodGet, "/b?location", "GetBucketLocation"},
 		{http.MethodGet, "/b?metrics", "ListBucketMetricsConfigurations"},
 		{http.MethodGet, "/b?metrics&id=m1", "GetBucketMetricsConfiguration"},
@@ -141,6 +138,10 @@ func TestS3Subresource_ResolvesTheRealOperationName(t *testing.T) {
 		{http.MethodDelete, "/b?cors=", "DeleteBucketCors"},
 		{http.MethodGet, "/b?cors", "GetBucketCors"},
 		{http.MethodPut, "/b?cors", "PutBucketCors"},
+		// ?encryption is routed since #493, and an SDK's "?encryption=" resolves the same.
+		{http.MethodDelete, "/b?encryption=", "DeleteBucketEncryption"},
+		{http.MethodGet, "/b?encryption", "GetBucketEncryption"},
+		{http.MethodPut, "/b?encryption", "PutBucketEncryption"},
 		{http.MethodDelete, "/b", "DeleteBucket"},
 		{http.MethodDelete, "/b?policy", "DeleteBucketPolicy"},
 		{http.MethodDelete, "/b?publicAccessBlock", "DeletePublicAccessBlock"},
