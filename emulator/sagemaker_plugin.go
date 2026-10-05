@@ -92,6 +92,10 @@ type SageMakerApp struct {
 	// Status is the app status (InService, Deleted).
 	Status string `json:"Status"`
 
+	// CreationTime is the epoch-seconds instant the app was created, which ListApps sorts by. An app
+	// recorded before #1400 has none and sorts first.
+	CreationTime float64 `json:"CreationTime,omitempty"`
+
 	// AccountID is the AWS account that owns the app.
 	AccountID string `json:"AccountID"`
 
@@ -128,45 +132,6 @@ func (p *SageMakerPlugin) listDomains() (*AWSResponse, error) {
 	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{"Domains": []interface{}{}})
 }
 
-func (p *SageMakerPlugin) listApps(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var body struct {
-		DomainIDEquals        string `json:"DomainIdEquals"`
-		UserProfileNameEquals string `json:"UserProfileNameEquals"`
-	}
-	// Both members are filters, so ListApps accepts no body at all — hence the length check, which every
-	// other list operation in the tree already had and this one did not. A body that is present and will
-	// not parse is refused (#1007); an absent one still lists everything.
-	if len(req.Body) > 0 {
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			return nil, sagemakerInvalidBody()
-		}
-	}
-
-	goCtx := context.Background()
-	keysKey := "app_keys:" + ctx.AccountID + "/" + ctx.Region
-	keys, _ := loadStringIndex(goCtx, p.state, sagemakerNamespace, keysKey)
-
-	apps := make([]SageMakerApp, 0)
-	for _, k := range keys {
-		data, err := p.state.Get(goCtx, sagemakerNamespace, k)
-		if err != nil || data == nil {
-			continue
-		}
-		var app SageMakerApp
-		if json.Unmarshal(data, &app) != nil {
-			continue
-		}
-		if body.DomainIDEquals != "" && app.DomainID != body.DomainIDEquals {
-			continue
-		}
-		if body.UserProfileNameEquals != "" && app.UserProfileName != body.UserProfileNameEquals {
-			continue
-		}
-		apps = append(apps, app)
-	}
-	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{"Apps": sagemakerAppsToDetails(apps)})
-}
-
 func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		AppName         string `json:"AppName"`
@@ -190,6 +155,7 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 		DomainID:        body.DomainID,
 		UserProfileName: body.UserProfileName,
 		Status:          "InService",
+		CreationTime:    float64(p.tc.Now().UnixNano()) / 1e9,
 		AccountID:       ctx.AccountID,
 		Region:          ctx.Region,
 	}
@@ -255,7 +221,11 @@ func (p *SageMakerPlugin) describeApp(ctx *RequestContext, req *AWSRequest) (*AW
 	appKey := fmt.Sprintf("app:%s/%s/%s/%s/%s/%s",
 		ctx.AccountID, ctx.Region, body.DomainID, body.UserProfileName, body.AppType, body.AppName)
 	data, err := p.state.Get(goCtx, sagemakerNamespace, appKey)
-	if err != nil || data == nil {
+	if err != nil {
+		// A store fault is not an absent app (#1400): ResourceNotFound would tell the caller to recreate it.
+		return nil, fmt.Errorf("describeApp: get: %w", err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "ResourceNotFound", Message: "app " + body.AppName + " not found", HTTPStatus: http.StatusBadRequest}
 	}
 	var app SageMakerApp
@@ -320,7 +290,10 @@ func (p *SageMakerPlugin) describeTrainingJob(ctx *RequestContext, req *AWSReque
 	goCtx := context.Background()
 	jobKey := "trainingjob:" + ctx.AccountID + "/" + ctx.Region + "/" + body.TrainingJobName
 	data, err := p.state.Get(goCtx, sagemakerNamespace, jobKey)
-	if err != nil || data == nil {
+	if err != nil {
+		return nil, fmt.Errorf("sagemaker training job %s get: %w", body.TrainingJobName, err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "ResourceNotFound", Message: "training job " + body.TrainingJobName + " not found", HTTPStatus: http.StatusBadRequest}
 	}
 	var job SageMakerTrainingJob
@@ -347,7 +320,10 @@ func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) 
 	goCtx := context.Background()
 	jobKey := "trainingjob:" + ctx.AccountID + "/" + ctx.Region + "/" + body.TrainingJobName
 	data, err := p.state.Get(goCtx, sagemakerNamespace, jobKey)
-	if err != nil || data == nil {
+	if err != nil {
+		return nil, fmt.Errorf("sagemaker training job %s get: %w", body.TrainingJobName, err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "ResourceNotFound", Message: "training job " + body.TrainingJobName + " not found", HTTPStatus: http.StatusBadRequest}
 	}
 	var job SageMakerTrainingJob
@@ -367,41 +343,6 @@ func (p *SageMakerPlugin) stopTrainingJob(ctx *RequestContext, req *AWSRequest) 
 		return nil, fmt.Errorf("stopTrainingJob: %w", err)
 	}
 	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{})
-}
-
-func (p *SageMakerPlugin) listTrainingJobs(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	namesKey := "trainingjob_names:" + ctx.AccountID + "/" + ctx.Region
-	names, _ := loadStringIndex(goCtx, p.state, sagemakerNamespace, namesKey)
-
-	type summary struct {
-		TrainingJobName   string  `json:"TrainingJobName"`
-		TrainingJobArn    string  `json:"TrainingJobArn"`
-		TrainingJobStatus string  `json:"TrainingJobStatus"`
-		CreationTime      float64 `json:"CreationTime"`
-	}
-	summaries := make([]summary, 0, len(names))
-	for _, name := range names {
-		key := "trainingjob:" + ctx.AccountID + "/" + ctx.Region + "/" + name
-		data, err := p.state.Get(goCtx, sagemakerNamespace, key)
-		if err != nil || data == nil {
-			continue
-		}
-		var job SageMakerTrainingJob
-		if json.Unmarshal(data, &job) == nil {
-			// The same observation Describe makes, so the two agree on one job (#1162).
-			if err := p.observeTrainingJob(&job); err != nil {
-				return nil, err
-			}
-			summaries = append(summaries, summary{
-				TrainingJobName:   job.TrainingJobName,
-				TrainingJobArn:    job.TrainingJobArn,
-				TrainingJobStatus: job.TrainingJobStatus,
-				CreationTime:      job.CreationTime,
-			})
-		}
-	}
-	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{"TrainingJobSummaries": summaries})
 }
 
 // sagemakerJSONResponse serializes v to JSON and returns an AWSResponse.

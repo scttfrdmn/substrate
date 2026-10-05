@@ -82,6 +82,37 @@ type DeployResult struct {
 	// ResourceDeletions records what a rollback did with each resource the failed
 	// create had created, and is empty when nothing was rolled back.
 	ResourceDeletions []CFNResourceDeletion
+
+	// TagPropagationFailures records each resource whose copy of the stack's tags could not
+	// be written, and is empty when every write succeeded or no tags were to be written.
+	//
+	// It is substrate's own observation, not an AWS one (#1138). Real CloudFormation writes a
+	// resource's tags in the resource's own create or update call, so a tag failure there is
+	// a resource failure, and "the resource created but its tags could not be written" is a
+	// state it cannot be in. Substrate propagates the stack's tags in a pass after the
+	// resources deploy, which is what makes the state possible, so it is reported here, in
+	// process, and invents no wire observation.
+	//
+	// It is deliberately not [DeployedResource.Error]: a non-empty Error makes
+	// DescribeStackResources and DescribeStackEvents report CREATE_FAILED, for a resource
+	// that in fact created, and takes the stack's status with it. The resource and the stack
+	// keep the status they earned.
+	TagPropagationFailures []CFNTagPropagationFailure
+}
+
+// CFNTagPropagationFailure is one resource the stack's tags could not be written onto.
+type CFNTagPropagationFailure struct {
+	// LogicalID is the resource's logical ID in the template.
+	LogicalID string
+
+	// PhysicalID is the resource's physical ID.
+	PhysicalID string
+
+	// Type is the resource's CloudFormation type.
+	Type string
+
+	// Error is the failure the write reported: a state read, a state write, or a marshal.
+	Error string
 }
 
 // Client is a convenience wrapper for the full in-process validation workflow. It

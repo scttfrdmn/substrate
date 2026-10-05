@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"slices"
+	"time"
 )
 
 // A CodeDeploy deployment's seeded status progression (#1196).
@@ -129,6 +130,56 @@ func (p *CodeDeployPlugin) observeDeployment(deployment CodeDeployDeployment) (m
 		out["errorInformation"] = info
 	}
 	return out, nil
+}
+
+// peekDeploymentRef reports a deployment as the group sees it now: the status the next GetDeployment
+// of it will answer, and no endTime while that status is not terminal. It peeks, spending nothing, so
+// reading the group does not advance a countdown a caller's GetDeployment loop is counting on.
+func (p *CodeDeployPlugin) peekDeploymentRef(ref CodeDeployDeploymentRef) (CodeDeployDeploymentRef, error) {
+	seed, seen, err := codedeployDeploymentProgressions.peek(context.Background(), p.state, ref.DeploymentID)
+	if err != nil {
+		return ref, fmt.Errorf("codedeploy peek deployment %s: %w", ref.DeploymentID, err)
+	}
+	if seed == nil {
+		return ref, nil
+	}
+	status, terminal := countdownState(seen, seed.PendingObservations, seed.State, seed.FinalState, "InProgress", ref.Status)
+	ref.Status = status
+	if !terminal {
+		ref.EndTime = time.Time{}
+	}
+	return ref, nil
+}
+
+// groupLastDeployments derives DeploymentGroupInfo's lastAttemptedDeployment and
+// lastSuccessfulDeployment from the group's deployments as observed now (#1400).
+//
+// The group used to answer the references createDeployment stored, which carry the record's
+// Succeeded, so a deployment seeded to run InProgress, or to end Failed, was reported by its group as
+// the last successful one while GetDeployment said otherwise. The attempted one is the newest
+// deployment, whatever it reports. The successful one is the newest that reports Succeeded — API_
+// DeploymentGroupInfo's "the most recent successful deployment" — so a later failure leaves an earlier
+// success in place, and a group none of whose deployments has succeeded answers none.
+//
+// A group recorded before #1400 holds no history and answers its stored references unchanged.
+func (p *CodeDeployPlugin) groupLastDeployments(group CodeDeployGroup) (attempted, successful *CodeDeployDeploymentRef, err error) {
+	if len(group.Deployments) == 0 {
+		return group.LastAttemptedDeployment, group.LastSuccessfulDeployment, nil
+	}
+	for i := len(group.Deployments) - 1; i >= 0; i-- {
+		ref, err := p.peekDeploymentRef(group.Deployments[i])
+		if err != nil {
+			return nil, nil, err
+		}
+		if attempted == nil {
+			attempted = &ref
+		}
+		if ref.Status == "Succeeded" {
+			successful = &ref
+			break
+		}
+	}
+	return attempted, successful, nil
 }
 
 // handleCodeDeploySeedDeploymentStatus handles POST /v1/codedeploy/deployment-status. Body:

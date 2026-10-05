@@ -590,15 +590,11 @@ func TestCFN_ELBListenerAndRule(t *testing.T) {
 // because the resolver answered any unrecognized attribute with the physical ID; the deploy passed
 // regardless, since nothing here reads the HostedZoneId back.
 //
-// #1123: it still passes regardless, because `require.NoError` plus `assert.Len(…, 3)` is undisturbed
-// by a resource that failed — Deploy reports a refusal on the resource, not as a returned error. The
-// record set is in fact refused today, for the reason filed as #1256: `Ref` on a hosted zone answers
-// the `/hostedzone/Z…` path form that CreateHostedZone returns, where the CloudFormation page
-// publishes the bare ID, so the record set's own path carries the segment twice. The assertions below
-// pin that refusal rather than ignoring it, so fixing #1256 turns this test red instead of leaving it
-// silently green in either state.
-//
-// TODO(#1256): replace the pinned refusal with the clean deploy AWS's own examples describe.
+// #1123 made it assert each resource rather than only `require.NoError` and `assert.Len(…, 3)`, which a
+// resource that failed does not disturb. Until #1256 the record set was refused: `Ref` on the hosted
+// zone answered CreateHostedZone's `/hostedzone/Z…` path form where the CloudFormation page publishes
+// the bare ID, so the record set's own path carried the segment twice, and the group discarded its
+// child's identical refusal. Both now deploy cleanly, which is what AWS's own examples describe.
 func TestCFN_Route53RecordSetGroup(t *testing.T) {
 	d := newV016FullDeployer(t)
 	tmpl := `{
@@ -646,27 +642,17 @@ func TestCFN_Route53RecordSetGroup(t *testing.T) {
 		byLogical[r.LogicalID] = r
 	}
 
-	// The zone itself is created. Its physical ID is the path form, which is the #1256 defect: the
-	// value is CreateHostedZone's own, and the divergence is that it is published as `Ref` unchanged.
+	// The zone's physical ID — what Ref answers — is the bare hosted zone ID the page publishes, and
+	// its ARN the arn:aws:route53:::hostedzone/<id> form the same page quotes.
 	zone := byLogical["MyZone"]
 	assert.Empty(t, zone.Error)
-	assert.Regexp(t, `^/hostedzone/Z[0-9A-Z]+$`, zone.PhysicalID,
-		"today's value; #1256 makes this the bare ID the CloudFormation page publishes")
-	assert.Equal(t, zone.PhysicalID, zone.ARN, "today's value; #1256 makes this an ARN or empty")
+	assert.Regexp(t, `^Z[0-9A-Z]+$`, zone.PhysicalID, "Ref answers the bare hosted zone ID (#1256)")
+	assert.Equal(t, "arn:aws:route53:::hostedzone/"+zone.PhysicalID, zone.ARN)
 
-	// And so the record set that names the zone by `Ref` builds a path with the segment twice.
-	assert.Contains(t, byLogical["MyRecordSet"].Error, "InvalidAction",
-		"#1256: the doubled /hostedzone/ segment reaches no route")
-	assert.Contains(t, byLogical["MyRecordSet"].Error, "/hostedzone//hostedzone/",
-		"the doubled segment itself, so this pins the cause and not just a refusal")
-
-	// The group's child record set is refused identically, but deployRoute53RecordSetGroup keeps only
-	// the Go error and a refusal is not one — so the group reports success. That half of #1256 is the
-	// "failure no caller can see" class, and it is pinned here because nothing else observes it.
-	assert.Empty(t, byLogical["MyRecordSetGroup"].Error,
-		"#1256: the group discards its children's refusals, so it reports clean")
-	assert.Equal(t, "ROLLBACK_FAILED", result.Status,
-		"the record set's refusal rolls the stack back; #1256 makes this CREATE_COMPLETE")
+	// So the record set and the group that name the zone by Ref both deploy.
+	assert.Empty(t, byLogical["MyRecordSet"].Error, "a RecordSet naming its zone by Ref deploys (#1256)")
+	assert.Empty(t, byLogical["MyRecordSetGroup"].Error)
+	assert.Equal(t, "CREATE_COMPLETE", result.Status)
 }
 
 // TestSSMPlugin_GetParameterHistory tests SSM GetParameterHistory (currently 0% coverage).

@@ -360,8 +360,12 @@ func (p *CodeDeployPlugin) getDeploymentGroup(reqCtx *RequestContext, req *AWSRe
 		return nil, err
 	}
 
+	attempted, successful, err := p.groupLastDeployments(*group)
+	if err != nil {
+		return nil, err
+	}
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
-		"deploymentGroupInfo": codedeployGroupToWire(*group),
+		"deploymentGroupInfo": codedeployGroupToWire(*group, attempted, successful),
 	})
 }
 
@@ -514,6 +518,7 @@ func (p *CodeDeployPlugin) createDeployment(reqCtx *RequestContext, req *AWSRequ
 		ref := &CodeDeployDeploymentRef{DeploymentID: deploymentID, Status: deployment.Status, CreateTime: now, EndTime: now}
 		group.LastAttemptedDeployment = ref
 		group.LastSuccessfulDeployment = ref
+		group.Deployments = append(group.Deployments, *ref)
 		if revision, ok := raw["revision"]; ok {
 			group.TargetRevision = revision
 		}

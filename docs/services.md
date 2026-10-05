@@ -2977,6 +2977,26 @@ whose `Ref` is something else:
 | `AWS::SQS::Queue` | the queue **URL** |
 | `AWS::WAFv2::WebACL` | `name\|id\|scope`, as the page's own example spells it |
 | `AWS::ApiGateway::UsagePlanKey` | `keyId:usagePlanId` |
+| `AWS::Route53::HostedZone` | the bare hosted zone **ID**, such as `Z23ABC4XYZL05B`, not the API's `/hostedzone/Z…` path form |
+
+A hosted zone's `Ref`, and its `Fn::GetAtt Id`, are the bare ID the CloudFormation page publishes ("`Ref` returns the
+hosted zone ID, such as `Z23ABC4XYZL05B`"), and its ARN is the `arn:aws:route53:::hostedzone/<id>` form the same page
+quotes. `CreateHostedZone` answers its `Id` member in the path form, `/hostedzone/Z…`, and until
+[#1256](https://github.com/scttfrdmn/substrate/issues/1256) that path form was both the `Ref` and the ARN. So a
+`RecordSet` naming its zone with `{"Ref": "MyZone"}`, as AWS's own examples do, built
+`/2013-04-01/hostedzone//hostedzone/Z…/rrset` and was refused, and a stack delete sent the same doubled path.
+`Fn::GetAtt NameServers` is not recorded and resolves empty.
+
+An `AWS::Route53::RecordSetGroup`'s `HostedZoneId` is declared on the group for every record set in it, and is
+passed to each record set that does not name its own; each was deployed with its own properties alone and named
+no zone. A refused record set fails the group, with the record set's refusal as the group's own; it used to be
+discarded, so a group whose every record set was refused reported a clean resource.
+
+The Route 53 plugin is deliberately unchanged: its `ChangeResourceRecordSets` route takes the bare ID in the path,
+and a path carrying `/hostedzone/` a second time is not routed (`InvalidAction`). The SDKs strip that prefix from a
+zone ID before building the path (botocore's Route 53 ID handler, for one), so a doubled path is only ever a client's
+own construction, as it was the deployer's. Whether `Ref` answers the bare ID is a separate question, and it is now
+answered as published. The plugin does not yet refuse a record set for a zone that does not exist.
 
 A queue's `Ref` is the URL substrate's own SQS operations answer with and accept —
 `http://sqs.{region}.localhost/{account}/{name}` rather than AWS's
@@ -3424,6 +3444,20 @@ each service's own tag call — see [what the stamp
 reaches](#cloudformation-stamps-its-own-tags-on-the-resources-it-creates) for the table of
 services and the named list of what is skipped. A resource whose service models no tags is
 skipped silently here too, with no log line.
+
+**A propagation that fails is reported, and is not a skip.** A write that finds the resource and then fails
+(a state read, a state write, a marshal) is logged and recorded on `DeployResult.TagPropagationFailures`: the
+resource's logical ID, physical ID, type and the error. Until
+[#1138](https://github.com/scttfrdmn/substrate/issues/1138) the log line was its only report, so the stack and the
+resource both reported success and the resource silently lacked the stack's tags. Three properties of the reading:
+- **It is substrate's own.** Real CloudFormation writes a resource's tags in its own create or update call, so a tag
+  failure there is a resource failure; "created, but its tags could not be written" is a state it cannot be in.
+  Substrate propagates in a pass after the resources deploy, which is what makes the state possible.
+- **It is reported in process,** to a `Client` or `StackDeployer` caller, and invents no wire observation. No stack
+  event or status carries it.
+- **It is not `DeployedResource.Error`.** A non-empty `Error` makes `DescribeStackResources` and
+  `DescribeStackEvents` report `CREATE_FAILED` for a resource that in fact created, and takes the stack's status
+  with it. The resource and the stack keep the status they earned.
 
 **Whose tag a key is** is the question propagation actually has to answer, because two of AWS's
 rules pull against each other: a tag the caller set directly on a resource must survive
@@ -21234,15 +21268,15 @@ Two unrelated slices of SageMaker are modelled: the Studio app lifecycle and tra
 | Operation | Notes |
 |-----------|-------|
 | ListDomains | Always an empty list — Substrate has no domain records |
-| ListApps | `DomainIdEquals` and `UserProfileNameEquals` filter; `MaxResults`, `NextToken`, `SortBy` and `SortOrder` are not read |
+| ListApps | [Pages and sorts by its published members](#listapps-and-listtrainingjobs-page-by-their-published-members); `DomainIdEquals` and `UserProfileNameEquals` filter, and `SpaceNameEquals` matches no app |
 | CreateApp | Only `AppName` is required; `AppType` and `DomainId` are `Required: Yes` and unchecked |
 | DeleteApp | [Refuses an app that does not exist](#deleteapp-refuses-an-absent-app) with `ResourceNotFound`/400 |
-| DescribeApp | Reports the stored record whole |
+| DescribeApp | Seven published members, `CreationTime` among them for an app created since #1400 |
 | CreatePresignedDomainUrl | A fixed stub URL; no domain, user profile or expiry is read |
 | CreateTrainingJob | Only `TrainingJobName` is read; the job is recorded `Completed`, and [a seed governs what is observed](#a-training-jobs-status-is-a-seeded-progression) |
-| DescribeTrainingJob | One observation of [the seeded progression](#a-training-jobs-status-is-a-seeded-progression) |
+| DescribeTrainingJob | One observation of [the seeded progression](#a-training-jobs-status-is-a-seeded-progression), answering [`SecondaryStatus` beside it](#secondarystatus-follows-the-observed-status) |
 | StopTrainingJob | Writes `Stopped` and restarts the job's countdown, so a seed can report `Stopping` first; a `Completed` job is stopped without complaint |
-| ListTrainingJobs | Each listed job is one observation of [the same progression](#a-training-jobs-status-is-a-seeded-progression), so List and Describe agree (#1162). It reads no request member at all, so `StatusEquals`, `NameContains`, the four time filters, `SortBy`, `SortOrder`, `MaxResults` and `NextToken` are all ignored |
+| ListTrainingJobs | Each listed job is one observation of [the same progression](#a-training-jobs-status-is-a-seeded-progression), so List and Describe agree (#1162), and each summary carries the same `SecondaryStatus`. [Pages, sorts and filters by its published members](#listapps-and-listtrainingjobs-page-by-their-published-members) |
 
 ### A training job's status is a seeded progression
 
@@ -21279,6 +21313,58 @@ DELETE /v1/sagemaker/training-job-status    (all seeds; ?trainingJobName=… for
 The POST answers `{"ok": true, "trainingJobName": "status:<name|*>"}`, the key the seed was stored
 under, as every progression's seed endpoint does.
 
+### SecondaryStatus follows the observed status
+
+`API_DescribeTrainingJob` publishes `SecondaryStatus` as Required, and `DescribeTrainingJob` used to
+omit it ([#1400](https://github.com/scttfrdmn/substrate/issues/1400)). It is now derived from the
+`TrainingJobStatus` the same observation reports, so a seeded countdown moves the two together:
+
+| `TrainingJobStatus` | `SecondaryStatus` |
+|---------------------|-------------------|
+| `InProgress` | `Training` |
+| `Completed` | `Completed` |
+| `Failed` | `Failed` |
+| `Stopping` | `Stopping` |
+| `Stopped` | `Stopped` |
+
+The page groups the secondary values under the primary status each belongs to. Four groups map one
+to one. For `InProgress`, `Training` is substrate's choice among the six the page lists. The other
+five (`Starting`, `Pending`, `Downloading`, `Interrupted`, `Uploading`) describe stages of a workload
+substrate does not run. `MaxRuntimeExceeded` and `MaxWaitTimeExceeded` are never reported, because no
+runtime limit is modelled. `ListTrainingJobs` summaries carry the same value.
+
+### ListApps and ListTrainingJobs page by their published members
+
+Neither operation used to read a pagination member. Both answered every record in one response, and
+both discarded the error from reading their index, so a store fault answered an empty list
+([#1400](https://github.com/scttfrdmn/substrate/issues/1400)). Both now page with `MaxResults` and
+`NextToken`, and return a store fault as an error:
+
+| | ListApps | ListTrainingJobs |
+|---|---|---|
+| `MaxResults` | 1–100, default 10 (published) | 1–100, default 100 (the page publishes no default) |
+| `SortBy` | `CreationTime` (the only value) | `Name`, `CreationTime` or `Status`, default `CreationTime` |
+| `SortOrder` | `Ascending` or `Descending`, default `Ascending` | the same |
+| filters | `DomainIdEquals`, `UserProfileNameEquals`; `SpaceNameEquals` matches nothing, since no space is modelled | `NameContains`, `StatusEquals`; `TrainingPlanArnEquals` and `WarmPoolStatusEquals` match nothing, since neither is modelled |
+
+- **Ties.** Equal sort keys are broken by name for `ListTrainingJobs` and by state key for `ListApps`,
+  so every offset token is stable.
+- **`StatusEquals` is applied after the cut.** The page's Note says that with both members set, "the
+  `MaxResults` number of training jobs are first retrieved ignoring the `StatusEquals` parameter and
+  then they are filtered". A page can therefore hold fewer summaries than `MaxResults`, or none, and
+  still carry a `NextToken`.
+- **The time filters are not read.** `ListTrainingJobs`' `CreationTimeAfter`/`Before` and
+  `LastModifiedTimeAfter`/`Before` are ignored.
+- **Old apps.** An app records its `CreationTime` from #1400 on, which `DescribeApp` and each
+  `ListApps` element now answer. An app recorded earlier has none, sorts first and answers no
+  `CreationTime`.
+- **Observations.** Every job the listing visits is observed, including jobs outside the returned
+  page. A `Status` sort has to observe each job before it can order them.
+
+A token neither operation issued, a `MaxResults` outside 1–100, an enum outside its published values,
+a `NameContains` outside `[a-zA-Z0-9\-]+` or longer than 63 characters, and a `SpaceNameEquals` sent
+with `UserProfileNameEquals` are all refused. The page states that last pair cannot both be set.
+
 ### DeleteApp refuses an absent app
 
 `DeleteApp` refuses an app that does not exist with `ResourceNotFound`/400, which `API_DeleteApp`
@@ -21293,12 +21379,18 @@ identity implies.
 
 | Condition | Code | Status |
 |-----------|------|--------|
-| a body that will not parse | `ValidationException` | 400 |
-| `AppName` or `TrainingJobName` absent or empty | `ValidationException` | 400 |
+| a body that will not parse | `ValidationError` | 400 |
+| `AppName` or `TrainingJobName` absent or empty | `ValidationError` | 400 |
+| a list member outside its published range, values or pattern, or an unissued `NextToken` | `ValidationError` | 400 |
 | an app or training job that does not exist, including on `DeleteApp` | `ResourceNotFound` | 400 |
 
+`ValidationError` comes from SageMaker's Common Errors page. None of these operations publishes an
+input-validation error of its own (`emulator/sagemaker_errors.go`).
+
 `ResourceNotFound` is spelled without the `Exception` suffix because that is how SageMaker publishes
-it, and at 400, which is the status its pages publish. SageMaker's `ResourceInUse`,
+it, and at 400, which is the status its pages publish. A store fault while reading an app or a
+training job is an error, not `ResourceNotFound`. `DescribeApp`, `DescribeTrainingJob` and
+`StopTrainingJob` used to report a store fault as the resource being absent (#1400). SageMaker's `ResourceInUse`,
 `ResourceLimitExceeded` and `ConflictException` are published and have no site.
 
 ### The account and Region a record carries reach no response
@@ -22128,13 +22220,20 @@ SDK and visible as an unpublished extra member to anything reading the raw body.
 
 | Condition | Code | Status |
 |-----------|------|--------|
-| a body that will not parse, or `DataSourceId`/`DataSetId` absent | `InvalidParameterValue` | 400 |
+| a body that will not parse | `InvalidParameterValueException` | 400 |
+| `DataSourceId`/`DataSetId` absent | `InvalidParameterValueException` | 400 |
 | a data source, data set or ingestion that does not exist, including an ingestion ID that is not the data set's | `ResourceNotFoundException` | 404 |
 
-`ResourceNotFoundException`/404 is what the pages publish. `InvalidParameterValue` is not: QuickSight
-publishes `InvalidParameterValueException`, and one code with the message *"DataSourceId is
-required"* also serves an unparseable body, which is a different failure
-([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+`ResourceNotFoundException`/404 is what the pages publish, and so is `InvalidParameterValueException`/400,
+which `API_CreateDataSource` and `API_CreateDataSet` both list. The two creates used to answer the
+suffixless `InvalidParameterValue`, which no QuickSight page publishes, so an SDK raised it as a
+generic error rather than the modeled exception. They also reported an unparseable body with the
+message *"DataSourceId is required"*. The two conditions now share the published code and carry
+their own messages ([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+
+A store fault while reading a data source is an error, not `ResourceNotFoundException`.
+`DescribeDataSource` used to answer not-found for it, which told the caller to recreate a data source
+that exists ([#1400](https://github.com/scttfrdmn/substrate/issues/1400)).
 
 `AccessDeniedException`/**401**, `ConflictException`/409, `LimitExceededException`/409,
 `ResourceExistsException`/409 and `ThrottlingException`/429 are published and have no site, so
@@ -22247,13 +22346,18 @@ and a subsequent read answers not-found rather than a deleted share.
 | Condition | Code | Status |
 |-----------|------|--------|
 | a body that will not parse | `ValidationError` | 400 |
-| `name` or `resourceShareArn` absent | `MissingRequiredParameter` | 400 |
+| `name` or `resourceShareArn` absent | `ValidationError` | 400 |
 | a resource share that does not exist | `UnknownResourceException` | 400 |
 
 `ValidationError`/400 is the spelling RAM's consolidated common-errors list publishes, and
-`UnknownResourceException`/400 matches its own page. `MissingRequiredParameter` is invented: no
-`MissingParameter`-anything appears anywhere in RAM's documentation, and the published code for the
-condition is `ValidationError` ([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+`UnknownResourceException`/400 matches its own page.
+
+An absent `name` or `resourceShareArn` used to answer `MissingRequiredParameter`. No RAM page
+publishes that code. It is now `ValidationError`, which Common Errors glosses as *"Check that all
+required parameters are included"* ([#1169](https://github.com/scttfrdmn/substrate/issues/1169)).
+`InvalidParameterException`, which `API_CreateResourceShare` lists, was not chosen. It covers a
+parameter that was sent with an invalid value, and an absent member was not sent at all. The one code
+covers every share operation, because they all look the share up the same way.
 
 `IdempotentParameterMismatch`, `InvalidClientTokenException`, `MalformedArnException`,
 `OperationNotPermittedException`, `ResourceShareLimitExceededException` and
@@ -22409,10 +22513,27 @@ the record's `Succeeded`). Any of `DeploymentInfo`'s eight published statuses is
 `Stopped` as the final one. A `Failed` or `Stopped` final status may carry `errorInformation` — the
 code held to `API_ErrorInformation`'s Valid Values — which is how a consumer's failure and rollback
 handling is exercised. Unseeded, a deployment reads `Succeeded` from the first `GetDeployment`, as
-before. The deployment group's `lastAttemptedDeployment` and `lastSuccessfulDeployment` keep the
-record's `Succeeded`; they are not observations. `deploymentOverview` is not emitted, because it counts
-the targets a deployment ran on and Substrate runs on none: assert on `status` instead
+before. `deploymentOverview` is not emitted, because it counts the targets a deployment ran on and
+Substrate runs on none: assert on `status` instead
 ([#1196](https://github.com/scttfrdmn/substrate/issues/1196)).
+
+The deployment group's `lastAttemptedDeployment` and `lastSuccessfulDeployment` reflect the seeded
+status too ([#1400](https://github.com/scttfrdmn/substrate/issues/1400)). They used to keep the
+record's `Succeeded`, so a group reported a deployment seeded to fail as its last successful one.
+
+- **Same status as `GetDeployment`.** `GetDeploymentGroup` reports each deployment with the status
+  the next `GetDeployment` of it would answer. It answers no `endTime` while that status is not
+  terminal; the page glosses `endTime` as "when the most recent deployment … was complete".
+- **Reading spends nothing.** `GetDeploymentGroup` peeks rather than observes, so it does not advance
+  a countdown a `GetDeployment` loop is counting on.
+- **Which deployment each member names.** `lastAttemptedDeployment` is the group's newest deployment.
+  `lastSuccessfulDeployment` is the newest that reports `Succeeded`, matching `DeploymentGroupInfo`'s
+  "the most recent successful deployment". A later failure therefore leaves an earlier success in
+  place, and a group with no successful deployment answers no `lastSuccessfulDeployment`.
+- **Older groups.** A group records its deployments from #1400 on. A group recorded earlier has no
+  such history and answers the two references it stored, unchanged.
+- **`targetRevision` is unchanged.** It is still the last created deployment's revision, whatever that
+  deployment reports.
 
 ### What each CodeDeploy request requires
 
@@ -22481,8 +22602,9 @@ Each record is projected onto its published shape in `emulator/codedeploy_wire.g
   `blueGreenDeploymentConfiguration`, `deploymentStyle`, `ec2TagFilters`, `ec2TagSet`, `ecsServices`,
   `loadBalancerInfo`, `onPremisesInstanceTagFilters`, `onPremisesTagSet`, `outdatedInstancesStrategy`,
   `terminationHookEnabled` and `triggerConfigurations`. `lastAttemptedDeployment`,
-  `lastSuccessfulDeployment` (each `LastDeploymentInfo`, dates in epoch seconds) and `targetRevision`
-  appear once a deployment has run in the group.
+  `lastSuccessfulDeployment` (each `LastDeploymentInfo`, dates in epoch seconds, `endTime` only once
+  terminal) and `targetRevision` appear once a deployment has run in the group. They follow
+  [the seeded status](#a-deployments-status-progresses-under-a-seed).
 - **`deploymentInfo`** — twenty-one of `DeploymentInfo`'s thirty-one: `applicationName`,
   `deploymentGroupName`, `deploymentId`, `status`, `createTime`, `startTime`, `completeTime`,
   `creator` (`user`), `computePlatform`, `deploymentConfigName`, and, when sent, the request's

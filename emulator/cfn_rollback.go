@@ -326,6 +326,7 @@ type cfnFailedCreate struct {
 	totalCost    float64
 	start        time.Time
 	onFailure    string
+	tagFailures  []CFNTagPropagationFailure
 }
 
 // handleFailedCreate applies the stack's OnFailure option to a create that had at
@@ -339,12 +340,13 @@ type cfnFailedCreate struct {
 // rollback happens.
 func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCreate) (*DeployResult, error) {
 	result := &DeployResult{
-		StackName: fc.stackName,
-		Resources: fc.resources,
-		StreamID:  fc.streamID,
-		TotalCost: fc.totalCost,
-		Duration:  d.tc.Now().Sub(fc.start),
-		Outputs:   map[string]string{},
+		StackName:              fc.stackName,
+		Resources:              fc.resources,
+		StreamID:               fc.streamID,
+		TotalCost:              fc.totalCost,
+		Duration:               d.tc.Now().Sub(fc.start),
+		Outputs:                map[string]string{},
+		TagPropagationFailures: fc.tagFailures,
 	}
 
 	// A failed stack publishes no outputs, and therefore no exports. Resolving them

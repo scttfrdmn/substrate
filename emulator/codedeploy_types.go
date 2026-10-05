@@ -49,6 +49,10 @@ type CodeDeployGroup struct {
 	LastAttemptedDeployment *CodeDeployDeploymentRef `json:"lastAttemptedDeployment,omitempty"`
 	// LastSuccessfulDeployment is the most recent deployment in the group that succeeded.
 	LastSuccessfulDeployment *CodeDeployDeploymentRef `json:"lastSuccessfulDeployment,omitempty"`
+	// Deployments are the group's deployments in creation order, each with its status at creation.
+	// GetDeploymentGroup observes them to answer lastAttemptedDeployment and lastSuccessfulDeployment
+	// (#1400); a group recorded before that has none and answers the two stored references instead.
+	Deployments []CodeDeployDeploymentRef `json:"deployments,omitempty"`
 	// TargetRevision is the revision of the group's last successful deployment.
 	TargetRevision json.RawMessage `json:"targetRevision,omitempty"`
 	// AccountID is the AWS account that owns this deployment group.

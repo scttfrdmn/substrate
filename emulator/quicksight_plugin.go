@@ -172,8 +172,11 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 		Name         string `json:"Name"`
 		Type         string `json:"Type"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSourceID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DataSourceId is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, quicksightInvalidParameterValue("the request body is not valid JSON")
+	}
+	if body.DataSourceID == "" {
+		return nil, quicksightInvalidParameterValue("DataSourceId is required")
 	}
 
 	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:datasource/%s", ctx.Region, ctx.AccountID, body.DataSourceID)
@@ -216,7 +219,12 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 	goCtx := context.Background()
 	key := "datasource:" + ctx.AccountID + "/" + dataSourceID
 	data, err := p.state.Get(goCtx, quicksightNamespace, key)
-	if err != nil || data == nil {
+	if err != nil {
+		// A store fault is not an absent data source. Answering ResourceNotFoundException for it would
+		// tell the caller to recreate a resource that exists (#1400).
+		return nil, fmt.Errorf("quicksight describeDataSource get: %w", err)
+	}
+	if data == nil {
 		return nil, &AWSError{
 			Code:       "ResourceNotFoundException",
 			Message:    "DataSource " + dataSourceID + " not found",
@@ -246,8 +254,11 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 		DataSetID string `json:"DataSetId"`
 		Name      string `json:"Name"`
 	}
-	if err := json.Unmarshal(req.Body, &body); err != nil || body.DataSetID == "" {
-		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DataSetId is required", HTTPStatus: http.StatusBadRequest}
+	if err := json.Unmarshal(req.Body, &body); err != nil {
+		return nil, quicksightInvalidParameterValue("the request body is not valid JSON")
+	}
+	if body.DataSetID == "" {
+		return nil, quicksightInvalidParameterValue("DataSetId is required")
 	}
 
 	arn := fmt.Sprintf("arn:aws:quicksight:%s:%s:dataset/%s", ctx.Region, ctx.AccountID, body.DataSetID)
