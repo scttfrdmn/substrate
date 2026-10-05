@@ -387,7 +387,9 @@ func (p *BedrockRuntimePlugin) createModelInvocationJob(ctx *RequestContext, req
 	if err := p.state.Put(goCtx, bedrockRuntimeNamespace, bedrockModelInvocationJobKey(ctx.AccountID, ctx.Region, jobID), data); err != nil {
 		return nil, fmt.Errorf("createModelInvocationJob: put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, bedrockRuntimeNamespace, bedrockModelInvocationJobIDsKey(ctx.AccountID, ctx.Region), jobID)
+	if err := updateStringIndex(goCtx, p.state, bedrockRuntimeNamespace, bedrockModelInvocationJobIDsKey(ctx.AccountID, ctx.Region), jobID); err != nil {
+		return nil, fmt.Errorf("bedrock createModelInvocationJob index: %w", err)
+	}
 	return bedrockRuntimeJSONResponse(http.StatusOK, map[string]string{"jobArn": jobArn})
 }
 

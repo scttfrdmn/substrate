@@ -213,7 +213,9 @@ func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, i
 		if err != nil {
 			return nil, fmt.Errorf("opensearch indexDocument marshal: %w", err)
 		}
-		_ = p.state.Put(goCtx, opensearchNamespace, indexKey, d)
+		if err := p.state.Put(goCtx, opensearchNamespace, indexKey, d); err != nil {
+			return nil, fmt.Errorf("opensearch indexDocument state.Put: %w", err)
+		}
 	}
 
 	docKey := "doc:" + index + "/" + docID
@@ -227,7 +229,9 @@ func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, i
 		return nil, fmt.Errorf("opensearch indexDocument put: %w", err)
 	}
 	if isNew {
-		updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID)
+		if err := updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID); err != nil {
+			return nil, fmt.Errorf("opensearch indexDocument index: %w", err)
+		}
 	}
 
 	result := "updated"
@@ -268,7 +272,9 @@ func (p *OpenSearchPlugin) deleteDocument(_ *RequestContext, index, docID string
 	if err := p.state.Delete(goCtx, opensearchNamespace, docKey); err != nil {
 		return nil, fmt.Errorf("opensearch deleteDocument: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID)
+	if err := removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID); err != nil {
+		return nil, fmt.Errorf("opensearch deleteDocument index: %w", err)
+	}
 	return openSearchOK(map[string]interface{}{
 		"_index":   index,
 		"_id":      docID,
@@ -315,9 +321,13 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 					if existing, _ := p.state.Get(goCtx, opensearchNamespace, docKey); existing != nil {
 						isNew = false
 					}
-					_ = p.state.Put(goCtx, opensearchNamespace, docKey, body)
+					if err := p.state.Put(goCtx, opensearchNamespace, docKey, body); err != nil {
+						return nil, fmt.Errorf("opensearch bulk state.Put: %w", err)
+					}
 					if isNew {
-						updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID)
+						if err := updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID); err != nil {
+							return nil, fmt.Errorf("opensearch bulk index: %w", err)
+						}
 						// Ensure index exists.
 						indexKey := "index:" + idx
 						if d, _ := p.state.Get(goCtx, opensearchNamespace, indexKey); d == nil {
@@ -326,7 +336,9 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 							if err != nil {
 								return nil, fmt.Errorf("opensearch bulk marshal: %w", err)
 							}
-							_ = p.state.Put(goCtx, opensearchNamespace, indexKey, d2)
+							if err := p.state.Put(goCtx, opensearchNamespace, indexKey, d2); err != nil {
+								return nil, fmt.Errorf("opensearch bulk state.Put: %w", err)
+							}
 						}
 					}
 					result := "updated"
@@ -340,7 +352,9 @@ func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultInd
 			case "delete":
 				docKey := "doc:" + idx + "/" + docID
 				_ = p.state.Delete(goCtx, opensearchNamespace, docKey)
-				removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID)
+				if err := removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID); err != nil {
+					return nil, fmt.Errorf("opensearch bulk index: %w", err)
+				}
 				items = append(items, map[string]interface{}{
 					"delete": map[string]interface{}{"_index": idx, "_id": docID, "result": "deleted", "status": 200},
 				})
@@ -408,7 +422,9 @@ func (p *OpenSearchPlugin) search(ctx *RequestContext, req *AWSRequest, index st
 		if err != nil {
 			return nil, fmt.Errorf("opensearch search marshal: %w", err)
 		}
-		_ = p.state.Put(goCtx, opensearchNamespace, "scroll:"+scrollID, sd)
+		if err := p.state.Put(goCtx, opensearchNamespace, "scroll:"+scrollID, sd); err != nil {
+			return nil, fmt.Errorf("opensearch search state.Put: %w", err)
+		}
 		hits := osPageHits(filtered, from, size)
 		return openSearchOK(p.buildSearchResponse(filtered, hits, body, scrollID))
 	}
@@ -514,7 +530,9 @@ func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, fmt.Errorf("opensearch scroll marshal: %w", err)
 	}
-	_ = p.state.Put(goCtx, opensearchNamespace, stateKey, updated)
+	if err := p.state.Put(goCtx, opensearchNamespace, stateKey, updated); err != nil {
+		return nil, fmt.Errorf("opensearch scroll state.Put: %w", err)
+	}
 
 	return openSearchOK(map[string]interface{}{
 		"_scroll_id": scrollID,

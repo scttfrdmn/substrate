@@ -111,7 +111,9 @@ func (p *CodeBuildPlugin) createProject(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, codebuildNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codebuild createProject put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+	if err := updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
+		return nil, fmt.Errorf("codebuild createProject index: %w", err)
+	}
 
 	return codebuildJSONResponse(http.StatusOK, map[string]interface{}{
 		"project": codebuildProjectToWire(project),
@@ -236,7 +238,9 @@ func (p *CodeBuildPlugin) deleteProject(reqCtx *RequestContext, req *AWSRequest)
 		if err := p.state.Delete(goCtx, codebuildNamespace, key); err != nil {
 			return nil, fmt.Errorf("codebuild deleteProject delete: %w", err)
 		}
-		removeFromStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name)
+		if err := removeFromStringIndex(goCtx, p.state, codebuildNamespace, codebuildProjectNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
+			return nil, fmt.Errorf("codebuild deleteProject index: %w", err)
+		}
 	}
 
 	// The page publishes "an empty HTTP body"; substrate answers {}, the form its JSON-protocol
@@ -301,7 +305,9 @@ func (p *CodeBuildPlugin) startBuild(reqCtx *RequestContext, req *AWSRequest) (*
 	if err := p.state.Put(goCtx, codebuildNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codebuild startBuild put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildBuildIDsKey(reqCtx.AccountID, reqCtx.Region), buildID)
+	if err := updateStringIndex(goCtx, p.state, codebuildNamespace, codebuildBuildIDsKey(reqCtx.AccountID, reqCtx.Region), buildID); err != nil {
+		return nil, fmt.Errorf("codebuild startBuild index: %w", err)
+	}
 
 	// A create-time read: it reports a seeded build's first state without spending an observation.
 	out, err := p.observedBuild(goCtx, build, false)

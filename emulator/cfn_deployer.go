@@ -1339,7 +1339,9 @@ func (d *StackDeployer) DeployWithOptions(
 			UpdatedAt:    d.tc.Now(),
 		}
 		state.setAttribution(d.attribution)
-		d.persistStack(ctx, state)
+		if err := d.persistStack(ctx, state); err != nil {
+			return nil, err
+		}
 	}
 
 	return result, nil
@@ -1395,7 +1397,9 @@ func (d *StackDeployer) UpdateStack(
 			reason := strings.Join(failures, "; ")
 			result.Status = cfnStackUpdateFailed
 			result.StatusReason = reason
-			d.setStackStatus(ctx, stackName, cfnStackUpdateFailed, reason)
+			if err := d.setStackStatus(ctx, stackName, cfnStackUpdateFailed, reason); err != nil {
+				return nil, err
+			}
 			// prevErr is logged rather than returned, and this is the one place that
 			// choice is not obvious. Failing to read the *previous* state is not a
 			// failure of this update: the update itself already ran and its resources
@@ -1420,7 +1424,9 @@ func (d *StackDeployer) UpdateStack(
 				s.Status = cfnStackUpdateComplete
 				s.StatusReason = ""
 				s.UpdatedAt = d.tc.Now()
-				d.persistStack(ctx, s)
+				if err := d.persistStack(ctx, s); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
@@ -1464,7 +1470,9 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 			stack.Status = cfnStackDeleteFailed
 			stack.ResourceDeletions = deletions
 			stack.UpdatedAt = d.tc.Now()
-			d.persistStack(ctx, *stack)
+			if err := d.persistStack(ctx, *stack); err != nil {
+				return fmt.Errorf("delete stack %s: %w", stackName, err)
+			}
 			return cfnErrf(ErrCFNDeleteFailed, "delete stack %s: %s", stackName,
 				strings.Join(failed, "; "))
 		}
@@ -1533,24 +1541,25 @@ func (d *StackDeployer) ListStacks(ctx context.Context) ([]CFNStackState, error)
 	return stacks, nil
 }
 
-func (d *StackDeployer) persistStack(ctx context.Context, s CFNStackState) {
+// persistStack writes a stack's record and its entry in the names index. Every failure is
+// returned: it was logged and dropped until #1192, so a stack whose record never landed answered
+// CreateStack 200 and then DescribeStacks did not know it.
+func (d *StackDeployer) persistStack(ctx context.Context, s CFNStackState) error {
 	data, err := json.Marshal(s)
 	if err != nil {
-		d.logger.Warn("cfn: failed to marshal stack state", "err", err)
-		return
+		return fmt.Errorf("cfn persistStack %s marshal: %w", s.StackName, err)
 	}
 	// A stack recorded before #1366 moves to its scoped keys before it is written (cfn_scope.go).
 	if err := d.migrateLegacyStack(ctx, s.StackName); err != nil {
-		d.logger.Warn("cfn: failed to migrate legacy stack state", "stack", s.StackName, "err", err)
-		return
+		return fmt.Errorf("cfn persistStack %s migrate legacy record: %w", s.StackName, err)
 	}
 	if err := d.state.Put(ctx, cfnNamespace, d.stackKey(s.StackName), data); err != nil {
-		d.logger.Warn("cfn: failed to persist stack state", "err", err)
-		return
+		return fmt.Errorf("cfn persistStack %s state.Put: %w", s.StackName, err)
 	}
 	if err := d.addStackName(ctx, s.StackName); err != nil {
-		d.logger.Warn("cfn: failed to index stack", "stack", s.StackName, "err", err)
+		return fmt.Errorf("cfn persistStack %s index: %w", s.StackName, err)
 	}
+	return nil
 }
 
 func (d *StackDeployer) loadStackNames(ctx context.Context) ([]string, error) {
@@ -6372,12 +6381,8 @@ func (d *StackDeployer) deployGenericStub(
 	}
 	arn := fmt.Sprintf("arn:aws:%s:%s:%s:%s/%s", service, cctx.region, cctx.accountID, rtype, logicalID)
 
-	if d.state != nil && props != nil {
-		data, err := json.Marshal(props)
-		if err == nil {
-			key := fmt.Sprintf("%s/%s/%s", cctx.accountID, cctx.region, logicalID)
-			_ = d.state.Put(ctx, cfnStubNamespace, key, data)
-		}
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployGenericStub %s: %w", resType, err)
 	}
 
 	return DeployedResource{

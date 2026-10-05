@@ -46,11 +46,10 @@ import "net/http"
 // whose precedence has to be preserved — ListQueryExecutions' WorkGroup is a filter, not a lookup, and
 // an absent workgroup yields an empty list rather than a refusal.
 //
-// That ordering cannot be asserted by sealing the store the way #915's other sites are, because
-// [athenaLoadStringIndex] reports a store failure as an empty index: a sealed read answers 200 with
-// an empty page, indistinguishable from an empty listing, so the seal would pass whichever side of
-// the read the decode sat on. The test counts reads instead and requires the refused request to have
-// performed none — see TestPaginationToken_AthenaListQueryExecutionsRefusesATokenItDidNotIssue.
+// The test counts reads and requires the refused request to have performed none — see
+// TestPaginationToken_AthenaListQueryExecutionsRefusesATokenItDidNotIssue. Until #1175,
+// [athenaLoadStringIndex] reported a store failure as an empty index, which is why a sealed store
+// could not assert the ordering; it now returns the failure, so a sealed read is an error.
 //
 // # Not fixed here, so that the conversion is not read as having fixed it
 //

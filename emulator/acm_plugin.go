@@ -127,7 +127,9 @@ func (p *ACMPlugin) requestCertificate(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	idxKey := acmCertARNsKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, acmNamespace, idxKey, certArn)
+	if err := updateStringIndex(goCtx, p.state, acmNamespace, idxKey, certArn); err != nil {
+		return nil, fmt.Errorf("acm requestCertificate index: %w", err)
+	}
 
 	type response struct {
 		CertificateArn string `json:"CertificateArn"`
@@ -193,7 +195,9 @@ func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	idxKey := acmCertARNsKey(ctx.AccountID, ctx.Region)
-	removeFromStringIndex(goCtx, p.state, acmNamespace, idxKey, body.CertificateArn)
+	if err := removeFromStringIndex(goCtx, p.state, acmNamespace, idxKey, body.CertificateArn); err != nil {
+		return nil, fmt.Errorf("acm deleteCertificate index: %w", err)
+	}
 
 	return acmJSONResponse(http.StatusOK, struct{}{})
 }

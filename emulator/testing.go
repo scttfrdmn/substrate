@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"sort"
 	"testing"
 	"time"
 )
@@ -27,6 +26,9 @@ type TestServer struct {
 	store    *EventStore
 	registry *PluginRegistry
 	creds    map[string]CredentialEntry
+	// tb is the test the server was started for. The seed helpers fail it when a write to state
+	// fails, rather than leaving the test to run against a seed that never happened (#1192).
+	tb testing.TB
 }
 
 // Store returns the [EventStore] backing the server, for cost summaries
@@ -342,7 +344,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	ts := &TestServer{
 		URL: baseURL, Port: port, tc: tc, srv: srv,
 		state: state, store: store, registry: registry,
-		creds: map[string]CredentialEntry{},
+		creds: map[string]CredentialEntry{}, tb: t,
 	}
 	if entry, ok := creds.Lookup(defaultTestAccessKeyID); ok {
 		ts.creds[entry.AccountID] = entry
@@ -504,32 +506,20 @@ func (ts *TestServer) SeedSSMParameter(name, value string) {
 	}
 	data, err := json.Marshal(param)
 	if err != nil {
+		ts.tb.Fatalf("SeedSSMParameter(%q): marshal: %v", name, err)
 		return
 	}
 	stateKey := "parameter:" + defaultAccountID + "/" + seedSSMRegion + "/" + name
-	_ = ts.state.Put(ctx, ssmNamespace, stateKey, data)
+	if err := ts.state.Put(ctx, ssmNamespace, stateKey, data); err != nil {
+		ts.tb.Fatalf("SeedSSMParameter(%q): state.Put: %v", name, err)
+		return
+	}
 
-	// Update the paths index.
+	// Update the paths index, sorted and without duplicates, as the plugin's own writes keep it.
 	pathsKey := "parameter_paths:" + defaultAccountID + "/" + seedSSMRegion
-	existing, _ := ts.state.Get(ctx, ssmNamespace, pathsKey)
-	var paths []string
-	if existing != nil {
-		_ = json.Unmarshal(existing, &paths)
-	}
-	// Add name if not already present.
-	found := false
-	for _, p := range paths {
-		if p == name {
-			found = true
-			break
-		}
-	}
-	if !found {
-		paths = append(paths, name)
-		sort.Strings(paths)
-		if pathsData, err := json.Marshal(paths); err == nil {
-			_ = ts.state.Put(ctx, ssmNamespace, pathsKey, pathsData)
-		}
+	if err := updateStringIndex(ctx, ts.state, ssmNamespace, pathsKey, name); err != nil {
+		ts.tb.Fatalf("SeedSSMParameter(%q): %v", name, err)
+		return
 	}
 }
 
@@ -570,8 +560,12 @@ func (ts *TestServer) SeedEC2Image(imageID, name string) {
 	}
 	data, err := json.Marshal(img)
 	if err != nil {
+		ts.tb.Fatalf("SeedEC2Image(%q): marshal: %v", imageID, err)
 		return
 	}
-	_ = ts.state.Put(context.Background(), ec2Namespace,
-		ec2ImageStateKey(defaultAccountID, seedSSMRegion, imageID), data)
+	if err := ts.state.Put(context.Background(), ec2Namespace,
+		ec2ImageStateKey(defaultAccountID, seedSSMRegion, imageID), data); err != nil {
+		ts.tb.Fatalf("SeedEC2Image(%q): state.Put: %v", imageID, err)
+		return
+	}
 }

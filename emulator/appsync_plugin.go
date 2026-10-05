@@ -168,7 +168,9 @@ func (p *AppSyncPlugin) createGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKey(acct, region, apiID), data); err != nil {
 		return nil, fmt.Errorf("put appsync api: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID)
+	if err := updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID); err != nil {
+		return nil, fmt.Errorf("appsync createGraphqlAPI index: %w", err)
+	}
 
 	return appsyncJSONResponse(http.StatusOK, map[string]any{"graphqlApi": appsyncAPIToWire(api)})
 }
@@ -237,7 +239,9 @@ func (p *AppSyncPlugin) deleteGraphqlAPI(reqCtx *RequestContext, req *AWSRequest
 	if err := p.state.Delete(goCtx, appSyncNamespace, appSyncAPIKey(acct, region, apiID)); err != nil {
 		return nil, fmt.Errorf("delete appsync api: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID)
+	if err := removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIIDsKey(acct, region), apiID); err != nil {
+		return nil, fmt.Errorf("appsync deleteGraphqlAPI index: %w", err)
+	}
 	return appsyncDeleted()
 }
 
@@ -273,7 +277,9 @@ func (p *AppSyncPlugin) createDataSource(reqCtx *RequestContext, req *AWSRequest
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncDataSourceKey(acct, region, apiID, input.Name), data); err != nil {
 		return nil, fmt.Errorf("put appsync datasource: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), input.Name)
+	if err := updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), input.Name); err != nil {
+		return nil, fmt.Errorf("appsync createDataSource index: %w", err)
+	}
 	return appsyncJSONResponse(http.StatusOK, map[string]any{"dataSource": appsyncDataSourceToWire(ds)})
 }
 
@@ -340,7 +346,9 @@ func (p *AppSyncPlugin) deleteDataSource(reqCtx *RequestContext, req *AWSRequest
 	if err := p.state.Delete(goCtx, appSyncNamespace, appSyncDataSourceKey(acct, region, apiID, name)); err != nil {
 		return nil, fmt.Errorf("delete appsync datasource: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), name)
+	if err := removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncDataSourceNamesKey(acct, region, apiID), name); err != nil {
+		return nil, fmt.Errorf("appsync deleteDataSource index: %w", err)
+	}
 	return appsyncDeleted()
 }
 
@@ -382,7 +390,9 @@ func (p *AppSyncPlugin) createResolver(reqCtx *RequestContext, req *AWSRequest, 
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncResolverKey(acct, region, apiID, typeName, input.FieldName), data); err != nil {
 		return nil, fmt.Errorf("put appsync resolver: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+input.FieldName)
+	if err := updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+input.FieldName); err != nil {
+		return nil, fmt.Errorf("appsync createResolver index: %w", err)
+	}
 	return appsyncJSONResponse(http.StatusOK, map[string]any{"resolver": appsyncResolverToWire(res)})
 }
 
@@ -457,7 +467,9 @@ func (p *AppSyncPlugin) deleteResolver(reqCtx *RequestContext, req *AWSRequest, 
 	if err := p.state.Delete(goCtx, appSyncNamespace, appSyncResolverKey(acct, region, apiID, typeName, fieldName)); err != nil {
 		return nil, fmt.Errorf("delete appsync resolver: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+fieldName)
+	if err := removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncResolverKeysKey(acct, region, apiID), typeName+"/"+fieldName); err != nil {
+		return nil, fmt.Errorf("appsync deleteResolver index: %w", err)
+	}
 	return appsyncDeleted()
 }
 
@@ -493,7 +505,9 @@ func (p *AppSyncPlugin) createFunction(reqCtx *RequestContext, req *AWSRequest, 
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncFunctionKey(acct, region, apiID, funcID), data); err != nil {
 		return nil, fmt.Errorf("put appsync function: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID)
+	if err := updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID); err != nil {
+		return nil, fmt.Errorf("appsync createFunction index: %w", err)
+	}
 	return appsyncJSONResponse(http.StatusOK, map[string]any{"functionConfiguration": appsyncFunctionToWire(fn)})
 }
 
@@ -532,7 +546,9 @@ func (p *AppSyncPlugin) deleteFunction(reqCtx *RequestContext, req *AWSRequest, 
 	if err := p.state.Delete(goCtx, appSyncNamespace, appSyncFunctionKey(acct, region, apiID, funcID)); err != nil {
 		return nil, fmt.Errorf("delete appsync function: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID)
+	if err := removeFromStringIndex(goCtx, p.state, appSyncNamespace, appSyncFunctionIDsKey(acct, region, apiID), funcID); err != nil {
+		return nil, fmt.Errorf("appsync deleteFunction index: %w", err)
+	}
 	return appsyncDeleted()
 }
 
@@ -576,7 +592,9 @@ func (p *AppSyncPlugin) createAPIKey(reqCtx *RequestContext, req *AWSRequest, ap
 	if err := p.state.Put(goCtx, appSyncNamespace, appSyncAPIKeyStateKey(acct, region, apiID, keyID), data); err != nil {
 		return nil, fmt.Errorf("put appsync api key: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIKeyIDsKey(acct, region, apiID), keyID)
+	if err := updateStringIndex(goCtx, p.state, appSyncNamespace, appSyncAPIKeyIDsKey(acct, region, apiID), keyID); err != nil {
+		return nil, fmt.Errorf("appsync createAPIKey index: %w", err)
+	}
 	return appsyncJSONResponse(http.StatusOK, map[string]any{"apiKey": appsyncAPIKeyToWire(key)})
 }
 

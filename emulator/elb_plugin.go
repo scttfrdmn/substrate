@@ -252,7 +252,9 @@ func (p *ELBPlugin) deleteLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 		if err := p.state.Delete(context.Background(), elbNamespace, k); err != nil {
 			return nil, fmt.Errorf("elb deleteLoadBalancer delete: %w", err)
 		}
-		p.removeFromList(scope, "lb_names", lb.Name)
+		if err := p.removeFromList(scope, "lb_names", lb.Name); err != nil {
+			return nil, fmt.Errorf("elb deleteLoadBalancer removeFromList: %w", err)
+		}
 		break
 	}
 	return elbEmptyOKResponse(reqCtx, "DeleteLoadBalancer")
@@ -402,7 +404,9 @@ func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		if err := p.state.Delete(context.Background(), elbNamespace, k); err != nil {
 			return nil, fmt.Errorf("elb deleteTargetGroup delete: %w", err)
 		}
-		p.removeFromList(scope, "tg_names", tg.Name)
+		if err := p.removeFromList(scope, "tg_names", tg.Name); err != nil {
+			return nil, fmt.Errorf("elb deleteTargetGroup removeFromList: %w", err)
+		}
 		break
 	}
 	return elbEmptyOKResponse(reqCtx, "DeleteTargetGroup")
@@ -1100,15 +1104,21 @@ func (p *ELBPlugin) appendToList(scope, listName, id string) error {
 	return p.state.Put(context.Background(), elbNamespace, key, newData)
 }
 
-func (p *ELBPlugin) removeFromList(scope, listName, id string) {
+// removeFromList drops id from the named list. An absent list is a no-op; a failed read, a
+// corrupt list, or a failed write is returned, so a delete that cannot update its list is
+// reported rather than leaving a listed resource that no longer exists (#1192).
+func (p *ELBPlugin) removeFromList(scope, listName, id string) error {
 	key := listName + ":" + scope
 	data, err := p.state.Get(context.Background(), elbNamespace, key)
-	if err != nil || data == nil {
-		return
+	if err != nil {
+		return fmt.Errorf("elb removeFromList %s state.Get: %w", key, err)
+	}
+	if data == nil {
+		return nil
 	}
 	var ids []string
-	if json.Unmarshal(data, &ids) != nil {
-		return
+	if err := json.Unmarshal(data, &ids); err != nil {
+		return fmt.Errorf("elb removeFromList %s unmarshal: %w", key, err)
 	}
 	filtered := ids[:0]
 	for _, v := range ids {
@@ -1116,8 +1126,14 @@ func (p *ELBPlugin) removeFromList(scope, listName, id string) {
 			filtered = append(filtered, v)
 		}
 	}
-	newData, _ := json.Marshal(filtered)
-	_ = p.state.Put(context.Background(), elbNamespace, key, newData)
+	newData, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("elb removeFromList %s marshal: %w", key, err)
+	}
+	if err := p.state.Put(context.Background(), elbNamespace, key, newData); err != nil {
+		return fmt.Errorf("elb removeFromList %s state.Put: %w", key, err)
+	}
+	return nil
 }
 
 // elbXMLResponse serializes v to XML and returns an AWSResponse.

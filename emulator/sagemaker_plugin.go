@@ -171,7 +171,9 @@ func (p *SageMakerPlugin) createApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("createApp: put: %w", err)
 	}
 	keysKey := "app_keys:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, sagemakerNamespace, keysKey, appKey)
+	if err := updateStringIndex(goCtx, p.state, sagemakerNamespace, keysKey, appKey); err != nil {
+		return nil, fmt.Errorf("sagemaker createApp index: %w", err)
+	}
 	return sagemakerJSONResponse(http.StatusOK, map[string]string{"AppArn": appArn})
 }
 
@@ -202,7 +204,9 @@ func (p *SageMakerPlugin) deleteApp(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("deleteApp: %w", err)
 	}
 	keysKey := "app_keys:" + ctx.AccountID + "/" + ctx.Region
-	removeFromStringIndex(goCtx, p.state, sagemakerNamespace, keysKey, appKey)
+	if err := removeFromStringIndex(goCtx, p.state, sagemakerNamespace, keysKey, appKey); err != nil {
+		return nil, fmt.Errorf("sagemaker deleteApp index: %w", err)
+	}
 	return sagemakerJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -272,7 +276,9 @@ func (p *SageMakerPlugin) createTrainingJob(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("createTrainingJob: put: %w", err)
 	}
 	namesKey := "trainingjob_names:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, sagemakerNamespace, namesKey, body.TrainingJobName)
+	if err := updateStringIndex(goCtx, p.state, sagemakerNamespace, namesKey, body.TrainingJobName); err != nil {
+		return nil, fmt.Errorf("sagemaker createTrainingJob index: %w", err)
+	}
 	return sagemakerJSONResponse(http.StatusOK, map[string]string{"TrainingJobArn": jobArn})
 }
 

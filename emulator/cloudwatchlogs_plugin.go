@@ -121,7 +121,9 @@ func (p *CloudWatchLogsPlugin) createLogGroup(ctx *RequestContext, req *AWSReque
 	}
 
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogGroupName)
+	if err := updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogGroupName); err != nil {
+		return nil, fmt.Errorf("cloudwatchlogs createLogGroup index: %w", err)
+	}
 
 	return cwLogsJSONResponse(http.StatusOK, struct{}{})
 }
@@ -160,7 +162,9 @@ func (p *CloudWatchLogsPlugin) deleteLogGroup(ctx *RequestContext, req *AWSReque
 
 	// Remove from index.
 	idxKey := cwLogGroupNamesKey(ctx.AccountID, ctx.Region)
-	removeFromStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogGroupName)
+	if err := removeFromStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogGroupName); err != nil {
+		return nil, fmt.Errorf("cloudwatchlogs deleteLogGroup index: %w", err)
+	}
 
 	// Delete all streams for this group.
 	streamsIdxKey := cwLogStreamNamesKey(ctx.AccountID, ctx.Region, body.LogGroupName)
@@ -434,7 +438,9 @@ func (p *CloudWatchLogsPlugin) createLogStream(ctx *RequestContext, req *AWSRequ
 	}
 
 	idxKey := cwLogStreamNamesKey(ctx.AccountID, ctx.Region, body.LogGroupName)
-	updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogStreamName)
+	if err := updateStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogStreamName); err != nil {
+		return nil, fmt.Errorf("cloudwatchlogs createLogStream index: %w", err)
+	}
 
 	return cwLogsJSONResponse(http.StatusOK, struct{}{})
 }
@@ -467,7 +473,9 @@ func (p *CloudWatchLogsPlugin) deleteLogStream(ctx *RequestContext, req *AWSRequ
 	_ = p.state.Delete(goCtx, cloudwatchLogsNamespace, cwLogEventsKey(ctx.AccountID, ctx.Region, body.LogGroupName, body.LogStreamName))
 
 	idxKey := cwLogStreamNamesKey(ctx.AccountID, ctx.Region, body.LogGroupName)
-	removeFromStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogStreamName)
+	if err := removeFromStringIndex(goCtx, p.state, cloudwatchLogsNamespace, idxKey, body.LogStreamName); err != nil {
+		return nil, fmt.Errorf("cloudwatchlogs deleteLogStream index: %w", err)
+	}
 
 	return cwLogsJSONResponse(http.StatusOK, struct{}{})
 }
@@ -613,7 +621,9 @@ func (p *CloudWatchLogsPlugin) putLogEvents(ctx *RequestContext, req *AWSRequest
 		ls.LastIngestionTime = now
 		ls.UploadSequenceToken = ctx.IDs.HexUUID()
 		if updated, marshalErr := json.Marshal(ls); marshalErr == nil {
-			_ = p.state.Put(goCtx, cloudwatchLogsNamespace, streamKey, updated)
+			if err := p.state.Put(goCtx, cloudwatchLogsNamespace, streamKey, updated); err != nil {
+				return nil, fmt.Errorf("cloudwatchlogs putLogEvents state.Put: %w", err)
+			}
 		}
 	}
 
@@ -885,33 +895,60 @@ func cwLogsJSONResponse(status int, v interface{}) (*AWSResponse, error) {
 
 // updateStringIndex appends name to the sorted []string JSON index stored at
 // namespace/key. It is a no-op if name is already present.
-func updateStringIndex(ctx context.Context, state StateManager, ns, key, name string) {
-	data, _ := state.Get(ctx, ns, key)
-	var names []string
-	if data != nil {
-		_ = json.Unmarshal(data, &names)
+//
+// It returns every failure, wrapped: a read, a decode, an encode or a write that fails would
+// otherwise leave the index without the name while the caller answers success, so the resource
+// vanishes from its own list (#1175). A caller propagates the error rather than discarding it.
+//
+// The partial state is deliberate. A create writes its resource record before its index entry, and
+// a failed index write does not roll the record back: the StateManager has no transaction, and a
+// compensating Delete can fail for the same reason the Put did, so a rollback would only move the
+// inconsistency. The create is refused instead, so the caller sees the failure and does not proceed
+// on a resource whose list does not show it. Because the record was written, a handler that checks
+// for an existing record refuses a retry of the create as already existing.
+//
+// How a store failure is reported is stated here once and applies to every handler that returns
+// one (#1192): the handler returns the wrapped error, which is not an [AWSError], so
+// [Server.writeError] answers it as InternalFailure with HTTP 500 — the status the AWS Common
+// Errors give an internal failure (IAM's included), and the one an SDK classifies as retryable.
+// No handler maps a store failure to a 4xx: nothing the caller sent was wrong.
+//
+// The read-modify-write is not synchronized: two concurrent updates of one index can lose one name.
+// That is a separate defect from a discarded error and is not addressed here.
+func updateStringIndex(ctx context.Context, state StateManager, ns, key, name string) error {
+	names, err := loadStringIndex(ctx, state, ns, key)
+	if err != nil {
+		return fmt.Errorf("updateStringIndex %s/%s: %w", ns, key, err)
 	}
 	for _, n := range names {
 		if n == name {
-			return
+			return nil
 		}
 	}
 	names = append(names, name)
 	sort.Strings(names)
-	b, _ := json.Marshal(names)
-	_ = state.Put(ctx, ns, key, b)
+	b, err := json.Marshal(names)
+	if err != nil {
+		return fmt.Errorf("updateStringIndex %s/%s marshal: %w", ns, key, err)
+	}
+	if err := state.Put(ctx, ns, key, b); err != nil {
+		return fmt.Errorf("updateStringIndex %s/%s state.Put: %w", ns, key, err)
+	}
+	return nil
 }
 
 // removeFromStringIndex removes name from the []string JSON index stored at
-// namespace/key. It is a no-op if name is not present.
-func removeFromStringIndex(ctx context.Context, state StateManager, ns, key, name string) {
-	data, _ := state.Get(ctx, ns, key)
-	if data == nil {
-		return
+// namespace/key. It is a no-op if the index or name is not present.
+//
+// Like updateStringIndex it returns every failure, wrapped (#1175). A corrupt index is a failure,
+// not an absent one: treating it as absent would silently leave the name listed.
+func removeFromStringIndex(ctx context.Context, state StateManager, ns, key, name string) error {
+	names, err := loadStringIndex(ctx, state, ns, key)
+	if err != nil {
+		return fmt.Errorf("removeFromStringIndex %s/%s: %w", ns, key, err)
 	}
-	var names []string
-	if json.Unmarshal(data, &names) != nil {
-		return
+	if names == nil {
+		return nil
 	}
 	filtered := make([]string, 0, len(names))
 	for _, n := range names {
@@ -919,8 +956,14 @@ func removeFromStringIndex(ctx context.Context, state StateManager, ns, key, nam
 			filtered = append(filtered, n)
 		}
 	}
-	b, _ := json.Marshal(filtered)
-	_ = state.Put(ctx, ns, key, b)
+	b, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("removeFromStringIndex %s/%s marshal: %w", ns, key, err)
+	}
+	if err := state.Put(ctx, ns, key, b); err != nil {
+		return fmt.Errorf("removeFromStringIndex %s/%s state.Put: %w", ns, key, err)
+	}
+	return nil
 }
 
 // loadStringIndex reads and deserialises the []string JSON index stored at

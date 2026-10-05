@@ -163,7 +163,9 @@ func (p *CognitoIDPPlugin) createUserPool(ctx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, stateKey, data); err != nil {
 		return nil, fmt.Errorf("cognito-idp createUserPool state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolIDsKey(ctx.AccountID, ctx.Region), poolID)
+	if err := updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolIDsKey(ctx.AccountID, ctx.Region), poolID); err != nil {
+		return nil, fmt.Errorf("cognito createUserPool index: %w", err)
+	}
 
 	type response struct {
 		UserPool cognitoUserPoolOut `json:"UserPool"`
@@ -257,7 +259,9 @@ func (p *CognitoIDPPlugin) deleteUserPool(ctx *RequestContext, req *AWSRequest) 
 
 	// Remove pool record.
 	_ = p.state.Delete(goCtx, cognitoIDPNamespace, cognitoUserPoolKey(ctx.AccountID, ctx.Region, poolID))
-	removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolIDsKey(ctx.AccountID, ctx.Region), poolID)
+	if err := removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolIDsKey(ctx.AccountID, ctx.Region), poolID); err != nil {
+		return nil, fmt.Errorf("cognito deleteUserPool index: %w", err)
+	}
 
 	// Remove all clients.
 	clientIDs, _ := loadStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, poolID))
@@ -394,7 +398,9 @@ func (p *CognitoIDPPlugin) createUserPoolClient(ctx *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, stateKey, data); err != nil {
 		return nil, fmt.Errorf("cognito-idp createUserPoolClient state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, body.UserPoolID), clientID)
+	if err := updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, body.UserPoolID), clientID); err != nil {
+		return nil, fmt.Errorf("cognito createUserPoolClient index: %w", err)
+	}
 
 	type response struct {
 		UserPoolClient cognitoUserPoolClientOut `json:"UserPoolClient"`
@@ -474,7 +480,9 @@ func (p *CognitoIDPPlugin) deleteUserPoolClient(ctx *RequestContext, req *AWSReq
 	}
 	goCtx := context.Background()
 	_ = p.state.Delete(goCtx, cognitoIDPNamespace, cognitoUserPoolClientKey(ctx.AccountID, ctx.Region, body.UserPoolID, body.ClientID))
-	removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.ClientID)
+	if err := removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserPoolClientIDsKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.ClientID); err != nil {
+		return nil, fmt.Errorf("cognito deleteUserPoolClient index: %w", err)
+	}
 	return cognitoIDPJSONResponse(http.StatusOK, struct{}{})
 }
 
@@ -551,7 +559,9 @@ func (p *CognitoIDPPlugin) createUserPoolDomain(ctx *RequestContext, req *AWSReq
 	if err != nil {
 		return nil, fmt.Errorf("cognito createUserPoolDomain marshal: %w", err)
 	}
-	_ = p.state.Put(goCtx, cognitoIDPNamespace, domainKey, domainData)
+	if err := p.state.Put(goCtx, cognitoIDPNamespace, domainKey, domainData); err != nil {
+		return nil, fmt.Errorf("cognito createUserPoolDomain state.Put: %w", err)
+	}
 
 	type response struct {
 		CloudFrontDomain string `json:"CloudFrontDomain"`
@@ -635,7 +645,9 @@ func (p *CognitoIDPPlugin) createGroup(ctx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, cognitoGroupKey(ctx.AccountID, ctx.Region, body.UserPoolID, body.GroupName), data); err != nil {
 		return nil, fmt.Errorf("cognito-idp createGroup state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoGroupNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.GroupName)
+	if err := updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoGroupNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.GroupName); err != nil {
+		return nil, fmt.Errorf("cognito createGroup index: %w", err)
+	}
 
 	type response struct {
 		Group cognitoGroupOut `json:"Group"`
@@ -671,7 +683,9 @@ func (p *CognitoIDPPlugin) deleteGroup(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	goCtx := context.Background()
 	_ = p.state.Delete(goCtx, cognitoIDPNamespace, cognitoGroupKey(ctx.AccountID, ctx.Region, body.UserPoolID, body.GroupName))
-	removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoGroupNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.GroupName)
+	if err := removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoGroupNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.GroupName); err != nil {
+		return nil, fmt.Errorf("cognito deleteGroup index: %w", err)
+	}
 	return cognitoIDPJSONResponse(http.StatusOK, struct{}{})
 }
 
@@ -745,7 +759,9 @@ func (p *CognitoIDPPlugin) adminCreateUser(ctx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, cognitoUserKey(ctx.AccountID, ctx.Region, body.UserPoolID, body.Username), data); err != nil {
 		return nil, fmt.Errorf("cognito-idp adminCreateUser state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.Username)
+	if err := updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.Username); err != nil {
+		return nil, fmt.Errorf("cognito adminCreateUser index: %w", err)
+	}
 
 	type response struct {
 		User cognitoUserOut `json:"User"`
@@ -832,7 +848,9 @@ func (p *CognitoIDPPlugin) adminDeleteUser(ctx *RequestContext, req *AWSRequest)
 	}
 	goCtx := context.Background()
 	_ = p.state.Delete(goCtx, cognitoIDPNamespace, cognitoUserKey(ctx.AccountID, ctx.Region, body.UserPoolID, body.Username))
-	removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.Username)
+	if err := removeFromStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, body.UserPoolID), body.Username); err != nil {
+		return nil, fmt.Errorf("cognito adminDeleteUser index: %w", err)
+	}
 	return cognitoIDPJSONResponse(http.StatusOK, struct{}{})
 }
 
@@ -1061,7 +1079,9 @@ func (p *CognitoIDPPlugin) signUp(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Put(goCtx, cognitoIDPNamespace, cognitoUserKey(ctx.AccountID, ctx.Region, poolID, body.Username), data); err != nil {
 		return nil, fmt.Errorf("cognito-idp signUp state.Put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, poolID), body.Username)
+	if err := updateStringIndex(goCtx, p.state, cognitoIDPNamespace, cognitoUserNamesKey(ctx.AccountID, ctx.Region, poolID), body.Username); err != nil {
+		return nil, fmt.Errorf("cognito signUp index: %w", err)
+	}
 
 	type response struct {
 		UserConfirmed bool   `json:"UserConfirmed"`

@@ -168,7 +168,9 @@ func (p *SSOPlugin) createPermissionSet(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ssoNamespace, ssoPermSetKey(reqCtx.AccountID, permSetArn), d); err != nil {
 		return nil, fmt.Errorf("sso createPermissionSet put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, ssoNamespace, ssoPermSetArnsKey(reqCtx.AccountID), permSetArn)
+	if err := updateStringIndex(goCtx, p.state, ssoNamespace, ssoPermSetArnsKey(reqCtx.AccountID), permSetArn); err != nil {
+		return nil, fmt.Errorf("sso createPermissionSet index: %w", err)
+	}
 
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
 		"PermissionSet": ssoPermissionSetToWire(ps),
@@ -248,7 +250,9 @@ func (p *SSOPlugin) deletePermissionSet(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Delete(goCtx, ssoNamespace, ssoPermSetKey(reqCtx.AccountID, input.PermissionSetArn)); err != nil {
 		return nil, fmt.Errorf("sso deletePermissionSet delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoPermSetArnsKey(reqCtx.AccountID), input.PermissionSetArn)
+	if err := removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoPermSetArnsKey(reqCtx.AccountID), input.PermissionSetArn); err != nil {
+		return nil, fmt.Errorf("sso deletePermissionSet index: %w", err)
+	}
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -282,7 +286,9 @@ func (p *SSOPlugin) attachManagedPolicy(reqCtx *RequestContext, req *AWSRequest)
 	}
 
 	goCtx := context.Background()
-	updateStringIndex(goCtx, p.state, ssoNamespace, ssoManagedPoliciesKey(reqCtx.AccountID, input.PermissionSetArn), input.ManagedPolicyArn)
+	if err := updateStringIndex(goCtx, p.state, ssoNamespace, ssoManagedPoliciesKey(reqCtx.AccountID, input.PermissionSetArn), input.ManagedPolicyArn); err != nil {
+		return nil, fmt.Errorf("sso attachManagedPolicy index: %w", err)
+	}
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -301,7 +307,9 @@ func (p *SSOPlugin) detachManagedPolicy(reqCtx *RequestContext, req *AWSRequest)
 	}
 
 	goCtx := context.Background()
-	removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoManagedPoliciesKey(reqCtx.AccountID, input.PermissionSetArn), input.ManagedPolicyArn)
+	if err := removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoManagedPoliciesKey(reqCtx.AccountID, input.PermissionSetArn), input.ManagedPolicyArn); err != nil {
+		return nil, fmt.Errorf("sso detachManagedPolicy index: %w", err)
+	}
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -383,7 +391,9 @@ func (p *SSOPlugin) createAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("sso createAccountAssignment put: %w", err)
 	}
 	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
-	updateStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
+	if err := updateStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey); err != nil {
+		return nil, fmt.Errorf("sso createAccountAssignment index: %w", err)
+	}
 
 	requestID := generateSSORequestID(reqCtx.IDs)
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{
@@ -433,7 +443,9 @@ func (p *SSOPlugin) deleteAccountAssignment(reqCtx *RequestContext, req *AWSRequ
 		return nil, fmt.Errorf("sso deleteAccountAssignment delete: %w", err)
 	}
 	compositeKey := input.TargetID + "/" + input.PrincipalType + "/" + input.PrincipalID
-	removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey)
+	if err := removeFromStringIndex(goCtx, p.state, ssoNamespace, ssoAssignmentKeysKey(reqCtx.AccountID, input.PermissionSetArn), compositeKey); err != nil {
+		return nil, fmt.Errorf("sso deleteAccountAssignment index: %w", err)
+	}
 
 	requestID := generateSSORequestID(reqCtx.IDs)
 	return ssoJSONResponse(http.StatusOK, map[string]interface{}{

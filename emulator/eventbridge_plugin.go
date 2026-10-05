@@ -112,7 +112,9 @@ func (p *EventBridgePlugin) putRule(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	idxKey := ebRuleNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, eventbridgeNamespace, idxKey, body.Name)
+	if err := updateStringIndex(goCtx, p.state, eventbridgeNamespace, idxKey, body.Name); err != nil {
+		return nil, fmt.Errorf("eventbridge putRule index: %w", err)
+	}
 
 	type response struct {
 		RuleArn string `json:"RuleArn"`
@@ -162,7 +164,9 @@ func (p *EventBridgePlugin) deleteRule(ctx *RequestContext, req *AWSRequest) (*A
 	_ = p.state.Delete(goCtx, eventbridgeNamespace, targetsKey)
 
 	idxKey := ebRuleNamesKey(ctx.AccountID, ctx.Region)
-	removeFromStringIndex(goCtx, p.state, eventbridgeNamespace, idxKey, body.Name)
+	if err := removeFromStringIndex(goCtx, p.state, eventbridgeNamespace, idxKey, body.Name); err != nil {
+		return nil, fmt.Errorf("eventbridge deleteRule index: %w", err)
+	}
 
 	return ebJSONResponse(http.StatusOK, struct{}{})
 }

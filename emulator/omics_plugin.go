@@ -196,7 +196,9 @@ func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("startRun: put: %w", err)
 	}
 	idsKey := "run_ids:" + ctx.AccountID + "/" + ctx.Region
-	updateStringIndex(goCtx, p.state, omicsNamespace, idsKey, runID)
+	if err := updateStringIndex(goCtx, p.state, omicsNamespace, idsKey, runID); err != nil {
+		return nil, fmt.Errorf("omics startRun index: %w", err)
+	}
 
 	// API_StartRun publishes the run's status in the create response. It is what the run's first
 	// observation would report, peeked rather than observed, so a "*" seed's countdown is not
@@ -295,7 +297,9 @@ func (p *OmicsPlugin) deleteRun(ctx *RequestContext, _ *AWSRequest, runID string
 	if err := p.state.Delete(goCtx, omicsNamespace, runKey); err != nil {
 		return nil, fmt.Errorf("deleteRun: delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, omicsNamespace, "run_ids:"+ctx.AccountID+"/"+ctx.Region, runID)
+	if err := removeFromStringIndex(goCtx, p.state, omicsNamespace, "run_ids:"+ctx.AccountID+"/"+ctx.Region, runID); err != nil {
+		return nil, fmt.Errorf("omics deleteRun index: %w", err)
+	}
 	if err := omicsRunProgressions.reset(goCtx, p.state, runID); err != nil {
 		return nil, fmt.Errorf("deleteRun: %w", err)
 	}

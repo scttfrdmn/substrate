@@ -186,7 +186,9 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := p.state.Put(goCtx, wafv2Namespace, key, data); err != nil {
 		return nil, fmt.Errorf("wafv2 createWebACL put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, wafv2Namespace, wafv2WebACLIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), id)
+	if err := updateStringIndex(goCtx, p.state, wafv2Namespace, wafv2WebACLIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), id); err != nil {
+		return nil, fmt.Errorf("wafv2 createWebACL index: %w", err)
+	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
 		"Summary": map[string]interface{}{
@@ -338,7 +340,9 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := p.state.Delete(goCtx, wafv2Namespace, key); err != nil {
 		return nil, fmt.Errorf("wafv2 deleteWebACL delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, wafv2Namespace, wafv2WebACLIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), input.ID)
+	if err := removeFromStringIndex(goCtx, p.state, wafv2Namespace, wafv2WebACLIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), input.ID); err != nil {
+		return nil, fmt.Errorf("wafv2 deleteWebACL index: %w", err)
+	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{})
 }
@@ -511,7 +515,9 @@ func (p *WAFv2Plugin) createIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err := p.state.Put(goCtx, wafv2Namespace, key, data); err != nil {
 		return nil, fmt.Errorf("wafv2 createIPSet put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, wafv2Namespace, wafv2IPSetIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), id)
+	if err := updateStringIndex(goCtx, p.state, wafv2Namespace, wafv2IPSetIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), id); err != nil {
+		return nil, fmt.Errorf("wafv2 createIPSet index: %w", err)
+	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
 		"Summary": map[string]interface{}{
@@ -628,7 +634,9 @@ func (p *WAFv2Plugin) deleteIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err := p.state.Delete(goCtx, wafv2Namespace, key); err != nil {
 		return nil, fmt.Errorf("wafv2 deleteIPSet delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, wafv2Namespace, wafv2IPSetIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), input.ID)
+	if err := removeFromStringIndex(goCtx, p.state, wafv2Namespace, wafv2IPSetIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope), input.ID); err != nil {
+		return nil, fmt.Errorf("wafv2 deleteIPSet index: %w", err)
+	}
 
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{})
 }

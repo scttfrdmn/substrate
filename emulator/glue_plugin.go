@@ -151,7 +151,9 @@ func (p *GluePlugin) createDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Put(goCtx, glueNamespace, "database:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+name, data); err != nil {
 		return nil, fmt.Errorf("glue createDatabase put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "database_names:"+reqCtx.AccountID+"/"+reqCtx.Region, name)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "database_names:"+reqCtx.AccountID+"/"+reqCtx.Region, name); err != nil {
+		return nil, fmt.Errorf("glue createDatabase index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -258,7 +260,9 @@ func (p *GluePlugin) deleteDatabase(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Delete(goCtx, glueNamespace, "database:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name); err != nil {
 		return nil, fmt.Errorf("glue deleteDatabase delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, glueNamespace, "database_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name)
+	if err := removeFromStringIndex(goCtx, p.state, glueNamespace, "database_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name); err != nil {
+		return nil, fmt.Errorf("glue deleteDatabase index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -303,7 +307,9 @@ func (p *GluePlugin) createTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.state.Put(goCtx, glueNamespace, "table:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName+"/"+input.TableInput.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createTable put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName, input.TableInput.Name)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName, input.TableInput.Name); err != nil {
+		return nil, fmt.Errorf("glue createTable index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -431,7 +437,9 @@ func (p *GluePlugin) deleteTable(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.state.Delete(goCtx, glueNamespace, "table:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName+"/"+input.Name); err != nil {
 		return nil, fmt.Errorf("glue deleteTable delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName, input.Name)
+	if err := removeFromStringIndex(goCtx, p.state, glueNamespace, "table_names:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.DatabaseName, input.Name); err != nil {
+		return nil, fmt.Errorf("glue deleteTable index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -472,7 +480,9 @@ func (p *GluePlugin) createConnection(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, glueNamespace, "connection:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+conn.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createConnection put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "connection_names:"+reqCtx.AccountID+"/"+reqCtx.Region, conn.Name)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "connection_names:"+reqCtx.AccountID+"/"+reqCtx.Region, conn.Name); err != nil {
+		return nil, fmt.Errorf("glue createConnection index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -578,7 +588,9 @@ func (p *GluePlugin) deleteConnection(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Delete(goCtx, glueNamespace, "connection:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.ConnectionName); err != nil {
 		return nil, fmt.Errorf("glue deleteConnection delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, glueNamespace, "connection_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.ConnectionName)
+	if err := removeFromStringIndex(goCtx, p.state, glueNamespace, "connection_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.ConnectionName); err != nil {
+		return nil, fmt.Errorf("glue deleteConnection index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -620,7 +632,9 @@ func (p *GluePlugin) createCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := p.state.Put(goCtx, glueNamespace, "crawler:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createCrawler put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "crawler_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "crawler_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name); err != nil {
+		return nil, fmt.Errorf("glue createCrawler index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -730,7 +744,9 @@ func (p *GluePlugin) deleteCrawler(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := p.state.Delete(goCtx, glueNamespace, "crawler:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name); err != nil {
 		return nil, fmt.Errorf("glue deleteCrawler delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, glueNamespace, "crawler_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name)
+	if err := removeFromStringIndex(goCtx, p.state, glueNamespace, "crawler_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name); err != nil {
+		return nil, fmt.Errorf("glue deleteCrawler index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -769,7 +785,9 @@ func (p *GluePlugin) createJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Put(goCtx, glueNamespace, "job:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.Name, data); err != nil {
 		return nil, fmt.Errorf("glue createJob put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "job_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "job_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.Name); err != nil {
+		return nil, fmt.Errorf("glue createJob index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{"Name": input.Name})
 }
 
@@ -871,7 +889,9 @@ func (p *GluePlugin) deleteJob(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if err := p.state.Delete(goCtx, glueNamespace, "job:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName); err != nil {
 		return nil, fmt.Errorf("glue deleteJob delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, glueNamespace, "job_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.JobName)
+	if err := removeFromStringIndex(goCtx, p.state, glueNamespace, "job_names:"+reqCtx.AccountID+"/"+reqCtx.Region, input.JobName); err != nil {
+		return nil, fmt.Errorf("glue deleteJob index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{"JobName": input.JobName})
 }
 
@@ -911,7 +931,9 @@ func (p *GluePlugin) startJobRun(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.state.Put(goCtx, glueNamespace, "jobrun:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName+"/"+runID, data); err != nil {
 		return nil, fmt.Errorf("glue startJobRun put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, glueNamespace, "jobrun_ids:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName, runID)
+	if err := updateStringIndex(goCtx, p.state, glueNamespace, "jobrun_ids:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+input.JobName, runID); err != nil {
+		return nil, fmt.Errorf("glue startJobRun index: %w", err)
+	}
 	return glueJSONResponse(http.StatusOK, map[string]interface{}{"JobRunId": runID})
 }
 

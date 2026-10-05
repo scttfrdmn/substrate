@@ -211,7 +211,9 @@ func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) 
 	if err := p.state.Put(goCtx, redshiftNamespace, redshiftClusterKey(reqCtx.AccountID, reqCtx.Region, id), d); err != nil {
 		return nil, fmt.Errorf("redshift createCluster put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id)
+	if err := updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id); err != nil {
+		return nil, fmt.Errorf("redshift createCluster index: %w", err)
+	}
 
 	// API_CreateCluster's sample answers creating, seeded or not; a describe then reports the
 	// countdown, and unseeded the record's available (#1196).
@@ -405,7 +407,9 @@ func (p *RedshiftPlugin) deleteCluster(reqCtx *RequestContext, req *AWSRequest) 
 		if err := p.state.Put(goCtx, redshiftNamespace, key, d); err != nil {
 			return nil, fmt.Errorf("redshift deleteCluster final snapshot put: %w", err)
 		}
-		updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), del.finalSnapshotID)
+		if err := updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), del.finalSnapshotID); err != nil {
+			return nil, fmt.Errorf("redshift deleteCluster index: %w", err)
+		}
 	}
 
 	answered := clusterToXML(*cluster)
@@ -503,7 +507,9 @@ func (p *RedshiftPlugin) createClusterParameterGroup(reqCtx *RequestContext, req
 	if err := p.state.Put(goCtx, redshiftNamespace, key, d); err != nil {
 		return nil, fmt.Errorf("redshift createClusterParameterGroup put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftParamGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name)
+	if err := updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftParamGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name); err != nil {
+		return nil, fmt.Errorf("redshift createClusterParameterGroup index: %w", err)
+	}
 
 	return redshiftOKResponse(reqCtx, "CreateClusterParameterGroup", redshiftCreateParamGroupResultXML{
 		ParameterGroup: paramGroupToXML(pg),
@@ -656,7 +662,9 @@ func (p *RedshiftPlugin) createClusterSubnetGroup(reqCtx *RequestContext, req *A
 	if err := p.state.Put(goCtx, redshiftNamespace, key, d); err != nil {
 		return nil, fmt.Errorf("redshift createClusterSubnetGroup put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSubnetGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name)
+	if err := updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSubnetGroupNamesKey(reqCtx.AccountID, reqCtx.Region), name); err != nil {
+		return nil, fmt.Errorf("redshift createClusterSubnetGroup index: %w", err)
+	}
 
 	return redshiftOKResponse(reqCtx, "CreateClusterSubnetGroup", redshiftCreateSubnetGroupResultXML{
 		SubnetGroup: subnetGroupToXML(sg),
@@ -770,7 +778,9 @@ func (p *RedshiftPlugin) createClusterSnapshot(reqCtx *RequestContext, req *AWSR
 	if err := p.state.Put(goCtx, redshiftNamespace, redshiftSnapshotKey(reqCtx.AccountID, reqCtx.Region, snapshotID), d); err != nil {
 		return nil, fmt.Errorf("redshift createClusterSnapshot put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), snapshotID)
+	if err := updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), snapshotID); err != nil {
+		return nil, fmt.Errorf("redshift createClusterSnapshot index: %w", err)
+	}
 
 	// API_Snapshot: CreateClusterSnapshot "returns status as 'creating'", seeded or not (#1196).
 	created := snapshotToXML(snapshot)

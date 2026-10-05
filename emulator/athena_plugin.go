@@ -356,7 +356,10 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 
 	goCtx := context.Background()
 	idsKey := "query_ids:" + ctx.AccountID + "/" + ctx.Region
-	ids := athenaLoadStringIndex(goCtx, p.state, idsKey)
+	ids, err := athenaLoadStringIndex(goCtx, p.state, idsKey)
+	if err != nil {
+		return nil, fmt.Errorf("athena listQueryExecutions: %w", err)
+	}
 
 	// Filter by workgroup if requested.
 	if body.WorkGroup != "" {
@@ -591,7 +594,9 @@ func (p *AthenaPlugin) deleteWorkGroup(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, fmt.Errorf("deleteWorkGroup: delete: %w", err)
 	}
 	namesKey := "workgroup_names:" + ctx.AccountID + "/" + ctx.Region
-	athenaRemoveStringIndex(goCtx, p.state, namesKey, body.WorkGroup)
+	if err := athenaRemoveStringIndex(goCtx, p.state, namesKey, body.WorkGroup); err != nil {
+		return nil, fmt.Errorf("athena deleteWorkGroup: %w", err)
+	}
 	return athenaJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
@@ -615,7 +620,10 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 
 	goCtx := context.Background()
 	namesKey := "workgroup_names:" + ctx.AccountID + "/" + ctx.Region
-	names := athenaLoadStringIndex(goCtx, p.state, namesKey)
+	names, err := athenaLoadStringIndex(goCtx, p.state, namesKey)
+	if err != nil {
+		return nil, fmt.Errorf("athena listWorkGroups: %w", err)
+	}
 
 	// The primary workgroup is prepended rather than appended, and the choice matters to the offset
 	// pagination #1086 converted this walk to. It exists before any workgroup a caller creates, so
@@ -687,39 +695,59 @@ func (p *AthenaPlugin) loadAthenaStateResult(sql string) *AthenaResultSet {
 
 // athenaAppendStringIndex loads a JSON []string index from state, appends value, and re-stores it.
 func athenaAppendStringIndex(ctx context.Context, state StateManager, key, value string) error {
-	existing := athenaLoadStringIndex(ctx, state, key)
+	existing, err := athenaLoadStringIndex(ctx, state, key)
+	if err != nil {
+		return err
+	}
 	existing = append(existing, value)
 	data, err := json.Marshal(existing)
 	if err != nil {
 		return fmt.Errorf("athenaAppendStringIndex: marshal: %w", err)
 	}
-	return state.Put(ctx, athenaNamespace, key, data)
+	if err := state.Put(ctx, athenaNamespace, key, data); err != nil {
+		return fmt.Errorf("athenaAppendStringIndex: state.Put: %w", err)
+	}
+	return nil
 }
 
-// athenaRemoveStringIndex loads a JSON []string index, removes value, and re-stores it.
-func athenaRemoveStringIndex(ctx context.Context, state StateManager, key, value string) {
-	existing := athenaLoadStringIndex(ctx, state, key)
+// athenaRemoveStringIndex loads a JSON []string index, removes value, and re-stores it. It returns
+// every failure, wrapped (#1175).
+func athenaRemoveStringIndex(ctx context.Context, state StateManager, key, value string) error {
+	existing, err := athenaLoadStringIndex(ctx, state, key)
+	if err != nil {
+		return err
+	}
 	filtered := existing[:0]
 	for _, v := range existing {
 		if v != value {
 			filtered = append(filtered, v)
 		}
 	}
-	data, _ := json.Marshal(filtered)
-	_ = state.Put(ctx, athenaNamespace, key, data)
+	data, err := json.Marshal(filtered)
+	if err != nil {
+		return fmt.Errorf("athenaRemoveStringIndex: marshal: %w", err)
+	}
+	if err := state.Put(ctx, athenaNamespace, key, data); err != nil {
+		return fmt.Errorf("athenaRemoveStringIndex: state.Put: %w", err)
+	}
+	return nil
 }
 
-// athenaLoadStringIndex loads a JSON []string from state, returning nil slice on missing/error.
-func athenaLoadStringIndex(ctx context.Context, state StateManager, key string) []string {
+// athenaLoadStringIndex loads a JSON []string from state. An absent index is nil, nil; a read or
+// decode failure is returned, wrapped, rather than read as an empty index (#1175).
+func athenaLoadStringIndex(ctx context.Context, state StateManager, key string) ([]string, error) {
 	data, err := state.Get(ctx, athenaNamespace, key)
-	if err != nil || data == nil {
-		return nil
+	if err != nil {
+		return nil, fmt.Errorf("athenaLoadStringIndex: state.Get: %w", err)
+	}
+	if data == nil {
+		return nil, nil
 	}
 	var ids []string
 	if err := json.Unmarshal(data, &ids); err != nil {
-		return nil
+		return nil, fmt.Errorf("athenaLoadStringIndex: unmarshal: %w", err)
 	}
-	return ids
+	return ids, nil
 }
 
 // generateAthenaQueryID mints a query execution ID from m, in the UUID shape AWS's own examples

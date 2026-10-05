@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A list-index write that fails is reported instead of swallowed** (#1175). `updateStringIndex`,
+  `removeFromStringIndex` and the per-service list helpers return their errors, and all 167 callers
+  propagate them. A create whose index write fails answers 500 `InternalFailure`, rather than 200 over
+  a resource missing from its own list, and a corrupt index is an error rather than treated as absent.
+  The record-without-index partial state is deliberate and documented: there is no transaction, so the
+  record stays and a retry is refused as already existing.
+- **A failed state write is reported as 500 `InternalFailure`** (#1192). Discarded writes now return,
+  across:
+  - 43 `_ = state.Put` sites;
+  - the ELB, Route 53, RDS and ElastiCache list removals;
+  - ECR tag maps, S3 version lists, SQS FIFO deduplication and DynamoDB stream records;
+  - the Lambda replay cache and log group;
+  - CloudFormation stubs and stack records;
+  - EC2's default security group, internet gateway and route table.
+
+  The `TestServer` seed helpers fail the test on a store failure, and a 59-case sweep test refuses each
+  write in turn and asserts the failure is reported. The new `make discarded-state-check` gate, run in
+  CI, fails on any new discarded state write. Nothing needed an allowlist entry. The default in-memory
+  store never fails, so behaviour is unchanged for it.
+
 - **An XML error response carries the request's own ID** (#1241). No Query-protocol error said which
   request it answered.
   - The Query `<ErrorResponse>` now closes with `<RequestId>` beside `<Error>`, as the smithy

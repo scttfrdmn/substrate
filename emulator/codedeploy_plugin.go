@@ -119,7 +119,9 @@ func (p *CodeDeployPlugin) createApplication(reqCtx *RequestContext, req *AWSReq
 	if err := p.state.Put(goCtx, codedeployNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codedeploy createApplication put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region), input.ApplicationName)
+	if err := updateStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region), input.ApplicationName); err != nil {
+		return nil, fmt.Errorf("codedeploy createApplication index: %w", err)
+	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
 		"applicationId": appID,
@@ -189,7 +191,9 @@ func (p *CodeDeployPlugin) deleteApplication(reqCtx *RequestContext, req *AWSReq
 	if err := p.state.Delete(goCtx, codedeployNamespace, key); err != nil {
 		return nil, fmt.Errorf("codedeploy deleteApplication delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region), input.ApplicationName)
+	if err := removeFromStringIndex(goCtx, p.state, codedeployNamespace, codedeployAppNamesKey(reqCtx.AccountID, reqCtx.Region), input.ApplicationName); err != nil {
+		return nil, fmt.Errorf("codedeploy deleteApplication index: %w", err)
+	}
 
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
@@ -326,7 +330,9 @@ func (p *CodeDeployPlugin) createDeploymentGroup(reqCtx *RequestContext, req *AW
 	if err := p.putGroup(goCtx, key, group); err != nil {
 		return nil, err
 	}
-	updateStringIndex(goCtx, p.state, codedeployNamespace, codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName), input.DeploymentGroupName)
+	if err := updateStringIndex(goCtx, p.state, codedeployNamespace, codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName), input.DeploymentGroupName); err != nil {
+		return nil, fmt.Errorf("codedeploy createDeploymentGroup index: %w", err)
+	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
 		"deploymentGroupId": groupID,
@@ -398,7 +404,9 @@ func (p *CodeDeployPlugin) deleteDeploymentGroup(reqCtx *RequestContext, req *AW
 	if err := p.state.Delete(goCtx, codedeployNamespace, key); err != nil {
 		return nil, fmt.Errorf("codedeploy deleteDeploymentGroup delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, codedeployNamespace, codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName), input.DeploymentGroupName)
+	if err := removeFromStringIndex(goCtx, p.state, codedeployNamespace, codedeployGroupNamesKey(reqCtx.AccountID, reqCtx.Region, input.ApplicationName), input.DeploymentGroupName); err != nil {
+		return nil, fmt.Errorf("codedeploy deleteDeploymentGroup index: %w", err)
+	}
 
 	return codedeployJSONResponse(http.StatusOK, map[string]interface{}{
 		"hooksNotCleanedUp": []interface{}{},

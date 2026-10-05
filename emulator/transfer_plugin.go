@@ -254,7 +254,9 @@ func (p *TransferPlugin) createServer(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, transferNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("transfer createServer put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), serverID)
+	if err := updateStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), serverID); err != nil {
+		return nil, fmt.Errorf("transfer createServer index: %w", err)
+	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
 		"ServerId": serverID,
@@ -372,7 +374,9 @@ func (p *TransferPlugin) deleteServer(reqCtx *RequestContext, req *AWSRequest) (
 	if err := p.state.Delete(goCtx, transferNamespace, key); err != nil {
 		return nil, fmt.Errorf("transfer deleteServer delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), input.ServerID)
+	if err := removeFromStringIndex(goCtx, p.state, transferNamespace, transferServerIDsKey(reqCtx.AccountID, reqCtx.Region), input.ServerID); err != nil {
+		return nil, fmt.Errorf("transfer deleteServer index: %w", err)
+	}
 	if err := transferServerProgressions.reset(goCtx, p.state, input.ServerID); err != nil {
 		return nil, fmt.Errorf("transfer deleteServer: %w", err)
 	}
@@ -575,7 +579,9 @@ func (p *TransferPlugin) createUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Put(goCtx, transferNamespace, userKey, data); err != nil {
 		return nil, fmt.Errorf("transfer createUser put: %w", err)
 	}
-	updateStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName)
+	if err := updateStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName); err != nil {
+		return nil, fmt.Errorf("transfer createUser index: %w", err)
+	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{
 		"ServerId": input.ServerID,
@@ -713,7 +719,9 @@ func (p *TransferPlugin) deleteUser(reqCtx *RequestContext, req *AWSRequest) (*A
 	if err := p.state.Delete(goCtx, transferNamespace, key); err != nil {
 		return nil, fmt.Errorf("transfer deleteUser delete: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName)
+	if err := removeFromStringIndex(goCtx, p.state, transferNamespace, transferUserNamesKey(reqCtx.AccountID, reqCtx.Region, input.ServerID), input.UserName); err != nil {
+		return nil, fmt.Errorf("transfer deleteUser index: %w", err)
+	}
 
 	return transferJSONResponse(http.StatusOK, map[string]interface{}{})
 }

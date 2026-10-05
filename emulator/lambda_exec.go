@@ -517,13 +517,16 @@ func lambdaReplayCacheKey(functionARN string, payload []byte) string {
 }
 
 // saveReplay persists a Lambda invocation result in the replay cache.
-func (p *LambdaPlugin) saveReplay(functionARN string, payload, response []byte) {
+func (p *LambdaPlugin) saveReplay(functionARN string, payload, response []byte) error {
 	key := lambdaReplayCacheKey(functionARN, payload)
 	data, err := json.Marshal(response)
 	if err != nil {
-		return
+		return fmt.Errorf("lambda saveReplay %s marshal: %w", functionARN, err)
 	}
-	_ = p.state.Put(context.Background(), lambdaNamespace, key, data)
+	if err := p.state.Put(context.Background(), lambdaNamespace, key, data); err != nil {
+		return fmt.Errorf("lambda saveReplay %s state.Put: %w", functionARN, err)
+	}
+	return nil
 }
 
 // loadReplay retrieves a previously cached Lambda invocation result.

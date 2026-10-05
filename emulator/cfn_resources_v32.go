@@ -16,16 +16,19 @@ import (
 // ----- v0.32.0 — Extended CFN stubs -------------------------------------------
 
 // stubStore persists resource properties into cfnStubNamespace.
-func (d *StackDeployer) stubStore(ctx context.Context, acct, region, logicalID string, props map[string]interface{}) {
+func (d *StackDeployer) stubStore(ctx context.Context, acct, region, logicalID string, props map[string]interface{}) error {
 	if d.state == nil || props == nil {
-		return
+		return nil
 	}
 	data, err := json.Marshal(props)
 	if err != nil {
-		return
+		return fmt.Errorf("cfn stubStore %s marshal: %w", logicalID, err)
 	}
 	key := fmt.Sprintf("%s/%s/%s", acct, region, logicalID)
-	_ = d.state.Put(ctx, cfnStubNamespace, key, data)
+	if err := d.state.Put(ctx, cfnStubNamespace, key, data); err != nil {
+		return fmt.Errorf("cfn stubStore %s state.Put: %w", logicalID, err)
+	}
+	return nil
 }
 
 // deployOpenSearchDomain creates an OpenSearch domain stub.
@@ -39,7 +42,9 @@ func (d *StackDeployer) deployOpenSearchDomain(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "DomainName", logicalID, cctx)
 	arn := fmt.Sprintf("arn:aws:es:%s:%s:domain/%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployOpenSearchDomain stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::OpenSearchService::Domain",
@@ -73,7 +78,9 @@ func (d *StackDeployer) deployWAFv2WebACL(
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 	scope := resolveStringProp(props, "Scope", "REGIONAL", cctx)
 	arn := wafv2ARN(cctx.region, cctx.accountID, scope, "webacl", name, logicalID)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployWAFv2WebACL stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::WAFv2::WebACL",
@@ -96,7 +103,9 @@ func (d *StackDeployer) deployBackupBackupPlan(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	arn := fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", cctx.region, cctx.accountID, logicalID)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployBackupBackupPlan stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::Backup::BackupPlan",
@@ -116,7 +125,9 @@ func (d *StackDeployer) deployCodeBuildProject(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 	arn := fmt.Sprintf("arn:aws:codebuild:%s:%s:project/%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCodeBuildProject stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::CodeBuild::Project",
@@ -138,7 +149,9 @@ func (d *StackDeployer) deployCodePipelinePipeline(
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 	// CodePipeline ARN format has no resource-type prefix.
 	arn := fmt.Sprintf("arn:aws:codepipeline:%s:%s:%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCodePipelinePipeline stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::CodePipeline::Pipeline",
@@ -159,7 +172,9 @@ func (d *StackDeployer) deployCodeDeployDeploymentGroup(
 	appName := resolveStringProp(props, "ApplicationName", logicalID, cctx)
 	name := resolveStringProp(props, "DeploymentGroupName", logicalID, cctx)
 	arn := fmt.Sprintf("arn:aws:codedeploy:%s:%s:deploymentgroup:%s/%s", cctx.region, cctx.accountID, appName, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCodeDeployDeploymentGroup stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::CodeDeploy::DeploymentGroup",
@@ -181,7 +196,9 @@ func (d *StackDeployer) deployCloudTrailTrail(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "TrailName", logicalID, cctx)
 	arn := fmt.Sprintf("arn:aws:cloudtrail:%s:%s:trail/%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCloudTrailTrail stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::CloudTrail::Trail",
@@ -213,7 +230,9 @@ func (d *StackDeployer) deployTransferServer(
 ) (DeployedResource, float64, error) {
 	serverID := "s-" + strings.ToLower(logicalID)
 	arn := fmt.Sprintf("arn:aws:transfer:%s:%s:server/%s", cctx.region, cctx.accountID, serverID)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployTransferServer stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::Transfer::Server",
@@ -233,7 +252,9 @@ func (d *StackDeployer) deployAthenaWorkGroup(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 	arn := fmt.Sprintf("arn:aws:athena:%s:%s:workgroup/%s", cctx.region, cctx.accountID, name)
-	d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props)
+	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployAthenaWorkGroup stubStore: %w", err)
+	}
 	return DeployedResource{
 		LogicalID:  logicalID,
 		Type:       "AWS::Athena::WorkGroup",

@@ -571,33 +571,6 @@ func (m *iamCorruptGetsStateManager) List(ctx context.Context, namespace, prefix
 	return m.inner.List(ctx, namespace, prefix)
 }
 
-// iamFailingPutStateManager is a StateManager whose writes start failing once armed, so a
-// tagging operation's read-modify-*write* can be made to fail after the read succeeded.
-type iamFailingPutStateManager struct {
-	inner  emulator.StateManager
-	fail   bool
-	putErr error
-}
-
-func (m *iamFailingPutStateManager) Get(ctx context.Context, namespace, key string) ([]byte, error) {
-	return m.inner.Get(ctx, namespace, key)
-}
-
-func (m *iamFailingPutStateManager) Put(ctx context.Context, namespace, key string, value []byte) error {
-	if m.fail {
-		return m.putErr
-	}
-	return m.inner.Put(ctx, namespace, key, value)
-}
-
-func (m *iamFailingPutStateManager) Delete(ctx context.Context, namespace, key string) error {
-	return m.inner.Delete(ctx, namespace, key)
-}
-
-func (m *iamFailingPutStateManager) List(ctx context.Context, namespace, prefix string) ([]string, error) {
-	return m.inner.List(ctx, namespace, prefix)
-}
-
 func TestIAMTagging_AnUndecodableRecordIsNotReportedAsNoSuchEntity(t *testing.T) {
 	// The other half of the distinction above. A record that reads back but does not decode is
 	// a corrupt store, not a missing resource, so it is propagated rather than answered 404 —
@@ -636,13 +609,10 @@ func TestIAMTagging_AFailedWriteIsReportedRatherThanSwallowed(t *testing.T) {
 		}
 		t.Run(tc.name+" via "+tc.operation, func(t *testing.T) {
 			t.Parallel()
-			state := &iamFailingPutStateManager{
-				inner:  emulator.NewMemoryStateManager(),
-				putErr: errors.New("state store unavailable"),
-			}
+			state := newFailingPutStateManager()
 			srv := newIAMTestServerWithState(t, state)
 			tc.seed(t, srv)
-			state.fail = true
+			state.failEvery()
 
 			resp := iamRequest(t, srv, tc.operation, tc.body)
 			require.NoError(t, resp.Body.Close())

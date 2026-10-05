@@ -957,7 +957,9 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		}
 		// Record this deduplication ID.
 		msgID := generateSQSMessageID(ctx.IDs)
-		p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now())
+		if err := p.recordFIFODedup(context.Background(), urlKey, dedupID, msgID, p.tc.Now()); err != nil {
+			return nil, fmt.Errorf("sqs sendMessage recordFIFODedup: %w", err)
+		}
 
 		md5Body := computeMD5(msgBody)
 		md5Attrs := sqsMD5OfMessageAttributes(msgAttrs)
@@ -1896,7 +1898,7 @@ func (p *SQSPlugin) checkFIFODedup(ctx context.Context, urlKey, dedupID string, 
 
 // recordFIFODedup adds dedupID → msgID to the deduplication window and prunes
 // expired entries.
-func (p *SQSPlugin) recordFIFODedup(ctx context.Context, urlKey, dedupID, msgID string, now time.Time) {
+func (p *SQSPlugin) recordFIFODedup(ctx context.Context, urlKey, dedupID, msgID string, now time.Time) error {
 	data, _ := p.state.Get(ctx, sqsNamespace, sqsFIFODedupKey(urlKey))
 	var window map[string]sqsFIFODedupEntry
 	if data != nil {
@@ -1916,9 +1918,14 @@ func (p *SQSPlugin) recordFIFODedup(ctx context.Context, urlKey, dedupID, msgID 
 		MessageID:   msgID,
 		ExpiresNano: now.Add(5 * time.Minute).UnixNano(),
 	}
-	if b, err := json.Marshal(window); err == nil {
-		_ = p.state.Put(ctx, sqsNamespace, sqsFIFODedupKey(urlKey), b)
+	b, err := json.Marshal(window)
+	if err != nil {
+		return fmt.Errorf("sqs recordFIFODedup marshal: %w", err)
 	}
+	if err := p.state.Put(ctx, sqsNamespace, sqsFIFODedupKey(urlKey), b); err != nil {
+		return fmt.Errorf("sqs recordFIFODedup state.Put: %w", err)
+	}
+	return nil
 }
 
 // sqsContentHash returns the hex SHA-256 digest of body for content-based

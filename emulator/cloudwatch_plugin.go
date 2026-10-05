@@ -131,7 +131,9 @@ func (p *CloudWatchPlugin) putMetricAlarm(ctx *RequestContext, req *AWSRequest) 
 	}
 
 	idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
+	if err := updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
+		return nil, fmt.Errorf("cloudwatch putMetricAlarm index: %w", err)
+	}
 
 	return cwUnitResponse(req, "PutMetricAlarm", ctx.RequestID)
 }
@@ -143,7 +145,9 @@ func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*
 	for _, name := range names {
 		_ = p.state.Delete(goCtx, monitoringNamespace, cwAlarmStateKey(ctx.AccountID, ctx.Region, name))
 		idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
-		removeFromStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
+		if err := removeFromStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
+			return nil, fmt.Errorf("cloudwatch deleteAlarms index: %w", err)
+		}
 	}
 
 	return cwUnitResponse(req, "DeleteAlarms", ctx.RequestID)
@@ -328,7 +332,9 @@ func (p *CloudWatchPlugin) setActionsEnabled(ctx *RequestContext, req *AWSReques
 		if err != nil {
 			return nil, fmt.Errorf("cloudwatch setActionsEnabled marshal: %w", err)
 		}
-		_ = p.state.Put(goCtx, monitoringNamespace, stateKey, updated)
+		if err := p.state.Put(goCtx, monitoringNamespace, stateKey, updated); err != nil {
+			return nil, fmt.Errorf("cloudwatch setActionsEnabled state.Put: %w", err)
+		}
 	}
 
 	operation := "EnableAlarmActions"
@@ -455,7 +461,9 @@ func (p *CloudWatchPlugin) putMetricData(ctx *RequestContext, req *AWSRequest) (
 			break
 		}
 		idxKey := cwMetricNamesKey(ctx.AccountID, ctx.Region, namespace)
-		updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name)
+		if err := updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
+			return nil, fmt.Errorf("cloudwatch putMetricData index: %w", err)
+		}
 	}
 
 	return cwUnitResponse(req, "PutMetricData", ctx.RequestID)

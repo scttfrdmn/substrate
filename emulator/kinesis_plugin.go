@@ -182,7 +182,9 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	idxKey := kinesisStreamNamesKey(ctx.AccountID, ctx.Region)
-	updateStringIndex(goCtx, p.state, kinesisNamespace, idxKey, body.StreamName)
+	if err := updateStringIndex(goCtx, p.state, kinesisNamespace, idxKey, body.StreamName); err != nil {
+		return nil, fmt.Errorf("kinesis createStream index: %w", err)
+	}
 
 	// A stream re-created under a deleted one's name and ARN starts its CREATING countdown from the
 	// beginning rather than from wherever its predecessor's had reached (#1119).
@@ -226,7 +228,9 @@ func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	idxKey := kinesisStreamNamesKey(target.AccountID, target.Region)
-	removeFromStringIndex(goCtx, p.state, kinesisNamespace, idxKey, target.Name)
+	if err := removeFromStringIndex(goCtx, p.state, kinesisNamespace, idxKey, target.Name); err != nil {
+		return nil, fmt.Errorf("kinesis deleteStream index: %w", err)
+	}
 
 	if err := kinesisStreamProgressions.reset(goCtx, p.state, stream.StreamArn); err != nil {
 		return nil, err

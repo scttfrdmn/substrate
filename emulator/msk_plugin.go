@@ -417,7 +417,9 @@ func (p *MSKPlugin) storeNewCluster(reqCtx *RequestContext, cluster *MSKCluster)
 	if err := p.state.Put(context.Background(), mskNamespace, "cluster:"+scope+"/"+cluster.ClusterName, data); err != nil {
 		return fmt.Errorf("msk create put: %w", err)
 	}
-	updateStringIndex(context.Background(), p.state, mskNamespace, indexKey, cluster.ClusterName)
+	if err := updateStringIndex(context.Background(), p.state, mskNamespace, indexKey, cluster.ClusterName); err != nil {
+		return fmt.Errorf("msk storeNewCluster index: %w", err)
+	}
 	return nil
 }
 

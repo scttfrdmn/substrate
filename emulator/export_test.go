@@ -208,8 +208,8 @@ func NewLambdaPluginForTest(state StateManager, tc *TimeController) *LambdaPlugi
 }
 
 // SaveReplayForTest exposes saveReplay for external tests.
-func (p *LambdaPlugin) SaveReplayForTest(functionARN string, payload, response []byte) {
-	p.saveReplay(functionARN, payload, response)
+func (p *LambdaPlugin) SaveReplayForTest(functionARN string, payload, response []byte) error {
+	return p.saveReplay(functionARN, payload, response)
 }
 
 // LoadReplayForTest exposes loadReplay for external tests.
@@ -782,7 +782,9 @@ func CWPutLogGroupStateForTest(ctx context.Context, state StateManager, accountI
 	if putErr := state.Put(ctx, cloudwatchLogsNamespace, key, data); putErr != nil {
 		return fmt.Errorf("CWPutLogGroupStateForTest state.Put: %w", putErr)
 	}
-	updateStringIndex(ctx, state, cloudwatchLogsNamespace, cwLogGroupNamesKey(accountID, region), lg.LogGroupName)
+	if err := updateStringIndex(ctx, state, cloudwatchLogsNamespace, cwLogGroupNamesKey(accountID, region), lg.LogGroupName); err != nil {
+		return fmt.Errorf("CWPutLogGroupStateForTest: %w", err)
+	}
 	return nil
 }
 

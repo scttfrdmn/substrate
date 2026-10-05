@@ -145,7 +145,9 @@ func (p *TimestreamPlugin) finishTableDelete(acct, region, db, table string) err
 	if err := p.state.Delete(goCtx, timestreamNamespace, timestreamTableKey(acct, region, db, table)); err != nil {
 		return fmt.Errorf("delete timestream table: %w", err)
 	}
-	removeFromStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, db), table)
+	if err := removeFromStringIndex(goCtx, p.state, timestreamNamespace, timestreamTableNamesKey(acct, region, db), table); err != nil {
+		return fmt.Errorf("timestream finishTableDelete index: %w", err)
+	}
 	return nil
 }
 

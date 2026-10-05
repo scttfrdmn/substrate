@@ -906,7 +906,9 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if status != "Success" {
 		cmd.Status = status
 		if data, mErr := json.Marshal(cmd); mErr == nil {
-			_ = p.state.Put(goCtx, ssmNamespace, ssmCommandKey(ctx.AccountID, ctx.Region, commandID), data)
+			if err := p.state.Put(goCtx, ssmNamespace, ssmCommandKey(ctx.AccountID, ctx.Region, commandID), data); err != nil {
+				return nil, fmt.Errorf("ssm sendCommand state.Put: %w", err)
+			}
 		}
 	}
 
@@ -925,7 +927,9 @@ func (p *SSMPlugin) sendCommand(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		if err != nil {
 			return nil, fmt.Errorf("ssm sendCommand marshal: %w", err)
 		}
-		_ = p.state.Put(goCtx, ssmNamespace, ssmInvocationKey(ctx.AccountID, ctx.Region, commandID, instID), invData)
+		if err := p.state.Put(goCtx, ssmNamespace, ssmInvocationKey(ctx.AccountID, ctx.Region, commandID, instID), invData); err != nil {
+			return nil, fmt.Errorf("ssm sendCommand state.Put: %w", err)
+		}
 	}
 
 	return ssmJSONResponse(http.StatusOK, map[string]any{
