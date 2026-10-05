@@ -29,14 +29,13 @@ import (
 // type whose delete takes a final backup by default; LustreResponse and OpenZFSResponse are answered
 // when the request carried that type's configuration. Each echoes the FinalBackupTags it was sent.
 //
-// # A deleted file system is removed in the request that deletes it
+// # A deleted file system is removed — at once, or after a seeded deleting window
 //
 // The page: the delete "returns while the file system has the DELETING status", and DescribeFileSystems
-// on a deleted ID "returns a FileSystemNotFound error". Substrate removes the record at once, so the
-// next DescribeFileSystems answers FileSystemNotFound and an SDK's deletion waiter completes on its
-// first poll. Making DELETING observable to DescribeFileSystems for a seeded number of observations is
-// the progression #1196 owns for every service that reaches a terminal state at birth, FSx's CREATING
-// included, so it is not duplicated here.
+// on a deleted ID "returns a FileSystemNotFound error". Unseeded, substrate removes the record at once,
+// so the next DescribeFileSystems answers FileSystemNotFound and an SDK's deletion waiter completes on
+// its first poll. Under a seed, DELETING is observable to DescribeFileSystems for the seeded number of
+// observations first, and CREATING before AVAILABLE likewise (#1196; see fsx_progression.go).
 //
 // # CreationTime keeps its fraction (#1373)
 //

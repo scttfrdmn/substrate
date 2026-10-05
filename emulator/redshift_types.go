@@ -31,6 +31,12 @@ type RedshiftCluster struct {
 	AvailabilityZone string `json:"availabilityZone,omitempty"`
 	// ClusterArn is the Amazon Resource Name (ARN) for the cluster.
 	ClusterArn string `json:"clusterArn"`
+	// Transition is the seeded transition the cluster is in (#1196): resizing, deleting or
+	// final-snapshot, or empty for a create. See emulator/redshift_progression.go.
+	Transition string `json:"transition,omitempty"`
+	// Previous holds the NodeType and NumberOfNodes from before a seeded resize, shown while it counts
+	// down.
+	Previous *redshiftResizeValues `json:"previous,omitempty"`
 	// AccountID is the AWS account that owns this cluster.
 	AccountID string `json:"accountID"`
 	// Region is the AWS region where the cluster exists.

@@ -24,6 +24,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Seven services' resources report a seeded lifecycle instead of a terminal state at birth** (#1196).
+  Each was born in its terminal state, so no poll loop could observe a transition and the failure
+  states were unreachable. Each now runs on the shared progression helper, with a recorded and
+  replayed seed endpoint, and unseeded resources read as before except where a page publishes the
+  initial state.
+  - **CodeDeploy:** `POST /v1/codedeploy/deployment-status` holds a deployment at a published transient
+    status (`InProgress` by default), then `Succeeded`, `Failed` or `Stopped` with `errorInformation`.
+    `completeTime` is absent until it completes.
+  - **EMR Serverless:** job runs and applications progress under `/v1/emr-serverless/job-run-status`
+    and `/application-status`. `GetJobRun` and `ListJobRuns` agree, and `CancelJobRun` reports
+    `CANCELLING` before `CANCELLED`.
+  - **FSx:** `CreateFileSystem` answers `CREATING`, as its page publishes, and a seed holds describes at
+    `CREATING` or `UPDATING` before `AVAILABLE`, `FAILED` or `MISCONFIGURED`. Under a seed, a delete
+    stays `DELETING` for the countdown before `FileSystemNotFound`.
+  - **Timestream:** `API_Table` publishes no creating state, so a table is still created `ACTIVE`.
+    Under a seed, `DeleteTable` holds it `DELETING` before `ResourceNotFoundException`.
+  - **MSK:** under `/v1/msk/cluster-status` a create answers `CREATING`, then the seed's final state
+    (`FAILED` with `stateInfo`), and a delete stays `DELETING` before `NotFoundException`. Every cluster
+    carries a `currentVersion`, minted from the request ID, and `DeleteCluster` refuses a mismatch.
+  - **Redshift:** `CreateCluster` and `CreateClusterSnapshot` answer `creating`, as their pages
+    publish. Under `/v1/redshift/cluster-status` and `/snapshot-status`, describes report the
+    countdown: a resize reports `resizing` with `PendingModifiedValues`, and a delete reports
+    `final-snapshot`/`deleting` before `ClusterNotFound`.
+    - `DeleteCluster` reads `SkipFinalClusterSnapshot`, `FinalClusterSnapshotIdentifier` and the
+      retention period, writes the final snapshot, and refuses the published combinations.
+    - A resize or delete still counting down is `InvalidClusterState`.
+  - **Transfer Family:** `StartServer` and `StopServer` are routed. Under `/v1/transfer/server-status`
+    a server reports `STARTING` or `STOPPING` before the state it moved to, or `START_FAILED`/
+    `STOP_FAILED`. No page publishes a deleting state, so a delete stays immediate.
+
+  The operation catalog goes from 1,034 to 1,036.
+
 - **A NAT gateway's state progresses through a seeded count of observations** (#1188).
   `CreateNatGateway` settled `available` at once, so a consumer's wait loop never ran its body.
   `POST`/`DELETE /v1/ec2/nat-gateway-state` seeds the countdown on the shared helper. A gateway

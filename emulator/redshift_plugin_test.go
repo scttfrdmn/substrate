@@ -86,8 +86,9 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 	if createResp.Cluster.ClusterIdentifier != "my-cluster" {
 		t.Errorf("want ClusterIdentifier=my-cluster, got %q", createResp.Cluster.ClusterIdentifier)
 	}
-	if createResp.Cluster.ClusterStatus != "available" {
-		t.Errorf("want ClusterStatus=available, got %q", createResp.Cluster.ClusterStatus)
+	// API_CreateCluster's sample answers creating; a describe reports available, unseeded (#1196).
+	if createResp.Cluster.ClusterStatus != "creating" {
+		t.Errorf("want ClusterStatus=creating, got %q", createResp.Cluster.ClusterStatus)
 	}
 	if createResp.Cluster.Endpoint.Port != 5439 {
 		t.Errorf("want Port=5439, got %d", createResp.Cluster.Endpoint.Port)
@@ -153,7 +154,7 @@ func TestRedshiftPlugin_ClusterCRUD(t *testing.T) {
 
 	// DeleteCluster.
 	_, err = p.HandleRequest(ctx, redshiftRequest(t, "DeleteCluster", map[string]string{
-		"ClusterIdentifier": "my-cluster",
+		"ClusterIdentifier": "my-cluster", "SkipFinalClusterSnapshot": "true",
 	}))
 	if err != nil {
 		t.Fatalf("DeleteCluster: %v", err)
@@ -338,8 +339,9 @@ func TestRedshiftPlugin_CreateDescribeSnapshot(t *testing.T) {
 	if snapResp.Snapshot.SnapshotIdentifier != "my-snapshot" {
 		t.Errorf("want SnapshotIdentifier=my-snapshot, got %q", snapResp.Snapshot.SnapshotIdentifier)
 	}
-	if snapResp.Snapshot.Status != "available" {
-		t.Errorf("want Status=available, got %q", snapResp.Snapshot.Status)
+	// API_Snapshot: CreateClusterSnapshot "returns status as 'creating'" (#1196).
+	if snapResp.Snapshot.Status != "creating" {
+		t.Errorf("want Status=creating, got %q", snapResp.Snapshot.Status)
 	}
 
 	// DescribeClusterSnapshots.

@@ -105,7 +105,7 @@ func TestRedshiftEnvelope_EveryOperationAnswersThePublishedDocument(t *testing.T
 		{"CreateClusterSnapshot", map[string]string{"ClusterIdentifier": "env-cluster", "SnapshotIdentifier": "env-snap"}, "Snapshot"},
 		{"DescribeClusterSnapshots", nil, "Snapshots/Snapshot"},
 		// Last: it removes the cluster the cases above read.
-		{"DeleteCluster", map[string]string{"ClusterIdentifier": "env-cluster"}, "Cluster"},
+		{"DeleteCluster", map[string]string{"ClusterIdentifier": "env-cluster", "SkipFinalClusterSnapshot": "true"}, "Cluster"},
 	} {
 		t.Run(tc.op, func(t *testing.T) {
 			body := call(tc.op, tc.params)

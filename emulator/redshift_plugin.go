@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,6 +18,8 @@ type RedshiftPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// seedMu serializes the read-modify-write of an observation counter; see [progression.observe].
+	seedMu sync.Mutex
 }
 
 // Name returns the service name "redshift".
@@ -99,8 +102,7 @@ type redshiftEndpointXML struct {
 //     ClusterPublicKey, ClusterRevisionNumber, ClusterSnapshotCopyStatus, DataTransferProgress,
 //     DeferredMaintenanceWindows, ElasticIpStatus, ElasticResizeNumberOfNodeOptions,
 //     ExpectedNextSnapshotScheduleTime and its status, HsmStatus, ModifyStatus, MultiAZSecondary,
-//     NextMaintenanceWindowStartTime, PendingActions, PendingModifiedValues,
-//     ReservedNodeExchangeStatus, ResizeInfo, RestoreStatus, SnapshotScheduleState,
+//     NextMaintenanceWindowStartTime, PendingActions, ReservedNodeExchangeStatus, ResizeInfo, RestoreStatus, SnapshotScheduleState,
 //     TotalStorageCapacityInMegaBytes, AvailabilityZoneRelocationStatus, LakehouseRegistrationStatus,
 //     AquaConfiguration and the three CustomDomain members.
 //   - **ClusterNamespaceArn**, which API_Cluster glosses as "the namespace Amazon Resource Name (ARN)
@@ -118,6 +120,9 @@ type redshiftClusterXML struct {
 	VpcID             string              `xml:"VpcId,omitempty"`
 	AvailabilityZone  string              `xml:"AvailabilityZone,omitempty"`
 	Endpoint          redshiftEndpointXML `xml:"Endpoint"`
+	// PendingModifiedValues is reported while a seeded resize counts down (#1196): the new NodeType
+	// and NumberOfNodes, beside the cluster's previous ones above. Absent otherwise.
+	PendingModifiedValues *redshiftPendingModifiedValuesXML `xml:"PendingModifiedValues,omitempty"`
 }
 
 // redshiftClusterListXML is DescribeClusters' result: `Clusters.Cluster.N` and the `Marker` that
@@ -208,7 +213,11 @@ func (p *RedshiftPlugin) createCluster(reqCtx *RequestContext, req *AWSRequest) 
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id)
 
-	return redshiftOKResponse(reqCtx, "CreateCluster", redshiftClusterResultXML{Cluster: clusterToXML(cluster)})
+	// API_CreateCluster's sample answers creating, seeded or not; a describe then reports the
+	// countdown, and unseeded the record's available (#1196).
+	created := clusterToXML(cluster)
+	created.ClusterStatus = "creating"
+	return redshiftOKResponse(reqCtx, "CreateCluster", redshiftClusterResultXML{Cluster: created})
 }
 
 // describeClusters handles DescribeClusters.
@@ -248,7 +257,18 @@ func (p *RedshiftPlugin) describeClusters(reqCtx *RequestContext, req *AWSReques
 			if filterID != "" && id != filterID {
 				return redshiftClusterXML{}, false
 			}
-			return clusterToXML(c), true
+			obs, obsErr := p.clusterObservation(&c, true)
+			if obsErr != nil {
+				readErr = obsErr
+				return redshiftClusterXML{}, false
+			}
+			if obs.Gone {
+				if rmErr := p.removeCluster(&c); rmErr != nil {
+					readErr = rmErr
+				}
+				return redshiftClusterXML{}, false
+			}
+			return observedClusterXML(c, obs), true
 		})
 	if err != nil {
 		return nil, fmt.Errorf("redshift describeClusters: %w", err)
@@ -259,13 +279,34 @@ func (p *RedshiftPlugin) describeClusters(reqCtx *RequestContext, req *AWSReques
 	return redshiftOKResponse(reqCtx, "DescribeClusters", redshiftClusterListXML{Clusters: page, Marker: next})
 }
 
+// modifyCluster handles ModifyCluster: a change of NodeType or NumberOfNodes is a resize.
+//
+// Unseeded, the resize is applied in place and answered at once, as it always was. Under a seed with
+// pending observations it is a transition (#1196): the record takes the new values and keeps the
+// previous ones, the countdown restarts, and a describe reports resizing with the previous values and
+// the new ones under PendingModifiedValues until the countdown is spent. A cluster whose resize or
+// delete is still counting down is refused with the page's InvalidClusterState.
 func (p *RedshiftPlugin) modifyCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["ClusterIdentifier"]
 	cluster, err := p.loadCluster(reqCtx.AccountID, reqCtx.Region, id)
 	if err != nil {
 		return nil, err
 	}
+	current, err := p.clusterObservation(cluster, false)
+	if err != nil {
+		return nil, err
+	}
+	if current.Gone {
+		if err := p.removeCluster(cluster); err != nil {
+			return nil, err
+		}
+		return nil, redshiftClusterNotFound(id)
+	}
+	if current.InProgress {
+		return nil, redshiftInvalidClusterState(id)
+	}
 
+	previous := redshiftResizeValues{NodeType: cluster.NodeType, NumberOfNodes: cluster.NumberOfNodes}
 	if nodeType := req.Params["NodeType"]; nodeType != "" {
 		cluster.NodeType = nodeType
 	}
@@ -275,32 +316,119 @@ func (p *RedshiftPlugin) modifyCluster(reqCtx *RequestContext, req *AWSRequest) 
 			cluster.NumberOfNodes = num
 		}
 	}
+	resize := cluster.NodeType != previous.NodeType || cluster.NumberOfNodes != previous.NumberOfNodes
 
-	goCtx := context.Background()
-	d, err := json.Marshal(cluster)
+	seed, _, err := redshiftClusterProgressions.peek(context.Background(), p.state, id)
 	if err != nil {
-		return nil, fmt.Errorf("redshift modifyCluster marshal: %w", err)
+		return nil, fmt.Errorf("redshift modifyCluster: %w", err)
 	}
-	if err := p.state.Put(goCtx, redshiftNamespace, redshiftClusterKey(reqCtx.AccountID, reqCtx.Region, id), d); err != nil {
-		return nil, fmt.Errorf("redshift modifyCluster put: %w", err)
+	seeded := resize && seed != nil && seed.PendingObservations > 0
+	if seeded {
+		cluster.Transition = redshiftTransitionResizing
+		cluster.Previous = &previous
 	}
-	return redshiftOKResponse(reqCtx, "ModifyCluster", redshiftClusterResultXML{Cluster: clusterToXML(*cluster)})
+	if err := p.putCluster(cluster); err != nil {
+		return nil, err
+	}
+	if !seeded {
+		return redshiftOKResponse(reqCtx, "ModifyCluster", redshiftClusterResultXML{Cluster: clusterToXML(*cluster)})
+	}
+	if err := redshiftClusterProgressions.reset(context.Background(), p.state, id); err != nil {
+		return nil, fmt.Errorf("redshift modifyCluster: %w", err)
+	}
+	obs, err := p.clusterObservation(cluster, false)
+	if err != nil {
+		return nil, err
+	}
+	return redshiftOKResponse(reqCtx, "ModifyCluster", redshiftClusterResultXML{Cluster: observedClusterXML(*cluster, obs)})
 }
 
+// deleteCluster handles DeleteCluster, reading the three final-snapshot parameters the page publishes
+// (see [parseRedshiftDelete]); until #1196 all three were discarded.
+//
+// A requested final snapshot is written as a manual snapshot of the cluster, refused with the page's
+// ClusterSnapshotAlreadyExists when its identifier is taken. The response answers deleting, as
+// API_DeleteCluster's sample does, or final-snapshot when a final snapshot was requested, as its text
+// says. Unseeded, the record is then removed at once; under a seed with pending observations it is
+// kept, marked as deleting, and that many describes report the transition before the cluster answers
+// ClusterNotFound. A cluster whose resize or delete is still counting down is refused with
+// InvalidClusterState.
 func (p *RedshiftPlugin) deleteCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["ClusterIdentifier"]
 	cluster, err := p.loadCluster(reqCtx.AccountID, reqCtx.Region, id)
 	if err != nil {
 		return nil, err
 	}
+	del, awsErr := parseRedshiftDelete(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	current, err := p.clusterObservation(cluster, false)
+	if err != nil {
+		return nil, err
+	}
+	if current.Gone {
+		if err := p.removeCluster(cluster); err != nil {
+			return nil, err
+		}
+		return nil, redshiftClusterNotFound(id)
+	}
+	if current.InProgress {
+		return nil, redshiftInvalidClusterState(id)
+	}
 
 	goCtx := context.Background()
-	if err := p.state.Delete(goCtx, redshiftNamespace, redshiftClusterKey(reqCtx.AccountID, reqCtx.Region, id)); err != nil {
-		return nil, fmt.Errorf("redshift deleteCluster delete: %w", err)
+	transition := redshiftTransitionDeleting
+	if !del.skipFinalSnapshot {
+		transition = redshiftTransitionFinalSnapshot
+		key := redshiftSnapshotKey(reqCtx.AccountID, reqCtx.Region, del.finalSnapshotID)
+		existing, err := p.state.Get(goCtx, redshiftNamespace, key)
+		if err != nil {
+			return nil, fmt.Errorf("redshift deleteCluster final snapshot get: %w", err)
+		}
+		if existing != nil {
+			return nil, &AWSError{Code: "ClusterSnapshotAlreadyExists", Message: "Cluster snapshot " + del.finalSnapshotID + " already exists.", HTTPStatus: http.StatusBadRequest}
+		}
+		snap := RedshiftSnapshot{
+			SnapshotIdentifier: del.finalSnapshotID,
+			ClusterIdentifier:  id,
+			SnapshotType:       "manual",
+			Status:             "available",
+			SnapshotCreateTime: p.tc.Now(),
+			AccountID:          reqCtx.AccountID,
+			Region:             reqCtx.Region,
+		}
+		d, err := json.Marshal(snap)
+		if err != nil {
+			return nil, fmt.Errorf("redshift deleteCluster final snapshot marshal: %w", err)
+		}
+		if err := p.state.Put(goCtx, redshiftNamespace, key, d); err != nil {
+			return nil, fmt.Errorf("redshift deleteCluster final snapshot put: %w", err)
+		}
+		updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), del.finalSnapshotID)
 	}
-	removeFromStringIndex(goCtx, p.state, redshiftNamespace, redshiftClusterIDsKey(reqCtx.AccountID, reqCtx.Region), id)
 
-	return redshiftOKResponse(reqCtx, "DeleteCluster", redshiftClusterResultXML{Cluster: clusterToXML(*cluster)})
+	answered := clusterToXML(*cluster)
+	answered.ClusterStatus = transition
+	seed, _, err := redshiftClusterProgressions.peek(goCtx, p.state, id)
+	if err != nil {
+		return nil, fmt.Errorf("redshift deleteCluster: %w", err)
+	}
+	if seed == nil || seed.PendingObservations == 0 {
+		if err := p.removeCluster(cluster); err != nil {
+			return nil, err
+		}
+		return redshiftOKResponse(reqCtx, "DeleteCluster", redshiftClusterResultXML{Cluster: answered})
+	}
+	cluster.Transition = transition
+	cluster.Previous = nil
+	if err := p.putCluster(cluster); err != nil {
+		return nil, err
+	}
+	if err := redshiftClusterProgressions.reset(goCtx, p.state, id); err != nil {
+		return nil, fmt.Errorf("redshift deleteCluster: %w", err)
+	}
+	return redshiftOKResponse(reqCtx, "DeleteCluster", redshiftClusterResultXML{Cluster: answered})
 }
 
 // --- Parameter group operations ----------------------------------------------
@@ -644,7 +772,10 @@ func (p *RedshiftPlugin) createClusterSnapshot(reqCtx *RequestContext, req *AWSR
 	}
 	updateStringIndex(goCtx, p.state, redshiftNamespace, redshiftSnapshotIDsKey(reqCtx.AccountID, reqCtx.Region), snapshotID)
 
-	return redshiftOKResponse(reqCtx, "CreateClusterSnapshot", redshiftCreateSnapshotResultXML{Snapshot: snapshotToXML(snapshot)})
+	// API_Snapshot: CreateClusterSnapshot "returns status as 'creating'", seeded or not (#1196).
+	created := snapshotToXML(snapshot)
+	created.Status = "creating"
+	return redshiftOKResponse(reqCtx, "CreateClusterSnapshot", redshiftCreateSnapshotResultXML{Snapshot: created})
 }
 
 // describeClusterSnapshots handles DescribeClusterSnapshots.
@@ -687,7 +818,14 @@ func (p *RedshiftPlugin) describeClusterSnapshots(reqCtx *RequestContext, req *A
 			if !filter.matches(reqCtx, snap) {
 				return redshiftSnapshotData{}, false
 			}
-			return snapshotToXML(snap), true
+			status, obsErr := p.snapshotObservation(&snap, true)
+			if obsErr != nil {
+				readErr = obsErr
+				return redshiftSnapshotData{}, false
+			}
+			out := snapshotToXML(snap)
+			out.Status = status
+			return out, true
 		})
 	if err != nil {
 		return nil, fmt.Errorf("redshift describeClusterSnapshots: %w", err)

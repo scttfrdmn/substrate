@@ -480,6 +480,28 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/ec2/nat-gateway-state", s.handleEC2SeedNatGatewayState)
 		cp.Delete("/v1/ec2/nat-gateway-state", s.handleEC2ClearNatGatewayState)
 
+		// Seeded status progressions on the shared helper (#1196; emulator/progression.go).
+		cp.Post("/v1/codedeploy/deployment-status", s.handleCodeDeploySeedDeploymentStatus)
+		cp.Delete("/v1/codedeploy/deployment-status", s.handleCodeDeployClearDeploymentStatus)
+		cp.Post("/v1/emr-serverless/job-run-status", s.handleEMRServerlessSeedJobRunStatus)
+		cp.Delete("/v1/emr-serverless/job-run-status", s.handleEMRServerlessClearJobRunStatus)
+		cp.Post("/v1/emr-serverless/application-status", s.handleEMRServerlessSeedApplicationStatus)
+		cp.Delete("/v1/emr-serverless/application-status", s.handleEMRServerlessClearApplicationStatus)
+		cp.Post("/v1/fsx/file-system-status", s.handleFSxSeedFileSystemStatus)
+		cp.Delete("/v1/fsx/file-system-status", s.handleFSxClearFileSystemStatus)
+		cp.Post("/v1/timestream-write/table-status", s.handleTimestreamSeedTableStatus)
+		cp.Delete("/v1/timestream-write/table-status", s.handleTimestreamClearTableStatus)
+		// #1196: MSK cluster, Redshift cluster and snapshot, and Transfer server lifecycles, on the
+		// shared seeded progression (emulator/progression.go).
+		cp.Post("/v1/msk/cluster-status", s.handleMSKSeedClusterStatus)
+		cp.Delete("/v1/msk/cluster-status", s.handleMSKClearClusterStatus)
+		cp.Post("/v1/redshift/cluster-status", s.handleRedshiftSeedClusterStatus)
+		cp.Delete("/v1/redshift/cluster-status", s.handleRedshiftClearClusterStatus)
+		cp.Post("/v1/redshift/snapshot-status", s.handleRedshiftSeedSnapshotStatus)
+		cp.Delete("/v1/redshift/snapshot-status", s.handleRedshiftClearSnapshotStatus)
+		cp.Post("/v1/transfer/server-status", s.handleTransferSeedServerStatus)
+		cp.Delete("/v1/transfer/server-status", s.handleTransferClearServerStatus)
+
 		// EC2 spot-placement-score control-plane endpoints (#892).
 		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
 		cp.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)

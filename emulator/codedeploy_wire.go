@@ -154,10 +154,10 @@ var codedeployDeploymentEchoMembers = []string{
 //
 //   - deploymentOverview, deploymentStatusMessages and instanceTerminationWaitTimeStarted describe
 //     the targets a deployment ran on, and substrate runs on none, so any count would be invented.
-//     A consumer asserting a deployment landed reads status, which is Succeeded (#1196 owns making it
-//     progress).
-//   - errorInformation and rollbackInfo describe a failure or a rollback, and no deployment here
-//     fails or rolls back.
+//     A consumer asserting a deployment landed reads status, which a seed can hold non-terminal for
+//     a number of observations and end Failed or Stopped (#1196; see codedeploy_progression.go).
+//   - errorInformation is answered only for a seeded Failed or Stopped deployment, by
+//     [CodeDeployPlugin.observeDeployment]; rollbackInfo describes a rollback, and none happens.
 //   - previousRevision, relatedDeployments, blueGreenDeploymentConfiguration and externalId are not
 //     modeled; additionalDeploymentStatusInfo is deprecated.
 //   - deploymentMode is answered only when the request sent RESTART: the page says the member "is
