@@ -792,6 +792,13 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
+	// One instant for the whole request (#1396). Every read the handler, the gates, any
+	// nested internal dispatch and the clock-driven work make returns it, and so does the
+	// event's timestamp, so the instant a replay freezes at (#1217) is the instant this
+	// request used. Released after the response is written; see [TimeController.Hold] for
+	// why an overlapping request does not extend it.
+	defer s.tc.Hold()()
+
 	// Pre-read the body so it is available for both ParseAWSRequest (which
 	// may call r.ParseForm for query-protocol services) and SigV4 verification.
 	ctx := r.Context()

@@ -56,8 +56,16 @@
 // advancing with wall time, so a date rendered at second resolution matched the
 // recording except when the recorded and replayed reads straddled a second
 // boundary. A regression fixture built out of a recorded run carried the same
-// one-in-N exposure, off CI, with nothing to point at. Use
-// [TestServer.FreezeTimeAt] to get the same exactness out of a *live* run.
+// one-in-N exposure, off CI, with nothing to point at.
+//
+// The recorded timestamp is the instant the live request read, so the freeze
+// reproduces it exactly even on a running clock (#1396). Each top-level request
+// holds the clock for its duration ([TimeController.Hold]): every read its handler
+// makes, and its event's timestamp, are one instant. Before #1396 the event was
+// stamped after the handler ran, and on a running clock a millisecond-precision date
+// replayed late. The guarantee is for requests that do not overlap; see
+// [TimeController.Hold]. Use [TestServer.FreezeTimeAt] for a *live* run whose
+// instants must also be identical across runs, not only between a run and its replay.
 //
 // # Seeding: determinism without sacrificing coverage
 //

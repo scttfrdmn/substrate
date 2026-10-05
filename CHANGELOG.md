@@ -41,6 +41,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
   With the seedable role-propagation window (#1402), this completes #1274's adoption list. The
   operation catalog goes from 1,039 to 1,042.
+- **On a running clock, a replayed date is the one the live request answered** (#1396). #1217 froze a
+  replay at each event's recorded timestamp, but the event was stamped after its handler ran. So on a
+  running clock, a date rendered at millisecond precision replayed late: FSx `CreationTime` read `…480`
+  live and `…481` on replay.
+  - Each top-level request now holds the clock for its duration (`TimeController.Hold`). Every read its
+    handler, gates, nested dispatches and clock-driven work make, and its event's timestamp, are one
+    instant, so a replay renders every recorded date byte-identically at any resolution.
+  - A hold is not a freeze: the clock keeps advancing underneath, so simulated time is not lost to
+    request latency. Only the hold's owner releases it, so overlapping requests cannot pin the clock.
+  - **The guarantee is exact for requests that do not overlap.** While one request runs, a concurrent
+    request reads its held instant, so a long request (a Docker-backed Lambda `Invoke`, say) briefly
+    stalls simulated time for the requests that overlap it. A frozen clock behaves as before.
+  - Kinesis sequence-number suffixes are drawn from the request's mint rather than `crypto/rand`, a site
+    #856 missed, so a replay answers the `SequenceNumber`s it recorded.
+  - Two replay-reporting tests that passed only because of this drift now record a genuine state
+    divergence.
 
 - **ECR enforces tag immutability and lists untagged images** (#1379). `imageTagMutability` was
   stored and never read, and every listing was built from the tag index.
