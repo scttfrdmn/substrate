@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **S3 resolves an object's encryption from the request and then the bucket default, and routes
+  `PutBucketEncryption`, `GetBucketEncryption` and `DeleteBucketEncryption`** (#493). Every bucket has
+  the SSE-S3 default S3 has applied since January 2023, so `GetBucketEncryption` on an unconfigured
+  bucket answers `AES256`, and `DeleteBucketEncryption` resets to it.
+  - A write naming no encryption takes the destination bucket's default, resolved once at write time.
+    A `CopyObject` naming none takes the destination's default, never the source's, so an in-place
+    metadata copy moves an SSE-KMS object to the bucket default unless it restates the key.
+  - `CreateMultipartUpload` resolves the encryption for the whole upload. `UploadPart` and
+    `UploadPartCopy` echo it and refuse to restate it.
+  - Four combinations are `InvalidArgument`/400: an unrecognized algorithm, a key ID beside a non-KMS
+    algorithm, a Bucket Key beside a non-`aws:kms` algorithm, and a part upload restating encryption.
+    The messages are substrate's own.
+  - **A write naming nothing now reports `AES256`.** This deliberately reverses #492's "no header in,
+    none out", and a record stored before this fix reads back as `AES256` too.
+
+  With the seedable role-propagation window (#1402), this completes #1274's adoption list. The
+  operation catalog goes from 1,039 to 1,042.
+
 - **ECR enforces tag immutability and lists untagged images** (#1379). `imageTagMutability` was
   stored and never read, and every listing was built from the tag index.
   - On an `IMMUTABLE` repository, a `PutImage` whose tag already names a different image is

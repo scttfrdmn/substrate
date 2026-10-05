@@ -263,6 +263,12 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getBucketCors(ctx, req, bucket)
 	case "DeleteBucketCors":
 		return p.deleteBucketCors(ctx, req, bucket)
+	case "PutBucketEncryption":
+		return p.putBucketEncryption(ctx, req, bucket)
+	case "GetBucketEncryption":
+		return p.getBucketEncryption(ctx, req, bucket)
+	case "DeleteBucketEncryption":
+		return p.deleteBucketEncryption(ctx, req, bucket)
 	case "SelectObjectContent":
 		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
@@ -367,6 +373,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["cors"]; ok {
 				return bucket, "", "PutBucketCors"
 			}
+			if _, ok := req.Params["encryption"]; ok {
+				return bucket, "", "PutBucketEncryption"
+			}
 			// Before the CreateBucket fall-through: an unrouted sub-resource is named for what it is
 			// and refused, rather than answered as a create (#1349).
 			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
@@ -392,6 +401,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["cors"]; ok {
 				return bucket, "", "DeleteBucketCors"
+			}
+			if _, ok := req.Params["encryption"]; ok {
+				return bucket, "", "DeleteBucketEncryption"
 			}
 			// Before the DeleteBucket fall-through, for every sub-resource #446 did not name: each of
 			// them used to delete the bucket (#1349).
@@ -429,6 +441,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["cors"]; ok {
 				return bucket, "", "GetBucketCors"
+			}
+			if _, ok := req.Params["encryption"]; ok {
+				return bucket, "", "GetBucketEncryption"
 			}
 			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
 			// for what it is and refused, rather than answered as a listing (#1349).
@@ -730,6 +745,7 @@ var s3BucketSubresourcePrefixes = []string{
 	"notification:",
 	"bucket_public_access_block:",
 	s3CORSKeyPrefix,
+	s3BucketEncryptionKeyPrefix,
 }
 
 // deleteBucket handles DELETE /<bucket>.
@@ -908,6 +924,16 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return scErr, nil
 	}
 
+	// The encryption the object records: the request's, or the bucket default (#493). Resolved
+	// before anything is written, so a refused combination leaves no partial object behind.
+	sse, sseRefusal, sseErr := p.resolveWriteEncryption(ctx, bucket, req.Headers)
+	if sseErr != nil {
+		return nil, sseErr
+	}
+	if sseRefusal != nil {
+		return sseRefusal, nil
+	}
+
 	// BlockPublicAcls rejects a PutObject carrying a public ACL — "PUT Object calls
 	// fail if the request includes a public ACL" — and rejects it here, before the
 	// body reaches the filesystem and before any metadata is stored, so a refused
@@ -993,7 +1019,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		ContentType:            contentType,
 		ContentEncoding:        s3PersistedContentEncoding(req.Headers),
 		S3SystemMetadata:       resolveSystemMetadata(req.Headers),
-		S3ServerSideEncryption: resolveServerSideEncryption(req.Headers),
+		S3ServerSideEncryption: sse,
 		Size:                   int64(len(body)),
 		StorageClass:           storageClass,
 		Checksum:               checksum,
@@ -1495,6 +1521,19 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	if cksErr != nil {
 		return cksErr, nil
 	}
+	// A copy's encryption comes from the request and, failing that, from the *destination*
+	// bucket's default, never from the source object: API_CopyObject, "if you don't specify
+	// encryption information in your copy request, the encryption setting of the target object is
+	// set to the default encryption configuration of the destination bucket" (#493). An in-place
+	// copy for a metadata change therefore moves an SSE-KMS object to the bucket default unless
+	// the request restates the key, which is exactly the trap #475's reporter fell into.
+	dstSSE, sseRefusal, sseErr := p.resolveWriteEncryption(ctx, dstBucket, req.Headers)
+	if sseErr != nil {
+		return nil, sseErr
+	}
+	if sseRefusal != nil {
+		return sseRefusal, nil
+	}
 
 	// A copy's ACL comes from the request and from nowhere else: "When you copy an
 	// object, the ACL metadata is not preserved and is set to private by default. Only
@@ -1592,14 +1631,10 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		ContentType:      meta.ContentType,
 		ContentEncoding:  meta.ContentEncoding,
 		S3SystemMetadata: meta.System,
-		// S3ServerSideEncryption is deliberately left zero, and the omission is named
-		// rather than silent: a copy's encryption comes from the request and, failing
-		// that, from the bucket default — never from the source (#493). Recording the
-		// request's headers here without that default would decide half of a resolution
-		// order whose other half does not exist yet, so a copy records no encryption at
-		// all for now, and the emulator reports none rather than guessing. There is a
-		// test pinning this, so #493 changes it deliberately.
-		Size: srcObj.Size,
+		// Resolved above from the request and the destination bucket's default, never from
+		// the source (#493).
+		S3ServerSideEncryption: dstSSE,
+		Size:                   srcObj.Size,
 		// The copy's class comes from the request, never from the source: "if the
 		// x-amz-storage-class header is not used, the copied object will be stored in
 		// the STANDARD Storage Class by default."
@@ -1627,10 +1662,17 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 		ETag         string   `xml:"ETag"`
 		LastModified string   `xml:"LastModified"`
 	}
-	return s3XMLResponse(http.StatusOK, copyObjectResult{
+	resp, err := s3XMLResponse(http.StatusOK, copyObjectResult{
 		ETag:         newETag,
 		LastModified: now.UTC().Format(time.RFC3339),
 	})
+	if err != nil {
+		return nil, err
+	}
+	// The copy reports the encryption the destination recorded, as API_CopyObject publishes the
+	// three headers in its response, so a caller can see the bucket default it was given (#493).
+	dstObj.emitSSE(resp.Headers)
+	return resp, nil
 }
 
 // listObjects handles GET /<bucket> (ListObjects v1).
@@ -1890,6 +1932,16 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		contentType = "application/octet-stream"
 	}
 
+	// The upload's encryption is resolved once, here, from the request and the bucket default,
+	// and carried by every part and by the assembled object (#493).
+	uploadSSE, sseRefusal, sseErr := p.resolveWriteEncryption(ctx, bucket, req.Headers)
+	if sseErr != nil {
+		return nil, sseErr
+	}
+	if sseRefusal != nil {
+		return sseRefusal, nil
+	}
+
 	upload := S3MultipartUpload{
 		UploadID:               uploadID,
 		Bucket:                 bucket,
@@ -1897,7 +1949,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		ContentType:            contentType,
 		ContentEncoding:        s3PersistedContentEncoding(req.Headers),
 		S3SystemMetadata:       resolveSystemMetadata(req.Headers),
-		S3ServerSideEncryption: resolveServerSideEncryption(req.Headers),
+		S3ServerSideEncryption: uploadSSE,
 		StorageClass:           storageClass,
 		ACL:                    uploadACL,
 		ChecksumAlgorithm:      checksumAlgorithm,
@@ -1960,6 +2012,10 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 	if uploadResp != nil {
 		return uploadResp, nil
 	}
+	// A part takes its upload's encryption and states none of its own (#493).
+	if present := s3SSERequestHeaders(req.Headers); len(present) > 0 {
+		return s3SSEPartRefusal(present), nil
+	}
 
 	body, trailers := decodeAWSChunkedWithTrailers(req.Headers, req.Body)
 	hash := md5.Sum(body) //nolint:gosec // nosemgrep
@@ -1992,6 +2048,8 @@ func (p *S3Plugin) uploadPart(_ *RequestContext, req *AWSRequest, bucket, key st
 	if checksum.present() {
 		respHeaders[s3ChecksumHeaderOf(checksum.Algorithm)] = checksum.Value
 	}
+	// UploadPart's response publishes the upload's encryption headers.
+	upload.emitSSE(respHeaders)
 
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
@@ -2024,6 +2082,11 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 	}
 	if uploadResp != nil {
 		return uploadResp, nil
+	}
+	// Like UploadPart, a copied part takes its upload's encryption and states none of its own:
+	// UploadPartCopy's Request Syntax carries only the SSE-C headers (#493).
+	if present := s3SSERequestHeaders(req.Headers); len(present) > 0 {
+		return s3SSEPartRefusal(present), nil
 	}
 
 	srcBucket, srcKey, srcErr := parseS3CopySource(req.Headers["X-Amz-Copy-Source"])
@@ -2103,11 +2166,17 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 	}
 	// No ETag response header: UploadPartCopy returns the tag in the body only, and a
 	// caller that reads the header instead of the body would silently see none.
-	return s3XMLResponse(http.StatusOK, copyPartResult{
+	resp, err := s3XMLResponse(http.StatusOK, copyPartResult{
 		LastModified: now.UTC().Format(time.RFC3339),
 		ETag:         etag,
 		Checksum:     checksumXMLElements(checksum),
 	})
+	if err != nil {
+		return nil, err
+	}
+	// Its response publishes the upload's encryption headers, as UploadPart's does.
+	upload.emitSSE(resp.Headers)
+	return resp, nil
 }
 
 // s3CopySourceRangeBytes resolves an x-amz-copy-source-range header against the

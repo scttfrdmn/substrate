@@ -15,8 +15,9 @@ const (
 // s3SSEBucketKeyEnabledValue is the only value that enables an S3 Bucket Key. The
 // header is a boolean, and S3 documents no meaning for any other token: "Setting this
 // header to true causes Amazon S3 to use an S3 Bucket Key for object encryption with
-// SSE-KMS". Substrate treats anything else as not-enabled and records nothing;
-// rejecting a malformed token is one of #493's four validations.
+// SSE-KMS". Substrate treats anything else as not-enabled and records nothing. #493's
+// refusal is for the flag enabled beside an algorithm other than aws:kms, not for the
+// token's spelling, which no page constrains further.
 const s3SSEBucketKeyEnabledValue = "true"
 
 // S3ServerSideEncryption holds the server-side-encryption headers S3 records on an
@@ -40,23 +41,21 @@ const s3SSEBucketKeyEnabledValue = "true"
 //
 // Deliberately *not* in [S3SystemMetadata], though it would fit the shape: that family
 // is defined by being recorded verbatim and echoed verbatim with no rules of its own,
-// and SSE has resolution rules coming in #493 — a bucket default, a CopyObject
+// and SSE has resolution rules of its own (#493) — a bucket default, a CopyObject
 // asymmetry, and four rejected combinations. Content-Type and the storage class stayed
 // out for the same reason. #475 raised the question explicitly; this is the answer.
 //
-// Out of scope here, all of it #493: bucket default encryption, CopyObject's
-// non-inheritance of the source's encryption, and the invalid-combination 400s. SSE-C
-// (x-amz-server-side-encryption-customer-*) is out of scope entirely — no consumer has
-// asked for it, and its key material would have to be discarded rather than recorded.
+// How a write resolves the struct — the request's headers, then the bucket default, never
+// a copy source's — and the four combinations it refuses are in s3_bucket_encryption.go
+// (#493). SSE-C (x-amz-server-side-encryption-customer-*) is out of scope entirely — no
+// consumer has asked for it, and its key material would have to be discarded rather than
+// recorded.
 type S3ServerSideEncryption struct {
 	// Algorithm is the x-amz-server-side-encryption value recorded on write and
-	// echoed on read — AES256 for SSE-S3, aws:kms for SSE-KMS. Empty when the write
-	// named no encryption, which stays a distinct observation from any value: see
-	// [S3ServerSideEncryption.emitSSE].
-	//
-	// Recorded verbatim and not validated against the documented set
-	// (AES256, aws:fsx, aws:kms, aws:kms:dsse); rejecting an unrecognized token is
-	// #493's.
+	// echoed on read — AES256 for SSE-S3, aws:kms for SSE-KMS. Since #493 every write
+	// resolves one, from the request or the bucket default, and a value outside the
+	// published set (AES256, aws:fsx, aws:backup, aws:kms, aws:kms:dsse) is refused.
+	// Empty only on a record written before #493; see [S3ServerSideEncryption.emitSSE].
 	Algorithm string `json:"sse_algorithm,omitempty"`
 
 	// KMSKeyID is the x-amz-server-side-encryption-aws-kms-key-id value, recorded and
@@ -75,9 +74,8 @@ type S3ServerSideEncryption struct {
 	// s3_copy_metadata.go. If key resolution is ever modeled, this decision has to
 	// be revisited rather than silently overtaken.
 	//
-	// Recorded whatever the algorithm is, including the AES256 combination real S3
-	// rejects with InvalidArgument — that rejection is #493's, and recording keeps the
-	// value observable until it exists.
+	// Since #493 a key ID beside an algorithm other than aws:kms or aws:kms:dsse is
+	// refused with InvalidArgument, so a stored key ID always belongs to a KMS algorithm.
 	KMSKeyID string `json:"sse_kms_key_id,omitempty"`
 
 	// BucketKeyEnabled is true when the write set
@@ -120,15 +118,15 @@ func resolveServerSideEncryption(headers map[string]string) S3ServerSideEncrypti
 // [S3SystemMetadata], and two embedded types with a method of the same name at the
 // same depth make the selector ambiguous.
 //
-// Every header is conditional, and each condition is a distinct observation rather
-// than a tidiness measure:
+// The algorithm is always answered, and the other two headers are conditional:
 //
-//   - No algorithm means no header. An object written without SSE must read back with
-//     none, so "no header sent" stays distinguishable from "header sent" — the
-//     property that makes recording worth anything at all. Real S3 has applied SSE-S3
-//     to every new object unconditionally since January 2023, so a real bucket never
-//     stores one; modeling that default is #493's item and would remove this
-//     distinction, which is why it is #493's decision to make deliberately.
+//   - Every object reports an algorithm. Real S3 has applied SSE-S3 to every new object
+//     unconditionally since January 2023, and since #493 every write resolves one — the
+//     request's or the bucket default's, see [S3Plugin.resolveWriteEncryption]. A record
+//     with none was written before #493, when a write naming nothing recorded nothing; it
+//     reports [s3SSEDefaultAlgorithm], the encryption S3 reports for such an object, rather
+//     than the "unencrypted" no S3 object can be. That reverses #492's "no header in, no
+//     header out", deliberately, as #493 requires.
 //   - An empty KMS key ID means no header, matching S3's own "if present, indicates
 //     the ID of the KMS key that was used for object encryption" — an SSE-KMS write
 //     that named no key gets the AWS managed key and no ID to report.
@@ -137,6 +135,7 @@ func resolveServerSideEncryption(headers map[string]string) S3ServerSideEncrypti
 //     one would otherwise report the wrong answer for a write that never mentioned it.
 func (e *S3ServerSideEncryption) emitSSE(dst map[string]string) {
 	if e.Algorithm == "" {
+		dst[s3SSEAlgorithmHeader] = s3SSEDefaultAlgorithm
 		return
 	}
 	dst[s3SSEAlgorithmHeader] = e.Algorithm
