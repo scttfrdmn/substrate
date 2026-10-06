@@ -248,7 +248,7 @@ func TestBackupWire_PlanResponsesCarryNoBookkeepingMember(t *testing.T) {
 	p, ctx, state := setupBackupWirePlugin(t)
 
 	const name = "wire-plan"
-	created := backupWireRaw(t, p, ctx, "CreateBackupPlan", "POST", "/backup/plans", map[string]any{
+	created := backupWireRaw(t, p, ctx, "CreateBackupPlan", "PUT", "/backup/plans", map[string]any{
 		// Rules are stored verbatim as recorded intent and answered back under BackupPlan, so one is
 		// sent: it is the only part of a plan response that is caller-supplied, and the walk has to
 		// see it to be walking the whole document.
@@ -298,7 +298,7 @@ func TestBackupWire_SelectionResponsesCarryNoBookkeepingMember(t *testing.T) {
 
 	// CreateBackupSelection refuses an unknown plan, so the plan comes first. Its own responses are
 	// the plan test's subject; here it is setup.
-	createdPlan := backupWireRaw(t, p, ctx, "CreateBackupPlan", "POST", "/backup/plans", map[string]any{
+	createdPlan := backupWireRaw(t, p, ctx, "CreateBackupPlan", "PUT", "/backup/plans", map[string]any{
 		"BackupPlan": map[string]any{"BackupPlanName": "wire-selection-plan"},
 	})
 	var plan struct {
@@ -308,7 +308,7 @@ func TestBackupWire_SelectionResponsesCarryNoBookkeepingMember(t *testing.T) {
 
 	const name = "wire-selection"
 	selections := "/backup/plans/" + plan.BackupPlanID + "/selections"
-	created := backupWireRaw(t, p, ctx, "CreateBackupSelection", "POST", selections, map[string]any{
+	created := backupWireRaw(t, p, ctx, "CreateBackupSelection", "PUT", selections, map[string]any{
 		"BackupSelection": map[string]any{
 			"SelectionName": name,
 			"IamRoleArn":    "arn:aws:iam::" + backupWireAccount + ":role/backup-wire",

@@ -247,18 +247,33 @@ func cfHasWithTags(params map[string]string) bool {
 // createDistribution handles POST /2020-05-31/distribution.
 //
 // The configuration is recorded whole (#1271; see cloudfront_distribution_config.go). Both creates
-// read it through [cfParseDistributionConfig], so the tagged create, which carries the same
-// document one level down, cannot record a different distribution from the same configuration.
-//
-// A body that does not parse still creates a distribution from an empty configuration, as it
-// always has: CreateDistribution's leniency about its own body is #1197's class, and changing it is
-// not this function's business.
+// read it through [cfReadCreateConfig], so the tagged create, which carries the same document one
+// level down, cannot record a different distribution from the same configuration.
 func (p *CloudFrontPlugin) createDistribution(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	cfg, err := cfParseDistributionConfig(req.Body)
+	cfg, err := cfReadCreateConfig(req.Body, "DistributionConfig")
 	if err != nil {
-		cfg = cfConfigNode{}
+		return nil, err
 	}
 	return p.createDistributionFrom(ctx, cfg, nil)
+}
+
+// cfReadCreateConfig reads the DistributionConfig a create's body carries, refusing a body it
+// cannot read rather than creating a distribution from an empty configuration (#1133).
+//
+// Until #1133 a body that did not parse created a default distribution and answered 201: enabled
+// whatever the caller sent, with an empty Comment. Both creates publish DistributionConfig as
+// Required: Yes, and both publish two codes that fit: MissingBody/400, "This operation requires a
+// body", for an empty one, and InvalidArgument/400, "An argument is invalid", for one that is not
+// XML or holds no DistributionConfig. MalformedXML is on neither page, so it is not used.
+func cfReadCreateConfig(body []byte, root string) (cfConfigNode, error) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return cfConfigNode{}, &AWSError{Code: "MissingBody", Message: "This operation requires a body.", HTTPStatus: http.StatusBadRequest}
+	}
+	cfg, err := cfParseDistributionConfig(body)
+	if err != nil {
+		return cfConfigNode{}, cfInvalidTagBody(root, err)
+	}
+	return cfg, nil
 }
 
 // createDistributionWithTags handles POST /2020-05-31/distribution?WithTags.
@@ -269,10 +284,9 @@ func (p *CloudFrontPlugin) createDistribution(ctx *RequestContext, req *AWSReque
 // TagResource permission — so it is one call doing the work of two, and here it is one decode
 // feeding the two halves [CloudFrontPlugin.createDistributionFrom] already writes.
 //
-// Unlike CreateDistribution, the decode error is *not* discarded: a caller reaching this operation
-// has asked for tags, and a body substrate cannot read would otherwise create an untagged
-// distribution and report success — the failure mode #883 closed on the tagging path. The refusal
-// is InvalidArgument/400, which the operation publishes alongside InvalidTagging/400.
+// The decode error is not discarded: a body substrate cannot read would otherwise create an
+// untagged distribution and report success, the failure mode #883 closed on the tagging path. The
+// refusals are those of [cfReadCreateConfig], which the plain create shares.
 func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		XMLName xml.Name `xml:"DistributionConfigWithTags"`
@@ -283,13 +297,16 @@ func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *
 			} `xml:"Items>Tag"`
 		} `xml:"Tags"`
 	}
-	if err := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&body); err != nil {
-		return nil, cfInvalidTagBody("DistributionConfigWithTags", err)
+	if len(bytes.TrimSpace(req.Body)) > 0 {
+		if err := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&body); err != nil {
+			return nil, cfInvalidTagBody("DistributionConfigWithTags", err)
+		}
 	}
-	// The root already decoded, so a missing DistributionConfig child is the one failure left.
-	cfg, err := cfParseDistributionConfig(req.Body)
+	// With the root decoded, a missing DistributionConfig child is the one failure left, and the
+	// child is Required: Yes, so it is refused too.
+	cfg, err := cfReadCreateConfig(req.Body, "DistributionConfigWithTags")
 	if err != nil {
-		cfg = cfConfigNode{}
+		return nil, err
 	}
 
 	tags := make(map[string]string, len(body.Tags.Items))

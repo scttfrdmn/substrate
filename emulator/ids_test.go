@@ -2062,7 +2062,7 @@ func TestIDs_OneCreateBackupPlanMintsAPlanAndAVersion(t *testing.T) {
 		BackupPlanID string `json:"BackupPlanId"`
 		VersionID    string `json:"VersionId"`
 	}
-	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPut,
 		"/backup/plans", map[string]any{
 			"BackupPlan": map[string]any{"BackupPlanName": "ids-tier7-plan"},
 		}), &created))
@@ -2217,7 +2217,7 @@ func idsRecordBackupPlan(t *testing.T, ts *emulator.TestServer) {
 		BackupPlanID string `json:"BackupPlanId"`
 		VersionID    string `json:"VersionId"`
 	}
-	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPut,
 		"/backup/plans", map[string]any{
 			"BackupPlan": map[string]any{"BackupPlanName": "ids-tier7-plan"},
 		}), &plan))
@@ -2228,7 +2228,7 @@ func idsRecordBackupPlan(t *testing.T, ts *emulator.TestServer) {
 	var selection struct {
 		SelectionID string `json:"SelectionId"`
 	}
-	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPost,
+	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBackupHost, http.MethodPut,
 		"/backup/plans/"+plan.BackupPlanID+"/selections", map[string]any{
 			"BackupSelection": map[string]any{
 				"SelectionName": "ids-tier7-selection",

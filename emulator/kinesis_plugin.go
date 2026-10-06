@@ -415,8 +415,9 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		kinesisStreamRef
-		Data         string `json:"Data"`
-		PartitionKey string `json:"PartitionKey"`
+		Data            string `json:"Data"`
+		PartitionKey    string `json:"PartitionKey"`
+		ExplicitHashKey string `json:"ExplicitHashKey"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, kinesisInvalidBody()
@@ -431,11 +432,15 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return nil, err
 	}
 
-	// A record lands on an open shard: a parent a reshard closed takes no more data (#1399). It is the
-	// first open shard, not the one the partition key's MD5 hashes into; see docs/services.md.
-	shardID := "shardId-000000000000"
-	if open := kinesisOpenShards(stream); len(open) > 0 {
-		shardID = open[0].ShardID
+	// A record lands on the open shard whose range holds its hash key (#1409); a parent a reshard
+	// closed takes no more data (#1399).
+	hashKey, keyErr := kinesisRecordHashKey(body.PartitionKey, body.ExplicitHashKey)
+	if keyErr != nil {
+		return nil, keyErr
+	}
+	shardID, err := kinesisShardForHashKey(stream, hashKey)
+	if err != nil {
+		return nil, err
 	}
 
 	seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
@@ -463,8 +468,9 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	var body struct {
 		kinesisStreamRef
 		Records []struct {
-			Data         string `json:"Data"`
-			PartitionKey string `json:"PartitionKey"`
+			Data            string `json:"Data"`
+			PartitionKey    string `json:"PartitionKey"`
+			ExplicitHashKey string `json:"ExplicitHashKey"`
 		} `json:"Records"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -485,15 +491,23 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		SequenceNumber string `json:"SequenceNumber"`
 	}
 
-	// Records are spread over the open shards only: a parent a reshard closed takes no more data
-	// (#1399).
-	open := kinesisOpenShards(stream)
+	// Each record lands on the open shard whose range holds its hash key (#1409). Every hash key is
+	// checked before any record is written, so a refused entry stores nothing.
+	shardIDs := make([]string, len(body.Records))
+	for i, rec := range body.Records {
+		hashKey, keyErr := kinesisRecordHashKey(rec.PartitionKey, rec.ExplicitHashKey)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		shardID, routeErr := kinesisShardForHashKey(stream, hashKey)
+		if routeErr != nil {
+			return nil, routeErr
+		}
+		shardIDs[i] = shardID
+	}
 	results := make([]recordResult, 0, len(body.Records))
 	for i, rec := range body.Records {
-		shardID := "shardId-000000000000"
-		if len(open) > 0 {
-			shardID = open[i%len(open)].ShardID
-		}
+		shardID := shardIDs[i]
 
 		seqNo := generateKinesisSeqNo(p.tc.Now(), ctx.IDs)
 

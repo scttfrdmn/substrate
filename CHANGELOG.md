@@ -7,7 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **API Gateway v2 `GetApiMappings`, `GetApiMapping`, `UpdateApiMapping` and `DeleteApiMapping` are routed (#566).** A domain indexes its mapping IDs on create and drops them on delete. `GetApiMappings` answers the `items` envelope as one complete page. `UpdateApiMapping` changes only the members sent, and `DeleteApiMapping` answers 204. An absent mapping or domain is `NotFoundException`/404. `CreateApiMapping` now also refuses an absent domain with 404, as its page publishes; before, it stored a mapping that nothing could read back.
+- **Batch `DeregisterJobDefinition`, `UpdateJobQueue`, `UpdateComputeEnvironment`, `DeleteJobQueue` and `DeleteComputeEnvironment` are routed (#555).**
+  - **Deregister:** the revision is kept and reported `INACTIVE`, so `status: INACTIVE` selects it.
+  - **Update:** moves `state` between `ENABLED` and `DISABLED` and leaves absent members unchanged. `computeResources` is merged member by member.
+  - **Delete:** a queue must be `DISABLED` first. An environment must be `DISABLED` and named, by name or ARN, in no queue's `computeEnvironmentOrder`. The resource disappears at once, because the pages publish no timing for `DELETING`→`DELETED`.
+  - **Refusals:** every refusal is `ClientException`/400.
+- **Cognito User Pools routes `TagResource`, `UntagResource` and `ListTagsForResource` (#1135).** They read and write the tag set `DescribeUserPool` reports as `UserPoolTags`. Only a user-pool ARN in the caller's account and Region resolves. Anything else, or an absent pool, is `ResourceNotFoundException`/400. A missing `ResourceArn`, `Tags` or `TagKeys` is `InvalidParameterException`/400. The two writes answer the published empty body.
+
 ### Fixed
+
+- **AWS Backup `CreateBackupPlan` and `CreateBackupSelection` answer on the published `PUT` (#1172).** They were routed on `POST`, so every SDK, CLI, CDK or Terraform create was refused as an unknown route. The `POST` spellings are dropped, not kept, so a `POST` on either collection is now `UnknownOperationException`. `UpdateBackupPlan` is routed only on its published `POST /backup/plans/{backupPlanId}`.
+- **AWS Backup `ListBackupSelections` is routed (#1408),** so a teardown can find the selections it must delete before `DeleteBackupPlan`. It answers the published `BackupSelectionsListMember` members. It pages by `maxResults` (1–1000, default 1000) and `nextToken`; a bad value is `InvalidParameterValueException`/400, and an unknown plan is `ResourceNotFoundException`/400.
+- **A Kinesis record is written to the shard its hash key falls in (#1409).** `PutRecord` and `PutRecords` wrote to the first open shard or spread a batch round-robin.
+  - **Routing:** the hash key is MD5 of `PartitionKey` read as a 128-bit integer, or `ExplicitHashKey` when one is sent, as API_PutRecord states. The record goes to the open shard whose range contains that key, and `ShardId` names it.
+  - **Validation:** an `ExplicitHashKey` failing its published pattern is refused with `InvalidArgumentException`/400. So is one at or above 2^128, which is substrate's reading, since no shard's range contains it.
+  - **Batches:** `PutRecords` checks every entry before writing any.
+- **Route 53 record-set operations require their hosted zone (#1410).** `ChangeResourceRecordSets` and `ListResourceRecordSets` refuse a zone ID that names no hosted zone, including a deleted one, with `NoSuchHostedZone`/404. Before, a change batch for a missing zone was written and answered with a `ChangeInfo`. An `AWS::Route53::RecordSet` naming a missing zone now fails its resource.
+- **An ECR repository holding only untagged images is not empty (#1112).** `DeleteRepository` now counts the stored images rather than the tag index. Such a repository is refused with `RepositoryNotEmptyException` unless `force` is set, and a forced delete removes the images. Before, it was deleted without `force`, and its images reappeared if the name was re-created. The `ListImages`/`DescribeImages` part of #1112 shipped in #1379.
+- **CodeBuild `UpdateProject` reads the published flat request (#1158).** It read a `project` wrapper that `UpdateProjectInput` does not have, so every SDK request was refused with "name is required". A member the request carries replaces the stored one, and an empty `description` clears it; an omitted member is left alone. An absent project is `ResourceNotFoundException`/400.
+- **CloudFront creates refuse a body they cannot read (#1133).** For `CreateDistribution` and `CreateDistributionWithTags`, an empty body is `MissingBody`/400. A body that isn't XML, or carries no `DistributionConfig`, is `InvalidArgument`/400. Before, the plain create built a default, enabled distribution and answered 201. The `?WithTags` routing itself was fixed by #1280; a wire test now pins it.
+- **Compatibility:**
+  - A `POST` create of a Backup plan or selection is now refused.
+  - A replay of a recording made before this release diverges at Kinesis `PutRecord`/`PutRecords` (the `ShardId` changes) and at record-set calls against an absent zone.
+  - The routed-operation catalog grows from 1,042 to 1,055.
 
 - **IAM success responses carry the request's own ID, a Query 5xx error reads `Receiver`, and ELBv2 `DescribeLoadBalancers` refuses an absent load balancer (#1413).**
   - **IAM request IDs.** Every IAM success document carried the literal `<RequestId>stub-request-id</RequestId>`. It now carries the request's own ID, the one `Event.RequestID` records, as the other Query plugins have done since #1149. So a replayed IAM success is byte-identical. The deferred stamp from #1241 now covers success documents too, and replaces only the envelope's placeholder.

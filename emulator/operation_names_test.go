@@ -67,6 +67,9 @@ func TestParseAWSRequest_ResolvesRESTOperationNames(t *testing.T) {
 			"/v2/email/identities", "CreateEmailIdentity"},
 		{"cloudfront CreateDistribution", "POST", "cloudfront.amazonaws.com",
 			"/2020-05-31/distribution", "CreateDistribution"},
+		// The bare WithTags key selects a different operation on the same path (#1133).
+		{"cloudfront CreateDistributionWithTags", "POST", "cloudfront.amazonaws.com",
+			"/2020-05-31/distribution?WithTags", "CreateDistributionWithTags"},
 		{"msk CreateCluster", "POST", "kafka.us-east-1.amazonaws.com",
 			"/v1/clusters", "CreateCluster"},
 		{"omics StartRun", "POST", "omics.us-east-1.amazonaws.com",

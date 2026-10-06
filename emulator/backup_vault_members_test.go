@@ -212,7 +212,7 @@ func TestBackupPlan_DeleteAnswersThePublishedBody(t *testing.T) {
 		BackupPlanArn string `json:"BackupPlanArn"`
 		VersionID     string `json:"VersionId"`
 	}
-	raw := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "del-plan"}})
+	raw := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "del-plan"}})
 	require.NoError(t, json.Unmarshal(raw, &created), "%s", raw)
 
 	deleted := h.ok(http.MethodDelete, "/backup/plans/"+created.BackupPlanID, nil, nil)

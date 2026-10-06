@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1042 operations**. This
+Substrate ships **67 built-in service plugins** routing **1055 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -22,11 +22,11 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 1 | Account Management | `account` | REST/JSON | 4 |
 | 2 | ACM | `acm` | JSON | 8 |
 | 3 | API Gateway (REST) | `apigateway` | REST/JSON | 41 |
-| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 31 |
+| 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 35 |
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
-| 7 | Backup | `backup` | REST/JSON | 12 |
-| 8 | Batch | `batch` | REST/JSON | 11 |
+| 7 | Backup | `backup` | REST/JSON | 13 |
+| 8 | Batch | `batch` | REST/JSON | 16 |
 | 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
 | 10 | Budgets | `budgets` | JSON | 5 |
 | 11 | Cost Explorer | `ce` | JSON | 3 |
@@ -37,7 +37,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 16 | CodeDeploy | `codedeploy` | JSON | 9 |
 | 17 | CodePipeline | `codepipeline` | JSON | 8 |
 | 18 | Cognito Identity | `cognito-identity` | JSON | 8 |
-| 19 | Cognito Identity Provider | `cognito-idp` | JSON | 31 |
+| 19 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 20 | Config | `config` | JSON | 25 |
 | 21 | DynamoDB | `dynamodb` | JSON | 26 |
 | 22 | EC2 / VPC | `ec2` | Query | 92 |
@@ -12136,15 +12136,25 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 | GetHostedZone | |
 | DeleteHostedZone | |
 | ListHostedZones | |
-| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions |
-| ListResourceRecordSets | |
+| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
+| ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
 
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::Route53::HostedZone | HostedZoneId | |
-| AWS::Route53::RecordSet | — | |
+| AWS::Route53::RecordSet | — | Fails its resource when `HostedZoneId` names no hosted zone |
+
+### A record set needs its hosted zone
+
+`ChangeResourceRecordSets` and `ListResourceRecordSets` refuse a zone ID that names no hosted zone,
+including a deleted one, with `NoSuchHostedZone` at HTTP 404. Both pages publish that code for *"No
+hosted zone exists with the ID that you specified"*. The change batch is refused before any of it is
+written, so nothing is stored ([#1410](https://github.com/scttfrdmn/substrate/issues/1410)). A batch for a
+missing zone used to be written and answered with a `ChangeInfo`, so `ListResourceRecordSets` found
+records under a zone that `GetHostedZone` said did not exist. A CloudFormation `AWS::Route53::RecordSet`
+naming a missing zone now fails its resource, where it used to report success over an orphan record set.
 
 ### The account a hosted zone carries reaches no response
 
@@ -16343,7 +16353,11 @@ no error (#529).
 | GetDeployment | `404 NotFoundException` for an unknown deployment |
 | CreateDomainName | Reads `DomainName` only, and reports one `domainNameConfigurations` entry — `apiGatewayDomainName` derived from the name and the caller's Region, `endpointType` `REGIONAL`, `domainNameStatus` `AVAILABLE`. `DomainNameConfigurations` and `MutualTlsAuthentication` in the request are not read |
 | GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
-| CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`; the domain name is taken from the URI and is not required to exist. There is no `GetApiMappings` to read the collection back |
+| CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`. A domain name the account and Region hold no record of is `404 NotFoundException` (#566) |
+| GetApiMappings | The domain's mappings in creation order, in the `items` envelope; one complete page, with no `nextToken`, like the other v2 lists here. `404 NotFoundException` for a domain that does not exist |
+| GetApiMapping | `404 NotFoundException` for a mapping, or a domain, that does not exist |
+| UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping` |
+| DeleteApiMapping | `204`, and the mapping leaves `GetApiMappings`. Same refusals as `GetApiMapping`, so deleting twice is refused the second time |
 | TagResource | `POST /v2/tags/{resource-arn}` with `{"tags": {…}}`; **201** with no body. Merges onto an API's tags (see *An API's tags*). `404 NotFoundException` for an API that does not exist, `400 BadRequestException` for a body that does not decode or an ARN that names no API |
 | GetTags | `GET /v2/tags/{resource-arn}`; answers `{"tags": {…}}`, an empty map for an untagged API. Same refusals as `TagResource` |
 | UntagResource | `DELETE /v2/tags/{resource-arn}?tagKeys=…`; **204**. `tagKeys` is Required and may repeat; its absence is `400 BadRequestException`. Same refusals as `TagResource` |
@@ -17472,11 +17486,13 @@ Two published refusals also had no site they could fire from:
   repository record, so a name that addresses nothing read as an empty index and each answered 200
   with an empty result — indistinguishable from a repository that exists and holds no images.
 - **`RepositoryNotEmptyException` on `DeleteRepository`.** `force` was decoded into a field nothing
-  read, so a repository full of images was deleted silently. A repository's contents are measured by
-  its tag index, the same way every operation that reports contents measures them: an image pushed
-  without a tag is written under its digest and entered in no index, so nothing in this plugin can
-  enumerate it. A forced delete now removes the images too — the index used to outlive the
-  repository, so a name re-created after a delete reported the previous repository's images.
+  read, so a repository full of images was deleted silently. A repository's contents are its image
+  records, the set `ListImages` enumerates, so one holding only [untagged
+  images](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is not empty and is refused
+  without `force` (#1112). Until #1112 emptiness was measured by the tag index, so such a repository
+  was deleted without `force` and its untagged images were left behind under their digests. A forced
+  delete removes every image, tagged or not — the index used to outlive the repository, so a name
+  re-created after a delete reported the previous repository's images.
 
 `DescribeRepositories` is the third site where the refusal could not fire, and the reading there is
 narrower: a name the **caller** supplied is answered for or refused, while a name read out of
@@ -17500,7 +17516,7 @@ What follows from that, each from `API_PutImage` and `API_BatchDeleteImage`:
 | A supplied `imageDigest` that is not the manifest's | `ImageDigestDoesNotMatchException`/400, and nothing is stored. A matching one is accepted. |
 | The same manifest under a new tag | The one image gains the tag. `ListImages` reports it once per tag under one digest, and `DescribeImages` once, with both tags. |
 | The same manifest under a tag that already names it, or with no tag | `ImageAlreadyExistsException`/400: "there were no changes to the manifest or image tag after the last push". |
-| Another manifest under an existing tag | The tag moves to the new image. Tag immutability is stored on the repository but not enforced, so `ImageTagAlreadyExistsException` has no site. |
+| Another manifest under an existing tag | The tag moves to the new image, unless the repository is [immutable](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed), where it is `ImageTagAlreadyExistsException`/400. |
 | `BatchDeleteImage` by tag | Removes that tag. The image is deleted with its last tag. |
 | `BatchDeleteImage` by digest | Removes the image and every tag, answering one `imageId` per tag, as the published sample does. A digest naming no image is a `failures` entry. |
 
@@ -17726,6 +17742,9 @@ ECS Fargate vCPU: $0.04048 per vCPU-hour. Memory: $0.004445 per GB-hour.
 | RespondToAuthChallenge | The identical stub tokens, reading neither the request nor state, so no challenge is ever verified |
 | GetUserPoolMfaConfig | Reports the pool's `MfaConfiguration` and nothing else |
 | SetUserPoolMfaConfig | Stores `MfaConfiguration` and echoes it; `SmsMfaConfiguration`, `SoftwareTokenMfaConfiguration` and `EmailMfaConfiguration` are accepted and not recorded |
+| TagResource | Merges `Tags` into the pool's tag set, the one `DescribeUserPool` reports as `UserPoolTags`, and answers an empty body — see [Tagging](#tagging-reads-and-writes-the-pools-own-tag-set) |
+| UntagResource | Removes the `TagKeys` named; a key the pool does not hold is a no-op. Answers an empty body |
+| ListTagsForResource | Reports the pool's tag set as `Tags`, `{}` when it holds none |
 
 **What the four loaders refuse.** Every operation that addresses an existing record keys through one
 resolver per type, so the refusals are uniform: an empty `UserPoolId`, `ClientId`, `GroupName` or
@@ -17783,12 +17802,27 @@ specified."* A request naming only `roleArn` is therefore explicitly legal, whic
 turn into a request that blanks the definition and leaves a state machine the service could not execute.
 So the merge there is what the page describes, and substrate keeps it.
 
-### Tagging is published and unrouted
+### Tagging reads and writes the pool's own tag set
 
-AWS publishes `ListTagsForResource`, `TagResource` and `UntagResource` for `cognito-idp`. Substrate routes
-none of the three ([#1135](https://github.com/scttfrdmn/substrate/issues/1135)), so a user pool's tag set
-is readable only through `DescribeUserPool`, where `UserPoolType` publishes it as `UserPoolTags`.
-`UpdateUserPool` replaces the tag set outright like every other published member.
+`TagResource`, `UntagResource` and `ListTagsForResource` are routed since
+[#1135](https://github.com/scttfrdmn/substrate/issues/1135). All three address the same stored map
+`DescribeUserPool` reports as `UserPoolTags`, which `CreateUserPool` and `UpdateUserPool` also write;
+`UpdateUserPool` still replaces it outright like every other published member.
+
+- **Only a user-pool ARN resolves.** Each page describes `ResourceArn` as the ARN "of the user pool",
+  and no page names an app client, whose `UserPoolClientType` publishes no ARN member. So the accepted
+  form is `arn:aws:cognito-idp:{region}:{account}:userpool/{id}`, in the caller's own account and
+  Region. Anything else, or a pool that does not exist, is `ResourceNotFoundException` at the
+  published **400**. That is unlike the loaders above, which answer the same code at 404.
+- **`ResourceArn`, `Tags` and `TagKeys` are `Required: Yes`**; an absent one is
+  `InvalidParameterException`/400.
+- **The two writes answer an empty body**, which is their pages' Response Elements, rather than the
+  `{}` `TagResource`'s Sample Response shows.
+- **The 50-tag quota is not enforced.** The `TagResource` page states it, but publishes no code for
+  exceeding it.
+- **GetResources sees the pools.** The resource-groups-tagging scanner already listed user pools by
+  reading the same map. A tag write stamps the previously-tagged flag, so a pool whose tags are all
+  removed is reported with an empty set rather than vanishing.
 
 **Responses are rendered from the published shape.** Four of the five Cognito records — the user pool,
 its app client, a group and a user — were not. Each was embedded straight into a response struct, so
@@ -18312,8 +18346,14 @@ caller named were never the ones that changed. Each now follows its page:
 - **IDs and closed shards.** New shards continue the stream's own sequence (`shardId-000000000000`
   upward), so an ID is never reused. A closed shard stays listed in `DescribeStream`, as it does in
   AWS until it ages out of retention, which is not modeled. `OpenShardCount` counts open shards only.
-- **Records.** `PutRecord` and `PutRecords` write only to open shards. A record goes to the first open
-  shard (`PutRecords` spreads a batch across them), not to the shard its partition key's MD5 falls in.
+- **Records.** `PutRecord` and `PutRecords` write only to open shards. A record goes to the open shard
+  whose hash key range contains its hash key, and the response's `ShardId` names it
+  ([#1409](https://github.com/scttfrdmn/substrate/issues/1409)). The hash key is `ExplicitHashKey` when
+  sent; otherwise it is the MD5 of `PartitionKey` read as a 128-bit integer, as API_PutRecord states
+  (*"An MD5 hash function is used to map partition keys to 128-bit integer values and to map associated
+  data records to shards using the hash key ranges of the shards"*). The same keys reach the same shards
+  in every run and every replay. `PutRecords` checks every entry's `ExplicitHashKey` before it writes
+  any record, so a refused batch stores nothing.
 - **Refusals,** each at HTTP 400:
 
   | Condition | Code |
@@ -18324,10 +18364,13 @@ caller named were never the ones that changed. Each now follows its page:
   | A split key outside the shard's range, or equal to its starting key | `InvalidArgumentException` |
   | A split key not matching `^(0\|([1-9]\d{0,38}))$` | `InvalidArgumentException` |
   | A missing `ShardToMerge`, `AdjacentShardToMerge`, `ShardToSplit` or `NewStartingHashKey` | `InvalidArgumentException` |
+  | An `ExplicitHashKey` not matching `^(0\|([1-9]\d{0,38}))$`, or at or above 2^128 | `InvalidArgumentException` |
 
-  Both codes are the ones the two pages publish. The messages are substrate's own wording, and so is
-  refusing a split key equal to the shard's starting key: it is *"in the range"*, but it would leave
-  one child with no hash keys at all.
+  Every code is one the pages publish. The messages are substrate's own wording, and so are two
+  readings. Refusing a split key equal to the shard's starting key is one: that key is *"in the
+  range"*, but it would leave one child with no hash keys at all. The other is refusing an
+  `ExplicitHashKey` of 2^128 or more: the published pattern admits 39-digit values up to 10^39-1, but
+  such a value falls in no shard's range.
 - **ListStreams** pages by `Limit` (1–10 000, default 100, and *"at most 100 results are returned"*) and
   `ExclusiveStartStreamName`, reporting `HasMoreStreams`. The page publishes no order, so names are
   listed lexicographically, which is what makes "start after this name" well defined. A `Limit` outside
@@ -18385,8 +18428,8 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 
 | Operation | Notes |
 |-----------|-------|
-| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277) |
-| CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`. A body substrate cannot decode is refused rather than creating an untagged distribution |
+| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277). An empty body is `MissingBody`/400, and one holding no readable `DistributionConfig` is `InvalidArgument`/400 — see [The `WithTags` query key selects an operation](#the-withtags-query-key-selects-an-operation) |
+| CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`, whose nested `DistributionConfig` is applied exactly as `CreateDistribution` applies it and whose `Tags` are stored on the distribution. The same refusals (#1133) |
 | GetDistribution | Answers the `ETag` header (#1271). Observes the seeded `Status` window — see [A distribution reports InProgress for a seeded window](#a-distribution-reports-inprogress-for-a-seeded-window) (#1381) |
 | GetDistributionConfig | Answers the configuration the create or last update sent, with what `CreateDistribution` defaults filled in, and the `ETag` header — see [An update replaces the configuration](#an-update-replaces-the-configuration) |
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb. Replaces the configuration; requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412); refuses `MissingBody`, `IllegalUpdate` and `InvalidArgument`/400 one member per call (#1271) |
@@ -18417,6 +18460,23 @@ CloudFront's own operations only. No other CloudFront resource type is reachable
 for why `GetResources` reports a distribution in `us-east-1` alone.
 
 All CloudFront resources are stored under `us-east-1` (global service).
+
+### The `WithTags` query key selects an operation
+
+`CreateDistribution` and `CreateDistributionWithTags` share `POST /2020-05-31/distribution`. The
+reference publishes the second as `POST /2020-05-31/distribution?WithTags`: a bare query key, with no
+value. That makes it the first query-string discriminator in the tree that selects an *operation*
+rather than a sub-resource, so the event log and the authorization decision both name
+`CreateDistributionWithTags`. The key is tested for presence, case-insensitively, because a bare key
+reaches the plugin with the sentinel value `1`.
+
+Both creates read the configuration through one function, and both refuse a body they cannot read
+([#1133](https://github.com/scttfrdmn/substrate/issues/1133)). An empty body is `MissingBody`/400. A
+body that is not XML, or that holds no `DistributionConfig`, is `InvalidArgument`/400. Both pages
+publish both codes, and `DistributionConfig` is `Required: Yes` on both; `MalformedXML` is on neither,
+so it is not used. Until #1133, `CreateDistribution` created a distribution from an empty
+configuration in that case and answered 201: enabled whatever the caller sent, with an empty
+`Comment`. A `<CreateDistributionRequest>` wrapping the configuration is still tolerated.
 
 ### The origin access control family
 
@@ -20402,6 +20462,26 @@ Firehose data ingestion: $0.029 per GB.
 | ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
 | TerminateJob | A job not yet settled is reported `FAILED` with the supplied `reason`, as the page publishes for `STARTING`/`RUNNING` (terminated) and earlier states (cancelled). A settled job is left as it is. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
 | CancelJob | `POST /v1/canceljob`. A `SUBMITTED`, `PENDING` or `RUNNABLE` job is reported `FAILED` with the `reason`; a `STARTING` or `RUNNING` one is not cancelled, and the call still succeeds, as the page publishes (#1248). Answers `{}` |
+| DeregisterJobDefinition | `jobDefinition` is `name:revision` or a full ARN; a bare name, which addresses no single revision, and a revision that does not exist are `ClientException`. The revision is [kept and reported `INACTIVE`](#a-resource-leaves-service-through-five-lifecycle-operations), so `status: INACTIVE` selects it. Answers `{}` (#555) |
+| UpdateJobQueue | Changes `state`, `priority`, `schedulingPolicyArn` and `computeEnvironmentOrder`; an absent member is left as it was. `state` outside `ENABLED \| DISABLED`, or a queue that does not exist, is `ClientException`. `jobStateTimeLimitActions` and `serviceEnvironmentOrder` are not read |
+| UpdateComputeEnvironment | Changes `state`, `serviceRole` and `unmanagedvCpus`, and merges `computeResources` member by member; an absent member is left as it was. Same refusals as `UpdateJobQueue`. `updatePolicy`, `ecsSettings`, `eksConfiguration` and `context` are not read |
+| DeleteJobQueue | Refused with `ClientException` unless the queue is `DISABLED`, as the page requires; its compute environments need not be disassociated first. The queue [is gone at once](#a-resource-leaves-service-through-five-lifecycle-operations). Answers `{}` |
+| DeleteComputeEnvironment | Refused with `ClientException` unless the environment is `DISABLED` and no job queue's `computeEnvironmentOrder` names it, by name or ARN. Answers `{}` |
+
+### A resource leaves service through five lifecycle operations
+
+Until #555 a compute environment, a job queue or a job definition could be created and described and
+never changed or removed, so `DescribeJobDefinitions`' `INACTIVE` filter could not select anything:
+deregistration is the only writer of `INACTIVE`. The documented teardown order is now the one that
+works — disable the queue and the environment, disassociate the environment from the queue, then
+delete both — and each step taken out of order is refused with `ClientException`, the only client
+error Batch publishes.
+
+A deregistered job definition **is kept**: "Job definitions are permanently deleted after 180 days",
+and `INACTIVE` is a published filter value, so it stays describable by name and by revision. A deleted
+queue or environment **is not**: AWS reports one as `DELETING` and then `DELETED` before it stops being
+listed, but the pages publish no count or interval for that transition, so substrate removes the record
+at once rather than invent one.
 
 Every operation reports a bad request as **`ClientException`** at HTTP 400. The API
 reference declares exactly two errors for each Batch operation, `ClientException` and
@@ -20925,25 +21005,26 @@ management events and $2.00 per 100,000 events for additional copies; Substrate 
 |-----------|-------|
 | CreateProject | `name` required; `source`, `artifacts` and `environment` are stored as opaque objects and never inspected |
 | BatchGetProjects | `names` must hold 1–100 non-empty names, else `InvalidInputException`/400; a well-formed name naming nothing is reported in `projectsNotFound` ([#1159](https://github.com/scttfrdmn/substrate/issues/1159)) |
-| UpdateProject | [Reads a `project` wrapper AWS does not send](#updateproject-cannot-be-reached-from-an-sdk) |
+| UpdateProject | Reads the flat published `UpdateProjectInput`; [a member the request carries replaces the stored one](#updateproject-replaces-the-members-it-names), and the response is wrapped in `project` |
 | DeleteProject | [Idempotent](#deleteproject-is-idempotent): a project that does not exist is deleted successfully |
 | ListProjects | Reports names only; `sortBy`, `sortOrder` and `nextToken` are not read |
 | StartBuild | Only `projectName` is read; the build is `SUCCEEDED` before the call returns unless [a seed makes it progress](#a-build-progresses-under-a-seed) |
 | BatchGetBuilds | Each build is [one observation of its own seeded progression](#a-build-progresses-under-a-seed); `ids` must hold 1–100 non-empty IDs, else `InvalidInputException`/400; [`buildsNotFound` means absence only](#what-buildsnotfound-and-projectsnotfound-mean) ([#1186](https://github.com/scttfrdmn/substrate/issues/1186)) |
 
-### UpdateProject cannot be reached from an SDK
+### UpdateProject replaces the members it names
 
-`updateProject` decodes its request into a struct whose only member is a `"project"` wrapper, where
-`UpdateProjectInput` is flat — AWS sends `{"name": "…", "description": "…"}`. So a request from any SDK
-or the CLI leaves the name empty and is refused with `InvalidInputException` / *"name is required"*,
-naming a member the request did contain. There is no payload a real client can produce that reaches the
-handler's body.
+`UpdateProjectInput` is flat: `name`, its one `Required: Yes` member, beside the members to change.
+Only `UpdateProjectOutput` is wrapped, in a single `project` member. Until
+[#1158](https://github.com/scttfrdmn/substrate/issues/1158) the handler read a `project` wrapper on
+the request too, so every SDK request was refused with `InvalidInputException` / *"name is required"*.
 
-The operation's *response* is correctly wrapped, which is presumably where the input shape came from:
-`UpdateProjectOutput` publishes a single `project` member.
-[#1158](https://github.com/scttfrdmn/substrate/issues/1158), which also covers the second half — the
-update **merges** member by member, so an optional member such as `description` can never be cleared,
-where AWS replaces the project configuration.
+The page describes each optional member as "a new or replacement" value. So a member the request
+carries replaces the stored one, and an empty `description` clears it. A member the request omits is
+left as it was. Of the published members, `description`, `source`, `artifacts`, `environment` and
+`serviceRole` are read; the others are not stored by `CreateProject` either. A name that resolves to
+no project is refused with `ResourceNotFoundException`/400, which the page publishes.
+
+The other six routed handlers read flat members, as their pages publish.
 
 ### DeleteProject is idempotent
 
@@ -21612,26 +21693,26 @@ The published path is given for every operation because one of them cannot be re
 | DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Nine of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), including `VaultState`, `VaultType` and `Locked`, and nothing Substrate does not publish |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
 | ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [nine of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault. [Pages by `maxResults` and `nextToken`, and applies `vaultType` and `shared`](#listbackupvaults-pages-and-filters); a bad value is `InvalidParameterValueException`/400 |
-| CreateBackupPlan | `PUT /backup/plans/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read. A repeated `CreatorRequestId` returns the existing plan, as published (#1173). The plan ARN [uses the wrong resource segment](#arn-shapes) |
+| CreateBackupPlan | `PUT /backup/plans/` | [Routed on the published verb only](#the-backup-plan-operations-are-routed-on-their-published-verbs). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read. A repeated `CreatorRequestId` returns the existing plan, as published (#1173). The plan ARN [uses the wrong resource segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Reachable over that path since #1176](#getbackupplan-is-reachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
 | DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId`. A plan that still has selections is [refused](#which-backup-preconditions-are-enforced) with `InvalidRequestException`/400 |
 | ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; `includeDeleted`, `maxResults` and `nextToken` are ignored |
-| CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on `POST` instead](#the-two-backup-creates-are-routed-on-the-wrong-verb); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
+| CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on the published verb only](#the-backup-plan-operations-are-routed-on-their-published-verbs); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
+| ListBackupSelections | `GET /backup/plans/{backupPlanId}/selections/` | `BackupSelectionsList` of the six published `BackupSelectionsListMember` members per selection — `IamRoleArn` and `CreatorRequestId` when the create sent them. Pages by `maxResults` (1 to 1000, the default 1000) and `nextToken`; a bad value is `InvalidParameterValueException`/400, and an unknown plan `ResourceNotFoundException`/400 (#1408) |
 | GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`. A selection whose plan is gone is `ResourceNotFoundException` |
 | DeleteBackupSelection | `DELETE /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `{}`, which is the published empty body. A selection whose plan is gone is `ResourceNotFoundException` |
 
 Every other AWS Backup operation is unrouted, including the whole job surface —
 `StartBackupJob`, `DescribeBackupJob`, `ListBackupJobs`, `StartRestoreJob`,
-`ListRecoveryPointsByBackupVault` — as well as `ListBackupSelections`, `ListBackupPlanVersions`,
+`ListRecoveryPointsByBackupVault` — as well as `ListBackupPlanVersions`,
 `PutBackupVaultAccessPolicy`, `PutBackupVaultLockConfiguration`, `GetBackupPlanFromJSON` and the
 three tag operations. No Backup resource is scanned by the Resource Groups Tagging API either, so a
 vault or plan cannot be found by tag.
 
-A create writes its resource and then adds it to a name or ID index with a helper that discards the
-index write's error, so a create can report success while the resource is missing from
-`ListBackupVaults` or `ListBackupPlans`
-([#1175](https://github.com/scttfrdmn/substrate/issues/1175)).
+A create writes its resource and then adds it to a name or ID index. A failed index write fails
+the create, so a create that reports success is always listed by `ListBackupVaults` or
+`ListBackupPlans` ([#1175](https://github.com/scttfrdmn/substrate/issues/1175)).
 
 ### GetBackupPlan is reachable over its published path
 
@@ -21642,18 +21723,24 @@ everything after `/backup/plans/` as the plan ID, so an SDK built from the model
 matcher (#1205) drops one trailing slash, so the published form reaches the plan, the slash-less form
 still does, and `GET /backup/plans/` is still `ListBackupPlans`. `TestBackupRouting_ANearMissPathIsUnknown`
 sends the published form verbatim, `?versionId=` included. The two creates publish a trailing slash too,
-and the slash is now dropped there as well, but their verb is still wrong.
+and the slash is dropped there as well.
 
 `versionId` is unread for a structural reason rather than an oversight: one record is kept per plan
 and `UpdateBackupPlan` overwrites it, so no previous version exists to fetch.
 
-### The two backup creates are routed on the wrong verb
+### The backup plan operations are routed on their published verbs
 
 `API_CreateBackupPlan` publishes `PUT /backup/plans/` and `API_CreateBackupSelection` publishes
-`PUT /backup/plans/{backupPlanId}/selections/`. Both are routed on `POST`, and nothing routes the
-published `PUT`, so an SDK call falls through to the router's fallback and is refused as an unknown
-route. `CreateBackupVault` is on its published `PUT`, so the plugin's three creates do not agree with
-each other. [#1172](https://github.com/scttfrdmn/substrate/issues/1172).
+`PUT /backup/plans/{backupPlanId}/selections/`. Until
+[#1172](https://github.com/scttfrdmn/substrate/issues/1172) both were routed on `POST` and nothing
+routed the published `PUT`, so every SDK's create was refused as an unknown route and no plan could
+exist. Both now answer on `PUT`, as `CreateBackupVault` already did.
+
+The `POST` spellings were dropped rather than kept as a substrate-only convenience: no SDK sends them,
+and keeping them would let a test written against the wrong verb keep passing. A `POST` on either
+collection is now `UnknownOperationException`. `UpdateBackupPlan` is routed from its own page,
+`POST /backup/plans/{backupPlanId}`, and only on a plan ID, not on the collection; a `PUT` on a plan ID
+is unknown too.
 
 ### Two backup plan responses carry the wrong members
 

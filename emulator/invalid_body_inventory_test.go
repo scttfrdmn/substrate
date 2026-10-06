@@ -47,9 +47,9 @@ type invalidBodyCase struct {
 	// below a resource lookup is not reachable this way; the two Lambda operations that do sit below one
 	// have their own test.
 	path string
-	// No method field: every parse guard here is reachable on POST, because a guard only runs on a
-	// method that carries a body. The member-complaint table below needs GET, PUT and DELETE, and
-	// carries its own.
+	// method is the verb the operation's page publishes, empty for POST. A guard only runs on a method
+	// that carries a body, so it is POST or PUT; Backup's CreateBackupPlan publishes PUT (#1172).
+	method string
 }
 
 // invalidBodyService groups one service's guarded operations under the code they all answer.
@@ -714,7 +714,7 @@ var invalidBodyServices = []invalidBodyService{
 		cases: []invalidBodyCase{
 			// CreateBackupSelection is the plugin's fourth guard and is not here: it sits below a plan
 			// lookup, so it is in TestInvalidBodyBelowAResourceLookup instead.
-			{op: "CreateBackupPlan", path: "/backup/plans"},
+			{op: "CreateBackupPlan", path: "/backup/plans", method: http.MethodPut},
 		},
 	},
 }
@@ -727,8 +727,12 @@ func TestInvalidBodyAnswersThePublishedCode(t *testing.T) {
 			ts := emulator.StartTestServer(t)
 			for _, tc := range svc.cases {
 				t.Run(tc.op, func(t *testing.T) {
-					status, code, message := rawUnsignedCall(t, ts, svc.host, tc.target, tc.path,
-						[]byte(invalidBodyPayload))
+					method := tc.method
+					if method == "" {
+						method = http.MethodPost
+					}
+					status, code, message := rawUnsignedMethodCall(t, ts, svc.host, tc.target, tc.path,
+						method, []byte(invalidBodyPayload))
 					assert.Equalf(t, svc.code, code, "%s answers the code published by %s",
 						tc.op, svc.provenance)
 					assert.Equalf(t, http.StatusBadRequest, status, "%s answers 400", tc.op)
@@ -1819,9 +1823,11 @@ func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		host string
-		// createPath and createBody bring the resource the guard sits below into existence.
-		createPath string
-		createBody string
+		// createPath and createBody bring the resource the guard sits below into existence, with
+		// createMethod (empty for POST) the verb the create's page publishes.
+		createPath   string
+		createBody   string
+		createMethod string
 		// idKey is the member of the create response holding the new resource's identifier, found at any
 		// depth so that a wire shape which nests it (AppSync's graphqlApi) needs no separate column.
 		idKey string
@@ -1851,31 +1857,37 @@ func TestInvalidBodyBelowAResourceLookup(t *testing.T) {
 			code:       "BadRequestException",
 		},
 		{
-			name:       "backup/UpdateBackupPlan",
-			host:       "backup.us-east-1.amazonaws.com",
-			createPath: "/backup/plans",
-			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup"}}`,
-			idKey:      "BackupPlanId",
-			refusePath: func(id string) string { return "/backup/plans/" + id },
-			method:     http.MethodPost,
-			code:       "InvalidRequestException",
+			name:         "backup/UpdateBackupPlan",
+			host:         "backup.us-east-1.amazonaws.com",
+			createPath:   "/backup/plans",
+			createBody:   `{"BackupPlan":{"BackupPlanName":"below-lookup"}}`,
+			createMethod: http.MethodPut,
+			idKey:        "BackupPlanId",
+			refusePath:   func(id string) string { return "/backup/plans/" + id },
+			method:       http.MethodPost,
+			code:         "InvalidRequestException",
 		},
 		{
 			// #1066's one site in this shape. createBackupSelection loads the plan before it decodes,
-			// which is why the POST table above cannot reach it and why the leak survived beside
+			// which is why the table above cannot reach it and why the leak survived beside
 			// createBackupPlan's, which it can.
-			name:       "backup/CreateBackupSelection",
-			host:       "backup.us-east-1.amazonaws.com",
-			createPath: "/backup/plans",
-			createBody: `{"BackupPlan":{"BackupPlanName":"below-lookup-selection"}}`,
-			idKey:      "BackupPlanId",
-			refusePath: func(id string) string { return "/backup/plans/" + id + "/selections" },
-			method:     http.MethodPost,
-			code:       "InvalidRequestException",
+			name:         "backup/CreateBackupSelection",
+			host:         "backup.us-east-1.amazonaws.com",
+			createPath:   "/backup/plans",
+			createBody:   `{"BackupPlan":{"BackupPlanName":"below-lookup-selection"}}`,
+			createMethod: http.MethodPut,
+			idKey:        "BackupPlanId",
+			refusePath:   func(id string) string { return "/backup/plans/" + id + "/selections" },
+			method:       http.MethodPut,
+			code:         "InvalidRequestException",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			status, raw := rawUnsignedRawBody(t, ts, tc.host, tc.createPath, http.MethodPost,
+			createMethod := tc.createMethod
+			if createMethod == "" {
+				createMethod = http.MethodPost
+			}
+			status, raw := rawUnsignedRawBody(t, ts, tc.host, tc.createPath, createMethod,
 				[]byte(tc.createBody))
 			require.Truef(t, status == http.StatusOK || status == http.StatusCreated,
 				"creating the prerequisite for %s answers 200 or 201, got %d: %s", tc.name, status, raw)

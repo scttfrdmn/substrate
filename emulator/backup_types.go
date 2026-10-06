@@ -129,12 +129,19 @@ func parseBackupOperation(method, path string) (op, vaultName, planID, selection
 		if len(segs) == 3 {
 			pid = segs[2]
 		}
+		// API_CreateBackupPlan publishes `PUT /backup/plans/` and API_UpdateBackupPlan publishes
+		// `POST /backup/plans/{backupPlanId}`. Each verb is routed only where its page names it: a
+		// POST on the collection is an unknown route, not a substrate-only spelling of the create
+		// (#1172).
 		switch method {
-		case "POST":
+		case "PUT":
 			if len(segs) == 2 {
 				return "CreateBackupPlan", "", "", ""
 			}
-			return "UpdateBackupPlan", "", pid, ""
+		case "POST":
+			if len(segs) == 3 {
+				return "UpdateBackupPlan", "", pid, ""
+			}
 		case "GET":
 			if len(segs) == 2 {
 				return "ListBackupPlans", "", "", ""
@@ -151,12 +158,17 @@ func parseBackupOperation(method, path string) (op, vaultName, planID, selection
 		if len(segs) == 5 {
 			sel = segs[4]
 		}
+		// API_CreateBackupSelection publishes `PUT /backup/plans/{backupPlanId}/selections/`, and
+		// API_ListBackupSelections `GET` on the same collection (#1172, #1408).
 		switch method {
-		case "POST":
+		case "PUT":
 			if len(segs) == 4 {
 				return "CreateBackupSelection", "", segs[2], ""
 			}
 		case "GET":
+			if len(segs) == 4 {
+				return "ListBackupSelections", "", segs[2], ""
+			}
 			return "GetBackupSelection", "", segs[2], sel
 		case "DELETE":
 			return "DeleteBackupSelection", "", segs[2], sel

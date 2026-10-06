@@ -20,13 +20,13 @@ import (
 // selection's ID.
 func backupPlanWithSelection(t *testing.T, h *backupHarness, name string) (planPath, selectionID string) {
 	t.Helper()
-	created := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": name}})
+	created := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": name}})
 	var plan struct {
 		BackupPlanID string `json:"BackupPlanId"`
 	}
 	require.NoError(t, json.Unmarshal(created, &plan), "decode CreateBackupPlan: %s", created)
 	planPath = "/backup/plans/" + plan.BackupPlanID
-	sel := h.ok(http.MethodPost, planPath+"/selections", nil, map[string]any{
+	sel := h.ok(http.MethodPut, planPath+"/selections", nil, map[string]any{
 		"BackupSelection": map[string]any{"SelectionName": name + "-sel", "IamRoleArn": "arn:aws:iam::123456789012:role/backup"},
 	})
 	var out struct {

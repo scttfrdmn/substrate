@@ -132,9 +132,7 @@ func TestCodeBuildWire_ProjectResponsesCarryNoBookkeepingMember(t *testing.T) {
 	codebuildWireRequireScoped(t, state, "project:"+codebuildWireAccount+"/"+codebuildWireRegion+"/"+name)
 
 	got := codebuildWire(t, p, ctx, "BatchGetProjects", map[string]any{"names": []string{name}})
-	// The `project` wrapper is the request shape the handler reads, not the one AWS publishes —
-	// UpdateProjectInput is flat (#1158). This drives the response, which is what is asserted.
-	updated := codebuildWire(t, p, ctx, "UpdateProject", map[string]any{"project": map[string]any{"name": name, "description": "wire"}})
+	updated := codebuildWire(t, p, ctx, "UpdateProject", map[string]any{"name": name, "description": "wire"})
 
 	codebuildWireRun(t, p, ctx, []codebuildWireCase{
 		{op: "CreateProject", held: created, anchor: `"name":"` + name + `"`},

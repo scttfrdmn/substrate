@@ -146,9 +146,8 @@ func TestSchedulerCreateAppliesTheDocumentedStateDefault(t *testing.T) {
 
 // TestCognitoUpdateUserPoolReplacesRatherThanMerges reads back through DescribeUserPool.
 //
-// Cognito publishes `ListTagsForResource`, `TagResource` and `UntagResource` for cognito-idp, but
-// substrate routes none of the three (#1135), so the pool's own read is the only door a test has to the
-// tag set — which is enough, since `UserPoolType` publishes the tags as a response member.
+// `UserPoolType` publishes the tags as a response member, so the pool's own read is enough here;
+// ListTagsForResource reads the same stored set (#1135), and is covered in cognito_idp_tags_test.go.
 //
 // The tag assertions below read the member as `UserPoolTags`, the name `UserPoolType` publishes. They
 // read `Tags` until #1136 — the persisted struct was also the wire struct, so its storage-side tag

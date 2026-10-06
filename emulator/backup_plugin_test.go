@@ -169,7 +169,7 @@ func TestBackupPlugin_PlanCRUD(t *testing.T) {
 	p, ctx := setupBackupPlugin(t)
 
 	// CreateBackupPlan.
-	resp, err := p.HandleRequest(ctx, backupRequest(t, "POST", "/backup/plans", map[string]any{
+	resp, err := p.HandleRequest(ctx, backupRequest(t, "PUT", "/backup/plans", map[string]any{
 		"BackupPlan": map[string]any{
 			"BackupPlanName": "my-plan",
 			"Rules": []map[string]any{
@@ -264,7 +264,7 @@ func TestBackupPlugin_ListPlans(t *testing.T) {
 	p, ctx := setupBackupPlugin(t)
 
 	for _, name := range []string{"plan-one", "plan-two"} {
-		_, err := p.HandleRequest(ctx, backupRequest(t, "POST", "/backup/plans", map[string]any{
+		_, err := p.HandleRequest(ctx, backupRequest(t, "PUT", "/backup/plans", map[string]any{
 			"BackupPlan": map[string]any{"BackupPlanName": name},
 		}))
 		if err != nil {
@@ -291,7 +291,7 @@ func TestBackupPlugin_SelectionCRUD(t *testing.T) {
 	p, ctx := setupBackupPlugin(t)
 
 	// Create a plan first.
-	resp, err := p.HandleRequest(ctx, backupRequest(t, "POST", "/backup/plans", map[string]any{
+	resp, err := p.HandleRequest(ctx, backupRequest(t, "PUT", "/backup/plans", map[string]any{
 		"BackupPlan": map[string]any{"BackupPlanName": "sel-plan"},
 	}))
 	if err != nil {
@@ -306,7 +306,7 @@ func TestBackupPlugin_SelectionCRUD(t *testing.T) {
 	planID := planResult.BackupPlanId
 
 	// CreateBackupSelection.
-	resp, err = p.HandleRequest(ctx, backupRequest(t, "POST", "/backup/plans/"+planID+"/selections", map[string]any{
+	resp, err = p.HandleRequest(ctx, backupRequest(t, "PUT", "/backup/plans/"+planID+"/selections", map[string]any{
 		"BackupSelection": map[string]any{
 			"SelectionName": "my-selection",
 			"IamRoleArn":    "arn:aws:iam::123456789012:role/backup-role",

@@ -62,6 +62,8 @@ func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*
 		return p.listBackupPlans(reqCtx)
 	case "CreateBackupSelection":
 		return p.createBackupSelection(reqCtx, req, planID)
+	case "ListBackupSelections":
+		return p.listBackupSelections(reqCtx, req, planID)
 	case "GetBackupSelection":
 		return p.getBackupSelection(reqCtx, planID, selectionID)
 	case "DeleteBackupSelection":
@@ -558,6 +560,69 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 		"CreationDate": EpochSeconds(now),
 	})
 }
+
+// listBackupSelections handles ListBackupSelections (#1408): the plan's selections as published
+// BackupSelectionsListMember entries, paged by maxResults (1 to 1000) and nextToken.
+func (p *BackupPlugin) listBackupSelections(reqCtx *RequestContext, req *AWSRequest, planID string) (*AWSResponse, error) {
+	invalid := func(msg string) error {
+		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
+	}
+	pageSize := backupListSelectionsMax
+	if raw, ok := req.Params["maxResults"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > backupListSelectionsMax {
+			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListSelectionsMax))
+		}
+		pageSize = n
+	}
+	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
+	if !ok {
+		return nil, invalid("The nextToken is not valid.")
+	}
+	if _, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID); err != nil {
+		return nil, err
+	}
+
+	goCtx := context.Background()
+	ids, err := loadStringIndex(goCtx, p.state, backupNamespace, backupSelectionIDsKey(reqCtx.AccountID, reqCtx.Region, planID))
+	if err != nil {
+		return nil, fmt.Errorf("backup listBackupSelections load index: %w", err)
+	}
+	members := make([]map[string]interface{}, 0, len(ids))
+	for _, id := range ids {
+		sel, err := p.loadSelection(reqCtx.AccountID, reqCtx.Region, planID, id)
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+			continue // an index entry outliving its record, which is not a fault
+		}
+		if err != nil {
+			return nil, err
+		}
+		member := map[string]interface{}{
+			"SelectionId":   sel.SelectionID,
+			"SelectionName": sel.SelectionName,
+			"BackupPlanId":  sel.BackupPlanID,
+			"CreationDate":  EpochSeconds(sel.CreationDate),
+		}
+		if sel.IamRoleArn != "" {
+			member["IamRoleArn"] = sel.IamRoleArn
+		}
+		if sel.CreatorRequestID != "" {
+			member["CreatorRequestId"] = sel.CreatorRequestID
+		}
+		members = append(members, member)
+	}
+	page, next := pageByOffsetToken(members, offset, pageSize)
+	out := map[string]interface{}{"BackupSelectionsList": page}
+	if next != "" {
+		out["NextToken"] = next
+	}
+	return backupJSONResponse(http.StatusOK, out)
+}
+
+// backupListSelectionsMax is ListBackupSelections' published maxResults maximum, and its page size
+// when the caller names none.
+const backupListSelectionsMax = 1000
 
 func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, selectionID string) (*AWSResponse, error) {
 	selection, err := p.loadSelection(reqCtx.AccountID, reqCtx.Region, planID, selectionID)

@@ -256,3 +256,96 @@ func TestCodeBuildReads_AStoreFaultIsAnError(t *testing.T) {
 		})
 	}
 }
+
+// TestCodeBuildUpdateProject_ReadsTheFlatPublishedShape sends UpdateProjectInput as AWS publishes it,
+// flat with `name` beside the members to change, and reads the result back through BatchGetProjects
+// (#1158). A member the request carries replaces the stored one, an empty description included; a
+// member it omits is left as it was.
+func TestCodeBuildUpdateProject_ReadsTheFlatPublishedShape(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	call := func(op string, body any) (int, []byte) {
+		return cicdCall(t, ts, cicdBuildHost, cicdBuildTgt, op, body)
+	}
+	status, body := call("CreateProject", map[string]any{
+		"name": "cb-upd", "description": "original", "serviceRole": "arn:aws:iam::123456789012:role/cb",
+		"source":      map[string]any{"type": "NO_SOURCE", "buildspec": "version: 0.2"},
+		"artifacts":   map[string]any{"type": "NO_ARTIFACTS"},
+		"environment": map[string]any{"type": "LINUX_CONTAINER", "image": "aws/codebuild/standard:7.0", "computeType": "BUILD_GENERAL1_SMALL"},
+	})
+	require.Equal(t, http.StatusOK, status, "CreateProject: %s", body)
+
+	type project struct {
+		Name        string         `json:"name"`
+		Description *string        `json:"description"`
+		ServiceRole string         `json:"serviceRole"`
+		Source      map[string]any `json:"source"`
+	}
+	read := func() project {
+		t.Helper()
+		status, body := call("BatchGetProjects", map[string]any{"names": []string{"cb-upd"}})
+		require.Equal(t, http.StatusOK, status, "BatchGetProjects: %s", body)
+		var out struct {
+			Projects []project `json:"projects"`
+		}
+		require.NoError(t, json.Unmarshal(body, &out), "%s", body)
+		require.Len(t, out.Projects, 1, "%s", body)
+		return out.Projects[0]
+	}
+
+	for _, tc := range []struct {
+		name        string
+		body        map[string]any
+		description *string
+		serviceRole string
+	}{
+		{
+			name:        "a member the request carries replaces the stored one",
+			body:        map[string]any{"name": "cb-upd", "description": "updated", "serviceRole": "arn:aws:iam::123456789012:role/cb2"},
+			description: new("updated"),
+			serviceRole: "arn:aws:iam::123456789012:role/cb2",
+		},
+		{
+			name:        "a member the request omits is left as it was",
+			body:        map[string]any{"name": "cb-upd"},
+			description: new("updated"),
+			serviceRole: "arn:aws:iam::123456789012:role/cb2",
+		},
+		{
+			name:        "an empty description clears it",
+			body:        map[string]any{"name": "cb-upd", "description": ""},
+			serviceRole: "arn:aws:iam::123456789012:role/cb2",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := call("UpdateProject", tc.body)
+			require.Equal(t, http.StatusOK, status, "UpdateProject: %s", body)
+			// The response, unlike the request, is wrapped in `project`.
+			var resp struct {
+				Project *project `json:"project"`
+			}
+			require.NoError(t, json.Unmarshal(body, &resp), "%s", body)
+			require.NotNil(t, resp.Project, "UpdateProjectOutput wraps the project: %s", body)
+			require.Equal(t, "cb-upd", resp.Project.Name)
+
+			got := read()
+			if tc.description == nil {
+				require.Nil(t, got.Description, "description must be cleared")
+			} else {
+				require.NotNil(t, got.Description)
+				require.Equal(t, *tc.description, *got.Description)
+			}
+			require.Equal(t, tc.serviceRole, got.ServiceRole)
+			require.Equal(t, "NO_SOURCE", got.Source["type"], "an omitted source is unchanged")
+		})
+	}
+
+	// The wrapped shape no AWS client sends names no project, so it is refused for its missing name.
+	status, body = call("UpdateProject", map[string]any{"project": map[string]any{"name": "cb-upd"}})
+	require.Equal(t, http.StatusBadRequest, status, "%s", body)
+	require.Equal(t, "InvalidInputException", cicdCode(t, body), "%s", body)
+
+	status, body = call("UpdateProject", map[string]any{"name": "cb-absent"})
+	require.Equal(t, http.StatusBadRequest, status, "%s", body)
+	require.Equal(t, "ResourceNotFoundException", cicdCode(t, body), "%s", body)
+}

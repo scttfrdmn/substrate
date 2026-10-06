@@ -308,8 +308,25 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 
 // --- Resource Record Set operations ---
 
+// requireHostedZone refuses a zone ID that names no hosted zone with NoSuchHostedZone (404), the
+// code API_ChangeResourceRecordSets and API_ListResourceRecordSets publish for "No hosted zone exists
+// with the ID that you specified" (#1410).
+func (p *Route53Plugin) requireHostedZone(zoneID string) error {
+	data, err := p.state.Get(context.Background(), route53Namespace, "hostedzone:"+r53ZoneSuffix(zoneID))
+	if err != nil {
+		return fmt.Errorf("route53 get hosted zone %s: %w", zoneID, err)
+	}
+	if data == nil {
+		return &AWSError{Code: "NoSuchHostedZone", Message: "No hosted zone found with ID: " + zoneID, HTTPStatus: http.StatusNotFound}
+	}
+	return nil
+}
+
 func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
+	if err := p.requireHostedZone(zoneID); err != nil {
+		return nil, err
+	}
 
 	// Parse the XML change batch.
 	var xmlReq struct {
@@ -413,6 +430,9 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 
 func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
+	if err := p.requireHostedZone(zoneID); err != nil {
+		return nil, err
+	}
 	keys, err := p.loadList(id, "rrset_keys")
 	if err != nil {
 		return nil, fmt.Errorf("route53 listResourceRecordSets list: %w", err)
