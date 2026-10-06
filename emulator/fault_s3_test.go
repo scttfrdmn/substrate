@@ -132,7 +132,9 @@ func TestFault_OtherProtocolsAreUnchanged(t *testing.T) {
 		}
 		require.NoError(t, xml.Unmarshal(body, &doc), "body was %s", body)
 		assert.Equal(t, "Throttling", doc.Error.Code)
-		assert.Equal(t, "Sender", doc.Error.Type)
+		// The rule injects a 503, a server fault, which the query protocol names
+		// "Receiver" (#1413). Before #1413 every Query error answered "Sender".
+		assert.Equal(t, "Receiver", doc.Error.Type)
 	})
 
 	// An injected EC2 error must carry the code where the SDK reads it, which is the

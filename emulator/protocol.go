@@ -180,9 +180,17 @@ func rpcV2CBORTargetConflict(r *http.Request) bool {
 // "Receiver" for a server one, which are the query protocol's own two fault names
 // rather than Smithy's "client" and "server".
 func queryErrorHeader(queryCode string, serverFault bool) string {
-	fault := "Sender"
+	return queryCode + ";" + queryFaultType(serverFault)
+}
+
+// queryFaultType is the query protocol's name for an error's fault: "Receiver" for a
+// server fault and "Sender" otherwise. The smithy awsQuery specification defines the
+// error document's <Type> as "One of 'Sender' or 'Receiver'; whomever is at fault from
+// the service perspective". The x-amzn-query-error header carries the same word, so the
+// two are spelled once, here (#1413).
+func queryFaultType(serverFault bool) string {
 	if serverFault {
-		fault = "Receiver"
+		return "Receiver"
 	}
-	return queryCode + ";" + fault
+	return "Sender"
 }

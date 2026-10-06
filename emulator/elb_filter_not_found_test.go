@@ -59,6 +59,22 @@ func TestELB_ADescribeFilterValueNamingNothingIsRefused(t *testing.T) {
 			map[string]string{"Action": "DescribeTargetGroups", "Names.member.1": "fv-tg", "Names.member.2": "fv-nothing"}, tgCode, tgMsg,
 			nil, "",
 		},
+		// #1413: API_DescribeLoadBalancers publishes LoadBalancerNotFound for both filters.
+		{
+			"DescribeLoadBalancers/Names alone",
+			map[string]string{"Action": "DescribeLoadBalancers", "Names.member.1": "fv-nothing"}, lbCode, lbMsg,
+			map[string]string{"Action": "DescribeLoadBalancers", "Names.member.1": "fv-alb"}, "<LoadBalancerName>fv-alb</LoadBalancerName>",
+		},
+		{
+			"DescribeLoadBalancers/Names beside a real one",
+			map[string]string{"Action": "DescribeLoadBalancers", "Names.member.1": "fv-alb", "Names.member.2": "fv-nothing"}, lbCode, lbMsg,
+			nil, "",
+		},
+		{
+			"DescribeLoadBalancers/LoadBalancerArns",
+			map[string]string{"Action": "DescribeLoadBalancers", "LoadBalancerArns.member.1": missing(lb)}, lbCode, lbMsg,
+			map[string]string{"Action": "DescribeLoadBalancers", "LoadBalancerArns.member.1": lb}, "<LoadBalancerArn>" + lb + "</LoadBalancerArn>",
+		},
 		{
 			"DescribeTargetGroups/LoadBalancerArn",
 			map[string]string{"Action": "DescribeTargetGroups", "LoadBalancerArn": missing(lb)}, lbCode, lbMsg,
@@ -112,6 +128,7 @@ func TestELB_ADescribeFilterLookupFaultIsAnError(t *testing.T) {
 		prefix string
 		params map[string]string
 	}{
+		{"lb:", map[string]string{"Action": "DescribeLoadBalancers", "Names.member.1": "fl-alb"}},
 		{"lb:", map[string]string{"Action": "DescribeTargetGroups", "LoadBalancerArn": lb}},
 		{"lb:", map[string]string{"Action": "DescribeListeners", "LoadBalancerArn": lb}},
 		{"listener:", map[string]string{"Action": "DescribeRules", "ListenerArn": listener}},
