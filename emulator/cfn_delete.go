@@ -63,6 +63,26 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::EFS::MountTarget": pathDeleter("efs", "/2015-02-01/mount-targets/"),
 	"AWS::FSx::FileSystem":  jsonBodyDeleter("fsx", "DeleteFileSystem", "FileSystemId"),
 
+	// --- Transfer and CodeDeploy (#1203) ---------------------------------------
+	// These three were stubs until #1203. CodeDeploy's two deletes succeed for an absent
+	// resource, so they need no not-found code; Transfer's answers ResourceNotFoundException.
+	"AWS::Transfer::Server":        jsonBodyDeleter("transfer", "DeleteServer", "ServerId"),
+	"AWS::CodeDeploy::Application": jsonBodyDeleter("codedeploy", "DeleteApplication", "applicationName"),
+	"AWS::CodeDeploy::DeploymentGroup": func(_ *StackDeployer, dr DeployedResource,
+		props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+		// DeleteDeploymentGroup takes the application's name as well as the group's, and the
+		// application is a template property rather than part of the group's physical ID.
+		body, err := json.Marshal(map[string]interface{}{
+			"applicationName":     resolveStringProp(props, "ApplicationName", "", cctx),
+			"deploymentGroupName": dr.PhysicalID,
+		})
+		if err != nil {
+			return nil
+		}
+		return &AWSRequest{Service: "codedeploy", Operation: "DeleteDeploymentGroup", Body: body,
+			Headers: map[string]string{}, Params: map[string]string{}}
+	},
+
 	// --- Messaging ----------------------------------------------------------
 	"AWS::SQS::Queue": func(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, cctx *cfnContext) *AWSRequest {
 		// DeleteQueue takes a QueueUrl, and the physical ID is the queue name, so
@@ -551,15 +571,14 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // resources of their own, so the record sets it wrote outlive the sweep. That gap
 // is reported rather than hidden; see cfnDeleteInertTypes.
 var cfnStubDeleteTypes = map[string]bool{
-	"AWS::Athena::WorkGroup":           true,
-	"AWS::Backup::BackupPlan":          true,
-	"AWS::CloudTrail::Trail":           true,
-	"AWS::CodeBuild::Project":          true,
-	"AWS::CodeDeploy::DeploymentGroup": true,
-	"AWS::CodePipeline::Pipeline":      true,
-	"AWS::OpenSearchService::Domain":   true,
-	"AWS::Transfer::Server":            true,
-	"AWS::WAFv2::WebACL":               true,
+	"AWS::Athena::WorkGroup":         true,
+	"AWS::Backup::BackupPlan":        true,
+	"AWS::CloudTrail::Trail":         true,
+	"AWS::CodeBuild::Project":        true,
+	"AWS::CodePipeline::Pipeline":    true,
+	"AWS::Elasticsearch::Domain":     true,
+	"AWS::OpenSearchService::Domain": true,
+	"AWS::WAFv2::WebACL":             true,
 }
 
 // cfnDeleteInertTypes maps a type whose sweep is a no-op to why, so the reason a

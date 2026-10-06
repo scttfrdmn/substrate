@@ -3133,9 +3133,9 @@ does not exist in substrate to return:
   exists, and `Ref` on the ingress type is not documented.
 - `AWS::EC2::SecurityGroup` — AWS returns the group **name** for a group created
   without a `VpcId` and the group ID otherwise. Substrate always returns the ID.
-- `AWS::SecretsManager::RotationSchedule` and `::SecretTargetAttachment`, and
-  `AWS::Backup::BackupPlan` — conditionally or self-consistently correct as they
-  stand.
+- `AWS::SecretsManager::RotationSchedule` and `::SecretTargetAttachment` —
+  conditionally or self-consistently correct as they stand. (`AWS::Backup::BackupPlan`
+  was listed here, and its `Ref` was the logical ID; since #1182 it is the plan ID.)
 
 #### What `Fn::GetAtt` returns
 
@@ -3383,6 +3383,35 @@ parse error, which is why AWS's own examples spell the outer function long-form 
 as the literal `${Count.Index}` with no substitution, which is how a template
 passes a `${…}` through to something that interpolates it later, such as Terraform
 or cloud-init.
+
+`Fn::Sub`'s resource-attribute form, `${LogicalId.Attribute}`, answers what
+`Fn::GetAtt` answers for the same pair, as the function's reference page states
+(#1103). The body is split on its **first** dot only, because an attribute name
+may itself hold one — `${Db.Endpoint.Address}`, or `Fn::GetAtt`'s published
+`SourceSecurityGroup.OwnerAlias`. A key in `Fn::Sub`'s own variable map still wins,
+even when it contains a dot. A dotted name that no declared resource matches
+resolves to `LogicalId.Attribute`, as `Fn::GetAtt` does, so the value names the
+template's mistake.
+
+**Json-typed properties resolve at depth too** (#1153). A policy document or an
+event pattern is resolved at every depth and then marshalled, so an `Fn::GetAtt` in
+a statement's `Resource` stores the ARN rather than `{"Fn::GetAtt":[…]}`. The
+string form, a JSON document written as a string, is passed through as the document
+rather than quoted a second time. This covers:
+
+| Resource type | Property |
+|---|---|
+| `AWS::IAM::Role` | `AssumeRolePolicyDocument` (and its drift comparison) |
+| `AWS::IAM::Policy` | `PolicyDocument` |
+| `AWS::SNS::TopicPolicy` | `PolicyDocument` |
+| `AWS::Events::Rule` | `EventPattern` |
+| `AWS::ECR::Repository` lifecycle | `LifecyclePolicyText` |
+| `AWS::StepFunctions::StateMachine` | `Definition` (#1074) |
+
+A resource can only resolve an attribute of a resource deployed before it. Deploy
+order comes from a per-type priority, not from the template's references, and
+`AWS::IAM::Policy` deploys first of all. So an `Fn::GetAtt` inside an IAM policy
+finds nothing deployed yet, and answers the `LogicalId.Attribute` fallback.
 
 Parameters use the Query protocol's list encoding, which is what every SDK and
 the CLI send:
@@ -17313,15 +17342,11 @@ published substitution form, `${variable_1,variable_2,…}`, addresses a key-val
 map variable rather than naming a substitution key, so no key can match it and it
 falls through that same untouched case.
 
-**Two things substrate does not do here.** `DefinitionS3Location` is declined: it
-names an S3 object holding the document, and fetching it would make a deploy
-depend on a bucket's contents, so a template using it gets the stub definition
-instead. And `Fn::Sub`'s `${LogicalId.Attribute}` form is unimplemented in the
-**shared** resolver — `${MyFunction.Arn}` resolves to the literal string
-`MyFunction.Arn` — which affects every resource type's properties, not just this
-one, and is tracked separately. A template needing an attribute inside a
-definition should use `DefinitionSubstitutions`, which is AWS's own documented
-mechanism for it, or an explicit `Fn::GetAtt`.
+`DefinitionS3Location` is declined: it names an S3 object holding the document,
+and fetching it would make a deploy depend on a bucket's contents, so a template
+using it gets the stub definition instead. `Fn::Sub`'s `${LogicalId.Attribute}`
+form works inside a definition as it does in every other property: the shared
+resolver answers `${MyFunction.Arn}` with what `Fn::GetAtt` answers (#1103).
 
 A template that supplies none of the three gets a stub definition, and the stub
 is a runnable state machine rather than a placeholder — which is what lets it
@@ -21916,7 +21941,7 @@ no transient failure to report.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| `AWS::Backup::BackupPlan` | the logical ID | A stub. No property is read — including `BackupPlan`, which is `Required: Yes` — and the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. AWS publishes that `Ref` returns `BackupPlanId`, and `BackupPlanArn`, `BackupPlanId` and `VersionId` as `Fn::GetAtt` attributes; Substrate returns the logical ID and supports no attribute, and the deploy function's own doc comment claims the `Ref` is the plan ID ([#1182](https://github.com/scttfrdmn/substrate/issues/1182)) |
+| `AWS::Backup::BackupPlan` | the plan ID | A stub, by decision: the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. Dispatching `CreateBackupPlan` waits for its route to settle on `PUT` (#1172) and for `AWS::Backup::BackupSelection`, the one consumer of this `Ref`, to be deployed. `BackupPlan` is `Required: Yes`, and a template without it fails the resource. `Ref` and `Fn::GetAtt BackupPlanId` return a UUID-shaped plan ID derived from the account, Region, stack and logical ID, so an `UpdateStack` keeps it. `VersionId` is derived from the same scope plus the declared properties, so it changes when the plan does. `BackupPlanArn` uses the plugin's `backup-plan` segment (#1181) ([#1182](https://github.com/scttfrdmn/substrate/issues/1182)) |
 
 `AWS::Backup::BackupVault` and `AWS::Backup::BackupSelection` are not deployed.
 
@@ -22791,12 +22816,12 @@ so none has a site.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::CodeDeploy::DeploymentGroup | DeploymentGroupName | A stub: properties are recorded in the CloudFormation stub store, which the CodeDeploy plugin does not read, so `GetDeploymentGroup` on a group a template just created answers `DeploymentGroupDoesNotExistException` ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)) |
+| AWS::CodeDeploy::Application | ApplicationName | Deployed through `CreateApplication`, and deleted through `DeleteApplication`. `ApplicationName` falls back to the logical ID. `ComputePlatform` is sent, and `Tags` is dropped. No `Fn::GetAtt` attribute is published |
+| AWS::CodeDeploy::DeploymentGroup | DeploymentGroupName | Deployed through `CreateDeploymentGroup`, so `GetDeploymentGroup` answers the group a stack created. Deleted through `DeleteDeploymentGroup`. Every property is renamed from PascalCase to the API's lowerCamel at every depth. `Ec2TagSet` and `OnPremisesTagSet` are also reshaped from `{…TagGroup: [filter…]}` objects to the API's filter lists. Two properties are dropped. `Deployment` would be a `CreateDeployment`, which a stack does not issue. `Tags` is not read by the plugin. No `Fn::GetAtt` attribute is published ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)) |
 
-AWS publishes three types in the namespace. `AWS::CodeDeploy::Application` and
-`AWS::CodeDeploy::DeploymentConfig` are not deployed, so an application exists only if
-`CreateApplication` creates it, and a template whose deployment group names a custom deployment
-configuration deploys without the configuration existing anywhere.
+AWS publishes three types in the namespace. `AWS::CodeDeploy::DeploymentConfig` is declined: the
+plugin routes no `CreateDeploymentConfig`, so the type falls through to the generic stub, whose `Ref`
+is the logical ID. A deployment group naming it deploys, because the plugin does not look configurations up.
 
 ### Cost
 
@@ -23309,19 +23334,26 @@ depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). The record sp
 
 ### CloudFormation resource types
 
-`AWS::FSx::FileSystem` deploys through `CreateFileSystem` and deletes through `DeleteFileSystem`. Five
-template properties reach the plugin — `FileSystemType` (defaulting to `LUSTRE`), `StorageCapacity`
-(defaulting to `1200`), `StorageType` (defaulting to `SSD`), `SubnetIds` and `Tags` — with `!Ref` and
-`!Sub` resolved in the subnet list and in both halves of every tag. Everything else the resource
-publishes is dropped, including `FileSystemTypeVersion`, `KmsKeyId`, `SecurityGroupIds`, `NetworkType`,
-`BackupId` and all four per-type configuration blocks. Dropping `LustreConfiguration` is the
-consequential one: a template asking for `PERSISTENT_2` gets the default `SCRATCH_1` and a mount
-name of `fsx`, which is the one Lustre observable a mount script actually reads.
+`AWS::FSx::FileSystem` deploys through `CreateFileSystem` and deletes through `DeleteFileSystem`. These
+template properties reach the plugin:
+- `FileSystemType`, defaulting to `LUSTRE`;
+- `StorageCapacity`, defaulting to `1200`;
+- `StorageType`, defaulting to `SSD`;
+- `SubnetIds` and `Tags`;
+- since #1203, the four per-type configuration blocks (`LustreConfiguration`, `WindowsConfiguration`,
+  `OpenZFSConfiguration` and `OntapConfiguration`), as declared.
 
-`Ref` returns the file system ID, as published. Of the four published `Fn::GetAtt` attributes,
-`DNSName` resolves from stored metadata and `ResourceARN` resolves because its name ends in `ARN`;
-`LustreMountName` and `RootVolumeId` have no stored value, so a template that reads either gets
-nothing.
+`!Ref` and `!Sub` are resolved in each of them. The plugin reads `LustreConfiguration`'s
+`DeploymentType`, so a `PERSISTENT_2` template now gets a `PERSISTENT_2` file system with a minted
+mount name. The other three blocks are sent but not read. `FileSystemTypeVersion`, `KmsKeyId`,
+`SecurityGroupIds`, `NetworkType` and `BackupId` are still dropped.
+
+`Ref` returns the file system ID, as published. Of the four published `Fn::GetAtt` attributes:
+- `DNSName` and `LustreMountName` resolve from stored metadata;
+- `ResourceARN` resolves because its name ends in `ARN`;
+- `RootVolumeId` is refused, failing the resource that reads it, because OpenZFS volumes are not
+  modeled. An `Output` reading it still answers an empty string.
+
 [#1203](https://github.com/scttfrdmn/substrate/issues/1203).
 
 ### Cost
@@ -23630,12 +23662,12 @@ routed operations across both API generations
 
 ### CloudFormation resource types
 
-`AWS::MSK::Cluster` deploys through `POST /v1/clusters` and deletes by path. Four template properties
+`AWS::MSK::Cluster` deploys through `POST /v1/clusters` and deletes by path. Five template properties
 reach the plugin: `ClusterName` (defaulting to the logical ID), `KafkaVersion` (defaulting to `3.5.1`),
 and `BrokerNodeGroupInfo`'s `InstanceType` (defaulting to `kafka.m5.large`) and `ClientSubnets`.
-`NumberOfBrokerNodes` is hard-coded to `2` and the template's value is not read, even though the
-resource publishes it as "*Required*: Yes" — so a stack asking for six brokers gets two, `ListNodes`
-then reports two nodes, and a template's broker count is unassertable. `ClientAuthentication`,
+`NumberOfBrokerNodes`, which the resource publishes as "*Required*: Yes", has been read from the
+template since #1203; it was hard-coded to `2`. A number or a numeric string is accepted. A template
+without it fails the resource. `ClientAuthentication`,
 `ConfigurationInfo`, `EncryptionInfo`, `EnhancedMonitoring`, `LoggingInfo`, `OpenMonitoring`,
 `Rebalancing`, `StorageMode`, `Tags` and `ZookeeperAccess` are all dropped.
 
@@ -24594,19 +24626,13 @@ The response is `ServerId` and `UserName`, as published.
 [#1204](https://github.com/scttfrdmn/substrate/issues/1204)). SSH public key IDs (`key-` and 17 hex characters) are minted the
 same way.
 
-### A stack-deployed server is invisible to DescribeServer
+### A stack-deployed server is the plugin's own
 
-`AWS::Transfer::Server` is deployed as a stub: the properties are written to the
-CloudFormation stub namespace and never into the Transfer plugin's own state, so
-the ten routed operations cannot see the resource the stack created. Calling
-`DescribeServer` on the value a template exported answers
-`ResourceNotFoundException`. The physical ID compounds it — it is `s-` followed by
-the lower-cased logical ID, so a resource named `MySftpServer` gets
-`s-mysftpserver`, which satisfies neither the published fixed length of 19 nor the
-published `s-([0-9a-f]{17})` pattern, and cannot be a value any Transfer
-operation would accept. `Ref` is correct: AWS publishes `Ref returns the server
-ARN, such as arn:aws:transfer:us-east-1:123456789012:server/s-01234567890abcdef`,
-and that is what substrate returns
+`AWS::Transfer::Server` deploys through `CreateServer`, and its properties are sent as `CreateServer`'s
+members, which have the same names. It deletes through `DeleteServer`. It used to be a stub whose ID
+was `s-` followed by the lower-cased logical ID, which matches neither the published fixed length of
+19 nor `s-([0-9a-f]{17})`, and `DescribeServer` answered `ResourceNotFoundException` for it. Now the
+plugin mints the ID, and `DescribeServer` answers it. `Ref` returns the server ARN, as AWS publishes
 ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)).
 
 ### The two delete operations answer an empty JSON object
@@ -24663,10 +24689,10 @@ unemitted: `ExpiredTokenException` (403), `IncompleteSignature` (403), `Internal
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::Transfer::Server | server ARN | Physical ID is `s-` + lower-cased logical ID, which the published `s-([0-9a-f]{17})` pattern rejects. Deployed as a stub, so `DescribeServer` cannot see it. `Fn::GetAtt Arn` resolves; `ServerId`, `State` and `As2ServiceManagedEgressIpAddresses` answer an empty string |
+| AWS::Transfer::Server | server ARN | Deployed through `CreateServer`, whose minted ID is the physical ID. Deleted through `DeleteServer`. No property is dropped. `Fn::GetAtt Arn` and `ServerId` resolve. `State` resolves to `ONLINE`, the state `CreateServer`'s record moves to; a seeded start progression is observed through `DescribeServer`, and this is substrate's reading. `As2ServiceManagedEgressIpAddresses` is refused, failing the resource that reads it, because no AS2 egress addresses are assigned |
 
 `AWS::Transfer::User` is not deployed, so a template that creates a server and its
-users gets the server stub and a refusal for each user.
+users gets the server and a generic stub for each user.
 
 ### Cost
 
@@ -24902,12 +24928,12 @@ substrate's answers in those two cases have nothing to be measured against.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::OpenSearchService::Domain | domain name | Deployed as a stub; the data plane does not see it and serves one shared cluster regardless. `Fn::GetAtt Arn` and `DomainArn` resolve to the domain ARN; `DomainEndpoint`, `DomainEndpointV2` and `Id` answer an empty string |
+| AWS::OpenSearchService::Domain | domain name | Deployed as a stub, because no control plane is routed (#1212), so there is no `CreateDomain` to call. No property is read but `DomainName`. `Fn::GetAtt Arn` and `DomainArn` resolve to the domain ARN, and `Id` to `{account}/{name}`. `DomainEndpoint` resolves to `search-{name}-{suffix}.{region}.es.amazonaws.com`, a host the data plane answers. The data plane serves one shared cluster, though, so every domain's endpoint reaches the same documents. `DomainEndpointV2` and the two nested attributes are refused, failing the resource that reads them |
+| AWS::Elasticsearch::Domain | domain name | Deployed the same way, rather than declined, because AWS still documents the legacy type. Its three attributes, `Arn`, `DomainArn` and `DomainEndpoint`, resolve as above |
 
-`AWS::Elasticsearch::Domain`, the legacy type AWS still documents a migration path
-from, is not deployed. Because `DomainEndpoint` resolves to an empty string, a
-template that passes the endpoint into a Lambda environment variable or a stack
-output hands on an empty value
+The endpoint's 12-character suffix is derived from the account, Region, stack and logical
+ID, so an `UpdateStack` keeps the endpoint a consumer already wired up. AWS's example
+suffix is longer, and the width is substrate's reading
 ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)).
 
 ### Cost

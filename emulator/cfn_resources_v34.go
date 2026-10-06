@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 )
 
 // ----- v0.34.0 — RDS Aurora cluster ----------------------------------------
@@ -102,10 +104,18 @@ func (d *StackDeployer) deployMSKCluster(
 		}
 	}
 
+	// NumberOfBrokerNodes is Required: Yes on AWS::MSK::Cluster, and was hard-coded to 2, so a
+	// three-broker template got two (#1203). It is read now, and its absence fails the resource.
+	brokers, ok := cfnIntProp(props, "NumberOfBrokerNodes", cctx)
+	if !ok {
+		return DeployedResource{LogicalID: logicalID, Type: "AWS::MSK::Cluster",
+			Error: "NumberOfBrokerNodes is a required integer property of AWS::MSK::Cluster"}, 0, nil
+	}
+
 	bodyMap := map[string]interface{}{
 		"ClusterName":         name,
 		"KafkaVersion":        kafkaVersion,
-		"NumberOfBrokerNodes": 2,
+		"NumberOfBrokerNodes": brokers,
 		"BrokerNodeGroupInfo": brokerInfo,
 	}
 	body, err := json.Marshal(bodyMap)
@@ -143,4 +153,19 @@ func (d *StackDeployer) deployMSKCluster(
 		}
 	}
 	return dr, cost, nil
+}
+
+// cfnIntProp resolves an integer property, which a template may write as a number or as a string
+// (a Ref to a Number parameter resolves to one). The second result is false when the property is
+// absent or does not resolve to an integer.
+func cfnIntProp(props map[string]interface{}, key string, cctx *cfnContext) (int, bool) {
+	v, ok := props[key]
+	if !ok || v == nil {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(resolveValue(v, cctx)))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
 }

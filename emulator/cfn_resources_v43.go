@@ -12,6 +12,9 @@ import (
 
 // ----- v0.43.0 — FSx ----------------------------------------------------------
 
+// fsxConfigBlocks are AWS::FSx::FileSystem's four per-type configuration properties.
+var fsxConfigBlocks = []string{"LustreConfiguration", "WindowsConfiguration", "OpenZFSConfiguration", "OntapConfiguration"}
+
 // deployFSxFileSystem creates an FSx file system for the given CFN resource.
 func (d *StackDeployer) deployFSxFileSystem(
 	ctx context.Context,
@@ -66,6 +69,16 @@ func (d *StackDeployer) deployFSxFileSystem(
 		"StorageType":     storageType,
 		"SubnetIds":       subnetIDs,
 		"Tags":            tags,
+	}
+	// The per-type configuration blocks were dropped, so a PERSISTENT_2 template created a file
+	// system of the default deployment type (#1203). A template's block has the same member names as
+	// CreateFileSystem's, so each is sent as declared, with its intrinsics resolved. The plugin reads
+	// LustreConfiguration's DeploymentType and none of the other three blocks' members, so passing
+	// those through records the request without changing what DescribeFileSystems reports.
+	for _, key := range fsxConfigBlocks {
+		if v, ok := props[key]; ok {
+			body[key] = resolveNested(v, cctx)
+		}
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

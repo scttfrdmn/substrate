@@ -946,6 +946,8 @@ var typePriority = map[string]int{
 	"AWS::MSK::Cluster": 3,
 	// v0.32.0 — extended CFN stubs.
 	"AWS::OpenSearchService::Domain":   2,
+	"AWS::Elasticsearch::Domain":       2,
+	"AWS::CodeDeploy::Application":     2,
 	"AWS::WAFv2::WebACL":               2,
 	"AWS::Backup::BackupPlan":          2,
 	"AWS::CodeBuild::Project":          2,
@@ -2495,9 +2497,12 @@ func compareIAMRoleDrift(ctx context.Context, d *StackDeployer, stack *CFNStackS
 	}
 	if raw, declared := props["AssumeRolePolicyDocument"]; declared {
 		var expected PolicyDocument
-		// The template value is a JSON object (or string); unmarshal it the same
-		// way the IAM CreateRole handler stores the live document.
-		if err := json.Unmarshal([]byte(marshalToJSON(raw)), &expected); err == nil {
+		// The template value is a JSON object (or string); render it the way
+		// deployIAMRole sent it — intrinsics resolved — and unmarshal it the same
+		// way the IAM CreateRole handler stores the live document. Comparing the
+		// unresolved template would report drift on every trust policy that names
+		// a resource through Fn::GetAtt or Fn::Sub (#1153).
+		if err := json.Unmarshal([]byte(cfnJSONDocument(raw, cctx)), &expected); err == nil {
 			if !policyDocumentsEqual(expected, role.AssumeRolePolicyDocument) {
 				diffs = append(diffs, driftDiff(
 					"/AssumeRolePolicyDocument",
@@ -3033,8 +3038,8 @@ func (d *StackDeployer) dispatchResource(
 	case "AWS::MSK::Cluster":
 		return d.deployMSKCluster(ctx, logicalID, res.Properties, streamID, cctx)
 	// v0.32.0 — extended CFN stubs.
-	case "AWS::OpenSearchService::Domain":
-		return d.deployOpenSearchDomain(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::OpenSearchService::Domain", "AWS::Elasticsearch::Domain":
+		return d.deployOpenSearchDomain(ctx, res.Type, logicalID, res.Properties, cctx)
 	case "AWS::WAFv2::WebACL":
 		return d.deployWAFv2WebACL(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Backup::BackupPlan":
@@ -3043,6 +3048,8 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployCodeBuildProject(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::CodePipeline::Pipeline":
 		return d.deployCodePipelinePipeline(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::CodeDeploy::Application":
+		return d.deployCodeDeployApplication(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::CodeDeploy::DeploymentGroup":
 		return d.deployCodeDeployDeploymentGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::CloudTrail::Trail":
@@ -3153,7 +3160,7 @@ func (d *StackDeployer) deployIAMRole(
 	body := map[string]string{
 		"RoleName":                 roleName,
 		"Path":                     resolveStringProp(props, "Path", "/", cctx),
-		"AssumeRolePolicyDocument": marshalToJSON(props["AssumeRolePolicyDocument"]),
+		"AssumeRolePolicyDocument": cfnJSONDocument(props["AssumeRolePolicyDocument"], cctx),
 		"Description":              resolveStringProp(props, "Description", "", cctx),
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -3204,7 +3211,7 @@ func (d *StackDeployer) deployIAMPolicy(
 	body := map[string]string{
 		"PolicyName":     policyName,
 		"Path":           resolveStringProp(props, "Path", "/", cctx),
-		"PolicyDocument": marshalToJSON(props["PolicyDocument"]),
+		"PolicyDocument": cfnJSONDocument(props["PolicyDocument"], cctx),
 		"Description":    resolveStringProp(props, "Description", "", cctx),
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -4694,7 +4701,7 @@ func (d *StackDeployer) deploySNSTopicPolicy(
 	if topicsList, ok := props["Topics"].([]interface{}); ok && len(topicsList) > 0 {
 		topicARN = resolveValue(topicsList[0], cctx)
 	}
-	policy := marshalToJSON(props["PolicyDocument"])
+	policy := cfnJSONDocument(props["PolicyDocument"], cctx)
 	req := &AWSRequest{
 		Service:   "sns",
 		Operation: "SetTopicAttributes",
@@ -4806,7 +4813,7 @@ func (d *StackDeployer) deployEventsRule(
 		"State": resolveStringProp(props, "State", "ENABLED", cctx),
 	}
 	if ep, ok := props["EventPattern"]; ok {
-		body["EventPattern"] = marshalToJSON(ep)
+		body["EventPattern"] = cfnJSONDocument(ep, cctx)
 	}
 	if se, ok := props["ScheduleExpression"]; ok {
 		body["ScheduleExpression"] = resolveValue(se, cctx)
@@ -5772,6 +5779,14 @@ func substituteTemplate(s string, cctx *cfnContext, extra map[string]string) str
 				}
 				if v, ok := extra[varName]; ok {
 					result.WriteString(v)
+				} else if logicalID, attr, dotted := strings.Cut(varName, "."); dotted {
+					// "${MyInstance.PublicIp}" is Fn::Sub's documented resource-attribute
+					// form, answered "as if you used the Fn::GetAtt intrinsic function"
+					// (#1103). The split is on the first dot only, because an attribute
+					// name may itself contain one (Fn::GetAtt's published
+					// "SourceSecurityGroup.OwnerAlias"). Neither a parameter name nor a
+					// logical ID can contain a dot, so nothing resolveRef answers is lost.
+					result.WriteString(resolveFnGetAtt([]interface{}{logicalID, attr}, cctx))
 				} else {
 					result.WriteString(resolveRef(varName, cctx))
 				}
@@ -6430,6 +6445,12 @@ func xmlUnmarshalIAM(body []byte, dst interface{}) error {
 }
 
 // marshalToJSON marshals v to a JSON string. Returns "" on nil or error.
+//
+// It resolves no intrinsics, because it has no *cfnContext: a caller marshaling a
+// template property owns resolution, and should pass the property through
+// resolveNested first — or call cfnJSONDocument, which does that and also accepts
+// the property's string form (#1153). Marshaling a raw property stores
+// {"Fn::GetAtt":[…]} as data.
 func marshalToJSON(v interface{}) string {
 	if v == nil {
 		return ""
@@ -6439,6 +6460,26 @@ func marshalToJSON(v interface{}) string {
 		return ""
 	}
 	return string(b)
+}
+
+// cfnJSONDocument renders a Json-typed template property — a policy document, an
+// event pattern — as the JSON text the service API takes, with intrinsics resolved
+// at every depth (#1153).
+//
+// CloudFormation accepts such a property either as an object or as a string holding
+// the JSON. A string, or an intrinsic that resolves to one (an Fn::Sub over the
+// document text), is already the document and is returned as-is; marshaling it
+// would quote it a second time. Anything else is resolved by resolveNested and
+// marshaled. A nil property answers "".
+func cfnJSONDocument(raw interface{}, cctx *cfnContext) string {
+	if raw == nil {
+		return ""
+	}
+	resolved := resolveNested(raw, cctx)
+	if s, ok := resolved.(string); ok {
+		return s
+	}
+	return marshalToJSON(resolved)
 }
 
 // deployLambdaEventSourceMapping creates a Lambda event source mapping for the
