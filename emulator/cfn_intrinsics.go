@@ -170,6 +170,7 @@ func cfnGetAttValue(dr DeployedResource, attr string, cctx *cfnContext) string {
 	if cfnGetAttNamesAnARN(attr) {
 		return cfnGetAttARN(dr)
 	}
+	cfnGetAttRefuseUnmodelled(dr, attr, cctx)
 	return ""
 }
 

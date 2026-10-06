@@ -77,31 +77,6 @@ func TestCFN_WAFv2WebACL(t *testing.T) {
 	assert.Contains(t, r.ARN, "webacl/my-acl")
 }
 
-// TestCFN_BackupBackupPlan verifies the Backup plan stub.
-func TestCFN_BackupBackupPlan(t *testing.T) {
-	d := newTestDeployer(t)
-	tmpl := `{
-		"AWSTemplateFormatVersion": "2010-09-09",
-		"Resources": {
-			"MyPlan": {
-				"Type": "AWS::Backup::BackupPlan",
-				"Properties": {
-					"BackupPlan": { "BackupPlanName": "daily-plan", "BackupPlanRule": [] }
-				}
-			}
-		}
-	}`
-	result, err := d.Deploy(context.Background(), tmpl, "backup-stack", nil)
-	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
-	r := result.Resources[0]
-	assert.Equal(t, "AWS::Backup::BackupPlan", r.Type)
-	assert.Empty(t, r.Error)
-	assert.Equal(t, "MyPlan", r.PhysicalID)
-	assert.Contains(t, r.ARN, "arn:aws:backup:")
-	assert.Contains(t, r.ARN, "backup-plan:MyPlan")
-}
-
 // TestCFN_CodeBuildProject verifies the CodeBuild project stub.
 func TestCFN_CodeBuildProject(t *testing.T) {
 	d := newTestDeployer(t)
@@ -148,31 +123,6 @@ func TestCFN_CodePipelinePipeline(t *testing.T) {
 	assert.Contains(t, r.ARN, ":my-pipeline")
 }
 
-// TestCFN_CodeDeployDeploymentGroup verifies the CodeDeploy deployment group stub.
-func TestCFN_CodeDeployDeploymentGroup(t *testing.T) {
-	d := newTestDeployer(t)
-	tmpl := `{
-		"AWSTemplateFormatVersion": "2010-09-09",
-		"Resources": {
-			"MyGroup": {
-				"Type": "AWS::CodeDeploy::DeploymentGroup",
-				"Properties": {
-					"ApplicationName": "my-app",
-					"DeploymentGroupName": "my-group"
-				}
-			}
-		}
-	}`
-	result, err := d.Deploy(context.Background(), tmpl, "codedeploy-stack", nil)
-	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
-	r := result.Resources[0]
-	assert.Equal(t, "AWS::CodeDeploy::DeploymentGroup", r.Type)
-	assert.Empty(t, r.Error)
-	assert.Equal(t, "my-group", r.PhysicalID)
-	assert.Contains(t, r.ARN, "deploymentgroup:my-app/my-group")
-}
-
 // TestCFN_CloudTrailTrail verifies the CloudTrail trail stub.
 func TestCFN_CloudTrailTrail(t *testing.T) {
 	d := newTestDeployer(t)
@@ -202,29 +152,6 @@ func TestCFN_CloudTrailTrail(t *testing.T) {
 // plugin, so both went green while creating nothing. That is the defect, not the
 // baseline. Their replacements are in cfn_resources_v101_test.go, against a deployer
 // that registers Config.
-
-// TestCFN_TransferServer verifies the Transfer Family server stub.
-func TestCFN_TransferServer(t *testing.T) {
-	d := newTestDeployer(t)
-	tmpl := `{
-		"AWSTemplateFormatVersion": "2010-09-09",
-		"Resources": {
-			"MyServer": {
-				"Type": "AWS::Transfer::Server",
-				"Properties": { "Protocols": ["SFTP"] }
-			}
-		}
-	}`
-	result, err := d.Deploy(context.Background(), tmpl, "transfer-stack", nil)
-	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
-	r := result.Resources[0]
-	assert.Equal(t, "AWS::Transfer::Server", r.Type)
-	assert.Empty(t, r.Error)
-	assert.Contains(t, r.PhysicalID, "s-")
-	assert.Contains(t, r.ARN, "arn:aws:transfer:")
-	assert.Contains(t, r.ARN, "server/s-")
-}
 
 // TestCFN_AthenaWorkGroup verifies the Athena WorkGroup stub.
 func TestCFN_AthenaWorkGroup(t *testing.T) {

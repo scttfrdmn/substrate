@@ -74,9 +74,11 @@ func (d *StackDeployer) deployECRLifecyclePolicy(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	repoName := resolveStringProp(props, "RepositoryName", "", cctx)
-	policy := marshalToJSON(props["LifecyclePolicyText"])
+	// LifecyclePolicyText is published as a String; cfnJSONDocument passes that
+	// form through unquoted and still accepts an object (#1153).
+	policy := cfnJSONDocument(props["LifecyclePolicyText"], cctx)
 	if policy == "" {
-		policy = resolveStringProp(props, "LifecyclePolicyText", "{}", cctx)
+		policy = "{}"
 	}
 
 	body := map[string]interface{}{

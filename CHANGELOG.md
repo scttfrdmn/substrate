@@ -29,10 +29,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An ECR repository holding only untagged images is not empty (#1112).** `DeleteRepository` now counts the stored images rather than the tag index. Such a repository is refused with `RepositoryNotEmptyException` unless `force` is set, and a forced delete removes the images. Before, it was deleted without `force`, and its images reappeared if the name was re-created. The `ListImages`/`DescribeImages` part of #1112 shipped in #1379.
 - **CodeBuild `UpdateProject` reads the published flat request (#1158).** It read a `project` wrapper that `UpdateProjectInput` does not have, so every SDK request was refused with "name is required". A member the request carries replaces the stored one, and an empty `description` clears it; an omitted member is left alone. An absent project is `ResourceNotFoundException`/400.
 - **CloudFront creates refuse a body they cannot read (#1133).** For `CreateDistribution` and `CreateDistributionWithTags`, an empty body is `MissingBody`/400. A body that isn't XML, or carries no `DistributionConfig`, is `InvalidArgument`/400. Before, the plain create built a default, enabled distribution and answered 201. The `?WithTags` routing itself was fixed by #1280; a wire test now pins it.
-- **Compatibility:**
+- **Compatibility (the service fixes above):**
   - A `POST` create of a Backup plan or selection is now refused.
   - A replay of a recording made before this release diverges at Kinesis `PutRecord`/`PutRecords` (the `ShardId` changes) and at record-set calls against an absent zone.
   - The routed-operation catalog grows from 1,042 to 1,055.
+
+- **CloudFormation Json-typed properties resolve intrinsics at every depth (#1153).** Five properties were marshalled straight from the template, so an `Fn::GetAtt` or `Fn::Sub` inside one was stored verbatim while the stack reported `CREATE_COMPLETE`:
+  - `AWS::IAM::Role` `AssumeRolePolicyDocument`;
+  - `AWS::IAM::Policy` `PolicyDocument`;
+  - `AWS::SNS::TopicPolicy` `PolicyDocument`;
+  - `AWS::Events::Rule` `EventPattern`;
+  - the ECR repository's `LifecyclePolicyText`.
+
+  Each one is now resolved and then marshalled. A Json property given as a string is passed through as the document rather than quoted a second time. Before, IAM refused a string-form trust policy as malformed, and ECR received a quoted lifecycle policy. The IAM role drift comparison resolves the template the same way, so a trust policy naming a resource no longer reports false drift. An `AWS::IAM::Policy` still cannot `Fn::GetAtt` another resource, because deploy order ignores references (#1420).
+- **`Fn::Sub`'s `${LogicalId.Attribute}` form is implemented (#1103).** It answers what `Fn::GetAtt` answers, as the `Fn::Sub` page states; before, it was stored as the literal string. The body splits on the first dot only, so `${Db.Endpoint.Address}` works. A dotted key in `Fn::Sub`'s own variable map still wins, and the `${!Literal}` escape is unchanged.
+- **Five CloudFormation resource types reach their own service (#1203).**
+  - **`AWS::Transfer::Server`** deploys through `CreateServer`, so `DescribeServer` sees it. Its ID is a real `s-` plus 17 hex characters, and `ServerId` and `State` resolve.
+  - **`AWS::CodeDeploy::DeploymentGroup` and `AWS::CodeDeploy::Application`** deploy through their create operations. The group's properties are renamed to the API's members, and its tag sets are reshaped.
+  - **`AWS::FSx::FileSystem`** sends its per-type configuration blocks, so a `PERSISTENT_2` template produces a `PERSISTENT_2` file system.
+  - **`AWS::MSK::Cluster`** reads the required `NumberOfBrokerNodes` instead of hard-coding 2.
+  - **`AWS::OpenSearchService::Domain`, and now `AWS::Elasticsearch::Domain`,** stay stubs until the control plane is routed (#1212), but `DomainEndpoint` and `Id` resolve.
+  - **Deletes:** each type deletes through its own operation.
+  - **Unmodelled attributes:** a published `Fn::GetAtt` attribute substrate does not model now fails the resource that reads it, instead of resolving to "". That covers Transfer `As2ServiceManagedEgressIpAddresses`, OpenSearch `DomainEndpointV2` and FSx `RootVolumeId`.
+  - **Not covered:** `AWS::CodeDeploy::DeploymentConfig` stays a generic stub, because the plugin routes no `CreateDeploymentConfig`.
+- **`AWS::Backup::BackupPlan` answers its plan ID for `Ref` and resolves its published attributes (#1182).** `Ref` is a UUID-shaped plan ID instead of the logical ID, and `BackupPlanId`, `BackupPlanArn` and `VersionId` resolve. The ID is stable across `UpdateStack`, and `VersionId` changes only when the declared plan changes. A template without the required `BackupPlan` fails the resource.
+- **Compatibility (the CloudFormation fixes above):**
+  - An MSK template without `NumberOfBrokerNodes` now fails.
+  - A template reading an unmodelled attribute named above now fails.
+  - Transfer servers and CodeDeploy groups now appear in their service APIs.
+  - The Backup plan's `Ref` changes shape.
 
 - **IAM success responses carry the request's own ID, a Query 5xx error reads `Receiver`, and ELBv2 `DescribeLoadBalancers` refuses an absent load balancer (#1413).**
   - **IAM request IDs.** Every IAM success document carried the literal `<RequestId>stub-request-id</RequestId>`. It now carries the request's own ID, the one `Event.RequestID` records, as the other Query plugins have done since #1149. So a replayed IAM success is byte-identical. The deferred stamp from #1241 now covers success documents too, and replaces only the envelope's placeholder.

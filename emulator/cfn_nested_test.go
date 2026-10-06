@@ -808,6 +808,7 @@ func TestCFN_MSKClientSubnets_Resolved(t *testing.T) {
 				"Type": "AWS::MSK::Cluster",
 				"Properties": {
 					"ClusterName": "cfn-kafka",
+					"NumberOfBrokerNodes": 2,
 					"BrokerNodeGroupInfo": {
 						"InstanceType": {"Ref": "Size"},
 						"ClientSubnets": {"Ref": "Subnets"}
@@ -847,6 +848,7 @@ func TestCFN_MSKClientSubnets_AbsentStaysEmptyList(t *testing.T) {
 				"Type": "AWS::MSK::Cluster",
 				"Properties": {
 					"ClusterName": "cfn-kafka-bare",
+					"NumberOfBrokerNodes": 2,
 					"BrokerNodeGroupInfo": {"InstanceType": "kafka.m5.large"}
 				}
 			}
