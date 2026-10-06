@@ -95,7 +95,7 @@ func TestBackupDates_PublishedDatesAreUnixTimestamps(t *testing.T) {
 		"EncryptionKeyArn": "arn:aws:kms:us-east-1:123456789012:key/dates",
 	})
 
-	createdPlan := backupDatesRaw(t, p, ctx, "CreateBackupPlan", "POST", "/backup/plans", map[string]any{
+	createdPlan := backupDatesRaw(t, p, ctx, "CreateBackupPlan", "PUT", "/backup/plans", map[string]any{
 		"BackupPlan": map[string]any{"BackupPlanName": "dates-plan"},
 	})
 	var plan struct {
@@ -104,7 +104,7 @@ func TestBackupDates_PublishedDatesAreUnixTimestamps(t *testing.T) {
 	require.NoError(t, json.Unmarshal(createdPlan, &plan), "decode CreateBackupPlan: %s", createdPlan)
 	require.NotEmpty(t, plan.BackupPlanID, "CreateBackupPlan must report a plan id")
 
-	createdSelection := backupDatesRaw(t, p, ctx, "CreateBackupSelection", "POST",
+	createdSelection := backupDatesRaw(t, p, ctx, "CreateBackupSelection", "PUT",
 		"/backup/plans/"+plan.BackupPlanID+"/selections", map[string]any{
 			"BackupSelection": map[string]any{
 				"SelectionName": "dates-selection",
@@ -164,7 +164,7 @@ func TestBackupDates_NoResponseRendersAnRFC3339Date(t *testing.T) {
 	const vault = "dates-vault"
 	bodies := map[string][]byte{
 		"CreateBackupVault": backupDatesRaw(t, p, ctx, "CreateBackupVault", "PUT", "/backup-vaults/"+vault, nil),
-		"CreateBackupPlan": backupDatesRaw(t, p, ctx, "CreateBackupPlan", "POST", "/backup/plans", map[string]any{
+		"CreateBackupPlan": backupDatesRaw(t, p, ctx, "CreateBackupPlan", "PUT", "/backup/plans", map[string]any{
 			"BackupPlan": map[string]any{"BackupPlanName": "dates-plan"},
 		}),
 	}
@@ -173,7 +173,7 @@ func TestBackupDates_NoResponseRendersAnRFC3339Date(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(bodies["CreateBackupPlan"], &plan), "decode CreateBackupPlan")
 
-	bodies["CreateBackupSelection"] = backupDatesRaw(t, p, ctx, "CreateBackupSelection", "POST",
+	bodies["CreateBackupSelection"] = backupDatesRaw(t, p, ctx, "CreateBackupSelection", "PUT",
 		"/backup/plans/"+plan.BackupPlanID+"/selections", map[string]any{
 			"BackupSelection": map[string]any{"SelectionName": "dates-selection"},
 		})

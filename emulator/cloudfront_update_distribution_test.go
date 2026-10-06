@@ -142,10 +142,6 @@ func TestCloudFrontCreate_RecordsWhatTheBodyHolds(t *testing.T) {
 		body string
 		want string
 	}{
-		{"a body that does not parse", "<DistributionConfig><Comment>",
-			"<DistributionConfig><Aliases><Quantity>0</Quantity></Aliases><Comment></Comment><Enabled>true</Enabled></DistributionConfig>"},
-		{"a body naming no DistributionConfig", "<Other><Comment>x</Comment></Other>",
-			"<DistributionConfig><Aliases><Quantity>0</Quantity></Aliases><Comment></Comment><Enabled>true</Enabled></DistributionConfig>"},
 		{"a wrapped configuration", "<CreateDistributionRequest><DistributionConfig><Comment>w</Comment><Enabled>false</Enabled></DistributionConfig></CreateDistributionRequest>",
 			"<DistributionConfig><Comment>w</Comment><Enabled>false</Enabled><Aliases><Quantity>0</Quantity></Aliases></DistributionConfig>"},
 	} {
@@ -155,6 +151,45 @@ func TestCloudFrontCreate_RecordsWhatTheBodyHolds(t *testing.T) {
 			id, _ := h.create(tc.body)
 			read, _ := h.config(id)
 			require.Equal(t, tc.want, read)
+		})
+	}
+}
+
+// TestCloudFrontCreate_RefusesABodyItCannotRead pins #1133: both creates refuse a body holding no
+// readable DistributionConfig with a code both pages publish, where they once created a default,
+// enabled distribution and answered 201. Nothing is left behind.
+func TestCloudFrontCreate_RefusesABodyItCannotRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		query string
+		body  string
+		code  string
+	}{
+		{"an empty body", "", "", "MissingBody"},
+		{"a body that does not parse", "", "<DistributionConfig><Comment>", "InvalidArgument"},
+		{"a body naming no DistributionConfig", "", "<Other><Comment>x</Comment></Other>", "InvalidArgument"},
+		{"WithTags: an empty body", "?WithTags", "", "MissingBody"},
+		{"WithTags: no DistributionConfig child", "?WithTags", "<DistributionConfigWithTags><Tags><Items/></Tags></DistributionConfigWithTags>", "InvalidArgument"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newCFDistHarness(t)
+			params := map[string]string{}
+			if tc.query != "" {
+				params["WithTags"] = "1"
+			}
+			_, err := h.p.HandleRequest(h.ctx, &emulator.AWSRequest{
+				Service: "cloudfront", HTTPMethod: http.MethodPost, Path: "/2020-05-31/distribution", Body: []byte(tc.body),
+				Headers: map[string]string{"Content-Type": "application/xml"}, Params: params,
+			})
+			var awsErr *emulator.AWSError
+			require.ErrorAs(t, err, &awsErr)
+			require.Equal(t, tc.code, awsErr.Code)
+			require.Equal(t, http.StatusBadRequest, awsErr.HTTPStatus)
+
+			list, _ := h.must(http.MethodGet, "/2020-05-31/distribution", "", "")
+			require.Contains(t, list, "<Quantity>0</Quantity>", "a refused create leaves no distribution behind")
 		})
 	}
 }

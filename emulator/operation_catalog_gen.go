@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 67 plugins, 1042 routed operations.
+// 67 plugins, 1055 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -85,11 +85,14 @@ var routedOperations = map[string][]string{
 		"CreateRoute",
 		"CreateStage",
 		"DeleteApi",
+		"DeleteApiMapping",
 		"DeleteAuthorizer",
 		"DeleteIntegration",
 		"DeleteRoute",
 		"DeleteStage",
 		"GetApi",
+		"GetApiMapping",
+		"GetApiMappings",
 		"GetApis",
 		"GetAuthorizer",
 		"GetAuthorizers",
@@ -105,6 +108,7 @@ var routedOperations = map[string][]string{
 		"TagResource",
 		"UntagResource",
 		"UpdateApi",
+		"UpdateApiMapping",
 		"UpdateRoute",
 		"UpdateStage",
 	},
@@ -156,6 +160,7 @@ var routedOperations = map[string][]string{
 		"GetBackupPlan",
 		"GetBackupSelection",
 		"ListBackupPlans",
+		"ListBackupSelections",
 		"ListBackupVaults",
 		"UpdateBackupPlan",
 	},
@@ -163,6 +168,9 @@ var routedOperations = map[string][]string{
 		"CancelJob",
 		"CreateComputeEnvironment",
 		"CreateJobQueue",
+		"DeleteComputeEnvironment",
+		"DeleteJobQueue",
+		"DeregisterJobDefinition",
 		"DescribeComputeEnvironments",
 		"DescribeJobDefinitions",
 		"DescribeJobQueues",
@@ -171,6 +179,8 @@ var routedOperations = map[string][]string{
 		"RegisterJobDefinition",
 		"SubmitJob",
 		"TerminateJob",
+		"UpdateComputeEnvironment",
+		"UpdateJobQueue",
 	},
 	"bedrock-runtime": {
 		"ApplyGuardrail",
@@ -305,12 +315,15 @@ var routedOperations = map[string][]string{
 		"GetUserPoolMfaConfig",
 		"InitiateAuth",
 		"ListGroups",
+		"ListTagsForResource",
 		"ListUserPoolClients",
 		"ListUserPools",
 		"ListUsers",
 		"RespondToAuthChallenge",
 		"SetUserPoolMfaConfig",
 		"SignUp",
+		"TagResource",
+		"UntagResource",
 		"UpdateUserPool",
 		"UpdateUserPoolClient",
 	},

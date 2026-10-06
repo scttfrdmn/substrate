@@ -109,7 +109,7 @@ func TestBackupRouting_ANearMissPathIsUnknown(t *testing.T) {
 	t.Parallel()
 	p := &emulator.BackupPlugin{}
 	ctx, _ := wireSetup(t, p, "req-backup-nearmiss")
-	planID := mintedIDMember(t, wireREST(t, p, ctx, "backup", http.MethodPost, "/backup/plans",
+	planID := mintedIDMember(t, wireREST(t, p, ctx, "backup", http.MethodPut, "/backup/plans",
 		map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "nm", "Rules": []any{}}}), "BackupPlanId")
 
 	requireRefusal(t, p, ctx, "backup", []nearMissCase{

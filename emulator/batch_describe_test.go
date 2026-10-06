@@ -301,10 +301,10 @@ func TestBatchDescribe_Filters(t *testing.T) {
 // TestBatchDescribe_JobDefinitionStatusFilter covers the documented status filter and
 // the name-matches-nothing case.
 //
-// Nothing in substrate can yet make a job definition INACTIVE — DeregisterJobDefinition
-// is unrouted, filed as #555 — so ACTIVE is the case with records in it. The INACTIVE
-// case still earns its place: it proves the filter is applied rather than accepted and
-// ignored, which is how a status parameter usually rots.
+// ACTIVE is the case with records in it here; the INACTIVE case still earns its place,
+// proving the filter is applied rather than accepted and ignored. A deregistered
+// revision, the INACTIVE filter's populated case, is TestBatchLifecycle_Deregister's
+// (#555).
 func TestBatchDescribe_JobDefinitionStatusFilter(t *testing.T) {
 	ts := newBatchTestServer(t)
 

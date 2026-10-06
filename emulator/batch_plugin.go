@@ -72,13 +72,21 @@ func (p *BatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return p.describeJobQueues(ctx, req)
 	case "DescribeJobDefinitions":
 		return p.describeJobDefinitions(ctx, req)
+	case "DeregisterJobDefinition":
+		return p.deregisterJobDefinition(ctx, req)
+	case "UpdateJobQueue":
+		return p.updateJobQueue(ctx, req)
+	case "UpdateComputeEnvironment":
+		return p.updateComputeEnvironment(ctx, req)
+	case "DeleteJobQueue":
+		return p.deleteJobQueue(ctx, req)
+	case "DeleteComputeEnvironment":
+		return p.deleteComputeEnvironment(ctx, req)
 	default:
 		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
 }
 
-// parseBatchOperation maps an HTTP method and path to a Batch operation name and
-// optional resource ID.
 // parseBatchOperation maps an HTTP method and path to a Batch operation name and
 // optional resource ID. The method parameter is the HTTP verb (GET, POST, DELETE).
 func parseBatchOperation(method, path string) (op, jobID string) {
@@ -112,6 +120,18 @@ func parseBatchOperation(method, path string) (op, jobID string) {
 		return "DescribeJobQueues", ""
 	case rest == "v1/describejobdefinitions" && method == "POST":
 		return "DescribeJobDefinitions", ""
+	// The lifecycle operations, without which a resource could enter service and never
+	// leave it (#555); see batch_lifecycle.go.
+	case rest == "v1/deregisterjobdefinition" && method == "POST":
+		return "DeregisterJobDefinition", ""
+	case rest == "v1/updatejobqueue" && method == "POST":
+		return "UpdateJobQueue", ""
+	case rest == "v1/updatecomputeenvironment" && method == "POST":
+		return "UpdateComputeEnvironment", ""
+	case rest == "v1/deletejobqueue" && method == "POST":
+		return "DeleteJobQueue", ""
+	case rest == "v1/deletecomputeenvironment" && method == "POST":
+		return "DeleteComputeEnvironment", ""
 	// Legacy REST-style paths retained for backwards compatibility.
 	case rest == "v1/jobs" && method == "POST":
 		return "DescribeJobs", ""
@@ -897,9 +917,9 @@ func (p *BatchPlugin) registerJobDefinition(ctx *RequestContext, req *AWSRequest
 		JobDefinitionName: body.JobDefinitionName,
 		JobDefinitionARN:  batchARN(ctx, "job-definition", name),
 		Revision:          revision,
-		// A newly registered job definition is ACTIVE. Nothing in substrate makes one
-		// INACTIVE yet — DeregisterJobDefinition is not routed (#555) — but the status
-		// is recorded rather than synthesized at read time so that it can be.
+		// A newly registered job definition is ACTIVE. DeregisterJobDefinition makes a
+		// revision INACTIVE (#555), which is why the status is recorded rather than
+		// synthesized at read time.
 		Status:               "ACTIVE",
 		Type:                 body.Type,
 		ContainerProperties:  body.ContainerProperties,

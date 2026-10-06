@@ -338,13 +338,15 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	// force is the one request member here that governs whether the delete happens at all, and
-	// it was decoded and never read (#1090). A repository's contents are its tag index: an
-	// image pushed without a tag is written under its digest and entered in no index, so
-	// nothing in this plugin can enumerate it — every image operation reads the tag map — and
-	// emptiness is measured the same way the operations that report contents measure it.
-	tagsKey := ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)
-	tagsMap := p.loadImageTagsMap(goCtx, tagsKey)
-	if len(tagsMap) > 0 && !body.Force {
+	// it was decoded and never read (#1090). A repository's contents are its image records, the
+	// same set ListImages enumerates (#1379), so a repository holding only untagged images is not
+	// empty (#1112). Measuring by the tag index, as this did, let such a repository be deleted
+	// without force and left its images behind under their digest keys.
+	digests, err := p.repositoryImageDigests(goCtx, ctx, body.RepositoryName)
+	if err != nil {
+		return nil, err
+	}
+	if len(digests) > 0 && !body.Force {
 		return nil, ecrRepositoryNotEmpty(body.RepositoryName)
 	}
 
@@ -352,18 +354,16 @@ func (p *ECRPlugin) deleteRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("ecr deleteRepository state.Delete: %w", err)
 	}
 
-	// The images go with it. Without this the tag index outlived the repository, so a name
-	// re-created after a forced delete reported the previous repository's images.
-	for _, digest := range tagsMap {
+	// The images go with it, tagged or not. Without this the index outlived the repository, so a
+	// name re-created after a forced delete reported the previous repository's images.
+	for _, digest := range digests {
 		imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
 		if err := p.state.Delete(goCtx, ecrNamespace, imgKey); err != nil {
 			return nil, fmt.Errorf("ecr deleteRepository state.Delete image: %w", err)
 		}
 	}
-	if len(tagsMap) > 0 {
-		if err := p.state.Delete(goCtx, ecrNamespace, tagsKey); err != nil {
-			return nil, fmt.Errorf("ecr deleteRepository state.Delete tags: %w", err)
-		}
+	if err := p.state.Delete(goCtx, ecrNamespace, ecrImageTagsKey(ctx.AccountID, ctx.Region, body.RepositoryName)); err != nil {
+		return nil, fmt.Errorf("ecr deleteRepository state.Delete tags: %w", err)
 	}
 
 	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)

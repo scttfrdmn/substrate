@@ -22,7 +22,7 @@ func TestBackupRefusals_AnswerThePublishedCodeAndStatus(t *testing.T) {
 	t.Parallel()
 	h := newBackupHarness(t)
 	h.ok(http.MethodPut, "/backup-vaults/refusal-vault", nil, nil)
-	created := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "refusal-plan"}})
+	created := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "refusal-plan"}})
 	var plan struct {
 		BackupPlanID string `json:"BackupPlanId"`
 	}
@@ -47,15 +47,15 @@ func TestBackupRefusals_AnswerThePublishedCodeAndStatus(t *testing.T) {
 		{"UpdateBackupPlan/absent", http.MethodPost, "/backup/plans/no-such-plan",
 			map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "x"}}, notFound},
 		{"DeleteBackupPlan/absent", http.MethodDelete, "/backup/plans/no-such-plan", nil, notFound},
-		{"CreateBackupSelection/absent plan", http.MethodPost, "/backup/plans/no-such-plan/selections",
+		{"CreateBackupSelection/absent plan", http.MethodPut, "/backup/plans/no-such-plan/selections",
 			map[string]any{"BackupSelection": map[string]any{"SelectionName": "s"}}, notFound},
 		{"GetBackupSelection/absent", http.MethodGet, planPath + "/selections/no-such-selection", nil, notFound},
 		{"DeleteBackupSelection/absent", http.MethodDelete, planPath + "/selections/no-such-selection", nil, notFound},
 
 		// A required member that is absent.
 		{"CreateBackupVault/no name", http.MethodPut, "/backup-vaults", nil, missing},
-		{"CreateBackupPlan/no BackupPlanName", http.MethodPost, "/backup/plans", map[string]any{"BackupPlan": map[string]any{}}, missing},
-		{"CreateBackupSelection/no SelectionName", http.MethodPost, planPath + "/selections",
+		{"CreateBackupPlan/no BackupPlanName", http.MethodPut, "/backup/plans", map[string]any{"BackupPlan": map[string]any{}}, missing},
+		{"CreateBackupSelection/no SelectionName", http.MethodPut, planPath + "/selections",
 			map[string]any{"BackupSelection": map[string]any{}}, missing},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -72,7 +72,7 @@ func TestBackupRefusals_AnswerThePublishedCodeAndStatus(t *testing.T) {
 func TestBackupRefusals_UpdateBackupPlanAnswersItsPublishedMembers(t *testing.T) {
 	t.Parallel()
 	h := newBackupHarness(t)
-	created := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "members-plan"}})
+	created := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "members-plan"}})
 	var plan map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(created, &plan), "decode CreateBackupPlan: %s", created)
 	var id string
@@ -110,8 +110,8 @@ func TestBackupRefusals_ACreateRepeatingItsCreatorRequestIDReturnsTheExistingRes
 	h := newBackupHarness(t)
 
 	planBody := map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "idem-plan"}, "CreatorRequestId": "req-plan-1"}
-	first := h.ok(http.MethodPost, "/backup/plans", nil, planBody)
-	second := h.ok(http.MethodPost, "/backup/plans", nil, planBody)
+	first := h.ok(http.MethodPut, "/backup/plans", nil, planBody)
+	second := h.ok(http.MethodPut, "/backup/plans", nil, planBody)
 	firstID := backupRefusalsMember(t, first, "BackupPlanId")
 	require.Equal(t, firstID, backupRefusalsMember(t, second, "BackupPlanId"), "a retried plan create returns the first plan")
 	require.Equal(t, backupRefusalsMember(t, first, "VersionId"), backupRefusalsMember(t, second, "VersionId"), "and its version")
@@ -125,13 +125,13 @@ func TestBackupRefusals_ACreateRepeatingItsCreatorRequestIDReturnsTheExistingRes
 	require.Equal(t, "req-plan-1", plans.BackupPlansList[0]["CreatorRequestId"], "ListBackupPlans answers the recorded CreatorRequestId")
 	got := h.ok(http.MethodGet, "/backup/plans/"+firstID, nil, nil)
 	require.Contains(t, string(got), `"CreatorRequestId":"req-plan-1"`, "GetBackupPlan answers it: %s", got)
-	other := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "idem-plan"}, "CreatorRequestId": "req-plan-2"})
+	other := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "idem-plan"}, "CreatorRequestId": "req-plan-2"})
 	require.NotEqual(t, firstID, backupRefusalsMember(t, other, "BackupPlanId"), "a different CreatorRequestId is a new plan")
 
 	selPath := "/backup/plans/" + firstID + "/selections"
 	selBody := map[string]any{"BackupSelection": map[string]any{"SelectionName": "idem-sel", "IamRoleArn": "arn:aws:iam::123456789012:role/b"}, "CreatorRequestId": "req-sel-1"}
-	s1 := h.ok(http.MethodPost, selPath, nil, selBody)
-	s2 := h.ok(http.MethodPost, selPath, nil, selBody)
+	s1 := h.ok(http.MethodPut, selPath, nil, selBody)
+	s2 := h.ok(http.MethodPut, selPath, nil, selBody)
 	selID := backupRefusalsMember(t, s1, "SelectionId")
 	require.Equal(t, selID, backupRefusalsMember(t, s2, "SelectionId"), "a retried selection create returns the first selection")
 	gotSel := h.ok(http.MethodGet, selPath+"/"+selID, nil, nil)
@@ -151,7 +151,7 @@ func TestBackupRefusals_ACreateRepeatingItsCreatorRequestIDReturnsTheExistingRes
 func TestBackupRefusals_ACreatorRequestIDOutsideItsPatternIsRefused(t *testing.T) {
 	t.Parallel()
 	h := newBackupHarness(t)
-	created := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "pattern-plan"}})
+	created := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "pattern-plan"}})
 	planID := backupRefusalsMember(t, created, "BackupPlanId")
 	const bad = "has a space"
 	for _, tc := range []struct {
@@ -162,7 +162,7 @@ func TestBackupRefusals_ACreatorRequestIDOutsideItsPatternIsRefused(t *testing.T
 		{"CreateBackupSelection", "/backup/plans/" + planID + "/selections",
 			map[string]any{"BackupSelection": map[string]any{"SelectionName": "s"}, "CreatorRequestId": bad}},
 	} {
-		status, code, _, err := h.call(http.MethodPost, tc.path, nil, tc.body)
+		status, code, _, err := h.call(http.MethodPut, tc.path, nil, tc.body)
 		require.NoError(t, err)
 		require.Equal(t, "InvalidParameterValueException", code, tc.name)
 		require.Equal(t, http.StatusBadRequest, status, tc.name)
@@ -185,16 +185,16 @@ func TestBackupRefusals_AStoreFaultInTheCreatorRequestIDLookupIsAnError(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newBackupHarness(t)
-			created := h.ok(http.MethodPost, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "fault-plan"}, "CreatorRequestId": "req-f"})
+			created := h.ok(http.MethodPut, "/backup/plans", nil, map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "fault-plan"}, "CreatorRequestId": "req-f"})
 			selPath := "/backup/plans/" + backupRefusalsMember(t, created, "BackupPlanId") + "/selections"
-			h.ok(http.MethodPost, selPath, nil, map[string]any{"BackupSelection": map[string]any{"SelectionName": "s"}, "CreatorRequestId": "req-s"})
+			h.ok(http.MethodPut, selPath, nil, map[string]any{"BackupSelection": map[string]any{"SelectionName": "s"}, "CreatorRequestId": "req-s"})
 
 			tc.arm(h.state)
 			path, body := selPath, map[string]any{"BackupSelection": map[string]any{"SelectionName": "s"}, "CreatorRequestId": "req-s"}
 			if tc.plan {
 				path, body = "/backup/plans", map[string]any{"BackupPlan": map[string]any{"BackupPlanName": "fault-plan"}, "CreatorRequestId": "req-f"}
 			}
-			_, code, _, err := h.call(http.MethodPost, path, nil, body)
+			_, code, _, err := h.call(http.MethodPut, path, nil, body)
 			require.Error(t, err, "%s must fail on a store fault", tc.name)
 			require.Empty(t, code, "a store fault is not a published refusal")
 		})

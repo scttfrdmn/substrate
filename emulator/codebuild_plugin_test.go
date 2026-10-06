@@ -143,38 +143,6 @@ func TestCodeBuildPlugin_CreateBatchGetDeleteProject(t *testing.T) {
 	}
 }
 
-func TestCodeBuildPlugin_UpdateProject(t *testing.T) {
-	p, ctx := setupCodeBuildPlugin(t)
-
-	_, err := p.HandleRequest(ctx, codebuildRequest(t, "CreateProject", map[string]any{
-		"name":        "update-project",
-		"description": "original description",
-	}))
-	if err != nil {
-		t.Fatalf("CreateProject: %v", err)
-	}
-
-	resp, err := p.HandleRequest(ctx, codebuildRequest(t, "UpdateProject", map[string]any{
-		"project": map[string]any{
-			"name":        "update-project",
-			"description": "updated description",
-		},
-	}))
-	if err != nil {
-		t.Fatalf("UpdateProject: %v", err)
-	}
-
-	var result struct {
-		Project codebuildPublishedProject `json:"project"`
-	}
-	if err := json.Unmarshal(resp.Body, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if result.Project.Description != "updated description" {
-		t.Errorf("want description=updated description, got %q", result.Project.Description)
-	}
-}
-
 func TestCodeBuildPlugin_ListProjects(t *testing.T) {
 	p, ctx := setupCodeBuildPlugin(t)
 

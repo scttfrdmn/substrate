@@ -158,15 +158,17 @@ func (p *CodeBuildPlugin) batchGetProjects(reqCtx *RequestContext, req *AWSReque
 }
 
 func (p *CodeBuildPlugin) updateProject(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// UpdateProjectInput is flat (#1158): `name` is its one required member, beside the members to
+	// change. Only the response is wrapped in `project`. Each member is a pointer so that a member
+	// the request carries replaces the stored one, an empty `description` included, and a member it
+	// omits is left as it was: the page describes each as "a new or replacement" value.
 	var input struct {
-		Project struct {
-			Name        string                 `json:"name"`
-			Description string                 `json:"description"`
-			Source      map[string]interface{} `json:"source"`
-			Artifacts   map[string]interface{} `json:"artifacts"`
-			Environment map[string]interface{} `json:"environment"`
-			ServiceRole string                 `json:"serviceRole"`
-		} `json:"project"`
+		Name        string                  `json:"name"`
+		Description *string                 `json:"description"`
+		Source      *map[string]interface{} `json:"source"`
+		Artifacts   *map[string]interface{} `json:"artifacts"`
+		Environment *map[string]interface{} `json:"environment"`
+		ServiceRole *string                 `json:"serviceRole"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -174,25 +176,25 @@ func (p *CodeBuildPlugin) updateProject(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 
-	proj, err := p.loadProject(reqCtx.AccountID, reqCtx.Region, input.Project.Name)
+	proj, err := p.loadProject(reqCtx.AccountID, reqCtx.Region, input.Name)
 	if err != nil {
 		return nil, err
 	}
 
-	if input.Project.Description != "" {
-		proj.Description = input.Project.Description
+	if input.Description != nil {
+		proj.Description = *input.Description
 	}
-	if input.Project.Source != nil {
-		proj.Source = input.Project.Source
+	if input.Source != nil {
+		proj.Source = *input.Source
 	}
-	if input.Project.Artifacts != nil {
-		proj.Artifacts = input.Project.Artifacts
+	if input.Artifacts != nil {
+		proj.Artifacts = *input.Artifacts
 	}
-	if input.Project.Environment != nil {
-		proj.Environment = input.Project.Environment
+	if input.Environment != nil {
+		proj.Environment = *input.Environment
 	}
-	if input.Project.ServiceRole != "" {
-		proj.ServiceRole = input.Project.ServiceRole
+	if input.ServiceRole != nil {
+		proj.ServiceRole = *input.ServiceRole
 	}
 	proj.LastModified = p.tc.Now()
 

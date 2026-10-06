@@ -108,6 +108,12 @@ func (p *CognitoIDPPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.getUserPoolMfaConfig(ctx, req)
 	case "SetUserPoolMfaConfig":
 		return p.setUserPoolMfaConfig(ctx, req)
+	case "TagResource":
+		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), op)
 	}

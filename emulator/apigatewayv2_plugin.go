@@ -102,6 +102,14 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 		return p.getDomainNameV2(ctx, params["name"])
 	case "CreateApiMapping":
 		return p.createAPIMapping(ctx, req, params["name"])
+	case "GetApiMappings":
+		return p.getAPIMappings(ctx, params["name"])
+	case "GetApiMapping":
+		return p.getAPIMapping(ctx, params["name"], params["apiMappingId"])
+	case "UpdateApiMapping":
+		return p.updateAPIMapping(ctx, req, params["name"], params["apiMappingId"])
+	case "DeleteApiMapping":
+		return p.deleteAPIMapping(ctx, params["name"], params["apiMappingId"])
 	default:
 		return nil, unknownRouteError(p.Name(), requestMethod(req), req.Path)
 	}
@@ -277,8 +285,24 @@ func parseAPIGatewayV2Operation(method, path string) (string, map[string]string)
 	// /domainnames/{name}/apimappings
 	case len(parts) == 3 && parts[0] == "domainnames" && parts[2] == "apimappings":
 		params["name"] = parts[1]
-		if method == "POST" {
+		switch method {
+		case "POST":
 			return "CreateApiMapping", params
+		case "GET":
+			return "GetApiMappings", params
+		}
+
+	// /domainnames/{name}/apimappings/{apiMappingId}
+	case len(parts) == 4 && parts[0] == "domainnames" && parts[2] == "apimappings":
+		params["name"] = parts[1]
+		params["apiMappingId"] = parts[3]
+		switch method {
+		case "GET":
+			return "GetApiMapping", params
+		case "PATCH":
+			return "UpdateApiMapping", params
+		case "DELETE":
+			return "DeleteApiMapping", params
 		}
 	}
 
@@ -899,6 +923,12 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 		return nil, &AWSError{Code: "BadRequestException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
 	}
 
+	// CreateApiMapping publishes 404 NotFoundException; a mapping under a domain that does not
+	// exist would be indexed where no GetApiMappings could reach it.
+	if err := p.requireDomainName(ctx, domainName); err != nil {
+		return nil, err
+	}
+
 	mappingID := generateAPIGatewayID(ctx.IDs)
 	mapping := v2APIMappingState{
 		APIMappingID:  mappingID,
@@ -915,6 +945,10 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 	}
 	if err := p.state.Put(goCtx, apigatewayv2Namespace, apigwv2APIMappingKey(ctx.AccountID, ctx.Region, domainName, mappingID), data); err != nil {
 		return nil, fmt.Errorf("apigatewayv2 createAPIMapping state.Put: %w", err)
+	}
+	// The domain's mapping index is what GetApiMappings enumerates (#566).
+	if err := updateStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIMappingIDsKey(ctx.AccountID, ctx.Region, domainName), mappingID); err != nil {
+		return nil, fmt.Errorf("apigatewayv2 createAPIMapping index: %w", err)
 	}
 
 	return apigwJSONResponse(http.StatusCreated, v2APIMappingWire(mapping))

@@ -247,6 +247,55 @@ func TestECR_ANonEmptyRepositoryNeedsForce(t *testing.T) {
 		"latest", "a re-created repository starts empty")
 }
 
+// TestECR_UntaggedImagesMakeARepositoryNonEmpty is #1112's DeleteRepository half: a repository
+// holding only untagged images is not empty, so it needs force, and a forced delete removes them.
+// Emptiness was measured by the tag index, so such a repository was deleted without force and its
+// images survived under their digest keys, reappearing when the name was re-created.
+func TestECR_UntaggedImagesMakeARepositoryNonEmpty(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, ts *httptest.Server)
+	}{
+		{"pushed without a tag", func(t *testing.T, ts *httptest.Server) {
+			ecrCallOK(t, ts, "PutImage", map[string]any{
+				"repositoryName": "untagged", "imageManifest": `{"schemaVersion":2,"n":1}`,
+			})
+		}},
+		{"left untagged when its last tag was removed", func(t *testing.T, ts *httptest.Server) {
+			ecrCallOK(t, ts, "PutImage", map[string]any{
+				"repositoryName": "untagged", "imageTag": "a", "imageManifest": `{"schemaVersion":2,"n":2}`,
+			})
+			// Moving the tag to another image leaves the first untagged, then deleting the tag by
+			// name removes the second image with its last tag.
+			ecrCallOK(t, ts, "PutImage", map[string]any{
+				"repositoryName": "untagged", "imageTag": "a", "imageManifest": `{"schemaVersion":2,"n":3}`,
+			})
+			ecrCallOK(t, ts, "BatchDeleteImage", map[string]any{
+				"repositoryName": "untagged", "imageIds": []map[string]string{{"imageTag": "a"}},
+			})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newECRTestServer(t)
+			ecrCallOK(t, ts, "CreateRepository", map[string]any{"repositoryName": "untagged"})
+			tc.setup(t, ts)
+			require.Contains(t, ecrCallOK(t, ts, "ListImages", map[string]any{
+				"repositoryName": "untagged", "filter": map[string]string{"tagStatus": "UNTAGGED"},
+			}), `"imageDigest":"sha256:`, "the setup leaves exactly an untagged image")
+
+			status, code := ecrErrorStatus(t, ts, "DeleteRepository", map[string]any{"repositoryName": "untagged"})
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, "RepositoryNotEmptyException", code)
+
+			ecrCallOK(t, ts, "DeleteRepository", map[string]any{"repositoryName": "untagged", "force": true})
+			ecrCallOK(t, ts, "CreateRepository", map[string]any{"repositoryName": "untagged"})
+			assert.Contains(t, ecrCallOK(t, ts, "ListImages", map[string]any{"repositoryName": "untagged"}),
+				`"imageIds":[]`, "a forced delete removes untagged images too")
+		})
+	}
+}
+
 // TestECR_AnEmptyRepositoryDeletesWithoutForce keeps the nominal path pinned, since the guard
 // above is the first thing in this plugin that can refuse a delete.
 func TestECR_AnEmptyRepositoryDeletesWithoutForce(t *testing.T) {
