@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1055 operations**. This
+Substrate ships **67 built-in service plugins** routing **1058 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -70,7 +70,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 49 | Redshift | `redshift` | Query | 10 |
 | 50 | Redshift Data API | `redshift-data` | JSON | 3 |
 | 51 | Route 53 | `route53` | REST/XML | 6 |
-| 52 | S3 | `s3` | REST/XML | 50 |
+| 52 | S3 | `s3` | REST/XML | 53 |
 | 53 | SageMaker | `sagemaker` | JSON | 10 |
 | 54 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
 | 55 | Secrets Manager | `secretsmanager` | JSON | 12 |
@@ -3749,11 +3749,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | GetUser | |
 | DeleteUser | |
 | ListUsers | |
-| CreateRole | Supports trust policy document |
-| GetRole | Reports `AssumeRolePolicyDocument`, re-marshalled from the stored document rather than returned verbatim, so an equivalent form can come back (a `{"AWS":"1234"}` principal reads back as `"1234"`) |
-| UpdateAssumeRolePolicy | Replaces the trust policy in place; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
+| CreateRole | Supports trust policy document; the response carries it as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| GetRole | Reports `AssumeRolePolicyDocument` as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| UpdateAssumeRolePolicy | Replaces the trust policy in place, kept as submitted; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles. Refuses a service-linked role with `UnmodifiableEntity`/400 — note 400, not the 409 the conflicts use |
-| ListRoles | |
+| ListRoles | Each role's trust policy as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | CreateServiceLinkedRole | Mints the role under `/aws-service-role/<principal>/` with a trust policy naming the linked service. A duplicate name is `InvalidInput`/400, not `EntityAlreadyExists` (see below) |
 | DeleteServiceLinkedRole | Returns a `DeletionTaskId`; an incomplete task for the same role is returned again rather than duplicated. A role that exists but is not service-linked is `NoSuchEntity`/404 |
 | GetServiceLinkedRoleDeletionStatus | Reports `SUCCEEDED` unless [seeded](#seeding-a-service-linked-role-deletion-outcome); a `FAILED` task also reports the `Reason` and `RoleUsageList` |
@@ -3774,14 +3774,14 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DetachGroupPolicy | Same `PolicyArn` check as `DetachUserPolicy` |
 | ListAttachedGroupPolicies | |
 | PutGroupPolicy | Inline policy |
-| GetGroupPolicy | |
+| GetGroupPolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteGroupPolicy | |
 | ListGroupPolicies | |
 | CreatePolicy | |
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | `DeleteConflict`/409 while attached, naming the users, groups and roles; `InvalidInput` for a malformed ARN or a bundled AWS managed one — see below |
 | ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
-| GetPolicyVersion | Returns the document, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
+| GetPolicyVersion | Returns the document as `CreatePolicy` received it, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
 | ListPolicyVersions | Returns exactly one version — substrate stores one document per policy |
 | SimulatePrincipalPolicy | Evaluates a user's, group's or role's identity policies plus its permissions boundary. See "What the policy simulator evaluates" |
 | SimulateCustomPolicy | Evaluates `PolicyInputList` only; resolves no entity, so it declares no `NoSuchEntity` |
@@ -3789,11 +3789,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteAccessKey | |
 | ListAccessKeys | |
 | PutUserPolicy | Inline policy |
-| GetUserPolicy | |
+| GetUserPolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteUserPolicy | |
 | ListUserPolicies | |
 | PutRolePolicy | Inline policy |
-| GetRolePolicy | |
+| GetRolePolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteRolePolicy | |
 | ListRolePolicies | |
 | PutUserPermissionsBoundary | ARN shape checked, existence not — see below |
@@ -3819,6 +3819,44 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | UntagInstanceProfile | |
 | ListInstanceProfileTags | |
 | GetAccountAuthorizationDetails | Reports the account's users, groups, roles and managed policies with their inline and attached policies in one response. `Filter` selects populations, `MaxItems` counts across all four — see below |
+
+### Policy documents are served as submitted
+
+IAM stores a policy as the text it was given. Substrate now does too
+([#1452](https://github.com/scttfrdmn/substrate/issues/1452)): `CreateRole` and
+`UpdateAssumeRolePolicy` keep the trust policy's text, `CreatePolicy` the managed policy's, and
+`PutUserPolicy`, `PutGroupPolicy` and `PutRolePolicy` store the inline document as written. Every
+read serves that text. Before, substrate kept only the parsed document and re-marshaled it, which
+normalized it: a trust principal submitted as `{"AWS":"arn:aws:iam::444455556666:role/X"}` read back
+as the bare string `"arn:aws:iam::444455556666:role/X"`, a form IAM accepts only for `"*"`. So the
+document `GetRole` answered was not one `UpdateAssumeRolePolicy` would take, and code converging a
+trust policy by comparing `GetRole`'s answer with the document it means to write rewrote one real
+IAM reports unchanged. Whitespace and list-form members are kept the same way.
+
+The parsed form is still what policy evaluation, the `AssumeRole` trust gate and CloudFormation
+drift comparison read, so none of them changed. A record with no stored text (one written before
+#1452, a service-linked role, a bundled AWS managed policy) is served from its parsed form.
+
+**Every policy document is URL-encoded, in every operation.** The text is percent-encoded per
+RFC 3986 wherever IAM returns a policy document: the `Role` shape's `AssumeRolePolicyDocument` from
+`CreateRole`, `GetRole`, `ListRoles`, `CreateServiceLinkedRole` and the roles nested in
+`GetInstanceProfile`, `ListInstanceProfiles` and `GetAccountAuthorizationDetails`; the
+`Get{User,Group,Role}Policy` documents; and `PolicyVersion.Document`. Only RFC 3986's unreserved
+characters are left bare, so a space is `%20`, never `+`.
+
+Six API Reference pages state the encoding (`GetRole`, `GetRolePolicy`, `GetUserPolicy`,
+`GetGroupPolicy`, `GetPolicyVersion`, `GetAccountAuthorizationDetails`); the rest say nothing either
+way, and every page's sample response renders plain JSON, including the six that state the
+encoding. The deciding evidence is botocore: its `json_decode_policies` handler, registered for
+every IAM operation, states that "any time an IAM operation returns a policy document it is a
+string that is json that has been urlencoded", and URL-decodes every member of the
+`policyDocumentType` shape. In the IAM service model that shape covers `Role.AssumeRolePolicyDocument`,
+`RoleDetail`, `PolicyDetail`, `PolicyVersion` and each `Get*Policy` response alike. Encoding only the
+six annotated operations would hand one role's trust policy back two ways, depending on which call
+read it.
+
+botocore and the AWS CLI decode these members automatically. An aws-sdk-go-v2 caller decodes them
+with `url.PathUnescape`, not `url.QueryUnescape`, which reads a literal `+` as a space.
 
 ### What the policy simulator evaluates
 
@@ -4381,18 +4419,13 @@ one shape rather than branching. With 52 bundled managed policies against a defa
 100, **truncation is on the default path** for any account of moderate size — a caller that
 ignores `IsTruncated` here sees a partial account, not an edge case.
 
-**Policy documents follow the per-shape pages, not the operation's blanket note**, and AWS's own
-documentation contradicts itself about this. The operation page states that every policy document
-in the response is URL-encoded per RFC 3986, while **its own sample response renders all of them
-as plain JSON**; of the members, only `PolicyVersion.Document`'s type page repeats the mandate,
-and `PolicyDetail.PolicyDocument` and `RoleDetail.AssumeRolePolicyDocument` carry no such
-sentence. Substrate follows the per-shape pages, so one response carries both conventions:
-`PolicyVersionList[].Document` is percent-encoded, byte-identical to `GetPolicyVersion`'s, while
-the inline documents and the trust policy are plain JSON, byte-identical to `GetUserPolicy`'s and
-`GetRole`'s. That is the invariant this operation exists to protect — a shape must not diverge
-between the operations reporting it — and encoding everything instead would be a breaking wire
-change to five shipped operations. The contradiction is recorded rather than silently resolved;
-`GetRole`'s page shows the same one.
+**Every policy document is URL-encoded per RFC 3986**, as the operation's page states ("Policies
+returned by this operation are URL-encoded compliant with RFC 3986"): the trust policy, the inline
+documents and `PolicyVersionList[].Document` alike, each the submitted text and byte-identical to
+what `GetRole`, `Get{User,Group,Role}Policy` and `GetPolicyVersion` send for it. The page's own
+sample response renders them as plain JSON; substrate follows the note, as it does for the singular
+operations ([#1452](https://github.com/scttfrdmn/substrate/issues/1452)). Before #1452 only
+`PolicyVersionList[].Document` was encoded.
 
 `SAMLProviderList` is a `Filter` value AWS accepts and substrate refuses, because substrate
 models no SAML provider: accepting the filter would select nothing, and a caller reading an empty
@@ -5285,24 +5318,24 @@ STS operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
+| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); tags the bucket from `CreateBucketConfiguration`'s `<Tags>` — see [Tag sets](#tag-sets); records `x-amz-object-ownership`, or the `BucketOwnerEnforced` default — see [Object Ownership](#object-ownership) |
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
-| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists) |
-| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
-| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption) |
+| PutObject | Supports Content-Type, metadata headers; `Cache-Control`, `Content-Disposition`, `Content-Language`, `Expires` — see [Object system metadata](#object-system-metadata); `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-storage-class` — see [Storage classes](#storage-classes); conditional writes, including a seedable `409 ConditionalRequestConflict` — see [Conditional requests](#conditional-requests); verifies `x-amz-checksum-*` — see [Additional checksums](#additional-checksums); records the `x-amz-server-side-encryption` family — see [Server-side encryption](#server-side-encryption); stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); records the tag set `x-amz-tagging` names — see [Tag sets](#tag-sets) |
+| GetObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); `403 InvalidObjectState` on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); synthesizes a seedable task-completion record — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
+| HeadObject | Echoes recorded system metadata — see [Object system metadata](#object-system-metadata); supports Range header — see [Ranged reads](#ranged-reads); preconditions — see [Conditional requests](#conditional-requests); succeeds on archived objects — see [Storage classes](#storage-classes); `x-amz-checksum-mode` — see [Additional checksums](#additional-checksums); resolves a synthesized task-completion record exactly as `GetObject` does — see [Task-completion records](#task-completion-records); echoes recorded encryption — see [Server-side encryption](#server-side-encryption); `x-amz-tagging-count` on a tagged object — see [Tag sets](#tag-sets) |
 | DeleteObject | Fires S3 notifications if configured |
 | DeleteObjects | `POST /{bucket}?delete`; deletes each `<Object>` through the same path as `DeleteObject`, so notifications, versioning and delete markers behave identically; honours `<Quiet>`; an `<Object>` with an empty `<Key>` is skipped rather than reported; a key that fails is reported per-key as `<Error><Code>InternalError</Code>` and does not abort the rest |
 | CopyObject | Honors both destination and `x-amz-copy-source-if-*` preconditions, including a seedable `409 ConditionalRequestConflict` on the destination — see [Conditional requests](#conditional-requests); `x-amz-metadata-directive` / `x-amz-tagging-directive` and storage-class transitions — see [Copying objects](#copying-objects); recomputes the checksum — see [Additional checksums](#additional-checksums); takes its encryption from the request or the **destination** bucket's default, never the source's — see [Copying objects](#copying-objects) and [Server-side encryption](#server-side-encryption); takes its ACL from the copy request and never from the source — see [Access control lists](#access-control-lists) |
 | ListObjects | Emits `<StorageClass>` per object |
 | ListObjectsV2 | Supports Prefix, Delimiter, MaxKeys, ContinuationToken; refuses an undecodable `continuation-token` with `400 InvalidArgument` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one); emits `<StorageClass>` per object |
 | ListObjectVersions | `GET /{bucket}?versions`; honours `prefix`, and reports every version in one response — `max-keys` is echoed as 1000 and `key-marker` / `version-id-marker` are not read, so the result is never truncated. Keys come out lexicographically and versions within a key newest-first; a key in a bucket that was never versioned is reported as one version with `VersionId` `null`; a delete marker is reported under `<DeleteMarker>` rather than `<Version>` |
-| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists) |
+| CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists); records the `x-amz-tagging` tag set for the assembled object — see [Tag sets](#tag-sets) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
 | UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
 | ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list |
-| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes, including a seedable `409 ConditionalRequestConflict` that invalidates the upload — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists) |
+| CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes, including a seedable `409 ConditionalRequestConflict` that invalidates the upload — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists); applies the upload's recorded tag set — see [Tag sets](#tag-sets) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
 | GetBucketPolicy | |
@@ -5317,10 +5350,10 @@ STS operations are free.
 | PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
 | GetBucketNotificationConfiguration | Reports the stored configuration in the API's element names; an unconfigured bucket is an empty `NotificationConfiguration` — see [Event notifications](#event-notifications) |
 | PutBucketNotificationConfiguration | Dispatches to Lambda, SQS and SNS on `PutObject`/`DeleteObject`; a body naming no recognized element is `400 MalformedXML` — see [Event notifications](#event-notifications) |
-| PutBucketTagging | |
+| PutBucketTagging | Replaces the tag set; `400 InvalidTag` past 50 tags or a published length limit — see [Tag sets](#tag-sets) |
 | GetBucketTagging | Reports the bucket's `TagSet` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | DeleteBucketTagging | |
-| PutObjectTagging | |
+| PutObjectTagging | Replaces the tag set; `400 InvalidTag` past 10 tags or a published length limit — see [Tag sets](#tag-sets) |
 | GetObjectTagging | Reports the object's `TagSet` sorted by key — see [A tag set read back out of a map](#a-tag-set-read-back-out-of-a-map) |
 | DeleteObjectTagging | |
 | PutBucketVersioning | `PUT /{bucket}?versioning`; stores `Enabled` or `Suspended`, and an empty body means `Enabled`; any other `<Status>` is `400 IllegalVersioningConfigurationException`. `x-amz-mfa` and `MfaDelete` are not read |
@@ -5334,6 +5367,9 @@ STS operations are free.
 | PutBucketEncryption | `PUT /{bucket}?encryption`; records the default `ServerSideEncryptionConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse or has no `Rule`, `400 InvalidArgument` for an unpublished `SSEAlgorithm` or a `KMSMasterKeyID` beside a non-KMS algorithm — see [Bucket default encryption](#bucket-default-encryption) |
 | GetBucketEncryption | `GET /{bucket}?encryption`; answers the recorded configuration, or the SSE-S3 default every bucket has — see [Bucket default encryption](#bucket-default-encryption) |
 | DeleteBucketEncryption | `DELETE /{bucket}?encryption`; `204`, idempotent, resets the default to SSE-S3 and never deletes the bucket — see [Bucket default encryption](#bucket-default-encryption) |
+| PutBucketOwnershipControls | `PUT /{bucket}?ownershipControls`; `200`, empty body, replacing the setting; `400 MalformedXML` for a body with no `Rule` or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`. Recorded, not enforced — see [Object Ownership](#object-ownership) |
+| GetBucketOwnershipControls | `GET /{bucket}?ownershipControls`; a new bucket answers `BucketOwnerEnforced`, or what `CreateBucket`'s `x-amz-object-ownership` named; `404 OwnershipControlsNotFoundError` after `DeleteBucketOwnershipControls` — see [Object Ownership](#object-ownership) |
+| DeleteBucketOwnershipControls | `DELETE /{bucket}?ownershipControls`; `204`, idempotent, removes only the setting and never the bucket — see [Object Ownership](#object-ownership) |
 | SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
 
 ### Listing buckets
@@ -5685,7 +5721,8 @@ request:
 
 Every range against a zero-byte object is unsatisfiable. A `416` body carries
 `<ActualObjectSize>` and `<RangeRequested>` so a caller can correct the request
-without a second round trip. Ranges compose with `versionId`.
+without a second round trip. Ranges compose with `versionId`. A partial range omits
+the object's stored checksum — see [Additional checksums](#additional-checksums).
 
 Retrieving a specific part by `?partNumber=N` is not implemented.
 
@@ -5933,6 +5970,7 @@ is assembled:
 | `x-amz-storage-class` | yes (empty means `STANDARD`) |
 | `x-amz-checksum-algorithm` | yes — see [Additional checksums](#additional-checksums) |
 | `x-amz-meta-*` | yes |
+| `x-amz-tagging` | yes, validated at Create — see [Tag sets](#tag-sets) |
 
 Setting one of these at `Complete` instead has no effect — the reference lists no
 object-metadata header there, so substrate ignores them rather than applying them
@@ -5982,8 +6020,20 @@ MalformedTrailerError`; so is a declared trailer that never arrives.
 
 **Reading a checksum back** requires `x-amz-checksum-mode: ENABLED` on `GetObject` or
 `HeadObject`. Without it the response carries no `x-amz-checksum-*` header and no
-`x-amz-checksum-type`, so the absence is observable. A ranged `GET` returns the
-whole object's checksum, not the range's.
+`x-amz-checksum-type`, so the absence is observable.
+
+**A ranged read carries no checksum unless it serves the whole part** (#1438). The
+stored value is the whole object's checksum, so a `GetObject` or `HeadObject` whose
+`Range` serves fewer bytes omits both `x-amz-checksum-*` and `x-amz-checksum-type`,
+as S3 does; S3 documents a part's checksum only for "a part number or byte range
+that aligns with a single part". A range covering every byte of an object written by
+`PutObject` or `CopyObject` serves its one part and keeps the header. No range of a
+multipart object carries one, because the assembled object records no per-part
+checksums and its stored value is not the checksum of any single part. A request
+with no usable range (absent, malformed, or multi-range) is served whole with `200`
+and keeps the header. aws-sdk-go-v2 `service/s3` v1.114 validates any checksum header
+against the body it received, so a whole-object value on a partial range failed every
+ranged read.
 
 **Multipart.** `CreateMultipartUpload` takes `x-amz-checksum-algorithm` (not the
 `x-amz-sdk-` form) and an optional `x-amz-checksum-type`, echoing both back. An
@@ -6409,11 +6459,12 @@ therefore warns earlier than the gate would refuse.
 Every published S3 sub-resource that substrate does not implement is named for the operation it is,
 and refused with `NotImplemented`/501. That is the code S3 publishes for functionality a server does
 not implement. It covers `?website`, `?location`, `?logging`,
-`?ownershipControls`, `?replication`, the four id-keyed configuration families (analytics, inventory,
+`?replication`, the four id-keyed configuration families (analytics, inventory,
 metrics, intelligent-tiering), object lock, the metadata-table configurations and `CreateSession` at
 bucket level. At object level it covers `?retention`, `?legal-hold`, `?attributes`, `?torrent` and
 `?restore`. The tables are in `emulator/s3_subresources.go`. `?cors` left them with #1278 and
-`?encryption` with [#493](https://github.com/scttfrdmn/substrate/issues/493).
+`?encryption` with [#493](https://github.com/scttfrdmn/substrate/issues/493), and `?ownershipControls`
+with [#1445](https://github.com/scttfrdmn/substrate/issues/1445).
 
 Until [#1349](https://github.com/scttfrdmn/substrate/issues/1349), the router reached each method's
 default by *absence*, so an unrouted sub-resource became a different, routed operation:
@@ -6427,6 +6478,96 @@ default by *absence*, so an unrouted sub-resource became a different, routed ope
 The name the router resolves is also the name the request is authorized under, so these calls were
 authorized as `s3:DeleteBucket`, `s3:PutObject` and `s3:ListBucket`. They are now authorized as
 themselves.
+
+### Tag sets
+
+An object's tag set is written by `PutObject`, `CreateMultipartUpload` (carried to the object
+`CompleteMultipartUpload` assembles, since Complete reads no tagging header) and `CopyObject` under
+`x-amz-tagging-directive: REPLACE`, each through the `x-amz-tagging` header, and by
+`PutObjectTagging`. A bucket's is written by `PutBucketTagging` and, atomically at creation, by
+`CreateBucketConfiguration`'s `<Tags><Tag><Key/><Value/></Tag></Tags>`
+([#1434](https://github.com/scttfrdmn/substrate/issues/1434),
+[#1463](https://github.com/scttfrdmn/substrate/issues/1463)). Until then `PutObject` and
+`CreateMultipartUpload` accepted the header and stored nothing, and `CreateBucket` never read its
+body, so `GetObjectTagging` and `GetBucketTagging` answered an empty `TagSet`.
+
+`x-amz-tagging` is URL query-encoded (`Key1=Value1&Key2=Value2`), and the header is read whatever its
+case. `GetObject` and `HeadObject` report `x-amz-tagging-count` on a tagged object rather than the
+set, and omit it on an untagged one. A bucket tagged at creation counts as tagged for the Resource
+Groups Tagging API exactly as one tagged by `PutBucketTagging` does, and its tags reach
+`aws:RequestTag/*` when `CreateBucket` is authorized.
+
+Every writer holds the set to the published limits before anything is stored, so a refused request
+leaves no object, upload or bucket behind and leaves an existing tag set untouched:
+
+| | Object | Bucket |
+|---|---|---|
+| Tags per set | 10 | 50 |
+| Key length | 1–128 | 1–128 |
+| Value length | 0–256 | 0–256 |
+| Keys | unique | unique |
+
+Two further rules come from the cross-service tag restrictions that S3's tagging pages point to. A
+key may not begin with the reserved `aws:` prefix (in any case). A key or value may contain only
+letters, numbers and spaces, in any script, plus `+ - = . _ : / @`, matching the
+`[\p{L}\p{Z}\p{N}_.:/=+\-@]` class IAM and ELB publish. Lengths are counted in UTF-16 code units,
+as S3 documents, so a character outside the Basic Multilingual Plane counts twice. A breach is `400 InvalidTag`, the code `PutObjectTagging` and
+`PutBucketTagging` publish for a tag that "did not pass input validation"; the messages are
+substrate's. An `x-amz-tagging` value that is not query-encoded is `400 InvalidArgument` naming
+`x-amz-tagging`, and a `CreateBucketConfiguration` that does not parse is `400 MalformedXML`.
+Neither `PutBucketTagging` nor `PutObjectTagging` checked any limit before #1434.
+
+**Authorization reads the same tag set and asks for the tagging permission.** `aws:RequestTag/*`
+and `aws:TagKeys` are read with the same parser the handler uses, so a condition and the stored set
+cannot disagree. A tag set the parser cannot read (a header that is not query-encoded, a
+`CreateBucket` body that does not parse, a key named twice) is refused with `AccessDenied` before
+any condition is evaluated, rather than being evaluated as an empty set. A create that also tags
+needs the permission its page names, checked in a second pass after the create itself is allowed:
+
+| Request | Additional permission | Source |
+|---|---|---|
+| `PutObject` with `x-amz-tagging` | `s3:PutObjectTagging` | API_PutObject: "To successfully set the tag-set with your `PutObject` request, you must have the `s3:PutObjectTagging`" |
+| `CreateBucket` with `CreateBucketConfiguration` `Tags` | `s3:TagResource` | API_CreateBucketConfiguration: "You must have the `s3:TagResource` permission to create a general purpose bucket with tags" |
+| `CreateBucket` with `x-amz-object-ownership` | `s3:PutBucketOwnershipControls` | API_CreateBucket |
+
+`CreateMultipartUpload` and `CopyObject` also apply `x-amz-tagging`, but neither page, nor the User
+Guide's multipart-upload permissions table, names a permission for it, so substrate requires none.
+
+### Object Ownership
+
+`PutBucketOwnershipControls`, `GetBucketOwnershipControls` and `DeleteBucketOwnershipControls`
+record and answer a bucket's S3 Object Ownership setting
+([#1445](https://github.com/scttfrdmn/substrate/issues/1445)); until then they answered
+`501 NotImplemented`.
+
+"By default, Amazon S3 sets `OwnershipControls` for all newly created buckets", and "by default,
+`ObjectOwnership` is set to `BucketOwnerEnforced`". So `CreateBucket` records `BucketOwnerEnforced`,
+or the value its `x-amz-object-ownership` header names, and `GetBucketOwnershipControls` on a new
+bucket answers it with `200`. A header value outside the enum refuses the create with `400
+InvalidArgument` naming `x-amz-object-ownership`, before the bucket exists.
+
+| Case | Answer |
+|------|--------|
+| The bucket does not exist (any of the three) | `404 NoSuchBucket` |
+| A body that does not parse, has no `Rule`, or names an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced` | `400 MalformedXML` |
+| `GetBucketOwnershipControls` after `DeleteBucketOwnershipControls` | `404 OwnershipControlsNotFoundError` |
+| `DeleteBucketOwnershipControls` with no setting stored | `204`, as with one stored |
+
+`DeleteBucket` removes the setting with the bucket, so a bucket re-created under the name starts
+from the default.
+
+`DeleteBucketOwnershipControls` is authorized as `s3:PutBucketOwnershipControls`. Its page says "you
+must have the `s3:PutBucketOwnershipControls` permission", and there is no
+`s3:DeleteBucketOwnershipControls` action. A `CreateBucket` naming `x-amz-object-ownership` also
+needs `s3:PutBucketOwnershipControls`; see [Tag sets](#tag-sets) for the second authorization pass.
+
+**Recorded, not enforced.** Under `BucketOwnerEnforced` real S3 disables ACLs: a write naming an
+ACL other than `bucket-owner-full-control` fails with `400 AccessControlListNotSupported`, and
+setting `BucketOwnerEnforced` on a bucket whose ACL grants others fails with `400
+InvalidBucketAclWithObjectOwnership`. Substrate keeps accepting ACLs whatever the setting, so a
+bucket reporting `BucketOwnerEnforced` still honours one. Enforcing it by default would change the
+answer every existing ACL caller gets, so it is tracked separately in
+[#1474](https://github.com/scttfrdmn/substrate/issues/1474).
 
 ### CORS configuration
 
@@ -15880,7 +16021,7 @@ EventBridge custom events: $1.00 per million events.
 | Operation | Route | Notes |
 |-----------|-------|-------|
 | CreateSchedule | `POST /schedules/{Name}` | Answers **200**, not 201 — see below |
-| GetSchedule | `GET /schedules/{Name}` | |
+| GetSchedule | `GET /schedules/{Name}` | Reports every member the create or update set, including `ActionAfterCompletion`, `StartDate`, `EndDate` and `KmsKeyArn` — see [The completion and window members are kept](#the-completion-and-window-members-are-kept) |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
 | ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one. All three filters are applied [before the page is cut](#a-published-filter-selects-what-the-page-is-cut-from), so a page carries `min(MaxResults, remaining matches)` and never an empty array alongside a cursor |
@@ -15908,21 +16049,22 @@ rather than the code carries which constraint failed.
 | `GroupName` | `Required: No`, length 1–64, pattern `[0-9a-zA-Z-_.]+` | names `'groupName'` |
 | `Description` | length 0–512 | names `'description'` |
 | `State` | `Valid Values` ENABLED \| DISABLED | names `'state'` |
+| `ScheduleExpressionTimezone` | length 1–50 | names `'scheduleExpressionTimezone'` |
+| `ActionAfterCompletion` | `Valid Values` NONE \| DELETE | names `'actionAfterCompletion'` |
+| `KmsKeyArn` | length 1–2048, pattern `arn:aws[a-z-]*:kms:[a-z0-9\-]+:\d{12}:(key\|alias)\/[0-9a-zA-Z-_]*` | names `'kmsKeyArn'` |
+| `StartDate`, `EndDate` | Timestamp (epoch seconds) | a non-number is refused as an invalid body |
 
 `MaximumWindowInMinutes` is the one member whose *absence* is observably different from a zero, which is
 why the request type holds it as a pointer: an explicit `0` is outside the published range and is
 refused, where an absent member is accepted. **AWS does not publish that a `FLEXIBLE` window requires
 the bound**, so substrate does not invent that rule — a `FLEXIBLE` window with no maximum is accepted.
 
-Three published constraints are deliberately **not** checked, and the omissions are recorded rather
+Two published constraints are deliberately **not** checked, and the omissions are recorded rather
 than silently taken:
 
 - `Target.RoleArn`'s IAM-role ARN **pattern**. Substrate does not model the role, so refusing a string
   that is not an ARN would refuse a call this emulator otherwise serves without ever needing the value
   to resolve. Its `Required: Yes` and its length are checked.
-- `StartDate`, `EndDate`, `KmsKeyArn` and `ActionAfterCompletion` are published and unmodelled:
-  substrate decodes none of them, so it validates none of them, and #1013's rule keeps them out of the
-  response as well.
 - The templated-target objects (`EcsParameters`, `EventBridgeParameters`, `KinesisParameters`,
   `SageMakerPipelineParameters`, `SqsParameters`, `DeadLetterConfig`) are likewise unmodelled, so they
   are neither decoded nor reported.
@@ -15955,6 +16097,26 @@ fifteen published response elements — it is a request-only idempotency token, 
 the update and on no read. It was removed *with* the full-replace fix rather than on its own because an
 omitted member now reverts: leaving it would have made an unpublished field start changing under callers
 who never named it. The record keeps it as recorded intent.
+
+### The completion and window members are kept
+
+`ActionAfterCompletion`, `StartDate`, `EndDate` and `KmsKeyArn` are published on `CreateSchedule`,
+`UpdateSchedule` and `GetSchedule`, and until [#1442](https://github.com/scttfrdmn/substrate/issues/1442)
+substrate decoded none of them: a schedule created with `ActionAfterCompletion: DELETE` and an `EndDate`
+read back with neither, so a consumer relying on finished schedules deleting themselves could only
+assert on its own outgoing request. They are now decoded, validated (see the table above), stored and
+reported. The dates are epoch seconds on the wire, as `CreationDate` is, and a fractional second sent is
+a fractional second read back.
+
+Each follows the replace rule: an `UpdateSchedule` naming new values replaces them, and one omitting a
+member clears it. None of the three pages publishes a default for `ActionAfterCompletion`, so a schedule
+created without it reports no `ActionAfterCompletion` member rather than an invented `NONE`; the dates
+and the key are absent the same way.
+
+They are **recorded, not acted on** (self-deletion is [#1475](https://github.com/scttfrdmn/substrate/issues/1475)). Substrate does not fire schedules, so a one-time `at()` schedule
+with `ActionAfterCompletion: DELETE` is not deleted when its time passes, `StartDate` and `EndDate`
+gate no invocation, and nothing is encrypted under `KmsKeyArn`. No relation between the two dates is
+checked, because no page publishes one.
 
 ### `CreateSchedule` answers 200, not 201
 

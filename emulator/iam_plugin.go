@@ -524,7 +524,10 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		MaxSessionDuration:       params.MaxSessionDuration.Int(),
 		CreateDate:               p.now().UTC(),
 		AssumeRolePolicyDocument: trustPolicy,
-		Tags:                     params.Tags,
+		// The text as submitted, served back verbatim rather than re-marshaled from
+		// trustPolicy, which would normalize it (#1452).
+		AssumeRolePolicyDocumentText: params.AssumeRolePolicyDocument,
+		Tags:                         params.Tags,
 	}
 
 	raw, err := json.Marshal(role)
@@ -571,8 +574,8 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 // updateAssumeRolePolicy replaces a role's trust policy in place.
 //
 // The document is stored the same way createRole stores it — unmarshalled into a
-// [PolicyDocument] — so the trust-policy gate STS applies (#593) and GetRole's
-// read-back both see the new document with no further plumbing. That gate reads
+// [PolicyDocument] for the trust-policy gate STS applies (#593), and kept as the
+// submitted text for GetRole's read-back (#1452). That gate reads
 // the stored policy at AssumeRole time, which is what makes the replacement take
 // effect on the *next* assume and leave already-minted sessions alone: AWS does
 // not revoke them either.
@@ -619,6 +622,7 @@ func (p *IAMPlugin) updateAssumeRolePolicy(ctx *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 	role.AssumeRolePolicyDocument = trustPolicy
+	role.AssumeRolePolicyDocumentText = params.PolicyDocument
 
 	raw, err := json.Marshal(role)
 	if err != nil {
@@ -1344,6 +1348,7 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		CreateDate:       now,
 		UpdateDate:       now,
 		Document:         doc,
+		DocumentText:     params.PolicyDocument,
 		Tags:             tags,
 	}
 
@@ -2062,12 +2067,11 @@ func (p *IAMPlugin) putInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 		return nil, err
 	}
 
-	docRaw, err := json.Marshal(doc)
-	if err != nil {
-		return nil, fmt.Errorf("marshal inline policy: %w", err)
-	}
+	// The document is stored as the text submitted, not re-marshaled from doc, so
+	// Get*Policy and GetAccountAuthorizationDetails serve back what was written
+	// (#1452). It parsed above, so every reader that decodes it still can.
 	stateKey := iamInlinePolicyKey(ctx.AccountID, entityType, entityName, params.PolicyName)
-	if err := p.state.Put(goCtx, iamNamespace, stateKey, docRaw); err != nil {
+	if err := p.state.Put(goCtx, iamNamespace, stateKey, []byte(params.PolicyDocument)); err != nil {
 		return nil, fmt.Errorf("put inline policy: %w", err)
 	}
 
@@ -2133,7 +2137,9 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 	return iamXMLResponse(http.StatusOK, "Get"+actionSuffix+"Policy",
 		"<"+actionSuffix+"Name>"+xmlEsc(entityName)+"</"+actionSuffix+"Name>"+
 			"<PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName>"+
-			"<PolicyDocument>"+xmlEsc(string(raw))+"</PolicyDocument>")
+			// Each Get*Policy page: "Policies returned by this operation are
+			// URL-encoded compliant with RFC 3986" (#1452).
+			"<PolicyDocument>"+iamRenderPolicyDocument(string(raw))+"</PolicyDocument>")
 }
 
 // deleteInlinePolicy removes an inline policy from a user, role or group.

@@ -269,6 +269,12 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getBucketEncryption(ctx, req, bucket)
 	case "DeleteBucketEncryption":
 		return p.deleteBucketEncryption(ctx, req, bucket)
+	case "PutBucketOwnershipControls":
+		return p.putBucketOwnershipControls(ctx, req, bucket)
+	case "GetBucketOwnershipControls":
+		return p.getBucketOwnershipControls(ctx, req, bucket)
+	case "DeleteBucketOwnershipControls":
+		return p.deleteBucketOwnershipControls(ctx, req, bucket)
 	case "SelectObjectContent":
 		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
@@ -376,6 +382,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["encryption"]; ok {
 				return bucket, "", "PutBucketEncryption"
 			}
+			if _, ok := req.Params["ownershipControls"]; ok {
+				return bucket, "", "PutBucketOwnershipControls"
+			}
 			// Before the CreateBucket fall-through: an unrouted sub-resource is named for what it is
 			// and refused, rather than answered as a create (#1349).
 			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
@@ -404,6 +413,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["encryption"]; ok {
 				return bucket, "", "DeleteBucketEncryption"
+			}
+			if _, ok := req.Params["ownershipControls"]; ok {
+				return bucket, "", "DeleteBucketOwnershipControls"
 			}
 			// Before the DeleteBucket fall-through, for every sub-resource #446 did not name: each of
 			// them used to delete the bucket (#1349).
@@ -444,6 +456,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["encryption"]; ok {
 				return bucket, "", "GetBucketEncryption"
+			}
+			if _, ok := req.Params["ownershipControls"]; ok {
+				return bucket, "", "GetBucketOwnershipControls"
 			}
 			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
 			// for what it is and refused, rather than answered as a listing (#1349).
@@ -576,12 +591,31 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 		accountID = reqCtx.AccountID
 	}
 
+	// Both are validated before anything is written, so a refused create leaves no
+	// bucket behind.
+	cfg, cfgErr := parseCreateBucketConfiguration(req)
+	if cfgErr != nil {
+		return cfgErr, nil
+	}
+	tags, tagErr := validateS3BucketTagSet(cfg.Tags.Tags)
+	if tagErr != nil {
+		return tagErr, nil
+	}
+	ownership, ownErr := resolveCreateBucketObjectOwnership(req.Headers)
+	if ownErr != nil {
+		return ownErr, nil
+	}
+
 	b := S3Bucket{
 		Name:         bucket,
 		Region:       region,
 		AccountID:    accountID,
 		CreationDate: p.tc.Now(),
-		Tags:         make(map[string]string),
+		// CreateBucketConfiguration's Tags tag the bucket atomically at creation
+		// (#1463), and mark it as tagged the way a PutBucketTagging would; see
+		// [taggingEverTagged].
+		Tags:       tags,
+		EverTagged: taggingEverTagged(false, 0, len(tags)),
 	}
 
 	data, err := json.Marshal(b)
@@ -605,10 +639,43 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 		return nil, err
 	}
 
+	// "By default, Amazon S3 sets OwnershipControls for all newly created buckets"
+	// (#1445). Stored after the bucket for the reason the ACL is.
+	if err := p.s3StoreOwnershipControls(ctx, bucket, s3OwnershipControls{
+		Rules: []s3OwnershipControlsRule{{ObjectOwnership: ownership}},
+	}); err != nil {
+		return nil, err
+	}
+
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{"Location": "/" + bucket},
 	}, nil
+}
+
+// s3CreateBucketConfiguration is CreateBucket's optional request body. Only Tags is read: the
+// bucket's Region comes from the request context, and Location and Bucket apply to directory
+// buckets only.
+type s3CreateBucketConfiguration struct {
+	XMLName            xml.Name `xml:"CreateBucketConfiguration"`
+	LocationConstraint string   `xml:"LocationConstraint"`
+	Tags               struct {
+		Tags []s3Tag `xml:"Tag"`
+	} `xml:"Tags"`
+}
+
+// parseCreateBucketConfiguration decodes CreateBucket's body. An absent or blank body is no
+// configuration; a body that is not a CreateBucketConfiguration document is MalformedXML (#1463).
+func parseCreateBucketConfiguration(req *AWSRequest) (s3CreateBucketConfiguration, *AWSResponse) {
+	var cfg s3CreateBucketConfiguration
+	body := bytes.TrimSpace(decodeAWSChunked(req.Headers, req.Body))
+	if len(body) == 0 {
+		return cfg, nil
+	}
+	if err := xml.Unmarshal(body, &cfg); err != nil {
+		return cfg, s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest)
+	}
+	return cfg, nil
 }
 
 // s3StoreObjectACL persists the ACL a write named, or clears any stored ACL when
@@ -746,6 +813,7 @@ var s3BucketSubresourcePrefixes = []string{
 	"bucket_public_access_block:",
 	s3CORSKeyPrefix,
 	s3BucketEncryptionKeyPrefix,
+	s3OwnershipControlsKeyPrefix,
 }
 
 // deleteBucket handles DELETE /<bucket>.
@@ -924,6 +992,13 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		return scErr, nil
 	}
 
+	// The tag set x-amz-tagging names, validated before anything is written for the
+	// same reason (#1434).
+	tags, tagErr := resolveTaggingHeader(req.Headers)
+	if tagErr != nil {
+		return tagErr, nil
+	}
+
 	// The encryption the object records: the request's, or the bucket default (#493). Resolved
 	// before anything is written, so a refused combination leaves no partial object behind.
 	sse, sseRefusal, sseErr := p.resolveWriteEncryption(ctx, bucket, req.Headers)
@@ -1025,6 +1100,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 		Checksum:               checksum,
 		LastModified:           p.tc.Now(),
 		UserMetadata:           userMeta,
+		Tags:                   tags,
 	}
 
 	respHeaders := map[string]string{"ETag": etag}
@@ -1176,13 +1252,15 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	}
 
 	headers := objectResponseHeaders(&obj)
-	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
 	rangeHeader := headerValueFold(req.Headers, "Range")
 	spec := parseByteRange(rangeHeader, obj.Size)
 	if spec.Unsatisfiable {
 		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
 	}
+	// The stored checksum describes the whole object, so a range serving fewer
+	// bytes must not carry it: an SDK validating the body against it fails (#1438).
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers) && rangeServesStoredChecksum(spec, &obj))
 	status := applyByteRange(spec, obj.Size, headers)
 	if spec.Satisfiable {
 		// Clamp against the body actually read: getObject's fallback path can
@@ -1258,14 +1336,15 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 	}
 
 	headers := objectResponseHeaders(&obj)
-	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
-	// HEAD honors Range exactly as GET does, minus the body.
+	// HEAD honors Range exactly as GET does, minus the body — including omitting
+	// the whole-object checksum from a partial range (#1438).
 	rangeHeader := headerValueFold(req.Headers, "Range")
 	spec := parseByteRange(rangeHeader, obj.Size)
 	if spec.Unsatisfiable {
 		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
 	}
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers) && rangeServesStoredChecksum(spec, &obj))
 	status := applyByteRange(spec, obj.Size, headers)
 
 	return &AWSResponse{StatusCode: status, Headers: headers}, nil
@@ -1914,6 +1993,14 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		return cksErr, nil
 	}
 
+	// x-amz-tagging is fixed here too: Complete accepts no tagging header, so a tag set
+	// not recorded on the upload is lost for good (#1434). Refused before an upload ID
+	// exists, so a bad set leaves no upload behind.
+	uploadTags, tagErr := resolveTaggingHeader(req.Headers)
+	if tagErr != nil {
+		return tagErr, nil
+	}
+
 	// The ACL is fixed here too, and for the same reason the encryption is: Complete's
 	// request carries no ACL header, so an ACL not recorded on the upload is lost for
 	// good. BlockPublicAcls is therefore evaluated here as well — a public ACL named at
@@ -1962,6 +2049,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		ChecksumType:           checksumType,
 		Initiated:              p.tc.Now(),
 		UserMetadata:           extractUserMetadata(req.Headers),
+		Tags:                   uploadTags,
 	}
 
 	data, err := json.Marshal(upload)
@@ -2589,6 +2677,9 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 		Checksum:               checksum,
 		LastModified:           p.tc.Now(),
 		UserMetadata:           upload.UserMetadata,
+		// The tag set the create named crosses the same way: Complete carries no
+		// x-amz-tagging header to read (#1434).
+		Tags: upload.Tags,
 	}
 	objData, err := json.Marshal(obj)
 	if err != nil {
@@ -3277,6 +3368,11 @@ func objectResponseHeaders(obj *S3Object) map[string]string {
 	}
 	for k, v := range obj.UserMetadata {
 		headers["X-Amz-Meta-"+k] = v
+	}
+	// GetObject and HeadObject both report "the number of tags, if any, on the object"
+	// rather than the set itself, so the header is absent on an untagged object (#1434).
+	if len(obj.Tags) > 0 {
+		headers["x-amz-tagging-count"] = strconv.Itoa(len(obj.Tags))
 	}
 	return headers
 }
@@ -4000,11 +4096,14 @@ func (p *S3Plugin) putBucketTagging(_ *RequestContext, req *AWSRequest, bucket s
 	// PutBucketTagging replaces the whole set rather than merging into it, so it is one of the two
 	// writers that would drop the previously-tagged flag if it did not read the set it replaces — see
 	// [taggingEverTagged] (#938).
-	b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(tagging.TagSet.Tags))
-	b.Tags = make(map[string]string)
-	for _, tag := range tagging.TagSet.Tags {
-		b.Tags[tag.Key] = tag.Value
+	// The bucket limits CreateBucket's Tags are held to, checked before the set is
+	// replaced so a refused set leaves the stored one untouched (#1463).
+	tags, tagErr := validateS3BucketTagSet(tagging.TagSet.Tags)
+	if tagErr != nil {
+		return tagErr, nil
 	}
+	b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(tags))
+	b.Tags = tags
 	newData, err := json.Marshal(b)
 	if err != nil {
 		return nil, fmt.Errorf("putBucketTagging marshal: %w", err)
@@ -4073,10 +4172,13 @@ func (p *S3Plugin) putObjectTagging(_ *RequestContext, req *AWSRequest, bucket, 
 	if err := json.Unmarshal(data, &obj); err != nil {
 		return nil, fmt.Errorf("putObjectTagging unmarshal: %w", err)
 	}
-	obj.Tags = make(map[string]string)
-	for _, tag := range tagging.TagSet.Tags {
-		obj.Tags[tag.Key] = tag.Value
+	// The limits PutObject's x-amz-tagging is held to, checked before the set is
+	// replaced so a refused set leaves the stored one untouched (#1434).
+	tags, tagErr := validateS3ObjectTagSet(tagging.TagSet.Tags)
+	if tagErr != nil {
+		return tagErr, nil
 	}
+	obj.Tags = tags
 	newData, err := json.Marshal(obj)
 	if err != nil {
 		return nil, fmt.Errorf("putObjectTagging marshal: %w", err)

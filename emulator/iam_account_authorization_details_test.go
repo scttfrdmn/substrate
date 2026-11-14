@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -197,10 +198,10 @@ func TestIAMAccountAuthorizationDetails_MemberSets(t *testing.T) {
 		"RoleDetail has no MaxSessionDuration member")
 }
 
-// TestIAMAccountAuthorizationDetails_PolicyDocumentEncodings asserts the two encodings AWS's own
-// page contradicts itself about appear side by side in **one** body: `PolicyVersionList`'s
-// document is percent-encoded, matching `GetPolicyVersion`, while the trust policy and the
-// inline documents are plain JSON, matching `GetRole` and `GetRolePolicy`.
+// TestIAMAccountAuthorizationDetails_PolicyDocumentEncodings asserts every policy document in one
+// body is the submitted text RFC 3986-encoded, as the operation's page states (#1452): the trust
+// policy, the inline document and `PolicyVersionList`'s document alike, each byte-for-byte what the
+// singular operation that reports it sends.
 func TestIAMAccountAuthorizationDetails_PolicyDocumentEncodings(t *testing.T) {
 	t.Parallel()
 	srv := newIAMTestServer(t)
@@ -221,19 +222,26 @@ func TestIAMAccountAuthorizationDetails_PolicyDocumentEncodings(t *testing.T) {
 
 	roles := iamXMLSection(t, body, "RoleDetailList")
 	trust := iamXMLSection(t, roles, "AssumeRolePolicyDocument")
-	assert.Contains(t, trust, "&#34;Version&#34;:&#34;2012-10-17&#34;",
-		"AssumeRolePolicyDocument is plain JSON, as GetRole sends it")
-	assert.NotContains(t, trust, "%22", "AssumeRolePolicyDocument must not be percent-encoded")
+	assert.Equal(t, iamEscapeRFC3986ForTest(iamAuthzTestTrustDoc), trust,
+		"AssumeRolePolicyDocument is the submitted trust policy, percent-encoded")
 
 	inline := iamXMLSection(t, roles, "PolicyDocument")
-	assert.Contains(t, inline, "&#34;Version&#34;", "an inline PolicyDetail document is plain JSON")
-	assert.NotContains(t, inline, "%22", "PolicyDetail.PolicyDocument must not be percent-encoded")
+	assert.Equal(t, iamEscapeRFC3986ForTest(iamAuthzTestPolicyDoc), inline,
+		"an inline PolicyDetail document is the submitted text, percent-encoded")
+
+	roleResp := iamRequest(t, srv, "GetRolePolicy", map[string]string{
+		"RoleName": "deploy", "PolicyName": "inline-role",
+	})
+	require.Equal(t, http.StatusOK, roleResp.StatusCode)
+	roleBody, err := io.ReadAll(roleResp.Body)
+	require.NoError(t, err)
+	require.NoError(t, roleResp.Body.Close())
+	assert.Equal(t, iamXMLSection(t, string(roleBody), "PolicyDocument"), inline,
+		"GetRolePolicy and this operation must agree byte-for-byte")
 
 	policies := iamXMLSection(t, body, "Policies")
 	document := iamXMLSection(t, policies, "Document")
-	assert.Contains(t, document, "%22Version%22%3A%222012-10-17%22",
-		"PolicyVersion.Document is the one shape whose own page mandates RFC 3986")
-	assert.NotContains(t, document, "&#34;", "PolicyVersion.Document must not be plain JSON")
+	assert.Equal(t, iamEscapeRFC3986ForTest(iamAuthzTestPolicyDoc), document)
 
 	// The same policy through GetPolicyVersion, so the two operations are shown to agree
 	// byte-for-byte rather than merely both being encoded.
@@ -756,4 +764,21 @@ func TestIAMAccountAuthorizationDetails_MaxItemsRefused(t *testing.T) {
 			})
 		}
 	}
+}
+
+// iamEscapeRFC3986ForTest percent-encodes s keeping only RFC 3986's unreserved characters, written
+// independently of the emulator's encoder so a test cannot agree with a wrong one.
+func iamEscapeRFC3986ForTest(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '.', c == '_', c == '~':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
 }

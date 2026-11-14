@@ -39,17 +39,13 @@ import (
 //     truncation is on the *default* path here rather than an edge case, so an unambiguous
 //     marker is load-bearing rather than tidy.
 //
-//   - **Policy documents follow the per-shape pages, not this operation's blanket note.** The
-//     operation page claims every policy document it returns is "URL encoded compliant with RFC
-//     3986" while *its own sample response renders all of them as plain JSON*. Only
-//     `PolicyVersion.Document`'s own type page repeats the mandate; `PolicyDetail.PolicyDocument`
-//     and `RoleDetail.AssumeRolePolicyDocument` carry no such sentence. So
-//     `PolicyVersionList[].Document` goes through [iamPolicyVersionXML] and is percent-encoded,
-//     byte-for-byte as `GetPolicyVersion` sends it, while the inline documents and the trust
-//     policy are plain JSON, byte-for-byte as `GetUserPolicy`, `GetRolePolicy`, `GetGroupPolicy`
-//     and `GetRole` send them. Encoding everything uniformly would be a breaking wire change to
-//     five shipped operations in exchange for matching a sentence AWS's own example contradicts.
-//     #848's fourth acceptance criterion asked for the opposite and is reversed for that reason.
+//   - **Every policy document is URL-encoded, as this operation's page states** (#1452): "Policies
+//     returned by this operation are URL-encoded compliant with RFC 3986". The trust policy, the
+//     inline documents and `PolicyVersionList[].Document` are each the submitted text,
+//     percent-encoded, byte-for-byte what `GetRole`, `Get{User,Group,Role}Policy` and
+//     `GetPolicyVersion` send for it — those pages carry the same note. The page's own sample
+//     renders plain JSON; substrate follows the note, as #848's fourth acceptance criterion asked.
+//     Before #1452 only `PolicyVersionList[].Document` was encoded. See iam_policy_text.go.
 //
 //   - **An embedded role is re-read from state, never taken from the instance-profile record.**
 //     `AddRoleToInstanceProfile` stores a copy of the role inside the profile, and STS writes
@@ -144,11 +140,10 @@ func (p *IAMPlugin) getAccountAuthorizationDetails(ctx *RequestContext, req *AWS
 // iamInlinePolicy is one member of a `UserPolicyList`, `GroupPolicyList` or `RolePolicyList`
 // — AWS's `PolicyDetail`, whose only two members are `PolicyName` and `PolicyDocument`.
 //
-// The document is the stored bytes rather than a decoded [PolicyDocument], so this operation
-// reports exactly what `GetUserPolicy` reports for the same policy. Decoding and re-marshaling
-// would normalize it — the round trip that already makes a trust policy come back in an
-// equivalent-but-different form (see [iamAssumeRolePolicyDocumentXML]) — and the whole point of
-// this operation is that a shape cannot disagree with the operation that reports it singly.
+// The document is the stored bytes — the text PutUserPolicy and its siblings received (#1452) —
+// rather than a decoded [PolicyDocument], so this operation reports exactly what `GetUserPolicy`
+// reports for the same policy. Decoding and re-marshaling would normalize it, and the whole point
+// of this operation is that a shape cannot disagree with the operation that reports it singly.
 type iamInlinePolicy struct {
 	// name is the policy's name, as PutUserPolicy and its siblings were given it.
 	name string
@@ -561,10 +556,9 @@ func (p *IAMPlugin) iamInstanceProfilesByRole(goCtx context.Context, accountID s
 // The wrapper is a parameter because AWS spells one shape three ways —
 // `UserPolicyList`, `GroupPolicyList`, `RolePolicyList` — following [iamStringListXML].
 //
-// The document is written as stored, not percent-encoded: `PolicyDetail.PolicyDocument`'s type
-// page carries no RFC 3986 sentence, and `GetUserPolicy` already returns these same bytes
-// plain, so encoding here would make one document arrive two ways depending on which operation
-// asked for it. See this file's preamble for the contradiction in AWS's own page.
+// The document is written as stored and percent-encoded, exactly as `GetUserPolicy`,
+// `GetGroupPolicy` and `GetRolePolicy` send it, so one document cannot arrive two ways depending
+// on which operation asked for it (#1452). See this file's preamble.
 func iamInlinePolicyListXML(wrapper string, policies []iamInlinePolicy) string {
 	var b strings.Builder
 	b.WriteString("<")
@@ -574,7 +568,7 @@ func iamInlinePolicyListXML(wrapper string, policies []iamInlinePolicy) string {
 		b.WriteString("<member><PolicyName>")
 		b.WriteString(xmlEsc(policy.name))
 		b.WriteString("</PolicyName><PolicyDocument>")
-		b.WriteString(xmlEsc(string(policy.document)))
+		b.WriteString(iamRenderPolicyDocument(string(policy.document)))
 		b.WriteString("</PolicyDocument></member>")
 	}
 	b.WriteString("</")

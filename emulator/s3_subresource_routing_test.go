@@ -25,7 +25,6 @@ var s3UnroutedBucketDeletes = map[string]string{
 	"metadataConfiguration": "DeleteBucketMetadataConfiguration",
 	"metadataTable":         "DeleteBucketMetadataTableConfiguration",
 	"metrics":               "DeleteBucketMetricsConfiguration",
-	"ownershipControls":     "DeleteBucketOwnershipControls",
 	"replication":           "DeleteBucketReplication",
 	"website":               "DeleteBucketWebsite",
 }

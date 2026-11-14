@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"net/http"
-	"net/url"
 	"strings"
 )
 
@@ -126,24 +125,8 @@ func resolveCopyTags(headers map[string]string, src *S3Object) (map[string]strin
 		return copyStringMap(src.Tags), nil
 	}
 
-	tagging := headerValueFold(headers, "x-amz-tagging")
-	if tagging == "" {
-		return nil, nil
-	}
-	values, parseErr := url.ParseQuery(tagging)
-	if parseErr != nil {
-		return nil, s3ErrorResponseWith(s3Error{
-			Code:    "InvalidArgument",
-			Message: "The tag-set must be encoded as URL query parameters.",
-			Status:  http.StatusBadRequest,
-			Details: []s3ErrorDetail{{Name: "ArgumentName", Value: "x-amz-tagging"}},
-		})
-	}
-	tags := make(map[string]string, len(values))
-	for k := range values {
-		tags[k] = values.Get(k)
-	}
-	return tags, nil
+	// The same parse and limits PutObject applies to the header (#1434).
+	return resolveTaggingHeader(headers)
 }
 
 // copyStringMap returns an independent copy of m, or nil when m is empty. The copy

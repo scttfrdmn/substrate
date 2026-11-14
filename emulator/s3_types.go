@@ -226,6 +226,11 @@ type S3MultipartUpload struct {
 
 	// UserMetadata holds x-amz-meta-* headers supplied at upload creation.
 	UserMetadata map[string]string `json:"user_metadata,omitempty"`
+
+	// Tags holds the tag set x-amz-tagging named at upload creation, applied to the
+	// object CompleteMultipartUpload assembles. Create is the only place it can be
+	// supplied, for the reason ContentEncoding is (#1434).
+	Tags map[string]string `json:"tags,omitempty"`
 }
 
 // S3Part holds metadata for one part within a multipart upload. The part body

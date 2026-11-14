@@ -356,8 +356,10 @@ func TestABAC_ResourceTag_Missing(t *testing.T) {
 }
 
 func TestABAC_RequestTag_Allow(t *testing.T) {
-	// Policy: allow s3:PutObject only when aws:RequestTag/Env == "prod".
+	// Policy: allow s3:PutObject only when aws:RequestTag/Env == "prod". A tagged
+	// PutObject also needs s3:PutObjectTagging (#1434), so the statement grants both.
 	policyDoc := newABACPolicy("Allow", "s3:PutObject", "*", "aws:RequestTag/Env", "prod")
+	policyDoc.Statement[0].Action = append(policyDoc.Statement[0].Action, "s3:PutObjectTagging")
 	policyARN := "arn:aws:iam::123456789012:policy/ReqTagProd"
 	state := newAuthTestState(t, "dave", policyARN, policyDoc)
 

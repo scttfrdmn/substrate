@@ -3,6 +3,7 @@ package emulator
 import (
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 )
 
@@ -15,7 +16,11 @@ import (
 //   - Description: length 0–512.
 //   - Target.Arn and Target.RoleArn: length 1–1600, both `Required: Yes` on `API_Target`.
 //   - FlexibleTimeWindow.MaximumWindowInMinutes: `Valid Range` 1–1440 on `API_FlexibleTimeWindow`.
+//   - ScheduleExpressionTimezone: length 1–50.
+//   - KmsKeyArn: length 1–2048 and the pattern [schedulerKMSKeyARNPattern] holds.
 const (
+	schedulerTimezoneMaxLength           = 50
+	schedulerKMSKeyARNMaxLength          = 2048
 	schedulerNameMaxLength               = 64
 	schedulerExpressionMaxLength         = 256
 	schedulerDescriptionMaxLength        = 512
@@ -30,7 +35,32 @@ const (
 var (
 	schedulerFlexibleTimeWindowModes = []string{"OFF", "FLEXIBLE"}     //nolint:gochecknoglobals // published enum
 	schedulerStates                  = []string{"ENABLED", "DISABLED"} //nolint:gochecknoglobals // published enum
+	// schedulerActionsAfterCompletion is the ActionAfterCompletion enum all three schedule pages
+	// publish (#1442).
+	schedulerActionsAfterCompletion = []string{"NONE", "DELETE"} //nolint:gochecknoglobals // published enum
 )
+
+// schedulerKMSKeyARNPattern is KmsKeyArn's published pattern, anchored:
+// arn:aws[a-z-]*:kms:[a-z0-9\-]+:\d{12}:(key|alias)\/[0-9a-zA-Z-_]*.
+var schedulerKMSKeyARNPattern = regexp.MustCompile( //nolint:gochecknoglobals // immutable compiled pattern
+	`^arn:aws[a-z-]*:kms:[a-z0-9\-]+:\d{12}:(key|alias)/[0-9a-zA-Z-_]*$`)
+
+// schedulerValidateKMSKeyARN checks KmsKeyArn against its published length and pattern, treating an
+// empty value as absent, since the member is optional.
+func schedulerValidateKMSKeyARN(value string) *AWSError {
+	if value == "" {
+		return nil
+	}
+	if err := schedulerValidateLength("kmsKeyArn", value, schedulerKMSKeyARNMaxLength); err != nil {
+		return err
+	}
+	if !schedulerKMSKeyARNPattern.MatchString(value) {
+		return schedulerValidation(fmt.Sprintf("1 validation error detected: Value '%s' at 'kmsKeyArn' "+
+			"failed to satisfy constraint: Member must satisfy regular expression pattern: "+
+			"arn:aws[a-z-]*:kms:[a-z0-9\\-]+:\\d{12}:(key|alias)\\/[0-9a-zA-Z-_]*", value))
+	}
+	return nil
+}
 
 // schedulerValidation returns ValidationException/400, the only refusal EventBridge Scheduler publishes
 // for an input that fails a constraint.
@@ -216,6 +246,17 @@ func schedulerValidateScheduleInput(name string, in *schedulerScheduleInput) *AW
 	}
 	if err := schedulerValidateLength("description", in.Description,
 		schedulerDescriptionMaxLength); err != nil {
+		return err
+	}
+	if err := schedulerValidateLength("scheduleExpressionTimezone", in.ScheduleExpressionTimezone,
+		schedulerTimezoneMaxLength); err != nil {
+		return err
+	}
+	if err := schedulerValidateEnum("actionAfterCompletion", in.ActionAfterCompletion,
+		schedulerActionsAfterCompletion); err != nil {
+		return err
+	}
+	if err := schedulerValidateKMSKeyARN(in.KmsKeyArn); err != nil {
 		return err
 	}
 	return schedulerValidateEnum("state", in.State, schedulerStates)

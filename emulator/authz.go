@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -199,6 +198,16 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		a.logger.Warn("authz: failed to load permission boundary", "principal", reqCtx.Principal.ARN, "err", err)
 	}
 
+	// An S3 tag set the handler would refuse as unreadable is refused here first, so no
+	// aws:RequestTag condition is evaluated against a set substrate could not read —
+	// failing closed, where reading it as empty would let a Deny on a tag be sidestepped
+	// by malforming the header. See [s3AuthzRequestTags].
+	if req.Service == "s3" {
+		if _, ok := s3AuthzRequestTags(req); !ok {
+			return s3AuthzUnreadableTagsError(reqCtx, action, deniedCode)
+		}
+	}
+
 	// The request tags describe the request, not any one resource, so they are read
 	// once and merged under each resource's own tags below.
 	requestTags := make(map[string]string)
@@ -304,6 +313,10 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 	// for a request of the other's service, so the two are chained rather than switched on
 	// here, and a third service arriving adds a line rather than a branch.
 	if err := a.checkEC2TagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock); err != nil {
+		return err
+	}
+	if err := a.checkS3CreateSideEffects(reqCtx, req, docs, boundary, resources, requestTags, deniedCode,
+		now, haveClock); err != nil {
 		return err
 	}
 	return a.checkELBTagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock)
@@ -844,6 +857,10 @@ var operationActionOverrides = map[string]string{
 	"s3:ListObjectVersions":   "s3:ListBucketVersions",
 	"s3:ListMultipartUploads": "s3:ListBucketMultipartUploads",
 	"s3:DeleteObjects":        "s3:DeleteObject",
+	// "To use this operation, you must have the s3:PutBucketOwnershipControls
+	// permission" — API_DeleteBucketOwnershipControls; there is no
+	// s3:DeleteBucketOwnershipControls action (#1445).
+	"s3:DeleteBucketOwnershipControls": "s3:PutBucketOwnershipControls",
 }
 
 // serviceToAction maps a request to the IAM action a policy must allow,
@@ -1387,18 +1404,12 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 		}
 
 	case "s3":
-		// S3 tags arrive in the x-amz-tagging header as URL-encoded key=value pairs.
-		tagging := req.Headers["x-amz-tagging"]
-		if tagging == "" {
-			return
-		}
-		vals, err := url.ParseQuery(tagging)
-		if err != nil {
-			return
-		}
-		for k, vs := range vals {
-			if len(vs) > 0 {
-				condCtx["aws:RequestTag/"+k] = vs[0]
+		// CreateBucket's tags arrive in its CreateBucketConfiguration body (#1463) and every
+		// other operation's in the x-amz-tagging header, each read by the parser its handler
+		// uses (#1434). An unreadable set never reaches here: CheckAccess refuses it first.
+		if tags, ok := s3AuthzRequestTags(req); ok {
+			for k, v := range tags {
+				condCtx["aws:RequestTag/"+k] = v
 			}
 		}
 	}

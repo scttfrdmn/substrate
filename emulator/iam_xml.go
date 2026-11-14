@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"bytes"
-	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -359,44 +358,31 @@ func iamRoleXMLFields(r *IAMRole) string {
 // iamAssumeRolePolicyDocumentXML renders a role's trust policy, and nothing at all when
 // the role has none.
 //
-// Shared by [iamRoleXMLFields] and by `GetAccountAuthorizationDetails`' `RoleDetail`, whose
-// type page lists `AssumeRolePolicyDocument` among its members (#848), so the two cannot
-// disagree about the encoding — which matters here more than anywhere else in the file,
-// because that operation's page claims *every* policy document it returns is RFC 3986
-// URL-encoded while its own sample response renders all of them as plain JSON. Substrate
-// follows the per-shape pages: only `PolicyVersion.Document`'s own type page repeats the
-// mandate, and [iamPolicyVersionXML] is the one builder that percent-encodes.
+// Shared by [iamRoleXMLFields] and by `GetAccountAuthorizationDetails`' `RoleDetail`, so every
+// operation that answers a Role renders the trust policy from one place, URL-encoded the same way
+// everywhere; iam_policy_text.go records the evidence for encoding it in every Role shape.
+//
+// The document is the text CreateRole or UpdateAssumeRolePolicy received, served verbatim
+// (#1452). Before, it was re-marshaled from the parsed form, which normalized it: a Principal
+// submitted as {"AWS":"arn:..."} came back as the bare string "arn:...", a form IAM accepts
+// only for "*". A role with no recorded text — one built by substrate, such as a
+// service-linked role, or a record written before #1452 — falls back to the parsed form.
+//
+// Omitted when there are no statements, because a role created without a trust policy has a
+// zero PolicyDocument, and marshaling that would report a document
+// ({"Version":"","Statement":null}) where AWS reports none. The emptiness test is the same one
+// the STS gate uses to decide the role is unenforced.
 func iamAssumeRolePolicyDocumentXML(r *IAMRole) string {
-	var b strings.Builder
-	// The Role shape carries AssumeRolePolicyDocument, so a role's trust policy is
-	// readable through GetRole/ListRoles — which is the only way a caller can
-	// confirm what UpdateAssumeRolePolicy stored (#594). Emitted as JSON rather
-	// than URL-encoded JSON, matching how GetRolePolicy already returns an inline
-	// document: botocore's after-call.iam handler unquotes then json.loads every
-	// policyDocumentType member, and unquoting plain JSON is a no-op.
-	//
-	// The document is *re-marshaled from the parsed form*, not returned verbatim,
-	// because that is what substrate stores — the same normalization GetRolePolicy
-	// and GetUserPolicy already apply to inline policies. So a semantically
-	// equivalent form can come back: a Principal submitted as {"AWS":"1234"}
-	// reports as "1234", since PolicyPrincipal marshals a lone AWS entry as the
-	// bare string AWS also accepts. Real IAM stores the document as text and
-	// returns the submitted bytes, so a consumer comparing byte-for-byte sees a
-	// difference; one parsing the document does not.
-	//
-	// Omitted when there are no statements, because a role created without a trust
-	// policy has a zero PolicyDocument, and marshaling that would report a
-	// document ({"Version":"","Statement":null}) where AWS reports none. The
-	// emptiness test is the same one the STS gate uses to decide the role is
-	// unenforced.
-	if len(r.AssumeRolePolicyDocument.Statement) > 0 {
-		if doc, err := json.Marshal(r.AssumeRolePolicyDocument); err == nil {
-			b.WriteString("<AssumeRolePolicyDocument>")
-			b.WriteString(xmlEsc(string(doc)))
-			b.WriteString("</AssumeRolePolicyDocument>")
-		}
+	if len(r.AssumeRolePolicyDocument.Statement) == 0 {
+		return ""
 	}
-	return b.String()
+	text, err := iamPolicyText(r.AssumeRolePolicyDocumentText, r.AssumeRolePolicyDocument)
+	if err != nil {
+		// Unreachable for a document that parsed, and the element is Required: No, so it is
+		// omitted rather than rendered empty.
+		return ""
+	}
+	return "<AssumeRolePolicyDocument>" + iamRenderPolicyDocument(text) + "</AssumeRolePolicyDocument>"
 }
 
 // iamRoleLastUsedXML renders a role's last use, and nothing at all when it has never been
