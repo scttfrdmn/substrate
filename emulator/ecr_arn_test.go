@@ -77,8 +77,9 @@ func TestECR_TaggingResolvesNamespacedRepositoryARN(t *testing.T) {
 	}))
 }
 
-// TestECR_RepositoryARNIsResolvedInTheRegistryItNames is #1113: the ARN's own account and Region
-// decide which registry is read, and a string that is not an ECR repository ARN is refused.
+// TestECR_RepositoryARNIsResolvedInTheRegistryItNames is #1113: an ARN naming a registry other than
+// the caller's — another Region or another account — is refused rather than served from the caller's
+// registry under the same name, and a string that is not an ECR repository ARN is refused.
 func TestECR_RepositoryARNIsResolvedInTheRegistryItNames(t *testing.T) {
 	ts := newECRTestServer(t)
 
@@ -94,11 +95,26 @@ func TestECR_RepositoryARNIsResolvedInTheRegistryItNames(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, status, body)
 
-	t.Run("cross-Region ARN reads the Region it names", func(t *testing.T) {
-		got := ecrCallOK(t, ts, "ListTagsForResource", map[string]any{
+	t.Run("cross-Region ARN is refused, not re-scoped", func(t *testing.T) {
+		// us-west-2's "prod" exists, so the refusal is the Regional endpoint declining to serve
+		// another Region's registry, not a lookup that happened to miss.
+		for _, op := range []string{"ListTagsForResource", "TagResource", "UntagResource"} {
+			status, body := ecrCall(t, ts, op, map[string]any{
+				"resourceArn": "arn:aws:ecr:us-west-2:123456789012:repository/prod",
+				"tags":        []map[string]string{{"Key": "x", "Value": "y"}},
+				"tagKeys":     []string{"where"},
+			})
+			ecrRequireRefusal(t, status, body, "RepositoryNotFoundException")
+		}
+		// Both registries kept their own tags through the refusals.
+		status, west := ecrCallIn(t, ts, "us-west-2", "ListTagsForResource", map[string]any{
 			"resourceArn": "arn:aws:ecr:us-west-2:123456789012:repository/prod",
 		})
-		assert.Contains(t, got, `"west"`, "presented in us-east-1, answered from us-west-2")
+		require.Equal(t, http.StatusOK, status, west)
+		assert.Equal(t, `{"tags":[{"Key":"where","Value":"west"}]}`, west, "served by its own Region's endpoint")
+		assert.Contains(t, ecrCallOK(t, ts, "ListTagsForResource", map[string]any{
+			"resourceArn": "arn:aws:ecr:us-east-1:123456789012:repository/prod",
+		}), `"east"`)
 	})
 
 	t.Run("same-registry ARN is served as before", func(t *testing.T) {

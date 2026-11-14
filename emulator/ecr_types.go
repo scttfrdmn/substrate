@@ -17,7 +17,8 @@ const ecrImageTagMutabilityDefault = "MUTABLE"
 // imageTagMutability.
 //
 // Four values, not the two the setting was introduced with: the two _WITH_EXCLUSION
-// forms accompany imageTagMutabilityExclusionFilters, which substrate does not model.
+// forms accompany imageTagMutabilityExclusionFilters, which CreateRepository does not read
+// and nothing evaluates.
 // They are accepted anyway rather than refused, because those filters are Required: No on
 // every page that publishes them — so a request naming one of the four without filters is
 // a request AWS accepts, and refusing it would be substrate inventing a bound.
@@ -40,12 +41,20 @@ type ECRRepository struct {
 	} `json:"imageScanningConfiguration"`
 	EncryptionConfiguration struct {
 		EncryptionType string `json:"encryptionType"`
+		// KMSKey is set only on a repository created from a creation template that names
+		// one (#1461); CreateRepository does not read the member.
+		KMSKey string `json:"kmsKey,omitempty"`
 	} `json:"encryptionConfiguration"`
 
 	// ImageTagMutability is the published setting CreateRepository accepts (#1090). A
 	// record written before it existed holds "", which the wire projection reads as the
 	// published default; see [ecrRepositoryToWire].
 	ImageTagMutability string `json:"imageTagMutability,omitempty"`
+
+	// ImageTagMutabilityExclusionFilters is set only on a repository created from a creation
+	// template that carries them (#1461); CreateRepository does not read the member, and
+	// nothing evaluates the filters against a push.
+	ImageTagMutabilityExclusionFilters []ECRImageTagMutabilityExclusionFilter `json:"imageTagMutabilityExclusionFilters,omitempty"`
 
 	Tags             map[string]string `json:"Tags,omitempty"`
 	LifecyclePolicy  string            `json:"LifecyclePolicy,omitempty"`

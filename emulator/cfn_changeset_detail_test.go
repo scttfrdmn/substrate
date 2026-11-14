@@ -66,8 +66,8 @@ const (
 
 // TestCFNChangeSet_DeletionPolicyOnlyChangeIsAStaticModify is the case #1446 names: a template
 // whose only difference is DeletionPolicy and UpdateReplacePolicy answers a Modify with two Static
-// details, and a dependent that Fn::GetAtts the modified resource answers a Dynamic
-// ResourceAttribute detail. Before #1446 the diff compared only Type and Properties, so the change
+// details, and nothing else: a dependent that Fn::GetAtts the modified resource is not a change,
+// because a policy is not an attribute. Before #1446 the diff compared only Type and Properties, so the change
 // set was empty.
 func TestCFNChangeSet_DeletionPolicyOnlyChangeIsAStaticModify(t *testing.T) {
 	retained := strings.Replace(cfnDetailBase,
@@ -91,15 +91,70 @@ func TestCFNChangeSet_DeletionPolicyOnlyChangeIsAStaticModify(t *testing.T) {
 		assert.Empty(t, d.CausingEntity, "no CausingEntity for a DirectModification")
 	}
 
-	runner, ok := changes["Runner/Modify"]
-	require.True(t, ok, "a dependent that GetAtts a modified resource is itself a Modify: %v", changes)
-	assert.Equal(t, "False", runner.Replacement)
-	assert.Equal(t, []string{"Properties"}, runner.Scope)
-	require.Len(t, runner.Details, 1)
-	assert.Equal(t, "Description", runner.Details[0].Name)
-	assert.Equal(t, "Dynamic", runner.Details[0].Evaluation)
-	assert.Equal(t, "ResourceAttribute", runner.Details[0].ChangeSource)
-	assert.Equal(t, "Data.Arn", runner.Details[0].CausingEntity)
+	// A policy change touches nothing Fn::GetAtt can read, so the dependent is not a change at all:
+	// a retain-only change set names exactly the resources whose policies changed.
+	_, leaked := changes["Runner/Modify"]
+	assert.False(t, leaked, "a DeletionPolicy-only change must not propagate to a GetAtt dependent: %v", changes)
+	assert.Len(t, changes, 1)
+}
+
+// TestCFNChangeSet_PropertyChangePropagatesThroughGetAtt pins the propagation that does happen: a
+// Properties or Tags change on a resource makes a dependent's Fn::GetAtt of it a Dynamic
+// ResourceAttribute detail, and a Metadata change does not.
+func TestCFNChangeSet_PropertyChangePropagatesThroughGetAtt(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		properties string
+		propagates bool
+	}{
+		{"Tags", `"Properties":{"BucketName":"cs-detail-bucket","Tags":[{"Key":"k","Value":"v"}]}`, true},
+		{"Metadata", `"Metadata":{"Note":"changed"},"Properties":{"BucketName":"cs-detail-bucket"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			next := strings.Replace(cfnDetailBase, `"Properties":{"BucketName":"cs-detail-bucket"}`, tc.properties, 1)
+			changes := cfnChangeSetChanges(t, cfnDetailBase, next, nil)
+			require.Contains(t, changes, "Data/Modify")
+			runner, ok := changes["Runner/Modify"]
+			require.Equal(t, tc.propagates, ok, "%v", changes)
+			if !ok {
+				return
+			}
+			assert.Equal(t, "False", runner.Replacement)
+			assert.Equal(t, []string{"Properties"}, runner.Scope)
+			require.Len(t, runner.Details, 1)
+			assert.Equal(t, "Description", runner.Details[0].Name)
+			assert.Equal(t, "Dynamic", runner.Details[0].Evaluation)
+			assert.Equal(t, "ResourceAttribute", runner.Details[0].ChangeSource)
+			assert.Equal(t, "Data.Arn", runner.Details[0].CausingEntity)
+		})
+	}
+}
+
+// TestCFNChangeSet_JSONAndYAMLNumbersAreEqual pins that a number is the same number whichever
+// syntax decoded it: encoding/json yields float64 and the YAML decoder int, and comparing the two
+// raw reported a change for an identical template.
+func TestCFNChangeSet_JSONAndYAMLNumbersAreEqual(t *testing.T) {
+	const asJSON = `{"Resources":{"Runner":{"Type":"AWS::IAM::Role",` +
+		`"Metadata":{"Retries":3,"Ratio":0.5},` +
+		`"CreationPolicy":{"ResourceSignal":{"Count":1}},` +
+		`"Properties":{"RoleName":"cs-yaml-role","MaxSessionDuration":3600,` +
+		`"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]}}}}}`
+	const asYAML = "Resources:\n" +
+		"  Runner:\n" +
+		"    Type: AWS::IAM::Role\n" +
+		"    Metadata:\n      Retries: 3\n      Ratio: 0.5\n" +
+		"    CreationPolicy:\n      ResourceSignal:\n        Count: 1\n" +
+		"    Properties:\n" +
+		"      RoleName: cs-yaml-role\n" +
+		"      MaxSessionDuration: 3600\n" +
+		"      AssumeRolePolicyDocument:\n        Version: '2012-10-17'\n        Statement: []\n"
+	assert.Empty(t, cfnChangeSetChanges(t, asJSON, asYAML, nil), "the same template in the other syntax changes nothing")
+
+	changed := strings.Replace(asYAML, "MaxSessionDuration: 3600", "MaxSessionDuration: 7200", 1)
+	got := cfnChangeSetChanges(t, asJSON, changed, nil)
+	require.Contains(t, got, "Runner/Modify", "a real numeric change is still reported")
+	require.Len(t, got["Runner/Modify"].Details, 1)
+	assert.Equal(t, "MaxSessionDuration", got["Runner/Modify"].Details[0].Name)
 }
 
 // TestCFNChangeSet_ReplacementFollowsRequiresRecreation pins the Replacement derivation: a

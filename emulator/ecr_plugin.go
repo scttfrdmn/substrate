@@ -428,37 +428,27 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "repositoryName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
-	goCtx := context.Background()
-
-	// Verify repository exists — or create it, when a CREATE_ON_PUSH template governs the name:
-	// PutImage is the call a push makes, so it is where create on push happens (#1461,
-	// ecr_creation_templates.go). Without such a template a missing repository is refused, as before.
-	// A push this handler will refuse below creates nothing, so the refusal order is unchanged and a
-	// refused request leaves no repository behind.
-	create := p.createOnPushRepository
-	if body.ImageManifest == "" || (body.ImageDigest != "" && body.ImageDigest != ecrManifestDigest(body.ImageManifest)) {
-		create = func(context.Context, *RequestContext, string) (bool, error) { return false, nil }
-	}
-	if err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, create); err != nil {
-		return nil, err
-	}
-	repoData, err := p.state.Get(goCtx, ecrNamespace, ecrRepoKey(ctx.AccountID, ctx.Region, body.RepositoryName))
-	if err != nil {
-		return nil, fmt.Errorf("ecr putImage state.Get repo: %w", err)
-	}
-	if repoData == nil {
-		return nil, ecrRepositoryNotFound(body.RepositoryName)
-	}
-
 	// API_PutImage marks imageManifest Required with a minimum length of 1, so a push with no
 	// manifest is refused rather than given a digest. That is also the rule that keeps manifest-less
-	// pushes from colliding: there is no empty manifest to hash (#1283).
+	// pushes from colliding: there is no empty manifest to hash (#1283). Both request-shape checks
+	// come before the repository is read, so a push this handler refuses never reaches create on
+	// push and leaves no repository behind (#1461).
 	if body.ImageManifest == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "imageManifest is required", HTTPStatus: http.StatusBadRequest}
 	}
 	digest := ecrManifestDigest(body.ImageManifest)
 	if body.ImageDigest != "" && body.ImageDigest != digest {
 		return nil, ecrImageDigestDoesNotMatch(body.ImageDigest, digest)
+	}
+
+	goCtx := context.Background()
+
+	// The repository — or a new one, when a CREATE_ON_PUSH template governs the name: PutImage is the
+	// call a push makes, so it is where create on push happens (#1461, ecr_creation_templates.go).
+	// Without such a template a missing repository is refused, as before.
+	repo, err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, p.createOnPushRepository)
+	if err != nil {
+		return nil, err
 	}
 
 	imgKey := ecrImageKey(ctx.AccountID, ctx.Region, body.RepositoryName, digest)
@@ -473,11 +463,7 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	// refuses with the published ImageTagAlreadyExistsException (#1379). A tag already naming this
 	// image moves nothing, so it falls through to ImageAlreadyExistsException below.
 	if current, tagged := tagsMap[body.ImageTag]; body.ImageTag != "" && tagged && current != digest {
-		mutability, err := ecrRepositoryMutability(repoData)
-		if err != nil {
-			return nil, fmt.Errorf("ecr putImage: %w", err)
-		}
-		if ecrTagsImmutable(mutability) {
+		if ecrTagsImmutable(repo.ImageTagMutability) {
 			return nil, ecrImageTagAlreadyExists(body.RepositoryName, body.ImageTag)
 		}
 	}
@@ -569,7 +555,7 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	// repository reads as empty and the operation answers 200 (#1090). A missing repository that
 	// falls under a pull through cache rule is the one exception: BatchGetImage is the call a pull
 	// makes, so it is where ECR creates the cached repository (#1461, ecr_creation_templates.go).
-	if err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, p.pullThroughCacheRepository); err != nil {
+	if _, err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, p.pullThroughCacheRepository); err != nil {
 		return nil, err
 	}
 
@@ -1341,17 +1327,17 @@ func (p *ECRPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 // loadRepoByARN loads the repository an ARN names, in the registry the ARN names.
 //
 // The ARN is taken apart by [ecrParseRepositoryARN]: everything after `repository/` is the name, so
-// a namespaced repository resolves (#1465), and the account and Region are the ARN's own, so an ARN
-// naming another registry is looked up there rather than in the caller's (#1113). A string that is
-// not an ECR repository ARN is InvalidParameterException/400; a well-formed ARN naming a repository
-// that registry does not hold is RepositoryNotFoundException/400 — substrate's reading, recorded at
-// [ecrParseRepositoryARN], since no ECR page publishes a code for a foreign registry. An ARN whose
-// account and Region are the caller's resolves exactly as it did before.
-//
-// The caller argument is unused since #1113 and kept so the three tagging handlers read alike.
-func (p *ECRPlugin) loadRepoByARN(goCtx context.Context, _ *RequestContext, arn string) (*ECRRepository, string, error) {
+// a namespaced repository resolves (#1465). An ARN naming another account's or another Region's
+// registry is refused by [ecrRequireLocalRepository] rather than served from the caller's own
+// registry under the same name (#1113). A string that is not an ECR repository ARN is
+// InvalidParameterException/400. An ARN whose account and Region are the caller's resolves exactly
+// as it did before.
+func (p *ECRPlugin) loadRepoByARN(goCtx context.Context, ctx *RequestContext, arn string) (*ECRRepository, string, error) {
 	target, awsErr := ecrParseRepositoryARN(arn)
 	if awsErr != nil {
+		return nil, "", awsErr
+	}
+	if awsErr := ecrRequireLocalRepository(ctx, target); awsErr != nil {
 		return nil, "", awsErr
 	}
 	stateKey := ecrRepoKey(target.AccountID, target.Region, target.Name)

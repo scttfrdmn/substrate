@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"fmt"
 	"reflect"
 	"sort"
 	"strings"
@@ -33,9 +34,12 @@ import (
 //     resource, not the resource, so none recreates it; RequiresRecreation is published only
 //     "if the Attribute value is Properties", and Never is what the page's Tags samples report
 //     for a non-Properties attribute.
-//   - **A dependent of a modified resource**: a property that `Fn::GetAtt`s a resource with a
-//     Modify is a Dynamic detail with ChangeSource ResourceAttribute and CausingEntity
-//     `Resource.Attribute`, because the attribute's value is not known until the update runs; a
+//   - **A dependent of a modified resource**: a property that `Fn::GetAtt`s a resource whose
+//     Properties or Tags change (or that is replaced) is a Dynamic detail with ChangeSource
+//     ResourceAttribute and CausingEntity `Resource.Attribute`, because the attribute's value is not
+//     known until the update runs. A policy- or Metadata-only change does not propagate: it touches
+//     nothing an attribute can read, so a DeletionPolicy-only change set stays confined to the
+//     resources whose policy changed; a
 //     property that `Ref`s a resource that will be replaced (Replacement True or Conditional, or
 //     a type change) is a Dynamic ResourceReference, because "if the resource is recreated, it
 //     will have a new physical ID, so all references to that resource will also be updated". A
@@ -90,6 +94,64 @@ func cfnRequiresRecreation(resourceType, attribute, property string) string {
 		return v
 	}
 	return "Never"
+}
+
+// cfnTemplateValuesEqual compares two template values after [cfnCanonicalValue], so a number the
+// JSON decoder produced (float64) and the same number the YAML decoder produced (int) are equal, as
+// are a YAML map with interface keys and the JSON object it spells.
+func cfnTemplateValuesEqual(a, b interface{}) bool {
+	return reflect.DeepEqual(cfnCanonicalValue(a), cfnCanonicalValue(b))
+}
+
+// cfnCanonicalValue rewrites a decoded template value into one form: every integer and float as a
+// float64, the form encoding/json decodes a number into, and every map keyed by string. A template
+// can arrive as JSON or YAML and a stack's two templates need not share a syntax, so comparing the
+// decoders' raw output reported `3600` and `3600` as a change.
+func cfnCanonicalValue(v interface{}) interface{} {
+	switch t := v.(type) {
+	case int:
+		return float64(t)
+	case int8:
+		return float64(t)
+	case int16:
+		return float64(t)
+	case int32:
+		return float64(t)
+	case int64:
+		return float64(t)
+	case uint:
+		return float64(t)
+	case uint8:
+		return float64(t)
+	case uint16:
+		return float64(t)
+	case uint32:
+		return float64(t)
+	case uint64:
+		return float64(t)
+	case float32:
+		return float64(t)
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, child := range t {
+			out[k] = cfnCanonicalValue(child)
+		}
+		return out
+	case map[interface{}]interface{}:
+		out := make(map[string]interface{}, len(t))
+		for k, child := range t {
+			out[fmt.Sprint(k)] = cfnCanonicalValue(child)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, len(t))
+		for i, child := range t {
+			out[i] = cfnCanonicalValue(child)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // cfnEffectiveParameters is the value each declared parameter resolves to: the supplied value,
@@ -223,6 +285,19 @@ func (b *cfnChangeBuilder) add(d CFNResourceChangeDetail) bool {
 	return true
 }
 
+// touchesResource reports whether any detail changes the resource itself — a Properties or Tags
+// target. A DeletionPolicy, UpdateReplacePolicy, Metadata, CreationPolicy or UpdatePolicy change
+// alters how CloudFormation handles the resource and nothing an Fn::GetAtt can read, so it does not
+// make a dependent's attribute reference Dynamic.
+func (b *cfnChangeBuilder) touchesResource() bool {
+	for _, d := range b.details {
+		if d.Target.Attribute == "Properties" || d.Target.Attribute == "Tags" {
+			return true
+		}
+	}
+	return false
+}
+
 // cfnPropertyTarget is the Target a top-level property's change reports.
 func cfnPropertyTarget(resourceType, property string) CFNResourceTargetDefinition {
 	if property == "Tags" {
@@ -347,7 +422,7 @@ func diffCFNResources(oldTmpl, newTmpl *cfnTemplate, oldParams, newParams, physi
 		for prop := range props {
 			target := cfnPropertyTarget(newR.Type, prop)
 			oldV, newV := oldR.Properties[prop], newR.Properties[prop]
-			if !reflect.DeepEqual(oldV, newV) {
+			if !cfnTemplateValuesEqual(oldV, newV) {
 				b.add(CFNResourceChangeDetail{Target: target, Evaluation: "Static", ChangeSource: "DirectModification"})
 				continue
 			}
@@ -370,7 +445,7 @@ func diffCFNResources(oldTmpl, newTmpl *cfnTemplate, oldParams, newParams, physi
 			{"DeletionPolicy", oldR.DeletionPolicy, newR.DeletionPolicy},
 			{"UpdateReplacePolicy", oldR.UpdateReplacePolicy, newR.UpdateReplacePolicy},
 		} {
-			if !reflect.DeepEqual(attr.old, attr.new) {
+			if !cfnTemplateValuesEqual(attr.old, attr.new) {
 				b.add(CFNResourceChangeDetail{
 					Target:       CFNResourceTargetDefinition{Attribute: attr.name, RequiresRecreation: "Never"},
 					Evaluation:   "Static",
@@ -396,7 +471,7 @@ func diffCFNResources(oldTmpl, newTmpl *cfnTemplate, oldParams, newParams, physi
 				target := cfnPropertyTarget(newR.Type, prop)
 				for attr := range refs.attrs {
 					dep, _, _ := strings.Cut(attr, ".")
-					if db, ok := builders[dep]; (ok && len(db.details) > 0) || replaced[dep] {
+					if db, ok := builders[dep]; replaced[dep] || (ok && db.touchesResource()) {
 						if b.add(CFNResourceChangeDetail{Target: target, Evaluation: "Dynamic", ChangeSource: "ResourceAttribute", CausingEntity: attr}) {
 							grew = true
 						}

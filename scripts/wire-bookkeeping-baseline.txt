@@ -184,6 +184,8 @@ emulator/ec2_types.go	EC2VPC	AccountID	account_id
 emulator/ec2_types.go	EC2VPC	Region	region
 emulator/ec2_types.go	EC2Volume	AccountID	account_id
 emulator/ec2_types.go	EC2Volume	Region	region
+emulator/ecr_pull_through.go	ecrValidationSeed	AccountID	accountId,omitempty
+emulator/ecr_pull_through.go	ecrValidationSeed	Region	region,omitempty
 emulator/ecr_types.go	ECRPullThroughCacheRule	AccountID	AccountID
 emulator/ecr_types.go	ECRPullThroughCacheRule	Region	Region
 emulator/ecr_types.go	ECRRepository	AccountID	AccountID

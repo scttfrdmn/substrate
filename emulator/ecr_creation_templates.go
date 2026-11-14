@@ -3,10 +3,10 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -58,7 +58,12 @@ var ecrAppliedForValues = map[string]bool{
 var ecrTemplateEncryptionTypes = map[string]bool{"AES256": true, "KMS": true, "KMS_DSSE": true}
 
 // ecrTemplateKMSKeyPattern is the published kmsKey pattern.
-var ecrTemplateKMSKeyPattern = regexp.MustCompile(`^$|arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-z0-9-]+`)
+//
+// The page prints it as `^$|arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-z0-9-]+`, whose `^`
+// and `$` bind only the empty branch; read with Go's search semantics that accepts any string
+// containing a key ARN. Both branches are anchored here, which is the whole-value match the
+// constraint means.
+var ecrTemplateKMSKeyPattern = regexp.MustCompile(`^(|arn:aws[a-z0-9-]*:kms:[a-z0-9-]+:[0-9]{12}:key\/[a-z0-9-]+)$`)
 
 // ecrExclusionFilterPattern is the published ImageTagMutabilityExclusionFilter filter pattern.
 var ecrExclusionFilterPattern = regexp.MustCompile(`^[0-9a-zA-Z._*-]{1,128}$`)
@@ -176,8 +181,9 @@ func (b *ecrTemplateBody) validate() *AWSError {
 	return nil
 }
 
-// apply writes every member the body carries onto tmpl, leaving the omitted ones as they are.
-func (b *ecrTemplateBody) apply(tmpl *ECRRepositoryCreationTemplate) {
+// apply writes every member the body carries onto tmpl, leaving the omitted ones as they are. It
+// refuses only what [ecrTemplateBody.validate] would, so a caller that validated first gets nil.
+func (b *ecrTemplateBody) apply(tmpl *ECRRepositoryCreationTemplate) *AWSError {
 	if b.Description != nil {
 		tmpl.Description = *b.Description
 	}
@@ -201,13 +207,16 @@ func (b *ecrTemplateBody) apply(tmpl *ECRRepositoryCreationTemplate) {
 		tmpl.RepositoryPolicy = *b.RepositoryPolicy
 	}
 	if b.ResourceTags != nil {
-		// Validated already, so the fold cannot refuse here.
-		tags, _ := ecrTagsToMap(*b.ResourceTags)
+		tags, awsErr := ecrTagsToMap(*b.ResourceTags)
+		if awsErr != nil {
+			return awsErr
+		}
 		tmpl.ResourceTags = tags
 	}
 	if b.CustomRoleArn != nil {
 		tmpl.CustomRoleArn = *b.CustomRoleArn
 	}
+	return nil
 }
 
 // ecrTemplateResponse is the response all four template operations but Describe answer.
@@ -250,7 +259,9 @@ func (p *ECRPlugin) createRepositoryCreationTemplate(ctx *RequestContext, req *A
 		AccountID:          ctx.AccountID,
 		Region:             ctx.Region,
 	}
-	body.apply(&tmpl)
+	if awsErr := body.apply(&tmpl); awsErr != nil {
+		return nil, awsErr
+	}
 	if err := p.putCreationTemplate(goCtx, key, tmpl); err != nil {
 		return nil, err
 	}
@@ -283,7 +294,9 @@ func (p *ECRPlugin) updateRepositoryCreationTemplate(ctx *RequestContext, req *A
 	// lifecycle policy and repository policy unchanged, which is a merge and not a replace — the
 	// imageTagMutability entry's "if this parameter is omitted, the default setting of MUTABLE will
 	// be used" is read as the create-time default it is copied from, not as an instruction to reset.
-	body.apply(&tmpl)
+	if awsErr := body.apply(&tmpl); awsErr != nil {
+		return nil, awsErr
+	}
 	tmpl.UpdatedAt = p.tc.Now()
 	if err := p.putCreationTemplate(goCtx, key, tmpl); err != nil {
 		return nil, err
@@ -450,7 +463,7 @@ func (p *ECRPlugin) matchingCreationTemplate(goCtx context.Context, accountID, r
 	}
 	var best, root *ECRRepositoryCreationTemplate
 	for i := range templates {
-		if !containsString(templates[i].AppliedFor, scenario) {
+		if !slices.Contains(templates[i].AppliedFor, scenario) {
 			continue
 		}
 		key := ecrPrefixKey(templates[i].Prefix)
@@ -470,16 +483,6 @@ func (p *ECRPlugin) matchingCreationTemplate(goCtx context.Context, accountID, r
 	return root, nil
 }
 
-// containsString reports whether list contains s.
-func containsString(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // --- Repositories created on the caller's behalf ------------------------------
 
 // createRepositoryFromTemplate creates name in the caller's registry the way Amazon ECR does when it
@@ -487,14 +490,17 @@ func containsString(list []string, s string) bool {
 //
 // With no template the settings are the user guide's defaults for a repository a pull through cache
 // creates: mutable tags, AES256 encryption, and no repository policy, lifecycle policy or resource
-// tags. A template replaces each with its own — imageTagMutability, encryptionType,
-// repositoryPolicy, lifecyclePolicy and resourceTags — and nothing else; the template's description,
-// appliedFor and customRoleArn are the template's, not the repository's.
+// tags. A template replaces each with its own — every template member a repository holds:
+// imageTagMutability, imageTagMutabilityExclusionFilters, encryptionType, kmsKey, repositoryPolicy,
+// lifecyclePolicy and resourceTags. The template's description, appliedFor and customRoleArn are the
+// template's, not the repository's.
 func (p *ECRPlugin) createRepositoryFromTemplate(goCtx context.Context, ctx *RequestContext, name string, tmpl *ECRRepositoryCreationTemplate) (*ECRRepository, error) {
 	repo := newECRRepositoryRecord(ctx, name, p.tc.Now())
 	if tmpl != nil {
 		repo.ImageTagMutability = tmpl.ImageTagMutability
+		repo.ImageTagMutabilityExclusionFilters = slices.Clone(tmpl.ImageTagMutabilityExclusionFilters)
 		repo.EncryptionConfiguration.EncryptionType = tmpl.EncryptionType
+		repo.EncryptionConfiguration.KMSKey = tmpl.KMSKey
 		repo.RepositoryPolicy = tmpl.RepositoryPolicy
 		repo.LifecyclePolicy = tmpl.LifecyclePolicy
 		if len(tmpl.ResourceTags) > 0 {
@@ -512,58 +518,96 @@ func (p *ECRPlugin) createRepositoryFromTemplate(goCtx context.Context, ctx *Req
 }
 
 // pullThroughCacheRepository creates the repository a pull through cache rule names, when name is
-// absent from the caller's registry and falls under a rule, and reports whether it did.
+// absent from the caller's registry and falls under a rule, and returns it — nil when no rule applies
+// or the pull would find nothing upstream.
 //
 // Called by BatchGetImage only after the repository was found missing, so an existing repository —
 // cached before, or created by CreateRepository under the same prefix — is never re-created or
 // re-templated: "the settings in a repository creation template are only applied during repository
 // creation and don't have any effect on existing repositories".
-func (p *ECRPlugin) pullThroughCacheRepository(goCtx context.Context, ctx *RequestContext, name string) (bool, error) {
+//
+// **An ECR upstream is checked.** For an ECR-to-ECR rule the upstream registry is one substrate
+// holds, so whether the pull finds anything is observable rather than unknowable: the repository is
+// created only when the upstream repository the rule maps the name onto exists
+// ([ecrUpstreamRepositoryName]). That is what keeps a ROOT rule — which ECR allows only for an ECR
+// upstream, and which matches every name — from turning a mistyped BatchGetImage into a new
+// repository. For any other upstream the content is outside the emulator, the rule's prefix is
+// mandatory, and a name under it is created as AWS's first pull would.
+func (p *ECRPlugin) pullThroughCacheRepository(goCtx context.Context, ctx *RequestContext, name string) (*ECRRepository, error) {
 	rule, err := p.matchingPullThroughCacheRule(goCtx, ctx.AccountID, ctx.Region, name)
 	if err != nil || rule == nil {
-		return false, err
+		return nil, err
+	}
+	if m := ecrUpstreamECRPattern.FindStringSubmatch(rule.UpstreamRegistryURL); m != nil {
+		upstream := ecrUpstreamRepositoryName(*rule, name)
+		data, err := p.state.Get(goCtx, ecrNamespace, ecrRepoKey(m[1], m[2], upstream))
+		if err != nil {
+			return nil, fmt.Errorf("ecr pull through cache upstream state.Get: %w", err)
+		}
+		if data == nil {
+			return nil, nil
+		}
 	}
 	tmpl, err := p.matchingCreationTemplate(goCtx, ctx.AccountID, ctx.Region, name, "PULL_THROUGH_CACHE")
 	if err != nil {
-		return false, err
+		return nil, err
 	}
-	if _, err := p.createRepositoryFromTemplate(goCtx, ctx, name, tmpl); err != nil {
-		return false, err
+	return p.createRepositoryFromTemplate(goCtx, ctx, name, tmpl)
+}
+
+// ecrUpstreamRepositoryName maps a cache repository name onto the upstream repository a rule pulls
+// it from, per the user guide's mapping table for ECR to ECR pull through cache: the rule's
+// ecrRepositoryPrefix is removed (nothing, for ROOT), and the upstreamRepositoryPrefix is prepended
+// unless it is ROOT — `ecr-public/my-app/image1` → `my-app/image1` under (ecr-public, ROOT), and
+// `my-app/image1` → `upstream-app/image1` under (my-app, upstream-app).
+func ecrUpstreamRepositoryName(rule ECRPullThroughCacheRule, name string) string {
+	rest := name
+	if key := ecrPrefixKey(rule.EcrRepositoryPrefix); key != ecrPrefixRoot {
+		rest = strings.TrimPrefix(name, key+"/")
 	}
-	return true, nil
+	if up := ecrPrefixKey(rule.UpstreamRepositoryPrefix); up != "" && up != ecrPrefixRoot {
+		return up + "/" + rest
+	}
+	return rest
 }
 
 // createOnPushRepository creates the repository a PutImage names when it is absent and a
-// CREATE_ON_PUSH template governs it, and reports whether it did. With no such template nothing is
-// created: "Amazon ECR will not create a repository with default settings" for a push.
-func (p *ECRPlugin) createOnPushRepository(goCtx context.Context, ctx *RequestContext, name string) (bool, error) {
+// CREATE_ON_PUSH template governs it, and returns it — nil when no such template does: "Amazon ECR
+// will not create a repository with default settings" for a push.
+func (p *ECRPlugin) createOnPushRepository(goCtx context.Context, ctx *RequestContext, name string) (*ECRRepository, error) {
 	tmpl, err := p.matchingCreationTemplate(goCtx, ctx.AccountID, ctx.Region, name, "CREATE_ON_PUSH")
 	if err != nil || tmpl == nil {
-		return false, err
+		return nil, err
 	}
-	if _, err := p.createRepositoryFromTemplate(goCtx, ctx, name, tmpl); err != nil {
-		return false, err
-	}
-	return true, nil
+	return p.createRepositoryFromTemplate(goCtx, ctx, name, tmpl)
 }
 
-// ensureRepositoryOnBehalf is the repository check BatchGetImage and PutImage make: nil when the
-// repository exists or Amazon ECR would have created it for this call, the published
-// RepositoryNotFoundException otherwise.
+// ensureRepositoryOnBehalf is the repository lookup BatchGetImage and PutImage make. It returns the
+// repository record when it exists or when create — the operation's on-behalf creation — makes it
+// for this call, and the published RepositoryNotFoundException otherwise. Returning the record is
+// what saves the caller a second read.
 func (p *ECRPlugin) ensureRepositoryOnBehalf(goCtx context.Context, ctx *RequestContext, name string,
-	create func(context.Context, *RequestContext, string) (bool, error),
-) error {
-	err := p.requireRepository(goCtx, ctx, name)
-	var notFound *AWSError
-	if err == nil || !errors.As(err, &notFound) {
-		return err
+	create func(context.Context, *RequestContext, string) (*ECRRepository, error),
+) (*ECRRepository, error) {
+	data, err := p.state.Get(goCtx, ecrNamespace, ecrRepoKey(ctx.AccountID, ctx.Region, name))
+	if err != nil {
+		return nil, fmt.Errorf("ecr repository state.Get: %w", err)
 	}
-	created, createErr := create(goCtx, ctx, name)
-	if createErr != nil {
-		return createErr
+	if data != nil {
+		var repo ECRRepository
+		if err := json.Unmarshal(data, &repo); err != nil {
+			return nil, fmt.Errorf("ecr repository unmarshal: %w", err)
+		}
+		return &repo, nil
 	}
-	if !created {
-		return err
+	if create != nil {
+		repo, err := create(goCtx, ctx, name)
+		if err != nil {
+			return nil, err
+		}
+		if repo != nil {
+			return repo, nil
+		}
 	}
-	return nil
+	return nil, ecrRepositoryNotFound(name)
 }

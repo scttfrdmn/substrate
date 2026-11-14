@@ -30,15 +30,12 @@ type ecrRepositoryTarget struct {
 // **The account and Region are the ARN's, not the caller's (#1113).** The parser this replaces took
 // a suffix and threw the rest away, and its caller built the state key from the request context, so
 // an ARN naming another registry was served from the caller's own: the wrong repository tagged when
-// the caller had one of that name, RepositoryNotFoundException when it did not. An ARN is a fully
-// qualified name, so the record it addresses is looked up where the ARN says it lives.
+// the caller had one of that name, RepositoryNotFoundException when it did not. The parse keeps the
+// ARN's scope so [ecrRequireLocalRepository] can refuse an ARN outside the caller's registry rather
+// than silently re-scoping it.
 //
-// What a well-formed ARN for a registry holding no such repository answers is substrate's reading,
-// because no ECR page publishes a code for it: **RepositoryNotFoundException/400**, which all three
-// tagging operations publish — "The specified repository could not be found … ensure that you are
-// performing operations on the correct registry" — and which is the literal truth: the repository
-// that ARN names does not exist. InvalidParameterException, the other published candidate, is kept
-// for a string that is not an ECR repository ARN at all.
+// InvalidParameterException is kept for a string that is not an ECR repository ARN at all; the code
+// for a well-formed ARN outside the caller's registry is argued at [ecrRequireLocalRepository].
 //
 // Refused as not an ECR repository ARN (InvalidParameterException): fewer than six `:`-separated
 // segments, a first segment other than `arn`, a partition that is not an `aws` one, a service other
@@ -60,6 +57,40 @@ func ecrParseRepositoryARN(arn string) (ecrRepositoryTarget, *AWSError) {
 		return ecrRepositoryTarget{}, ecrInvalidRepositoryARN(arn)
 	}
 	return ecrRepositoryTarget{AccountID: account, Region: region, Name: name}, nil
+}
+
+// ecrRequireLocalRepository refuses a repository ARN that names a registry other than the caller's:
+// another account, or the caller's account in another Region.
+//
+// **Another account.** ECR reaches across accounts only through a repository policy — "Resource-based
+// policies let you grant usage permission to other accounts on a per-resource basis", and "when the
+// principal and the resource are in different AWS accounts, you must also grant the principal entity
+// permission" through an identity-based policy (ECR user guide, "How Amazon ECR works with IAM").
+// Substrate stores a repository policy's text and evaluates none of it, so it cannot tell a
+// cross-account TagResource AWS would allow from one it would deny, and no ECR page confirms that the
+// three tagging operations are reachable cross-account at all. Serving the foreign repository would
+// let any caller read and rewrite another account's tags with no permission check; refusing is the
+// side that never grants what AWS would not. This is the arrangement [kmsRequireLocal] has for KMS.
+//
+// **Another Region.** An ECR endpoint is Regional and serves its own Region's registry; no page says a
+// Regional endpoint resolves a repository ARN from a different Region, so this is refused on the same
+// footing, which is also what #1113's acceptance criteria asked for.
+//
+// The code is RepositoryNotFoundException/400, published on all three tagging operations — "The
+// specified repository could not be found. … ensure that you are performing operations on the
+// correct registry". From the caller's side a repository it may not address is indistinguishable
+// from one that is not there. The mapping is substrate's reading: no ECR page joins the case to a
+// code.
+func ecrRequireLocalRepository(ctx *RequestContext, target ecrRepositoryTarget) *AWSError {
+	if target.AccountID == ctx.AccountID && target.Region == ctx.Region {
+		return nil
+	}
+	return &AWSError{
+		Code: "RepositoryNotFoundException",
+		Message: "The repository with name '" + target.Name + "' does not exist in the registry with id '" + ctx.AccountID +
+			"' in " + ctx.Region + "; the ARN names registry " + target.AccountID + " in " + target.Region,
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // ecrInvalidRepositoryARN reports a resourceArn that is not an ECR repository ARN.

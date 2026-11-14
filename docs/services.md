@@ -2531,8 +2531,13 @@ The diff used to compare only `Type` and `Properties`, so a template that change
 | Nothing in the template, but the property `Ref`s (or `Fn::Sub`s) a parameter whose value changed | `Dynamic` / `DirectModification` **and** `Static` / `ParameterReference` with `CausingEntity` the parameter |
 | The `Tags` property | as above, `Target` `Tags` with no `Name`, `RequiresRecreation` `Never` |
 | `DeletionPolicy`, `UpdateReplacePolicy`, `Metadata`, `CreationPolicy`, `UpdatePolicy` | `Static` / `DirectModification`, `Target` that attribute, `RequiresRecreation` `Never` |
-| A property that `Fn::GetAtt`s a resource that is modified | `Dynamic` / `ResourceAttribute`, `CausingEntity` `Resource.Attribute` |
+| A property that `Fn::GetAtt`s a resource whose `Properties` or `Tags` change, or that is replaced | `Dynamic` / `ResourceAttribute`, `CausingEntity` `Resource.Attribute` |
 | A property that `Ref`s a resource that will be replaced | `Dynamic` / `ResourceReference`, `CausingEntity` the resource |
+
+A policy- or `Metadata`-only change does not propagate to dependents: it touches nothing an
+`Fn::GetAtt` can read, so a retain-only change set names exactly the resources whose policies
+changed. Values are compared after normalizing numbers (a JSON template decodes `3600` as a float, a
+YAML one as an integer) and map keys, so the same template in the other syntax is no change.
 
 Dependents are followed to a fixpoint. `Replacement` is the most intrusive detail — `Always` and
 `Static` is `True`, `Always` and only `Dynamic` is `Conditional`, `Conditionally` is `Conditional`,
@@ -17596,7 +17601,7 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | BatchDeleteImage | [By tag removes that tag](#an-ecr-digest-is-the-sha-256-of-its-manifest), and the image only with its last; by digest removes the image and every tag, one `imageId` per tag; an entry that matches nothing is reported in `failures` |
 | DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException`; describes [untagged images](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) and honors `filter` |
 | ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member; an [untagged image](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is one entry with its digest alone, and `filter` is honored |
-| TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `resourceArn` is [resolved in the registry it names](#a-repository-arn-is-resolved-where-it-points), and a namespaced name keeps its `/` |
+| TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `resourceArn` is [parsed whole and must name the caller's registry](#a-repository-arn-is-resolved-where-it-points); a namespaced name keeps its `/` |
 | UntagResource | `tagKeys` is an array of strings, as published; `resourceArn` as for `TagResource` |
 | ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]`; `resourceArn` as for `TagResource` |
 | CreatePullThroughCacheRule | [Pull through cache](#pull-through-cache-rules-and-repository-creation-templates): `upstreamRegistryUrl` must be on the published list (`UnsupportedUpstreamRegistryException`); an authenticated upstream needs a `credentialArn` and a cross-account ECR upstream a `customRoleArn` (`ValidationException`); a taken prefix is `PullThroughCacheRuleAlreadyExistsException` |
@@ -17662,9 +17667,11 @@ is what proves the two halves now agree about the wire as well as about the reco
 `API_Repository` publishes nine members, all `Required: No`, and substrate answers eight of them —
 `repositoryName`, `repositoryArn`, `registryId`, `repositoryUri`, `createdAt`, `imageTagMutability`,
 `imageScanningConfiguration` and `encryptionConfiguration`. The ninth,
-`imageTagMutabilityExclusionFilters`, is unmodelled and therefore **absent** rather than present and
-empty, per #1013's rule; AWS's own `CreateRepository` sample response omits it and
-`encryptionConfiguration.kmsKey` as well, so the absences are shapes the page publishes.
+`imageTagMutabilityExclusionFilters`, and `encryptionConfiguration.kmsKey` are **absent** rather than
+present and empty unless the repository has them, per #1013's rule; AWS's own `CreateRepository`
+sample response omits both, so the absences are shapes the page publishes. `CreateRepository` reads
+neither member; a repository created from a [creation template](#pull-through-cache-rules-and-repository-creation-templates)
+carries the template's.
 
 Until #1090 the persisted record was marshalled straight onto the wire at all three sites that answer
 a repository, so each of them also reported fields that are substrate's own:
@@ -17898,13 +17905,16 @@ reading its last path segment:
 - **Everything after `repository/` is the name.** A namespaced repository — `ns/sub/repo`, and every
   pull-through-cache repository, which is `<prefix>/<upstream-repo>` — is reached by its own ARN. The
   old parser answered `RepositoryNotFoundException: Repository not found: repo` for it.
-- **The account and Region are the ARN's.** An ARN naming another Region's or another account's
-  registry is looked up there, not in the caller's. Before, the ARN's scope was discarded and the
-  caller's own repository of that name was tagged, untagged or read.
-- **A well-formed ARN for a registry holding no such repository** is
-  `RepositoryNotFoundException`/400. No ECR page publishes a code for a foreign registry; this one is
-  published on all three operations ("ensure that you are performing operations on the correct
-  registry") and says what is true. It is substrate's reading.
+- **The ARN must name the caller's registry.** Before, the ARN's account and Region were discarded
+  and the caller's own repository of that name was tagged, untagged or read. Now an ARN naming another
+  account, or the caller's account in another Region, is refused with
+  `RepositoryNotFoundException`/400 — the code all three operations publish ("ensure that you are
+  performing operations on the correct registry"), and the KMS tagging precedent. That mapping is
+  substrate's reading. The reasons: ECR reaches across accounts only through a repository policy plus
+  an identity policy (user guide, "How Amazon ECR works with IAM"), substrate stores repository
+  policies without evaluating them, and no ECR page confirms the tagging operations work cross-account
+  — so serving a foreign repository would grant access AWS might deny. An ECR endpoint is Regional,
+  and no page says one serves another Region's repository ARN.
 - **A string that is not an ECR repository ARN** — another service's ARN, a bare name, `repository/`
   with nothing after it, an account that is not twelve digits, no Region — is
   `InvalidParameterException`/400. `ListTagsForResource` publishes that "the only supported resource
@@ -17938,14 +17948,26 @@ each page's own constraints:
   answered.
 - `upstreamRepositoryPrefix` is reported as `ROOT` when omitted for an ECR upstream ("When this field
   isn't specified, Amazon ECR will use the ROOT") and absent for the others.
+- **`ROOT` and `upstreamRepositoryPrefix` are ECR-to-ECR only.** The user guide documents both on its
+  "Customizing repository prefixes for ECR to ECR pull through cache" page and for no other upstream,
+  and adds "You can set the upstream repository prefix only when the Amazon ECR repository prefix has
+  a non-ROOT value". So a `ROOT` `ecrRepositoryPrefix` or any `upstreamRepositoryPrefix` on a non-ECR
+  upstream, and a non-`ROOT` upstream prefix under a `ROOT` ecr prefix, are `ValidationException`.
+  That the customization is ECR-only is substrate's reading of the page's scope.
 
 **What a pull creates.** A cached repository is created by the first pull, and a pull's one ECR API
 call is `BatchGetImage` — "When an image is pulled, the BatchGetImage API is called once" — which is
 also the only operation that publishes `UnableToGetUpstreamImageException`. So `BatchGetImage` against
 an absent repository that falls under a rule (the longest matching prefix, else a `ROOT` rule)
 creates it, from the longest-prefix `PULL_THROUGH_CACHE` template (else a `ROOT` one), else with the
-user guide's defaults: `MUTABLE`, `AES256`, no policies and no tags. A template contributes its
-`imageTagMutability`, encryption type, `repositoryPolicy`, `lifecyclePolicy` and `resourceTags`. The
+user guide's defaults: `MUTABLE`, `AES256`, no policies and no tags. A template contributes every
+member a repository holds: `imageTagMutability`, `imageTagMutabilityExclusionFilters`, encryption type
+and `kmsKey`, `repositoryPolicy`, `lifecyclePolicy` and `resourceTags`. For an **ECR upstream** the
+upstream registry is one substrate holds, so the repository is created only when the upstream
+repository the name maps onto exists — the rule's prefix removed, its `upstreamRepositoryPrefix`
+prepended unless `ROOT`, per the user guide's mapping table. That is what keeps a `ROOT` rule, which
+matches every name, from turning a mistyped `BatchGetImage` into a new repository. For other upstreams
+the content is outside the emulator and the prefix is mandatory. The
 image itself is **not** there: substrate reaches no upstream, so `BatchGetImage` reports each
 requested image under `failures`, as for any repository that lacks it — push the manifest with
 `PutImage` if a test needs one. An existing repository is never re-templated.
@@ -17953,7 +17975,9 @@ requested image under `failures`, as for any repository that lacks it — push t
 **Create on push.** `PutImage` is the call a push makes, so a push to an absent repository governed
 by a `CREATE_ON_PUSH` template creates it from that template first. With no such template it is
 still `RepositoryNotFoundException`: "Amazon ECR will not create a repository with default settings"
-for a push. A push `PutImage` would refuse (no manifest, a mismatched digest) creates nothing.
+for a push. `PutImage` checks the manifest and digest before it reads the repository, so a push it
+would refuse creates nothing — and a missing manifest is now `InvalidParameterException` even when
+the repository is also missing.
 `REPLICATION` is stored and echoed and never applied, because no replication is modeled.
 
 **Not modelled.** The user guide says a template's role "must be provided when using repository tags
@@ -17963,10 +17987,11 @@ the failure. `ValidatePullThroughCacheRule` contacts no upstream, so it answers 
 seeded:
 
 ```bash
-# One rule's outcome; "*" or an empty prefix governs every rule.
+# One rule's outcome in one registry. accountId, region and ecrRepositoryPrefix are each optional;
+# empty or "*" is a wildcard, and the most specific seed wins.
 curl -X POST http://localhost:4566/v1/ecr/pull-through-cache-validation \
-  -d '{"ecrRepositoryPrefix":"docker-hub","isValid":false,"failure":"authentication failed"}'
-curl -X DELETE "http://localhost:4566/v1/ecr/pull-through-cache-validation?ecrRepositoryPrefix=docker-hub"
+  -d '{"accountId":"123456789012","region":"us-east-1","ecrRepositoryPrefix":"docker-hub","isValid":false,"failure":"authentication failed"}'
+curl -X DELETE "http://localhost:4566/v1/ecr/pull-through-cache-validation?accountId=123456789012&region=us-east-1&ecrRepositoryPrefix=docker-hub"
 curl -X DELETE http://localhost:4566/v1/ecr/pull-through-cache-validation   # every seed
 ```
 

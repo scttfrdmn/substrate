@@ -36,11 +36,13 @@ type ecrImageScanningConfigurationOut struct {
 // response.
 //
 // API_EncryptionConfiguration publishes encryptionType and kmsKey. kmsKey is absent
-// rather than present and empty because substrate does not model a customer managed
-// key, and AWS's own CreateRepository sample response omits it — so its absence is a
-// shape the page publishes.
+// rather than present and empty when no key was set — AWS's own CreateRepository sample
+// response omits it, so its absence is a shape the page publishes. CreateRepository does
+// not read one; a repository created from a creation template carries the template's
+// (#1461).
 type ecrEncryptionConfigurationOut struct {
 	EncryptionType string `json:"encryptionType"`
+	KMSKey         string `json:"kmsKey,omitempty"`
 }
 
 // ecrRepositoryOut is the repository element of the ECR repository responses:
@@ -48,9 +50,10 @@ type ecrEncryptionConfigurationOut struct {
 // DescribeRepositories.
 //
 // Member names and optionality follow API_Repository, whose nine members are all
-// Required: No. The one substrate does not model,
-// imageTagMutabilityExclusionFilters, is simply absent from the type rather than
-// present and empty, so this reports nothing AWS would not (#1013's rule).
+// Required: No. imageTagMutabilityExclusionFilters is absent rather than present and
+// empty unless the repository has filters, so this reports nothing AWS would not
+// (#1013's rule). CreateRepository does not read the member; a repository created from a
+// creation template carries the template's (#1461).
 //
 // createdAt is EpochSeconds rather than a time.Time because ECR speaks
 // application/x-amz-json-1.1, whose timestamps are epoch seconds: AWS's own sample
@@ -65,6 +68,8 @@ type ecrRepositoryOut struct {
 	ImageTagMutability         string                           `json:"imageTagMutability"`
 	ImageScanningConfiguration ecrImageScanningConfigurationOut `json:"imageScanningConfiguration"`
 	EncryptionConfiguration    ecrEncryptionConfigurationOut    `json:"encryptionConfiguration"`
+
+	ImageTagMutabilityExclusionFilters []ECRImageTagMutabilityExclusionFilter `json:"imageTagMutabilityExclusionFilters,omitempty"`
 }
 
 // ecrRepositoryToWire projects a persisted repository onto the published shape.
@@ -91,7 +96,9 @@ func ecrRepositoryToWire(repo ECRRepository) ecrRepositoryOut {
 		},
 		EncryptionConfiguration: ecrEncryptionConfigurationOut{
 			EncryptionType: repo.EncryptionConfiguration.EncryptionType,
+			KMSKey:         repo.EncryptionConfiguration.KMSKey,
 		},
+		ImageTagMutabilityExclusionFilters: repo.ImageTagMutabilityExclusionFilters,
 	}
 }
 

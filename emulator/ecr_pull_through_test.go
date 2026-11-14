@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -336,8 +337,12 @@ func TestECR_CreateOnPushNeedsATemplate(t *testing.T) {
 		"resourceTags": []map[string]string{{"Key": "tier", "Value": "team"}},
 	})
 
-	// A push this handler refuses creates nothing.
+	// A push this handler refuses is refused before the repository is read, so it creates nothing.
 	status, body = ecrCall(t, ts, "PutImage", map[string]any{"repositoryName": "prod/team/app"})
+	ecrRequireRefusal(t, status, body, "InvalidParameterException")
+	status, body = ecrCall(t, ts, "PutImage", map[string]any{"repositoryName": "prod/team/app", "imageManifest": manifest, "imageDigest": "sha256:00"})
+	ecrRequireRefusal(t, status, body, "ImageDigestDoesNotMatchException")
+	status, body = ecrCall(t, ts, "DescribeRepositories", map[string]any{"repositoryNames": []string{"prod/team/app"}})
 	ecrRequireRefusal(t, status, body, "RepositoryNotFoundException")
 
 	ecrCallOK(t, ts, "PutImage", map[string]any{"repositoryName": "prod/team/app", "imageManifest": manifest, "imageTag": "v1"})
@@ -345,4 +350,138 @@ func TestECR_CreateOnPushNeedsATemplate(t *testing.T) {
 		"resourceArn": "arn:aws:ecr:us-east-1:123456789012:repository/prod/team/app",
 	}), "the longest matching prefix wins")
 	assert.Contains(t, ecrCallOK(t, ts, "ListImages", map[string]any{"repositoryName": "prod/team/app"}), `"imageTag":"v1"`)
+}
+
+// TestECR_TemplateCarriesEveryRepositoryMember pins that a repository created from a template holds
+// every template member a repository has: mutability, its exclusion filters, encryption type and
+// KMS key, both policies, and tags.
+func TestECR_TemplateCarriesEveryRepositoryMember(t *testing.T) {
+	ts := newECRTestServer(t)
+	const key = "arn:aws:kms:us-east-1:123456789012:key/0123abcd-ef01-2345-6789-abcdef012345"
+	ecrCallOK(t, ts, "CreateRepositoryCreationTemplate", map[string]any{
+		"prefix":                             "secure",
+		"appliedFor":                         []string{"CREATE_ON_PUSH"},
+		"imageTagMutability":                 "IMMUTABLE_WITH_EXCLUSION",
+		"imageTagMutabilityExclusionFilters": []map[string]string{{"filter": "latest*", "filterType": "WILDCARD"}},
+		"encryptionConfiguration":            map[string]string{"encryptionType": "KMS", "kmsKey": key},
+		"repositoryPolicy":                   `{"Version":"2012-10-17","Statement":[]}`,
+		"lifecyclePolicy":                    `{"rules":[]}`,
+	})
+	ecrCallOK(t, ts, "PutImage", map[string]any{"repositoryName": "secure/app", "imageManifest": `{"schemaVersion":2}`})
+
+	got := ecrCallOK(t, ts, "DescribeRepositories", map[string]any{"repositoryNames": []string{"secure/app"}})
+	assert.Contains(t, got, `"imageTagMutability":"IMMUTABLE_WITH_EXCLUSION"`)
+	assert.Contains(t, got, `"imageTagMutabilityExclusionFilters":[{"filter":"latest*","filterType":"WILDCARD"}]`)
+	assert.Contains(t, got, `"encryptionConfiguration":{"encryptionType":"KMS","kmsKey":"`+key+`"}`)
+	assert.Contains(t, ecrCallOK(t, ts, "GetRepositoryPolicy", map[string]any{"repositoryName": "secure/app"}), `2012-10-17`)
+	assert.Contains(t, ecrCallOK(t, ts, "GetLifecyclePolicy", map[string]any{"repositoryName": "secure/app"}), `rules`)
+
+	// A repository CreateRepository makes carries neither member, as before.
+	plain := ecrCallOK(t, ts, "CreateRepository", map[string]any{"repositoryName": "plain"})
+	assert.NotContains(t, plain, "imageTagMutabilityExclusionFilters")
+	assert.NotContains(t, plain, "kmsKey")
+}
+
+// TestECR_TemplateKMSKeyPatternIsAnchored pins the whole-value match: the published pattern's `^$`
+// binds only its empty branch, so an unanchored reading accepted any string containing a key ARN.
+func TestECR_TemplateKMSKeyPatternIsAnchored(t *testing.T) {
+	ts := newECRTestServer(t)
+	const key = "arn:aws:kms:us-east-1:123456789012:key/abc-123"
+	for _, bad := range []string{"junk " + key, key + " trailing", "alias/aws/ecr"} {
+		status, body := ecrCall(t, ts, "CreateRepositoryCreationTemplate", map[string]any{
+			"prefix": "k1", "appliedFor": []string{"REPLICATION"},
+			"encryptionConfiguration": map[string]string{"encryptionType": "KMS", "kmsKey": bad},
+		})
+		ecrRequireRefusal(t, status, body, "InvalidParameterException")
+	}
+	for i, good := range []string{key, ""} {
+		ecrCallOK(t, ts, "CreateRepositoryCreationTemplate", map[string]any{
+			"prefix": fmt.Sprintf("k%d", i+2), "appliedFor": []string{"REPLICATION"},
+			"encryptionConfiguration": map[string]string{"encryptionType": "KMS", "kmsKey": good},
+		})
+	}
+}
+
+// TestECR_RootAndUpstreamPrefixAreECRToECROnly pins the namespace customization's scope: ROOT and
+// upstreamRepositoryPrefix are documented for ECR to ECR pull through cache only, and the upstream
+// prefix only under a non-ROOT ecr prefix.
+func TestECR_RootAndUpstreamPrefixAreECRToECROnly(t *testing.T) {
+	ts := newECRTestServer(t)
+	const ecrUpstream = "123456789012.dkr.ecr.us-west-2.amazonaws.com"
+	for _, tc := range []struct {
+		name string
+		body map[string]any
+	}{
+		{"ROOT on Quay", map[string]any{"ecrRepositoryPrefix": "ROOT", "upstreamRegistryUrl": "quay.io"}},
+		{"an upstream prefix on Quay", map[string]any{"ecrRepositoryPrefix": "quay", "upstreamRegistryUrl": "quay.io", "upstreamRepositoryPrefix": "team"}},
+		{"an upstream prefix under ROOT", map[string]any{"ecrRepositoryPrefix": "ROOT", "upstreamRegistryUrl": ecrUpstream, "upstreamRepositoryPrefix": "team"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := ecrCall(t, ts, "CreatePullThroughCacheRule", tc.body)
+			ecrRequireRefusal(t, status, body, "ValidationException")
+		})
+	}
+	ecrCallOK(t, ts, "CreatePullThroughCacheRule", map[string]any{"ecrRepositoryPrefix": "ROOT", "upstreamRegistryUrl": ecrUpstream})
+	ecrCallOK(t, ts, "CreatePullThroughCacheRule", map[string]any{
+		"ecrRepositoryPrefix": "mirror", "upstreamRegistryUrl": ecrUpstream, "upstreamRepositoryPrefix": "team",
+	})
+}
+
+// TestECR_ECRUpstreamPullNeedsTheUpstreamRepository pins that an ECR-to-ECR pull creates the cache
+// repository only when the upstream repository it maps onto exists — so a ROOT rule, which matches
+// every name, does not turn a mistyped BatchGetImage into a new repository.
+func TestECR_ECRUpstreamPullNeedsTheUpstreamRepository(t *testing.T) {
+	ts := newECRTestServer(t)
+	const ecrUpstream = "123456789012.dkr.ecr.us-west-2.amazonaws.com"
+	for _, name := range []string{"team/app", "team/tool"} {
+		status, body := ecrCallIn(t, ts, "us-west-2", "CreateRepository", map[string]any{"repositoryName": name})
+		require.Equal(t, http.StatusOK, status, body)
+	}
+	ecrCallOK(t, ts, "CreatePullThroughCacheRule", map[string]any{"ecrRepositoryPrefix": "ROOT", "upstreamRegistryUrl": ecrUpstream})
+	ecrCallOK(t, ts, "CreatePullThroughCacheRule", map[string]any{
+		"ecrRepositoryPrefix": "mirror", "upstreamRegistryUrl": ecrUpstream, "upstreamRepositoryPrefix": "team",
+	})
+	pull := func(name string) (int, string) {
+		return ecrCall(t, ts, "BatchGetImage", map[string]any{"repositoryName": name, "imageIds": []map[string]string{{"imageTag": "latest"}}})
+	}
+
+	status, body := pull("team/app")
+	require.Equal(t, http.StatusOK, status, "ROOT maps team/app onto upstream team/app, which exists: %s", body)
+	status, body = pull("mirror/tool")
+	require.Equal(t, http.StatusOK, status, "mirror/tool maps onto upstream team/tool: %s", body)
+
+	for _, typo := range []string{"team/ap", "nothing/here", "mirror/app2"} {
+		status, body := pull(typo)
+		ecrRequireRefusal(t, status, body, "RepositoryNotFoundException")
+		status, body = ecrCall(t, ts, "DescribeRepositories", map[string]any{"repositoryNames": []string{typo}})
+		ecrRequireRefusal(t, status, body, "RepositoryNotFoundException")
+	}
+}
+
+// TestECR_ValidationSeedIsScopedToARegistry pins the seed key's account and Region: a seed for
+// another account does not govern the caller's rule, and one for the caller's Region does.
+func TestECR_ValidationSeedIsScopedToARegistry(t *testing.T) {
+	ts := newECRTestServer(t)
+	ecrCallOK(t, ts, "CreatePullThroughCacheRule", map[string]any{"ecrRepositoryPrefix": "quay", "upstreamRegistryUrl": "quay.io"})
+	post := func(body map[string]any) {
+		t.Helper()
+		data, err := json.Marshal(body)
+		require.NoError(t, err)
+		req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, ts.URL+"/v1/ecr/pull-through-cache-validation", bytes.NewReader(data))
+		require.NoError(t, err)
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+	}
+	validate := func() string {
+		return ecrCallOK(t, ts, "ValidatePullThroughCacheRule", map[string]any{"ecrRepositoryPrefix": "quay"})
+	}
+
+	post(map[string]any{"accountId": "999999999999", "ecrRepositoryPrefix": "quay", "isValid": false})
+	post(map[string]any{"region": "eu-west-1", "ecrRepositoryPrefix": "quay", "isValid": false})
+	assert.Contains(t, validate(), `"isValid":true`, "seeds for another account or Region do not govern this registry")
+
+	post(map[string]any{"accountId": "123456789012", "region": "us-east-1", "ecrRepositoryPrefix": "quay", "isValid": false, "failure": "scoped"})
+	assert.Contains(t, validate(), `"failure":"scoped"`)
 }

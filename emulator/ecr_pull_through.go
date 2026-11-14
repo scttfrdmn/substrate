@@ -240,6 +240,25 @@ func (p *ECRPlugin) createPullThroughCacheRule(ctx *RequestContext, req *AWSRequ
 		}
 	case ecrUpstreamAuthNone:
 	}
+	// ROOT and the upstream prefix are the ECR-to-ECR namespace customization: the user guide
+	// documents both on its "Customizing repository prefixes for ECR to ECR pull through cache" page
+	// and nowhere for any other upstream, and that page adds "You can set the upstream repository
+	// prefix only when the Amazon ECR repository prefix has a non-ROOT value". So a ROOT
+	// ecrRepositoryPrefix, or any upstreamRepositoryPrefix, on a non-ECR upstream is refused, as is
+	// a non-ROOT upstream prefix under a ROOT ecr prefix. The code is ValidationException, the
+	// cross-member reading [ecrValidationException] records; that ROOT is ECR-only is substrate's
+	// reading of the page's scope, since no page states the refusal.
+	ecrPrefixIsRoot := ecrPrefixKey(body.EcrRepositoryPrefix) == ecrPrefixRoot
+	if registry != "ecr" {
+		if ecrPrefixIsRoot {
+			return nil, ecrValidationException("ecrRepositoryPrefix ROOT is supported only for an Amazon ECR upstream registry")
+		}
+		if body.UpstreamRepositoryPrefix != "" {
+			return nil, ecrValidationException("upstreamRepositoryPrefix is supported only for an Amazon ECR upstream registry")
+		}
+	} else if ecrPrefixIsRoot && body.UpstreamRepositoryPrefix != "" && ecrPrefixKey(body.UpstreamRepositoryPrefix) != ecrPrefixRoot {
+		return nil, ecrValidationException("upstreamRepositoryPrefix can be set only when ecrRepositoryPrefix is not ROOT")
+	}
 
 	goCtx := context.Background()
 	key := ecrPullThroughCacheRuleKey(ctx.AccountID, ctx.Region, body.EcrRepositoryPrefix)
@@ -463,7 +482,7 @@ func (p *ECRPlugin) validatePullThroughCacheRule(ctx *RequestContext, req *AWSRe
 	// as the upstream would, so "Amazon ECR was able to reach the upstream registry and
 	// authentication was successful" is the default and the alternative is a test's to choose.
 	isValid, failure := true, ""
-	seed, err := ecrLoadValidationSeed(context.Background(), p.state, rule.EcrRepositoryPrefix)
+	seed, err := ecrLoadValidationSeed(context.Background(), p.state, ctx, rule.EcrRepositoryPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -571,9 +590,18 @@ func (p *ECRPlugin) matchingPullThroughCacheRule(goCtx context.Context, accountI
 const ecrCtrlNamespace = "ecr-ctrl"
 
 // ecrValidationSeed is the body of POST /v1/ecr/pull-through-cache-validation: what
-// ValidatePullThroughCacheRule answers for the rule with that prefix, or for every rule when the
-// prefix is empty or "*".
+// ValidatePullThroughCacheRule answers for the rule with that prefix in that registry.
+//
+// A rule is scoped to an account and a Region like every other ECR record, so the seed is too. Each
+// of the three scope members is optional, and an empty value or "*" is a wildcard: a seed naming
+// only a prefix governs that prefix in every registry, and a seed naming nothing governs every rule.
 type ecrValidationSeed struct {
+	// AccountID is the registry the seed governs; empty or "*" governs every account.
+	AccountID string `json:"accountId,omitempty"`
+
+	// Region is the Region the seed governs; empty or "*" governs every Region.
+	Region string `json:"region,omitempty"`
+
 	// EcrRepositoryPrefix is the rule the seed governs; empty or "*" governs every rule.
 	EcrRepositoryPrefix string `json:"ecrRepositoryPrefix"`
 
@@ -584,28 +612,45 @@ type ecrValidationSeed struct {
 	Failure string `json:"failure,omitempty"`
 }
 
-func ecrValidationSeedKey(prefix string) string {
-	if prefix == "" || prefix == "*" {
-		return "ptc-validation:*"
+// ecrSeedScope folds an empty scope member into the wildcard.
+func ecrSeedScope(v string) string {
+	if v == "" {
+		return "*"
 	}
-	return "ptc-validation:" + ecrPrefixKey(prefix)
+	return v
 }
 
-// ecrLoadValidationSeed returns the seed governing prefix — its own, else the wildcard — or nil.
-func ecrLoadValidationSeed(goCtx context.Context, state StateManager, prefix string) (*ecrValidationSeed, error) {
-	for _, key := range []string{ecrValidationSeedKey(prefix), ecrValidationSeedKey("*")} {
-		data, err := state.Get(goCtx, ecrCtrlNamespace, key)
-		if err != nil {
-			return nil, fmt.Errorf("ecr validation seed state.Get: %w", err)
+// ecrValidationSeedKey is the seed key for one registry and prefix, any of which may be "*" — the
+// `{account}/{region}/{name}` shape every ECR key has.
+func ecrValidationSeedKey(accountID, region, prefix string) string {
+	prefix = ecrSeedScope(prefix)
+	if prefix != "*" {
+		prefix = ecrPrefixKey(prefix)
+	}
+	return "ptc-validation:" + ecrSeedScope(accountID) + "/" + ecrSeedScope(region) + "/" + prefix
+}
+
+// ecrLoadValidationSeed returns the seed governing the rule with prefix in the caller's registry, or
+// nil. The most specific seed wins: the caller's own account before the wildcard, then its own
+// Region, then the rule's own prefix.
+func ecrLoadValidationSeed(goCtx context.Context, state StateManager, ctx *RequestContext, prefix string) (*ecrValidationSeed, error) {
+	for _, acct := range []string{ctx.AccountID, "*"} {
+		for _, region := range []string{ctx.Region, "*"} {
+			for _, pfx := range []string{prefix, "*"} {
+				data, err := state.Get(goCtx, ecrCtrlNamespace, ecrValidationSeedKey(acct, region, pfx))
+				if err != nil {
+					return nil, fmt.Errorf("ecr validation seed state.Get: %w", err)
+				}
+				if data == nil {
+					continue
+				}
+				var seed ecrValidationSeed
+				if err := json.Unmarshal(data, &seed); err != nil {
+					return nil, fmt.Errorf("ecr validation seed unmarshal: %w", err)
+				}
+				return &seed, nil
+			}
 		}
-		if data == nil {
-			continue
-		}
-		var seed ecrValidationSeed
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, fmt.Errorf("ecr validation seed unmarshal: %w", err)
-		}
-		return &seed, nil
 	}
 	return nil, nil
 }
@@ -629,7 +674,7 @@ func (s *Server) handleECRSeedPullThroughCacheValidation(w http.ResponseWriter, 
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	key := ecrValidationSeedKey(seed.EcrRepositoryPrefix)
+	key := ecrValidationSeedKey(seed.AccountID, seed.Region, seed.EcrRepositoryPrefix)
 	if err := s.state.Put(r.Context(), ecrCtrlNamespace, key, data); err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
@@ -638,12 +683,15 @@ func (s *Server) handleECRSeedPullThroughCacheValidation(w http.ResponseWriter, 
 }
 
 // handleECRClearPullThroughCacheValidation handles DELETE /v1/ecr/pull-through-cache-validation.
-// With ?ecrRepositoryPrefix=... it removes that rule's seed; without one it removes every seed.
+// With any of ?accountId=, ?region= or ?ecrRepositoryPrefix= it removes the one seed those name,
+// an omitted member being the wildcard, exactly as the seed was posted; with none it removes every
+// seed.
 func (s *Server) handleECRClearPullThroughCacheValidation(w http.ResponseWriter, r *http.Request) {
-	prefix := r.URL.Query().Get("ecrRepositoryPrefix")
+	q := r.URL.Query()
+	acct, region, prefix := q.Get("accountId"), q.Get("region"), q.Get("ecrRepositoryPrefix")
 	var keys []string
-	if prefix != "" {
-		keys = []string{ecrValidationSeedKey(prefix)}
+	if acct != "" || region != "" || prefix != "" {
+		keys = []string{ecrValidationSeedKey(acct, region, prefix)}
 	} else {
 		listed, err := s.state.List(r.Context(), ecrCtrlNamespace, "ptc-validation:")
 		if err != nil {
