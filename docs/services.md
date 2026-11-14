@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1074 operations**. This
+Substrate ships **68 built-in service plugins** routing **1088 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -25,67 +25,68 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 35 |
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
-| 7 | Backup | `backup` | REST/JSON | 13 |
-| 8 | Batch | `batch` | REST/JSON | 16 |
-| 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
-| 10 | Budgets | `budgets` | JSON | 5 |
-| 11 | Cost Explorer | `ce` | JSON | 3 |
-| 12 | CloudFormation | `cloudformation` | Query | 19 |
-| 13 | CloudFront | `cloudfront` | REST/XML | 17 |
-| 14 | CloudTrail | `cloudtrail` | JSON | 8 |
-| 15 | CodeBuild | `codebuild` | JSON | 7 |
-| 16 | CodeDeploy | `codedeploy` | JSON | 9 |
-| 17 | CodePipeline | `codepipeline` | JSON | 8 |
-| 18 | Cognito Identity | `cognito-identity` | JSON | 8 |
-| 19 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
-| 20 | Config | `config` | JSON | 25 |
-| 21 | DynamoDB | `dynamodb` | JSON | 26 |
-| 22 | EC2 / VPC | `ec2` | Query | 97 |
-| 23 | ECR | `ecr` | JSON | 26 |
-| 24 | ECS | `ecs` | JSON | 21 |
-| 25 | EFS | `efs` | REST/JSON | 13 |
-| 26 | ElastiCache | `elasticache` | Query | 17 |
-| 27 | ELBv2 | `elasticloadbalancing` | Query | 24 |
-| 28 | EMR Serverless | `emrserverless` | REST/JSON | 7 |
-| 29 | EventBridge | `eventbridge` | JSON | 9 |
-| 30 | API Gateway (execute-api) | `execute-api` | REST/JSON | 0 |
-| 31 | Kinesis Data Firehose | `firehose` | JSON | 6 |
-| 32 | FSx | `fsx` | JSON | 3 |
-| 33 | Glue | `glue` | JSON | 33 |
-| 34 | Health | `health` | JSON | 4 |
-| 35 | IAM | `iam` | Query | 74 |
-| 36 | Kinesis Data Streams | `kinesis` | JSON | 17 |
-| 37 | KMS | `kms` | JSON | 24 |
-| 38 | Lambda | `lambda` | REST/JSON | 29 |
-| 39 | CloudWatch Logs | `logs` | JSON | 14 |
-| 40 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
-| 41 | MSK | `msk` | REST/JSON | 9 |
-| 42 | HealthOmics | `omics` | REST/JSON | 5 |
-| 43 | OpenSearch | `opensearch` | REST/JSON | 0 |
-| 44 | Organizations | `organizations` | JSON | 34 |
-| 45 | Price List Query API | `pricing` | JSON | 3 |
-| 46 | QuickSight | `quicksight` | REST/JSON | 4 |
-| 47 | RAM | `ram` | REST/JSON | 8 |
-| 48 | RDS | `rds` | Query | 23 |
-| 49 | Redshift | `redshift` | Query | 10 |
-| 50 | Redshift Data API | `redshift-data` | JSON | 3 |
-| 51 | Route 53 | `route53` | REST/XML | 6 |
-| 52 | S3 | `s3` | REST/XML | 53 |
-| 53 | SageMaker | `sagemaker` | JSON | 10 |
-| 54 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
-| 55 | Secrets Manager | `secretsmanager` | JSON | 12 |
-| 56 | Service Quotas | `servicequotas` | JSON | 8 |
-| 57 | SES v2 | `sesv2` | REST/JSON | 5 |
-| 58 | SNS | `sns` | Query | 18 |
-| 59 | SQS | `sqs` | JSON | 17 |
-| 60 | SSM | `ssm` | JSON | 15 |
-| 61 | SSO / Identity Store | `sso` | JSON | 12 |
-| 62 | Step Functions | `states` | JSON | 18 |
-| 63 | STS | `sts` | Query | 3 |
-| 64 | Resource Groups Tagging | `tagging` | JSON | 3 |
-| 65 | Timestream | `timestream` | JSON | 12 |
-| 66 | Transfer Family | `transfer` | JSON | 12 |
-| 67 | WAFv2 | `wafv2` | JSON | 13 |
+| 7 | EC2 Auto Scaling | `autoscaling` | Query | 14 |
+| 8 | Backup | `backup` | REST/JSON | 13 |
+| 9 | Batch | `batch` | REST/JSON | 16 |
+| 10 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
+| 11 | Budgets | `budgets` | JSON | 5 |
+| 12 | Cost Explorer | `ce` | JSON | 3 |
+| 13 | CloudFormation | `cloudformation` | Query | 19 |
+| 14 | CloudFront | `cloudfront` | REST/XML | 17 |
+| 15 | CloudTrail | `cloudtrail` | JSON | 8 |
+| 16 | CodeBuild | `codebuild` | JSON | 7 |
+| 17 | CodeDeploy | `codedeploy` | JSON | 9 |
+| 18 | CodePipeline | `codepipeline` | JSON | 8 |
+| 19 | Cognito Identity | `cognito-identity` | JSON | 8 |
+| 20 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
+| 21 | Config | `config` | JSON | 25 |
+| 22 | DynamoDB | `dynamodb` | JSON | 26 |
+| 23 | EC2 / VPC | `ec2` | Query | 97 |
+| 24 | ECR | `ecr` | JSON | 26 |
+| 25 | ECS | `ecs` | JSON | 21 |
+| 26 | EFS | `efs` | REST/JSON | 13 |
+| 27 | ElastiCache | `elasticache` | Query | 17 |
+| 28 | ELBv2 | `elasticloadbalancing` | Query | 24 |
+| 29 | EMR Serverless | `emrserverless` | REST/JSON | 7 |
+| 30 | EventBridge | `eventbridge` | JSON | 9 |
+| 31 | API Gateway (execute-api) | `execute-api` | REST/JSON | 0 |
+| 32 | Kinesis Data Firehose | `firehose` | JSON | 6 |
+| 33 | FSx | `fsx` | JSON | 3 |
+| 34 | Glue | `glue` | JSON | 33 |
+| 35 | Health | `health` | JSON | 4 |
+| 36 | IAM | `iam` | Query | 74 |
+| 37 | Kinesis Data Streams | `kinesis` | JSON | 17 |
+| 38 | KMS | `kms` | JSON | 24 |
+| 39 | Lambda | `lambda` | REST/JSON | 29 |
+| 40 | CloudWatch Logs | `logs` | JSON | 14 |
+| 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
+| 42 | MSK | `msk` | REST/JSON | 9 |
+| 43 | HealthOmics | `omics` | REST/JSON | 5 |
+| 44 | OpenSearch | `opensearch` | REST/JSON | 0 |
+| 45 | Organizations | `organizations` | JSON | 34 |
+| 46 | Price List Query API | `pricing` | JSON | 3 |
+| 47 | QuickSight | `quicksight` | REST/JSON | 4 |
+| 48 | RAM | `ram` | REST/JSON | 8 |
+| 49 | RDS | `rds` | Query | 23 |
+| 50 | Redshift | `redshift` | Query | 10 |
+| 51 | Redshift Data API | `redshift-data` | JSON | 3 |
+| 52 | Route 53 | `route53` | REST/XML | 6 |
+| 53 | S3 | `s3` | REST/XML | 53 |
+| 54 | SageMaker | `sagemaker` | JSON | 10 |
+| 55 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
+| 56 | Secrets Manager | `secretsmanager` | JSON | 12 |
+| 57 | Service Quotas | `servicequotas` | JSON | 8 |
+| 58 | SES v2 | `sesv2` | REST/JSON | 5 |
+| 59 | SNS | `sns` | Query | 18 |
+| 60 | SQS | `sqs` | JSON | 17 |
+| 61 | SSM | `ssm` | JSON | 15 |
+| 62 | SSO / Identity Store | `sso` | JSON | 12 |
+| 63 | Step Functions | `states` | JSON | 18 |
+| 64 | STS | `sts` | Query | 3 |
+| 65 | Resource Groups Tagging | `tagging` | JSON | 3 |
+| 66 | Timestream | `timestream` | JSON | 12 |
+| 67 | Transfer Family | `transfer` | JSON | 12 |
+| 68 | WAFv2 | `wafv2` | JSON | 13 |
 <!-- END GENERATED COVERAGE MATRIX -->
 
 ---
@@ -12615,6 +12616,126 @@ consumer asserts against it happily.
 ### Cost
 
 ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
+
+---
+
+## EC2 Auto Scaling
+
+**Endpoint:** `autoscaling.{region}.amazonaws.com`
+**Protocol:** AWS Query (form-encoded, `Action=` parameter), namespace `http://autoscaling.amazonaws.com/doc/2011-01-01/`
+
+### Supported operations
+
+| Operation | Notes |
+|-----------|-------|
+| CreateAutoScalingGroup | `LaunchTemplate` or `MixedInstancesPolicy` (exactly one), `MinSize`/`MaxSize`/`DesiredCapacity` (default `MinSize`), `VPCZoneIdentifier` or `AvailabilityZones`, `Tags.member.N` with `PropagateAtLaunch`, `CapacityRebalance`, `NewInstancesProtectedFromScaleIn`, `TerminationPolicies`. Launches the desired capacity before answering. Refuses `AlreadyExists`/400, and `ValidationError`/400 for contradictory sizes, a missing or unknown launch template or version, an unknown subnet, a reserved `aws:` tag key and a launch configuration. More than 50 tags is `LimitExceeded`/400. With IAM enforced, the caller's `ec2:RunInstances` is checked first (see below) |
+| DescribeAutoScalingGroups | `AutoScalingGroupNames.member.N`, `Filters` `tag-key`/`tag-value`/`tag:<key>` (another name is `ValidationError`), `IncludeInstances`. Pages on `NextToken`/`MaxRecords` (default 50, max 100). An observation: reconciles each group it returns first |
+| UpdateAutoScalingGroup | Any subset of Create's members; a member not sent is unchanged, inside `MixedInstancesPolicy` too (overrides are replaced as a list when any is sent, distribution members one by one, an empty `SpotMaxPrice` clears it, a `LaunchTemplateSpecification` carrying only `Version` re-points the existing template). A new `MinSize` above, or `MaxSize` below, the current desired capacity moves it there when no `DesiredCapacity` is named, as the reference states. Reconciles before answering |
+| DeleteAutoScalingGroup | `ResourceInUse`/400 while instances remain unless `ForceDelete`, which terminates them through EC2. A `ForceDelete` whose termination fails fails the request and leaves the group, still owning its instances |
+| SetDesiredCapacity | Outside `MinSize`–`MaxSize` is `ValidationError`/400. `HonorCooldown=true` inside `DefaultCooldown` of the group's last activity is `ScalingActivityInProgress`/400. Scales out or in before answering |
+| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` below `MinSize` is `ValidationError`/400. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
+| SuspendProcesses | The nine published processes, all of them when `ScalingProcesses` is omitted. `Launch`, `Terminate`, `HealthCheck` and `ReplaceUnhealthy` change what a reconciliation does; the others are recorded and echoed |
+| ResumeProcesses | |
+| DescribeScalingActivities | Most recent first; `AutoScalingGroupName`, `ActivityIds`, `IncludeDeletedGroups` (which adds `AutoScalingGroupState`), `Filters` `Status`/`StartTimeLowerBound`/`StartTimeUpperBound`. Pages on `NextToken`/`MaxRecords` (default and max 100). An observation |
+| SetInstanceProtection | An instance outside the group is `ValidationError`/400; more than 50 is `LimitExceeded`/400 |
+| CreateOrUpdateTags | Overwrites an existing key. A group that does not exist is `ValidationError`/400; a group past 50 tags is `LimitExceeded`/400 and the request writes nothing. Existing instances are not retagged |
+| DeleteTags | |
+| DescribeTags | `Filters` `auto-scaling-group`/`key`/`value`/`propagate-at-launch`. Pages on `NextToken`/`MaxRecords` (default 50, max 100) |
+| DescribeAutoScalingInstances | `InstanceIds.member.N` (unknown IDs ignored, as published). Pages on `NextToken`/`MaxRecords` (default and max 50). `HealthStatus` is `HEALTHY`, the spelling this operation's published sample uses. An observation |
+
+**A group's instances are EC2's own.** Every launch runs EC2's RunInstances launch path and every
+termination EC2's termination path, so `DescribeInstances` reports a group's instances like
+any others: launched from the template version the group resolves (`$Default` unless named),
+tagged with the reserved `aws:autoscaling:groupName`, the template's instance tags and the group's
+`PropagateAtLaunch` tags (the group's value winning on a shared key, as the tagging guide states),
+and moving `pending → running` through EC2's own [seeded progression](#how-a-progression-is-seeded).
+A member reports `LifecycleState` `InService`; the group adds no clock of its own
+([#1460](https://github.com/scttfrdmn/substrate/issues/1460)).
+
+**Reconciliation is synchronous, and also happens on observation.** A request that changes
+capacity — Create, Update, SetDesiredCapacity, TerminateInstanceInAutoScalingGroup — launches or
+terminates before it answers. The three describes are observations: each first checks every member
+against EC2's instance record, so an instance terminated directly through EC2 (a worker scaling
+itself in) is removed with a scaling activity and replaced, unless the desired capacity was lowered
+first. EC2's record is read rather than described, so a group's check does not spend a test's seeded
+`pending` observations. Both moments are requests, so a recorded session replays identically.
+
+**Mixed instances.** Overrides are taken in request order. An `InstanceRequirements` override
+matches EC2's seeded instance-type catalog on `VCpuCount`, `MemoryMiB`, `MemoryGiBPerVCpu`,
+`AcceleratorCount`, `AcceleratorTypes`, `CpuManufacturers`, `BurstablePerformance`, `BareMetal`,
+`LocalStorage`, `InstanceGenerations`, `AllowedInstanceTypes` and `ExcludedInstanceTypes`, with the
+published defaults; the price-protection thresholds are echoed and not evaluated, and the bandwidth,
+interface-count, accelerator-name and hibernation members are accepted and ignored, the catalog
+holding nothing to evaluate them against. Substrate models no capacity pools or prices, so every
+allocation strategy launches the **first** candidate: the first override's type, or for
+requirements the smallest match (vCPU, then memory, then name). On-Demand and Spot are split as the
+setup overview publishes — base capacity first, then the percentage above it rounded up in favor of
+On-Demand — and a Spot launch is a launch with `InstanceMarketOptions.MarketType=spot`, which EC2
+reports as `instanceLifecycle` `spot`. As for a CreateFleet Spot pool, no `sir-` Spot Instance
+request is written: the group is the record that tracks the capacity. `WeightedCapacity` is echoed
+and every instance counts as one unit.
+
+**A zone-only group uses the default VPC.** A group naming `AvailabilityZones` and no
+`VPCZoneIdentifier` launches "into the default VPC subnet in each Availability Zone", as
+API_CreateAutoScalingGroup states, through EC2's own default-subnet resolution; an Auto Scaling
+request seeds the account's default VPC first, as an EC2 request does
+([#1464](https://github.com/scttfrdmn/substrate/issues/1464)).
+
+**A group's terminations ignore EC2 termination protection.** The EC2 user guide: "Enabling
+termination protection does not prevent Amazon EC2 Auto Scaling from terminating an instance when
+the instance is unhealthy or during scale-in events." Substrate applies that to every termination a
+group makes — scale-in, health replacement, `TerminateInstanceInAutoScalingGroup` and `ForceDelete`
+— since all run as the group's service-linked role; scale-in protection (`SetInstanceProtection`)
+is what stops a scale-in.
+
+**Template tags are held to EC2's rules.** A launch's tags are the template version's instance
+tags, then the group's `PropagateAtLaunch` tags, then `aws:autoscaling:groupName`. The merged set is
+checked as EC2 checks a template's tags — no reserved key, at most 50 counting everything but the
+group-name tag — and a launch that fails it is a `Failed` activity carrying EC2's message.
+
+**Scale-in follows the default termination policy as far as it is observable.** Protected
+instances are never chosen. A mixed group first picks the purchase option that keeps it nearest its
+ratio; then the zone with the most instances; then instances from a template other than the current
+one, then the oldest version of the current one, then the instance closest to its next billing hour;
+where AWS would choose at random, the lowest instance ID. `OldestInstance`, `NewestInstance`,
+`OldestLaunchTemplate` and `ClosestToNextInstanceHour` apply in the order listed;
+`AllocationStrategy`, `OldestLaunchConfiguration` and a Lambda ARN narrow nothing.
+
+**A launch failure is seeded.** `POST /v1/autoscaling/launch-failure` with
+`{"autoScalingGroupName":"pool","statusMessage":"…"}` (the name defaulting to `"*"`, the message to
+EC2's insufficient-capacity text) makes every launch attempt for the group fail with that
+`StatusMessage` and launch nothing, leaving the capacity unmet; `DELETE` (with
+`?autoScalingGroupName=` or without, for all) clears it, and the next attempt succeeds. Every
+observation retries, but one that fails exactly as the last recorded failure did — same desired
+capacity, same message — records nothing new: AWS publishes no retry cadence, so the rule is one
+`Failed` activity per desired-capacity change, and a poll loop sees one failure rather than one per
+poll. The seed is a control-plane write, so a replay re-applies it in position. A launch EC2 itself
+refuses — an AMI that does not exist, say — is reported the same way. An observation of a group with
+nothing to reconcile writes no state.
+
+**Authorization.** A mutation is decided against the group's ARN
+(`arn:aws:autoscaling:{region}:{account}:autoScalingGroup:{uuid}:autoScalingGroupName/{name}`; a
+create's, with the UUID as the literal `*` the user guide prescribes), and a describe against `*`,
+as the Service Authorization Reference (vendored as `emulator/authzref/autoscaling.json`) publishes.
+The group's tags are reported as both `autoscaling:ResourceTag/<key>` and `aws:ResourceTag/<key>`;
+`aws:RequestTag/<key>` and `aws:TagKeys` are populated for CreateAutoScalingGroup, CreateOrUpdateTags
+and DeleteTags. A tagging request naming several groups is decided once per group, each with only
+the tags aimed at it, and one denial denies the request. TerminateInstanceInAutoScalingGroup by
+`InstanceId` is decided against the group that owns the instance. Create and Update also check the caller's `ec2:RunInstances` against the request the
+group would launch — the user guide's "RunInstances dry run" — before writing anything, and a
+denial is Auto Scaling's own `AccessDenied`/403
+`You are not authorized to use launch template: <template>` (no page publishes it; it is the response SDK users report verbatim); later launches
+run as the group's service-linked role and are not checked against the caller.
+
+**Not emulated.** Launch configurations (refused with `ValidationError`), scaling policies, lifecycle
+hooks, warm pools, instance refresh, load-balancer and target-group registration (the names are
+echoed), Capacity Rebalancing (echoed; no rebalance recommendation is ever sent),
+`MaxInstanceLifetime` (echoed, not enforced), `DesiredCapacityType` other than `units`, and the
+CloudFormation `AWS::AutoScaling::AutoScalingGroup` resource type.
+
+### Cost
+
+Auto Scaling itself is free; the EC2 instances a group launches are costed as EC2 instances.
 
 ---
 

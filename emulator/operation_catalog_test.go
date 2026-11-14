@@ -29,11 +29,11 @@ const (
 	// place. Updating this figure is the deliberate half of adding or removing an
 	// operation; `make operation-catalog` regenerates the catalog and this test then says
 	// by how much the total moved.
-	routedOperationTotal = 1074
+	routedOperationTotal = 1088
 
 	// routedPluginTotal is the number of plugins RegisterDefaultPlugins registers. The
 	// coverage matrix in docs/services.md reports the same figure from the same source.
-	routedPluginTotal = 67
+	routedPluginTotal = 68
 )
 
 // registeredPluginNames boots the default registry and returns the names it files plugins
@@ -107,6 +107,7 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 		"dynamodb":             26,
 		"sts":                  3,
 		"elasticloadbalancing": 24,
+		"autoscaling":          14,
 		"ecr":                  26,
 		"cloudformation":       19,
 	}

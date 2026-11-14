@@ -272,12 +272,23 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		a.authzTimeContext(condCtx, now, haveClock)
 		authzPrincipalContext(condCtx, reqCtx.Principal)
 
+		multi := requestMulti
+		if len(res.Multi) > 0 {
+			multi = make(map[string][]string, len(requestMulti)+len(res.Multi))
+			for k, v := range requestMulti {
+				multi[k] = v
+			}
+			for k, v := range res.Multi {
+				multi[k] = v
+			}
+		}
+
 		result := Evaluate(docs, EvaluationRequest{
 			Principal:    reqCtx.Principal.ARN,
 			Action:       action,
 			Resource:     res.ARN,
 			Context:      condCtx,
-			MultiContext: requestMulti,
+			MultiContext: multi,
 		})
 		if result.Decision != DecisionAllow {
 			return &AWSError{
@@ -916,6 +927,11 @@ type authzResource struct {
 	// RunInstances on network-interface/* unless ec2:Subnet names one subnet, and
 	// the launch's other four resources must not carry the key at all.
 	Context map[string]string
+
+	// Multi holds multi-valued condition keys scoped to this resource, merged over the
+	// request-level ones. Auto Scaling's tagging actions are the one user: a request tagging
+	// several groups reports each group's own aws:TagKeys (#1460). Nil everywhere else.
+	Multi map[string][]string
 }
 
 // buildResourceARNs returns every resource the request names, each paired with
@@ -980,6 +996,11 @@ func (a *AuthController) buildResourceARNs(reqCtx *RequestContext, req *AWSReque
 	}
 	if req.Service == elbServiceName {
 		if multi := elbAuthzResources(a.state, reqCtx, req); len(multi) > 0 {
+			return multi
+		}
+	}
+	if req.Service == autoscalingNamespace {
+		if multi := asgAuthzTagResources(a.state, reqCtx, req); len(multi) > 0 {
 			return multi
 		}
 	}
@@ -1129,6 +1150,8 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		// cfgsvcAuthzResourceARN for why an operation naming a *list* of resources
 		// resolves to "*" rather than to one arbitrary member of the list.
 		return cfgsvcAuthzResourceARN(reqCtx, req)
+	case autoscalingNamespace:
+		return asgAuthzResourceARN(a.state, reqCtx, req)
 	default:
 		return "*"
 	}
@@ -1174,6 +1197,12 @@ func authzResourceTagPrefixes(service string) []string {
 		// condition on a describe unsatisfiable, and AWS's own list of what counts as
 		// mutating is not published operation by operation.
 		return []string{authzAWSResourceTagPrefix, elbResourceTagPrefix}
+	case autoscalingNamespace:
+		// The Service Authorization Reference lists both autoscaling:ResourceTag/${TagKey}
+		// and aws:ResourceTag/${TagKey} as condition keys of the autoScalingGroup resource
+		// type, and the Auto Scaling user guide's own sample policies condition on the
+		// service-specific form (#1460).
+		return []string{authzAWSResourceTagPrefix, "autoscaling:ResourceTag/"}
 	}
 	return []string{authzAWSResourceTagPrefix}
 }
@@ -1297,6 +1326,13 @@ func (a *AuthController) resourceTagsFor(reqCtx *RequestContext, req *AWSRequest
 		// disagree about which resource a request names.
 		tags = cfgsvcAuthzResourceTags(a.state, reqCtx, req)
 
+	case autoscalingNamespace:
+		// The group buildResourceARN resolves, through the same helper, so the tags
+		// belong to the ARN the decision is made about (#1460).
+		if g := asgAuthzGroup(a.state, reqCtx, req); g != nil {
+			tags = g.tagMap()
+		}
+
 	default:
 		return nil
 	}
@@ -1401,6 +1437,18 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 		// that is the whole point of the second decision.
 		for k, v := range elbAuthzRequestTags(req) {
 			condCtx["aws:RequestTag/"+k] = v
+		}
+
+	case autoscalingNamespace:
+		// Auto Scaling tags arrive as Tags.member.N.Key / .Value on CreateAutoScalingGroup,
+		// CreateOrUpdateTags and DeleteTags — the three actions the Service Authorization
+		// Reference gives aws:RequestTag/${TagKey} and aws:TagKeys (#1460). The two tagging
+		// actions can name several groups, so their request tags are scoped per group by
+		// [asgAuthzTagResources] instead of being reported here for every group at once.
+		if req.Operation == "CreateAutoScalingGroup" {
+			for _, t := range asgParseTags(req.Params) {
+				condCtx["aws:RequestTag/"+t.Key] = t.Value
+			}
 		}
 
 	case "s3":

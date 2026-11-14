@@ -122,6 +122,7 @@ var serviceErrorProtocols = map[string]awsErrorProtocol{
 	// cloudfront and route53 are REST-XML like S3 but stay here deliberately:
 	// their real error documents are <ErrorResponse>, so the Query shape is
 	// already byte-correct for them. Only S3 returns a bare <Error>.
+	"autoscaling":          errProtoQueryXML,
 	"cloudformation":       errProtoQueryXML,
 	"cloudfront":           errProtoQueryXML,
 	"elasticache":          errProtoQueryXML,

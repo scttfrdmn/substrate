@@ -1,0 +1,380 @@
+{
+  "Name": "autoscaling",
+  "Version": "v1.5",
+  "Actions": [
+    {
+      "Name": "AttachInstances",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "AttachLoadBalancerTargetGroups",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "AttachLoadBalancers",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "AttachTrafficSources",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "BatchDeleteScheduledAction",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "BatchPutScheduledUpdateGroupAction",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "CancelInstanceRefresh",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "CompleteLifecycleAction",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "CreateAutoScalingGroup",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "CreateLaunchConfiguration",
+      "Resources": [
+        "launchConfiguration"
+      ]
+    },
+    {
+      "Name": "CreateOrUpdateTags",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteAutoScalingGroup",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteLaunchConfiguration",
+      "Resources": [
+        "launchConfiguration"
+      ]
+    },
+    {
+      "Name": "DeleteLifecycleHook",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteNotificationConfiguration",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeletePolicy",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteScheduledAction",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteTags",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DeleteWarmPool",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DescribeAccountLimits",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAccountSettings",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAdjustmentTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAutoScalingGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAutoScalingInstances",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeAutoScalingNotificationTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeInstanceRefreshes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLaunchConfigurations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLifecycleHookTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLifecycleHooks",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancerTargetGroups",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeLoadBalancers",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeMetricCollectionTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeNotificationConfigurations",
+      "Resources": []
+    },
+    {
+      "Name": "DescribePolicies",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeScalingActivities",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeScalingProcessTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeScheduledActions",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTags",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTerminationPolicyTypes",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeTrafficSources",
+      "Resources": []
+    },
+    {
+      "Name": "DescribeWarmPool",
+      "Resources": []
+    },
+    {
+      "Name": "DetachInstances",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DetachLoadBalancerTargetGroups",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DetachLoadBalancers",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DetachTrafficSources",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "DisableMetricsCollection",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "EnableMetricsCollection",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "EnterStandby",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "ExecutePolicy",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "ExitStandby",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "GetPredictiveScalingForecast",
+      "Resources": []
+    },
+    {
+      "Name": "LaunchInstances",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "PutAccountSetting",
+      "Resources": []
+    },
+    {
+      "Name": "PutLifecycleHook",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "PutNotificationConfiguration",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "PutScalingPolicy",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "PutScheduledUpdateGroupAction",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "PutWarmPool",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "RecordLifecycleActionHeartbeat",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "ResumeProcesses",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "RollbackInstanceRefresh",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "SetDesiredCapacity",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "SetInstanceHealth",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "SetInstanceProtection",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "StartInstanceRefresh",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "SuspendProcesses",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "TerminateInstanceInAutoScalingGroup",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    },
+    {
+      "Name": "UpdateAutoScalingGroup",
+      "Resources": [
+        "autoScalingGroup"
+      ]
+    }
+  ],
+  "Resources": [
+    {
+      "Name": "autoScalingGroup",
+      "ARNFormats": [
+        "arn:${Partition}:autoscaling:${Region}:${Account}:autoScalingGroup:${GroupId}:autoScalingGroupName/${GroupFriendlyName}"
+      ]
+    },
+    {
+      "Name": "launchConfiguration",
+      "ARNFormats": [
+        "arn:${Partition}:autoscaling:${Region}:${Account}:launchConfiguration:${Id}:launchConfigurationName/${LaunchConfigurationName}"
+      ]
+    }
+  ]
+}
