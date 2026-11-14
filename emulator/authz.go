@@ -1387,8 +1387,21 @@ func addRequestTags(condCtx map[string]string, req *AWSRequest) {
 		}
 
 	case "s3":
-		// S3 tags arrive in the x-amz-tagging header as URL-encoded key=value pairs.
-		tagging := req.Headers["x-amz-tagging"]
+		// CreateBucket's tags arrive in its CreateBucketConfiguration body (#1463). The
+		// body is decoded with the parser the handler uses, so the condition and the
+		// stored set cannot disagree; a malformed body contributes nothing here and is
+		// refused by the handler.
+		if _, _, op := parseS3Operation(req); op == "CreateBucket" {
+			if cfg, errResp := parseCreateBucketConfiguration(req); errResp == nil {
+				for _, t := range cfg.Tags.Tags {
+					condCtx["aws:RequestTag/"+t.Key] = t.Value
+				}
+			}
+		}
+		// Object tags arrive in the x-amz-tagging header as URL-encoded key=value pairs,
+		// read case-insensitively: an in-process request has not always been through
+		// net/http's canonicalization (#1434).
+		tagging := headerValueFold(req.Headers, "x-amz-tagging")
 		if tagging == "" {
 			return
 		}
