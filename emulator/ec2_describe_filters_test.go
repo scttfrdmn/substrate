@@ -116,10 +116,11 @@ func TestEC2_VPCFilters_EvaluatedNamesSelect(t *testing.T) {
 	owner := ec2DescribeVPCs(t, ts, map[string]string{"Action": "DescribeVpcs", "VpcId.1": wanted})[0].OwnerID
 	require.NotEmpty(t, owner, "ownerId must be rendered for the owner-id filter to be readable")
 
-	// state and owner-id are the same on both VPCs, so they pin that a *matching* filter
-	// does not exclude — the complement of the single-selection rows below.
-	assert.Len(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "state", "available")), 2)
-	assert.Len(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "owner-id", owner)), 2)
+	// state and owner-id are the same on all three VPCs — the two created here and the
+	// account's seeded default VPC (#1464) — so they pin that a *matching* filter does not
+	// exclude, the complement of the single-selection rows below.
+	assert.Len(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "state", "available")), 3)
+	assert.Len(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "owner-id", owner)), 3)
 
 	for _, tc := range []struct{ name, filter, value string }{
 		{"cidr", "cidr", "10.9.0.0/16"},
@@ -152,9 +153,13 @@ func TestEC2_VPCFilters_IsDefaultAndNonMatchingValues(t *testing.T) {
 		"a filter no VPC matches selects nothing, not everything")
 	assert.Empty(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "owner-id", "000000000001")),
 		"another account owns no VPC here")
-	assert.Empty(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "is-default", "true")),
-		"a created VPC is not the default one")
-	assert.Len(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "is-default", "false")), 1)
+	defaults := ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "is-default", "true"))
+	require.Len(t, defaults, 1, "is-default=true selects the seeded default VPC alone (#1464)")
+	assert.True(t, defaults[0].IsDefault)
+	assert.Equal(t, "172.31.0.0/16", defaults[0].CIDRBlock)
+	created := ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "is-default", "false"))
+	require.Len(t, created, 1, "a created VPC is not the default one")
+	assert.Equal(t, "10.9.0.0/16", created[0].CIDRBlock)
 }
 
 // TestEC2_VPCFilters_InertNameSelectsEverything pins that a documented name substrate cannot
@@ -168,7 +173,8 @@ func TestEC2_VPCFilters_InertNameSelectsEverything(t *testing.T) {
 	for _, filter := range []string{"dhcp-options-id", "cidr-block-association.cidr-block", "ipv6-cidr-block-association.state"} {
 		t.Run(filter, func(t *testing.T) {
 			items := ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", filter, "nothing-matches-this"))
-			assert.Len(t, items, 1, "an inert filter is accepted and constrains nothing")
+			assert.Len(t, items, 2, "an inert filter is accepted and constrains nothing: "+
+				"the created VPC and the default one")
 		})
 	}
 }
@@ -296,8 +302,21 @@ func TestEC2_InternetGatewayFilters_AllSixEvaluated(t *testing.T) {
 	owner := ec2DescribeIGWs(t, ts, map[string]string{"Action": "DescribeInternetGateways"})[0].OwnerID
 	require.NotEmpty(t, owner)
 
+	// attachment.state is shared with the default VPC's gateway (#1464), so it is
+	// asserted with the attachment.vpc-id it is ANDed with in practice.
+	t.Run("attachment.state", func(t *testing.T) {
+		items := ec2DescribeIGWs(t, ts, map[string]string{
+			"Action":        "DescribeInternetGateways",
+			"Filter.1.Name": "attachment.state", "Filter.1.Value.1": "available",
+			"Filter.2.Name": "attachment.vpc-id", "Filter.2.Value.1": vpcID,
+		})
+		require.Len(t, items, 1)
+		assert.Equal(t, attached, items[0].InternetGatewayID)
+		assert.Len(t, ec2DescribeIGWs(t, ts, ec2OneFilter("DescribeInternetGateways",
+			"attachment.state", "available")), 2, "the default VPC's gateway is attached too")
+	})
+
 	for _, tc := range []struct{ name, filter, value string }{
-		{"attachment.state", "attachment.state", "available"},
 		{"attachment.vpc-id", "attachment.vpc-id", vpcID},
 		{"internet-gateway-id", "internet-gateway-id", attached},
 		{"tag by key and value", "tag:Env", "prod"},
@@ -312,7 +331,7 @@ func TestEC2_InternetGatewayFilters_AllSixEvaluated(t *testing.T) {
 
 	t.Run("owner-id selects both", func(t *testing.T) {
 		items := ec2DescribeIGWs(t, ts, ec2OneFilter("DescribeInternetGateways", "owner-id", owner))
-		assert.Len(t, items, 2, "both gateways belong to the requesting account")
+		assert.Len(t, items, 3, "all three gateways, the default VPC's included, belong to the requesting account")
 	})
 
 	t.Run("an unattached gateway matches no attachment filter", func(t *testing.T) {

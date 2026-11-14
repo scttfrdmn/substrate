@@ -19,9 +19,9 @@ import (
 // Two decisions here are substrate's reading, and each has a test below that pins it rather than
 // leaving it to be rediscovered:
 //
-//   - A name is matched **account-wide**, not scoped to the default VPC. Substrate creates its
-//     default VPC lazily, only when a launch path asks for one, so a default-VPC scope would make
-//     the parameter answer nothing in a fresh account.
+//   - A name is matched **account-wide**, not scoped to the default VPC — kept even now that the
+//     default VPC is seeded on an account's first request (#1464), so the default group named
+//     "default" is one of the groups an unqualified describe answers.
 //   - A name matching nothing answers an **empty set**, not InvalidGroup.NotFound. The
 //     operation's Errors section is empty and EC2's client-error table describes that code as a
 //     missing security group *ID*, so refusing would mean inventing wording AWS does not publish
@@ -85,9 +85,9 @@ func TestEC2_DescribeSecurityGroups_GroupNameNarrows(t *testing.T) {
 		want   []string
 	}{
 		{
-			name:   "no selector answers every group",
+			name:   "no selector answers every group, the default VPC's included",
 			params: nil,
-			want:   []string{"web", "db", "cache"},
+			want:   []string{"default", "web", "db", "cache"},
 		},
 		{
 			name:   "one indexed name",

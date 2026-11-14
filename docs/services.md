@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1068 operations**. This
+Substrate ships **67 built-in service plugins** routing **1073 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -40,7 +40,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 19 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 20 | Config | `config` | JSON | 25 |
 | 21 | DynamoDB | `dynamodb` | JSON | 26 |
-| 22 | EC2 / VPC | `ec2` | Query | 92 |
+| 22 | EC2 / VPC | `ec2` | Query | 97 |
 | 23 | ECR | `ecr` | JSON | 26 |
 | 24 | ECS | `ecs` | JSON | 21 |
 | 25 | EFS | `efs` | REST/JSON | 13 |
@@ -7704,7 +7704,7 @@ DynamoDB write operations: $0.00000125 per WCU. Read operations: $0.00000025 per
 
 ### Supported operations
 
-**All 92 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
+**All 97 operations the EC2 plugin routes have a row below.** The table and the plugin's dispatch
 switch agree in both directions — no row names an action the switch does not handle, and no action
 the switch handles is missing a row. Thirty-six of the rows were added by
 [#1094](https://github.com/scttfrdmn/substrate/issues/1094), which is also where the count came
@@ -7714,8 +7714,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | Auto-creates default VPC (172.31.0.0/16); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); eleven filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); thirteen filters, `instance-lifecycle` and `spot-instance-request-id` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honored-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids); answers `pending` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
@@ -7724,20 +7724,22 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
+| CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
+| CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport` and `EnableDnsHostnames` are the two modelled attributes; `EnableNetworkAddressUsageMetrics` is unread. **Both are read under a parameter name AWS does not publish** — `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends — so a modify is answered `return=true` and discarded ([#1151](https://github.com/scttfrdmn/substrate/issues/1151)). Neither attribute is readable back either way: `DescribeVpcs` publishes no member for them, and `DescribeVpcAttribute` is not routed. The two published combination rules — not both attributes in one request, and hostnames only where support is already enabled — are not enforced |
-| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again. Dependencies are not checked — AWS's `DependencyViolation` is not raised, and the VPC's subnets, groups and gateways stay listed |
 | CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. **It too is read under an unpublished parameter name** (`MapPublicIPOnLaunch.Value`), so a modify is answered `return=true` and discarded ([#1151](https://github.com/scttfrdmn/substrate/issues/1151)). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateSecurityGroup | |
-| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`) — see [Security group tags and rules](#security-group-tags-and-rules) |
+| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
 | AuthorizeSecurityGroupEgress | Supports destination security groups |
-| RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source |
-| RevokeSecurityGroupEgress | |
+| RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source, and removes [each named source on its own](#security-group-tags-and-rules), not the permission it was authorized in; a rule the group does not hold is `InvalidPermission.NotFound` outside the default VPC and `unknownIpPermissionSet` inside it. `SecurityGroupRuleId.N` is unread |
+| RevokeSecurityGroupEgress | As `RevokeSecurityGroupIngress` |
 | CreateInternetGateway | Renders the same gateway `DescribeInternetGateways` does — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | AttachInternetGateway | |
 | DetachInternetGateway | `InternetGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the named VPC is removed from the gateway's `attachmentSet`, so the detach is visible through `DescribeInternetGateways`. `VpcId` is `Required: Yes` on the page but is read without being resolved, so a detach naming a VPC the gateway is not attached to removes nothing and still answers `return=true`. AWS's precondition — *"The VPC must not contain any running instances with Elastic IP addresses or public IPv4 addresses"* — is not enforced |
@@ -7749,6 +7751,9 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceTypeOfferings | `instance-type` and `location` filters (both with [wildcards](#wildcards-in-filter-values)) and the `LocationType` parameter; an unmatched filter is an empty answer, not an error. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range and counting offerings rather than types — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — one of the three converted describes with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
+| RequestSpotInstances | Launches `InstanceCount` Spot Instances from `LaunchSpecification`, one request per instance, active/`fulfilled` at once — see [Spot Instance requests](#spot-instance-requests). `TagSpecification.N` must be `spot-instances-request` |
+| DescribeSpotInstanceRequests | `SpotInstanceRequestId.N` asserts existence (`InvalidSpotInstanceRequestID.NotFound`); twenty-two of forty filters, `state`, `instance-id` and `tag:<key>` among them; paginates on `MaxResults`/`NextToken` with no published range; fulfills an open request a cleared seed no longer blocks — see [Spot Instance requests](#spot-instance-requests) |
+| CancelSpotInstanceRequests | Moves each request to `cancelled` without terminating its instance; an unknown ID cancels nothing — see [Spot Instance requests](#spot-instance-requests) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
 | ReplaceRouteTableAssociation | Both IDs resolve before anything is written: an unknown `RouteTableId` is refused through [the route-table kind](#explicit-resource-ids) and an `AssociationId` naming nothing answers `InvalidAssociationID.NotFound`/400 — the ordering #713 fixed, since the refusals used to sit after the source association had already been removed, so a bogus target destroyed the association it was asked to move. A fresh `rtbassoc-` is minted on replacement, matching AWS, and the subnet and main-table flag move with it |
@@ -7803,7 +7808,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | CreateCapacityReservation | Reserves capacity **immediately**, in `active` state, and returns the whole `capacityReservation` structure. `InstanceCount`, `InstancePlatform` and `InstanceType` are the only required parameters — `AvailabilityZone` is not one — and `InstanceCount` is range-checked 1–1000. Honours `TagSpecification.N`. `EndDateType` is inferred from `EndDate` rather than defaulted; a **future-dated** reservation is refused rather than answered falsely, and the outcome is [seedable](#seeding-a-capacity-reservation-outcome) — see [A Capacity Reservation is never consumed](#a-capacity-reservation-is-never-consumed) |
 | DescribeCapacityReservations | `CapacityReservationId.N` is **singular** and narrows rather than asserting, while a malformed ID is refused; **all twelve** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — the page documents **no tag filter**, so use `DescribeTags`. `MaxResults` 1–1000 and `NextToken` through the [shared paginator](#one-offset-paginator-shared). A reservation past its `EndDate` reports `expired`, derived from the simulated clock |
 | CancelCapacityReservation | Sets the state to `cancelled` and releases the capacity, so `availableInstanceCount` becomes zero while `totalInstanceCount` keeps reporting what was reserved. A well-formed ID naming nothing answers `InvalidCapacityReservationId.NotFound`; a second cancel answers `IncorrectState`, which is [substrate's reading](#a-capacity-reservation-is-never-consumed) |
-| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all sixteen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
+| CreateTags | Rejects [reserved `aws:` keys](#reserved-tag-keys), [over-long keys and values](#tag-key-and-value-length-limits), and more than [50 tags per resource](#the-50-tag-per-resource-limit); reaches [all seventeen taggable ID prefixes](#every-taggable-id-prefix-is-reachable) and refuses anything else with `InvalidID`; [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DeleteTags | Rejects [reserved `aws:` keys](#reserved-tag-keys) and [over-long keys](#tag-key-and-value-length-limits); resolves [the same sixteen prefixes](#every-taggable-id-prefix-is-reachable); [authorized against every resource named](#tagging-is-authorized-against-every-resource-it-names) |
 | DescribeTags | Every tag in the region, across [the same sixteen resource types `CreateTags` writes](#every-taggable-id-prefix-is-reachable). Five filters with **wildcards**, `MaxResults` 5–1000 and `NextToken` (through the [shared paginator](#one-offset-paginator-shared)), and a deterministic order — see [Finding a resource by tag](#finding-a-resource-by-tag) |
 
@@ -7868,12 +7873,13 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 
 | Operation | Evaluated | Documented but inert |
 |---|---|---|
-| DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 125 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
+| DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-lifecycle`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `spot-instance-request-id`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 123 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
 | DescribeImages | `architecture`, `block-device-mapping.snapshot-id`, `description`, `hypervisor`, `image-id`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state`, `tag-key`, `tag:<key>`, `virtualization-type` | the other 25 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `creation-date`, the ENA/sriov and kernel/ramdisk names, the Allowed-AMIs and Free-Tier markers and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
 | DescribeSnapshots | `description`, `encrypted`, `owner-id`, `progress`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `storage-tier`, `transfer-type` |
 | DescribeSubnets | `availability-zone`, `cidr-block`, `default-for-az`, `map-public-ip-on-launch`, `owner-id`, `state`, `subnet-arn`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id`, plus AWS's four alias spellings `availabilityZone`, `cidr`, `cidrBlock` and `defaultForAz` | `availability-zone-id`/`availabilityZoneId`, `available-ip-address-count`, `customer-owned-ipv4-pool`, `enable-dns64`, `enable-lni-at-device-index`, `ipv6-native`, `map-customer-owned-ip-on-launch`, `outpost-arn`, and the three `ipv6-cidr-block-association.*` and three `private-dns-name-options-on-launch.*` filters |
-| DescribeSecurityGroups | `group-id`, `group-name`, `vpc-id` | `description`, `owner-id`, `tag-key`, `tag:<key>`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters |
+| DescribeSecurityGroups | `description`, `group-id`, `group-name`, `owner-id`, `tag-key`, `tag:<key>`, `vpc-id`, and the twenty `ip-permission.*`/`egress.ip-permission.*` rule filters — **all of them** (#1440) | — |
+| DescribeSpotInstanceRequests | `availability-zone-group`, `create-time`, `fault-code`, `fault-message`, `instance-id`, `launch-group`, `launch.group-id`, `launch.image-id`, `launch.instance-type`, `launch.key-name`, `launched-availability-zone`, `network-interface.subnet-id`, `product-description`, `spot-instance-request-id`, `spot-price`, `state`, `status-code`, `status-message`, `tag-key`, `tag:<key>`, `type`, `valid-until` | the five `launch.block-device-mapping.*` filters, `launch.group-name`, `launch.kernel-id`, `launch.monitoring-enabled`, `launch.ramdisk-id`, `launched-availability-zone-id`, the other seven `network-interface.*` filters, and `valid-from` |
 | DescribeRouteTables | `association.route-table-id`, `association.subnet-id`, `vpc-id` | `association.gateway-id`, `association.main`, `association.route-table-association-id`, `owner-id`, `route-table-id`, `tag-key`, `tag:<key>`, and the eleven `route.*` filters |
 | DescribeNatGateways | `state`, `vpc-id` | `nat-gateway-id`, `subnet-id`, `tag-key`, `tag:<key>` |
 | DescribeFleets | `activity-status`, `fleet-state`, `type` | `excess-capacity-termination-policy`, `replace-unhealthy-instances` |
@@ -8137,8 +8143,15 @@ EC2 does:
 | The value | Answer |
 |---|---|
 | `ami-` + a run of lowercase hex naming an AMI substrate can resolve | the launch proceeds |
-| `ami-` + a run of lowercase hex naming nothing | `InvalidAMIID.NotFound` / "The image ID '…' does not exist", HTTP 400 |
+| `ami-` + a run of lowercase hex naming nothing | `InvalidAMIID.NotFound` / "The image ID '…' does not exist. No image with this ID is registered in this account and Region: register one with RegisterImage, or launch a public AMI resolved from an SSM public parameter such as /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64 (DescribeImages with Owner=amazon lists them)", HTTP 400 |
 | anything else — `not-an-ami`, `ami-EXAMPLE`, `ami-zzzzzzzz`, a bare `ami-` | `InvalidAMIID.Malformed` / `Invalid id: "…"`, HTTP 400 |
+
+The not-found message names where an AMI comes from as of
+[#1432](https://github.com/scttfrdmn/substrate/issues/1432): a fresh server holds no image the
+account owns, so a test launching from a fabricated `ami-12345678` fails here, and the code alone
+pointed at the ID rather than at the missing step. The code and the leading sentence are unchanged,
+so a caller dispatching on either is unaffected; `DescribeImages` with `Owner=amazon` lists the
+[bundled AMIs](#which-amis-resolve) a launch can name.
 
 Syntax is reported before absence, as everywhere else substrate names an EC2
 resource — see [Explicit resource IDs](#explicit-resource-ids), whose table this
@@ -8255,14 +8268,24 @@ inventing a literal.
 
 Two things follow from bundled images living outside state.
 
-- **They are not enumerated.** `DescribeImages` lists what the account owns, and a
-  public AWS-owned AMI is not that, so an unqualified `DescribeImages` does not
-  return them. This is substrate's reading, not AWS's behaviour — real AWS would
-  return every public image, tens of thousands of them. A bundled AMI is
-  resolvable and nameable; it is not inventory. Naming one in `ImageId.N` does
-  answer with it, because a describe and a launch must agree about which AMIs
-  exist — see [Explicit resource IDs](#explicit-resource-ids), whose rules
-  `DescribeImages` follows for every other ID.
+- **They are listed by owner, not unqualified.** `DescribeImages` with `Owner.N=amazon` lists
+  the seven AWS-published entries — every row above but the two Canonical Ubuntu images, which
+  carry no owner alias — and applies the request's filters to them, so the discovery AWS's own
+  examples use (`Owners=amazon` and a `name` filter) finds an AMI on a fresh server
+  ([#1432](https://github.com/scttfrdmn/substrate/issues/1432)). An *unqualified*
+  `DescribeImages` still lists only what the account owns: real AWS would return every public
+  image, tens of thousands of them, and substrate's reading keeps the unqualified answer meaning
+  what it meant. Naming a bundled AMI in `ImageId.N` answers with it too, because a describe and
+  a launch must agree about which AMIs exist — see [Explicit resource
+  IDs](#explicit-resource-ids). The full `Owner.N` reading:
+
+  | `Owner.N` value | Selects |
+  |---|---|
+  | `self`, or the caller's account ID | the images the account registered or created |
+  | `amazon` | the bundled AMIs published under that alias |
+  | anything else — another account ID, `aws-marketplace`, `aws-backup-vault` | nothing substrate holds |
+
+  Several values union. `ExecutableBy.N` remains unread.
 - **They are not the caller's.** A bundled image reports no owner, so it is not
   taggable, an `Owners=self` describe does not match it, and the `owner-id` filter
   selects nothing for it. It reports `imageOwnerAlias` instead where AWS publishes
@@ -8476,7 +8499,7 @@ Precedence when the same value is available from several sources, matching AWS:
 | The request itself — `SubnetId`, or the primary `NetworkInterface.N.SubnetId` | everything below |
 | A `CreateFleet` override's `SubnetId` | the template (it reaches `RunInstances` as a request-level value) |
 | The launch template's network interface | the default VPC |
-| The auto-created default VPC | — |
+| The [default VPC](#the-default-vpc)'s zone-a default subnet | — |
 
 `AssociatePublicIpAddress` is three-valued, and only a non-default subnet without
 `MapPublicIPOnLaunch` distinguishes them: **absent** uses the subnet's own
@@ -8486,6 +8509,69 @@ Every declared interface is parsed, on both `RunInstances` and launch templates 
 [Multiple network interfaces](#multiple-network-interfaces). The flat fields above
 describe the **primary** interface, which is what a launch from a multi-interface
 template resolves its subnet and groups from.
+
+### The default VPC
+
+**Every account has a default VPC in each Region, seeded on its first EC2 request**
+([#1464](https://github.com/scttfrdmn/substrate/issues/1464)). Until then a fresh substrate
+held none — `DescribeVpcs` and `DescribeSubnets` answered nothing, with or without `is-default`
+and `default-for-az` — and one was created only by a `RunInstances` that named no subnet, with a
+single subnet. Tooling that places resources in the default VPC found nothing to place them in.
+
+Before the first EC2 request an account makes in a Region is dispatched, substrate writes what
+`CreateDefaultVpc` documents — "a default VPC with a size /16 IPv4 CIDR block and a default subnet
+in each Availability Zone" — and what the VPC User Guide lists alongside it:
+
+| Resource | What it is |
+|---|---|
+| VPC | `172.31.0.0/16`, `isDefault=true`, DNS support and hostnames on |
+| Subnets | one per seeded zone — `172.31.0.0/20` in `a`, `172.31.16.0/20` in `b`, `172.31.32.0/20` in `c` — each `defaultForAz=true` and `mapPublicIpOnLaunch=true` |
+| Security group | named `default`, "default VPC security group", with an all-traffic ingress rule from itself and the all-traffic egress rule |
+| Internet gateway | attached to the VPC |
+| Route table | the VPC's main one: `172.31.0.0/16 → local` and `0.0.0.0/0 →` the gateway |
+
+So the very first call — whatever it is — already sees them, and `is-default=true` and
+`default-for-az=true` select them. A launch naming no subnet uses the default subnet of its
+`Placement.AvailabilityZone` — the zone-a subnet when it names none — and the `default` group; a
+named zone with no default subnet is refused with `InvalidInput` / "No default subnet for
+availability zone: '…'", EC2's observed answer. `CreateSecurityGroup` without a `VpcId` places the
+group in the default VPC, and refuses the reserved name `default` (any case) with
+`InvalidParameterValue` / "Cannot use reserved security group name: default". Time travel
+(`/v1/debug/events/{seq}/state`) replays with the server's own `ec2.default_vpc` setting.
+
+**The identifiers derive from the account and Region**, not from the request that triggered the
+seed: one account and Region always get the same default VPC ID, and the triggering request's own
+mint is not advanced, so a recorded `CreateVpc` that was the first EC2 call in its run still mints
+the `vpc-…` it recorded. The check every later request makes is one read of a marker record.
+
+**A deleted default VPC stays deleted.** `DeleteVpc` on it leaves a tombstone in the marker, so the
+next request does not seed it again — as on AWS, where an account gets one back only by asking. A
+launch naming no subnet is then refused with `VPCIdNotSpecified` (the client-error table's "You
+have no default VPC in which to carry out the request"), and so is a `CreateSecurityGroup` naming
+no `VpcId`. `CreateDefaultVpc` recreates it, with new identifiers and every resource above, and
+clears the tombstone; `CreateDefaultSubnet` recreates one deleted default subnet, in the first
+`172.31.x.0/20` that overlaps no subnet of the VPC, and concurrent calls for one zone make one
+subnet. A default VPC
+whose default subnets are all deleted refuses a subnet-less launch with `MissingInput`, rather than
+growing a new subnet as the lazy path did.
+
+**Switching it off.** `ec2.default_vpc: false` in `substrate.yaml` (or
+`SUBSTRATE_EC2_DEFAULT_VPC=false`) starts every account and Region without a default VPC, the state
+an account whose default VPC was deleted is in; `emulator.WithoutDefaultVPC()` does the same for
+`StartTestServer`. The default is on.
+
+**Compatibility.** A fresh account now holds a VPC, three subnets, a security group, an internet
+gateway and a route table before it creates anything, so a test counting resources in a fresh
+account counts them too.
+
+**A recording made before the change does not replay identically when it relied on the old lazy
+default VPC.** The lazy path drew the default VPC's identifiers from the triggering request's own
+mint, and the seed does not, so a recorded subnet-less `RunInstances` — or any EC2 call that relied
+on the default VPC the old path created — replays to different reservation, instance, subnet and
+group IDs, and every later event naming them diverges. No compatibility shim is offered; re-record
+such a stream. A recording that names its own VPCs and subnets — one starting with `CreateVpc`, say
+— keeps its identifiers, and differs only by the seeded records a state-hash comparison sees. A
+recording made under this release replays identically, state hashes included.
 
 ### Security groups on an instance
 
@@ -8498,7 +8584,7 @@ source supplied them:
   `NetworkInterface.N.SecurityGroupId.N` / `NetworkInterface.N.Groups.N` of the
   **primary** interface.
 - The launch template's [network interface](#launch-template-networking).
-- The auto-created default VPC's `default` group, when the launch names none.
+- The [default VPC](#the-default-vpc)'s group named `default`, when the launch names none.
 
 `groupName` is **omitted when the group cannot be resolved** — for example after
 the group is deleted while the instance it was launched with still exists. The
@@ -8567,6 +8653,54 @@ Substrate's own choices, where the API model does not decide:
   state reported beside it.
 - `InterfaceType` defaults to `interface`; `efa` and `efa-only` are recorded as
   given. `NetworkCardIndex` is recorded as given and defaults to 0.
+
+### Security group tags and rules
+
+**A security group keeps its tags** ([#1440](https://github.com/scttfrdmn/substrate/issues/1440)).
+Before it, `CreateSecurityGroup` discarded `TagSpecification.N`, `DescribeSecurityGroups`
+rendered no `tagSet` — so a tag `CreateTags` had stored was unreadable too — and `tag:<key>` was
+accepted and inert, so `tag:spawn:managed=true` selected every group. Now:
+
+- `TagSpecification.N` scoped to `security-group` tags the group at creation, under the shared
+  [reserved-key](#reserved-tag-keys), [length](#tag-key-and-value-length-limits) and
+  [50-tag](#the-50-tag-per-resource-limit) rules; a specification naming another type is skipped.
+  `CreateSecurityGroup` answers the tags in `tagSet`.
+- `DescribeSecurityGroups` renders `ownerId` and `tagSet` (omitted when untagged) and evaluates
+  every filter it documents: `tag:<key>`, `tag-key`, `description`, `owner-id`, and the twenty rule
+  filters. The rule filters follow the page's own note — "the results include security groups for
+  which any combination of rules - not necessarily a single rule - match all filters" — so each
+  filter is answered against every rule in its direction, independently.
+
+**A revoke removes the sources it names**
+([#1453](https://github.com/scttfrdmn/substrate/issues/1453)). EC2 stores one rule per source.
+Substrate stores the `IpPermission` an authorize carried, and before this change a revoke naming one
+of its sources dropped the whole permission, so revoking `0.0.0.0/0` from a permission authorized
+with `0.0.0.0/0` and `10.1.0.0/16` left no rule at all. Each source a revoke names — an IPv4 range,
+an IPv6 range, a prefix list or a referenced group — is now removed on its own, from every stored
+permission with the same protocol and port range, and a permission goes only once it holds no
+source. IPv6 ranges (`Ipv6Ranges.M.CidrIpv6`) and prefix lists (`PrefixListIds.M.PrefixListId`) are
+stored and rendered as of the same change; before it, a revoke naming only an IPv6 range named no
+source and removed the first permission on its port.
+
+A revoke naming a rule the group does not hold is answered the way
+`API_RevokeSecurityGroupIngress` says, by VPC:
+
+| The group's VPC | Answer |
+|---|---|
+| a non-default VPC | `InvalidPermission.NotFound` / "The specified rule does not exist in this security group.", HTTP 400 — and **no rules are revoked**, including any the same request did match |
+| the default VPC | `return=true`, the matched sources revoked, and the rest reported in `unknownIpPermissionSet` |
+
+Before it, both answered `return=true` having removed nothing. `SecurityGroupRuleId.N` is not
+read, because substrate assigns no `sgr-` rule IDs; a revoke naming rules only by ID still answers
+`MissingParameter`. A revoke permission naming no source at all keeps its old meaning — it removes
+the first stored permission on its protocol and ports — because AWS describes no such rule.
+
+**A referenced group is stored by ID.** A `Groups.M` source named by `GroupName` alone — the
+default-VPC form, and the legacy `SourceSecurityGroupName` — is resolved to the group of that name in
+the same VPC, "The source security group must be in the same VPC", on authorize and on revoke alike,
+so a rule authorized by name is revoked by ID and the other way round. The seeded default group's
+self-reference renders `userId` and `groupId` without a `groupName`, which is the shape AWS's own
+DescribeSecurityGroups Example 4 shows for a default VPC's default group.
 
 ### Launch-time storage
 
@@ -8945,10 +9079,10 @@ unknown resource would widen the policy the caller wrote instead of narrowing it
 ##### A launch that omits `SubnetId` is authorized against the default VPC's resources
 
 A launch that names no subnet does not run without one: substrate resolves the default
-VPC's default subnet and its `default` security group — the VPC being the
-`172.31.0.0/16` one substrate auto-creates on the first launch that needs it — creating
-them when the account has none. Both are part of the decision, resolved from state
-*before* it is made:
+VPC's zone-a default subnet and its group named `default` — the VPC being the
+`172.31.0.0/16` one [seeded on the account's first EC2 request](#the-default-vpc). Both are
+part of the decision, resolved from state *before* it is made. The decision for an account's
+very first EC2 request is made before the seed, which is the "No default VPC" row:
 
 | State when the launch arrives | Subnet in the decision | Security group in the decision |
 |---|---|---|
@@ -9700,6 +9834,75 @@ terminated instance as code `48` `terminated` immediately, where real EC2 report
 `shutting-down` first and settles to `48`. A consumer polling for `shutting-down` will never
 observe it. That is tracked separately.
 
+### Spot Instance requests
+
+**`RunInstances` launches a Spot Instance, and the three Spot request operations are routed**
+([#1436](https://github.com/scttfrdmn/substrate/issues/1436)). Before it,
+`RequestSpotInstances`, `DescribeSpotInstanceRequests` and `CancelSpotInstanceRequests` answered
+`InvalidAction`, and `RunInstances` ignored `InstanceMarketOptions` — a launch asking for Spot got
+an On-Demand instance with no request behind it.
+
+`InstanceMarketOptions.MarketType=spot` on `RunInstances` — or a `RequestSpotInstances` — launches
+Spot Instances, each with its own `sir-` request, linked both ways: the instance reports
+`instanceLifecycle=spot` and `spotInstanceRequestId`, and the request reports `instanceId`. A
+request is `active` / `fulfilled` at once, where AWS passes through `pending-evaluation`; substrate
+models no evaluation delay. `TagSpecification.N` with `ResourceType=spot-instances-request` tags the
+request, and the instance takes only its own `instance`-scoped tags. `DescribeInstances` evaluates
+`instance-lifecycle` and `spot-instance-request-id`.
+
+The `SpotMarketOptions` rules `RunInstances` states are enforced: `SpotInstanceType` is `one-time`
+or `persistent`, `InstanceInterruptionBehavior` is `hibernate`, `stop` or `terminate`, a `MaxPrice`
+must be more than USD $0.001 (`InvalidParameterValue`), "persistent Spot Instance requests are only
+supported when the instance interruption behavior is either hibernate or stop", and `ValidUntil` is
+"Supported only for persistent requests" (both `InvalidParameterCombination`, a code substrate
+chose — the page publishes none). `RequestSpotInstances` allows a persistent `terminate` request, as
+its own page does, and defaults a one-time request's `ValidUntil` to seven days from creation.
+
+**What each request goes through**, using the status codes of the EC2 User Guide's "Spot request
+status" list:
+
+| Event | Request state | Status code |
+|---|---|---|
+| Launched | `active` | `fulfilled` |
+| `CancelSpotInstanceRequests`, instance running | `cancelled` | `request-canceled-and-instance-running` |
+| `CancelSpotInstanceRequests`, no instance | `cancelled` | `canceled-before-fulfillment` |
+| Its instance terminated — a one-time request, or a persistent one past `ValidUntil` | `closed` | `instance-terminated-by-user` |
+| Its instance terminated — a cancelled request | `cancelled` | `instance-terminated-by-user` |
+| Its instance terminated — an active persistent request | `active`, with a **replacement** | `fulfilled` |
+
+"Canceling a Spot Instance request does not terminate running Spot Instances associated with the
+request." The last row is the behaviour a cancel-before-terminate path exists for: terminating the
+instance of an active persistent request launches a replacement from the request's own launch —
+**with no tags**, since a launch specification carries none — and moves the request's `instanceId`
+to it, inside the same `TerminateInstances` call. A cancelled request launches nothing. A
+replacement the launch refuses (its AMI deregistered since, say) leaves the request `open` with
+`bad-parameters`.
+
+**An open request is re-evaluated on observation.** Each `DescribeSpotInstanceRequests` looks at
+every request a [seeded outcome](#seeding-a-spot-request-outcome) left `open`: once no seed blocks
+its instance type it is fulfilled — an instance launched from its recorded launch, the request
+`active`/`fulfilled` — and once its `ValidUntil` has passed it is `closed` with `schedule-expired`.
+So a wait-for-fulfillment loop terminates when the seed is cleared, and a replay of the same
+describe launches the same instance.
+
+**CreateFleet's Spot pools launch Spot Instances** — `instanceLifecycle=spot`, so
+`instance-lifecycle=spot` selects them — without a `sir-` request: CreateFleet publishes no Spot
+Instance request, and the fleet record is what tracks the capacity. The request-outcome seed does
+not apply to them; a fleet's shortfall has [its own](#seeding-ec2-fleet-partial-fulfillment).
+
+`DescribeSpotInstanceRequests` asserts existence on `SpotInstanceRequestId.N`
+(`InvalidSpotInstanceRequestID.NotFound`, `.Malformed`), evaluates twenty-two of its forty
+filters (see [What is refused, and what is merely inert](#what-is-refused-and-what-is-merely-inert)),
+and paginates on `MaxResults`/`NextToken` — with no ceiling, because the page publishes no Valid
+Range, only a recommendation. `CancelSpotInstanceRequests` resolves every ID before cancelling any,
+so an unknown one cancels nothing. `CreateTags` reaches a request by its `sir-` ID.
+
+Not modeled: Spot pricing, interruption and rebalance notices — an instance runs until something
+terminates it — `ValidFrom`, `BlockDurationMinutes`, launch-group and Availability-Zone-group
+enforcement (both are recorded and filterable), and the deletion of a request "four hours after
+they are canceled and their instances are terminated". A capacity shortfall is
+[seedable](#seeding-a-spot-request-outcome) instead.
+
 ### MinCount and MaxCount
 
 A count that is **present but invalid** fails with `InvalidParameterValue`,
@@ -10128,11 +10331,11 @@ unions with `GroupId.N` like the [other paired identity
 parameters](#twelve-describes-gained-filters). Two things about it are substrate's reading:
 
 - **A name is matched account-wide**, where AWS scopes the parameter to the default VPC
-  ("[Default VPC] The names of the security groups"). Substrate does model a default VPC, but
-  creates it *lazily* — only when a launch path asks for one — so scoping the parameter to it
-  would make `GroupName.N` answer nothing at all in a fresh account. That is the same
-  invisible-wrong-answer failure as the superset it replaces, in the other direction. A
-  consequence: a name may legitimately match **several** groups here, because
+  ("[Default VPC] The names of the security groups"). The scope was first declined because
+  substrate created its default VPC lazily, so scoping the parameter to it would have answered
+  nothing in a fresh account. The default VPC is [seeded eagerly](#the-default-vpc) as of #1464,
+  and the reading is kept anyway: narrowing it now would refuse lookups of groups in other VPCs
+  that callers make here today, a behavior change of its own. A consequence: a name may legitimately match **several** groups here, because
   `CreateSecurityGroup` enforces no name uniqueness where AWS's is per-VPC. Narrow with the
   `vpc-id` filter, which composes with the name.
 - **A name matching nothing answers an empty set**, not `InvalidGroup.NotFound`. This
@@ -10143,12 +10346,9 @@ parameters](#twelve-describes-gained-filters). Two things about it are substrate
   contract either way: a malformed `GroupId.N` is refused before the walk and an unresolved one
   after it, whether or not a name selected something.
 
-`DescribeImages` also does not read `Owner.N` or `ExecutableBy.N`. Substrate stores only
-images the account owns, so `self` is the answer to every describe and AWS's other three
-`Owner` values — `amazon`, `aws-marketplace`, another account ID — select sets substrate
-does not model. Reading the parameter would let a caller believe a narrowing happened. A
-bundled public AMI is reachable by naming its ID, which is the case generated IaC
-actually produces; see [Which AMIs resolve](#which-amis-resolve).
+`DescribeImages` reads `Owner.N` as of #1432 — `self` and the caller's account ID select its
+own images, `amazon` the bundled catalog, anything else nothing — and still does not read
+`ExecutableBy.N`; see [Which AMIs resolve](#which-amis-resolve).
 
 Both ID lists are read in every form AWS accepts — `VolumeId.1`, `VolumeId.2`, … and the
 un-indexed `VolumeId` — and an explicitly empty value is an ID the caller sent, so it is
@@ -10827,8 +11027,9 @@ nothing. Every one of the five was well-formed and named a resource substrate st
 there was no way for a caller to tell — the answer a consumer's tag-everything step reads is
 the same answer it gets when the tags land.
 
-Sixteen prefixes now resolve, on `CreateTags` and `DeleteTags` alike — the fifteen the
-resolution below covers, and `cr-` with the Capacity Reservation operations (#891):
+Seventeen prefixes now resolve, on `CreateTags` and `DeleteTags` alike — the fifteen the
+resolution below covers, `cr-` with the Capacity Reservation operations (#891), and `sir-` with
+the Spot Instance request operations (#1436):
 
 | Prefix | Resource type | Prefix | Resource type |
 |---|---|---|---|
@@ -10840,6 +11041,7 @@ resolution below covers, and `cr-` with the Capacity Reservation operations (#89
 | `rtb-` | `route-table` | `key-` | `key-pair` |
 | `eipalloc-` | `elastic-ip` | `vol-` | `volume` |
 | `nat-` | `natgateway` | `cr-` | `capacity-reservation` |
+| `sir-` | `spot-instances-request` | | |
 
 **A prefix naming no taggable type is now refused** rather than ignored, before anything is
 written:
@@ -11454,6 +11656,40 @@ for a pagination loop to exercise will not find one; `NextToken` is still parsed
 malformed, as at every other paginated EC2 describe.
 
 `DryRun` is accepted and inert, as it is at every EC2 operation substrate routes.
+
+### Seeding a Spot request outcome
+
+A Spot launch is fulfilled by default. The branch a consumer's wait loop exists for — no capacity,
+so the request stays open — is unreachable without a seed:
+
+```bash
+# Every Spot launch of p4d.24xlarge goes unfulfilled; other types are untouched.
+curl -X POST http://localhost:4566/v1/ec2/spot-request-outcomes \
+  -d '{"instanceType":"p4d.24xlarge","statusCode":"capacity-not-available"}'
+
+# Every type, until cleared.
+curl -X POST http://localhost:4566/v1/ec2/spot-request-outcomes -d '{"statusCode":"price-too-low"}'
+
+# Clear one type, or every seed.
+curl -X DELETE 'http://localhost:4566/v1/ec2/spot-request-outcomes?instanceType=p4d.24xlarge'
+curl -X DELETE http://localhost:4566/v1/ec2/spot-request-outcomes
+```
+
+`statusCode` is `capacity-not-available` or `price-too-low` — the two status codes that leave a
+request `open` with no instance. A seed for the instance type wins over the `"*"` one. While one
+applies:
+
+| Path | Answer |
+|---|---|
+| `RunInstances` with `MarketType=spot` | `InsufficientInstanceCapacity`, HTTP 500 — the server-error table's code, answered at the class it publishes, as [Capacity Reservation outcomes](#seeding-a-capacity-reservation-outcome) are |
+| `RequestSpotInstances` | `InstanceCount` requests, `open`, with the seeded status and no `instanceId` |
+| A persistent request's replacement | the request reopens — `open`, the seeded status, no `instanceId` |
+
+An open request is fulfilled by the first `DescribeSpotInstanceRequests` after the seed that held it
+is cleared — see [Spot Instance requests](#spot-instance-requests).
+
+The seed is read at request time from its own namespace, so it is recorded and replayed with the
+rest of the state.
 
 ### A Capacity Reservation is never consumed
 

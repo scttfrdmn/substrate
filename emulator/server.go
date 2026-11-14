@@ -512,6 +512,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/ec2/spot-placement-scores", s.handleEC2SeedSpotPlacementScore)
 		cp.Delete("/v1/ec2/spot-placement-scores", s.handleEC2ClearSpotPlacementScore)
 
+		// EC2 Spot Instance request outcome control-plane endpoints (#1436).
+		cp.Post("/v1/ec2/spot-request-outcomes", s.handleEC2SeedSpotRequestOutcome)
+		cp.Delete("/v1/ec2/spot-request-outcomes", s.handleEC2ClearSpotRequestOutcome)
+
 		// EC2 Capacity Reservation outcome control-plane endpoints (#891).
 		cp.Post("/v1/ec2/capacity-reservation-outcomes", s.handleEC2SeedCapacityReservationOutcome)
 		cp.Delete("/v1/ec2/capacity-reservation-outcomes", s.handleEC2ClearCapacityReservationOutcome)

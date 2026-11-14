@@ -882,17 +882,18 @@ func TestEC2_Instance_ReportsAvailabilityZone(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	// RunInstances reports it directly, so no follow-up describe is needed.
+	// RunInstances reports it directly, so no follow-up describe is needed. The zone is one
+	// of the Region's own: a subnet-less launch lands in that zone's default subnet (#1464).
 	resp := ec2Request(t, ts, map[string]string{
 		"Action": "RunInstances", "MinCount": "1", "MaxCount": "1",
 		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
-		"Placement.AvailabilityZone": "us-west-2c",
+		"Placement.AvailabilityZone": "us-east-1c",
 	})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	launched, err := io.ReadAll(resp.Body)
 	require.NoError(t, resp.Body.Close())
 	require.NoError(t, err)
-	assert.Contains(t, string(launched), "<availabilityZone>us-west-2c</availabilityZone>",
+	assert.Contains(t, string(launched), "<availabilityZone>us-east-1c</availabilityZone>",
 		"RunInstances reports the placement it applied")
 
 	var out struct {
@@ -911,7 +912,7 @@ func TestEC2_Instance_ReportsAvailabilityZone(t *testing.T) {
 	body, err := io.ReadAll(described.Body)
 	require.NoError(t, described.Body.Close())
 	require.NoError(t, err)
-	assert.Contains(t, string(body), "<availabilityZone>us-west-2c</availabilityZone>",
+	assert.Contains(t, string(body), "<availabilityZone>us-east-1c</availabilityZone>",
 		"and DescribeInstances reports it too")
 }
 
@@ -924,16 +925,16 @@ func TestEC2_DescribeInstances_AvailabilityZoneFilter(t *testing.T) {
 
 	inA := runInstance(t, ts, map[string]string{
 		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
-		"Placement.AvailabilityZone": "eu-west-1a",
+		"Placement.AvailabilityZone": "us-east-1a",
 	})
 	inB := runInstance(t, ts, map[string]string{
 		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
-		"Placement.AvailabilityZone": "eu-west-1b",
+		"Placement.AvailabilityZone": "us-east-1b",
 	})
 
 	resp := ec2Request(t, ts, map[string]string{
 		"Action":        "DescribeInstances",
-		"Filter.1.Name": "availability-zone", "Filter.1.Value.1": "eu-west-1a",
+		"Filter.1.Name": "availability-zone", "Filter.1.Value.1": "us-east-1a",
 	})
 	defer resp.Body.Close() //nolint:errcheck
 	require.Equal(t, http.StatusOK, resp.StatusCode)

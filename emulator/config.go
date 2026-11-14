@@ -63,6 +63,9 @@ type Config struct {
 
 	// RDS controls RDS backend behavior.
 	RDS RDSCfg `mapstructure:"rds"`
+
+	// EC2 controls EC2 plugin behavior.
+	EC2 EC2Cfg `mapstructure:"ec2"`
 }
 
 // MetricsCfg controls Prometheus metrics exposure.
@@ -652,6 +655,15 @@ type RDSCfg struct {
 	Engine string `mapstructure:"engine"`
 }
 
+// EC2Cfg controls EC2 plugin behavior.
+type EC2Cfg struct {
+	// DefaultVPC seeds each account and Region with a default VPC — a default subnet per
+	// Availability Zone, the default security group, an attached internet gateway and a
+	// main route table — on its first EC2 request, as a real account has. Default true;
+	// false starts every account and Region without one (SUBSTRATE_EC2_DEFAULT_VPC=false).
+	DefaultVPC bool `mapstructure:"default_vpc"`
+}
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -758,6 +770,9 @@ func DefaultConfig() *Config {
 		RDS: RDSCfg{
 			Engine: "stub",
 		},
+		EC2: EC2Cfg{
+			DefaultVPC: true,
+		},
 	}
 }
 
@@ -818,6 +833,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("lambda.replay_mode", defaults.Lambda.ReplayMode)
 	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
 	v.SetDefault("rds.engine", defaults.RDS.Engine)
+	v.SetDefault("ec2.default_vpc", defaults.EC2.DefaultVPC)
 
 	// Environment variable overrides.
 	v.SetEnvPrefix("SUBSTRATE")

@@ -4,28 +4,30 @@ import (
 	"encoding/xml"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// #673's second half: a launch refused for a bad security group leaves no default VPC
-// behind.
+// #673's second half: a launch refused for a bad security group leaves nothing behind.
 //
 // runInstancesWithTags validated security-group *membership*, which needs the target
-// subnet's VPC — so the check sat below the ensureDefaultVPC branch, and a launch that
-// omitted SubnetId committed a VPC, a subnet, a security group, an internet gateway, a
-// route table and four index mutations before being refused. Two of those writes
-// swallow their own errors, so the state a refused request left behind was not even
-// guaranteed to be complete.
+// subnet's VPC — so the check sat below the default-VPC branch, and a launch that omitted
+// SubnetId committed a VPC, a subnet, a security group, an internet gateway, a route table
+// and four index mutations before being refused.
 //
-// The fix splits the check in two: existence needs nothing and runs before the first
-// write, membership keeps its place. This is reachable with no IAM configured at all,
-// so it stands on its own regardless of the authorization change beside it.
+// The fix split the check in two: existence needs nothing and runs before the first write,
+// membership keeps its place. As of #1464 the default VPC no longer comes from the launch
+// at all — it is seeded on the account's first EC2 request — so the assertion is that a
+// refused launch changes no listing, with the seeded default VPC counted on both sides.
 func TestEC2_DefaultVPC_BadSecurityGroupRefusalWritesNothing(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
+	before := ec2ListingSizes(t, ts)
+	require.Equal(t, map[string]int{"vpcs": 1, "subnets": 3, "groups": 1, "instances": 0}, before,
+		"a fresh account holds its default VPC, three default subnets and the default group")
 
 	status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
 		"Action":            "RunInstances",
@@ -39,51 +41,33 @@ func TestEC2_DefaultVPC_BadSecurityGroupRefusalWritesNothing(t *testing.T) {
 	assert.Equal(t, "The security group ID 'sg-0000000000000dead' does not exist", msg,
 		"the kind's wording since #713 routed this refusal through ec2SecurityGroupIDKind")
 
-	// Nothing the launch would have created exists. DescribeSecurityGroups is included
-	// because ensureDefaultVPC's third write is the default group itself.
-	resp := ec2Request(t, ts, map[string]string{"Action": "DescribeVpcs"})
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var vpcs struct {
-		Items []struct{} `xml:"vpcSet>item"`
-	}
-	require.NoError(t, xml.Unmarshal(body, &vpcs), string(body))
-	assert.Empty(t, vpcs.Items, "a refused launch creates no default VPC")
+	assert.Equal(t, before, ec2ListingSizes(t, ts), "a refused launch changes no listing")
+}
 
-	resp = ec2Request(t, ts, map[string]string{"Action": "DescribeSubnets"})
-	body, err = io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var subnets struct {
-		Items []struct{} `xml:"subnetSet>item"`
+// ec2ListingSizes counts the VPCs, subnets, security groups and instances the account holds,
+// for a test asserting that a refused request wrote nothing.
+func ec2ListingSizes(t *testing.T, ts *httptest.Server) map[string]int {
+	t.Helper()
+	sizes := map[string]int{}
+	for action, key := range map[string]string{
+		"DescribeVpcs": "vpcs", "DescribeSubnets": "subnets",
+		"DescribeSecurityGroups": "groups", "DescribeInstances": "instances",
+	} {
+		resp := ec2Request(t, ts, map[string]string{"Action": action})
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
+		var counted struct {
+			VPCs      []struct{} `xml:"vpcSet>item"`
+			Subnets   []struct{} `xml:"subnetSet>item"`
+			Groups    []struct{} `xml:"securityGroupInfo>item"`
+			Instances []struct{} `xml:"reservationSet>item>instancesSet>item"`
+		}
+		require.NoError(t, xml.Unmarshal(body, &counted), string(body))
+		sizes[key] = len(counted.VPCs) + len(counted.Subnets) + len(counted.Groups) + len(counted.Instances)
 	}
-	require.NoError(t, xml.Unmarshal(body, &subnets), string(body))
-	assert.Empty(t, subnets.Items, "and no default subnet")
-
-	resp = ec2Request(t, ts, map[string]string{"Action": "DescribeSecurityGroups"})
-	body, err = io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var groups struct {
-		Items []struct{} `xml:"securityGroupInfo>item"`
-	}
-	require.NoError(t, xml.Unmarshal(body, &groups), string(body))
-	assert.Empty(t, groups.Items, "and no default security group")
-
-	resp = ec2Request(t, ts, map[string]string{"Action": "DescribeInstances"})
-	body, err = io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-	var instances struct {
-		Items []struct{} `xml:"reservationSet>item>instancesSet>item"`
-	}
-	require.NoError(t, xml.Unmarshal(body, &instances), string(body))
-	assert.Empty(t, instances.Items, "and no instance")
+	return sizes
 }
 
 // TestEC2_DefaultVPC_MembershipStillRefusedAfterResolution pins the half of the check

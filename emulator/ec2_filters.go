@@ -160,7 +160,7 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 		evaluated: []string{
 			"availability-zone", "image-id", "instance-id", "instance-state-code",
 			"instance-state-name", "instance-type", "key-name", "subnet-id", "tag-key",
-			"vpc-id",
+			"vpc-id", "instance-lifecycle", "spot-instance-request-id",
 		},
 		accepted: []string{
 			"affinity", "architecture", "availability-zone-id",
@@ -174,7 +174,7 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 			"client-token", "current-instance-boot-mode", "dns-name", "ebs-optimized",
 			"ena-support", "enclave-options.enabled", "hibernation-options.configured",
 			"host-id", "hypervisor", "iam-instance-profile.arn",
-			"iam-instance-profile.id", "instance-lifecycle", "instance.group-id",
+			"iam-instance-profile.id", "instance.group-id",
 			"instance.group-name", "ip-address", "ipv6-address", "kernel-id",
 			"launch-index", "launch-time", "maintenance-options.auto-recovery",
 			"metadata-options.http-endpoint", "metadata-options.http-protocol-ipv4",
@@ -236,7 +236,7 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 			"private-dns-name-options.hostname-type", "private-ip-address",
 			"product-code", "product-code.type", "ramdisk-id", "reason", "requester-id",
 			"reservation-id", "root-device-name", "root-device-type",
-			"source-dest-check", "spot-instance-request-id", "state-reason-code",
+			"source-dest-check", "state-reason-code",
 			"state-reason-message", "tenancy", "tpm-support", "usage-operation",
 			"usage-operation-update-time", "virtualization-type",
 		},
@@ -359,17 +359,18 @@ func ec2SubnetFilterSpec() ec2FilterSpec {
 // ec2SecurityGroupFilterSpec is DescribeSecurityGroups' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeSecurityGroups.html.
 //
-// The twenty rule-scoped filters are accepted and inert. AWS's own note on this
-// operation — "if using multiple filters for rules, the results include security groups
-// for which any combination of rules, not necessarily a single rule, match all filters" —
-// is a semantics substrate would have to implement deliberately rather than incidentally,
-// so answering those names is left to a change that can pin that rule.
+// Every documented name is evaluated as of #1440, by [ec2SecurityGroupMatchesFilter]. The
+// twenty rule-scoped filters were accepted and inert before it, and so were tag:<key>,
+// tag-key, description and owner-id — an inert name answers every group, which is how a
+// tag: filter "matched" groups that did not carry the tag. AWS's note on rule filters —
+// "the results include security groups for which any combination of rules - not
+// necessarily a single rule - match all filters" — is what evaluating each filter on its
+// own across the group's rules gives.
 func ec2SecurityGroupFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
 		tagValueFilter: true,
-		evaluated:      []string{"group-id", "group-name", "vpc-id"},
-		accepted: []string{
-			"description", "egress.ip-permission.cidr",
+		evaluated: []string{
+			"group-id", "group-name", "vpc-id", "description", "egress.ip-permission.cidr",
 			"egress.ip-permission.from-port", "egress.ip-permission.group-id",
 			"egress.ip-permission.group-name", "egress.ip-permission.ipv6-cidr",
 			"egress.ip-permission.prefix-list-id", "egress.ip-permission.protocol",

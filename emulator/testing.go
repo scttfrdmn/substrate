@@ -86,6 +86,7 @@ type testServerConfig struct {
 	verifySignatures  bool
 	recordBodies      bool
 	recordStateHashes bool
+	noDefaultVPC      bool
 }
 
 // WithAccounts makes the server callable as each of the given accounts, in
@@ -139,6 +140,17 @@ func WithRecordedBodies() TestServerOption {
 // and the replay and lands in the state it hashes (#856).
 func WithRecordedStateHashes() TestServerOption {
 	return func(c *testServerConfig) { c.recordStateHashes = true }
+}
+
+// WithoutDefaultVPC starts the server with no default VPC in any account or Region, the
+// state an account whose default VPC was deleted is in — the test-server form of
+// ec2.default_vpc=false (#1464).
+//
+// By default each account and Region is seeded with one on its first EC2 request, as a real
+// account has. Without it, a RunInstances naming no subnet is refused with
+// VPCIdNotSpecified, and CreateDefaultVpc creates one.
+func WithoutDefaultVPC() TestServerOption {
+	return func(c *testServerConfig) { c.noDefaultVPC = true }
 }
 
 // StartTestServer starts an in-process Substrate server on a random port,
@@ -258,6 +270,9 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	cfg.EventStore.IncludeBodies = tsCfg.recordBodies
 	cfg.EventStore.IncludeStateHashes = tsCfg.recordStateHashes
 	cfg.Log.Level = "error"
+	// The server keeps its own copy of the config, which time travel registers its replay
+	// plugins from, so the default-VPC switch has to be on both.
+	cfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
 
 	state := NewMemoryStateManager()
 	tc := NewTimeController(time.Now())
@@ -279,7 +294,14 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	auth := NewAuthController(state, logger, WithAuthTimeController(tc))
 
 	ctx := context.Background()
-	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, nil,
+	// nil unless an option needs a plugin setting, so a default test server registers its
+	// plugins exactly as it always has.
+	var pluginCfg *Config
+	if tsCfg.noDefaultVPC {
+		pluginCfg = DefaultConfig()
+		pluginCfg.EC2.DefaultVPC = false
+	}
+	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, pluginCfg,
 		WithPluginAuth(auth)); err != nil {
 		t.Fatalf("StartTestServer: register plugins: %v", err)
 	}

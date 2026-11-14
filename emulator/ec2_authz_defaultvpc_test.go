@@ -31,13 +31,11 @@ var ec2AuthzDefaultSubnetARN = "arn:aws:ec2:" + ec2AuthzRegion + ":" + ec2AuthzA
 	":subnet/" + ec2AuthzDefaultSubnetID
 
 // putDefaultVPC gives the fixture's account a default VPC, its default subnet, and a
-// default security group inside it — the three records ensureDefaultVPC would create.
+// default security group inside it — three of the records the default-VPC seed writes.
 //
-// The security group is the fixture's own ec2AuthzSG re-put with the VPC's ID rather
-// than a second group, because ec2LookupDefaultSecurityGroup takes the *first*
-// security-group key in the account and only if it belongs to the VPC. Adding a
-// second group would make which one resolves depend on key ordering, which is not
-// what these tests are about.
+// The security group is the fixture's own ec2AuthzSG re-put with the VPC's ID and the
+// name "default", because ec2LookupDefaultSecurityGroup resolves the group of that name
+// in the VPC (#1464).
 //
 // subnetTags are the resolved subnet's own tags, which is what an aws:ResourceTag
 // condition about it is evaluated against.
@@ -62,8 +60,9 @@ func (f *ec2AuthzFixture) putDefaultVPC(t *testing.T, subnetTags map[string]stri
 		Region:    ec2AuthzRegion,
 	})
 	f.put(t, "sg:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2AuthzSG, emulator.EC2SecurityGroup{
-		GroupID: ec2AuthzSG,
-		VPCID:   ec2AuthzDefaultVPCID,
+		GroupID:   ec2AuthzSG,
+		GroupName: "default",
+		VPCID:     ec2AuthzDefaultVPCID,
 	})
 }
 
@@ -239,9 +238,9 @@ func TestEC2_Authz_FreshAccountResolvesToWildcards(t *testing.T) {
 	})
 }
 
-// TestEC2_Authz_DefaultVPCWithoutADefaultSubnet covers the state ensureDefaultVPC can
-// leave behind: the VPC exists but its default subnet does not, so the launch mints
-// the subnet and keeps the VPC.
+// TestEC2_Authz_DefaultVPCWithoutADefaultSubnet covers a default VPC whose default
+// subnets are gone. The handler refuses such a launch with MissingInput as of #1464, but
+// the decision is made first and still has to name what it can.
 //
 // The subnet is therefore the wildcard while the security group — which does exist
 // alongside the VPC — is named. Resolving both to wildcards would let a Deny on the
@@ -258,8 +257,9 @@ func TestEC2_Authz_DefaultVPCWithoutADefaultSubnet(t *testing.T) {
 			Region:    ec2AuthzRegion,
 		})
 		f.put(t, "sg:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2AuthzSG, emulator.EC2SecurityGroup{
-			GroupID: ec2AuthzSG,
-			VPCID:   ec2AuthzDefaultVPCID,
+			GroupID:   ec2AuthzSG,
+			GroupName: "default",
+			VPCID:     ec2AuthzDefaultVPCID,
 		})
 		return f
 	}
@@ -368,9 +368,10 @@ func TestEC2_Authz_DefaultSubnetTagsAreItsOwn(t *testing.T) {
 		f.putDefaultVPC(t, map[string]string{"Env": "test"})
 		f.putImage(t, ec2AuthzAMI, map[string]string{"Env": "test"})
 		f.put(t, "sg:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2AuthzSG, emulator.EC2SecurityGroup{
-			GroupID: ec2AuthzSG,
-			VPCID:   ec2AuthzDefaultVPCID,
-			Tags:    ec2AuthzTags(map[string]string{"Env": "test"}),
+			GroupID:   ec2AuthzSG,
+			GroupName: "default",
+			VPCID:     ec2AuthzDefaultVPCID,
+			Tags:      ec2AuthzTags(map[string]string{"Env": "test"}),
 		})
 		f.setPolicy(t,
 			emulator.PolicyStatement{

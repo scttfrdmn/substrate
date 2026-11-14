@@ -42,6 +42,7 @@ const (
 	ec2TagAuthzLT       = "lt-0fff9999aaaa0000c"
 	ec2TagAuthzFleet    = "fleet-12a34b56-7cd8-90ef-1a2b-3c4d5e6f7a8b"
 	ec2TagAuthzCR       = "cr-0ccc6666dddd7777f"
+	ec2TagAuthzSIR      = "sir-0ddd8888"
 
 	// A placement group's and a key pair's ARNs name them by *name*, while CreateTags
 	// names them by ID, so each needs both spellings written out.
@@ -54,7 +55,7 @@ const (
 // ec2TagARN builds the ARN a tagging call is authorized against.
 //
 // Written out here rather than derived from the state key on purpose: for seven of
-// the sixteen taggable prefixes substrate's state key abbreviates the resource type
+// the seventeen taggable prefixes substrate's state key abbreviates the resource type
 // the Service Authorization Reference's ARN uses, or names the resource by something
 // other than the ID the caller passed, and a test that derived one from the other
 // would agree with a wrong answer.
@@ -86,9 +87,9 @@ type ec2TagAuthzResource struct {
 // ec2TagAuthzAllTypes is every resource type substrate can tag, in the order these
 // tests name them in ResourceId.N — which is the order the decision evaluates.
 //
-// All sixteen, not a sample: the ARN resource type is a hand-written string per type,
-// so a wrong one is only caught by a case that names that type. Six joined in #708 and a
-// Capacity Reservation in #891, and each of the three ways an ARN diverges from the state
+// All seventeen, not a sample: the ARN resource type is a hand-written string per type,
+// so a wrong one is only caught by a case that names that type. Six joined in #708, a
+// Capacity Reservation in #891 and a Spot Instance request in #1436, and each of the three ways an ARN diverges from the state
 // key is now represented — the abbreviating five, the two with an empty account field, and
 // the two named by name.
 func ec2TagAuthzAllTypes() []ec2TagAuthzResource {
@@ -113,6 +114,7 @@ func ec2TagAuthzAllTypes() []ec2TagAuthzResource {
 		{ec2TagAuthzPGID, ec2TagARN("placement-group", ec2TagAuthzPGName), (*ec2AuthzFixture).putTagPlacementGroup},
 		{ec2TagAuthzKeyID, ec2TagARN("key-pair", ec2TagAuthzKeyName), (*ec2AuthzFixture).putTagKeyPair},
 		{ec2TagAuthzCR, ec2TagARN("capacity-reservation", ec2TagAuthzCR), (*ec2AuthzFixture).putTagCapacityReservation},
+		{ec2TagAuthzSIR, ec2TagARN("spot-instances-request", ec2TagAuthzSIR), (*ec2AuthzFixture).putTagSpotRequest},
 	}
 }
 
@@ -188,6 +190,14 @@ func (f *ec2AuthzFixture) putTagFleet(t *testing.T, tags map[string]string) {
 // A Capacity Reservation is keyed by ID and its ARN carries the account, so it is the
 // plain case — it is here because the ARN type "capacity-reservation" is a hand-written
 // string that nothing else in the tree would catch if it were wrong.
+func (f *ec2AuthzFixture) putTagSpotRequest(t *testing.T, tags map[string]string) {
+	t.Helper()
+	f.put(t, "spot_request:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzSIR,
+		emulator.EC2SpotInstanceRequest{
+			SpotInstanceRequestID: ec2TagAuthzSIR, Tags: ec2AuthzTags(tags),
+		})
+}
+
 func (f *ec2AuthzFixture) putTagCapacityReservation(t *testing.T, tags map[string]string) {
 	t.Helper()
 	f.put(t, "cr:"+ec2AuthzAccount+"/"+ec2AuthzRegion+"/"+ec2TagAuthzCR,

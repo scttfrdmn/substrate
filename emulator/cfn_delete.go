@@ -686,8 +686,8 @@ func cfnServiceForPath(path string) string {
 // substrate does not model, so the deploy records the *group* as the physical ID and
 // a revoke has to restate the permission it authorized. The parameters are rebuilt
 // from the template with the same sgRuleParams the deploy used, which is what makes
-// the revoke match — removePerm compares protocol, ports and source, so a revoke
-// built any other way would silently remove nothing.
+// the revoke match — [ec2RevokePermissions] compares protocol, ports and source, so a
+// revoke built any other way would name a rule the group does not hold.
 func sgRuleDeleter(action string) cfnDeleteRequestFunc {
 	return func(_ *StackDeployer, dr DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
 		if dr.PhysicalID == "" {
@@ -985,9 +985,12 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"InvalidInternetGatewayID.NotFound": true,
 	"InvalidLaunchTemplateId.NotFound":  true,
 	"InvalidNatGatewayID.NotFound":      true,
-	"InvalidRouteTableID.NotFound":      true,
-	"InvalidSubnetID.NotFound":          true,
-	"InvalidVpcID.NotFound":             true,
+	// A SecurityGroupIngress/Egress revoke of a rule that is already gone, which a group
+	// outside the default VPC answers with this code as of #1453.
+	"InvalidPermission.NotFound":   true,
+	"InvalidRouteTableID.NotFound": true,
+	"InvalidSubnetID.NotFound":     true,
+	"InvalidVpcID.NotFound":        true,
 	// DeleteNatGateway's code before #713 routed it through ec2NatGatewayIDKind. The
 	// reference publishes both spellings, so this entry is not dead: an event log
 	// recorded by an older substrate replays the old code, and a stack mid-delete must

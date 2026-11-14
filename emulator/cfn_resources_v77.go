@@ -230,10 +230,19 @@ func sgRuleParams(props map[string]interface{}, prefix string, cctx *cfnContext)
 	if cidr := resolveStringProp(props, "CidrIp", "", cctx); cidr != "" {
 		params[prefix+"IpRanges.1.CidrIp"] = cidr
 	}
-	// CidrIpv6 has no IPv6-specific storage yet; record it as a range so the rule
-	// is not silently dropped.
+	// CidrIpv6 is its own source list since #1453 stored IPv6 ranges, so it no longer
+	// overwrites CidrIp: a rule declaring both carries both, and a revoke built from the
+	// same template names the same two sources.
 	if cidr6 := resolveStringProp(props, "CidrIpv6", "", cctx); cidr6 != "" {
-		params[prefix+"IpRanges.1.CidrIp"] = cidr6
+		params[prefix+"Ipv6Ranges.1.CidrIpv6"] = cidr6
+	}
+	// A prefix-list source (ingress) or destination (egress).
+	prefixList := resolveStringProp(props, "SourcePrefixListId", "", cctx)
+	if prefixList == "" {
+		prefixList = resolveStringProp(props, "DestinationPrefixListId", "", cctx)
+	}
+	if prefixList != "" {
+		params[prefix+"PrefixListIds.1.PrefixListId"] = prefixList
 	}
 
 	// A source/destination security group. GroupId takes precedence over

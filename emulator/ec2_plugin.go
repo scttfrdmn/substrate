@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -38,12 +39,24 @@ type EC2Plugin struct {
 	// than one per snapshot for the reason [EC2Plugin.observeSnapshotStatus] records, the
 	// same shape [SQSPlugin.consumeQueueMiss] carries (#582).
 	seedMu sync.Mutex
+
+	// defaultVPCDisabled turns off seeding each account and Region's default VPC (#1464).
+	// The zero value seeds, so a plugin built without options behaves as AWS does; it is set
+	// from Options["default_vpc"], which [RegisterDefaultPlugins] fills from ec2.default_vpc.
+	defaultVPCDisabled bool
+
+	// defaultVPCMu serializes the default VPC's check-then-create; see
+	// [EC2Plugin.seedDefaultVPC].
+	defaultVPCMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
 func (p *EC2Plugin) Name() string { return "ec2" }
 
 // Initialize sets up the EC2Plugin with the provided configuration.
+//
+// Options["default_vpc"] set to false starts every account and Region without a default
+// VPC; any other value, or none, seeds one (#1464).
 func (p *EC2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
@@ -55,6 +68,9 @@ func (p *EC2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	if auth, ok := cfg.Options["auth_controller"].(*AuthController); ok {
 		p.auth = auth
 	}
+	if enabled, ok := cfg.Options["default_vpc"].(bool); ok {
+		p.defaultVPCDisabled = !enabled
+	}
 	return nil
 }
 
@@ -62,10 +78,16 @@ func (p *EC2Plugin) Initialize(_ context.Context, cfg PluginConfig) error {
 func (p *EC2Plugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches an EC2 query-protocol request to the appropriate handler.
+//
+// The account and Region's default VPC is seeded first, so the request — whatever it is —
+// sees the state a real account starts with (#1464); see [EC2Plugin.seedDefaultVPC].
 func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	action := req.Operation
 	if action == "" {
 		action = req.Params["Action"]
+	}
+	if err := p.seedDefaultVPC(ctx); err != nil {
+		return nil, err
 	}
 	switch action {
 	// Instance operations
@@ -84,6 +106,10 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	// VPC operations
 	case "CreateVpc":
 		return p.createVPC(ctx, req)
+	case "CreateDefaultVpc":
+		return p.createDefaultVpc(ctx, req)
+	case "CreateDefaultSubnet":
+		return p.createDefaultSubnet(ctx, req)
 	case "DescribeVpcs":
 		return p.describeVPCs(ctx, req)
 	case "DeleteVpc":
@@ -213,6 +239,12 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	// Spot placement score operations
 	case "GetSpotPlacementScores":
 		return p.getSpotPlacementScores(ctx, req)
+	case "RequestSpotInstances":
+		return p.requestSpotInstances(ctx, req)
+	case "DescribeSpotInstanceRequests":
+		return p.describeSpotInstanceRequests(ctx, req)
+	case "CancelSpotInstanceRequests":
+		return p.cancelSpotInstanceRequests(ctx, req)
 	// Launch template operations
 	case "CreateLaunchTemplate":
 		return p.createLaunchTemplate(ctx, req)
@@ -310,11 +342,44 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // the request's checked TagSpecification.N tags, and the fleet path passes those plus
 // its own fleet-ID tag. See [EC2Plugin.runInstances] for why the check lives with the
 // parse rather than here.
+//
+// A request carrying InstanceMarketOptions.MarketType=spot launches Spot Instances, each
+// with its own Spot Instance request (#1436); a seeded capacity shortfall refuses it with
+// InsufficientInstanceCapacity — see [ec2SpotUnfulfilledError].
 func (p *EC2Plugin) runInstancesWithTags(
 	reqCtx *RequestContext,
 	req *AWSRequest,
 	tags []EC2Tag,
 ) (*AWSResponse, error) {
+	spot, awsErr := ec2SpotLaunchFromRunInstances(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	instances, reservationID, _, err := p.launchInstances(reqCtx, req, tags, spot)
+	if err != nil {
+		var unfulfilled *ec2SpotUnfulfilledError
+		if errors.As(err, &unfulfilled) {
+			return nil, unfulfilled.runInstancesError()
+		}
+		return nil, err
+	}
+	return p.runInstancesResponse(instances, reservationID, reqCtx)
+}
+
+// launchInstances is RunInstances' launch, returning the instances it wrote and, for a Spot
+// launch, the Spot Instance requests that track them.
+//
+// spot is nil for an On-Demand launch. Otherwise each instance is a Spot Instance: a new
+// request is written for each one, or — for a persistent request's replacement — the request
+// spot.replacing names is re-pointed at it. A seeded capacity shortfall answers
+// [ec2SpotUnfulfilledError] before anything is written, and each caller turns that into its
+// own published outcome.
+func (p *EC2Plugin) launchInstances(
+	reqCtx *RequestContext,
+	req *AWSRequest,
+	tags []EC2Tag,
+	spot *ec2SpotLaunch,
+) ([]EC2Instance, string, []EC2SpotInstanceRequest, error) {
 	imageID := req.Params["ImageId"]
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
@@ -335,7 +400,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// MaxCount's default, which is all it can affect here.
 	_, maxCount, countErr := resolveInstanceCounts(req.Params)
 	if countErr != nil {
-		return nil, countErr
+		return nil, "", nil, countErr
 	}
 
 	keyName := req.Params["KeyName"]
@@ -368,7 +433,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	if pgName := req.Params["Placement.GroupName"]; pgName != "" {
 		pgKey := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, pgName)
 		if data, _ := p.state.Get(context.Background(), ec2Namespace, pgKey); data == nil {
-			return nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
+			return nil, "", nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
 		}
 	}
 
@@ -446,7 +511,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
 		version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
 		if awsErr != nil {
-			return nil, awsErr
+			return nil, "", nil, awsErr
 		}
 		ltData := version.Data
 		if imageID == "" {
@@ -510,10 +575,10 @@ func (p *EC2Plugin) runInstancesWithTags(
 			// log, can still carry a reserved key or more than the limit, and this is
 			// the launch that would otherwise apply them.
 			if awsErr := ec2CheckTagRules(ltData.TagSpecifications); awsErr != nil {
-				return nil, awsErr
+				return nil, "", nil, awsErr
 			}
 			if awsErr := ec2CheckTagLimit(nil, ltData.TagSpecifications); awsErr != nil {
-				return nil, awsErr
+				return nil, "", nil, awsErr
 			}
 			tags = append(append([]EC2Tag{}, ltData.TagSpecifications...), tags...)
 		}
@@ -544,7 +609,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// serializes, i.e. absent from the wire — launched successfully here and
 	// failed on real AWS (#412).
 	if imageID == "" {
-		return nil, ec2MissingParameter("ImageId")
+		return nil, "", nil, ec2MissingParameter("ImageId")
 	}
 
 	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
@@ -561,17 +626,19 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// merge, for the same two reasons that position exists at all. An AMI that reaches
 	// this launch through a template is refused at RunInstances time rather than
 	// materialized, and CreateFleet inherits the rule for free by going through
-	// runInstancesWithTags. And it is ahead of the ensureDefaultVPC branch below, which
-	// commits a VPC, subnet, security group, gateway and route table: refusing past
-	// that point would leave state behind for the next request in the same test to see.
+	// runInstancesWithTags. And it is ahead of the first write below: refusing past that
+	// point would leave state behind for the next request in the same test to see. (The
+	// default-VPC branch once committed a VPC and its resources here; it no longer writes
+	// anything, the VPC being seeded before dispatch as of #1464.)
 	//
 	// CreateLaunchTemplate deliberately does not carry this rule. It reports mapping
 	// problems through AWS's documented warning member rather than refusing, and an AMI
 	// named in a template is not yet a launch — so a refusal there would be one AWS
 	// does not make. The template's AMI is checked here, when it is used.
-	_, imageFound := p.resolveImage(reqCtx, imageID)
+	launchedImage, imageFound := p.resolveImage(reqCtx, imageID)
 	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
-		return nil, awsErr
+		// The not-found refusal says where an AMI comes from (#1432); the code is unchanged.
+		return nil, "", nil, ec2AMINotFoundHint(awsErr)
 	}
 
 	// Block device mappings are validated here for two reasons that fix the position
@@ -579,17 +646,16 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// this launch through a template is refused at RunInstances time rather than
 	// materialized — and one validator here covers requests, templates, template
 	// versions and fleet launches alike, since a fleet reaches mappings only through a
-	// template. And it is before the ensureDefaultVPC branch below, which commits a
-	// VPC, subnet, security group, internet gateway, route table and four index
-	// mutations: a refusal past that point leaves state behind, which is worse than no
-	// validation at all because the next request in the same test sees it.
+	// template. And it is before the first write below: a refusal past that point leaves
+	// state behind, which is worse than no validation at all because the next request in
+	// the same test sees it.
 	//
 	// peekSnapshotStatus, not observeSnapshotStatus: a launch is not a poll, and the
 	// countdown advances in one place, so observing here would spend one of a test's
 	// seeded observations per mapping — see [ec2CheckMappingSnapshot].
 	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
 	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings, resolveSnapshot, p.peekSnapshotStatus); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 
 	// A mapping that names a snapshot and no size takes the snapshot's, which the
@@ -606,14 +672,14 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// by a replayed event log, can still carry a reserved key or more than the limit.
 	// A new volume starts with no tags, so the resolved set is the whole count (#670).
 	if awsErr := ec2CheckTagRules(volumeTags); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, volumeTags); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 
 	// The groups the request or its template named are checked for existence here,
-	// before the ensureDefaultVPC branch below writes anything (#673). The membership
+	// before anything below is written (#673). The membership
 	// check has to wait for the subnet's VPC, but existence does not, and a launch
 	// naming a group that does not exist was previously refused *after* nine records
 	// had been committed — a VPC, subnet, security group, internet gateway, route
@@ -623,14 +689,15 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// with no IAM configured, so this stands on its own regardless of the
 	// authorization change beside it.
 	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); sgCheckErr != nil {
-		return nil, sgCheckErr
+		return nil, "", nil, sgCheckErr
 	}
 
-	// Auto-create default VPC/subnet if none specified.
+	// A launch naming no subnet lands in the default VPC, which HandleRequest has already
+	// seeded (#1464); one with no default VPC is refused rather than given one.
 	if subnetID == "" {
-		vpc, subnet, err := p.ensureDefaultVPC(context.Background(), reqCtx)
+		vpc, subnet, err := p.resolveLaunchDefaultSubnet(reqCtx, placementAZ)
 		if err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		subnetID = subnet.SubnetID
 		if sgID == "" {
@@ -663,12 +730,32 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// ran above, before the default VPC could be created; this pass adds the
 	// membership half and covers the default group the branch above may have supplied.
 	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, targetVPCID); sgCheckErr != nil {
-		return nil, sgCheckErr
+		return nil, "", nil, sgCheckErr
+	}
+
+	// A Spot launch is checked last, after every refusal a launch shares, so a malformed
+	// request is refused for what is wrong with it rather than for capacity — and before the
+	// first write, so a capacity shortfall leaves nothing behind (#1436).
+	if spot != nil && !spot.fleetOnly {
+		if awsErr := ec2CheckTagRules(spot.tags); awsErr != nil {
+			return nil, "", nil, awsErr
+		}
+		if awsErr := ec2CheckTagLimit(nil, spot.tags); awsErr != nil {
+			return nil, "", nil, awsErr
+		}
+		code, seedErr := p.spotRequestOutcomeSeed(instanceType)
+		if seedErr != nil {
+			return nil, "", nil, seedErr
+		}
+		if code != "" {
+			return nil, "", nil, &ec2SpotUnfulfilledError{statusCode: code}
+		}
 	}
 
 	reservationID := generateReservationID(reqCtx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	var instances []EC2Instance
+	var spotRequests []EC2SpotInstanceRequest
 
 	for i := 0; i < maxCount; i++ {
 		inst := EC2Instance{
@@ -690,6 +777,16 @@ func (p *EC2Plugin) runInstancesWithTags(
 
 			DisableAPITermination: disableAPITermination,
 			AvailabilityZone:      placementAZ,
+		}
+		if spot != nil {
+			inst.InstanceLifecycle = ec2InstanceLifecycleSpot
+			switch {
+			case spot.fleetOnly:
+			case spot.replacing != nil:
+				inst.SpotInstanceRequestID = spot.replacing.SpotInstanceRequestID
+			default:
+				inst.SpotInstanceRequestID = generateSpotInstanceRequestID(reqCtx.IDs)
+			}
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -730,26 +827,33 @@ func (p *EC2Plugin) runInstancesWithTags(
 
 		data, err := json.Marshal(inst)
 		if err != nil {
-			return nil, fmt.Errorf("ec2 runInstances marshal: %w", err)
+			return nil, "", nil, fmt.Errorf("ec2 runInstances marshal: %w", err)
 		}
 		stateKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + inst.InstanceID
 		if err := p.state.Put(context.Background(), ec2Namespace, stateKey, data); err != nil {
-			return nil, fmt.Errorf("ec2 runInstances state.Put: %w", err)
+			return nil, "", nil, fmt.Errorf("ec2 runInstances state.Put: %w", err)
 		}
 		// Update instance_ids list.
 		if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "instance_ids", inst.InstanceID); err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		// Materialize this instance's volumes, after the instance so they can carry
 		// its ID and its zone. Each instance of a multi-count launch gets its own
 		// volumes with their own IDs — two instances cannot share one EBS volume.
 		if err := p.ec2CreateLaunchVolumes(reqCtx.IDs, &inst, blockDeviceMappings, volumeTags, now); err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		instances = append(instances, inst)
+		if spot != nil && !spot.fleetOnly {
+			sir, err := p.fulfillSpotRequest(reqCtx, spot, inst, launchedImage, now)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			spotRequests = append(spotRequests, sir)
+		}
 	}
 
-	return p.runInstancesResponse(instances, reservationID, reqCtx)
+	return instances, reservationID, spotRequests, nil
 }
 
 // ec2GroupItem is one groupSet>item entry, mirroring AWS's GroupIdentifier.
@@ -835,6 +939,11 @@ type ec2InstanceItem struct {
 	BlockDeviceMappings []ec2BlockDeviceMappingItem `xml:"blockDeviceMapping>item,omitempty"`
 
 	NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
+
+	// InstanceLifecycle and SpotInstanceRequestID are Instance's instanceLifecycle and
+	// spotInstanceRequestId, both omitted for an On-Demand instance (#1436).
+	InstanceLifecycle     string `xml:"instanceLifecycle,omitempty"`
+	SpotInstanceRequestID string `xml:"spotInstanceRequestId,omitempty"`
 }
 
 // ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
@@ -865,6 +974,9 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 		Groups:              p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs),
 		BlockDeviceMappings: mappings,
 		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
+
+		InstanceLifecycle:     inst.InstanceLifecycle,
+		SpotInstanceRequestID: inst.SpotInstanceRequestID,
 	}
 	// Echo the IAM instance profile set at launch (#331), resolved against IAM state so
 	// two describes of one instance report one id (#1291). The stored value is the name
@@ -1088,6 +1200,12 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		return ec2FilterAccepts(values, inst.SubnetID)
 	case "key-name":
 		return ec2FilterAccepts(values, inst.KeyName)
+	case "instance-lifecycle":
+		// An On-Demand instance carries no lifecycle — AWS omits the member — so it matches
+		// no value of the filter (#1436).
+		return inst.InstanceLifecycle != "" && ec2FilterAccepts(values, inst.InstanceLifecycle)
+	case "spot-instance-request-id":
+		return inst.SpotInstanceRequestID != "" && ec2FilterAccepts(values, inst.SpotInstanceRequestID)
 	case "availability-zone":
 		// The reference names this filter "availability-zone", not
 		// "placement.availability-zone" — the placement family's filters are
@@ -1319,6 +1437,13 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 		// state real EC2 never reaches (#666).
 		if err := p.ec2DeleteInstanceVolumes(reqCtx.AccountID, reqCtx.Region, inst.InstanceID); err != nil {
 			return nil, err
+		}
+		// A Spot Instance's request is settled — closed, or for an active persistent request a
+		// replacement launched — after the instance itself is written terminated (#1436).
+		if inst.SpotInstanceRequestID != "" {
+			if err := p.onSpotInstanceTerminated(reqCtx, inst); err != nil {
+				return nil, err
+			}
 		}
 
 		// `shutting-down`, which `API_TerminateInstances`' sample response publishes as
@@ -1754,8 +1879,17 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if lookupErr := ec2RequireResource(ec2VPCIDKind, vpcID, existing != nil); lookupErr != nil {
 		return nil, lookupErr
 	}
+	var vpc EC2VPC
+	if err := json.Unmarshal(existing, &vpc); err != nil {
+		return nil, fmt.Errorf("ec2 deleteVpc unmarshal: %w", err)
+	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteVpc: %w", err)
+	}
+	// A deleted default VPC stays deleted: the tombstone stops the next request re-seeding it,
+	// as a real account does not get one back until CreateDefaultVpc (#1464).
+	if err := p.markDefaultVPCDeleted(reqCtx, vpc); err != nil {
+		return nil, err
 	}
 	type response struct {
 		XMLName xml.Name `xml:"DeleteVpcResponse"`
@@ -1908,10 +2042,55 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// createSecurityGroup creates a security group, tagging it from TagSpecification.N.
+//
+// TagSpecification.N scoped to security-group was accepted and discarded until #1440, so a
+// group created with tags read back with none and a tag: filter could not select it. The tag
+// rules are checked before the record is written, so a rejected request creates no group. A
+// specification naming another resource type is skipped rather than refused, which is what
+// [ec2LaunchTagsForResource] does for every create that accepts the list and publishes no
+// type rule — CreateSecurityGroup's page says only "The tags to assign to the security
+// group."
+//
+// VpcId is "Required for a nondefault VPC", so an absent one places the group in the
+// account's default VPC (#1464). With no default VPC the request is refused with
+// VPCIdNotSpecified, the code the client-error table gives for "You have no default VPC in
+// which to carry out the request".
+//
+// The name "default" is reserved for the group every VPC is created with, and is refused
+// with InvalidParameterValue / "Cannot use reserved security group name: default" — EC2's
+// observed answer (the operation's Errors section is empty), matched case-insensitively
+// because "Names are case-insensitive". The refusal is also what keeps
+// [ec2LookupDefaultSecurityGroup], which resolves the default VPC's group by that name,
+// unambiguous.
 func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	groupName := req.Params["GroupName"]
 	description := req.Params["GroupDescription"]
 	vpcID := req.Params["VpcId"]
+	if strings.EqualFold(groupName, "default") {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Cannot use reserved security group name: " + groupName,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	tags := ec2LaunchTagsForResource(req.Params, "security-group")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if vpcID == "" {
+		vpc, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
+		if err != nil {
+			return nil, err
+		}
+		if vpc == nil {
+			return nil, ec2NoDefaultVPCError()
+		}
+		vpcID = vpc.VPCID
+	}
 	sgID := generateSGID(reqCtx.IDs)
 	sg := EC2SecurityGroup{
 		GroupID:     sgID,
@@ -1921,6 +2100,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 		AccountID:   reqCtx.AccountID,
 		Region:      reqCtx.Region,
 		EgressRules: []EC2IPPermission{{IPProtocol: "-1", IPRanges: []string{"0.0.0.0/0"}}},
+		Tags:        tags,
 	}
 	data, err := json.Marshal(sg)
 	if err != nil {
@@ -1934,12 +2114,16 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 	type response struct {
-		XMLName xml.Name `xml:"CreateSecurityGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		GroupID string   `xml:"groupId"`
-		Return  bool     `xml:"return"`
+		XMLName xml.Name      `xml:"CreateSecurityGroupResponse"`
+		XMLNS   string        `xml:"xmlns,attr"`
+		Return  bool          `xml:"return"`
+		GroupID string        `xml:"groupId"`
+		Tags    *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
-	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", GroupID: sgID, Return: true})
+	return ec2XMLResponse(http.StatusOK, response{
+		XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", GroupID: sgID, Return: true,
+		Tags: ec2TagSet(sg.Tags),
+	})
 }
 
 // describeSecurityGroups reports the security groups the account holds in the region.
@@ -1953,10 +2137,12 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 // in docs/services.md:
 //
 // A name is matched **account-wide**, where AWS scopes the parameter to the default VPC
-// ("[Default VPC] The names of the security groups"). Substrate does model a default VPC —
-// [EC2VPC.IsDefault], [EC2Plugin.ensureDefaultVPC] — but creates it lazily, only when a launch
-// path asks for one, so scoping the parameter to it would make GroupName.N answer nothing in a
-// fresh account. Account-wide also means a name may legitimately match several groups here,
+// ("[Default VPC] The names of the security groups"). The scope was first declined because
+// substrate created its default VPC lazily, so a default-VPC scope would have answered nothing
+// in a fresh account. The default VPC is seeded eagerly as of #1464 — [EC2Plugin.seedDefaultVPC]
+// — so that reason is gone, but the reading is kept: narrowing it now would refuse lookups of
+// groups in other VPCs that callers make here today, which is a behavior change of its own
+// rather than part of seeding the VPC. Account-wide also means a name may legitimately match several groups here,
 // because [EC2Plugin.createSecurityGroup] enforces no name uniqueness where AWS's is per-VPC.
 //
 // A name matching nothing answers an **empty set** rather than InvalidGroup.NotFound. This
@@ -2005,29 +2191,19 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSecurityGroups: %w", err)
 	}
-	type ipRangeItem struct {
-		CidrIP string `xml:"cidrIp"` //nolint:revive
-	}
-	type groupPairItem struct {
-		UserID      string `xml:"userId,omitempty"`
-		GroupID     string `xml:"groupId,omitempty"`
-		GroupName   string `xml:"groupName,omitempty"`
-		Description string `xml:"description,omitempty"`
-	}
-	type permItem struct {
-		IPProtocol string          `xml:"ipProtocol"` //nolint:revive
-		FromPort   int             `xml:"fromPort"`
-		ToPort     int             `xml:"toPort"`
-		IPRanges   []ipRangeItem   `xml:"ipRanges>item"` //nolint:revive
-		Groups     []groupPairItem `xml:"groups>item,omitempty"`
-	}
+	// ownerId and tagSet are published members of SecurityGroup that this item did not
+	// render until #1440: tagSet because a tag the group carried was otherwise unreadable,
+	// and ownerId because the owner-id filter selects on it. tagSet is omitted when the
+	// group has no tags, the shape [ec2VPCItem] follows for the same reason.
 	type sgItem struct {
-		GroupID        string     `xml:"groupId"`
-		GroupName      string     `xml:"groupName"`
-		Description    string     `xml:"groupDescription"`
-		VpcID          string     `xml:"vpcId"`
-		IPPermissions  []permItem `xml:"ipPermissions>item"`       //nolint:revive
-		IPPermissionsE []permItem `xml:"ipPermissionsEgress>item"` //nolint:revive
+		OwnerID        string                `xml:"ownerId"`
+		GroupID        string                `xml:"groupId"`
+		GroupName      string                `xml:"groupName"`
+		Description    string                `xml:"groupDescription"`
+		VpcID          string                `xml:"vpcId"`
+		IPPermissions  []ec2IPPermissionItem `xml:"ipPermissions>item"`       //nolint:revive
+		IPPermissionsE []ec2IPPermissionItem `xml:"ipPermissionsEgress>item"` //nolint:revive
+		Tags           *ec2TagSetXML         `xml:"tagSet,omitempty"`
 	}
 	type response struct {
 		XMLName   xml.Name `xml:"DescribeSecurityGroupsResponse"`
@@ -2048,39 +2224,20 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if !ids.matchOrNamed(sg.GroupID, names, sg.GroupName) {
 			continue
 		}
-		// A filter naming no values matches nothing, as it does everywhere else: these
-		// three arms used to carry an `ok && len(vals) > 0 &&` guard, which returned every
-		// security group for a request that had asked for a subset (#696).
-		if vals, ok := filters["group-name"]; ok && !ec2FilterAccepts(vals, sg.GroupName) {
+		// A filter naming no values matches nothing, as it does everywhere else (#696). Every
+		// documented name is evaluated as of #1440 — see [ec2SecurityGroupMatchesFilter].
+		if !ec2SecurityGroupMatchesFilters(sg, filters) {
 			continue
 		}
-		if vals, ok := filters["vpc-id"]; ok && !ec2FilterAccepts(vals, sg.VPCID) {
-			continue
+		item := sgItem{
+			OwnerID: sg.AccountID, GroupID: sg.GroupID, GroupName: sg.GroupName,
+			Description: sg.Description, VpcID: sg.VPCID, Tags: ec2TagSet(sg.Tags),
 		}
-		if vals, ok := filters["group-id"]; ok && !ec2FilterAccepts(vals, sg.GroupID) {
-			continue
-		}
-		renderPerm := func(rule EC2IPPermission) permItem {
-			pi := permItem{IPProtocol: rule.IPProtocol, FromPort: rule.FromPort, ToPort: rule.ToPort}
-			for _, cidr := range rule.IPRanges {
-				pi.IPRanges = append(pi.IPRanges, ipRangeItem{CidrIP: cidr})
-			}
-			for _, pair := range rule.UserIDGroupPairs {
-				pi.Groups = append(pi.Groups, groupPairItem{
-					UserID:      pair.UserID,
-					GroupID:     pair.GroupID,
-					GroupName:   pair.GroupName,
-					Description: pair.Description,
-				})
-			}
-			return pi
-		}
-		item := sgItem{GroupID: sg.GroupID, GroupName: sg.GroupName, Description: sg.Description, VpcID: sg.VPCID}
 		for _, rule := range sg.IngressRules {
-			item.IPPermissions = append(item.IPPermissions, renderPerm(rule))
+			item.IPPermissions = append(item.IPPermissions, ec2IPPermissionXML(rule))
 		}
 		for _, rule := range sg.EgressRules {
-			item.IPPermissionsE = append(item.IPPermissionsE, renderPerm(rule))
+			item.IPPermissionsE = append(item.IPPermissionsE, ec2IPPermissionXML(rule))
 		}
 		resp.Groups = append(resp.Groups, item)
 	}
@@ -2131,6 +2288,20 @@ func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRe
 	return p.modifySGRules(reqCtx, req, "egress", false)
 }
 
+// modifySGRules applies an Authorize/RevokeSecurityGroupIngress/Egress request.
+//
+// A revoke removes each named source on its own (#1453) — see [ec2RevokePermissions] — and
+// answers a source that matched nothing the way API_RevokeSecurityGroupIngress says it is
+// answered, which depends on the group's VPC: "For a default VPC, if the values you specify
+// do not match the existing rule's values, no error is returned, and the output describes the
+// security group rules that were not revoked. For a non-default VPC ... an
+// InvalidPermission.NotFound client error is returned, and no rules are revoked." The
+// default-VPC half renders unknownIpPermissionSet; the other refuses before anything is
+// written. Through v0.125.0 an unmatched revoke answered return=true in both, having removed
+// nothing.
+//
+// SecurityGroupRuleId.N is not read: substrate assigns no sgr- rule IDs, so a revoke naming
+// rules only by ID still answers MissingParameter.
 func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
 	sgID := req.Params["GroupId"]
 	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
@@ -2154,19 +2325,28 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	// A group named rather than identified is resolved to its ID within the group's VPC, on
+	// authorize and revoke alike, so the two forms address one rule.
+	if err := p.resolveGroupPairNames(reqCtx, sg.VPCID, perms); err != nil {
+		return nil, err
+	}
 
-	for _, perm := range perms {
-		if direction == "ingress" {
-			if add {
-				sg.IngressRules = append(sg.IngressRules, perm)
-			} else {
-				sg.IngressRules = removePerm(sg.IngressRules, perm)
+	rules := &sg.IngressRules
+	if direction == "egress" {
+		rules = &sg.EgressRules
+	}
+	var unknown []EC2IPPermission
+	if add {
+		*rules = append(*rules, perms...)
+	} else {
+		*rules, unknown = ec2RevokePermissions(*rules, perms)
+		if len(unknown) > 0 {
+			inDefault, lookupErr := p.ec2VPCIsDefault(reqCtx, sg.VPCID)
+			if lookupErr != nil {
+				return nil, lookupErr
 			}
-		} else {
-			if add {
-				sg.EgressRules = append(sg.EgressRules, perm)
-			} else {
-				sg.EgressRules = removePerm(sg.EgressRules, perm)
+			if !inDefault {
+				return nil, ec2PermissionNotFoundError()
 			}
 		}
 	}
@@ -2187,19 +2367,40 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 	} else if direction == "egress" && !add {
 		opName = "RevokeSecurityGroupEgressResponse"
 	}
-
-	body, err := xml.Marshal(struct {
-		XMLName xml.Name `xml:"response"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Return  bool     `xml:"return"`
-	}{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
-	if err != nil {
-		return nil, fmt.Errorf("ec2 modifySGRules marshal: %w", err)
+	type response struct {
+		XMLName xml.Name
+		XMLNS   string                `xml:"xmlns,attr"`
+		Return  bool                  `xml:"return"`
+		Unknown []ec2IPPermissionItem `xml:"unknownIpPermissionSet>item,omitempty"`
 	}
-	// Use dynamic XML element name.
-	xmlStr := strings.Replace(string(body), "<response ", "<"+opName+" ", 1)
-	xmlStr = strings.Replace(xmlStr, "</response>", "</"+opName+">", 1)
-	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{"Content-Type": "text/xml; charset=UTF-8"}, Body: []byte(xmlStr)}, nil
+	resp := response{
+		XMLName: xml.Name{Local: opName},
+		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
+		Return:  true,
+	}
+	for _, perm := range unknown {
+		resp.Unknown = append(resp.Unknown, ec2IPPermissionXML(perm))
+	}
+	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// ec2VPCIsDefault reports whether vpcID names the account's default VPC in the region.
+func (p *EC2Plugin) ec2VPCIsDefault(reqCtx *RequestContext, vpcID string) (bool, error) {
+	if vpcID == "" {
+		return false, nil
+	}
+	data, err := p.state.Get(context.Background(), ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+vpcID)
+	if err != nil {
+		return false, fmt.Errorf("ec2 vpcIsDefault get: %w", err)
+	}
+	if data == nil {
+		return false, nil
+	}
+	var vpc EC2VPC
+	if err := json.Unmarshal(data, &vpc); err != nil {
+		return false, fmt.Errorf("ec2 vpcIsDefault unmarshal: %w", err)
+	}
+	return vpc.IsDefault, nil
 }
 
 func (p *EC2Plugin) createInternetGateway(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
@@ -3235,6 +3436,13 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 			stateKey: ec2CapacityReservationStateKey(acct, region, id),
 			arnType:  "capacity-reservation", arnID: id,
 		}, true
+	case strings.HasPrefix(id, "sir-"):
+		// A Spot Instance request (#1436): "To tag the Spot Instance request after it has been
+		// created, see CreateTags." The ARN type is spot-instances-request, with the account.
+		return ec2Taggable{
+			stateKey: ec2SpotRequestStateKey(acct, region, id),
+			arnType:  "spot-instances-request", arnID: id,
+		}, true
 	case strings.HasPrefix(id, "pg-"):
 		// AWS does not settle whether CreateTags takes a placement group by ID or by
 		// name: the ARN is by name and DescribePlacementGroups publishes no group-id
@@ -3779,86 +3987,6 @@ func ec2KeyFingerprint(derBytes []byte) string {
 
 // --- Helper functions ---
 
-// ec2LookupDefaultVPC returns the account and region's default VPC and that VPC's
-// default subnet, reading state without writing any of it.
-//
-// It is a free function taking a [StateManager] for the same reason
-// [ec2LookupLaunchTemplate] is one: the authorization decision needs it, and
-// CheckAccess runs before the handler and has no plugin to call a method on. A
-// launch that omits SubnetId is authorized against the subnet it will actually land
-// in, which is only knowable by reading the default VPC first (#673).
-//
-// The read is split out from [EC2Plugin.ensureDefaultVPC] rather than shared with
-// it, because that one *creates* what it does not find — nine records, two of them
-// swallowing their own failures. Calling it from the authorizer would let an
-// unauthorized request create a VPC, which is the opposite of what authorizing
-// early is for.
-//
-// A nil subnet with a non-nil VPC means the default VPC exists but has no default
-// subnet: the caller decides whether to create one (the handler) or treat the
-// subnet as one this launch will mint (the authorizer). Both nil means there is no
-// default VPC yet. A state error is returned rather than reported as "no default
-// VPC", so the handler still fails instead of creating a second one.
-func ec2LookupDefaultVPC(ctx context.Context, state StateManager, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
-	vpcKeys, err := state.List(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-	if err != nil {
-		return nil, nil, fmt.Errorf("ec2 lookupDefaultVPC list vpcs: %w", err)
-	}
-	for _, k := range vpcKeys {
-		data, getErr := state.Get(ctx, ec2Namespace, k)
-		if getErr != nil || data == nil {
-			continue
-		}
-		var vpc EC2VPC
-		if json.Unmarshal(data, &vpc) != nil || !vpc.IsDefault {
-			continue
-		}
-		subnetKeys, listErr := state.List(ctx, ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-		if listErr != nil {
-			return nil, nil, fmt.Errorf("ec2 lookupDefaultVPC list subnets: %w", listErr)
-		}
-		for _, sk := range subnetKeys {
-			sdata, sErr := state.Get(ctx, ec2Namespace, sk)
-			if sErr != nil || sdata == nil {
-				continue
-			}
-			var subnet EC2Subnet
-			if json.Unmarshal(sdata, &subnet) == nil && subnet.VPCID == vpc.VPCID && subnet.IsDefault {
-				return &vpc, &subnet, nil
-			}
-		}
-		return &vpc, nil, nil
-	}
-	return nil, nil, nil
-}
-
-// ec2LookupDefaultSecurityGroup returns the ID of the security group a launch that
-// named none falls back to, or "" when none resolves.
-//
-// Shared between the launch handler and the authorization decision so the group the
-// launch attaches and the group its policy is evaluated against cannot differ. The
-// rule is deliberately the handler's own, unchanged: the first security-group key in
-// the account and region, and only if it belongs to vpcID. That is narrower than
-// "the group named default" — a launch in an account whose lexicographically first
-// group lives in another VPC attaches no group at all — but widening it would change
-// what a launch attaches, which is a separate question from what it is authorized
-// against.
-func ec2LookupDefaultSecurityGroup(ctx context.Context, state StateManager, reqCtx *RequestContext, vpcID string) string {
-	sgKeys, err := state.List(ctx, ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
-	if err != nil || len(sgKeys) == 0 {
-		return ""
-	}
-	data, getErr := state.Get(ctx, ec2Namespace, sgKeys[0])
-	if getErr != nil || data == nil {
-		return ""
-	}
-	var sg EC2SecurityGroup
-	if json.Unmarshal(data, &sg) != nil || sg.VPCID != vpcID {
-		return ""
-	}
-	return sg.GroupID
-}
-
 // ec2CheckSecurityGroups refuses a launch naming a security group that does not
 // exist, or one that exists in a VPC other than vpcID.
 //
@@ -3895,132 +4023,6 @@ func (p *EC2Plugin) ec2CheckSecurityGroups(reqCtx *RequestContext, ids []string,
 		}
 	}
 	return nil
-}
-
-// ensureDefaultVPC creates the default VPC and subnet if they don't already
-// exist for the given account/region.
-func (p *EC2Plugin) ensureDefaultVPC(ctx context.Context, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
-	vpc, subnet, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx)
-	if err != nil {
-		return nil, nil, err
-	}
-	if vpc != nil {
-		if subnet != nil {
-			return vpc, subnet, nil
-		}
-		// The default VPC exists but has no default subnet; create one.
-		created, createErr := p.createDefaultSubnet(ctx, reqCtx, vpc)
-		if createErr != nil {
-			return nil, nil, createErr
-		}
-		return vpc, created, nil
-	}
-
-	// Create default VPC.
-	vpcID := generateVPCID(reqCtx.IDs)
-	created := EC2VPC{
-		VPCID:              vpcID,
-		CIDRBlock:          "172.31.0.0/16",
-		IsDefault:          true,
-		State:              "available",
-		EnableDNSSupport:   true,
-		EnableDNSHostnames: true,
-		AccountID:          reqCtx.AccountID,
-		Region:             reqCtx.Region,
-	}
-	vpcData, err := json.Marshal(created)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC marshal: %w", err)
-	}
-	vpcKey := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
-	if err := p.state.Put(ctx, ec2Namespace, vpcKey, vpcData); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create vpc: %w", err)
-	}
-	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "vpc_ids", vpcID); err != nil {
-		return nil, nil, err
-	}
-
-	// Create default security group.
-	sgID := generateSGID(reqCtx.IDs)
-	sg := EC2SecurityGroup{
-		GroupID:     sgID,
-		GroupName:   "default",
-		Description: "default VPC security group",
-		VPCID:       vpcID,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
-		EgressRules: []EC2IPPermission{{IPProtocol: "-1", IPRanges: []string{"0.0.0.0/0"}}},
-	}
-	sgData, err := json.Marshal(sg)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC marshal: %w", err)
-	}
-	sgKey := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
-	if err := p.state.Put(ctx, ec2Namespace, sgKey, sgData); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create default sg: %w", err)
-	}
-	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "sg_ids", sgID); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC index default sg: %w", err)
-	}
-
-	// Create and attach a default internet gateway so the main route table can
-	// carry a 0.0.0.0/0 → igw route, matching a real default VPC.
-	igwID := generateIGWID(reqCtx.IDs)
-	igw := EC2InternetGateway{
-		InternetGatewayID: igwID,
-		Attachments:       []EC2IGWAttachment{{VPCID: vpcID, State: "available"}},
-		AccountID:         reqCtx.AccountID,
-		Region:            reqCtx.Region,
-	}
-	igwData, err := json.Marshal(igw)
-	if err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC marshal: %w", err)
-	}
-	igwKey := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
-	if err := p.state.Put(ctx, ec2Namespace, igwKey, igwData); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create default internet gateway: %w", err)
-	}
-	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "igw_ids", igwID); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC index default internet gateway: %w", err)
-	}
-
-	// Create main route table with local route + default IGW route.
-	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, "172.31.0.0/16", true, igwID); err != nil {
-		return nil, nil, fmt.Errorf("ec2 ensureDefaultVPC create main route table: %w", err)
-	}
-
-	subnet, err = p.createDefaultSubnet(ctx, reqCtx, &created)
-	if err != nil {
-		return nil, nil, err
-	}
-	return &created, subnet, nil
-}
-
-func (p *EC2Plugin) createDefaultSubnet(ctx context.Context, reqCtx *RequestContext, vpc *EC2VPC) (*EC2Subnet, error) {
-	subnetID := generateSubnetID(reqCtx.IDs)
-	subnet := EC2Subnet{
-		SubnetID:            subnetID,
-		VPCID:               vpc.VPCID,
-		CIDRBlock:           "172.31.0.0/20",
-		AvailabilityZone:    reqCtx.Region + "a",
-		IsDefault:           true,
-		MapPublicIPOnLaunch: true,
-		State:               "available",
-		AccountID:           reqCtx.AccountID,
-		Region:              reqCtx.Region,
-	}
-	data, err := json.Marshal(subnet)
-	if err != nil {
-		return nil, fmt.Errorf("ec2 createDefaultSubnet marshal: %w", err)
-	}
-	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
-	if err := p.state.Put(ctx, ec2Namespace, key, data); err != nil {
-		return nil, fmt.Errorf("ec2 createDefaultSubnet: %w", err)
-	}
-	if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "subnet_ids", subnetID); err != nil {
-		return nil, fmt.Errorf("ec2 createDefaultSubnet index: %w", err)
-	}
-	return &subnet, nil
 }
 
 // appendToList loads the JSON list at listKey, appends id, and saves it back.
@@ -4153,9 +4155,9 @@ func extractEC2Filters(params map[string]string) map[string][]string {
 //   - [ec2FilterSpec.documents]' name lookup. AWS's wildcards are for values; a filter *name*
 //     is one of a fixed documented set and "Filter names are case-sensitive" per the Filter
 //     type, so a name is either in the set or refused.
-//   - [sgSourcesMatch], which compares two stored permissions to each other rather than a
-//     request value to a record. It backs RevokeSecurityGroupIngress/Egress, where the
-//     source a caller names is the rule being removed, not a pattern selecting rules.
+//   - [ec2RevokePermissions], which compares the sources a revoke names to the stored
+//     rule's. It backs RevokeSecurityGroupIngress/Egress, where the source a caller names
+//     is the rule being removed, not a pattern selecting rules.
 func containsStr(slice []string, s string) bool {
 	for _, v := range slice {
 		if v == s {
@@ -4195,49 +4197,6 @@ func filterEmpty(slice []string) []string {
 		}
 	}
 	return result
-}
-
-// removePerm removes the first matching permission from the slice.
-// removePerm removes the first permission matching target's protocol, port
-// range, and source. The source must match too: a CIDR rule and a
-// source-security-group rule on the same port are distinct rules, so revoking
-// one must not remove the other.
-func removePerm(perms []EC2IPPermission, target EC2IPPermission) []EC2IPPermission {
-	for i, p := range perms {
-		if p.IPProtocol != target.IPProtocol || p.FromPort != target.FromPort || p.ToPort != target.ToPort {
-			continue
-		}
-		if !sgSourcesMatch(p, target) {
-			continue
-		}
-		return append(perms[:i], perms[i+1:]...)
-	}
-	return perms
-}
-
-// sgSourcesMatch reports whether two permissions have the same source, comparing
-// CIDR ranges and referenced security groups. A target that names no source at
-// all matches any source, preserving the pre-existing revoke-by-ports behavior.
-func sgSourcesMatch(a, target EC2IPPermission) bool {
-	if len(target.IPRanges) == 0 && len(target.UserIDGroupPairs) == 0 {
-		return true
-	}
-	for _, cidr := range target.IPRanges {
-		if containsStr(a.IPRanges, cidr) {
-			return true
-		}
-	}
-	for _, pair := range target.UserIDGroupPairs {
-		for _, existing := range a.UserIDGroupPairs {
-			if pair.GroupID != "" && existing.GroupID == pair.GroupID {
-				return true
-			}
-			if pair.GroupID == "" && pair.GroupName != "" && existing.GroupName == pair.GroupName {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // parseSGPermissions parses security-group rules from the EC2 query protocol,
@@ -4297,6 +4256,20 @@ func parseSGPermission(params map[string]string, prefix, accountID string) (EC2I
 		perm.IPRanges = append(perm.IPRanges, cidr)
 	}
 	for m := 1; ; m++ {
+		cidr, ok := params[fmt.Sprintf("%sIpv6Ranges.%d.CidrIpv6", prefix, m)]
+		if !ok || cidr == "" {
+			break
+		}
+		perm.IPv6Ranges = append(perm.IPv6Ranges, cidr)
+	}
+	for m := 1; ; m++ {
+		id, ok := params[fmt.Sprintf("%sPrefixListIds.%d.PrefixListId", prefix, m)]
+		if !ok || id == "" {
+			break
+		}
+		perm.PrefixListIDs = append(perm.PrefixListIDs, id)
+	}
+	for m := 1; ; m++ {
 		groupPrefix := fmt.Sprintf("%sGroups.%d.", prefix, m)
 		groupID := params[groupPrefix+"GroupId"]
 		groupName := params[groupPrefix+"GroupName"]
@@ -4311,7 +4284,7 @@ func parseSGPermission(params map[string]string, prefix, accountID string) (EC2I
 		})
 	}
 
-	present := hasProto || len(perm.IPRanges) > 0 || len(perm.UserIDGroupPairs) > 0
+	present := hasProto || ec2PermHasSource(perm)
 	return perm, present
 }
 
@@ -4626,12 +4599,16 @@ func ec2RegisteredRootDeviceType(params map[string]string) string {
 // describeImages lists the AMIs the account owns in the request's Region, narrowed by an
 // explicit ImageId.N list and by the filters [ec2ImageFilterSpec] evaluates.
 //
-// `Owner.N` and `ExecutableBy.N` are not read, deliberately and visibly: substrate stores
-// only images the account owns, so `self` is the answer to every describe and the other
-// three values AWS documents — `amazon`, `aws-marketplace`, another account ID — select
-// sets substrate does not model. Reading the parameter would let a caller believe a
-// narrowing happened. A bundled public AMI is reachable by naming it, which is the case
-// generated IaC actually produces.
+// `Owner.N` is read as of #1432 — "Scopes the results to images with the specified owners.
+// You can specify a combination of AWS account IDs, self, amazon, aws-backup-vault, and
+// aws-marketplace" — because a fresh server holds no image the account owns, and the way
+// AWS's own examples discover one is Owners=amazon. `self` and the caller's account ID
+// select the account's own images; `amazon` selects the bundled catalog's AMIs published
+// under that alias (see [ec2ImageOwnerSelected]); every other value selects nothing
+// substrate holds. An absent Owner.N still answers the account's own images alone, where AWS
+// would add every public image: substrate's reading, kept so an unqualified describe keeps
+// meaning what it meant. `ExecutableBy.N` remains unread. A bundled AMI is also reachable by
+// naming it in ImageId.N.
 //
 // It paginates as of #917. API_DescribeImages publishes MaxResults with **no** Valid Range and no
 // Default — only "The maximum number of items to return for this request" — so, per #671, the
@@ -4664,6 +4641,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	owners := extractIndexedParams(req.Params, "Owner")
 
 	if err := ec2ImageFilterSpec().check(req.Params); err != nil {
 		return nil, err
@@ -4836,6 +4814,10 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	// listed records the IDs the passes below have answered, so a bundled AMI a caller
+	// registered a colliding record for is reported once, as its registered self — the
+	// precedence [EC2Plugin.resolveImage] gives a launch.
+	listed := map[string]bool{}
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
 		if getErr != nil || data == nil {
@@ -4849,20 +4831,39 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if !ids.match(img.ImageID) {
 			continue
 		}
+		listed[img.ImageID] = true
 
 		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
 		// values within one — so the map's iteration order does not affect the outcome.
-		if !ec2ImageMatchesFilters(img, filters) {
+		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
 	}
 
-	// An ID the account's own images did not answer may still name a bundled public AMI.
-	// Those are deliberately absent from state (#733), so they are reachable by name but
-	// are not part of an unqualified describe's answer — substrate's reading, and the one
-	// that keeps this operation reporting what the account owns while a launch and a
-	// describe still agree about the AMI a consumer resolved through SSM.
+	// Owner.N naming an alias the bundled catalog publishes under — "amazon" — lists those
+	// AMIs (#1432), so a caller discovering an image the way AWS's own examples do,
+	// DescribeImages with Owners=amazon and a name filter, finds one on a fresh server. They
+	// are not part of an *unqualified* describe's answer, which keeps reporting what the
+	// account owns, as it did before.
+	if ec2OwnersNameBundledAlias(owners) {
+		for _, b := range bundledImages {
+			img := b.image(reqCtx.Region)
+			if listed[img.ImageID] || !ids.match(img.ImageID) {
+				continue
+			}
+			listed[img.ImageID] = true
+			if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
+				continue
+			}
+			resp.Images = append(resp.Images, renderImage(img))
+		}
+	}
+
+	// An ID the passes above did not answer may still name a bundled public AMI. Those are
+	// deliberately absent from state (#733), so they are reachable by name — the case
+	// generated IaC produces, and the one that keeps a launch and a describe agreeing about
+	// the AMI a consumer resolved through SSM.
 	for _, id := range ids.pending() {
 		img, found := p.resolveImage(reqCtx, id)
 		if !found {
@@ -4871,7 +4872,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		// Records the resolution, so unresolved below does not report an AMI that exists.
 		// It cannot return false: the ID came from the request's own list.
 		_ = ids.match(id)
-		if !ec2ImageMatchesFilters(img, filters) {
+		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
