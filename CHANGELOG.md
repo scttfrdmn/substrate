@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.125.0] - 2026-11-14
+
 ### Added
 
 - **API Gateway v2 `GetApiMappings`, `GetApiMapping`, `UpdateApiMapping` and `DeleteApiMapping` are routed (#566).** A domain indexes its mapping IDs on create and drops them on delete. `GetApiMappings` answers the `items` envelope as one complete page. `UpdateApiMapping` changes only the members sent, and `DeleteApiMapping` answers 204. An absent mapping or domain is `NotFoundException`/404. `CreateApiMapping` now also refuses an absent domain with 404, as its page publishes; before, it stored a mapping that nothing could read back.
@@ -20997,7 +20999,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.124.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.125.0...HEAD
+[v0.125.0]: https://github.com/scttfrdmn/substrate/compare/v0.124.0...v0.125.0
 [v0.124.0]: https://github.com/scttfrdmn/substrate/compare/v0.123.0...v0.124.0
 [v0.123.0]: https://github.com/scttfrdmn/substrate/compare/v0.122.0...v0.123.0
 [v0.122.0]: https://github.com/scttfrdmn/substrate/compare/v0.121.0...v0.122.0
