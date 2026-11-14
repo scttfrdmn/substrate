@@ -371,8 +371,9 @@ func TestSQSPlugin_GetQueueAttributes(t *testing.T) {
 
 	queueURL := "http://sqs.us-east-1.localhost/123456789012/attrs-queue"
 	resp := sqsRequest(t, srv, map[string]string{
-		"Action":   "GetQueueAttributes",
-		"QueueUrl": queueURL,
+		"Action":          "GetQueueAttributes",
+		"QueueUrl":        queueURL,
+		"AttributeName.1": "All",
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body := readBody(t, resp)
@@ -547,8 +548,9 @@ func TestSQSPlugin_SetQueueAttributes(t *testing.T) {
 
 	// Verify via GetQueueAttributes.
 	resp2 := sqsRequest(t, srv, map[string]string{
-		"Action":   "GetQueueAttributes",
-		"QueueUrl": queueURL,
+		"Action":          "GetQueueAttributes",
+		"QueueUrl":        queueURL,
+		"AttributeName.1": "VisibilityTimeout",
 	})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 	body := readBody(t, resp2)
@@ -657,7 +659,8 @@ func TestSQSPlugin_JSON_SetQueueAttributes(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	resp2 := sqsJSONRequest(t, srv, "GetQueueAttributes", map[string]interface{}{
-		"QueueUrl": qURL,
+		"QueueUrl":       qURL,
+		"AttributeNames": []string{"VisibilityTimeout"},
 	})
 	body := readJSONBody(t, resp2)
 	attrs := body["Attributes"].(map[string]interface{})

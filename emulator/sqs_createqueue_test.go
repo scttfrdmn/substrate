@@ -526,7 +526,7 @@ func sqsQueueAttribute(t *testing.T, srv *emulator.Server, name, attr string, js
 		return v
 	}
 
-	resp := sqsRequest(t, srv, map[string]string{"Action": "GetQueueAttributes", "QueueUrl": queueURL})
+	resp := sqsRequest(t, srv, map[string]string{"Action": "GetQueueAttributes", "QueueUrl": queueURL, "AttributeName.1": "All"})
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	var out struct {
 		Attributes []struct {

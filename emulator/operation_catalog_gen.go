@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 67 plugins, 1073 routed operations.
+// 67 plugins, 1074 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -1109,6 +1109,7 @@ var routedOperations = map[string][]string{
 	},
 	"sqs": {
 		"ChangeMessageVisibility",
+		"ChangeMessageVisibilityBatch",
 		"CreateQueue",
 		"DeleteMessage",
 		"DeleteMessageBatch",

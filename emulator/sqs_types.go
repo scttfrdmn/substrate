@@ -70,6 +70,16 @@ type SQSMessage struct {
 
 	// MessageGroupID is the FIFO message group identifier. Empty for standard queues.
 	MessageGroupID string `json:"MessageGroupId,omitempty"`
+
+	// MessageDeduplicationID is the FIFO deduplication identifier the message was sent
+	// with, or the content hash ContentBasedDeduplication derived. Empty for standard
+	// queues. ReceiveMessage returns it as the MessageDeduplicationId system attribute.
+	MessageDeduplicationID string `json:"MessageDeduplicationId,omitempty"`
+
+	// FirstReceiveTimestamp is the Unix epoch milliseconds of the message's first
+	// receive, zero until then. ReceiveMessage returns it as the
+	// ApproximateFirstReceiveTimestamp system attribute (#1462).
+	FirstReceiveTimestamp int64 `json:"ApproximateFirstReceiveTimestamp,omitempty"`
 }
 
 // SQSMessageAttribute holds a single user-defined message attribute.
