@@ -588,7 +588,7 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 			if !ok {
 				failures = append(failures, failure{
 					ImageID:       imageID{ImageTag: id.ImageTag},
-					FailureCode:   "ImageNotFoundException",
+					FailureCode:   "ImageNotFound",
 					FailureReason: "Image not found",
 				})
 				continue
@@ -601,7 +601,7 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		if data == nil {
 			failures = append(failures, failure{
 				ImageID:       imageID{ImageDigest: digest, ImageTag: id.ImageTag},
-				FailureCode:   "ImageNotFoundException",
+				FailureCode:   "ImageNotFound",
 				FailureReason: "Image not found",
 			})
 			continue
@@ -823,7 +823,7 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 			if !ok {
 				failures = append(failures, failure{
 					ImageID:       imageID{ImageTag: tag},
-					FailureCode:   "ImageNotFoundException",
+					FailureCode:   "ImageNotFound",
 					FailureReason: "Image not found",
 				})
 				continue
@@ -837,7 +837,7 @@ func (p *ECRPlugin) batchDeleteImage(ctx *RequestContext, req *AWSRequest) (*AWS
 		if data == nil {
 			failures = append(failures, failure{
 				ImageID:       imageID{ImageDigest: digest, ImageTag: tag},
-				FailureCode:   "ImageNotFoundException",
+				FailureCode:   "ImageNotFound",
 				FailureReason: "Image not found",
 			})
 			continue

@@ -298,7 +298,7 @@ func TestECRDigest_BatchDeleteImageRemovesATagOrTheWholeImage(t *testing.T) {
 		out := del(h, map[string]string{"imageDigest": ecrDigestOf("nothing")})
 		assert.Empty(t, out.ImageIDs)
 		require.Len(t, out.Failures, 1)
-		assert.Equal(t, "ImageNotFoundException", out.Failures[0].FailureCode)
+		assert.Equal(t, "ImageNotFound", out.Failures[0].FailureCode)
 	})
 }
 
