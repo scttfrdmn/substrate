@@ -27,13 +27,13 @@ import (
 // removing it. Here a delete removes, so the default has to be a stored record for the delete to be
 // observable.
 //
-// # What is not modelled
+// # What is not modeled
 //
 // The setting is recorded and reported; it is not enforced. Under BucketOwnerEnforced real S3
 // disables ACLs — a write naming any ACL other than bucket-owner-full-control fails with
 // AccessControlListNotSupported, and PutBucketOwnershipControls(BucketOwnerEnforced) on a bucket
 // whose ACL grants others fails with InvalidBucketAclWithObjectOwnership. Substrate keeps accepting
-// ACLs whatever the setting, so a bucket reporting BucketOwnerEnforced still honours one. That is
+// ACLs whatever the setting, so a bucket reporting BucketOwnerEnforced still honors one. That is
 // tracked separately (#1474) rather than folded in here, because enforcing it by default would
 // change the answer every existing ACL caller gets.
 

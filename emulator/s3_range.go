@@ -150,7 +150,7 @@ func s3InvalidRangeResponse(rangeHeader string, total int64) *AWSResponse {
 // object's stored value is a COMPOSITE checksum-of-checksums or a FULL_OBJECT value
 // over every part, neither of which is the checksum of any one part, and Substrate
 // records no per-part checksum on the assembled object, so no range of it carries
-// one. GetObject's partNumber parameter is not modelled.
+// one. GetObject's partNumber parameter is not modeled.
 func rangeServesStoredChecksum(spec byteRangeSpec, obj *S3Object) bool {
 	if !spec.Satisfiable {
 		return true
