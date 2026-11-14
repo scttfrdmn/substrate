@@ -8513,7 +8513,7 @@ template resolves its subnet and groups from.
 ### The default VPC
 
 **Every account has a default VPC in each Region, seeded on its first EC2 request**
-([#1464](https://github.com/scttfrdmn/substrate/issues/1464)). Through v0.125.0 a fresh substrate
+([#1464](https://github.com/scttfrdmn/substrate/issues/1464)). Until then a fresh substrate
 held none — `DescribeVpcs` and `DescribeSubnets` answered nothing, with or without `is-default`
 and `default-for-az` — and one was created only by a `RunInstances` that named no subnet, with a
 single subnet. Tooling that places resources in the default VPC found nothing to place them in.
@@ -8555,7 +8555,7 @@ an account whose default VPC was deleted is in; `emulator.WithoutDefaultVPC()` d
 
 **Compatibility.** A fresh account now holds a VPC, three subnets, a security group, an internet
 gateway and a route table before it creates anything, so a test counting resources in a fresh
-account counts them too, and a replay of a recording made before v0.126.0 seeds them on its first
+account counts them too, and a replay of a recording made before the change seeds them on its first
 EC2 event — its recorded identifiers still match, but a state-hash comparison against the old
 recording differs by the seeded records.
 
@@ -8643,7 +8643,7 @@ Substrate's own choices, where the API model does not decide:
 ### Security group tags and rules
 
 **A security group keeps its tags** ([#1440](https://github.com/scttfrdmn/substrate/issues/1440)).
-Through v0.125.0 `CreateSecurityGroup` discarded `TagSpecification.N`, `DescribeSecurityGroups`
+Before it, `CreateSecurityGroup` discarded `TagSpecification.N`, `DescribeSecurityGroups`
 rendered no `tagSet` — so a tag `CreateTags` had stored was unreadable too — and `tag:<key>` was
 accepted and inert, so `tag:spawn:managed=true` selected every group. Now:
 
@@ -8659,7 +8659,7 @@ accepted and inert, so `tag:spawn:managed=true` selected every group. Now:
 
 **A revoke removes the sources it names**
 ([#1453](https://github.com/scttfrdmn/substrate/issues/1453)). EC2 stores one rule per source.
-Substrate stores the `IpPermission` an authorize carried, and through v0.125.0 a revoke naming one
+Substrate stores the `IpPermission` an authorize carried, and before this change a revoke naming one
 of its sources dropped the whole permission, so revoking `0.0.0.0/0` from a permission authorized
 with `0.0.0.0/0` and `10.1.0.0/16` left no rule at all. Each source a revoke names — an IPv4 range,
 an IPv6 range, a prefix list or a referenced group — is now removed on its own, from every stored
@@ -8676,7 +8676,7 @@ A revoke naming a rule the group does not hold is answered the way
 | a non-default VPC | `InvalidPermission.NotFound` / "The specified rule does not exist in this security group.", HTTP 400 — and **no rules are revoked**, including any the same request did match |
 | the default VPC | `return=true`, the matched sources revoked, and the rest reported in `unknownIpPermissionSet` |
 
-Through v0.125.0 both answered `return=true` having removed nothing. `SecurityGroupRuleId.N` is not
+Before it, both answered `return=true` having removed nothing. `SecurityGroupRuleId.N` is not
 read, because substrate assigns no `sgr-` rule IDs; a revoke naming rules only by ID still answers
 `MissingParameter`. A revoke permission naming no source at all keeps its old meaning — it removes
 the first stored permission on its protocol and ports — because AWS describes no such rule.
@@ -9816,7 +9816,7 @@ observe it. That is tracked separately.
 ### Spot Instance requests
 
 **`RunInstances` launches a Spot Instance, and the three Spot request operations are routed**
-([#1436](https://github.com/scttfrdmn/substrate/issues/1436)). Through v0.125.0
+([#1436](https://github.com/scttfrdmn/substrate/issues/1436)). Before it,
 `RequestSpotInstances`, `DescribeSpotInstanceRequests` and `CancelSpotInstanceRequests` answered
 `InvalidAction`, and `RunInstances` ignored `InstanceMarketOptions` — a launch asking for Spot got
 an On-Demand instance with no request behind it.
