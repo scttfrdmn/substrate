@@ -105,6 +105,13 @@ var pluginRouting = map[string]PluginRouting{
 		SigningNames: []string{"athena"},
 		Source:       "botocore athena service-2.json",
 	},
+	"autoscaling": {
+		Display:      "EC2 Auto Scaling",
+		Protocol:     "Query",
+		Hosts:        []string{"autoscaling.us-east-1.amazonaws.com"},
+		SigningNames: []string{"autoscaling"},
+		Source:       "botocore autoscaling service-2.json",
+	},
 	"backup": {
 		Display:      "Backup",
 		Protocol:     "REST/JSON",

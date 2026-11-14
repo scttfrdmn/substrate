@@ -81,6 +81,7 @@ var docSections = map[string]string{
 	"apigatewayv2":         "API Gateway v2 (HTTP)",
 	"appsync":              "AppSync",
 	"athena":               "Athena",
+	"autoscaling":          "EC2 Auto Scaling",
 	"backup":               "AWS Backup",
 	"batch":                "Batch",
 	"bedrock-runtime":      "Bedrock Runtime",

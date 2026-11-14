@@ -155,6 +155,14 @@ func RegisterDefaultPlugins(
 		ec2Opts["default_vpc"] = cfg.EC2.DefaultVPC
 	}
 
+	// Auto Scaling launches and terminates through the EC2 plugin it finds in the registry,
+	// and checks the caller's ec2:RunInstances permission itself at create and update, for
+	// the reason CreateFleet does (#1460).
+	autoscalingOpts := map[string]any{"registry": registry}
+	if settings.auth != nil {
+		autoscalingOpts["auth_controller"] = settings.auth
+	}
+
 	// The CloudFormation plugin adapts the StackDeployer that [Client] already
 	// drives in process, so it needs the registry to deploy each template resource
 	// into. It is registered after S3/IAM/Lambda only for readability: the registry
@@ -250,6 +258,7 @@ func RegisterDefaultPlugins(
 		{&RedshiftPlugin{}, "redshift", nil},
 		{&RedshiftDataPlugin{}, "redshift-data", nil},
 		{&TimestreamPlugin{}, "timestream", nil},
+		{&AutoScalingPlugin{}, "autoscaling", autoscalingOpts},
 	}
 	for _, r := range registrations {
 		if err := w.register(ctx, r.plugin, r.name, r.extra); err != nil {

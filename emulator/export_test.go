@@ -1830,3 +1830,24 @@ func ElastiCacheTimeOrNilForTest(t time.Time) *time.Time {
 func CognitoTimeOrNilForTest(t time.Time) *EpochSeconds {
 	return cognitoTimeOrNil(t)
 }
+
+// AutoScalingTargetOnDemandForTest wraps asgTargetOnDemand, the On-Demand count a
+// mixed-instances group holds at a size. Exported so the scaling-behavior table the
+// mixed-instances setup overview publishes can be checked row by row without launching
+// forty instances per row.
+func AutoScalingTargetOnDemandForTest(total, base, pct int) int {
+	return asgTargetOnDemand(total, AutoScalingInstancesDistribution{
+		OnDemandBaseCapacity:                base,
+		OnDemandPercentageAboveBaseCapacity: pct,
+	})
+}
+
+// AutoScalingMatchInstanceTypesForTest returns the catalog types asgMatchInstanceTypes
+// selects for req, in launch-priority order.
+func AutoScalingMatchInstanceTypesForTest(req *AutoScalingInstanceRequirements) []string {
+	var out []string
+	for _, info := range asgMatchInstanceTypes(req) {
+		out = append(out, info.InstanceType)
+	}
+	return out
+}

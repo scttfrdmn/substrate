@@ -136,6 +136,11 @@ func TestRender_ProducesCompilableSourceCitingItsSnapshot(t *testing.T) {
 	}
 }
 
+// validAutoscalingSnapshot is a well-formed snapshot for the service that sorts first in
+// [services], so a case breaking ec2.json reaches the ec2 snapshot rather than stopping at
+// a missing autoscaling.json (#1460).
+const validAutoscalingSnapshot = `{"Name":"autoscaling","Version":"v1.5","Actions":[{"Name":"X"}]}`
+
 // TestLoad_RefusesASnapshotItCannotTrust covers the four ways the vendored data can be
 // wrong. Each refusal exists because the alternative is silent: a missing or truncated
 // snapshot would generate a table that classifies every action as unpublished, which the
@@ -153,22 +158,24 @@ func TestLoad_RefusesASnapshotItCannotTrust(t *testing.T) {
 		},
 		{
 			name:    "a snapshot that is not JSON",
-			write:   map[string]string{"ec2.json": "{", "iam.json": "{"},
+			write:   map[string]string{"autoscaling.json": validAutoscalingSnapshot, "ec2.json": "{", "iam.json": "{"},
 			wantErr: "parse",
 		},
 		{
 			name: "a snapshot naming another service",
 			write: map[string]string{
-				"ec2.json": `{"Name":"ecs","Version":"v1.4","Actions":[{"Name":"X"}]}`,
-				"iam.json": `{"Name":"iam","Version":"v1.4","Actions":[{"Name":"X"}]}`,
+				"autoscaling.json": validAutoscalingSnapshot,
+				"ec2.json":         `{"Name":"ecs","Version":"v1.4","Actions":[{"Name":"X"}]}`,
+				"iam.json":         `{"Name":"iam","Version":"v1.4","Actions":[{"Name":"X"}]}`,
 			},
 			wantErr: `names service "ecs"`,
 		},
 		{
 			name: "a snapshot with no actions",
 			write: map[string]string{
-				"ec2.json": `{"Name":"ec2","Version":"v1.4","Actions":[]}`,
-				"iam.json": `{"Name":"iam","Version":"v1.4","Actions":[{"Name":"X"}]}`,
+				"autoscaling.json": validAutoscalingSnapshot,
+				"ec2.json":         `{"Name":"ec2","Version":"v1.4","Actions":[]}`,
+				"iam.json":         `{"Name":"iam","Version":"v1.4","Actions":[{"Name":"X"}]}`,
 			},
 			wantErr: "lists no actions",
 		},

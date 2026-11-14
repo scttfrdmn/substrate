@@ -3,6 +3,7 @@
 // Source: AWS Service Reference Information,
 // https://servicereference.us-east-1.amazonaws.com/, vendored under emulator/authzref:
 //
+//   autoscaling v1.5   68 actions,   2 resource types
 //   ec2  v1.4  824 actions, 114 resource types
 //   elasticloadbalancing v1.4   77 actions,  11 resource types
 //   iam  v1.4  190 actions,  15 resource types
@@ -21,6 +22,75 @@ package emulator
 // length of a single return. An absent key is an action AWS does not publish at all.
 // Read it through [authzActionSupportsResourceType] rather than directly.
 var authzActionResources = map[string][]string{
+	// autoscaling (v1.5)
+	"autoscaling:AttachInstances":                      {"autoScalingGroup"},
+	"autoscaling:AttachLoadBalancerTargetGroups":       {"autoScalingGroup"},
+	"autoscaling:AttachLoadBalancers":                  {"autoScalingGroup"},
+	"autoscaling:AttachTrafficSources":                 {"autoScalingGroup"},
+	"autoscaling:BatchDeleteScheduledAction":           {"autoScalingGroup"},
+	"autoscaling:BatchPutScheduledUpdateGroupAction":   {"autoScalingGroup"},
+	"autoscaling:CancelInstanceRefresh":                {"autoScalingGroup"},
+	"autoscaling:CompleteLifecycleAction":              {"autoScalingGroup"},
+	"autoscaling:CreateAutoScalingGroup":               {"autoScalingGroup"},
+	"autoscaling:CreateLaunchConfiguration":            {"launchConfiguration"},
+	"autoscaling:CreateOrUpdateTags":                   {"autoScalingGroup"},
+	"autoscaling:DeleteAutoScalingGroup":               {"autoScalingGroup"},
+	"autoscaling:DeleteLaunchConfiguration":            {"launchConfiguration"},
+	"autoscaling:DeleteLifecycleHook":                  {"autoScalingGroup"},
+	"autoscaling:DeleteNotificationConfiguration":      {"autoScalingGroup"},
+	"autoscaling:DeletePolicy":                         {"autoScalingGroup"},
+	"autoscaling:DeleteScheduledAction":                {"autoScalingGroup"},
+	"autoscaling:DeleteTags":                           {"autoScalingGroup"},
+	"autoscaling:DeleteWarmPool":                       {"autoScalingGroup"},
+	"autoscaling:DescribeAccountLimits":                {},
+	"autoscaling:DescribeAccountSettings":              {},
+	"autoscaling:DescribeAdjustmentTypes":              {},
+	"autoscaling:DescribeAutoScalingGroups":            {},
+	"autoscaling:DescribeAutoScalingInstances":         {},
+	"autoscaling:DescribeAutoScalingNotificationTypes": {},
+	"autoscaling:DescribeInstanceRefreshes":            {},
+	"autoscaling:DescribeLaunchConfigurations":         {},
+	"autoscaling:DescribeLifecycleHookTypes":           {},
+	"autoscaling:DescribeLifecycleHooks":               {},
+	"autoscaling:DescribeLoadBalancerTargetGroups":     {},
+	"autoscaling:DescribeLoadBalancers":                {},
+	"autoscaling:DescribeMetricCollectionTypes":        {},
+	"autoscaling:DescribeNotificationConfigurations":   {},
+	"autoscaling:DescribePolicies":                     {},
+	"autoscaling:DescribeScalingActivities":            {},
+	"autoscaling:DescribeScalingProcessTypes":          {},
+	"autoscaling:DescribeScheduledActions":             {},
+	"autoscaling:DescribeTags":                         {},
+	"autoscaling:DescribeTerminationPolicyTypes":       {},
+	"autoscaling:DescribeTrafficSources":               {},
+	"autoscaling:DescribeWarmPool":                     {},
+	"autoscaling:DetachInstances":                      {"autoScalingGroup"},
+	"autoscaling:DetachLoadBalancerTargetGroups":       {"autoScalingGroup"},
+	"autoscaling:DetachLoadBalancers":                  {"autoScalingGroup"},
+	"autoscaling:DetachTrafficSources":                 {"autoScalingGroup"},
+	"autoscaling:DisableMetricsCollection":             {"autoScalingGroup"},
+	"autoscaling:EnableMetricsCollection":              {"autoScalingGroup"},
+	"autoscaling:EnterStandby":                         {"autoScalingGroup"},
+	"autoscaling:ExecutePolicy":                        {"autoScalingGroup"},
+	"autoscaling:ExitStandby":                          {"autoScalingGroup"},
+	"autoscaling:GetPredictiveScalingForecast":         {},
+	"autoscaling:LaunchInstances":                      {"autoScalingGroup"},
+	"autoscaling:PutAccountSetting":                    {},
+	"autoscaling:PutLifecycleHook":                     {"autoScalingGroup"},
+	"autoscaling:PutNotificationConfiguration":         {"autoScalingGroup"},
+	"autoscaling:PutScalingPolicy":                     {"autoScalingGroup"},
+	"autoscaling:PutScheduledUpdateGroupAction":        {"autoScalingGroup"},
+	"autoscaling:PutWarmPool":                          {"autoScalingGroup"},
+	"autoscaling:RecordLifecycleActionHeartbeat":       {"autoScalingGroup"},
+	"autoscaling:ResumeProcesses":                      {"autoScalingGroup"},
+	"autoscaling:RollbackInstanceRefresh":              {"autoScalingGroup"},
+	"autoscaling:SetDesiredCapacity":                   {"autoScalingGroup"},
+	"autoscaling:SetInstanceHealth":                    {"autoScalingGroup"},
+	"autoscaling:SetInstanceProtection":                {"autoScalingGroup"},
+	"autoscaling:StartInstanceRefresh":                 {"autoScalingGroup"},
+	"autoscaling:SuspendProcesses":                     {"autoScalingGroup"},
+	"autoscaling:TerminateInstanceInAutoScalingGroup":  {"autoScalingGroup"},
+	"autoscaling:UpdateAutoScalingGroup":               {"autoScalingGroup"},
 	// ec2 (v1.4)
 	"ec2:AcceptAddressTransfer":                     {"elastic-ip"},
 	"ec2:AcceptCapacityReservationBillingOwnership": {"capacity-reservation"},
@@ -1703,6 +1773,13 @@ var authzActionResources = map[string][]string{
 // that what a per-operation resolver builds has the shape recorded here, so the shapes
 // cannot drift from AWS's without a failure.
 var authzResourceARNFormatsByType = map[string][]string{
+	// autoscaling (v1.5)
+	"autoscaling:autoScalingGroup": {
+		"arn:${Partition}:autoscaling:${Region}:${Account}:autoScalingGroup:${GroupId}:autoScalingGroupName/${GroupFriendlyName}",
+	},
+	"autoscaling:launchConfiguration": {
+		"arn:${Partition}:autoscaling:${Region}:${Account}:launchConfiguration:${Id}:launchConfigurationName/${LaunchConfigurationName}",
+	},
 	// ec2 (v1.4)
 	"ec2:application-status-check": {
 		"arn:${Partition}:ec2:${Region}:${Account}:application-status-check/${ApplicationStatusCheckId}",

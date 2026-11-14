@@ -1364,7 +1364,23 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 }
 
 func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	ids := extractIndexedParams(req.Params, "InstanceId")
+	return p.terminateInstanceIDs(reqCtx, extractIndexedParams(req.Params, "InstanceId"), true)
+}
+
+// terminateForAutoScaling terminates instances on an Auto Scaling group's behalf, which
+// termination protection does not stop: "Enabling termination protection does not prevent
+// Amazon EC2 Auto Scaling from terminating an instance when the instance is unhealthy or
+// during scale-in events" (EC2 user guide, Change instance termination protection). It is a
+// method rather than a request flag for the reason [EC2Plugin.runInstances] gives: no request
+// a caller can send reaches it (#1460).
+func (p *EC2Plugin) terminateForAutoScaling(reqCtx *RequestContext, ids []string) error {
+	_, err := p.terminateInstanceIDs(reqCtx, ids, false)
+	return err
+}
+
+// terminateInstanceIDs terminates ids, honoring termination protection when honorProtection
+// is set — always, for a TerminateInstances request.
+func (p *EC2Plugin) terminateInstanceIDs(reqCtx *RequestContext, ids []string, honorProtection bool) (*AWSResponse, error) {
 	type stateChange struct {
 		InstanceID   string `xml:"instanceId"`
 		CurrentState struct {
@@ -1412,7 +1428,10 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 	// then report the failure if any zone was blocked. The terminations persist —
 	// the request "reports failure" while the unaffected zones still went through —
 	// so the ordering here is the behavior, not an implementation detail.
-	blocked := ec2TerminationProtectionBlocked(instances)
+	blocked := map[string]string{}
+	if honorProtection {
+		blocked = ec2TerminationProtectionBlocked(instances)
+	}
 	for i, inst := range instances {
 		if _, azBlocked := blocked[inst.AvailabilityZone]; azBlocked {
 			continue
