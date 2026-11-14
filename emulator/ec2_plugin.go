@@ -596,7 +596,8 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// does not make. The template's AMI is checked here, when it is used.
 	_, imageFound := p.resolveImage(reqCtx, imageID)
 	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
-		return nil, awsErr
+		// The not-found refusal says where an AMI comes from (#1432); the code is unchanged.
+		return nil, ec2AMINotFoundHint(awsErr)
 	}
 
 	// Block device mappings are validated here for two reasons that fix the position
@@ -4474,12 +4475,16 @@ func ec2RegisteredRootDeviceType(params map[string]string) string {
 // describeImages lists the AMIs the account owns in the request's Region, narrowed by an
 // explicit ImageId.N list and by the filters [ec2ImageFilterSpec] evaluates.
 //
-// `Owner.N` and `ExecutableBy.N` are not read, deliberately and visibly: substrate stores
-// only images the account owns, so `self` is the answer to every describe and the other
-// three values AWS documents — `amazon`, `aws-marketplace`, another account ID — select
-// sets substrate does not model. Reading the parameter would let a caller believe a
-// narrowing happened. A bundled public AMI is reachable by naming it, which is the case
-// generated IaC actually produces.
+// `Owner.N` is read as of #1432 — "Scopes the results to images with the specified owners.
+// You can specify a combination of AWS account IDs, self, amazon, aws-backup-vault, and
+// aws-marketplace" — because a fresh server holds no image the account owns, and the way
+// AWS's own examples discover one is Owners=amazon. `self` and the caller's account ID
+// select the account's own images; `amazon` selects the bundled catalog's AMIs published
+// under that alias (see [ec2ImageOwnerSelected]); every other value selects nothing
+// substrate holds. An absent Owner.N still answers the account's own images alone, where AWS
+// would add every public image: substrate's reading, kept so an unqualified describe keeps
+// meaning what it meant. `ExecutableBy.N` remains unread. A bundled AMI is also reachable by
+// naming it in ImageId.N.
 //
 // It paginates as of #917. API_DescribeImages publishes MaxResults with **no** Valid Range and no
 // Default — only "The maximum number of items to return for this request" — so, per #671, the
@@ -4512,6 +4517,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err := ids.validate(); err != nil {
 		return nil, err
 	}
+	owners := extractIndexedParams(req.Params, "Owner")
 
 	if err := ec2ImageFilterSpec().check(req.Params); err != nil {
 		return nil, err
@@ -4684,6 +4690,10 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	resp := response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/"}
+	// listed records the IDs the passes below have answered, so a bundled AMI a caller
+	// registered a colliding record for is reported once, as its registered self — the
+	// precedence [EC2Plugin.resolveImage] gives a launch.
+	listed := map[string]bool{}
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
 		if getErr != nil || data == nil {
@@ -4697,20 +4707,39 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if !ids.match(img.ImageID) {
 			continue
 		}
+		listed[img.ImageID] = true
 
 		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
 		// values within one — so the map's iteration order does not affect the outcome.
-		if !ec2ImageMatchesFilters(img, filters) {
+		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
 	}
 
-	// An ID the account's own images did not answer may still name a bundled public AMI.
-	// Those are deliberately absent from state (#733), so they are reachable by name but
-	// are not part of an unqualified describe's answer — substrate's reading, and the one
-	// that keeps this operation reporting what the account owns while a launch and a
-	// describe still agree about the AMI a consumer resolved through SSM.
+	// Owner.N naming an alias the bundled catalog publishes under — "amazon" — lists those
+	// AMIs (#1432), so a caller discovering an image the way AWS's own examples do,
+	// DescribeImages with Owners=amazon and a name filter, finds one on a fresh server. They
+	// are not part of an *unqualified* describe's answer, which keeps reporting what the
+	// account owns, as it did before.
+	if ec2OwnersNameBundledAlias(owners) {
+		for _, b := range bundledImages {
+			img := b.image(reqCtx.Region)
+			if listed[img.ImageID] || !ids.match(img.ImageID) {
+				continue
+			}
+			listed[img.ImageID] = true
+			if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
+				continue
+			}
+			resp.Images = append(resp.Images, renderImage(img))
+		}
+	}
+
+	// An ID the passes above did not answer may still name a bundled public AMI. Those are
+	// deliberately absent from state (#733), so they are reachable by name — the case
+	// generated IaC produces, and the one that keeps a launch and a describe agreeing about
+	// the AMI a consumer resolved through SSM.
 	for _, id := range ids.pending() {
 		img, found := p.resolveImage(reqCtx, id)
 		if !found {
@@ -4719,7 +4748,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		// Records the resolution, so unresolved below does not report an AMI that exists.
 		// It cannot return false: the ID came from the request's own list.
 		_ = ids.match(id)
-		if !ec2ImageMatchesFilters(img, filters) {
+		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
