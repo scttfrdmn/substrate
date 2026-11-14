@@ -327,36 +327,48 @@ func ec2CreatePagedImages(t *testing.T, ts *httptest.Server, n int) []string {
 	return ids
 }
 
-// ec2CreatePagedVPCs creates n VPCs and returns their IDs.
+// ec2CreatePagedVPCs returns the IDs of n VPCs, one of which is the account's default VPC.
+//
+// The listing is not empty before this helper creates anything: the default VPC is seeded on the
+// account's first EC2 request (#1464), so it is read back and n-1 are created — the same
+// arrangement [ec2CreatePagedRouteTables] makes for a VPC's main route table, and for the same
+// reason: the returned set has to be the whole listing.
 func ec2CreatePagedVPCs(t *testing.T, ts *httptest.Server, n int) []string {
 	t.Helper()
-	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	ids, _ := ec2DescribePagedVPCs(t, ts, nil)
+	require.Len(t, ids, 1, "a fresh account holds exactly one VPC, its default one")
+	for i := len(ids); i < n; i++ {
 		ids = append(ids, ec2CreateVPC(t, ts, "10."+strconv.Itoa(i)+".0.0/16"))
 	}
 	return ids
 }
 
-// ec2CreatePagedSubnets creates n subnets in one VPC and returns their IDs.
+// ec2CreatePagedSubnets returns the IDs of n subnets, the default VPC's default subnets among
+// them, creating the rest in one VPC — see [ec2CreatePagedVPCs] for why the seeded ones are read
+// back rather than excluded.
 func ec2CreatePagedSubnets(t *testing.T, ts *httptest.Server, n int) []string {
 	t.Helper()
 	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
-	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	ids, _ := ec2DescribePagedSubnets(t, ts, nil)
+	require.Len(t, ids, 3, "a fresh account holds the default VPC's three default subnets")
+	for i := len(ids); i < n; i++ {
 		ids = append(ids, ec2CreateTaggedSubnet(t, ts, vpcID,
 			"10.0."+strconv.Itoa(i)+".0/24", "us-east-1a", nil))
 	}
 	return ids
 }
 
-// ec2CreatePagedSecurityGroups creates n security groups and returns their IDs.
+// ec2CreatePagedSecurityGroups returns the IDs of n security groups, one of which is the default
+// VPC's default group.
 //
-// No VPC, because CreateVpc mints no default security group here and a group needs none: the
-// listing is then exactly the n groups created, with nothing the account acquired implicitly.
+// No VPC is named, so the groups land in the default VPC (#1464), whose default group is read back
+// rather than excluded — see [ec2CreatePagedVPCs]. CreateVpc mints no default security group here,
+// so the default VPC's is the only one the account acquired implicitly.
 func ec2CreatePagedSecurityGroups(t *testing.T, ts *httptest.Server, n int) []string {
 	t.Helper()
-	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	ids, _ := ec2DescribePagedSecurityGroups(t, ts, nil)
+	require.Len(t, ids, 1, "a fresh account holds exactly one security group, the default VPC's")
+	for i := len(ids); i < n; i++ {
 		ids = append(ids, ec2CreateSG(t, ts, "paged-"+strconv.Itoa(i), "paged group", ""))
 	}
 	return ids
@@ -493,15 +505,16 @@ func ec2DescribePagedInstanceStatuses(t *testing.T, ts *httptest.Server, extra m
 	return ids, decoded.NextToken
 }
 
-// ec2CreatePagedInternetGateways creates n internet gateways and returns their IDs.
+// ec2CreatePagedInternetGateways returns the IDs of n internet gateways, one of which is the
+// default VPC's.
 //
-// Unattached, because an attachment is not part of the listing: CreateInternetGateway takes no
-// arguments at all, so these n gateways are the whole answer with nothing the account acquired
-// implicitly — the property [ec2CreatePagedSecurityGroups] needed a comment to arrange.
+// The created ones are unattached, because an attachment is not part of the listing. The default
+// VPC's gateway is read back rather than excluded — see [ec2CreatePagedVPCs].
 func ec2CreatePagedInternetGateways(t *testing.T, ts *httptest.Server, n int) []string {
 	t.Helper()
-	ids := make([]string, 0, n)
-	for i := 0; i < n; i++ {
+	ids, _ := ec2DescribePagedInternetGateways(t, ts, nil)
+	require.Len(t, ids, 1, "a fresh account holds exactly one internet gateway, the default VPC's")
+	for i := len(ids); i < n; i++ {
 		var created struct {
 			InternetGatewayID string `xml:"internetGateway>internetGatewayId"`
 		}
@@ -542,22 +555,21 @@ func ec2CreatePagedNatGateways(t *testing.T, ts *httptest.Server, n int) []strin
 	return ids
 }
 
-// ec2CreatePagedRouteTables returns the IDs of n route tables in one VPC, one of which the VPC
-// brought with it.
+// ec2CreatePagedRouteTables returns the IDs of n route tables, two of which are main route tables
+// a VPC brought with it.
 //
-// Unlike every other row, the listing is not empty before this helper creates anything: CreateVpc
-// mints the VPC's main route table (createRouteTableForVPC with main true), and that table is a
-// genuine member of DescribeRouteTables' answer rather than an artifact — so n-1 are created here
-// and the main one is read back rather than guessed. Returning it is what keeps the listing exactly
-// n, which is what lets a walk be compared against the whole answer element for element.
+// The listing is not empty before this helper creates anything: CreateVpc mints the VPC's main
+// route table (createRouteTableForVPC with main true), and the seeded default VPC (#1464) has one
+// too. Both are genuine members of DescribeRouteTables' answer rather than artifacts — so n-2 are
+// created here and the main ones are read back rather than guessed. Returning them keeps the
+// listing exactly n, which is what lets a walk be compared against the whole answer element for element.
 func ec2CreatePagedRouteTables(t *testing.T, ts *httptest.Server, n int) []string {
 	t.Helper()
-	require.Positive(t, n, "the main route table alone makes a listing of one")
 	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
 	ids, token := ec2DescribePagedRouteTables(t, ts, nil)
-	require.Len(t, ids, 1, "a fresh VPC holds exactly one route table, its main one")
+	require.Len(t, ids, 2, "the default VPC and a fresh VPC hold one main route table each")
 	require.Empty(t, token)
-	for i := 0; i < n-1; i++ {
+	for i := len(ids); i < n; i++ {
 		ids = append(ids, ec2CreateRouteTableID(t, ts, vpcID))
 	}
 	return ids

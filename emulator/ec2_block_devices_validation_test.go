@@ -1,7 +1,6 @@
 package emulator_test
 
 import (
-	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -276,6 +275,7 @@ func TestEC2_BlockDeviceMapping_ValidIsAccepted(t *testing.T) {
 func TestEC2_BlockDeviceMapping_RefusalWritesNothing(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
+	before := ec2ListingSizes(t, ts)
 
 	_, code, _ := ec2InvalidBDM(t, ts, map[string]string{
 		"BlockDeviceMapping.1.DeviceName":     "/dev/sdf",
@@ -284,24 +284,9 @@ func TestEC2_BlockDeviceMapping_RefusalWritesNothing(t *testing.T) {
 	require.Equal(t, "InvalidBlockDeviceMapping", code)
 
 	assert.Empty(t, bdmDescribeVolumes(t, ts, nil), "a refused launch materializes no volume")
-
-	for _, action := range []string{"DescribeInstances", "DescribeVpcs", "DescribeSubnets"} {
-		resp := ec2Request(t, ts, map[string]string{"Action": action})
-		body, err := io.ReadAll(resp.Body)
-		require.NoError(t, err)
-		require.NoError(t, resp.Body.Close())
-		require.Equal(t, http.StatusOK, resp.StatusCode, string(body))
-
-		var counted struct {
-			VPCs      []struct{} `xml:"vpcSet>item"`
-			Subnets   []struct{} `xml:"subnetSet>item"`
-			Instances []struct{} `xml:"reservationSet>item>instancesSet>item"`
-		}
-		require.NoError(t, xml.Unmarshal(body, &counted), string(body))
-		assert.Empty(t, counted.VPCs, "%s: a refused launch creates no default VPC", action)
-		assert.Empty(t, counted.Subnets, "%s: no default subnet either", action)
-		assert.Empty(t, counted.Instances, "%s: and no instance", action)
-	}
+	// The default VPC is seeded on the account's first request, not by the launch (#1464), so
+	// it is on both sides of the comparison: what is asserted is that the refusal added nothing.
+	assert.Equal(t, before, ec2ListingSizes(t, ts), "a refused launch changes no listing")
 }
 
 // TestEC2_BlockDeviceMapping_TemplateMappingRefusedAtLaunch pins that the validator sits

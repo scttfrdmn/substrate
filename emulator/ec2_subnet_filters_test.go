@@ -81,13 +81,17 @@ func ec2CreateTaggedSubnet(t *testing.T, ts *httptest.Server, vpcID, cidr, az st
 	return created.Subnet.SubnetID
 }
 
-// subnetFixture is the three-subnet fixture the filter tests share: the account's default
-// subnet, which a launch with no SubnetId mints, plus two tagged subnets in a VPC of their
-// own. The default subnet is what makes default-for-az and map-public-ip-on-launch
-// testable in both directions — nothing else in substrate sets either to true.
+// subnetFixture is the five-subnet fixture the filter tests share: the account's three
+// default subnets, one per zone, which the default VPC is seeded with (#1464), plus two tagged
+// subnets in a VPC of their own. The default subnets are what make default-for-az and
+// map-public-ip-on-launch testable in both directions — nothing else in substrate sets either
+// to true.
 type subnetFixture struct {
-	vpcID          string
+	vpcID string
+	// defaultSubnet is the default subnet in zone a, the one a launch naming no subnet uses.
 	defaultSubnet  string
+	defaultSubnets []string
+	defaultByZone  map[string]string
 	alpha, beta    string
 	owner          string
 	defaultSubnetV string
@@ -96,7 +100,7 @@ type subnetFixture struct {
 // newSubnetFixture builds [subnetFixture].
 func newSubnetFixture(t *testing.T, ts *httptest.Server) subnetFixture {
 	t.Helper()
-	ec2TagTestInstance(t, ts) // no SubnetId, so this mints the default VPC and subnet
+	ec2TagTestInstance(t, ts) // no SubnetId, so this lands in the default VPC's zone-a subnet
 
 	var vpc struct {
 		VPCID string `xml:"vpc>vpcId"`
@@ -105,7 +109,8 @@ func newSubnetFixture(t *testing.T, ts *httptest.Server) subnetFixture {
 	require.NotEmpty(t, vpc.VPCID)
 
 	f := subnetFixture{
-		vpcID: vpc.VPCID,
+		vpcID:         vpc.VPCID,
+		defaultByZone: map[string]string{},
 		alpha: ec2CreateTaggedSubnet(t, ts, vpc.VPCID, "10.9.1.0/24", "us-east-1b",
 			map[string]string{"Scope": "alpha", "Tier": "web"}),
 		beta: ec2CreateTaggedSubnet(t, ts, vpc.VPCID, "10.9.2.0/24", "us-east-1c",
@@ -114,11 +119,14 @@ func newSubnetFixture(t *testing.T, ts *httptest.Server) subnetFixture {
 	for _, s := range ec2DescribeSubnets(t, ts, nil) {
 		f.owner = s.OwnerID
 		if s.DefaultForAz {
-			f.defaultSubnet = s.SubnetID
+			f.defaultSubnets = append(f.defaultSubnets, s.SubnetID)
+			f.defaultByZone[s.AvailabilityZone] = s.SubnetID
 			f.defaultSubnetV = s.VpcID
 		}
 	}
-	require.NotEmpty(t, f.defaultSubnet, "the launch should have left a default subnet")
+	f.defaultSubnet = f.defaultByZone["us-east-1a"]
+	require.Len(t, f.defaultSubnets, 3, "the default VPC holds one default subnet per zone")
+	require.NotEmpty(t, f.defaultSubnet, "one of them is in zone a")
 	require.NotEmpty(t, f.owner, "ownerId is what the owner-id filter compares against")
 	return f
 }
@@ -134,8 +142,9 @@ func TestEC2_DescribeSubnets_FiltersNarrowTheAnswer(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 	f := newSubnetFixture(t, ts)
-	all := []string{f.defaultSubnet, f.alpha, f.beta}
+	all := append([]string{f.alpha, f.beta}, f.defaultSubnets...)
 	created := []string{f.alpha, f.beta}
+	inZoneB := []string{f.alpha, f.defaultByZone["us-east-1b"]}
 
 	tests := []struct {
 		name   string
@@ -145,18 +154,18 @@ func TestEC2_DescribeSubnets_FiltersNarrowTheAnswer(t *testing.T) {
 		{"vpc-id selects one VPC's subnets", ec2Filter("vpc-id", f.vpcID), created},
 		{"vpc-id values OR", ec2Filter("vpc-id", f.vpcID, f.defaultSubnetV), all},
 		{"vpc-id miss", ec2Filter("vpc-id", "vpc-0000000000000dead"), nil},
-		{"availability-zone", ec2Filter("availability-zone", "us-east-1b"), []string{f.alpha}},
-		{"availabilityZone alias", ec2Filter("availabilityZone", "us-east-1b"), []string{f.alpha}},
+		{"availability-zone", ec2Filter("availability-zone", "us-east-1b"), inZoneB},
+		{"availabilityZone alias", ec2Filter("availabilityZone", "us-east-1b"), inZoneB},
 		{"cidr-block is exact", ec2Filter("cidr-block", "10.9.1.0/24"), []string{f.alpha}},
 		{"cidr alias", ec2Filter("cidr", "10.9.2.0/24"), []string{f.beta}},
 		{"cidrBlock alias", ec2Filter("cidrBlock", "10.9.2.0/24"), []string{f.beta}},
 		{"cidr-block does not match a containing block",
 			ec2Filter("cidr-block", "10.9.0.0/16"), nil},
-		{"default-for-az true", ec2Filter("default-for-az", "true"), []string{f.defaultSubnet}},
+		{"default-for-az true", ec2Filter("default-for-az", "true"), f.defaultSubnets},
 		{"default-for-az false", ec2Filter("default-for-az", "false"), created},
-		{"defaultForAz alias", ec2Filter("defaultForAz", "true"), []string{f.defaultSubnet}},
+		{"defaultForAz alias", ec2Filter("defaultForAz", "true"), f.defaultSubnets},
 		{"map-public-ip-on-launch true",
-			ec2Filter("map-public-ip-on-launch", "true"), []string{f.defaultSubnet}},
+			ec2Filter("map-public-ip-on-launch", "true"), f.defaultSubnets},
 		{"map-public-ip-on-launch false", ec2Filter("map-public-ip-on-launch", "false"), created},
 		{"owner-id self", ec2Filter("owner-id", f.owner), all},
 		{"owner-id another account", ec2Filter("owner-id", "999999999999"), nil},
@@ -221,7 +230,7 @@ func TestEC2_DescribeSubnets_InertFiltersReturnEverything(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 	f := newSubnetFixture(t, ts)
-	want := []string{f.defaultSubnet, f.alpha, f.beta}
+	want := append([]string{f.alpha, f.beta}, f.defaultSubnets...)
 
 	for name, value := range map[string]string{
 		"availability-zone-id":       "use1-az1",
@@ -355,6 +364,8 @@ func TestEC2_CreateSubnet_RejectsReservedTagKeys(t *testing.T) {
 	assert.Equal(t, "InvalidParameterValue", code)
 	assert.Equal(t, ec2ReservedTagMessage, message)
 
-	assert.Empty(t, ec2DescribeSubnets(t, ts, nil),
-		"a rejected CreateSubnet must not create a subnet")
+	for _, s := range ec2DescribeSubnets(t, ts, nil) {
+		assert.NotEqual(t, vpc.VPCID, s.VpcID,
+			"a rejected CreateSubnet must not create a subnet; only the default VPC's remain")
+	}
 }

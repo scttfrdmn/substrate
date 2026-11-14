@@ -300,6 +300,15 @@ type EC2IPPermission struct {
 	// group itself) has no CIDR at all, so it cannot be represented by IPRanges
 	// alone (#388).
 	UserIDGroupPairs []EC2UserIDGroupPair `json:"user_id_group_pairs,omitempty"`
+
+	// IPv6Ranges holds the IPv6 CIDR ranges for this permission, from
+	// IpPermissions.N.Ipv6Ranges.M.CidrIpv6. Recorded as of #1453 so a revoke naming
+	// only an IPv6 range names a source rather than reading as "any source".
+	IPv6Ranges []string `json:"ipv6_ranges,omitempty"`
+
+	// PrefixListIDs holds the prefix-list sources for this permission, from
+	// IpPermissions.N.PrefixListIds.M.PrefixListId (#1453).
+	PrefixListIDs []string `json:"prefix_list_ids,omitempty"`
 }
 
 // EC2UserIDGroupPair identifies a security group referenced as the source or

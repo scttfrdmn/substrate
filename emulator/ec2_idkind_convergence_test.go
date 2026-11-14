@@ -439,9 +439,11 @@ func TestEC2_IDKind_ConvergedOperationsStillSucceed(t *testing.T) {
 			"Action": "AuthorizeSecurityGroupIngress", "GroupId": sgID,
 			"IpProtocol": "tcp", "FromPort": "22", "ToPort": "22", "CidrIp": "0.0.0.0/0",
 		}},
+		// The group's own all-traffic egress rule, because a revoke naming a rule a
+		// non-default-VPC group does not hold is InvalidPermission.NotFound (#1453).
 		{"RevokeSecurityGroupEgress", map[string]string{
 			"Action": "RevokeSecurityGroupEgress", "GroupId": sgID,
-			"IpProtocol": "tcp", "FromPort": "22", "ToPort": "22", "CidrIp": "0.0.0.0/0",
+			"IpProtocol": "-1", "CidrIp": "0.0.0.0/0",
 		}},
 		{"AttachInternetGateway", map[string]string{
 			"Action": "AttachInternetGateway", "InternetGatewayId": igwID, "VpcId": vpcID,

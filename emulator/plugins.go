@@ -149,6 +149,11 @@ func RegisterDefaultPlugins(
 		// the server, so the fleet's launches are authorized by the plugin itself.
 		ec2Opts["auth_controller"] = settings.auth
 	}
+	if cfg != nil {
+		// Absent from the options when there is no config, so the plugin's own default —
+		// seed the default VPC — applies (#1464).
+		ec2Opts["default_vpc"] = cfg.EC2.DefaultVPC
+	}
 
 	// The CloudFormation plugin adapts the StackDeployer that [Client] already
 	// drives in process, so it needs the registry to deploy each template resource
