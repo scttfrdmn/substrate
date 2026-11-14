@@ -69,6 +69,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **`golang.org/x/net` is raised to v0.60.0, and the pinned toolchain to go1.26.9.** These clear GO-2026-6611, GO-2026-6612, GO-2026-6613 and GO-2026-6617 (CVE-2026-78669 among them: denial of service through excessive HTTP/2 SETTINGS frames). The vulnerable versions are `golang.org/x/net` v0.58.0 and the `net/http` of go1.26.6. The scheduled Security Scan had failed on `main` since 2026-10-12, in Trivy, the container image scan and govulncheck. `golang.org/x/sys` and `golang.org/x/text` move to v0.48.0 and v0.42.0, as `x/net` requires. Both `go.mod` and `test/e2e/go.mod` are updated.
 
+- **`golang.org/x/net` is raised to v0.62.0, and the pinned toolchain to go1.26.11.** These clear CVE-2026-78661 (`x/net/html` denial of service through crafted HTML input, fixed in v0.62.0), GO-2026-6859 (`net/http`, fixed in go1.26.11) and GO-2026-6809 (`crypto/x509`, fixed in go1.26.10). All three were published after the change above was opened, so `main` stayed red in Trivy, the container image scan and govulncheck after it merged. `golang.org/x/sys` and `golang.org/x/text` move to v0.49.0 and v0.43.0, as `x/net` requires. Both `go.mod` and `test/e2e/go.mod` are updated.
+
 ## [v0.124.0] - 2026-10-05
 
 ### Fixed
