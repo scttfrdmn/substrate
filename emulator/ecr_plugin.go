@@ -18,7 +18,9 @@ import (
 // BatchGetImage, DescribeImages, BatchDeleteImage, ListImages,
 // GetAuthorizationToken, PutLifecyclePolicy, GetLifecyclePolicy,
 // SetRepositoryPolicy, GetRepositoryPolicy, DeleteRepositoryPolicy,
-// TagResource, UntagResource, and ListTagsForResource.
+// TagResource, UntagResource, ListTagsForResource, the five pull-through-cache
+// rule operations (ecr_pull_through.go) and the four repository-creation-template
+// operations (ecr_creation_templates.go).
 type ECRPlugin struct {
 	state  StateManager
 	logger Logger
@@ -88,6 +90,24 @@ func (p *ECRPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.untagResource(ctx, req)
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
+	case "CreatePullThroughCacheRule":
+		return p.createPullThroughCacheRule(ctx, req)
+	case "DescribePullThroughCacheRules":
+		return p.describePullThroughCacheRules(ctx, req)
+	case "UpdatePullThroughCacheRule":
+		return p.updatePullThroughCacheRule(ctx, req)
+	case "DeletePullThroughCacheRule":
+		return p.deletePullThroughCacheRule(ctx, req)
+	case "ValidatePullThroughCacheRule":
+		return p.validatePullThroughCacheRule(ctx, req)
+	case "CreateRepositoryCreationTemplate":
+		return p.createRepositoryCreationTemplate(ctx, req)
+	case "DescribeRepositoryCreationTemplates":
+		return p.describeRepositoryCreationTemplates(ctx, req)
+	case "UpdateRepositoryCreationTemplate":
+		return p.updateRepositoryCreationTemplate(ctx, req)
+	case "DeleteRepositoryCreationTemplate":
+		return p.deleteRepositoryCreationTemplate(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), op)
 	}
@@ -112,6 +132,42 @@ func ecrImageTagsKey(accountID, region, repo string) string {
 }
 
 // --- Repository operations ---------------------------------------------------
+
+// newECRRepositoryRecord builds the record for a new repository in the caller's registry with the
+// published defaults: MUTABLE tags (API_CreateRepository's default for an omitted
+// imageTagMutability) and AES256 encryption. CreateRepository and the repositories ECR creates on a
+// caller's behalf (ecr_creation_templates.go) both start from it, so the two cannot disagree about
+// a repository's ARN, URI or defaults.
+func newECRRepositoryRecord(ctx *RequestContext, name string, now time.Time) ECRRepository {
+	repo := ECRRepository{
+		RepositoryName:     name,
+		RepositoryArn:      fmt.Sprintf("arn:aws:ecr:%s:%s:repository/%s", ctx.Region, ctx.AccountID, name),
+		RegistryID:         ctx.AccountID,
+		RepositoryURI:      fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", ctx.AccountID, ctx.Region, name),
+		CreatedAt:          now,
+		ImageTagMutability: ecrImageTagMutabilityDefault,
+		AccountID:          ctx.AccountID,
+		Region:             ctx.Region,
+	}
+	repo.EncryptionConfiguration.EncryptionType = "AES256"
+	return repo
+}
+
+// storeNewRepository persists a new repository record and adds it to the registry's names index.
+func (p *ECRPlugin) storeNewRepository(goCtx context.Context, ctx *RequestContext, repo ECRRepository) error {
+	data, err := json.Marshal(repo)
+	if err != nil {
+		return fmt.Errorf("ecr store repository marshal: %w", err)
+	}
+	if err := p.state.Put(goCtx, ecrNamespace, ecrRepoKey(ctx.AccountID, ctx.Region, repo.RepositoryName), data); err != nil {
+		return fmt.Errorf("ecr store repository state.Put: %w", err)
+	}
+	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
+	if err := updateStringIndex(goCtx, p.state, ecrNamespace, idxKey, repo.RepositoryName); err != nil {
+		return fmt.Errorf("ecr store repository index: %w", err)
+	}
+	return nil
+}
 
 func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
@@ -168,45 +224,24 @@ func (p *ECRPlugin) createRepository(ctx *RequestContext, req *AWSRequest) (*AWS
 		return nil, ecrRepositoryAlreadyExists(body.RepositoryName)
 	}
 
-	encType := body.EncryptionConfiguration.EncryptionType
-	if encType == "" {
-		encType = "AES256"
-	}
-
-	repo := ECRRepository{
-		RepositoryName:     body.RepositoryName,
-		RepositoryArn:      fmt.Sprintf("arn:aws:ecr:%s:%s:repository/%s", ctx.Region, ctx.AccountID, body.RepositoryName),
-		RegistryID:         ctx.AccountID,
-		RepositoryURI:      fmt.Sprintf("%s.dkr.ecr.%s.amazonaws.com/%s", ctx.AccountID, ctx.Region, body.RepositoryName),
-		CreatedAt:          p.tc.Now(),
-		ImageTagMutability: mutability,
-		Tags:               tags,
-		AccountID:          ctx.AccountID,
-		Region:             ctx.Region,
-		// Set where the fact becomes true: this repository has carried a tag. No observation depends
-		// on it today — every remover recomputes the flag from the count it saw before deleting, so
-		// UntagResource (:945) and the Resource Groups Tagging API's untag arm
-		// (tagging_plugin.go:2119) each stamp it themselves — which is why deleting this line breaks
-		// no test. It is here so #938's rule (a resource that has been tagged stays reported with an
-		// empty tag set) rests on the flag meaning what it says rather than on every future remover
-		// remembering to derive it. The line was unreachable before #1017, when a create carrying
-		// tags answered 400.
-		EverTagged: taggingEverTagged(false, 0, len(tags)),
-	}
+	repo := newECRRepositoryRecord(ctx, body.RepositoryName, p.tc.Now())
+	repo.ImageTagMutability = mutability
+	repo.Tags = tags
+	// Set where the fact becomes true: this repository has carried a tag. No observation depends
+	// on it today — every remover recomputes the flag from the count it saw before deleting, so
+	// UntagResource and the Resource Groups Tagging API's untag arm each stamp it themselves —
+	// which is why deleting this line breaks no test. It is here so #938's rule (a resource that
+	// has been tagged stays reported with an empty tag set) rests on the flag meaning what it says
+	// rather than on every future remover remembering to derive it. The line was unreachable
+	// before #1017, when a create carrying tags answered 400.
+	repo.EverTagged = taggingEverTagged(false, 0, len(tags))
 	repo.ImageScanningConfiguration.ScanOnPush = body.ImageScanningConfiguration.ScanOnPush
-	repo.EncryptionConfiguration.EncryptionType = encType
-
-	data, err := json.Marshal(repo)
-	if err != nil {
-		return nil, fmt.Errorf("ecr createRepository marshal: %w", err)
-	}
-	if err := p.state.Put(goCtx, ecrNamespace, stateKey, data); err != nil {
-		return nil, fmt.Errorf("ecr createRepository state.Put: %w", err)
+	if encType := body.EncryptionConfiguration.EncryptionType; encType != "" {
+		repo.EncryptionConfiguration.EncryptionType = encType
 	}
 
-	idxKey := ecrRepoNamesKey(ctx.AccountID, ctx.Region)
-	if err := updateStringIndex(goCtx, p.state, ecrNamespace, idxKey, body.RepositoryName); err != nil {
-		return nil, fmt.Errorf("ecr createRepository index: %w", err)
+	if err := p.storeNewRepository(goCtx, ctx, repo); err != nil {
+		return nil, err
 	}
 
 	type response struct {
@@ -395,7 +430,18 @@ func (p *ECRPlugin) putImage(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 
 	goCtx := context.Background()
 
-	// Verify repository exists.
+	// Verify repository exists — or create it, when a CREATE_ON_PUSH template governs the name:
+	// PutImage is the call a push makes, so it is where create on push happens (#1461,
+	// ecr_creation_templates.go). Without such a template a missing repository is refused, as before.
+	// A push this handler will refuse below creates nothing, so the refusal order is unchanged and a
+	// refused request leaves no repository behind.
+	create := p.createOnPushRepository
+	if body.ImageManifest == "" || (body.ImageDigest != "" && body.ImageDigest != ecrManifestDigest(body.ImageManifest)) {
+		create = func(context.Context, *RequestContext, string) (bool, error) { return false, nil }
+	}
+	if err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, create); err != nil {
+		return nil, err
+	}
 	repoData, err := p.state.Get(goCtx, ecrNamespace, ecrRepoKey(ctx.AccountID, ctx.Region, body.RepositoryName))
 	if err != nil {
 		return nil, fmt.Errorf("ecr putImage state.Get repo: %w", err)
@@ -520,8 +566,10 @@ func (p *ECRPlugin) batchGetImage(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	goCtx := context.Background()
 
 	// Verify repository exists. Without this the tag index for a name that addresses no
-	// repository reads as empty and the operation answers 200 (#1090).
-	if err := p.requireRepository(goCtx, ctx, body.RepositoryName); err != nil {
+	// repository reads as empty and the operation answers 200 (#1090). A missing repository that
+	// falls under a pull through cache rule is the one exception: BatchGetImage is the call a pull
+	// makes, so it is where ECR creates the cached repository (#1461, ecr_creation_templates.go).
+	if err := p.ensureRepositoryOnBehalf(goCtx, ctx, body.RepositoryName, p.pullThroughCacheRepository); err != nil {
 		return nil, err
 	}
 

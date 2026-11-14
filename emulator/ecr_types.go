@@ -66,3 +66,54 @@ type ECRImage struct {
 	ImageManifest    string    `json:"imageManifest,omitempty"`
 	RepoName         string    `json:"repoName"`
 }
+
+// ECRPullThroughCacheRule holds the persisted state of an ECR pull through cache rule (#1461).
+//
+// Keyed by [ecrPullThroughCacheRuleKey] on the caller's registry and the prefix with any trailing
+// `/` removed, because "there is always an assumed `/` applied to the end of the prefix": `quay`
+// and `quay/` name one rule. The prefix is stored as the caller wrote it and echoed that way.
+// Responses render it through [ecrPullThroughCacheRuleToWire], never as stored.
+type ECRPullThroughCacheRule struct {
+	EcrRepositoryPrefix      string    `json:"ecrRepositoryPrefix"`
+	UpstreamRegistryURL      string    `json:"upstreamRegistryUrl"`
+	UpstreamRegistry         string    `json:"upstreamRegistry"`
+	UpstreamRepositoryPrefix string    `json:"upstreamRepositoryPrefix,omitempty"`
+	CredentialArn            string    `json:"credentialArn,omitempty"`
+	CustomRoleArn            string    `json:"customRoleArn,omitempty"`
+	RegistryID               string    `json:"registryId"`
+	CreatedAt                time.Time `json:"createdAt"`
+	UpdatedAt                time.Time `json:"updatedAt"`
+	AccountID                string    `json:"AccountID"`
+	Region                   string    `json:"Region"`
+}
+
+// ECRImageTagMutabilityExclusionFilter is one entry of a creation template's
+// imageTagMutabilityExclusionFilters, as API_ImageTagMutabilityExclusionFilter publishes it.
+type ECRImageTagMutabilityExclusionFilter struct {
+	Filter     string `json:"filter"`
+	FilterType string `json:"filterType"`
+}
+
+// ECRRepositoryCreationTemplate holds the persisted state of an ECR repository creation template
+// (#1461).
+//
+// Keyed by [ecrCreationTemplateKey] on the caller's registry and the prefix with any trailing `/`
+// removed, for the same reason as [ECRPullThroughCacheRule]. ResourceTags is the storage map every
+// other ECR tag set uses. Responses render it through [ecrCreationTemplateToWire], never as stored.
+type ECRRepositoryCreationTemplate struct {
+	Prefix                             string                                 `json:"prefix"`
+	Description                        string                                 `json:"description,omitempty"`
+	AppliedFor                         []string                               `json:"appliedFor"`
+	ImageTagMutability                 string                                 `json:"imageTagMutability"`
+	ImageTagMutabilityExclusionFilters []ECRImageTagMutabilityExclusionFilter `json:"imageTagMutabilityExclusionFilters,omitempty"`
+	EncryptionType                     string                                 `json:"encryptionType"`
+	KMSKey                             string                                 `json:"kmsKey,omitempty"`
+	LifecyclePolicy                    string                                 `json:"lifecyclePolicy,omitempty"`
+	RepositoryPolicy                   string                                 `json:"repositoryPolicy,omitempty"`
+	ResourceTags                       map[string]string                      `json:"resourceTags,omitempty"`
+	CustomRoleArn                      string                                 `json:"customRoleArn,omitempty"`
+	CreatedAt                          time.Time                              `json:"createdAt"`
+	UpdatedAt                          time.Time                              `json:"updatedAt"`
+	AccountID                          string                                 `json:"AccountID"`
+	Region                             string                                 `json:"Region"`
+}

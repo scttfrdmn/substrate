@@ -104,3 +104,142 @@ func ecrRepositoriesToWire(repos []ECRRepository) []ecrRepositoryOut {
 	}
 	return out
 }
+
+// --- Pull through cache rules (#1461) ----------------------------------------
+//
+// Five operations answer a rule, and API_PullThroughCacheRule is the only one of the five
+// shapes that is a named type: the other four are each operation's own Response Syntax, and
+// they do not agree. CreatePullThroughCacheRule answers no updatedAt; DeletePullThroughCacheRule
+// answers neither updatedAt nor upstreamRegistry; UpdatePullThroughCacheRule answers neither
+// createdAt, upstreamRegistry nor upstreamRegistryUrl; ValidatePullThroughCacheRule answers no
+// date at all and adds isValid and failure. Each therefore gets its own struct, transcribed from
+// its page, rather than one struct with the differences left to omitempty — a member present on
+// one response and published on another is the near-miss #1013's rule exists to prevent.
+
+// ecrPullThroughCacheRuleOut is one entry of DescribePullThroughCacheRules' pullThroughCacheRules,
+// mirroring API_PullThroughCacheRule's nine members, all Required: No.
+type ecrPullThroughCacheRuleOut struct {
+	CreatedAt                EpochSeconds `json:"createdAt"`
+	CredentialArn            string       `json:"credentialArn,omitempty"`
+	CustomRoleArn            string       `json:"customRoleArn,omitempty"`
+	EcrRepositoryPrefix      string       `json:"ecrRepositoryPrefix"`
+	RegistryID               string       `json:"registryId"`
+	UpdatedAt                EpochSeconds `json:"updatedAt"`
+	UpstreamRegistry         string       `json:"upstreamRegistry"`
+	UpstreamRegistryURL      string       `json:"upstreamRegistryUrl"`
+	UpstreamRepositoryPrefix string       `json:"upstreamRepositoryPrefix,omitempty"`
+}
+
+// ecrPullThroughCacheRuleToWire projects a persisted rule onto API_PullThroughCacheRule.
+func ecrPullThroughCacheRuleToWire(rule ECRPullThroughCacheRule) ecrPullThroughCacheRuleOut {
+	return ecrPullThroughCacheRuleOut{
+		CreatedAt:                EpochSeconds(rule.CreatedAt),
+		CredentialArn:            rule.CredentialArn,
+		CustomRoleArn:            rule.CustomRoleArn,
+		EcrRepositoryPrefix:      rule.EcrRepositoryPrefix,
+		RegistryID:               rule.RegistryID,
+		UpdatedAt:                EpochSeconds(rule.UpdatedAt),
+		UpstreamRegistry:         rule.UpstreamRegistry,
+		UpstreamRegistryURL:      rule.UpstreamRegistryURL,
+		UpstreamRepositoryPrefix: rule.UpstreamRepositoryPrefix,
+	}
+}
+
+// ecrCreatePullThroughCacheRuleOut is API_CreatePullThroughCacheRule's Response Syntax.
+type ecrCreatePullThroughCacheRuleOut struct {
+	CreatedAt                EpochSeconds `json:"createdAt"`
+	CredentialArn            string       `json:"credentialArn,omitempty"`
+	CustomRoleArn            string       `json:"customRoleArn,omitempty"`
+	EcrRepositoryPrefix      string       `json:"ecrRepositoryPrefix"`
+	RegistryID               string       `json:"registryId"`
+	UpstreamRegistry         string       `json:"upstreamRegistry"`
+	UpstreamRegistryURL      string       `json:"upstreamRegistryUrl"`
+	UpstreamRepositoryPrefix string       `json:"upstreamRepositoryPrefix,omitempty"`
+}
+
+// ecrDeletePullThroughCacheRuleOut is API_DeletePullThroughCacheRule's Response Syntax, which
+// publishes no upstreamRegistry and no updatedAt.
+type ecrDeletePullThroughCacheRuleOut struct {
+	CreatedAt                EpochSeconds `json:"createdAt"`
+	CredentialArn            string       `json:"credentialArn,omitempty"`
+	CustomRoleArn            string       `json:"customRoleArn,omitempty"`
+	EcrRepositoryPrefix      string       `json:"ecrRepositoryPrefix"`
+	RegistryID               string       `json:"registryId"`
+	UpstreamRegistryURL      string       `json:"upstreamRegistryUrl"`
+	UpstreamRepositoryPrefix string       `json:"upstreamRepositoryPrefix,omitempty"`
+}
+
+// ecrUpdatePullThroughCacheRuleOut is API_UpdatePullThroughCacheRule's Response Syntax, which
+// publishes no createdAt, upstreamRegistry or upstreamRegistryUrl.
+type ecrUpdatePullThroughCacheRuleOut struct {
+	CredentialArn            string       `json:"credentialArn,omitempty"`
+	CustomRoleArn            string       `json:"customRoleArn,omitempty"`
+	EcrRepositoryPrefix      string       `json:"ecrRepositoryPrefix"`
+	RegistryID               string       `json:"registryId"`
+	UpdatedAt                EpochSeconds `json:"updatedAt"`
+	UpstreamRepositoryPrefix string       `json:"upstreamRepositoryPrefix,omitempty"`
+}
+
+// ecrValidatePullThroughCacheRuleOut is API_ValidatePullThroughCacheRule's Response Syntax.
+//
+// failure is absent rather than empty on a valid rule: the page describes it only as "the reason
+// the validation failed", so there is nothing to report when it did not.
+type ecrValidatePullThroughCacheRuleOut struct {
+	CredentialArn            string `json:"credentialArn,omitempty"`
+	CustomRoleArn            string `json:"customRoleArn,omitempty"`
+	EcrRepositoryPrefix      string `json:"ecrRepositoryPrefix"`
+	Failure                  string `json:"failure,omitempty"`
+	IsValid                  bool   `json:"isValid"`
+	RegistryID               string `json:"registryId"`
+	UpstreamRegistryURL      string `json:"upstreamRegistryUrl"`
+	UpstreamRepositoryPrefix string `json:"upstreamRepositoryPrefix,omitempty"`
+}
+
+// --- Repository creation templates (#1461) -----------------------------------
+
+// ecrCreationTemplateEncryptionOut is a template's encryptionConfiguration, as
+// API_EncryptionConfigurationForRepositoryCreationTemplate publishes it: encryptionType, and
+// kmsKey only when one was given.
+type ecrCreationTemplateEncryptionOut struct {
+	EncryptionType string `json:"encryptionType"`
+	KMSKey         string `json:"kmsKey,omitempty"`
+}
+
+// ecrRepositoryCreationTemplateOut is API_RepositoryCreationTemplate, the element all four
+// template operations answer.
+//
+// resourceTags is always rendered, as `[]` when the template carries none, for the reason
+// [ecrTagList] records; the other optional strings are absent when unset, as the
+// DescribeRepositoryCreationTemplates sample response shows them.
+type ecrRepositoryCreationTemplateOut struct {
+	AppliedFor                         []string                               `json:"appliedFor"`
+	CreatedAt                          EpochSeconds                           `json:"createdAt"`
+	CustomRoleArn                      string                                 `json:"customRoleArn,omitempty"`
+	Description                        string                                 `json:"description,omitempty"`
+	EncryptionConfiguration            ecrCreationTemplateEncryptionOut       `json:"encryptionConfiguration"`
+	ImageTagMutability                 string                                 `json:"imageTagMutability"`
+	ImageTagMutabilityExclusionFilters []ECRImageTagMutabilityExclusionFilter `json:"imageTagMutabilityExclusionFilters,omitempty"`
+	LifecyclePolicy                    string                                 `json:"lifecyclePolicy,omitempty"`
+	Prefix                             string                                 `json:"prefix"`
+	RepositoryPolicy                   string                                 `json:"repositoryPolicy,omitempty"`
+	ResourceTags                       []ecrTag                               `json:"resourceTags"`
+	UpdatedAt                          EpochSeconds                           `json:"updatedAt"`
+}
+
+// ecrCreationTemplateToWire projects a persisted template onto API_RepositoryCreationTemplate.
+func ecrCreationTemplateToWire(tmpl ECRRepositoryCreationTemplate) ecrRepositoryCreationTemplateOut {
+	return ecrRepositoryCreationTemplateOut{
+		AppliedFor:                         append([]string{}, tmpl.AppliedFor...),
+		CreatedAt:                          EpochSeconds(tmpl.CreatedAt),
+		CustomRoleArn:                      tmpl.CustomRoleArn,
+		Description:                        tmpl.Description,
+		EncryptionConfiguration:            ecrCreationTemplateEncryptionOut{EncryptionType: tmpl.EncryptionType, KMSKey: tmpl.KMSKey},
+		ImageTagMutability:                 tmpl.ImageTagMutability,
+		ImageTagMutabilityExclusionFilters: tmpl.ImageTagMutabilityExclusionFilters,
+		LifecyclePolicy:                    tmpl.LifecyclePolicy,
+		Prefix:                             tmpl.Prefix,
+		RepositoryPolicy:                   tmpl.RepositoryPolicy,
+		ResourceTags:                       ecrTagList(tmpl.ResourceTags),
+		UpdatedAt:                          EpochSeconds(tmpl.UpdatedAt),
+	}
+}

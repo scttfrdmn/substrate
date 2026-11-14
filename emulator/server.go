@@ -404,6 +404,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/codepipeline/execution-status", s.handleCodePipelineSeedExecutionStatus)
 		cp.Delete("/v1/codepipeline/execution-status", s.handleCodePipelineClearExecutionStatus)
 
+		// ECR ValidatePullThroughCacheRule outcome (#1461).
+		cp.Post("/v1/ecr/pull-through-cache-validation", s.handleECRSeedPullThroughCacheValidation)
+		cp.Delete("/v1/ecr/pull-through-cache-validation", s.handleECRClearPullThroughCacheValidation)
+
 		cp.Post("/v1/timestream-query/results", s.handleTimestreamSeedResult)
 		cp.Delete("/v1/timestream-query/results", s.handleTimestreamClearResults)
 
