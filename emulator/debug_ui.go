@@ -348,7 +348,12 @@ func (s *Server) stateAtSequence(ctx context.Context, upToSeq int64) ([]byte, er
 	freshState := NewMemoryStateManager()
 	freshRegistry := NewPluginRegistry()
 	freshTC := NewTimeController(time.Time{})
-	if err := RegisterDefaultPlugins(ctx, freshRegistry, freshState, freshTC, s.logger, nil, nil); err != nil {
+	// The EC2 section of the server's own config is passed through so a time-travel replay
+	// seeds a default VPC exactly when the live server did (#1464). Only that section: the
+	// rest — Docker-backed Lambda and RDS above all — would start containers for a read.
+	pluginCfg := DefaultConfig()
+	pluginCfg.EC2 = s.config.EC2
+	if err := RegisterDefaultPlugins(ctx, freshRegistry, freshState, freshTC, s.logger, nil, pluginCfg); err != nil {
 		return nil, fmt.Errorf("stateAtSequence register plugins: %w", err)
 	}
 

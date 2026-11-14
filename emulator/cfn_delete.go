@@ -985,9 +985,12 @@ var cfnDeleteAbsentCodes = map[string]bool{
 	"InvalidInternetGatewayID.NotFound": true,
 	"InvalidLaunchTemplateId.NotFound":  true,
 	"InvalidNatGatewayID.NotFound":      true,
-	"InvalidRouteTableID.NotFound":      true,
-	"InvalidSubnetID.NotFound":          true,
-	"InvalidVpcID.NotFound":             true,
+	// A SecurityGroupIngress/Egress revoke of a rule that is already gone, which a group
+	// outside the default VPC answers with this code as of #1453.
+	"InvalidPermission.NotFound":   true,
+	"InvalidRouteTableID.NotFound": true,
+	"InvalidSubnetID.NotFound":     true,
+	"InvalidVpcID.NotFound":        true,
 	// DeleteNatGateway's code before #713 routed it through ec2NatGatewayIDKind. The
 	// reference publishes both spellings, so this entry is not dead: an event log
 	// recorded by an older substrate replays the old code, and a stack mid-delete must

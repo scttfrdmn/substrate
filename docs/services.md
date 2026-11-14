@@ -7714,7 +7714,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s zone-a subnet, and is refused with `VPCIdNotSpecified` when the account has none; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); thirteen filters, `instance-lifecycle` and `spot-instance-request-id` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honored-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
@@ -7733,7 +7733,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. **It too is read under an unpublished parameter name** (`MapPublicIPOnLaunch.Value`), so a modify is answered `return=true` and discarded ([#1151](https://github.com/scttfrdmn/substrate/issues/1151)). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one — see [Security group tags and rules](#security-group-tags-and-rules) |
+| CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`) — see [Security group tags and rules](#security-group-tags-and-rules) |
 | DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
 | AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
@@ -7752,7 +7752,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeSpotPriceHistory | One stub price per catalog type per zone. `InstanceType.N` here is a *filter*, so an unknown type is an empty history — [see below](#instance-types-are-a-seeded-catalog). `ProductDescription.N` is read at every index, and five of six filters. Paginates on `MaxResults`/`NextToken`, with no published range and no `InvalidParameterCombination` — one of the three converted describes with no ID-list parameter, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | GetSpotPlacementScores | Scores the three seeded regions, or their nine zones under `SingleAvailabilityZone=true`, by AZ **ID**. `TargetCapacity` is required and range-checked; `InstanceType.N` and `RegionName.N` are **singular**; `MaxResults` floors at **10**, which is this operation's own published range. The score itself is [seeded, not computed](#seeding-a-spot-placement-score) |
 | RequestSpotInstances | Launches `InstanceCount` Spot Instances from `LaunchSpecification`, one request per instance, active/`fulfilled` at once — see [Spot Instance requests](#spot-instance-requests). `TagSpecification.N` must be `spot-instances-request` |
-| DescribeSpotInstanceRequests | `SpotInstanceRequestId.N` asserts existence (`InvalidSpotInstanceRequestID.NotFound`); twenty-two of forty filters, `state`, `instance-id` and `tag:<key>` among them; paginates on `MaxResults`/`NextToken` with no published range — see [Spot Instance requests](#spot-instance-requests) |
+| DescribeSpotInstanceRequests | `SpotInstanceRequestId.N` asserts existence (`InvalidSpotInstanceRequestID.NotFound`); twenty-two of forty filters, `state`, `instance-id` and `tag:<key>` among them; paginates on `MaxResults`/`NextToken` with no published range; fulfills an open request a cleared seed no longer blocks — see [Spot Instance requests](#spot-instance-requests) |
 | CancelSpotInstanceRequests | Moves each request to `cancelled` without terminating its instance; an unknown ID cancels nothing — see [Spot Instance requests](#spot-instance-requests) |
 | CreateRouteTable | |
 | AssociateRouteTable | |
@@ -8531,8 +8531,13 @@ in each Availability Zone" — and what the VPC User Guide lists alongside it:
 | Route table | the VPC's main one: `172.31.0.0/16 → local` and `0.0.0.0/0 →` the gateway |
 
 So the very first call — whatever it is — already sees them, and `is-default=true` and
-`default-for-az=true` select them. A launch naming no subnet uses the zone-a subnet and the
-`default` group; `CreateSecurityGroup` without a `VpcId` places the group in the default VPC.
+`default-for-az=true` select them. A launch naming no subnet uses the default subnet of its
+`Placement.AvailabilityZone` — the zone-a subnet when it names none — and the `default` group; a
+named zone with no default subnet is refused with `InvalidInput` / "No default subnet for
+availability zone: '…'", EC2's observed answer. `CreateSecurityGroup` without a `VpcId` places the
+group in the default VPC, and refuses the reserved name `default` (any case) with
+`InvalidParameterValue` / "Cannot use reserved security group name: default". Time travel
+(`/v1/debug/events/{seq}/state`) replays with the server's own `ec2.default_vpc` setting.
 
 **The identifiers derive from the account and Region**, not from the request that triggered the
 seed: one account and Region always get the same default VPC ID, and the triggering request's own
@@ -8544,7 +8549,9 @@ next request does not seed it again — as on AWS, where an account gets one bac
 launch naming no subnet is then refused with `VPCIdNotSpecified` (the client-error table's "You
 have no default VPC in which to carry out the request"), and so is a `CreateSecurityGroup` naming
 no `VpcId`. `CreateDefaultVpc` recreates it, with new identifiers and every resource above, and
-clears the tombstone; `CreateDefaultSubnet` recreates one deleted default subnet. A default VPC
+clears the tombstone; `CreateDefaultSubnet` recreates one deleted default subnet, in the first
+`172.31.x.0/20` that overlaps no subnet of the VPC, and concurrent calls for one zone make one
+subnet. A default VPC
 whose default subnets are all deleted refuses a subnet-less launch with `MissingInput`, rather than
 growing a new subnet as the lazy path did.
 
@@ -8555,9 +8562,16 @@ an account whose default VPC was deleted is in; `emulator.WithoutDefaultVPC()` d
 
 **Compatibility.** A fresh account now holds a VPC, three subnets, a security group, an internet
 gateway and a route table before it creates anything, so a test counting resources in a fresh
-account counts them too, and a replay of a recording made before the change seeds them on its first
-EC2 event — its recorded identifiers still match, but a state-hash comparison against the old
-recording differs by the seeded records.
+account counts them too.
+
+**A recording made before the change does not replay identically when it relied on the old lazy
+default VPC.** The lazy path drew the default VPC's identifiers from the triggering request's own
+mint, and the seed does not, so a recorded subnet-less `RunInstances` — or any EC2 call that relied
+on the default VPC the old path created — replays to different reservation, instance, subnet and
+group IDs, and every later event naming them diverges. No compatibility shim is offered; re-record
+such a stream. A recording that names its own VPCs and subnets — one starting with `CreateVpc`, say
+— keeps its identifiers, and differs only by the seeded records a state-hash comparison sees. A
+recording made under this release replays identically, state hashes included.
 
 ### Security groups on an instance
 
@@ -8680,6 +8694,13 @@ Before it, both answered `return=true` having removed nothing. `SecurityGroupRul
 read, because substrate assigns no `sgr-` rule IDs; a revoke naming rules only by ID still answers
 `MissingParameter`. A revoke permission naming no source at all keeps its old meaning — it removes
 the first stored permission on its protocol and ports — because AWS describes no such rule.
+
+**A referenced group is stored by ID.** A `Groups.M` source named by `GroupName` alone — the
+default-VPC form, and the legacy `SourceSecurityGroupName` — is resolved to the group of that name in
+the same VPC, "The source security group must be in the same VPC", on authorize and on revoke alike,
+so a rule authorized by name is revoked by ID and the other way round. The seeded default group's
+self-reference renders `userId` and `groupId` without a `groupName`, which is the shape AWS's own
+DescribeSecurityGroups Example 4 shows for a default VPC's default group.
 
 ### Launch-time storage
 
@@ -9856,6 +9877,18 @@ instance of an active persistent request launches a replacement from the request
 to it, inside the same `TerminateInstances` call. A cancelled request launches nothing. A
 replacement the launch refuses (its AMI deregistered since, say) leaves the request `open` with
 `bad-parameters`.
+
+**An open request is re-evaluated on observation.** Each `DescribeSpotInstanceRequests` looks at
+every request a [seeded outcome](#seeding-a-spot-request-outcome) left `open`: once no seed blocks
+its instance type it is fulfilled — an instance launched from its recorded launch, the request
+`active`/`fulfilled` — and once its `ValidUntil` has passed it is `closed` with `schedule-expired`.
+So a wait-for-fulfillment loop terminates when the seed is cleared, and a replay of the same
+describe launches the same instance.
+
+**CreateFleet's Spot pools launch Spot Instances** — `instanceLifecycle=spot`, so
+`instance-lifecycle=spot` selects them — without a `sir-` request: CreateFleet publishes no Spot
+Instance request, and the fleet record is what tracks the capacity. The request-outcome seed does
+not apply to them; a fleet's shortfall has [its own](#seeding-ec2-fleet-partial-fulfillment).
 
 `DescribeSpotInstanceRequests` asserts existence on `SpotInstanceRequestId.N`
 (`InvalidSpotInstanceRequestID.NotFound`, `.Malformed`), evaluates twenty-two of its forty
@@ -11651,6 +11684,9 @@ applies:
 | `RunInstances` with `MarketType=spot` | `InsufficientInstanceCapacity`, HTTP 500 — the server-error table's code, answered at the class it publishes, as [Capacity Reservation outcomes](#seeding-a-capacity-reservation-outcome) are |
 | `RequestSpotInstances` | `InstanceCount` requests, `open`, with the seeded status and no `instanceId` |
 | A persistent request's replacement | the request reopens — `open`, the seeded status, no `instanceId` |
+
+An open request is fulfilled by the first `DescribeSpotInstanceRequests` after the seed that held it
+is cleared — see [Spot Instance requests](#spot-instance-requests).
 
 The seed is read at request time from its own namespace, so it is recorded and replayed with the
 rest of the state.

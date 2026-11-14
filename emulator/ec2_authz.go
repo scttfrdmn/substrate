@@ -563,7 +563,7 @@ func ec2AuthzResolveLaunch(state StateManager, reqCtx *RequestContext, req *AWSR
 	// template. A return from the template merge above must not skip this: a plain
 	// request naming no template is exactly the launch whose subnet comes from the
 	// default VPC (#673).
-	m.resolveDefaultVPC(state, reqCtx)
+	m.resolveDefaultVPC(state, reqCtx, req.Params["Placement.AvailabilityZone"])
 	return m
 }
 
@@ -639,12 +639,15 @@ func ec2AuthzTemplateData(state StateManager, reqCtx *RequestContext, req *AWSRe
 // [EC2Plugin.seedDefaultVPC] runs (#1464), and the seed is about to create both. A Deny
 // on subnet/* still matches, and a least-privilege Allow naming one specific subnet
 // correctly refuses a launch that will land in a different one.
-func (m *ec2AuthzLaunchMembers) resolveDefaultVPC(state StateManager, reqCtx *RequestContext) {
+//
+// zone is the launch's Placement.AvailabilityZone, so the subnet named is the one the handler
+// resolves for that zone.
+func (m *ec2AuthzLaunchMembers) resolveDefaultVPC(state StateManager, reqCtx *RequestContext, zone string) {
 	if m.subnetID != "" {
 		return
 	}
 	namedGroups := len(m.securityGroupIDs) > 0
-	vpc, subnet, err := ec2LookupDefaultVPC(context.Background(), state, reqCtx)
+	vpc, subnet, err := ec2LookupDefaultVPC(context.Background(), state, reqCtx, zone)
 	if err != nil || vpc == nil {
 		// No default VPC, or state cannot say: this launch creates both. A failed read
 		// resolves to the wildcards rather than to nothing, so a storage fault cannot

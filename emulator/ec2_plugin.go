@@ -695,7 +695,7 @@ func (p *EC2Plugin) launchInstances(
 	// A launch naming no subnet lands in the default VPC, which HandleRequest has already
 	// seeded (#1464); one with no default VPC is refused rather than given one.
 	if subnetID == "" {
-		vpc, subnet, err := p.resolveLaunchDefaultSubnet(reqCtx)
+		vpc, subnet, err := p.resolveLaunchDefaultSubnet(reqCtx, placementAZ)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -736,7 +736,7 @@ func (p *EC2Plugin) launchInstances(
 	// A Spot launch is checked last, after every refusal a launch shares, so a malformed
 	// request is refused for what is wrong with it rather than for capacity — and before the
 	// first write, so a capacity shortfall leaves nothing behind (#1436).
-	if spot != nil {
+	if spot != nil && !spot.fleetOnly {
 		if awsErr := ec2CheckTagRules(spot.tags); awsErr != nil {
 			return nil, "", nil, awsErr
 		}
@@ -780,9 +780,11 @@ func (p *EC2Plugin) launchInstances(
 		}
 		if spot != nil {
 			inst.InstanceLifecycle = ec2InstanceLifecycleSpot
-			if spot.replacing != nil {
+			switch {
+			case spot.fleetOnly:
+			case spot.replacing != nil:
 				inst.SpotInstanceRequestID = spot.replacing.SpotInstanceRequestID
-			} else {
+			default:
 				inst.SpotInstanceRequestID = generateSpotInstanceRequestID(reqCtx.IDs)
 			}
 		}
@@ -842,7 +844,7 @@ func (p *EC2Plugin) launchInstances(
 			return nil, "", nil, err
 		}
 		instances = append(instances, inst)
-		if spot != nil {
+		if spot != nil && !spot.fleetOnly {
 			sir, err := p.fulfillSpotRequest(reqCtx, spot, inst, launchedImage, now)
 			if err != nil {
 				return nil, "", nil, err
@@ -2054,10 +2056,24 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // account's default VPC (#1464). With no default VPC the request is refused with
 // VPCIdNotSpecified, the code the client-error table gives for "You have no default VPC in
 // which to carry out the request".
+//
+// The name "default" is reserved for the group every VPC is created with, and is refused
+// with InvalidParameterValue / "Cannot use reserved security group name: default" — EC2's
+// observed answer (the operation's Errors section is empty), matched case-insensitively
+// because "Names are case-insensitive". The refusal is also what keeps
+// [ec2LookupDefaultSecurityGroup], which resolves the default VPC's group by that name,
+// unambiguous.
 func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	groupName := req.Params["GroupName"]
 	description := req.Params["GroupDescription"]
 	vpcID := req.Params["VpcId"]
+	if strings.EqualFold(groupName, "default") {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Cannot use reserved security group name: " + groupName,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	tags := ec2LaunchTagsForResource(req.Params, "security-group")
 	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
 		return nil, awsErr
@@ -2066,7 +2082,7 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 		return nil, awsErr
 	}
 	if vpcID == "" {
-		vpc, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx)
+		vpc, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
 		if err != nil {
 			return nil, err
 		}
@@ -2308,6 +2324,11 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 			Message:    "No permissions specified",
 			HTTPStatus: http.StatusBadRequest,
 		}
+	}
+	// A group named rather than identified is resolved to its ID within the group's VPC, on
+	// authorize and revoke alike, so the two forms address one rule.
+	if err := p.resolveGroupPairNames(reqCtx, sg.VPCID, perms); err != nil {
+		return nil, err
 	}
 
 	rules := &sg.IngressRules

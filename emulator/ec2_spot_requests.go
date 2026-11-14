@@ -54,6 +54,7 @@ const (
 	ec2SpotStatusCapacityNotAvailable = "capacity-not-available"
 	ec2SpotStatusPriceTooLow          = "price-too-low"
 	ec2SpotStatusBadParameters        = "bad-parameters"
+	ec2SpotStatusScheduleExpired      = "schedule-expired"
 )
 
 // ec2SpotStatusMessages are the status messages substrate renders, AWS's own explanations
@@ -66,6 +67,7 @@ var ec2SpotStatusMessages = map[string]string{
 	ec2SpotStatusCapacityNotAvailable: "There is not enough capacity available for the instances that you requested.",
 	ec2SpotStatusPriceTooLow:          "Your maximum price is below the current Spot price.",
 	ec2SpotStatusBadParameters:        "One or more parameters for your Spot request are not valid.",
+	ec2SpotStatusScheduleExpired:      "Your Spot request expired because it was not fulfilled before the specified date.",
 }
 
 // ec2SpotSeedableStatuses are the outcomes the control plane may seed: the two status codes
@@ -197,6 +199,11 @@ type ec2SpotLaunch struct {
 	// replacing names the persistent request a replacement launch fulfills, nil for a
 	// launch that creates its own requests.
 	replacing *EC2SpotInstanceRequest
+
+	// fleetOnly marks a CreateFleet Spot pool: its instances are Spot Instances, but no
+	// request is written for them and the request outcome seed does not apply — see
+	// [EC2Plugin.launchFleetPool].
+	fleetOnly bool
 }
 
 // ec2SpotUnfulfilledError reports a Spot launch that a seeded outcome left unfulfilled.
@@ -463,37 +470,7 @@ func (p *EC2Plugin) onSpotInstanceTerminated(reqCtx *RequestContext, inst EC2Ins
 		return p.putSpotRequest(*r)
 	}
 
-	params := maps.Clone(r.LaunchParams)
-	if params == nil {
-		params = map[string]string{}
-	}
-	params["MinCount"], params["MaxCount"] = "1", "1"
-	replacement := &AWSRequest{Service: "ec2", Operation: "RunInstances", Params: params, Headers: map[string]string{}}
-	spot := &ec2SpotLaunch{
-		opts: ec2SpotOptions{
-			requestType: r.Type, interruptionBehavior: r.InstanceInterruptionBehavior,
-			maxPrice: r.SpotPrice, validUntil: r.ValidUntil,
-		},
-		launchParams: r.LaunchParams,
-		replacing:    r,
-	}
-	if _, _, _, launchErr := p.launchInstances(reqCtx, replacement, nil, spot); launchErr != nil {
-		r.State = ec2SpotStateOpen
-		r.InstanceID = ""
-		r.LaunchedAvailabilityZone = ""
-		var unfulfilled *ec2SpotUnfulfilledError
-		var refused *AWSError
-		switch {
-		case errors.As(launchErr, &unfulfilled):
-			r.setStatus(unfulfilled.statusCode, now)
-		case errors.As(launchErr, &refused):
-			r.setStatus(ec2SpotStatusBadParameters, now)
-		default:
-			return launchErr
-		}
-		return p.putSpotRequest(*r)
-	}
-	return nil
+	return p.launchForSpotRequest(reqCtx, r, now)
 }
 
 // requestSpotInstances handles RequestSpotInstances.
@@ -820,6 +797,9 @@ func (p *EC2Plugin) describeSpotInstanceRequests(reqCtx *RequestContext, req *AW
 		return nil, err
 	}
 	filters := extractEC2Filters(req.Params)
+	if err := p.reconcileOpenSpotRequests(reqCtx); err != nil {
+		return nil, err
+	}
 	keys, err := p.state.List(context.Background(), ec2Namespace, "spot_request:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeSpotInstanceRequests: %w", err)
@@ -850,6 +830,94 @@ func (p *EC2Plugin) describeSpotInstanceRequests(reqCtx *RequestContext, req *AW
 	}
 	resp.Requests, resp.NextToken = ec2Page(resp.Requests, offset, maxResults)
 	return ec2XMLResponse(http.StatusOK, resp)
+}
+
+// reconcileOpenSpotRequests re-evaluates every open request a seeded outcome left
+// unfulfilled, so a caller's wait-for-fulfillment loop terminates once the seed is cleared.
+//
+// It runs on observation — each DescribeSpotInstanceRequests — rather than on a clock, the
+// same choice [progression] makes: an open request is fulfilled by the first describe that
+// finds no seed blocking its instance type, launching its instance from the request's own
+// launch and minting from that describe's request ID, so a replay of the same describe mints
+// the same instance. A request whose ValidUntil has passed is closed with schedule-expired
+// instead ("The Spot request expired because it was not fulfilled before the specified
+// date"). An open request whose launch is refused outright stays open with bad-parameters.
+func (p *EC2Plugin) reconcileOpenSpotRequests(reqCtx *RequestContext) error {
+	keys, err := p.state.List(context.Background(), ec2Namespace, "spot_request:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return fmt.Errorf("ec2 reconcile spot requests: %w", err)
+	}
+	nowTime := p.tc.Now().UTC()
+	now := nowTime.Format(time.RFC3339)
+	for _, k := range keys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var r EC2SpotInstanceRequest
+		if json.Unmarshal(data, &r) != nil || r.State != ec2SpotStateOpen || r.InstanceID != "" ||
+			!containsStr(ec2SpotSeedableStatuses, r.StatusCode) {
+			continue
+		}
+		if r.ValidUntil != "" {
+			if until, parseErr := time.Parse(time.RFC3339, r.ValidUntil); parseErr == nil && !nowTime.Before(until) {
+				r.State = ec2SpotStateClosed
+				r.setStatus(ec2SpotStatusScheduleExpired, now)
+				if err := p.putSpotRequest(r); err != nil {
+					return err
+				}
+				continue
+			}
+		}
+		code, seedErr := p.spotRequestOutcomeSeed(r.LaunchSpecification.InstanceType)
+		if seedErr != nil {
+			return seedErr
+		}
+		if code != "" {
+			continue
+		}
+		if err := p.launchForSpotRequest(reqCtx, &r, now); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// launchForSpotRequest launches one instance from a request's recorded launch and points the
+// request at it. A launch the seed or the launch path refuses leaves the request open, with
+// the seeded status or bad-parameters, and no instance.
+func (p *EC2Plugin) launchForSpotRequest(reqCtx *RequestContext, r *EC2SpotInstanceRequest, now string) error {
+	params := maps.Clone(r.LaunchParams)
+	if params == nil {
+		params = map[string]string{}
+	}
+	params["MinCount"], params["MaxCount"] = "1", "1"
+	launch := &AWSRequest{Service: "ec2", Operation: "RunInstances", Params: params, Headers: map[string]string{}}
+	spot := &ec2SpotLaunch{
+		opts: ec2SpotOptions{
+			requestType: r.Type, interruptionBehavior: r.InstanceInterruptionBehavior,
+			maxPrice: r.SpotPrice, validUntil: r.ValidUntil,
+		},
+		launchParams: r.LaunchParams,
+		replacing:    r,
+	}
+	if _, _, _, launchErr := p.launchInstances(reqCtx, launch, nil, spot); launchErr != nil {
+		r.State = ec2SpotStateOpen
+		r.InstanceID = ""
+		r.LaunchedAvailabilityZone = ""
+		var unfulfilled *ec2SpotUnfulfilledError
+		var refused *AWSError
+		switch {
+		case errors.As(launchErr, &unfulfilled):
+			r.setStatus(unfulfilled.statusCode, now)
+		case errors.As(launchErr, &refused):
+			r.setStatus(ec2SpotStatusBadParameters, now)
+		default:
+			return launchErr
+		}
+		return p.putSpotRequest(*r)
+	}
+	return nil
 }
 
 // cancelSpotInstanceRequests handles CancelSpotInstanceRequests.

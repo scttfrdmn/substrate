@@ -332,7 +332,7 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 
 		if gotPerPool[i] > 0 {
-			ids, launchErr := p.launchFleetPool(reqCtx, pool, gotPerPool[i], instanceTags, fleet.FleetID)
+			ids, launchErr := p.launchFleetPool(reqCtx, pool, gotPerPool[i], instanceTags, fleet.FleetID, lifecycle)
 			if launchErr != nil {
 				return nil, launchErr
 			}
@@ -547,12 +547,21 @@ func ec2FleetLaunchRequest(pool fleetPool, count int) *AWSRequest {
 // The launch is not authorized here. [EC2Plugin.authorizeFleetLaunches] does it for
 // every pool before the first one launches, so a refused fleet leaves no instances
 // behind.
+//
+// A pool whose lifecycle is "spot" launches Spot Instances: each reports
+// instanceLifecycle=spot, so DescribeInstances' instance-lifecycle filter selects it
+// (#1436). No sir- request is written for them. A Spot Instance request is the object
+// RequestSpotInstances and RunInstances' market options create; CreateFleet publishes no
+// such request in its response, and the fleet record is what tracks the capacity. The
+// Spot request outcome seed does not apply either — a fleet's shortfall has its own
+// (/v1/ec2/fleet-shortfall).
 func (p *EC2Plugin) launchFleetPool(
 	reqCtx *RequestContext,
 	pool fleetPool,
 	count int,
 	instanceTags []EC2Tag,
 	fleetID string,
+	lifecycle string,
 ) ([]string, error) {
 	// The caller's tags travel as already-parsed values rather than as re-emitted
 	// TagSpecification.N params, so the fleet-ID tag can be appended without hunting
@@ -567,21 +576,16 @@ func (p *EC2Plugin) launchFleetPool(
 		})
 	}
 
-	resp, err := p.runInstancesWithTags(reqCtx, ec2FleetLaunchRequest(pool, count), tags)
+	var spot *ec2SpotLaunch
+	if lifecycle == ec2InstanceLifecycleSpot {
+		spot = &ec2SpotLaunch{fleetOnly: true}
+	}
+	instances, _, _, err := p.launchInstances(reqCtx, ec2FleetLaunchRequest(pool, count), tags, spot)
 	if err != nil {
 		return nil, err
 	}
-
-	var parsed struct {
-		Instances []struct {
-			InstanceID string `xml:"instanceId"`
-		} `xml:"instancesSet>item"`
-	}
-	if err := xml.Unmarshal(resp.Body, &parsed); err != nil {
-		return nil, fmt.Errorf("ec2 launchFleetPool parse RunInstances response: %w", err)
-	}
-	ids := make([]string, 0, len(parsed.Instances))
-	for _, inst := range parsed.Instances {
+	ids := make([]string, 0, len(instances))
+	for _, inst := range instances {
 		ids = append(ids, inst.InstanceID)
 	}
 	return ids, nil

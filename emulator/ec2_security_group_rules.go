@@ -1,6 +1,9 @@
 package emulator
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"slices"
 	"strconv"
@@ -21,13 +24,66 @@ func ec2SamePortRange(a, b EC2IPPermission) bool {
 }
 
 // ec2GroupPairMatches reports whether a referenced-group source a revoke names is the one a
-// stored rule holds. The ID decides when the revoke gives one; a name-only reference — the
-// default-VPC form, and the legacy SourceSecurityGroupName parameter — matches by name.
+// stored rule holds. When both carry an ID the IDs decide; otherwise the names do.
+//
+// Both sides normally carry an ID: [EC2Plugin.resolveGroupPairNames] fills one in for a
+// name-only reference — the default-VPC form, and the legacy SourceSecurityGroupName
+// parameter — on authorize and on revoke alike, so a rule authorized by name is revoked by
+// ID and the other way round. The name comparison is what is left for a name that names no
+// group in the VPC.
 func ec2GroupPairMatches(stored, target EC2UserIDGroupPair) bool {
-	if target.GroupID != "" {
+	if target.GroupID != "" && stored.GroupID != "" {
 		return stored.GroupID == target.GroupID
 	}
 	return target.GroupName != "" && stored.GroupName == target.GroupName
+}
+
+// resolveGroupPairNames fills in the group ID of every name-only referenced group in perms,
+// looking the name up among the groups of vpcID — "The source security group must be in the
+// same VPC" (API_RevokeSecurityGroupIngress). The name is kept alongside the ID it resolved
+// to. A name that resolves to no group is left as it was.
+func (p *EC2Plugin) resolveGroupPairNames(reqCtx *RequestContext, vpcID string, perms []EC2IPPermission) error {
+	var byName map[string]string
+	for i := range perms {
+		for j := range perms[i].UserIDGroupPairs {
+			pair := &perms[i].UserIDGroupPairs[j]
+			if pair.GroupID != "" || pair.GroupName == "" {
+				continue
+			}
+			if byName == nil {
+				var err error
+				if byName, err = p.securityGroupIDsByName(reqCtx, vpcID); err != nil {
+					return err
+				}
+			}
+			pair.GroupID = byName[strings.ToLower(pair.GroupName)]
+		}
+	}
+	return nil
+}
+
+// securityGroupIDsByName maps the lower-cased name of each group in vpcID to its ID, the
+// first group in key order winning where substrate holds two of one name.
+func (p *EC2Plugin) securityGroupIDsByName(reqCtx *RequestContext, vpcID string) (map[string]string, error) {
+	keys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
+	if err != nil {
+		return nil, fmt.Errorf("ec2 securityGroupIDsByName list: %w", err)
+	}
+	out := map[string]string{}
+	for _, k := range keys {
+		data, getErr := p.state.Get(context.Background(), ec2Namespace, k)
+		if getErr != nil || data == nil {
+			continue
+		}
+		var sg EC2SecurityGroup
+		if json.Unmarshal(data, &sg) != nil || sg.VPCID != vpcID {
+			continue
+		}
+		if _, seen := out[strings.ToLower(sg.GroupName)]; !seen {
+			out[strings.ToLower(sg.GroupName)] = sg.GroupID
+		}
+	}
+	return out, nil
 }
 
 // ec2RevokePermissions subtracts the rules a RevokeSecurityGroupIngress/Egress request names

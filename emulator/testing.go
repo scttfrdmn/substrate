@@ -270,6 +270,9 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	cfg.EventStore.IncludeBodies = tsCfg.recordBodies
 	cfg.EventStore.IncludeStateHashes = tsCfg.recordStateHashes
 	cfg.Log.Level = "error"
+	// The server keeps its own copy of the config, which time travel registers its replay
+	// plugins from, so the default-VPC switch has to be on both.
+	cfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
 
 	state := NewMemoryStateManager()
 	tc := NewTimeController(time.Now())

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"net"
 	"net/http"
 	"sort"
 )
@@ -114,7 +115,7 @@ func (p *EC2Plugin) seedDefaultVPC(reqCtx *RequestContext) error {
 	}
 	// State written before #1464 may already hold a default VPC, created lazily by a launch.
 	// It is adopted rather than joined by a second one.
-	existing, _, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx)
+	existing, _, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx, "")
 	if err != nil {
 		return nil //nolint:nilerr // An unreadable store skips the seed, as an unreadable marker does.
 	}
@@ -253,15 +254,17 @@ func (p *EC2Plugin) putEC2Record(ctx context.Context, key string, v any) error {
 // authorized against the subnet it will actually land in, which is only knowable by reading
 // the default VPC first (#673).
 //
-// The default VPC has a default subnet per zone as of #1464, so the subnet returned is the
-// one in the lexicographically first zone — the region's "a" zone while it exists. The
-// choice has to be a rule rather than whichever record a scan meets first, because the
-// handler and the authorizer both call this and must name the same subnet.
+// The default VPC has a default subnet per zone as of #1464. zone is the launch's
+// Placement.AvailabilityZone: when it names one, the subnet returned is that zone's default
+// subnet; when it is empty, the subnet in the lexicographically first zone — the Region's
+// "a" zone while it exists. The choice has to be a rule rather than whichever record a scan
+// meets first, because the handler and the authorizer both call this and must name the same
+// subnet.
 //
 // A nil subnet with a non-nil VPC means the default VPC exists but has no default subnet
-// left; both nil means there is no default VPC. A state error is returned rather than
-// reported as "no default VPC".
-func ec2LookupDefaultVPC(ctx context.Context, state StateManager, reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
+// (in zone, when one is named); both nil means there is no default VPC. A state error is
+// returned rather than reported as "no default VPC".
+func ec2LookupDefaultVPC(ctx context.Context, state StateManager, reqCtx *RequestContext, zone string) (*EC2VPC, *EC2Subnet, error) {
 	vpcKeys, err := state.List(ctx, ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
 		return nil, nil, fmt.Errorf("ec2 lookupDefaultVPC list vpcs: %w", err)
@@ -279,10 +282,12 @@ func ec2LookupDefaultVPC(ctx context.Context, state StateManager, reqCtx *Reques
 		if listErr != nil {
 			return nil, nil, listErr
 		}
-		if len(subnets) == 0 {
-			return &vpc, nil, nil
+		for _, s := range subnets {
+			if zone == "" || s.AvailabilityZone == zone {
+				return &vpc, &s, nil
+			}
 		}
-		return &vpc, &subnets[0], nil
+		return &vpc, nil, nil
 	}
 	return nil, nil, nil
 }
@@ -337,20 +342,30 @@ func ec2LookupDefaultSecurityGroup(ctx context.Context, state StateManager, reqC
 }
 
 // resolveLaunchDefaultSubnet returns the default VPC and subnet a launch naming no subnet
-// lands in.
+// lands in: the default subnet of the launch's Placement.AvailabilityZone, or of the
+// Region's first zone when it names none.
 //
 // It no longer creates them (#1464): the default VPC is seeded before the request is
 // dispatched, so a launch that finds none is in an account whose default VPC was deleted or
-// was never seeded, and EC2 refuses that launch with VPCIdNotSpecified. A default VPC with no
-// default subnet left is refused with MissingInput, the client-error table's "An input
+// was never seeded, and EC2 refuses that launch with VPCIdNotSpecified. A named zone with no
+// default subnet is refused with InvalidInput / "No default subnet for availability zone:
+// '…'", EC2's observed answer (RunInstances' Errors section is empty). A default VPC with
+// no default subnet left is refused with MissingInput, the client-error table's "An input
 // parameter is missing", worded as EC2 words it.
-func (p *EC2Plugin) resolveLaunchDefaultSubnet(reqCtx *RequestContext) (*EC2VPC, *EC2Subnet, error) {
-	vpc, subnet, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx)
+func (p *EC2Plugin) resolveLaunchDefaultSubnet(reqCtx *RequestContext, zone string) (*EC2VPC, *EC2Subnet, error) {
+	vpc, subnet, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, zone)
 	if err != nil {
 		return nil, nil, err
 	}
 	if vpc == nil {
 		return nil, nil, ec2NoDefaultVPCError()
+	}
+	if subnet == nil && zone != "" {
+		return nil, nil, &AWSError{
+			Code:       "InvalidInput",
+			Message:    "No default subnet for availability zone: '" + zone + "'.",
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
 	if subnet == nil {
 		return nil, nil, &AWSError{
@@ -384,7 +399,7 @@ func (p *EC2Plugin) markDefaultVPCDeleted(reqCtx *RequestContext, vpc EC2VPC) er
 func (p *EC2Plugin) createDefaultVpc(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
 	p.defaultVPCMu.Lock()
 	defer p.defaultVPCMu.Unlock()
-	existing, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx)
+	existing, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -418,7 +433,8 @@ func (p *EC2Plugin) createDefaultVpc(reqCtx *RequestContext, _ *AWSRequest) (*AW
 // specified, but not both" — and must be one of the Region's seeded zones. The published
 // refusals are DefaultVpcDoesNotExist, DefaultSubnetAlreadyExistsInAvailabilityZone and
 // InvalidAvailabilityZone, all from the client-error table. The block is the first
-// 172.31.x.0/20 no subnet of the default VPC already holds. Ipv6Native is not modeled.
+// 172.31.x.0/20 that overlaps no subnet of the default VPC — a caller's own CreateSubnet in it
+// included. Ipv6Native is not modeled.
 func (p *EC2Plugin) createDefaultSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	zone, zoneID := req.Params["AvailabilityZone"], req.Params["AvailabilityZoneId"]
 	if zone == "" && zoneID == "" {
@@ -449,8 +465,12 @@ func (p *EC2Plugin) createDefaultSubnet(reqCtx *RequestContext, req *AWSRequest)
 		}
 	}
 
+	// Held across the check and the write, so two concurrent calls for one zone cannot both
+	// pass the one-default-per-zone check, and cannot both take the same free block.
+	p.defaultVPCMu.Lock()
+	defer p.defaultVPCMu.Unlock()
 	ctx := context.Background()
-	vpc, _, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx)
+	vpc, _, err := ec2LookupDefaultVPC(ctx, p.state, reqCtx, "")
 	if err != nil {
 		return nil, err
 	}
@@ -480,7 +500,7 @@ func (p *EC2Plugin) createDefaultSubnet(reqCtx *RequestContext, req *AWSRequest)
 	}
 	cidr := ""
 	for i := 0; i < 16; i++ {
-		if candidate := ec2DefaultSubnetCIDR(i); !taken[candidate] {
+		if candidate := ec2DefaultSubnetCIDR(i); !ec2CIDROverlapsAny(candidate, taken) {
 			cidr = candidate
 			break
 		}
@@ -502,6 +522,26 @@ func (p *EC2Plugin) createDefaultSubnet(reqCtx *RequestContext, req *AWSRequest)
 		Subnet  ec2SubnetItem `xml:"subnet"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Subnet: ec2SubnetXML(*subnet)})
+}
+
+// ec2CIDROverlapsAny reports whether candidate shares any address with a block in taken. A
+// block that does not parse is skipped: substrate does not validate CreateSubnet's CidrBlock,
+// so a stored one may not be a CIDR at all, and it cannot hold an address the candidate needs.
+func ec2CIDROverlapsAny(candidate string, taken map[string]bool) bool {
+	_, want, err := net.ParseCIDR(candidate)
+	if err != nil {
+		return true
+	}
+	for block := range taken {
+		_, have, parseErr := net.ParseCIDR(block)
+		if parseErr != nil {
+			continue
+		}
+		if want.Contains(have.IP) || have.Contains(want.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // vpcSubnetCIDRs returns the IPv4 blocks every subnet of vpcID holds.
