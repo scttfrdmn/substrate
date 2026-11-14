@@ -35,30 +35,28 @@ class TestFindBinary:
         with patch.dict("os.environ", {"SUBSTRATE_BINARY": str(binary)}):
             assert SubstrateServer._find_binary() == str(binary)
 
-    def test_home_candidate_used_when_present(self, tmp_path: Path) -> None:
+    # Each test that needs SUBSTRATE_BINARY unset removes it through monkeypatch, which
+    # restores it afterwards. A bare os.environ.pop leaked the removal into every later
+    # test in the session, so a botocore test running after this file found no binary.
+    def test_home_candidate_used_when_present(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         fake_home = tmp_path
         candidate = fake_home / "src" / "substrate" / "bin" / "substrate"
         candidate.parent.mkdir(parents=True)
         candidate.touch()
-        with patch.dict("os.environ", {}, clear=False):
-            # Remove SUBSTRATE_BINARY if set.
-            import os
-            os.environ.pop("SUBSTRATE_BINARY", None)
-            with patch("pathlib.Path.home", return_value=fake_home):
-                assert SubstrateServer._find_binary() == str(candidate)
+        monkeypatch.delenv("SUBSTRATE_BINARY", raising=False)
+        with patch("pathlib.Path.home", return_value=fake_home):
+            assert SubstrateServer._find_binary() == str(candidate)
 
-    def test_falls_back_to_path(self, tmp_path: Path) -> None:
-        import os
-        os.environ.pop("SUBSTRATE_BINARY", None)
+    def test_falls_back_to_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SUBSTRATE_BINARY", raising=False)
         with (
             patch("pathlib.Path.home", return_value=tmp_path),  # no candidate
             patch("shutil.which", return_value="/usr/local/bin/substrate"),
         ):
             assert SubstrateServer._find_binary() == "/usr/local/bin/substrate"
 
-    def test_raises_when_not_found(self, tmp_path: Path) -> None:
-        import os
-        os.environ.pop("SUBSTRATE_BINARY", None)
+    def test_raises_when_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SUBSTRATE_BINARY", raising=False)
         with (
             patch("pathlib.Path.home", return_value=tmp_path),
             patch("shutil.which", return_value=None),
