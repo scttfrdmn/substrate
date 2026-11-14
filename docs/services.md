@@ -15986,7 +15986,7 @@ EventBridge custom events: $1.00 per million events.
 | Operation | Route | Notes |
 |-----------|-------|-------|
 | CreateSchedule | `POST /schedules/{Name}` | Answers **200**, not 201 — see below |
-| GetSchedule | `GET /schedules/{Name}` | |
+| GetSchedule | `GET /schedules/{Name}` | Reports every member the create or update set, including `ActionAfterCompletion`, `StartDate`, `EndDate` and `KmsKeyArn` — see [The completion and window members are kept](#the-completion-and-window-members-are-kept) |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below |
 | DeleteSchedule | `DELETE /schedules/{Name}` | |
 | ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one. All three filters are applied [before the page is cut](#a-published-filter-selects-what-the-page-is-cut-from), so a page carries `min(MaxResults, remaining matches)` and never an empty array alongside a cursor |
@@ -16014,21 +16014,22 @@ rather than the code carries which constraint failed.
 | `GroupName` | `Required: No`, length 1–64, pattern `[0-9a-zA-Z-_.]+` | names `'groupName'` |
 | `Description` | length 0–512 | names `'description'` |
 | `State` | `Valid Values` ENABLED \| DISABLED | names `'state'` |
+| `ScheduleExpressionTimezone` | length 1–50 | names `'scheduleExpressionTimezone'` |
+| `ActionAfterCompletion` | `Valid Values` NONE \| DELETE | names `'actionAfterCompletion'` |
+| `KmsKeyArn` | length 1–2048, pattern `arn:aws[a-z-]*:kms:[a-z0-9\-]+:\d{12}:(key\|alias)\/[0-9a-zA-Z-_]*` | names `'kmsKeyArn'` |
+| `StartDate`, `EndDate` | Timestamp (epoch seconds) | a non-number is refused as an invalid body |
 
 `MaximumWindowInMinutes` is the one member whose *absence* is observably different from a zero, which is
 why the request type holds it as a pointer: an explicit `0` is outside the published range and is
 refused, where an absent member is accepted. **AWS does not publish that a `FLEXIBLE` window requires
 the bound**, so substrate does not invent that rule — a `FLEXIBLE` window with no maximum is accepted.
 
-Three published constraints are deliberately **not** checked, and the omissions are recorded rather
+Two published constraints are deliberately **not** checked, and the omissions are recorded rather
 than silently taken:
 
 - `Target.RoleArn`'s IAM-role ARN **pattern**. Substrate does not model the role, so refusing a string
   that is not an ARN would refuse a call this emulator otherwise serves without ever needing the value
   to resolve. Its `Required: Yes` and its length are checked.
-- `StartDate`, `EndDate`, `KmsKeyArn` and `ActionAfterCompletion` are published and unmodelled:
-  substrate decodes none of them, so it validates none of them, and #1013's rule keeps them out of the
-  response as well.
 - The templated-target objects (`EcsParameters`, `EventBridgeParameters`, `KinesisParameters`,
   `SageMakerPipelineParameters`, `SqsParameters`, `DeadLetterConfig`) are likewise unmodelled, so they
   are neither decoded nor reported.
@@ -16061,6 +16062,26 @@ fifteen published response elements — it is a request-only idempotency token, 
 the update and on no read. It was removed *with* the full-replace fix rather than on its own because an
 omitted member now reverts: leaving it would have made an unpublished field start changing under callers
 who never named it. The record keeps it as recorded intent.
+
+### The completion and window members are kept
+
+`ActionAfterCompletion`, `StartDate`, `EndDate` and `KmsKeyArn` are published on `CreateSchedule`,
+`UpdateSchedule` and `GetSchedule`, and until [#1442](https://github.com/scttfrdmn/substrate/issues/1442)
+substrate decoded none of them: a schedule created with `ActionAfterCompletion: DELETE` and an `EndDate`
+read back with neither, so a consumer relying on finished schedules deleting themselves could only
+assert on its own outgoing request. They are now decoded, validated (see the table above), stored and
+reported. The dates are epoch seconds on the wire, as `CreationDate` is, and a fractional second sent is
+a fractional second read back.
+
+Each follows the replace rule: an `UpdateSchedule` naming new values replaces them, and one omitting a
+member clears it. None of the three pages publishes a default for `ActionAfterCompletion`, so a schedule
+created without it reports no `ActionAfterCompletion` member rather than an invented `NONE`; the dates
+and the key are absent the same way.
+
+They are **recorded, not acted on** (self-deletion is [#1475](https://github.com/scttfrdmn/substrate/issues/1475)). Substrate does not fire schedules, so a one-time `at()` schedule
+with `ActionAfterCompletion: DELETE` is not deleted when its time passes, `StartDate` and `EndDate`
+gate no invocation, and nothing is encrypted under `KmsKeyArn`. No relation between the two dates is
+checked, because no page publishes one.
 
 ### `CreateSchedule` answers 200, not 201
 

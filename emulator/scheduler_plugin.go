@@ -31,6 +31,18 @@ type SchedulerRecord struct {
 	FlexibleTimeWindow SchedulerFlexibleTimeWindow `json:"flexible_time_window"`
 	// Description is a human-readable description of the schedule.
 	Description string `json:"description"`
+	// ActionAfterCompletion is NONE or DELETE, what Scheduler does to the schedule once it has
+	// finished invoking its target. Empty when the request named none (#1442).
+	ActionAfterCompletion string `json:"action_after_completion,omitempty"`
+	// StartDate is the epoch-seconds time after which the schedule may begin invoking its target,
+	// as the request sent it; nil when it named none (#1442).
+	StartDate *float64 `json:"start_date,omitempty"`
+	// EndDate is the epoch-seconds time before which the schedule may invoke its target, as the
+	// request sent it; nil when it named none (#1442).
+	EndDate *float64 `json:"end_date,omitempty"`
+	// KmsKeyArn is the customer managed KMS key the request named. Recorded and reported; no
+	// encryption is performed. Empty when the request named none (#1442).
+	KmsKeyArn string `json:"kms_key_arn,omitempty"`
 	// ARN is the Amazon Resource Name of the schedule.
 	ARN string `json:"arn"`
 	// CreationDate is the ISO-8601 timestamp when the schedule was created.
@@ -94,6 +106,10 @@ type schedulerScheduleInput struct {
 	FlexibleTimeWindow         *schedulerFlexibleTimeWindowInput `json:"FlexibleTimeWindow"`
 	Description                string                            `json:"Description"`
 	ClientToken                string                            `json:"ClientToken"`
+	ActionAfterCompletion      string                            `json:"ActionAfterCompletion"`
+	StartDate                  *float64                          `json:"StartDate"`
+	EndDate                    *float64                          `json:"EndDate"`
+	KmsKeyArn                  string                            `json:"KmsKeyArn"`
 }
 
 // schedulerTargetInput is the `Target` object as AWS publishes it.
@@ -169,6 +185,14 @@ func (in *schedulerScheduleInput) applyTo(rec *SchedulerRecord) {
 	rec.FlexibleTimeWindow = in.FlexibleTimeWindow.record()
 	rec.Description = in.Description
 	rec.ClientToken = in.ClientToken
+	// The four members #1442 found dropped. Each is assigned unconditionally like the rest, so an
+	// update omitting one clears it — the replace rule above, with no published default to revert
+	// to: none of the three operation pages states one for ActionAfterCompletion, and the two
+	// dates and the key have none by nature.
+	rec.ActionAfterCompletion = in.ActionAfterCompletion
+	rec.StartDate = in.StartDate
+	rec.EndDate = in.EndDate
+	rec.KmsKeyArn = in.KmsKeyArn
 }
 
 // state resolves the request's State to the value the schedule carries, applying the documented
@@ -628,6 +652,10 @@ type schedWireRecord struct {
 	Description                string                      `json:"Description,omitempty"`
 	CreationDate               float64                     `json:"CreationDate"`
 	LastModificationDate       float64                     `json:"LastModificationDate"`
+	ActionAfterCompletion      string                      `json:"ActionAfterCompletion,omitempty"`
+	StartDate                  *float64                    `json:"StartDate,omitempty"`
+	EndDate                    *float64                    `json:"EndDate,omitempty"`
+	KmsKeyArn                  string                      `json:"KmsKeyArn,omitempty"`
 }
 
 // schedWireTarget is the wire-format representation of a schedule target.
@@ -665,6 +693,10 @@ func schedRecordToWire(rec SchedulerRecord) schedWireRecord {
 		Description:                rec.Description,
 		CreationDate:               float64(ct.Unix()),
 		LastModificationDate:       float64(mt.Unix()),
+		ActionAfterCompletion:      rec.ActionAfterCompletion,
+		StartDate:                  rec.StartDate,
+		EndDate:                    rec.EndDate,
+		KmsKeyArn:                  rec.KmsKeyArn,
 		Target: schedWireTarget{
 			Arn:     rec.Target.ARN,
 			RoleArn: rec.Target.RoleARN,
