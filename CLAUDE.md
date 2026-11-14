@@ -73,6 +73,22 @@ v0.97.0 before being swept; none of them had been kept for a reason. A branch is
 recoverable from its PR page after deletion, so keeping it buys nothing that a squash
 merge has not already recorded on `main`.
 
+PR conventions, as practiced:
+
+- Branch `<type>/v<milestone>-<area>` (e.g. `fix/v0126-ec2`); title in conventional
+  form, naming the issues: `fix(#1153, #1103): …`. One PR usually bundles one
+  milestone's work in one area.
+- Body: `Fixes #N` lines first (a title reference does not close anything; write
+  `Part of #N` plus what remains when an issue ships partly), then one bullet per
+  area, the routed-operation catalog count change ("from 1,042 to 1,055"), the gates
+  run locally, and follow-up issues filed with their numbers.
+- A release PR (`chore/release-vX.Y.Z`) changes only `CHANGELOG.md`; versions are
+  stamped by ldflags (`emulator/doc.go` stays `"dev"`) and docs carry no pinned
+  numbers.
+- Adding a plugin or an operation touches a fixed set of tables, each enforced by a
+  test or a CI gate; the list and the local `make` targets that reproduce the CI drift
+  jobs are in `docs/contributing.md`.
+
 ## Code conventions
 
 - Idiomatic Go 1.26; target A+ on https://goreportcard.com/report/github.com/scttfrdmn/substrate
