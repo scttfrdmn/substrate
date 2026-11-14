@@ -20,6 +20,7 @@ type DynamoDBPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	locks  dynamodbLocks // serializes writes per item and per table (#1449)
 }
 
 // Name returns the service name "dynamodb".
@@ -197,6 +198,41 @@ func (p *DynamoDBPlugin) saveItemKeys(ctx context.Context, accountID, region, ta
 	return p.state.Put(ctx, dynamodbNamespace, p.itemKeysStateKey(accountID, region, tableName), data)
 }
 
+// addItemKey records ik in a table's item_keys list, under the table's stripe so two
+// concurrent creates of distinct items both land (#1449). A key already listed is not
+// added twice.
+func (p *DynamoDBPlugin) addItemKey(ctx context.Context, accountID, region, tableName, ik string) error {
+	unlock := p.locks.lockTable(accountID, region, tableName)
+	defer unlock()
+	keys, err := p.loadItemKeys(ctx, accountID, region, tableName)
+	if err != nil {
+		return err
+	}
+	for _, k := range keys {
+		if k == ik {
+			return nil
+		}
+	}
+	return p.saveItemKeys(ctx, accountID, region, tableName, append(keys, ik))
+}
+
+// removeItemKey drops ik from a table's item_keys list, under the table's stripe.
+func (p *DynamoDBPlugin) removeItemKey(ctx context.Context, accountID, region, tableName, ik string) error {
+	unlock := p.locks.lockTable(accountID, region, tableName)
+	defer unlock()
+	keys, err := p.loadItemKeys(ctx, accountID, region, tableName)
+	if err != nil {
+		return err
+	}
+	kept := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if k != ik {
+			kept = append(kept, k)
+		}
+	}
+	return p.saveItemKeys(ctx, accountID, region, tableName, kept)
+}
+
 func (p *DynamoDBPlugin) loadItem(ctx context.Context, accountID, region, tableName, itemKey string) (map[string]*AttributeValue, error) {
 	data, err := p.state.Get(ctx, dynamodbNamespace, p.itemStateKey(accountID, region, tableName, itemKey))
 	if err != nil {
@@ -243,38 +279,51 @@ func extractPrimaryKey(item map[string]*AttributeValue, keySchema []DynamoDBKeyS
 	if !ok || pkAV == nil {
 		return "", "", "", "", &AWSError{Code: "ValidationException", Message: "One or more parameter values were invalid: Missing the key " + pkAttr + " in the item", HTTPStatus: http.StatusBadRequest}
 	}
-	pkVal := avToString(pkAV)
+	pkVal := dynamodbKeyComponent(pkAV)
 	var skVal string
 	if skAttr != "" {
 		skAV, skOk := item[skAttr]
 		if !skOk || skAV == nil {
 			return "", "", "", "", &AWSError{Code: "ValidationException", Message: "One or more parameter values were invalid: Missing the key " + skAttr + " in the item", HTTPStatus: http.StatusBadRequest}
 		}
-		skVal = avToString(skAV)
+		skVal = dynamodbKeyComponent(skAV)
 	}
 	return pkAttr, pkVal, skAttr, skVal, nil
 }
 
-// avS safely dereferences an AttributeValue's S pointer, returning "" if nil.
-func avS(av *AttributeValue) string {
-	if av == nil || av.S == nil {
-		return ""
+// dynamodbItemKeyFor validates key against the table's key schema and declared key
+// types and returns the item's encoded state-key component.
+func dynamodbItemKeyFor(tbl *DynamoDBTable, key map[string]*AttributeValue) (string, error) {
+	_, pkVal, _, skVal, err := extractPrimaryKey(key, tbl.KeySchema)
+	if err != nil {
+		return "", err
 	}
-	return *av.S
+	if err := dynamodbValidateKeyTypes(tbl, key); err != nil {
+		return "", err
+	}
+	return dynamodbItemKey(pkVal, skVal), nil
 }
 
-// avToString returns a string representation of an AttributeValue for key usage.
-func avToString(av *AttributeValue) string {
-	if av == nil {
-		return ""
+// dynamodbNewItemFromKey returns the item an UpdateItem creates when no item exists:
+// just the key attributes, deep-copied.
+func dynamodbNewItemFromKey(key map[string]*AttributeValue) map[string]*AttributeValue {
+	item := make(map[string]*AttributeValue, len(key))
+	for k, v := range key {
+		item[k] = deepCopyAV(v)
 	}
-	if av.S != nil {
-		return *av.S
+	return item
+}
+
+// dynamodbProjectAttrs returns the named top-level attributes of item that exist. It
+// is how UpdateItem's UPDATED_OLD and UPDATED_NEW report "only the updated attributes".
+func dynamodbProjectAttrs(item map[string]*AttributeValue, names []string) map[string]*AttributeValue {
+	out := make(map[string]*AttributeValue, len(names))
+	for _, n := range names {
+		if v, ok := item[n]; ok {
+			out[n] = v
+		}
 	}
-	if av.N != "" {
-		return av.N
-	}
-	return ""
+	return out
 }
 
 // --- Table lifecycle ---------------------------------------------------------
@@ -675,11 +724,14 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
-	_, pkVal, _, skVal, err := extractPrimaryKey(input.Item, tbl.KeySchema)
+	ik, err := dynamodbItemKeyFor(tbl, input.Item)
 	if err != nil {
 		return nil, err
 	}
-	ik := dynamodbItemKey(pkVal, skVal)
+
+	// Hold the item's stripe across load → condition → save (#1449).
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, input.TableName, ik)
+	defer unlock()
 
 	// Load old item for condition checking and ReturnValues.
 	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
@@ -705,12 +757,7 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 
 	// Update item keys list if new.
 	if oldItem == nil {
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
-		if err != nil {
-			return nil, err
-		}
-		itemKeys = append(itemKeys, ik)
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, itemKeys); err != nil {
+		if err := p.addItemKey(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik); err != nil {
 			return nil, fmt.Errorf("dynamodb putItem saveItemKeys: %w", err)
 		}
 	}
@@ -751,11 +798,10 @@ func (p *DynamoDBPlugin) getItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
-	_, pkVal, _, skVal, err := extractPrimaryKey(input.Key, tbl.KeySchema)
+	ik, err := dynamodbItemKeyFor(tbl, input.Key)
 	if err != nil {
 		return nil, err
 	}
-	ik := dynamodbItemKey(pkVal, skVal)
 
 	item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
@@ -791,11 +837,14 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
-	_, pkVal, _, skVal, err := extractPrimaryKey(input.Key, tbl.KeySchema)
+	ik, err := dynamodbItemKeyFor(tbl, input.Key)
 	if err != nil {
 		return nil, err
 	}
-	ik := dynamodbItemKey(pkVal, skVal)
+
+	// Hold the item's stripe across load → condition → delete (#1449).
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, input.TableName, ik)
+	defer unlock()
 
 	oldItem, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 	if err != nil {
@@ -818,17 +867,7 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 			return nil, fmt.Errorf("dynamodb deleteItem: %w", err)
 		}
 		// Remove from item keys.
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
-		if err != nil {
-			return nil, err
-		}
-		newKeys := make([]string, 0, len(itemKeys))
-		for _, k := range itemKeys {
-			if k != ik {
-				newKeys = append(newKeys, k)
-			}
-		}
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, newKeys); err != nil {
+		if err := p.removeItemKey(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik); err != nil {
 			return nil, fmt.Errorf("dynamodb deleteItem saveItemKeys: %w", err)
 		}
 		// Append stream record.
@@ -866,31 +905,28 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + input.TableName, HTTPStatus: http.StatusBadRequest}
 	}
 
-	_, pkVal, _, skVal, err := extractPrimaryKey(input.Key, tbl.KeySchema)
-	if err != nil {
-		return nil, err
-	}
-	ik := dynamodbItemKey(pkVal, skVal)
-
-	item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
+	ik, err := dynamodbItemKeyFor(tbl, input.Key)
 	if err != nil {
 		return nil, err
 	}
 
-	isNew := item == nil
-	if isNew {
-		// Create item from key.
-		item = make(map[string]*AttributeValue)
-		for k, v := range input.Key {
-			item[k] = v
-		}
+	// Hold the item's stripe across load → condition → save, so concurrent
+	// conditional updates of one item serialize and exactly one of N writers whose
+	// conditions are mutually exclusive wins (#1449).
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, input.TableName, ik)
+	defer unlock()
+
+	// current is the stored item, nil when there is none. The condition is evaluated
+	// against it — not against an item seeded from the key — so attribute_exists(pk)
+	// is false and attribute_not_exists(pk) true for an item that does not exist yet,
+	// as on DynamoDB (#1448, #1451).
+	current, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
+	if err != nil {
+		return nil, err
 	}
 
-	oldItem := copyItem(item)
-
-	// Evaluate condition expression against current state.
 	if input.ConditionExpression != "" {
-		ok, evalErr := evalDynamoCondition(input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues, oldItem)
+		ok, evalErr := evalDynamoCondition(input.ConditionExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues, current)
 		if evalErr != nil {
 			return nil, &AWSError{Code: "ValidationException", Message: evalErr.Error(), HTTPStatus: http.StatusBadRequest}
 		}
@@ -899,9 +935,20 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 		}
 	}
 
-	// Apply update expression.
+	// The item the update is applied to: a deep copy of the stored item, or the key
+	// attributes when the update creates it.
+	isNew := current == nil
+	var item map[string]*AttributeValue
+	if isNew {
+		item = dynamodbNewItemFromKey(input.Key)
+	} else {
+		item = copyItem(current)
+	}
+
+	var touched []string
 	if input.UpdateExpression != "" {
-		if err := applyUpdateExpression(item, input.UpdateExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues); err != nil {
+		touched, err = applyUpdateExpression(item, input.UpdateExpression, input.ExpressionAttributeNames, input.ExpressionAttributeValues)
+		if err != nil {
 			return nil, &AWSError{Code: "ValidationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 		}
 	}
@@ -911,38 +958,37 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 
 	if isNew {
-		itemKeys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
-		if err != nil {
-			return nil, err
-		}
-		itemKeys = append(itemKeys, ik)
-		if err := p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, input.TableName, itemKeys); err != nil {
+		if err := p.addItemKey(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik); err != nil {
 			return nil, fmt.Errorf("dynamodb updateItem saveItemKeys: %w", err)
 		}
 	}
 
-	// Append stream record.
+	// Append stream record: an INSERT has no old image.
 	updateEventName := "MODIFY"
 	if isNew {
 		updateEventName = "INSERT"
 	}
-	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, updateEventName, oldItem, item); err != nil {
+	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, input.TableName, updateEventName, current, item); err != nil {
 		return nil, fmt.Errorf("dynamodb updateItem appendStreamRecord: %w", err)
 	}
 
+	// ReturnValues. An item that did not exist has no "old" attributes, so ALL_OLD and
+	// UPDATED_OLD return nothing for it.
 	result := map[string]interface{}{}
 	switch input.ReturnValues {
 	case "ALL_NEW":
 		result["Attributes"] = item
 	case "ALL_OLD":
 		if !isNew {
-			result["Attributes"] = oldItem
+			result["Attributes"] = current
 		}
 	case "UPDATED_NEW":
-		result["Attributes"] = item
+		if attrs := dynamodbProjectAttrs(item, touched); len(attrs) > 0 {
+			result["Attributes"] = attrs
+		}
 	case "UPDATED_OLD":
-		if !isNew {
-			result["Attributes"] = oldItem
+		if attrs := dynamodbProjectAttrs(current, touched); len(attrs) > 0 {
+			result["Attributes"] = attrs
 		}
 	}
 	return dynamodbJSONResponse(http.StatusOK, result)
@@ -1020,39 +1066,21 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 		}
 
 		for _, writeReq := range requests {
-			if writeReq.PutRequest.Item != nil {
-				_, pkVal, _, skVal, err := extractPrimaryKey(writeReq.PutRequest.Item, tbl.KeySchema)
-				if err != nil {
-					return nil, err
-				}
-				ik := dynamodbItemKey(pkVal, skVal)
-				existing, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
-				if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, writeReq.PutRequest.Item); err != nil {
-					return nil, fmt.Errorf("dynamodb batchWriteItem put: %w", err)
-				}
-				if existing == nil {
-					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName)
-					itemKeys = append(itemKeys, ik)
-					_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName, itemKeys)
-				}
-			} else if writeReq.DeleteRequest.Key != nil {
-				_, pkVal, _, skVal, err := extractPrimaryKey(writeReq.DeleteRequest.Key, tbl.KeySchema)
-				if err != nil {
-					return nil, err
-				}
-				ik := dynamodbItemKey(pkVal, skVal)
-				existing, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
-				if existing != nil {
-					_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
-					itemKeys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName)
-					newKeys := make([]string, 0, len(itemKeys))
-					for _, k := range itemKeys {
-						if k != ik {
-							newKeys = append(newKeys, k)
-						}
-					}
-					_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tableName, newKeys)
-				}
+			var key, newItem map[string]*AttributeValue
+			switch {
+			case writeReq.PutRequest.Item != nil:
+				key, newItem = writeReq.PutRequest.Item, writeReq.PutRequest.Item
+			case writeReq.DeleteRequest.Key != nil:
+				key = writeReq.DeleteRequest.Key
+			default:
+				continue
+			}
+			ik, err := dynamodbItemKeyFor(tbl, key)
+			if err != nil {
+				return nil, err
+			}
+			if err := p.batchWriteOne(ctx, tableName, ik, newItem); err != nil {
+				return nil, fmt.Errorf("dynamodb batchWriteItem: %w", err)
 			}
 		}
 	}
@@ -1060,6 +1088,47 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 	return dynamodbJSONResponse(http.StatusOK, map[string]interface{}{
 		"UnprocessedItems": map[string]interface{}{},
 	})
+}
+
+// batchWriteOne applies one BatchWriteItem request — a put when newItem is non-nil,
+// otherwise a delete — under the item's stripe.
+func (p *DynamoDBPlugin) batchWriteOne(ctx *RequestContext, tableName, ik string, newItem map[string]*AttributeValue) error {
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tableName, ik)
+	defer unlock()
+	old, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
+	if err != nil {
+		return err
+	}
+	return p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, old, newItem)
+}
+
+// commitItem replaces the stored item old with item — or deletes it when item is nil —
+// and keeps the table's item_keys list and stream in step. The caller holds the item's
+// stripe and has already loaded old.
+func (p *DynamoDBPlugin) commitItem(ctx context.Context, accountID, region, tableName, ik string, old, item map[string]*AttributeValue) error {
+	if item == nil {
+		if old == nil {
+			return nil
+		}
+		if err := p.deleteItemByKey(ctx, accountID, region, tableName, ik); err != nil {
+			return err
+		}
+		if err := p.removeItemKey(ctx, accountID, region, tableName, ik); err != nil {
+			return err
+		}
+		return p.appendStreamRecord(ctx, accountID, region, tableName, "REMOVE", old, nil)
+	}
+	if err := p.saveItem(ctx, accountID, region, tableName, ik, item); err != nil {
+		return err
+	}
+	eventName := "MODIFY"
+	if old == nil {
+		eventName = "INSERT"
+		if err := p.addItemKey(ctx, accountID, region, tableName, ik); err != nil {
+			return err
+		}
+	}
+	return p.appendStreamRecord(ctx, accountID, region, tableName, eventName, old, item)
 }
 
 // --- Transact operations -----------------------------------------------------
@@ -1154,72 +1223,82 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Phase 1: evaluate all condition expressions.
-	type cancellationReason struct {
-		Code    string `json:"Code"`
-		Message string `json:"Message,omitempty"`
+	// Resolve every action's table and item first, so all touched items can be locked
+	// before anything is read (#1449). Stripes are taken in ascending order, each once,
+	// so two transactions over overlapping items cannot deadlock.
+	type txOp struct {
+		kind      string // Put, Update, Delete, ConditionCheck, or "" for an empty entry
+		tableName string
+		ik        string
+		key       map[string]*AttributeValue
+		putItem   map[string]*AttributeValue
+		update    string
+		cond      string
+		names     map[string]string
+		vals      map[string]*AttributeValue
 	}
-	reasons := make([]cancellationReason, len(input.TransactItems))
-	canceled := false
-
+	ops := make([]txOp, len(input.TransactItems))
+	var stripes []int
 	for i, ti := range input.TransactItems {
-		var tableName string
-		var key map[string]*AttributeValue
-		var condExpr string
-		var names map[string]string
-		var vals map[string]*AttributeValue
-
+		var op txOp
 		switch {
 		case ti.Put != nil:
-			tableName = ti.Put.TableName
-			key = ti.Put.Item
-			condExpr = ti.Put.ConditionExpression
-			names = ti.Put.ExpressionAttributeNames
-			vals = ti.Put.ExpressionAttributeValues
+			op = txOp{kind: "Put", tableName: ti.Put.TableName, key: ti.Put.Item, putItem: ti.Put.Item,
+				cond: ti.Put.ConditionExpression, names: ti.Put.ExpressionAttributeNames, vals: ti.Put.ExpressionAttributeValues}
 		case ti.Update != nil:
-			tableName = ti.Update.TableName
-			key = ti.Update.Key
-			condExpr = ti.Update.ConditionExpression
-			names = ti.Update.ExpressionAttributeNames
-			vals = ti.Update.ExpressionAttributeValues
+			op = txOp{kind: "Update", tableName: ti.Update.TableName, key: ti.Update.Key, update: ti.Update.UpdateExpression,
+				cond: ti.Update.ConditionExpression, names: ti.Update.ExpressionAttributeNames, vals: ti.Update.ExpressionAttributeValues}
 		case ti.Delete != nil:
-			tableName = ti.Delete.TableName
-			key = ti.Delete.Key
-			condExpr = ti.Delete.ConditionExpression
-			names = ti.Delete.ExpressionAttributeNames
-			vals = ti.Delete.ExpressionAttributeValues
+			op = txOp{kind: "Delete", tableName: ti.Delete.TableName, key: ti.Delete.Key,
+				cond: ti.Delete.ConditionExpression, names: ti.Delete.ExpressionAttributeNames, vals: ti.Delete.ExpressionAttributeValues}
 		case ti.ConditionCheck != nil:
-			tableName = ti.ConditionCheck.TableName
-			key = ti.ConditionCheck.Key
-			condExpr = ti.ConditionCheck.ConditionExpression
-			names = ti.ConditionCheck.ExpressionAttributeNames
-			vals = ti.ConditionCheck.ExpressionAttributeValues
-		}
-
-		reasons[i] = cancellationReason{Code: "None"}
-
-		if condExpr == "" {
+			op = txOp{kind: "ConditionCheck", tableName: ti.ConditionCheck.TableName, key: ti.ConditionCheck.Key,
+				cond: ti.ConditionCheck.ConditionExpression, names: ti.ConditionCheck.ExpressionAttributeNames, vals: ti.ConditionCheck.ExpressionAttributeValues}
+		default:
+			ops[i] = op
 			continue
 		}
-
-		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, tableName)
+		tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, op.tableName)
 		if err != nil {
 			return nil, err
 		}
 		if tbl == nil {
-			return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + tableName, HTTPStatus: http.StatusBadRequest}
+			return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + op.tableName, HTTPStatus: http.StatusBadRequest}
 		}
+		ik, err := dynamodbItemKeyFor(tbl, op.key)
+		if err != nil {
+			return nil, err
+		}
+		op.ik = ik
+		ops[i] = op
+		stripes = append(stripes, p.locks.itemStripe(reqCtx.AccountID, reqCtx.Region, op.tableName, ik))
+	}
+	unlock := p.locks.lockItemStripes(stripes)
+	defer unlock()
 
-		_, pkVal, _, skVal, keyErr := extractPrimaryKey(key, tbl.KeySchema)
-		if keyErr != nil {
-			return nil, keyErr
+	// Phase 1: load every item and evaluate every condition against the stored item —
+	// nil when there is none, never an item seeded from the key (#1448, #1451).
+	type cancellationReason struct {
+		Code    string `json:"Code"`
+		Message string `json:"Message,omitempty"`
+	}
+	reasons := make([]cancellationReason, len(ops))
+	canceled := false
+	olds := make([]map[string]*AttributeValue, len(ops))
+	for i, op := range ops {
+		reasons[i] = cancellationReason{Code: "None"}
+		if op.kind == "" {
+			continue
 		}
-		currentItem, loadErr := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, tableName, dynamodbItemKey(pkVal, skVal))
-		if loadErr != nil {
-			return nil, loadErr
+		current, err := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, op.tableName, op.ik)
+		if err != nil {
+			return nil, err
 		}
-
-		ok, evalErr := evalDynamoCondition(condExpr, names, vals, currentItem)
+		olds[i] = current
+		if op.cond == "" {
+			continue
+		}
+		ok, evalErr := evalDynamoCondition(op.cond, op.names, op.vals, current)
 		if evalErr != nil {
 			return nil, &AWSError{Code: "ValidationException", Message: evalErr.Error(), HTTPStatus: http.StatusBadRequest}
 		}
@@ -1245,108 +1324,35 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		}, nil
 	}
 
-	// Phase 2: apply all mutations.
-	for _, ti := range input.TransactItems {
-		switch {
-		case ti.Put != nil:
-			put := ti.Put
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName)
-			if err != nil {
-				return nil, err
+	// Phase 2: compute every resulting item before writing any, so an update
+	// expression that cannot be applied fails the transaction with nothing written.
+	news := make([]map[string]*AttributeValue, len(ops))
+	for i, op := range ops {
+		switch op.kind {
+		case "Put":
+			news[i] = op.putItem
+		case "Update":
+			var item map[string]*AttributeValue
+			if olds[i] == nil {
+				item = dynamodbNewItemFromKey(op.key)
+			} else {
+				item = copyItem(olds[i])
 			}
-			if tbl == nil {
-				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + put.TableName, HTTPStatus: http.StatusBadRequest}
-			}
-			_, pkVal, _, skVal, err := extractPrimaryKey(put.Item, tbl.KeySchema)
-			if err != nil {
-				return nil, err
-			}
-			ik := dynamodbItemKey(pkVal, skVal)
-			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, ik)
-			if err := p.saveItem(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, ik, put.Item); err != nil {
-				return nil, fmt.Errorf("transactWriteItems put saveItem: %w", err)
-			}
-			if old == nil {
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName)
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, append(keys, ik))
-			}
-			eventName := "MODIFY"
-			if old == nil {
-				eventName = "INSERT"
-			}
-			if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, put.TableName, eventName, old, put.Item); err != nil {
-				return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
-			}
-
-		case ti.Update != nil:
-			upd := ti.Update
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName)
-			if err != nil {
-				return nil, err
-			}
-			if tbl == nil {
-				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + upd.TableName, HTTPStatus: http.StatusBadRequest}
-			}
-			_, pkVal, _, skVal, err := extractPrimaryKey(upd.Key, tbl.KeySchema)
-			if err != nil {
-				return nil, err
-			}
-			ik := dynamodbItemKey(pkVal, skVal)
-			item, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, ik)
-			isNew := item == nil
-			if isNew {
-				item = make(map[string]*AttributeValue)
-				for k, v := range upd.Key {
-					item[k] = v
-				}
-			}
-			old := copyItem(item)
-			if upd.UpdateExpression != "" {
-				if err := applyUpdateExpression(item, upd.UpdateExpression, upd.ExpressionAttributeNames, upd.ExpressionAttributeValues); err != nil {
+			if op.update != "" {
+				if _, err := applyUpdateExpression(item, op.update, op.names, op.vals); err != nil {
 					return nil, &AWSError{Code: "ValidationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 				}
 			}
-			if err := p.saveItem(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, ik, item); err != nil {
-				return nil, fmt.Errorf("transactWriteItems update saveItem: %w", err)
-			}
-			if isNew {
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName)
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, append(keys, ik))
-			}
-			if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, upd.TableName, "MODIFY", old, item); err != nil {
-				return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
-			}
+			news[i] = item
+		}
+	}
 
-		case ti.Delete != nil:
-			del := ti.Delete
-			tbl, err := p.loadTable(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName)
-			if err != nil {
-				return nil, err
-			}
-			if tbl == nil {
-				return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + del.TableName, HTTPStatus: http.StatusBadRequest}
-			}
-			_, pkVal, _, skVal, err := extractPrimaryKey(del.Key, tbl.KeySchema)
-			if err != nil {
-				return nil, err
-			}
-			ik := dynamodbItemKey(pkVal, skVal)
-			old, _ := p.loadItem(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, ik)
-			if old != nil {
-				if err := p.deleteItemByKey(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, ik); err != nil {
-					return nil, fmt.Errorf("transactWriteItems delete: %w", err)
-				}
-				keys, _ := p.loadItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName)
-				newKeys := make([]string, 0, len(keys))
-				for _, k := range keys {
-					if k != ik {
-						newKeys = append(newKeys, k)
-					}
-				}
-				_ = p.saveItemKeys(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, newKeys)
-				if err := p.appendStreamRecord(context.Background(), reqCtx.AccountID, reqCtx.Region, del.TableName, "REMOVE", old, nil); err != nil {
-					return nil, fmt.Errorf("dynamodb transactWriteItems appendStreamRecord: %w", err)
-				}
+	// Phase 3: apply all mutations.
+	for i, op := range ops {
+		switch op.kind {
+		case "Put", "Update", "Delete":
+			if err := p.commitItem(context.Background(), reqCtx.AccountID, reqCtx.Region, op.tableName, op.ik, olds[i], news[i]); err != nil {
+				return nil, fmt.Errorf("dynamodb transactWriteItems %s: %w", op.kind, err)
 			}
 		}
 	}
@@ -1501,8 +1507,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		}
 
 		// Check PK match.
-		pkAV := item[pkAttr]
-		if pkAV == nil || avToString(pkAV) != pkVal {
+		if !avEqual(item[pkAttr], pkVal) {
 			continue
 		}
 
@@ -1512,7 +1517,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			if skAV == nil {
 				continue
 			}
-			if !evalSKCondition(avToString(skAV), skCondOp, skLow, skHigh) {
+			if !evalSKCondition(skAV, skCondOp, skLow, skHigh) {
 				continue
 			}
 		}
@@ -1533,18 +1538,22 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	}
 	forward := input.ScanIndexForward == nil || *input.ScanIndexForward
 	if sortKey != "" {
-		sort.Slice(matchingKeys, func(i, j int) bool {
+		sort.SliceStable(matchingKeys, func(i, j int) bool {
 			itemI, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[i])
 			itemJ, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[j])
 			if itemI == nil || itemJ == nil {
 				return false
 			}
-			skI := avToString(itemI[sortKey])
-			skJ := avToString(itemJ[sortKey])
-			if forward {
-				return skI < skJ
+			// Typed order: a Number sort key sorts numerically and a Binary one by
+			// unsigned bytes (#1454).
+			c, ok := avOrder(itemI[sortKey], itemJ[sortKey])
+			if !ok {
+				c = strings.Compare(dynamodbKeyComponent(itemI[sortKey]), dynamodbKeyComponent(itemJ[sortKey]))
 			}
-			return skI > skJ
+			if forward {
+				return c < 0
+			}
+			return c > 0
 		})
 	}
 
@@ -1752,6 +1761,11 @@ func (p *DynamoDBPlugin) appendStreamRecord(
 		return nil // streams not enabled
 	}
 
+	// The ring is a read-modify-write shared by every item of the table; hold the
+	// table's stripe so concurrent writes to distinct items keep every record (#1449).
+	unlock := p.locks.lockTable(accountID, region, tableName)
+	defer unlock()
+
 	rk := p.streamRecordsKey(accountID, region, tableName)
 	data, _ := p.state.Get(ctx, dynamodbNamespace, rk)
 	var records []DynamoDBStreamRecord
@@ -1771,7 +1785,7 @@ func (p *DynamoDBPlugin) appendStreamRecord(
 		Sequence:        seq,
 		OldImage:        oldImage,
 		NewImage:        newImage,
-		ApproxTimestamp: time.Now().UnixMilli(),
+		ApproxTimestamp: p.tc.Now().UnixMilli(),
 	})
 
 	if len(records) > dynamodbMaxStreamRecords {
@@ -2097,6 +2111,8 @@ const (
 	dynTokLBracket  // [
 	dynTokRBracket  // ]
 	dynTokNumber    // numeric literal
+	dynTokPlus      // +
+	dynTokMinus     // -
 )
 
 func tokenizeDynamo(expr string) ([]dynamoToken, error) {
@@ -2162,6 +2178,12 @@ func tokenizeDynamo(expr string) ([]dynamoToken, error) {
 			i++
 		case ch == ']':
 			tokens = append(tokens, dynamoToken{dynTokRBracket, "]"})
+			i++
+		case ch == '+':
+			tokens = append(tokens, dynamoToken{dynTokPlus, "+"})
+			i++
+		case ch == '-':
+			tokens = append(tokens, dynamoToken{dynTokMinus, "-"})
 			i++
 		case ch >= '0' && ch <= '9':
 			j := i
@@ -2285,137 +2307,54 @@ func (e *condEvaluator) evalPrimary() (bool, error) {
 		return val, nil
 	}
 
-	// Function call: attribute_exists, attribute_not_exists, begins_with, contains, attribute_type, size
-	if tok.typ == dynTokIdent {
-		fn := strings.ToLower(tok.value)
-		switch fn {
-		case "attribute_exists":
+	// Function call: attribute_exists, attribute_not_exists, begins_with, contains,
+	// attribute_type. size() is an operand and is handled by evalOperand.
+	if tok.typ == dynTokIdent && e.pos+1 < len(e.tokens) && e.tokens[e.pos+1].typ == dynTokLParen {
+		switch fn := strings.ToLower(tok.value); fn {
+		case "attribute_exists", "attribute_not_exists":
 			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after attribute_exists")
-			}
 			e.next()
 			path, err := e.evalPath()
 			if err != nil {
 				return false, err
 			}
 			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after attribute_exists argument")
+				return false, fmt.Errorf("expected ')' after %s argument", fn)
 			}
 			e.next()
-			attr := getAttrByPath(e.item, path)
-			return attr != nil, nil
+			exists := getAttrByPath(e.item, path) != nil
+			if fn == "attribute_exists" {
+				return exists, nil
+			}
+			return !exists, nil
 
-		case "attribute_not_exists":
+		case "begins_with", "contains", "attribute_type":
 			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after attribute_not_exists")
-			}
 			e.next()
-			path, err := e.evalPath()
-			if err != nil {
-				return false, err
-			}
-			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after attribute_not_exists argument")
-			}
-			e.next()
-			attr := getAttrByPath(e.item, path)
-			return attr == nil, nil
-
-		case "begins_with":
-			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after begins_with")
-			}
-			e.next()
-			av1, err := e.evalOperand()
+			first, err := e.evalOperand()
 			if err != nil {
 				return false, err
 			}
 			if e.peek().typ != dynTokComma {
-				return false, fmt.Errorf("expected ',' in begins_with")
+				return false, fmt.Errorf("expected ',' in %s", fn)
 			}
 			e.next()
-			av2, err := e.evalOperand()
+			second, err := e.evalOperand()
 			if err != nil {
 				return false, err
 			}
 			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after begins_with arguments")
+				return false, fmt.Errorf("expected ')' after %s arguments", fn)
 			}
 			e.next()
-			if av1 == nil || av2 == nil {
-				return false, nil
+			switch fn {
+			case "begins_with":
+				return avBeginsWith(first, second), nil
+			case "contains":
+				return avContains(first, second), nil
+			default:
+				return first != nil && second != nil && second.S != nil && avTypeName(first) == *second.S, nil
 			}
-			return strings.HasPrefix(avS(av1), avS(av2)), nil
-
-		case "contains":
-			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after contains")
-			}
-			e.next()
-			av1, err := e.evalOperand()
-			if err != nil {
-				return false, err
-			}
-			if e.peek().typ != dynTokComma {
-				return false, fmt.Errorf("expected ',' in contains")
-			}
-			e.next()
-			av2, err := e.evalOperand()
-			if err != nil {
-				return false, err
-			}
-			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after contains arguments")
-			}
-			e.next()
-			if av1 == nil || av2 == nil {
-				return false, nil
-			}
-			if av1.S != nil {
-				return strings.Contains(*av1.S, avS(av2)), nil
-			}
-			// Check list contains.
-			for _, elem := range av1.L {
-				if elem != nil && elem.S != nil && av2.S != nil && *elem.S == *av2.S {
-					return true, nil
-				}
-			}
-			return false, nil
-
-		case "attribute_type":
-			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after attribute_type")
-			}
-			e.next()
-			av1, err := e.evalOperand()
-			if err != nil {
-				return false, err
-			}
-			if e.peek().typ != dynTokComma {
-				return false, fmt.Errorf("expected ',' in attribute_type")
-			}
-			e.next()
-			av2, err := e.evalOperand()
-			if err != nil {
-				return false, err
-			}
-			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after attribute_type arguments")
-			}
-			e.next()
-			if av1 == nil || av2 == nil {
-				return false, nil
-			}
-			return av2.S != nil && avTypeName(av1) == *av2.S, nil
-
-		case "size":
-			// size(path) op value — evaluated as comparison operand below
-			// fall through to operand evaluation
 		}
 	}
 
@@ -2427,153 +2366,76 @@ func (e *condEvaluator) evalPrimary() (bool, error) {
 
 	tok = e.peek()
 	switch tok.typ {
-	case dynTokEQ:
+	case dynTokEQ, dynTokNE, dynTokLT, dynTokLE, dynTokGT, dynTokGE:
 		e.next()
 		right, err := e.evalOperand()
 		if err != nil {
 			return false, err
 		}
-		return compareAV(left, right) == 0, nil
-	case dynTokNE:
+		return avCompareOp(tok.typ, left, right), nil
+	}
+
+	if e.isKeyword(tok, "BETWEEN") {
 		e.next()
-		right, err := e.evalOperand()
+		lo, err := e.evalOperand()
 		if err != nil {
 			return false, err
 		}
-		return compareAV(left, right) != 0, nil
-	case dynTokLT:
+		if !e.isKeyword(e.peek(), "AND") {
+			return false, fmt.Errorf("expected AND in BETWEEN expression")
+		}
 		e.next()
-		right, err := e.evalOperand()
+		hi, err := e.evalOperand()
 		if err != nil {
 			return false, err
 		}
-		return compareAV(left, right) < 0, nil
-	case dynTokLE:
+		cLo, okLo := avOrder(left, lo)
+		cHi, okHi := avOrder(left, hi)
+		return okLo && okHi && cLo >= 0 && cHi <= 0, nil
+	}
+
+	if e.isKeyword(tok, "IN") {
 		e.next()
-		right, err := e.evalOperand()
-		if err != nil {
-			return false, err
+		if e.peek().typ != dynTokLParen {
+			return false, fmt.Errorf("expected '(' after IN")
 		}
-		return compareAV(left, right) <= 0, nil
-	case dynTokGT:
 		e.next()
-		right, err := e.evalOperand()
-		if err != nil {
-			return false, err
-		}
-		return compareAV(left, right) > 0, nil
-	case dynTokGE:
-		e.next()
-		right, err := e.evalOperand()
-		if err != nil {
-			return false, err
-		}
-		return compareAV(left, right) >= 0, nil
-	default:
-		// Check BETWEEN and IN keywords.
-		if e.isKeyword(tok, "BETWEEN") {
-			e.next()
-			lo, err := e.evalOperand()
+		matched := false
+		for {
+			val, err := e.evalOperand()
 			if err != nil {
 				return false, err
 			}
-			if !e.isKeyword(e.peek(), "AND") {
-				return false, fmt.Errorf("expected AND in BETWEEN expression")
+			if avEqual(left, val) {
+				matched = true
 			}
-			e.next()
-			hi, err := e.evalOperand()
-			if err != nil {
-				return false, err
-			}
-			return compareAV(left, lo) >= 0 && compareAV(left, hi) <= 0, nil
-		}
-		if e.isKeyword(tok, "IN") {
-			e.next()
-			if e.peek().typ != dynTokLParen {
-				return false, fmt.Errorf("expected '(' after IN")
-			}
-			e.next()
-			for {
-				val, err := e.evalOperand()
-				if err != nil {
-					return false, err
-				}
-				if compareAV(left, val) == 0 {
-					// Skip remaining values.
-					for e.peek().typ == dynTokComma {
-						e.next()
-						_, _ = e.evalOperand()
-					}
-					if e.peek().typ == dynTokRParen {
-						e.next()
-					}
-					return true, nil
-				}
-				if e.peek().typ == dynTokComma {
-					e.next()
-					continue
-				}
+			if e.peek().typ != dynTokComma {
 				break
 			}
-			if e.peek().typ != dynTokRParen {
-				return false, fmt.Errorf("expected ')' after IN list")
-			}
 			e.next()
-			return false, nil
 		}
-		// No operator — treat as bool (e.g., function result).
-		if left != nil && left.BOOL != nil {
-			return *left.BOOL, nil
+		if e.peek().typ != dynTokRParen {
+			return false, fmt.Errorf("expected ')' after IN list")
 		}
-		return left != nil, nil
+		e.next()
+		return matched, nil
 	}
+
+	// No operator — treat as bool (e.g., function result).
+	if left != nil && left.BOOL != nil {
+		return *left.BOOL, nil
+	}
+	return left != nil, nil
 }
 
-// evalPath reads a dotted attribute path (e.g., "a.b.c" or "#n") and returns it as a string.
-func (e *condEvaluator) evalPath() (string, error) {
-	tok := e.peek()
-	var parts []string
-
-	switch tok.typ {
-	case dynTokIdent:
-		e.next()
-		parts = append(parts, tok.value)
-	case dynTokExprName:
-		e.next()
-		name := tok.value
-		if e.names != nil {
-			if resolved, ok := e.names[name]; ok {
-				name = resolved
-			}
-		}
-		parts = append(parts, name)
-	default:
-		return "", fmt.Errorf("expected attribute path, got %q", tok.value)
+// evalPath reads a document path (e.g. "a.b[0].c" or "#n") at the cursor.
+func (e *condEvaluator) evalPath() ([]ddbPathSeg, error) {
+	path, pos, err := parseDDBPath(e.tokens, e.pos, e.names)
+	if err != nil {
+		return nil, err
 	}
-
-	// Handle dotted sub-paths.
-	for e.peek().typ == dynTokDot {
-		e.next()
-		sub := e.peek()
-		switch sub.typ {
-		case dynTokIdent:
-			e.next()
-			parts = append(parts, sub.value)
-		case dynTokExprName:
-			e.next()
-			name := sub.value
-			if e.names != nil {
-				if resolved, ok := e.names[name]; ok {
-					name = resolved
-				}
-			}
-			parts = append(parts, name)
-		default:
-			return "", fmt.Errorf("expected attribute name after '.', got %q", sub.value)
-		}
-	}
-
-	return strings.Join(parts, "."), nil
+	e.pos = pos
+	return path, nil
 }
 
 // evalOperand evaluates a single value operand: #name, :val, attribute path, or size() function.
@@ -2625,62 +2487,6 @@ func (e *condEvaluator) evalOperand() (*AttributeValue, error) {
 	return nil, fmt.Errorf("expected operand, got %q", tok.value)
 }
 
-// getAttrByPath retrieves a nested attribute from an item using a dot-separated path.
-func getAttrByPath(item map[string]*AttributeValue, path string) *AttributeValue {
-	if item == nil || path == "" {
-		return nil
-	}
-	parts := strings.SplitN(path, ".", 2)
-	av, ok := item[parts[0]]
-	if !ok || av == nil {
-		return nil
-	}
-	if len(parts) == 1 {
-		return av
-	}
-	if av.M != nil {
-		return getAttrByPath(av.M, parts[1])
-	}
-	return nil
-}
-
-// compareAV compares two AttributeValues. Returns -1, 0, or 1.
-func compareAV(a, b *AttributeValue) int {
-	if a == nil && b == nil {
-		return 0
-	}
-	if a == nil {
-		return -1
-	}
-	if b == nil {
-		return 1
-	}
-	// Compare numbers numerically.
-	if a.N != "" && b.N != "" {
-		an, aerr := strconv.ParseFloat(a.N, 64)
-		bn, berr := strconv.ParseFloat(b.N, 64)
-		if aerr == nil && berr == nil {
-			if an < bn {
-				return -1
-			}
-			if an > bn {
-				return 1
-			}
-			return 0
-		}
-	}
-	// Compare strings.
-	aStr := avToString(a)
-	bStr := avToString(b)
-	if aStr < bStr {
-		return -1
-	}
-	if aStr > bStr {
-		return 1
-	}
-	return 0
-}
-
 // avTypeName returns the DynamoDB type name for an AttributeValue.
 func avTypeName(av *AttributeValue) string {
 	if av == nil {
@@ -2691,7 +2497,7 @@ func avTypeName(av *AttributeValue) string {
 		return "S"
 	case av.N != "":
 		return "N"
-	case len(av.B) > 0:
+	case av.B != nil:
 		return "B"
 	case len(av.SS) > 0:
 		return "SS"
@@ -2771,14 +2577,15 @@ func extractKeyFromItem(item map[string]*AttributeValue, keySchema []DynamoDBKey
 	return key
 }
 
-// copyItem makes a shallow copy of an item map.
+// copyItem makes a deep copy of an item map, so an update applied to the copy —
+// including to a nested map or list — never reaches the original.
 func copyItem(item map[string]*AttributeValue) map[string]*AttributeValue {
 	if item == nil {
 		return nil
 	}
 	dst := make(map[string]*AttributeValue, len(item))
 	for k, v := range item {
-		dst[k] = v
+		dst[k] = deepCopyAV(v)
 	}
 	return dst
 }
@@ -2801,9 +2608,9 @@ func findIndexKeySchema(tbl *DynamoDBTable, indexName string) []DynamoDBKeySchem
 // parseKeyCondition parses a DynamoDB KeyConditionExpression.
 // Returns: pkAttr, pkVal, skAttr, skCondOp, skLow, skHigh, error.
 // skCondOp is one of: "=", "<", "<=", ">", ">=", "BETWEEN", "begins_with".
-func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names map[string]string, values map[string]*AttributeValue) (pkAttr, pkVal, skAttr, skCondOp, skLow, skHigh string, err error) {
+func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names map[string]string, values map[string]*AttributeValue) (pkAttr string, pkVal *AttributeValue, skAttr, skCondOp string, skLow, skHigh *AttributeValue, err error) {
 	if expr == "" {
-		return "", "", "", "", "", "", fmt.Errorf("KeyConditionExpression is required")
+		return "", nil, "", "", nil, nil, fmt.Errorf("KeyConditionExpression is required")
 	}
 
 	// Determine PK and SK attribute names from schema.
@@ -2819,7 +2626,7 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 	// Tokenize.
 	tokens, tokErr := tokenizeDynamo(expr)
 	if tokErr != nil {
-		return "", "", "", "", "", "", tokErr
+		return "", nil, "", "", nil, nil, tokErr
 	}
 
 	// Simple pattern matching for common key conditions.
@@ -2844,16 +2651,16 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 		return tok.value
 	}
 
-	resolveValue := func(tok dynamoToken) (string, error) {
+	resolveValue := func(tok dynamoToken) (*AttributeValue, error) {
 		if tok.typ != dynTokExprValue {
-			return "", fmt.Errorf("expected expression value, got %q", tok.value)
+			return nil, fmt.Errorf("expected expression value, got %q", tok.value)
 		}
 		if values != nil {
 			if av, ok := values[tok.value]; ok {
-				return avToString(av), nil
+				return av, nil
 			}
 		}
-		return "", fmt.Errorf("expression value %q not defined", tok.value)
+		return nil, fmt.Errorf("expression value %q not defined", tok.value)
 	}
 
 	pos := 0
@@ -2882,13 +2689,13 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 
 	eqTok := nextTok()
 	if eqTok.typ != dynTokEQ {
-		return "", "", "", "", "", "", fmt.Errorf("expected '=' in key condition, got %q", eqTok.value)
+		return "", nil, "", "", nil, nil, fmt.Errorf("expected '=' in key condition, got %q", eqTok.value)
 	}
 
 	valTok := nextTok()
 	pkValParsed, valErr := resolveValue(valTok)
 	if valErr != nil {
-		return "", "", "", "", "", "", valErr
+		return "", nil, "", "", nil, nil, valErr
 	}
 
 	// If first attr is actually the SK, try to find PK by looking ahead.
@@ -2897,13 +2704,13 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 
 	// No AND — done.
 	if peekTok().typ == dynTokEOF {
-		return pkAttr, pkVal, "", "", "", "", nil
+		return pkAttr, pkVal, "", "", nil, nil, nil
 	}
 
 	// AND keyword.
 	andTok := nextTok()
 	if !strings.EqualFold(andTok.value, "AND") {
-		return "", "", "", "", "", "", fmt.Errorf("expected AND in key condition, got %q", andTok.value)
+		return "", nil, "", "", nil, nil, fmt.Errorf("expected AND in key condition, got %q", andTok.value)
 	}
 
 	// SK condition.
@@ -2913,24 +2720,24 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 	if strings.ToLower(skTok.value) == "begins_with" && skTok.typ == dynTokIdent {
 		// begins_with(skAttr, :prefix)
 		if peekTok().typ != dynTokLParen {
-			return "", "", "", "", "", "", fmt.Errorf("expected '(' after begins_with")
+			return "", nil, "", "", nil, nil, fmt.Errorf("expected '(' after begins_with")
 		}
 		nextTok()     // consume (
 		_ = nextTok() // skAttr inside parens
 		if peekTok().typ != dynTokComma {
-			return "", "", "", "", "", "", fmt.Errorf("expected ',' in begins_with")
+			return "", nil, "", "", nil, nil, fmt.Errorf("expected ',' in begins_with")
 		}
 		nextTok() // consume ,
 		prefixTok := nextTok()
 		prefix, prefixErr := resolveValue(prefixTok)
 		if prefixErr != nil {
-			return "", "", "", "", "", "", prefixErr
+			return "", nil, "", "", nil, nil, prefixErr
 		}
 		if peekTok().typ != dynTokRParen {
-			return "", "", "", "", "", "", fmt.Errorf("expected ')' in begins_with")
+			return "", nil, "", "", nil, nil, fmt.Errorf("expected ')' in begins_with")
 		}
 		nextTok() // consume )
-		return pkAttr, pkVal, skAttr, "begins_with", prefix, "", nil
+		return pkAttr, pkVal, skAttr, "begins_with", prefix, nil, nil
 	}
 
 	// sk op :val or sk BETWEEN :lo AND :hi
@@ -2942,16 +2749,16 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 		loTok := nextTok()
 		lo, loErr := resolveValue(loTok)
 		if loErr != nil {
-			return "", "", "", "", "", "", loErr
+			return "", nil, "", "", nil, nil, loErr
 		}
 		andTok2 := nextTok()
 		if !strings.EqualFold(andTok2.value, "AND") {
-			return "", "", "", "", "", "", fmt.Errorf("expected AND in BETWEEN, got %q", andTok2.value)
+			return "", nil, "", "", nil, nil, fmt.Errorf("expected AND in BETWEEN, got %q", andTok2.value)
 		}
 		hiTok := nextTok()
 		hi, hiErr := resolveValue(hiTok)
 		if hiErr != nil {
-			return "", "", "", "", "", "", hiErr
+			return "", nil, "", "", nil, nil, hiErr
 		}
 		return pkAttr, pkVal, skAttr, "BETWEEN", lo, hi, nil
 	}
@@ -2970,321 +2777,46 @@ func parseKeyCondition(expr string, keySchema []DynamoDBKeySchemaElement, names 
 	case dynTokGE:
 		condOp = ">="
 	default:
-		return "", "", "", "", "", "", fmt.Errorf("unsupported SK condition operator: %q", opTok.value)
+		return "", nil, "", "", nil, nil, fmt.Errorf("unsupported SK condition operator: %q", opTok.value)
 	}
 
 	valTok2 := nextTok()
 	skValParsed, valErr2 := resolveValue(valTok2)
 	if valErr2 != nil {
-		return "", "", "", "", "", "", valErr2
+		return "", nil, "", "", nil, nil, valErr2
 	}
 
-	return pkAttr, pkVal, skAttr, condOp, skValParsed, "", nil
+	return pkAttr, pkVal, skAttr, condOp, skValParsed, nil, nil
 }
 
-// evalSKCondition evaluates a sort key condition.
-func evalSKCondition(skVal, op, low, high string) bool {
+// evalSKCondition evaluates a sort key condition with DynamoDB's typed comparison:
+// Numbers numerically, Strings and Binaries by unsigned byte order (#1454). A value of a
+// different type from the condition's does not match.
+func evalSKCondition(skVal *AttributeValue, op string, low, high *AttributeValue) bool {
+	if op == "begins_with" {
+		return avBeginsWith(skVal, low)
+	}
+	if op == "=" {
+		return avEqual(skVal, low)
+	}
+	c, ok := avOrder(skVal, low)
+	if !ok {
+		return false
+	}
 	switch op {
-	case "=":
-		return skVal == low
 	case "<":
-		return skVal < low
+		return c < 0
 	case "<=":
-		return skVal <= low
+		return c <= 0
 	case ">":
-		return skVal > low
+		return c > 0
 	case ">=":
-		return skVal >= low
+		return c >= 0
 	case "BETWEEN":
-		return skVal >= low && skVal <= high
-	case "begins_with":
-		return strings.HasPrefix(skVal, low)
+		h, hok := avOrder(skVal, high)
+		return hok && c >= 0 && h <= 0
 	}
 	return false
-}
-
-// --- UpdateExpression parser -------------------------------------------------
-
-// applyUpdateExpression parses and applies a DynamoDB UpdateExpression to an item.
-func applyUpdateExpression(item map[string]*AttributeValue, expr string, names map[string]string, values map[string]*AttributeValue) error {
-	// Split expression into SET/REMOVE/ADD/DELETE clauses.
-	// Clauses start with SET, REMOVE, ADD, or DELETE keyword.
-	upper := strings.ToUpper(expr)
-	type clause struct {
-		keyword string
-		body    string
-	}
-	var clauses []clause
-
-	// Find clause boundaries.
-	keywords := []string{"SET", "REMOVE", "ADD", "DELETE"}
-	type pos struct {
-		start int
-		kw    string
-	}
-	var positions []pos
-	for _, kw := range keywords {
-		// Find all occurrences of kw as a word boundary.
-		// A clause keyword must be preceded by start-of-string or whitespace,
-		// and followed by end-of-string or whitespace. This prevents false
-		// matches like "REMOVE" inside expression values such as ":remove".
-		idx := 0
-		for {
-			i := strings.Index(upper[idx:], kw)
-			if i < 0 {
-				break
-			}
-			absI := idx + i
-			// Check strict whitespace word boundary.
-			before := absI == 0 || upper[absI-1] == ' ' || upper[absI-1] == '\t'
-			after := absI+len(kw) >= len(upper) || upper[absI+len(kw)] == ' ' || upper[absI+len(kw)] == '\t'
-			if before && after {
-				positions = append(positions, pos{absI, kw})
-			}
-			idx = absI + 1
-		}
-	}
-	sort.Slice(positions, func(i, j int) bool { return positions[i].start < positions[j].start })
-
-	for i, p := range positions {
-		var body string
-		if i+1 < len(positions) {
-			body = expr[p.start+len(p.kw) : positions[i+1].start]
-		} else {
-			body = expr[p.start+len(p.kw):]
-		}
-		clauses = append(clauses, clause{keyword: p.kw, body: strings.TrimSpace(body)})
-	}
-
-	for _, cl := range clauses {
-		switch cl.keyword {
-		case "SET":
-			if err := applySetClause(item, cl.body, names, values); err != nil {
-				return err
-			}
-		case "REMOVE":
-			if err := applyRemoveClause(item, cl.body, names); err != nil {
-				return err
-			}
-		case "ADD":
-			if err := applyAddClause(item, cl.body, names, values); err != nil {
-				return err
-			}
-		case "DELETE":
-			if err := applyDeleteClause(item, cl.body, names, values); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// applySetClause applies a SET clause to an item.
-func applySetClause(item map[string]*AttributeValue, body string, names map[string]string, values map[string]*AttributeValue) error {
-	actions := splitUpdateActions(body)
-	for _, action := range actions {
-		action = strings.TrimSpace(action)
-		if action == "" {
-			continue
-		}
-
-		// Find the = sign.
-		eqIdx := strings.Index(action, "=")
-		if eqIdx < 0 {
-			return fmt.Errorf("SET action missing '=': %q", action)
-		}
-		lhs := strings.TrimSpace(action[:eqIdx])
-		rhs := strings.TrimSpace(action[eqIdx+1:])
-
-		attrName := resolveUpdateName(lhs, names)
-
-		// Parse RHS: could be :val, path + :val, path - :val.
-		if plus := strings.Index(rhs, "+"); plus > 0 {
-			// Check it's not inside a function.
-			left := strings.TrimSpace(rhs[:plus])
-			right := strings.TrimSpace(rhs[plus+1:])
-			leftVal := resolveUpdateValue(left, item, names, values)
-			rightVal := resolveUpdateValue(right, item, names, values)
-			item[attrName] = addAV(leftVal, rightVal)
-		} else if minus := strings.LastIndex(rhs, "-"); minus > 0 && !strings.HasPrefix(strings.TrimSpace(rhs[minus:]), "->") {
-			left := strings.TrimSpace(rhs[:minus])
-			right := strings.TrimSpace(rhs[minus+1:])
-			leftVal := resolveUpdateValue(left, item, names, values)
-			rightVal := resolveUpdateValue(right, item, names, values)
-			item[attrName] = subtractAV(leftVal, rightVal)
-		} else {
-			item[attrName] = resolveUpdateValue(rhs, item, names, values)
-		}
-	}
-	return nil
-}
-
-// applyRemoveClause applies a REMOVE clause to an item.
-func applyRemoveClause(item map[string]*AttributeValue, body string, names map[string]string) error {
-	actions := splitUpdateActions(body)
-	for _, action := range actions {
-		attrName := resolveUpdateName(strings.TrimSpace(action), names)
-		delete(item, attrName)
-	}
-	return nil
-}
-
-// applyAddClause applies an ADD clause to an item.
-func applyAddClause(item map[string]*AttributeValue, body string, names map[string]string, values map[string]*AttributeValue) error {
-	actions := splitUpdateActions(body)
-	for _, action := range actions {
-		action = strings.TrimSpace(action)
-		parts := strings.Fields(action)
-		if len(parts) < 2 {
-			return fmt.Errorf("ADD action requires path and value: %q", action)
-		}
-		attrName := resolveUpdateName(parts[0], names)
-		valKey := parts[1]
-		addVal := resolveUpdateValue(valKey, item, names, values)
-		existing := item[attrName]
-		item[attrName] = addAV(existing, addVal)
-	}
-	return nil
-}
-
-// applyDeleteClause applies a DELETE clause to an item (set subtraction).
-func applyDeleteClause(item map[string]*AttributeValue, body string, names map[string]string, values map[string]*AttributeValue) error {
-	actions := splitUpdateActions(body)
-	for _, action := range actions {
-		action = strings.TrimSpace(action)
-		parts := strings.Fields(action)
-		if len(parts) < 2 {
-			return fmt.Errorf("DELETE action requires path and value: %q", action)
-		}
-		attrName := resolveUpdateName(parts[0], names)
-		valKey := parts[1]
-		delVal := resolveUpdateValue(valKey, item, names, values)
-		existing := item[attrName]
-		if existing == nil {
-			continue
-		}
-		item[attrName] = subtractSetAV(existing, delVal)
-	}
-	return nil
-}
-
-// splitUpdateActions splits a clause body by commas, respecting parentheses.
-func splitUpdateActions(body string) []string {
-	var actions []string
-	depth := 0
-	start := 0
-	for i, ch := range body {
-		switch ch {
-		case '(':
-			depth++
-		case ')':
-			depth--
-		case ',':
-			if depth == 0 {
-				actions = append(actions, body[start:i])
-				start = i + 1
-			}
-		}
-	}
-	actions = append(actions, body[start:])
-	return actions
-}
-
-// resolveUpdateName resolves an attribute name, handling #name references.
-func resolveUpdateName(s string, names map[string]string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "#") && names != nil {
-		if resolved, ok := names[s]; ok {
-			return resolved
-		}
-	}
-	return s
-}
-
-// resolveUpdateValue resolves a value in an update expression (either :val or attribute path).
-func resolveUpdateValue(s string, item map[string]*AttributeValue, names map[string]string, values map[string]*AttributeValue) *AttributeValue {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, ":") {
-		if values != nil {
-			if av, ok := values[s]; ok {
-				return av
-			}
-		}
-		return nil
-	}
-	// Attribute reference.
-	attrName := resolveUpdateName(s, names)
-	return item[attrName]
-}
-
-// addAV adds two AttributeValues (numeric addition or set union).
-func addAV(a, b *AttributeValue) *AttributeValue {
-	if a == nil {
-		return b
-	}
-	if b == nil {
-		return a
-	}
-	// Numeric addition.
-	if a.N != "" && b.N != "" {
-		an, _ := strconv.ParseFloat(a.N, 64)
-		bn, _ := strconv.ParseFloat(b.N, 64)
-		result := an + bn
-		return &AttributeValue{N: strconv.FormatFloat(result, 'f', -1, 64)}
-	}
-	// String set union.
-	if len(a.SS) > 0 || len(b.SS) > 0 {
-		merged := append(append([]string{}, a.SS...), b.SS...)
-		seen := make(map[string]bool)
-		unique := make([]string, 0, len(merged))
-		for _, s := range merged {
-			if !seen[s] {
-				seen[s] = true
-				unique = append(unique, s)
-			}
-		}
-		sort.Strings(unique)
-		return &AttributeValue{SS: unique}
-	}
-	return b
-}
-
-// subtractAV subtracts two AttributeValues (numeric subtraction).
-func subtractAV(a, b *AttributeValue) *AttributeValue {
-	if a == nil {
-		return &AttributeValue{N: "0"}
-	}
-	if b == nil {
-		return a
-	}
-	if a.N != "" && b.N != "" {
-		an, _ := strconv.ParseFloat(a.N, 64)
-		bn, _ := strconv.ParseFloat(b.N, 64)
-		result := an - bn
-		return &AttributeValue{N: strconv.FormatFloat(result, 'f', -1, 64)}
-	}
-	return a
-}
-
-// subtractSetAV removes elements of b from the set a.
-func subtractSetAV(a, b *AttributeValue) *AttributeValue {
-	if a == nil || b == nil {
-		return a
-	}
-	if len(a.SS) > 0 && len(b.SS) > 0 {
-		remove := make(map[string]bool, len(b.SS))
-		for _, s := range b.SS {
-			remove[s] = true
-		}
-		result := make([]string, 0, len(a.SS))
-		for _, s := range a.SS {
-			if !remove[s] {
-				result = append(result, s)
-			}
-		}
-		return &AttributeValue{SS: result}
-	}
-	return a
 }
 
 // --- Response helper ---------------------------------------------------------
@@ -3460,6 +2992,10 @@ func tokenizePartiQL(stmt string) (verb, tableName, whereClause, setClause strin
 		rest := strings.TrimSpace(stmt[6:])
 		tableName = extractPartiQLTableName(rest)
 		setClause = extractPartiQLClause(rest, "SET")
+		// The SET clause ends where the WHERE clause begins.
+		if w := strings.Index(strings.ToUpper(setClause), " WHERE "); w >= 0 {
+			setClause = strings.TrimSpace(setClause[:w])
+		}
 		whereClause = extractPartiQLClause(rest, "WHERE")
 		return "UPDATE", tableName, whereClause, setClause
 	}
@@ -3560,20 +3096,19 @@ func (p *DynamoDBPlugin) partiQLInsert(
 		}
 	}
 
-	_, pkVal, _, skVal, err := extractPrimaryKey(item, tbl.KeySchema)
+	ik, err := dynamodbItemKeyFor(tbl, item)
 	if err != nil {
 		return nil, err
 	}
-	ik := dynamodbItemKey(pkVal, skVal)
 
-	if err := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik, item); err != nil {
-		return nil, fmt.Errorf("partiQL insert saveItem: %w", err)
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tbl.TableName, ik)
+	defer unlock()
+	old, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik)
+	if err != nil {
+		return nil, err
 	}
-	keys, _ := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
-	keys = append(keys, ik)
-	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, keys)
-	if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "INSERT", nil, item); err != nil {
-		return nil, fmt.Errorf("dynamodb partiQLInsert appendStreamRecord: %w", err)
+	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik, old, item); err != nil {
+		return nil, fmt.Errorf("dynamodb partiQLInsert: %w", err)
 	}
 	return nil, nil
 }
@@ -3584,42 +3119,155 @@ func (p *DynamoDBPlugin) partiQLUpdate(
 	whereClause, setClause string,
 	_ []*AttributeValue,
 ) ([]map[string]*AttributeValue, error) {
+	var (
+		updateExpr string
+		names      map[string]string
+		values     map[string]*AttributeValue
+	)
+	if setClause != "" {
+		var err error
+		updateExpr, names, values, err = partiQLSetToUpdateExpression(setClause)
+		if err != nil {
+			return nil, &AWSError{
+				Code:       "ValidationException",
+				Message:    "Failed to apply SET clause: " + err.Error(),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
+
 	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
-		if err != nil || item == nil {
-			continue
-		}
-		if whereClause != "" {
-			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
-			if !ok {
-				continue
-			}
-		}
-		oldItem := copyItem(item)
-		if setClause != "" {
-			// Convert SET clause to UpdateExpression format.
-			updateExpr := "SET " + setClause
-			if applyErr := applyUpdateExpression(item, updateExpr, nil, nil); applyErr != nil {
-				return nil, &AWSError{
-					Code:       "ValidationException",
-					Message:    "Failed to apply SET clause: " + applyErr.Error(),
-					HTTPStatus: http.StatusBadRequest,
-				}
-			}
-		}
-		if saveErr := p.saveItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k, item); saveErr != nil {
-			return nil, fmt.Errorf("partiQL update saveItem: %w", saveErr)
-		}
-		if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "MODIFY", oldItem, item); err != nil {
-			return nil, fmt.Errorf("dynamodb partiQLUpdate appendStreamRecord: %w", err)
+		if err := p.partiQLUpdateOne(ctx, tbl.TableName, k, whereClause, updateExpr, names, values); err != nil {
+			return nil, err
 		}
 	}
 	return nil, nil
+}
+
+// partiQLUpdateOne applies a PartiQL UPDATE to one item under the item's stripe. An
+// item that does not exist or does not match the WHERE clause is left alone.
+func (p *DynamoDBPlugin) partiQLUpdateOne(
+	ctx *RequestContext,
+	tableName, ik, whereClause, updateExpr string,
+	names map[string]string,
+	values map[string]*AttributeValue,
+) error {
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tableName, ik)
+	defer unlock()
+	current, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
+	if whereClause != "" {
+		if ok, _ := evalDynamoCondition(whereClause, nil, nil, current); !ok {
+			return nil
+		}
+	}
+	item := copyItem(current)
+	if updateExpr != "" {
+		if _, applyErr := applyUpdateExpression(item, updateExpr, names, values); applyErr != nil {
+			return &AWSError{
+				Code:       "ValidationException",
+				Message:    "Failed to apply SET clause: " + applyErr.Error(),
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
+	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, current, item); err != nil {
+		return fmt.Errorf("dynamodb partiQLUpdate: %w", err)
+	}
+	return nil
+}
+
+// partiQLSetToUpdateExpression rewrites a PartiQL SET clause — `a = 'x', "b" = 5` —
+// as an update expression over placeholders, so it is applied by the same code as
+// UpdateItem. Each value must be a literal: a single-quoted string (” escapes a
+// quote), a number, or true/false. A double-quoted right-hand side is read as a string,
+// as substrate has always accepted it.
+func partiQLSetToUpdateExpression(setClause string) (string, map[string]string, map[string]*AttributeValue, error) {
+	names := map[string]string{}
+	values := map[string]*AttributeValue{}
+	var actions []string
+	for i, part := range partiQLSplitTopLevel(setClause, ',') {
+		eq := partiQLIndexTopLevel(part, '=')
+		if eq < 0 {
+			return "", nil, nil, fmt.Errorf("SET action missing '=': %q", strings.TrimSpace(part))
+		}
+		lhs := strings.Trim(strings.TrimSpace(part[:eq]), `"`)
+		rhs := strings.TrimSpace(part[eq+1:])
+		if lhs == "" {
+			return "", nil, nil, fmt.Errorf("SET action missing attribute name: %q", strings.TrimSpace(part))
+		}
+		av, err := partiQLLiteral(rhs)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		n, v := "#p"+strconv.Itoa(i), ":p"+strconv.Itoa(i)
+		names[n] = lhs
+		values[v] = av
+		actions = append(actions, n+" = "+v)
+	}
+	return "SET " + strings.Join(actions, ", "), names, values, nil
+}
+
+// partiQLLiteral reads one PartiQL literal value.
+func partiQLLiteral(s string) (*AttributeValue, error) {
+	switch {
+	case len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'':
+		v := strings.ReplaceAll(s[1:len(s)-1], "''", "'")
+		return &AttributeValue{S: &v}, nil
+	case len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"':
+		v := s[1 : len(s)-1]
+		return &AttributeValue{S: &v}, nil
+	case strings.EqualFold(s, "true"), strings.EqualFold(s, "false"):
+		b := strings.EqualFold(s, "true")
+		return &AttributeValue{BOOL: &b}, nil
+	}
+	if _, ok := ddbParseNumber(s); ok {
+		return &AttributeValue{N: s}, nil
+	}
+	return nil, fmt.Errorf("unsupported value in SET clause: %q", s)
+}
+
+// partiQLSplitTopLevel splits s at sep where sep is outside quotes.
+func partiQLSplitTopLevel(s string, sep byte) []string {
+	var parts []string
+	start := 0
+	for {
+		i := partiQLIndexTopLevel(s[start:], sep)
+		if i < 0 {
+			return append(parts, s[start:])
+		}
+		parts = append(parts, s[start:start+i])
+		start += i + 1
+	}
+}
+
+// partiQLIndexTopLevel returns the index of the first sep in s outside quotes, or -1.
+func partiQLIndexTopLevel(s string, sep byte) int {
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		case c == sep:
+			return i
+		}
+	}
+	return -1
 }
 
 func (p *DynamoDBPlugin) partiQLDelete(
@@ -3633,25 +3281,32 @@ func (p *DynamoDBPlugin) partiQLDelete(
 		return nil, err
 	}
 
-	remaining := keys[:0]
 	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
-		if err != nil || item == nil {
-			remaining = append(remaining, k)
-			continue
-		}
-		if whereClause != "" {
-			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
-			if !ok {
-				remaining = append(remaining, k)
-				continue
-			}
-		}
-		_ = p.deleteItemByKey(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
-		if err := p.appendStreamRecord(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, "REMOVE", item, nil); err != nil {
-			return nil, fmt.Errorf("dynamodb partiQLDelete appendStreamRecord: %w", err)
+		if err := p.partiQLDeleteOne(ctx, tbl.TableName, k, whereClause); err != nil {
+			return nil, err
 		}
 	}
-	_ = p.saveItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, remaining)
 	return nil, nil
+}
+
+// partiQLDeleteOne applies a PartiQL DELETE to one item under the item's stripe.
+func (p *DynamoDBPlugin) partiQLDeleteOne(ctx *RequestContext, tableName, ik, whereClause string) error {
+	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tableName, ik)
+	defer unlock()
+	current, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
+	if err != nil {
+		return err
+	}
+	if current == nil {
+		return nil
+	}
+	if whereClause != "" {
+		if ok, _ := evalDynamoCondition(whereClause, nil, nil, current); !ok {
+			return nil
+		}
+	}
+	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, current, nil); err != nil {
+		return fmt.Errorf("dynamodb partiQLDelete: %w", err)
+	}
+	return nil
 }
