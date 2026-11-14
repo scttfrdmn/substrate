@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The contributor guide lists every table a new plugin or operation must update, and the CI drift jobs' local targets.** `docs/contributing.md` gains the registration checklist (routing, error protocol, operation catalog and totals, service section, wire bookkeeping), the models to copy for awsQuery and JSON services, how one plugin calls another, the shared seeded progression, the per-key lock pattern, and a table of the `make` targets behind Service Reference Drift and Wire Bookkeeping Drift. `CLAUDE.md` records the PR conventions.
+
 ## [v0.125.0] - 2026-11-14
 
 ### Added

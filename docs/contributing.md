@@ -171,17 +171,91 @@ worked examples, and register the routes in `server.go`'s `buildRouter`.
 
 ### Registration + service reference
 
-Register the plugin in `RegisterDefaultPlugins` (`emulator/plugins.go`). Then add
-a metadata entry (display name + protocol) in
-[`cmd/gen-service-reference`](https://github.com/scttfrdmn/substrate/tree/main/cmd/gen-service-reference)
-and regenerate the reference:
+Register the plugin in `RegisterDefaultPlugins` (`emulator/plugins.go`) by adding a
+row to its table. The middle string of a row is only an error label; the registry key
+is whatever `Name()` returns. `pluginWiring.register` always injects
+`"time_controller"`. A plugin that dispatches to other plugins also takes
+`registryOpt` (`{"registry": registry}`), and one that runs IAM checks takes the auth
+controller via `WithPluginAuth`.
 
-```bash
-make docs-reference
-```
+A new plugin is not done until every table below agrees with the registry. Each row
+is enforced by a test or a CI gate, so a missing one fails the build rather than
+drifting silently.
 
-The `docs-reference-check` CI job **fails** if a registered plugin has no
-metadata entry, so this is not optional.
+| What | Where | Enforced by |
+|------|-------|-------------|
+| Routing identifiers (Display, Protocol, TargetPrefix, Hosts, SigningNames, Source) | `emulator/routing.go` `pluginRouting` | `routing_test.go` (both directions, and every host/signing name must parse to a registered plugin); `cmd/gen-service-reference` refuses a plugin with no entry |
+| Error protocol | `emulator/error_protocol.go` (e.g. `"elasticloadbalancing": errProtoQueryXML`) | `access_denied_code_test.go`; `unknownActionError` uses it to answer `InvalidAction`/`UnknownOperationException` |
+| Operation catalog | `make operation-catalog` regenerates `emulator/operation_catalog_gen.go` from each `HandleRequest` switch (on a variable named `op`, `action` or `operation`) | `make operation-catalog-check` |
+| Catalog totals | `routedOperationTotal`, `routedPluginTotal` and the per-service counts in `emulator/operation_catalog_test.go` — bumped by hand | `operation_catalog_test.go` |
+| Service section | a `## <Section>` in `docs/services.md` with one *Supported operations* row per routed operation, plus a `docSections` entry in `cmd/check-operation-docs/main.go` | `make operation-docs-check` (`scripts/undocumented-operations.txt` is empty and stays empty), `make docs-headings-check` |
+| Coverage matrix | `make docs-reference` regenerates the matrix at the top of `docs/services.md` | `make docs-reference-check` |
+| Wire bookkeeping | a state struct with a json-tagged `AccountID`, `Region`, `CreatedAt`, `UpdatedAt` or `EverTagged` needs lines in `scripts/wire-bookkeeping-baseline.txt` and in `-projected.txt` (naming a raw-bytes test proving the field never reaches the wire — `ecr_wire.go` is the pattern) or `-internal.txt` | `make wire-bookkeeping-check` |
+| `ResettablePlugin` list (only if you implement it) | `emulator/replay_plugin_reset_test.go` | the test asserts the exact set |
+| Costs (optional) | `defaultCostTable` in `emulator/costs.go` | unknown operations cost 0 |
+| Authz reference (optional) | `cmd/gen-authz-reference` + `emulator/authzref/*.json` | `make authz-reference-check` (offline) |
+
+Adding an operation to an existing plugin needs the catalog, totals, service-section
+row and coverage-matrix steps.
+
+### Models to copy
+
+Each plugin owns its wire encoding, so start from the closest existing one rather than
+from scratch.
+
+- **awsQuery (XML) services** — copy ELB. `elb_plugin.go` dispatches on
+  `req.Operation` with `unknownActionError` as the default; `elb_response_envelope.go`
+  (`elbOKResponse`, `elbEmptyOKResponse`) writes the `<{Op}Response>` envelope with
+  `ResponseMetadata` carrying `reqCtx.RequestID`. Read `member.N` lists with
+  `extractIndexedParams` (`ec2_plugin.go`) and structs with `iamMemberList`,
+  `iamMemberStructs` and `iamMemberTags` (`iam_query.go`). Errors are plain `*AWSError`
+  values; the shared Query writer (`marshalAWSError` in `error_protocol.go`) emits the
+  `<ErrorResponse>` with `<Type>` from `queryFaultType`.
+- **JSON services** — copy ECR. `HandleRequest` switches on the `X-Amz-Target`
+  suffix; responses go through a separate wire struct (`ecr_wire.go`) so bookkeeping
+  fields never reach the wire.
+- **Pagination** — `query_marker_pagination.go` (`Marker`/`MaxRecords`, RDS and
+  ElastiCache), `ec2_pagination.go` (`NextToken`/`MaxResults`, `ec2Page[T]`),
+  `elb_page_size.go`, and CloudFormation's offset tokens in `cfn_events.go`. An
+  unreadable token is an error, never page one.
+
+### Calling another plugin
+
+No plugin holds a pointer to another. To act through another service, build an
+`*AWSRequest` and send it through `registry.RouteRequest`, so the call is routed,
+authorized and recorded exactly like a client's. CloudFormation's
+`StackDeployer.dispatch` (`cfn_deployer.go`) is the reference: it mints a fresh
+`RequestContext` with `NewIDMint(requestID)`, runs `auth.CheckAccess` when a principal
+is present, routes the request and records the event. When the effect is launching
+instances, EC2 Fleet (`ec2_fleet.go`: `authorizeFleetLaunches` then `launchFleetPool`)
+is the precedent: authorize every launch before performing any. A reserved `aws:` tag
+can be stamped by internal callers only (fleet stamps `aws:ec2:fleet-id`).
+
+### Status progressions and clock-driven work
+
+When a resource's published lifecycle passes through states one request cannot show,
+use the shared seeded progression in `emulator/progression.go` (`newProgression`,
+`observe`, `peek`, `reset`, and `serveSeed`/`serveClear` for the control-plane
+handlers). It counts *observations*, not elapsed time, so "still pending" assertions
+are exactly reproducible live and on replay. EC2 instances
+(`ec2_instance_state_control.go`, `POST/DELETE /v1/ec2/instance-state`) are the worked
+example: the stored record always holds the settled state, and the seed only governs
+what an observation reports. Register seed endpoints inside the control-plane group
+in `server.go` so `recordControlPlaneWrites` records them and they replay.
+
+Work that must happen as simulated time passes, rather than on a request, implements
+`ClockDrivenPlugin.RunDue` (`emulator/clock_driven.go`); the registry runs it before
+every top-level request, live and on replay. Lambda's event-source mappings are the
+only user today — prefer reconciling inside the request that causes the change, or
+on the next observation, when the published behaviour allows it.
+
+### Concurrency
+
+Handlers run concurrently and `StateManager` has no compare-and-swap. An operation
+that reads, checks and writes one resource (a conditional write, an index list
+update) must hold a lock across all three. S3's striped `s3KeyMutex`
+(`s3_conditional.go`, 64 FNV-hashed stripes) is the pattern; lock multiple keys in
+sorted order.
 
 ## Testing
 
@@ -196,16 +270,31 @@ metadata entry, so this is not optional.
 - If your change diverges from real AWS behaviour in any way, document it (and
   the reason) so reviewers can see it.
 
+## Reproducing CI locally
+
+Two CI jobs exist only to catch bookkeeping drift. Run their targets before pushing:
+
+| CI job | Targets | Regenerate after a deliberate change |
+|--------|---------|--------------------------------------|
+| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check` | `make operation-catalog docs-reference operation-docs-write` |
+| Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check` | `make wire-bookkeeping-write` |
+
+The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded
+`json`/`xml.Marshal`, no discarded `state.Put`. `make docs-versions` refuses a pinned
+release number in README or `docs/` prose. `make e2e` runs the aws-sdk-go-v2 suite in
+`test/e2e` (a separate module with `replace … => ../../`, so a root `go.mod` bump
+needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrate.
+
 ## Checklist before opening a PR
 
 - [ ] There is a tracked issue for the work.
 - [ ] Behaviour passes the scope test (API-observable, not resource-internal).
 - [ ] Shapes/errors/pagination verified against the official AWS API docs.
 - [ ] Alternate outcomes are seedable via a control-plane endpoint, not random.
-- [ ] Plugin registered in `RegisterDefaultPlugins` **and** metadata added to
-      `cmd/gen-service-reference`; `make docs-reference` run.
+- [ ] Every table in [Registration + service reference](#registration-service-reference)
+      updated; the generators re-run.
 - [ ] Tests added (table-driven, race-safe, no wall-clock/network), coverage
       maintained.
-- [ ] `make test` and `make lint` pass.
+- [ ] `make test` and `make lint` pass, and both drift jobs' targets pass.
 - [ ] `CHANGELOG.md` updated under `## [Unreleased]`.
 - [ ] Every exported symbol has a doc comment ending in a period.
