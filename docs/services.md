@@ -12723,8 +12723,8 @@ and DeleteTags. A tagging request naming several groups is decided once per grou
 the tags aimed at it, and one denial denies the request. TerminateInstanceInAutoScalingGroup by
 `InstanceId` is decided against the group that owns the instance. Create and Update also check the caller's `ec2:RunInstances` against the request the
 group would launch — the user guide's "RunInstances dry run" — before writing anything, and a
-denial is Auto Scaling's own `AccessDenied`/403 "You are not authorized to use launch template:
-<template>" (no page publishes it; it is the response SDK users report verbatim); later launches
+denial is Auto Scaling's own `AccessDenied`/403
+`You are not authorized to use launch template: <template>` (no page publishes it; it is the response SDK users report verbatim); later launches
 run as the group's service-linked role and are not checked against the caller.
 
 **Not emulated.** Launch configurations (refused with `ValidationError`), scaling policies, lifecycle
