@@ -45,11 +45,14 @@ const s3OwnershipControlsKeyPrefix = "bucket_ownership_controls:"
 // x-amz-object-ownership header.
 const s3DefaultObjectOwnership = "BucketOwnerEnforced"
 
-// s3ObjectOwnershipValues is the published ObjectOwnership enum.
-var s3ObjectOwnershipValues = map[string]bool{
-	"BucketOwnerPreferred": true,
-	"ObjectWriter":         true,
-	"BucketOwnerEnforced":  true,
+// s3ValidObjectOwnership reports whether v is in the published ObjectOwnership enum. A switch rather
+// than a package-level set, so there is no mutable global to guard.
+func s3ValidObjectOwnership(v string) bool {
+	switch v {
+	case "BucketOwnerPreferred", "ObjectWriter", "BucketOwnerEnforced":
+		return true
+	}
+	return false
 }
 
 // s3OwnershipControls is the OwnershipControls document, both as the request body
@@ -85,7 +88,7 @@ func resolveCreateBucketObjectOwnership(headers map[string]string) (string, *AWS
 	if !ok || value == "" {
 		return s3DefaultObjectOwnership, nil
 	}
-	if !s3ObjectOwnershipValues[value] {
+	if !s3ValidObjectOwnership(value) {
 		return "", s3ErrorResponseWith(s3Error{
 			Code:    "InvalidArgument",
 			Message: "Invalid x-amz-object-ownership header: " + value,
@@ -128,7 +131,7 @@ func (p *S3Plugin) putBucketOwnershipControls(_ *RequestContext, req *AWSRequest
 		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // the decode error is the refusal
 	}
 	for _, r := range in.Rules {
-		if !s3ObjectOwnershipValues[r.ObjectOwnership] {
+		if !s3ValidObjectOwnership(r.ObjectOwnership) {
 			return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil
 		}
 	}

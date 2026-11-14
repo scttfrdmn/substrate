@@ -3,6 +3,7 @@ package emulator
 import (
 	"net/http"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -21,6 +22,14 @@ import (
 // Unicode characters" and a value of "0 to 256" (Using cost allocation S3 bucket tags). API_Tag gives
 // Key a minimum length of 1.
 //
+// Two restrictions come from the tag-restriction pages S3's own tagging pages point to rather than
+// from S3's: "The aws: prefix is reserved for AWS use" and "the allowed characters across all AWS
+// services are: letters (a-z, A-Z), numbers (0-9), and spaces representable in UTF-8, and the
+// following characters: + - = . _ : / @" (Amazon EC2 User Guide, Tag restrictions, which the
+// Billing guide's "User-defined tag restrictions" defers to for basic restrictions). The character
+// class is read as the Unicode one, [\p{L}\p{Z}\p{N}_.:/=+\-@], the pattern the services that
+// publish one use (IAM and ELB's Tag shapes), so a non-ASCII letter is accepted.
+//
 // A set breaking any of them is refused with InvalidTag/400, the code PutObjectTagging and
 // PutBucketTagging both publish for "the tag provided was not a valid tag. This error can occur if
 // the tag did not pass input validation". The messages are substrate's; S3 publishes none.
@@ -35,6 +44,15 @@ const (
 	// s3MaxTagValueLength is the longest tag value, in UTF-16 code units.
 	s3MaxTagValueLength = 256
 )
+
+// s3TagCharPattern is the cross-service tag character class: letters, numbers and spaces in any
+// script, and + - = . _ : / @. It matches the empty string; a key's minimum length is checked
+// separately.
+var s3TagCharPattern = regexp.MustCompile(`^[\p{L}\p{Z}\p{N}_.:/=+\-@]*$`)
+
+// s3ReservedTagPrefix is the prefix reserved for AWS-generated tags, refused in a caller's key.
+// Matched case-insensitively, so "AWS:" cannot be used to slip past it.
+const s3ReservedTagPrefix = "aws:"
 
 // s3InvalidTagResponse is the InvalidTag/400 refusal of a tag set.
 func s3InvalidTagResponse(message string) *AWSResponse {
@@ -57,6 +75,15 @@ func validateS3TagSet(tags []s3Tag, maxTags int, what string) (map[string]string
 	for _, t := range tags {
 		if t.Key == "" {
 			return nil, s3InvalidTagResponse("The TagKey you have provided is invalid")
+		}
+		if strings.HasPrefix(strings.ToLower(t.Key), s3ReservedTagPrefix) {
+			return nil, s3InvalidTagResponse("Your TagKey cannot be prefixed with aws:")
+		}
+		if !s3TagCharPattern.MatchString(t.Key) {
+			return nil, s3InvalidTagResponse("The TagKey you have provided is invalid")
+		}
+		if !s3TagCharPattern.MatchString(t.Value) {
+			return nil, s3InvalidTagResponse("The TagValue you have provided is invalid")
 		}
 		if s3UTF16Len(t.Key) > s3MaxTagKeyLength {
 			return nil, s3InvalidTagResponse("The TagKey you have provided is too long, max " + strconv.Itoa(s3MaxTagKeyLength))

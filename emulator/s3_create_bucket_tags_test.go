@@ -66,6 +66,8 @@ func TestS3CreateBucket_ConfigurationRefused(t *testing.T) {
 		{name: "fifty-one tags", body: createBucketBody("", s3TagPairs(51)...), code: "InvalidTag"},
 		{name: "duplicate key", body: createBucketBody("", [2]string{"a", "1"}, [2]string{"a", "2"}), code: "InvalidTag"},
 		{name: "empty key", body: createBucketBody("", [2]string{"", "1"}), code: "InvalidTag"},
+		{name: "reserved aws: prefix", body: createBucketBody("", [2]string{"aws:cloudformation:stack-name", "s"}), code: "InvalidTag"},
+		{name: "disallowed character", body: createBucketBody("", [2]string{"cost*center", "1"}), code: "InvalidTag"},
 		{name: "key too long", body: createBucketBody("", [2]string{strings.Repeat("k", 129), "1"}), code: "InvalidTag"},
 		{name: "value too long", body: createBucketBody("", [2]string{"k", strings.Repeat("v", 257)}), code: "InvalidTag"},
 	}

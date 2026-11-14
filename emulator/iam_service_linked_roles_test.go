@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -97,8 +98,11 @@ func TestIAM_CreateServiceLinkedRole(t *testing.T) {
 			// The trust policy names the linked service and nothing else — "unless
 			// defined otherwise, only that service can assume the roles" — so the role
 			// is usable by the STS trust-policy gate without inventing permissions.
-			doc, ok := role["AssumeRolePolicyDocument"].(string)
+			encoded, ok := role["AssumeRolePolicyDocument"].(string)
 			require.True(t, ok, "the Role shape should carry the trust policy")
+			// URL-encoded per RFC 3986, as every Role shape is (#1452).
+			doc, err := url.PathUnescape(encoded)
+			require.NoError(t, err)
 			var parsed emulator.PolicyDocument
 			require.NoError(t, json.Unmarshal([]byte(doc), &parsed))
 			require.Len(t, parsed.Statement, 1)

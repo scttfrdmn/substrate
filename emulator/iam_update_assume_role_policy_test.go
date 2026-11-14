@@ -118,8 +118,10 @@ func TestIAMPlugin_UpdateAssumeRolePolicy_SetsAPolicyOnARoleCreatedWithout(t *te
 // and a document whose whitespace and list-form members a re-marshal would also
 // have changed.
 //
-// GetRole serves the text RFC 3986-encoded, as its page states; CreateRole and
-// ListRoles, whose pages carry no such note, serve it plain.
+// Every Role shape serves the text RFC 3986-encoded — CreateRole, GetRole and ListRoles
+// alike — so one role's trust policy reads back identically whichever operation reported
+// it. botocore's json_decode_policies handler URL-decodes the member on every IAM
+// operation, which is the evidence for encoding all of them.
 func TestIAMPlugin_TrustPolicyReadBackIsVerbatim(t *testing.T) {
 	const awsPrincipal = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
 		`"Principal":{"AWS":"arn:aws:iam::444455556666:role/X"},"Action":"sts:AssumeRole"}]}`
@@ -154,8 +156,11 @@ func TestIAMPlugin_TrustPolicyReadBackIsVerbatim(t *testing.T) {
 				decodeIAMXML(t, created, &out)
 				role, ok := out["Role"].(map[string]any)
 				require.True(t, ok)
-				assert.Equal(t, tc.doc, role["AssumeRolePolicyDocument"],
-					"CreateRole answers the same trust policy in JSON format, unencoded")
+				createEncoded, ok := role["AssumeRolePolicyDocument"].(string)
+				require.True(t, ok)
+				createDecoded, err := url.PathUnescape(createEncoded)
+				require.NoError(t, err)
+				assert.Equal(t, tc.doc, createDecoded, "CreateRole answers the submitted text, URL-encoded")
 			}
 
 			var got map[string]any
@@ -168,6 +173,14 @@ func TestIAMPlugin_TrustPolicyReadBackIsVerbatim(t *testing.T) {
 			decoded, err := url.PathUnescape(encoded)
 			require.NoError(t, err)
 			assert.Equal(t, tc.doc, decoded, "GetRole answers the submitted text")
+
+			// ListRoles carries the same encoded bytes for the same role.
+			list := iamRequest(t, srv, "ListRoles", map[string]any{})
+			listBody, err := io.ReadAll(list.Body)
+			require.NoError(t, err)
+			require.NoError(t, list.Body.Close())
+			assert.Contains(t, string(listBody), "<AssumeRolePolicyDocument>"+encoded+"</AssumeRolePolicyDocument>",
+				"ListRoles must render the trust policy exactly as GetRole does")
 
 			// The meaning survives, which is what the STS gate reads.
 			var parsed emulator.PolicyDocument

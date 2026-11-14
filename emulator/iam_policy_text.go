@@ -24,33 +24,31 @@ import (
 // read; only what a response renders changed. A record with no text — one written before #1452,
 // a service-linked role, a bundled AWS managed policy — falls back to marshaling the parsed form.
 //
-// # Encoded where a page says so
+// # URL-encoded everywhere
 //
-// GetRole, GetRolePolicy, GetUserPolicy, GetGroupPolicy, GetPolicyVersion and
-// GetAccountAuthorizationDetails each carry the note "Policies returned by this operation are
-// URL-encoded compliant with RFC 3986", so those operations percent-encode the text with
-// [iamEscapeRFC3986]. CreateRole's page says instead that "the response includes the same trust
-// policy in JSON format", and ListRoles, CreateServiceLinkedRole, GetInstanceProfile and
-// ListInstanceProfiles carry no such note, so they serve the same text unencoded. SDKs that decode
-// automatically (botocore unquotes every policy-document member) read the same document either
-// way; a client that decodes by hand must do so for the six operations above.
+// Every policy document IAM returns is the text percent-encoded per RFC 3986, in every operation
+// and every shape: Role.AssumeRolePolicyDocument (CreateRole, GetRole, ListRoles,
+// CreateServiceLinkedRole, and the roles nested in GetInstanceProfile, ListInstanceProfiles and
+// GetAccountAuthorizationDetails), the inline Get{User,Group,Role}Policy documents, PolicyDetail and
+// PolicyVersion.Document. The evidence is botocore (as bundled in AWS CLI v2.40.3): its
+// json_decode_policies handler, registered as after-call.iam for every IAM operation, says "Any time
+// an IAM operation returns a policy document it is a string that is json that has been urlencoded,
+// i.e urlencode(json.dumps(policy_document))", and URL-decodes every member whose shape is
+// policyDocumentType — which, in the IAM service model, is the shape of Role.AssumeRolePolicyDocument,
+// RoleDetail.AssumeRolePolicyDocument, PolicyDetail.PolicyDocument, PolicyVersion.Document and each
+// Get*PolicyResponse.PolicyDocument alike. Six API Reference pages (GetRole, GetRolePolicy,
+// GetUserPolicy, GetGroupPolicy, GetPolicyVersion, GetAccountAuthorizationDetails) state the encoding
+// in a note; the others are silent rather than contrary, and their sample responses render plain JSON
+// exactly as the six annotated pages' samples do, so the samples are not evidence either way.
+//
+// Encoding only on the annotated pages, as #1452 first did, would have handed one document back two
+// ways depending on which operation read it — a CreateRole response a caller could not compare with
+// the GetRole answer for the same role.
 
-// iamDocEncoding is how a response renders a policy document.
-type iamDocEncoding int
-
-const (
-	// iamDocPlain renders the document text as it is, XML-escaped.
-	iamDocPlain iamDocEncoding = iota
-	// iamDocRFC3986 percent-encodes the document text before XML-escaping it.
-	iamDocRFC3986
-)
-
-// render returns text as the response element's content under e.
-func (e iamDocEncoding) render(text string) string {
-	if e == iamDocRFC3986 {
-		return xmlEsc(iamEscapeRFC3986(text))
-	}
-	return xmlEsc(text)
+// iamRenderPolicyDocument returns text as a response element's content: percent-encoded per RFC 3986
+// with [iamEscapeRFC3986], then XML-escaped.
+func iamRenderPolicyDocument(text string) string {
+	return xmlEsc(iamEscapeRFC3986(text))
 }
 
 // iamPolicyText returns the text a response serves for a policy document: text when the writer

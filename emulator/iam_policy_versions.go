@@ -229,7 +229,7 @@ func iamPolicyVersionXML(version iamPolicyVersion, includeDocument bool) (string
 			return "", err
 		}
 		b.WriteString("<Document>")
-		b.WriteString(iamDocRFC3986.render(text))
+		b.WriteString(iamRenderPolicyDocument(text))
 		b.WriteString("</Document>")
 	}
 	return b.String(), nil

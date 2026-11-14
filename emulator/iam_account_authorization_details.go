@@ -568,7 +568,7 @@ func iamInlinePolicyListXML(wrapper string, policies []iamInlinePolicy) string {
 		b.WriteString("<member><PolicyName>")
 		b.WriteString(xmlEsc(policy.name))
 		b.WriteString("</PolicyName><PolicyDocument>")
-		b.WriteString(iamDocRFC3986.render(string(policy.document)))
+		b.WriteString(iamRenderPolicyDocument(string(policy.document)))
 		b.WriteString("</PolicyDocument></member>")
 	}
 	b.WriteString("</")
@@ -612,7 +612,7 @@ func iamRoleDetailXML(d *iamRoleDetail) string {
 		return ""
 	}
 	return "<member>" + iamRoleIdentityXML(d.role) +
-		iamAssumeRolePolicyDocumentXML(d.role, iamDocRFC3986) +
+		iamAssumeRolePolicyDocumentXML(d.role) +
 		iamInstanceProfileListXML("InstanceProfileList", d.instanceProfiles, true) +
 		iamInlinePolicyListXML("RolePolicyList", d.inline) +
 		iamAttachedPoliciesXML("AttachedManagedPolicies", d.attached) +

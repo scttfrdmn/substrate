@@ -53,7 +53,8 @@ func TestS3PutObject_TaggingHeaderIsStored(t *testing.T) {
 		want   map[string]string
 	}{
 		{name: "two tags", header: "A=1&B=2", want: map[string]string{"A": "1", "B": "2"}},
-		{name: "url-encoded key and value", header: "team%20name=a%26b&k=v%3Dw", want: map[string]string{"team name": "a&b", "k": "v=w"}},
+		{name: "url-encoded key and value", header: "team%20name=a%2Fb&k=v%3Dw", want: map[string]string{"team name": "a/b", "k": "v=w"}},
+		{name: "non-ASCII letters", header: "%C3%A9quipe=caf%C3%A9", want: map[string]string{"équipe": "café"}},
 		{name: "empty value", header: "flag=", want: map[string]string{"flag": ""}},
 		{name: "key without equals", header: "flag", want: map[string]string{"flag": ""}},
 		{name: "ten tags is the limit", header: s3TaggingHeaderOf(10), want: s3TagMapOf(10)},
@@ -115,7 +116,11 @@ var s3InvalidTaggingHeaders = []struct {
 	{name: "eleven tags", header: s3TaggingHeaderOf(11), code: "InvalidTag"},
 	{name: "key too long", header: strings.Repeat("k", 129) + "=v", code: "InvalidTag"},
 	{name: "value too long", header: "k=" + strings.Repeat("v", 257), code: "InvalidTag"},
-	{name: "surrogate pairs count twice", header: "k=" + strings.Repeat("\U0001F600", 129), code: "InvalidTag"},
+	{name: "surrogate pairs count twice", header: "k=" + strings.Repeat("\U0001D400", 129), code: "InvalidTag"},
+	{name: "reserved aws: prefix", header: "aws:createdBy=me", code: "InvalidTag"},
+	{name: "reserved prefix in another case", header: "AWS:x=1", code: "InvalidTag"},
+	{name: "disallowed character in key", header: "a%26b=1", code: "InvalidTag"},
+	{name: "disallowed character in value", header: "k=semi%3Bcolon", code: "InvalidTag"},
 	{name: "duplicate key", header: "A=1&A=2", code: "InvalidTag"},
 	{name: "empty key", header: "=v", code: "InvalidTag"},
 	{name: "not query-encoded", header: "%zz=1", code: "InvalidArgument"},
@@ -142,7 +147,8 @@ func TestS3PutObject_InvalidTaggingRefused(t *testing.T) {
 func TestS3PutObject_TwoTagsAtTheLengthLimits(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 	putBucket(t, srv, "limits")
-	key, value := strings.Repeat("k", 128), strings.Repeat("\U0001F600", 128)
+	// U+1D400 is a letter outside the Basic Multilingual Plane: two UTF-16 units each.
+	key, value := strings.Repeat("k", 128), strings.Repeat("\U0001D400", 128)
 	w := s3Request(t, srv, http.MethodPut, "/limits/k", []byte("x"), map[string]string{"x-amz-tagging": key + "=" + value})
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
 	assert.Equal(t, map[string]string{key: value}, s3TagSetOf(t, srv, "/limits/k"))
@@ -277,6 +283,7 @@ func TestS3PutBucketTagging_Validated(t *testing.T) {
 // before #1434.
 func TestABAC_RequestTag_S3TaggingHeaderCaseInsensitive(t *testing.T) {
 	policyDoc := newABACPolicy("Allow", "s3:PutObject", "*", "aws:RequestTag/Env", "prod")
+	policyDoc.Statement[0].Action = append(policyDoc.Statement[0].Action, "s3:PutObjectTagging")
 	policyARN := "arn:aws:iam::123456789012:policy/ReqTagProdCase"
 	state := newAuthTestState(t, "frank", policyARN, policyDoc)
 	auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))
@@ -296,6 +303,7 @@ func TestABAC_RequestTag_S3TaggingHeaderCaseInsensitive(t *testing.T) {
 // bucket will carry (#1463).
 func TestABAC_RequestTag_CreateBucketConfigurationTags(t *testing.T) {
 	policyDoc := newABACPolicy("Allow", "s3:CreateBucket", "*", "aws:RequestTag/Env", "prod")
+	policyDoc.Statement[0].Action = append(policyDoc.Statement[0].Action, "s3:TagResource")
 	policyARN := "arn:aws:iam::123456789012:policy/ReqTagCreateBucket"
 	state := newAuthTestState(t, "gina", policyARN, policyDoc)
 	auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))

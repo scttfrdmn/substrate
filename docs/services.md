@@ -3749,11 +3749,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | GetUser | |
 | DeleteUser | |
 | ListUsers | |
-| CreateRole | Supports trust policy document; the response carries it as submitted, unencoded — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| CreateRole | Supports trust policy document; the response carries it as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | GetRole | Reports `AssumeRolePolicyDocument` as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | UpdateAssumeRolePolicy | Replaces the trust policy in place, kept as submitted; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles. Refuses a service-linked role with `UnmodifiableEntity`/400 — note 400, not the 409 the conflicts use |
-| ListRoles | Each role's trust policy as submitted, unencoded — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| ListRoles | Each role's trust policy as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | CreateServiceLinkedRole | Mints the role under `/aws-service-role/<principal>/` with a trust policy naming the linked service. A duplicate name is `InvalidInput`/400, not `EntityAlreadyExists` (see below) |
 | DeleteServiceLinkedRole | Returns a `DeletionTaskId`; an incomplete task for the same role is returned again rather than duplicated. A role that exists but is not service-linked is `NoSuchEntity`/404 |
 | GetServiceLinkedRoleDeletionStatus | Reports `SUCCEEDED` unless [seeded](#seeding-a-service-linked-role-deletion-outcome); a `FAILED` task also reports the `Reason` and `RoleUsageList` |
@@ -3837,15 +3837,26 @@ The parsed form is still what policy evaluation, the `AssumeRole` trust gate and
 drift comparison read, so none of them changed. A record with no stored text (one written before
 #1452, a service-linked role, a bundled AWS managed policy) is served from its parsed form.
 
-**Which operations URL-encode.** Each page carrying the note "Policies returned by this operation
-are URL-encoded compliant with RFC 3986" percent-encodes the text: `GetRole`, `GetRolePolicy`,
-`GetUserPolicy`, `GetGroupPolicy`, `GetPolicyVersion` and `GetAccountAuthorizationDetails`. Only
-RFC 3986's unreserved characters are left bare, so a space is `%20`, never `+`. `CreateRole`'s page
-says instead that "the response includes the same trust policy in JSON format", and `ListRoles`,
-`CreateServiceLinkedRole`, `GetInstanceProfile` and `ListInstanceProfiles` carry no such note, so
-they serve the same text unencoded. botocore decodes every policy-document member automatically;
-an aws-sdk-go-v2 caller decodes `GetRole`'s `AssumeRolePolicyDocument` with `url.PathUnescape` (not
-`url.QueryUnescape`, which reads a literal `+` as a space).
+**Every policy document is URL-encoded, in every operation.** The text is percent-encoded per
+RFC 3986 wherever IAM returns a policy document: the `Role` shape's `AssumeRolePolicyDocument` from
+`CreateRole`, `GetRole`, `ListRoles`, `CreateServiceLinkedRole` and the roles nested in
+`GetInstanceProfile`, `ListInstanceProfiles` and `GetAccountAuthorizationDetails`; the
+`Get{User,Group,Role}Policy` documents; and `PolicyVersion.Document`. Only RFC 3986's unreserved
+characters are left bare, so a space is `%20`, never `+`.
+
+Six API Reference pages state the encoding (`GetRole`, `GetRolePolicy`, `GetUserPolicy`,
+`GetGroupPolicy`, `GetPolicyVersion`, `GetAccountAuthorizationDetails`); the rest say nothing either
+way, and every page's sample response renders plain JSON, including the six that state the
+encoding. The deciding evidence is botocore: its `json_decode_policies` handler, registered for
+every IAM operation, states that "any time an IAM operation returns a policy document it is a
+string that is json that has been urlencoded", and URL-decodes every member of the
+`policyDocumentType` shape. In the IAM service model that shape covers `Role.AssumeRolePolicyDocument`,
+`RoleDetail`, `PolicyDetail`, `PolicyVersion` and each `Get*Policy` response alike. Encoding only the
+six annotated operations would hand one role's trust policy back two ways, depending on which call
+read it.
+
+botocore and the AWS CLI decode these members automatically. An aws-sdk-go-v2 caller decodes them
+with `url.PathUnescape`, not `url.QueryUnescape`, which reads a literal `+` as a space.
 
 ### What the policy simulator evaluates
 
@@ -6496,12 +6507,31 @@ leaves no object, upload or bucket behind and leaves an existing tag set untouch
 | Value length | 0–256 | 0–256 |
 | Keys | unique | unique |
 
-Lengths are counted in UTF-16 code units, as S3 documents, so a character outside the Basic
-Multilingual Plane counts twice. A breach is `400 InvalidTag`, the code `PutObjectTagging` and
+Two further rules come from the cross-service tag restrictions that S3's tagging pages point to. A
+key may not begin with the reserved `aws:` prefix (in any case). A key or value may contain only
+letters, numbers and spaces, in any script, plus `+ - = . _ : / @`, matching the
+`[\p{L}\p{Z}\p{N}_.:/=+\-@]` class IAM and ELB publish. Lengths are counted in UTF-16 code units,
+as S3 documents, so a character outside the Basic Multilingual Plane counts twice. A breach is `400 InvalidTag`, the code `PutObjectTagging` and
 `PutBucketTagging` publish for a tag that "did not pass input validation"; the messages are
 substrate's. An `x-amz-tagging` value that is not query-encoded is `400 InvalidArgument` naming
 `x-amz-tagging`, and a `CreateBucketConfiguration` that does not parse is `400 MalformedXML`.
 Neither `PutBucketTagging` nor `PutObjectTagging` checked any limit before #1434.
+
+**Authorization reads the same tag set and asks for the tagging permission.** `aws:RequestTag/*`
+and `aws:TagKeys` are read with the same parser the handler uses, so a condition and the stored set
+cannot disagree. A tag set the parser cannot read (a header that is not query-encoded, a
+`CreateBucket` body that does not parse, a key named twice) is refused with `AccessDenied` before
+any condition is evaluated, rather than being evaluated as an empty set. A create that also tags
+needs the permission its page names, checked in a second pass after the create itself is allowed:
+
+| Request | Additional permission | Source |
+|---|---|---|
+| `PutObject` with `x-amz-tagging` | `s3:PutObjectTagging` | API_PutObject: "To successfully set the tag-set with your `PutObject` request, you must have the `s3:PutObjectTagging`" |
+| `CreateBucket` with `CreateBucketConfiguration` `Tags` | `s3:TagResource` | API_CreateBucketConfiguration: "You must have the `s3:TagResource` permission to create a general purpose bucket with tags" |
+| `CreateBucket` with `x-amz-object-ownership` | `s3:PutBucketOwnershipControls` | API_CreateBucket |
+
+`CreateMultipartUpload` and `CopyObject` also apply `x-amz-tagging`, but neither page, nor the User
+Guide's multipart-upload permissions table, names a permission for it, so substrate requires none.
 
 ### Object Ownership
 
@@ -6525,6 +6555,11 @@ InvalidArgument` naming `x-amz-object-ownership`, before the bucket exists.
 
 `DeleteBucket` removes the setting with the bucket, so a bucket re-created under the name starts
 from the default.
+
+`DeleteBucketOwnershipControls` is authorized as `s3:PutBucketOwnershipControls`. Its page says "you
+must have the `s3:PutBucketOwnershipControls` permission", and there is no
+`s3:DeleteBucketOwnershipControls` action. A `CreateBucket` naming `x-amz-object-ownership` also
+needs `s3:PutBucketOwnershipControls`; see [Tag sets](#tag-sets) for the second authorization pass.
 
 **Recorded, not enforced.** Under `BucketOwnerEnforced` real S3 disables ACLs: a write naming an
 ACL other than `bucket-owner-full-control` fails with `400 AccessControlListNotSupported`, and

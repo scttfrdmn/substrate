@@ -538,9 +538,7 @@ func (p *IAMPlugin) createRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, fmt.Errorf("put role: %w", err)
 	}
 
-	// CreateRole's page says the response carries "the same trust policy in JSON
-	// format" and has no RFC 3986 note, unlike GetRole's; see iam_policy_text.go.
-	return iamXMLResponse(http.StatusOK, "CreateRole", iamSingleRoleXML(role, iamDocPlain))
+	return iamXMLResponse(http.StatusOK, "CreateRole", iamSingleRoleXML(role))
 }
 
 func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -570,8 +568,7 @@ func (p *IAMPlugin) getRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse,
 			http.StatusNotFound), nil
 	}
 
-	// "Policies returned by this operation are URL-encoded compliant with RFC 3986" (#1452).
-	return iamXMLResponse(http.StatusOK, "GetRole", iamSingleRoleXML(role, iamDocRFC3986))
+	return iamXMLResponse(http.StatusOK, "GetRole", iamSingleRoleXML(role))
 }
 
 // updateAssumeRolePolicy replaces a role's trust policy in place.
@@ -2142,7 +2139,7 @@ func (p *IAMPlugin) getInlinePolicy(ctx *RequestContext, req *AWSRequest, entity
 			"<PolicyName>"+xmlEsc(params.PolicyName)+"</PolicyName>"+
 			// Each Get*Policy page: "Policies returned by this operation are
 			// URL-encoded compliant with RFC 3986" (#1452).
-			"<PolicyDocument>"+iamDocRFC3986.render(string(raw))+"</PolicyDocument>")
+			"<PolicyDocument>"+iamRenderPolicyDocument(string(raw))+"</PolicyDocument>")
 }
 
 // deleteInlinePolicy removes an inline policy from a user, role or group.

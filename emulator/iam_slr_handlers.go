@@ -147,7 +147,7 @@ func (p *IAMPlugin) createServiceLinkedRole(ctx *RequestContext, req *AWSRequest
 		return nil, fmt.Errorf("put service-linked role: %w", err)
 	}
 
-	return iamXMLResponse(http.StatusOK, "CreateServiceLinkedRole", iamSingleRoleXML(role, iamDocPlain))
+	return iamXMLResponse(http.StatusOK, "CreateServiceLinkedRole", iamSingleRoleXML(role))
 }
 
 // deleteServiceLinkedRole handles DeleteServiceLinkedRole.

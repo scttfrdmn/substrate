@@ -340,9 +340,7 @@ func iamRoleIdentityXML(r *IAMRole) string {
 //
 // `RoleLastUsed` is *not* rendered here; it is single-entity-and-detail-only, via
 // [iamRoleLastUsedXML], for the reason that function documents.
-//
-// enc is how the trust policy is rendered; see iam_policy_text.go.
-func iamRoleXMLFields(r *IAMRole, enc iamDocEncoding) string {
+func iamRoleXMLFields(r *IAMRole) string {
 	var b strings.Builder
 	b.WriteString(iamRoleIdentityXML(r))
 	if r.MaxSessionDuration > 0 {
@@ -353,7 +351,7 @@ func iamRoleXMLFields(r *IAMRole, enc iamDocEncoding) string {
 		b.WriteString(xmlEsc(r.Description))
 		b.WriteString("</Description>")
 	}
-	b.WriteString(iamAssumeRolePolicyDocumentXML(r, enc))
+	b.WriteString(iamAssumeRolePolicyDocumentXML(r))
 	return b.String()
 }
 
@@ -361,8 +359,8 @@ func iamRoleXMLFields(r *IAMRole, enc iamDocEncoding) string {
 // the role has none.
 //
 // Shared by [iamRoleXMLFields] and by `GetAccountAuthorizationDetails`' `RoleDetail`, so every
-// operation that answers a Role renders the trust policy from one place; enc is the only thing
-// that differs between them, and iam_policy_text.go records which operation passes which.
+// operation that answers a Role renders the trust policy from one place, URL-encoded the same way
+// everywhere; iam_policy_text.go records the evidence for encoding it in every Role shape.
 //
 // The document is the text CreateRole or UpdateAssumeRolePolicy received, served verbatim
 // (#1452). Before, it was re-marshaled from the parsed form, which normalized it: a Principal
@@ -374,7 +372,7 @@ func iamRoleXMLFields(r *IAMRole, enc iamDocEncoding) string {
 // zero PolicyDocument, and marshaling that would report a document
 // ({"Version":"","Statement":null}) where AWS reports none. The emptiness test is the same one
 // the STS gate uses to decide the role is unenforced.
-func iamAssumeRolePolicyDocumentXML(r *IAMRole, enc iamDocEncoding) string {
+func iamAssumeRolePolicyDocumentXML(r *IAMRole) string {
 	if len(r.AssumeRolePolicyDocument.Statement) == 0 {
 		return ""
 	}
@@ -384,7 +382,7 @@ func iamAssumeRolePolicyDocumentXML(r *IAMRole, enc iamDocEncoding) string {
 		// omitted rather than rendered empty.
 		return ""
 	}
-	return "<AssumeRolePolicyDocument>" + enc.render(text) + "</AssumeRolePolicyDocument>"
+	return "<AssumeRolePolicyDocument>" + iamRenderPolicyDocument(text) + "</AssumeRolePolicyDocument>"
 }
 
 // iamRoleLastUsedXML renders a role's last use, and nothing at all when it has never been
@@ -436,8 +434,8 @@ func iamRoleLastUsedXML(lastUsed *IAMRoleLastUsed) string {
 }
 
 // iamSingleRoleXML wraps role fields in a <Role> element.
-func iamSingleRoleXML(r *IAMRole, enc iamDocEncoding) string {
-	return "<Role>" + iamRoleXMLFields(r, enc) + iamRoleLastUsedXML(r.RoleLastUsed) +
+func iamSingleRoleXML(r *IAMRole) string {
+	return "<Role>" + iamRoleXMLFields(r) + iamRoleLastUsedXML(r.RoleLastUsed) +
 		iamPermissionsBoundaryXML(r.PermissionsBoundary) +
 		iamEntityTagsXML(r.Tags) + "</Role>"
 }
@@ -448,8 +446,7 @@ func iamRoleListXML(roles []*IAMRole) string {
 	b.WriteString("<Roles>")
 	for _, r := range roles {
 		b.WriteString("<member>")
-		// ListRoles' page carries no RFC 3986 note; see iam_policy_text.go.
-		b.WriteString(iamRoleXMLFields(r, iamDocPlain))
+		b.WriteString(iamRoleXMLFields(r))
 		b.WriteString("</member>")
 	}
 	b.WriteString("</Roles>")
@@ -474,14 +471,7 @@ func iamRoleMembersXML(roles []IAMRole, withRoleLastUsed bool) string {
 	b.WriteString("<Roles>")
 	for i := range roles {
 		b.WriteString("<member>")
-		// withRoleLastUsed is set exactly for GetAccountAuthorizationDetails, whose page
-		// URL-encodes every policy it returns; the instance-profile operations' pages do
-		// not (#1452).
-		enc := iamDocPlain
-		if withRoleLastUsed {
-			enc = iamDocRFC3986
-		}
-		b.WriteString(iamRoleXMLFields(&roles[i], enc))
+		b.WriteString(iamRoleXMLFields(&roles[i]))
 		if withRoleLastUsed {
 			b.WriteString(iamRoleLastUsedXML(roles[i].RoleLastUsed))
 		}
