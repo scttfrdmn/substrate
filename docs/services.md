@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1073 operations**. This
+Substrate ships **67 built-in service plugins** routing **1074 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -77,7 +77,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 56 | Service Quotas | `servicequotas` | JSON | 8 |
 | 57 | SES v2 | `sesv2` | REST/JSON | 5 |
 | 58 | SNS | `sns` | Query | 18 |
-| 59 | SQS | `sqs` | JSON | 16 |
+| 59 | SQS | `sqs` | JSON | 17 |
 | 60 | SSM | `ssm` | JSON | 15 |
 | 61 | SSO / Identity Store | `sso` | JSON | 12 |
 | 62 | Step Functions | `states` | JSON | 18 |
@@ -7086,16 +7086,17 @@ Lambda invocations: $0.0000002 per request.
 |-----------|-------|
 | CreateQueue | Supports FifoQueue, VisibilityTimeout attributes; [`QueueNameExists`](#queuenameexists) when a name is reused with differing attributes; [seedable `QueueDeletedRecently`](#seeding-queuedeletedrecently); stores a [create-time tag set](#a-tag-set-at-create-time-and-the-query-spelling-aws-publishes) |
 | GetQueueUrl | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window) |
-| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window); [attribute defaults](#queue-attribute-defaults) |
+| GetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; [seedable consistency window](#seeding-the-create-then-lookup-consistency-window); [attribute defaults](#queue-attribute-defaults); returns only the `AttributeNames` requested (`All` or by name; none requested returns none) and `InvalidAttributeName` for an undefined name; computes `ApproximateNumberOfMessages`, `ApproximateNumberOfMessagesNotVisible` and `ApproximateNumberOfMessagesDelayed` from the queue's messages at the simulated clock |
 | SetQueueAttributes | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | ListQueues | Scoped to the caller's account and the endpoint's Region; filters on `QueueNamePrefix`; see [One queue name is one queue per Region](#one-queue-name-is-one-queue-per-region) |
 | SendMessage | Returns MessageId; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; enforces [`MaximumMessageSize`](#message-size-enforcement); stores [message attributes](#message-attributes) and returns `MD5OfMessageAttributes`; enforces the [attribute count, name, type and `Number` rules](#attribute-rules) |
 | SendMessageBatch | Enforces both the [per-message and batch-total size limits](#message-size-enforcement); stores [message attributes](#message-attributes) per entry; reports an [attribute-rule violation per entry](#batch-failures-are-per-entry) in `Failed` at HTTP 200 |
-| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; returns [message attributes](#message-attributes) for the names requested |
+| ReceiveMessage | Supports MaxNumberOfMessages, WaitTimeSeconds; [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; returns [message attributes](#message-attributes) for the names requested; returns the system attributes `ApproximateReceiveCount`, `ApproximateFirstReceiveTimestamp`, `SentTimestamp`, `SenderId` (and `MessageGroupId`/`MessageDeduplicationId` on FIFO) selected by `AttributeNames` or `MessageSystemAttributeNames`; a per-receive `VisibilityTimeout` (including `0`) overrides the queue's, and one outside 0–43200 is `InvalidParameterValue` |
 | DeleteMessage | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | DeleteMessageBatch | |
-| ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
+| ChangeMessageVisibility | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; `ReceiptHandleIsInvalid` for a handle naming no message, `MessageNotInflight` for a message not in flight, `InvalidParameterValue` outside 0–43200 |
+| ChangeMessageVisibilityBatch | Up to 10 entries; `EmptyBatchRequest`, `TooManyEntriesInBatchRequest`, `BatchEntryIdsNotDistinct` and `InvalidBatchEntryId` refuse the request; `ReceiptHandleIsInvalid` and `MessageNotInflight` fail their entry in `Failed` at HTTP 200 |
 | PurgeQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent |
 | TagQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; merges into the existing set rather than replacing it; reads both the indexed `Tag.N.Key` spelling an SDK emits and the [unindexed `Tag.Key`/`Tag.Value` pair AWS actually publishes](#a-tag-set-at-create-time-and-the-query-spelling-aws-publishes), and enforces no tag-count limit because the API publishes none to enforce |
 | UntagQueue | [`QueueDoesNotExist`](#queuedoesnotexist) when the queue is absent; an unknown key is a no-op and so is an empty `TagKeys` |
@@ -7620,16 +7621,16 @@ SQS requests: $0.0000004 per request.
 | DeleteTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | ListTables | |
 | UpdateTable | Applies `BillingMode` and `ProvisionedThroughput`; every other member — `GlobalSecondaryIndexUpdates`, the stream and SSE specifications, `TableClass`, `DeletionProtectionEnabled` — is accepted and not applied; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
-| PutItem | Supports ConditionExpression |
+| PutItem | Supports ConditionExpression; a key whose type differs from the table's `AttributeDefinitions` is `ValidationException`; conditional writes to one item [serialize](#conditional-writes-serialize-per-item) |
 | GetItem | Supports ProjectionExpression |
-| UpdateItem | Supports UpdateExpression (SET/REMOVE/ADD/DELETE) |
+| UpdateItem | Supports UpdateExpression (SET/REMOVE/ADD/DELETE) with `if_not_exists`, `list_append`, `+`/`-`, document paths (`a.b[0]`) and DynamoDB's `ValidationException` messages; every action reads the item as it was before the update. The ConditionExpression is evaluated against the stored item — none when the update creates it, so `attribute_not_exists(pk)` holds and `attribute_exists(pk)` does not. `ALL_OLD`/`UPDATED_OLD` return nothing for a created item; `UPDATED_*` return only the updated top-level attributes. Conditional writes to one item [serialize](#conditional-writes-serialize-per-item) |
 | DeleteItem | Supports ConditionExpression |
-| Query | Supports FilterExpression, GSI/LSI via IndexName |
+| Query | Supports FilterExpression, GSI/LSI via IndexName; key conditions and sort order use [typed comparison](#comparisons-are-typed) — a Number sort key sorts numerically, a Binary one by unsigned bytes |
 | Scan | Supports FilterExpression, GSI/LSI via IndexName |
 | BatchGetItem | |
 | BatchWriteItem | |
 | TransactGetItems | |
-| TransactWriteItems | |
+| TransactWriteItems | Conditions are evaluated against the stored items (none for an absent item); every resulting item is computed before any is written, so an update expression that cannot be applied writes nothing; every touched item is locked for the transaction |
 | UpdateTimeToLive | |
 | DescribeTimeToLive | `ENABLED` with the attribute name once `UpdateTimeToLive` set one, `DISABLED` otherwise. No item ever expires — the sweep that deletes expired items is background service work, not an API observation |
 | TagResource | Merges into the table's tags by key. The table name comes from the ARN's `:table/` segment with any `/index/…` or `/stream/…` suffix dropped, but the ARN's account and Region are **not** read — the name is resolved in the caller's account and Region. An ARN with no `:table/` segment, and a name with no table behind it, are both `ResourceNotFoundException` at **400**, which is the status DynamoDB's JSON protocol uses throughout |
@@ -7641,6 +7642,27 @@ SQS requests: $0.0000004 per request.
 | DescribeStream | Reports one shard, `shardId-00000000000000000000-00000001`, with `StreamStatus` `ENABLED`. The shard is synthesized from the ARN rather than looked up, so the description does not depend on the table existing |
 | GetShardIterator | Encodes the table, account, Region and starting sequence number into the iterator itself, so an iterator is self-describing and survives a replay. `TRIM_HORIZON` starts at zero, `LATEST` after the newest record, and `AT_SEQUENCE_NUMBER` / `AFTER_SEQUENCE_NUMBER` at and past the given one; an unrecognized `ShardIteratorType` is treated as `TRIM_HORIZON` |
 | GetRecords | Returns the records at or after the iterator's sequence number a page holds 1000 unless a smaller `Limit` asks for fewer — and a `NextShardIterator` advanced past the last one returned. An **absent** `ShardIterator` is `ValidationError`/400, the JSON protocol's common-list code rather than the `ValidationException` this plugin's control-plane operations answer, because no DynamoDB Streams page publishes a validation error at all ([#1062](https://github.com/scttfrdmn/substrate/issues/1062)). An iterator that is present but does not decode still answers `200` with an empty list. Substrate routes the four Streams operations through DynamoDB's own host and `DynamoDB_20120810` target prefix, not the `streams.dynamodb` endpoint |
+
+### Comparisons are typed
+
+Condition, filter and key-condition expressions compare values the way the `Condition` API
+reference states. `=`, `<>` and `IN` are defined for every type: values of different types are
+never equal (`{"S":"1"}` does not equal `{"N":"1"}`), sets compare as unordered collections, and
+lists and maps compare deeply. `<`, `<=`, `>`, `>=` and `BETWEEN` hold only between two Strings,
+two Numbers or two Binaries — Numbers numerically and exactly (38 digits survive), Strings and
+Binaries by unsigned byte order — and any other pairing does not match. Until #1454 every Binary
+compared equal to every other, and every Binary key of a table addressed the same item; a Binary
+key is now stored as `B:` followed by its base64, while String and Number keys keep their
+existing state keys.
+
+### Conditional writes serialize per item
+
+Of N concurrent conditional writes to one item whose conditions are mutually exclusive, exactly
+one succeeds and the rest get `ConditionalCheckFailedException`, as on DynamoDB. Substrate holds a
+striped per-item lock across load, condition and write in PutItem, UpdateItem, DeleteItem,
+BatchWriteItem, TransactWriteItems (every touched item, in one global order) and PartiQL, and a
+per-table lock around the item list and stream records concurrent creates share (#1449). The
+guarantee is process-local, like S3's conditional writes.
 
 ### CloudFormation resource types
 
