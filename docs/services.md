@@ -5685,7 +5685,8 @@ request:
 
 Every range against a zero-byte object is unsatisfiable. A `416` body carries
 `<ActualObjectSize>` and `<RangeRequested>` so a caller can correct the request
-without a second round trip. Ranges compose with `versionId`.
+without a second round trip. Ranges compose with `versionId`. A partial range omits
+the object's stored checksum — see [Additional checksums](#additional-checksums).
 
 Retrieving a specific part by `?partNumber=N` is not implemented.
 
@@ -5982,8 +5983,20 @@ MalformedTrailerError`; so is a declared trailer that never arrives.
 
 **Reading a checksum back** requires `x-amz-checksum-mode: ENABLED` on `GetObject` or
 `HeadObject`. Without it the response carries no `x-amz-checksum-*` header and no
-`x-amz-checksum-type`, so the absence is observable. A ranged `GET` returns the
-whole object's checksum, not the range's.
+`x-amz-checksum-type`, so the absence is observable.
+
+**A ranged read carries no checksum unless it serves the whole part** (#1438). The
+stored value is the whole object's checksum, so a `GetObject` or `HeadObject` whose
+`Range` serves fewer bytes omits both `x-amz-checksum-*` and `x-amz-checksum-type`,
+as S3 does; S3 documents a part's checksum only for "a part number or byte range
+that aligns with a single part". A range covering every byte of an object written by
+`PutObject` or `CopyObject` serves its one part and keeps the header. No range of a
+multipart object carries one, because the assembled object records no per-part
+checksums and its stored value is not the checksum of any single part. A request
+with no usable range (absent, malformed, or multi-range) is served whole with `200`
+and keeps the header. aws-sdk-go-v2 `service/s3` v1.114 validates any checksum header
+against the body it received, so a whole-object value on a partial range failed every
+ranged read.
 
 **Multipart.** `CreateMultipartUpload` takes `x-amz-checksum-algorithm` (not the
 `x-amz-sdk-` form) and an optional `x-amz-checksum-type`, echoing both back. An

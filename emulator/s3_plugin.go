@@ -1176,13 +1176,15 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	}
 
 	headers := objectResponseHeaders(&obj)
-	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
 	rangeHeader := headerValueFold(req.Headers, "Range")
 	spec := parseByteRange(rangeHeader, obj.Size)
 	if spec.Unsatisfiable {
 		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
 	}
+	// The stored checksum describes the whole object, so a range serving fewer
+	// bytes must not carry it: an SDK validating the body against it fails (#1438).
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers) && rangeServesStoredChecksum(spec, &obj))
 	status := applyByteRange(spec, obj.Size, headers)
 	if spec.Satisfiable {
 		// Clamp against the body actually read: getObject's fallback path can
@@ -1258,14 +1260,15 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 	}
 
 	headers := objectResponseHeaders(&obj)
-	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers))
 
-	// HEAD honors Range exactly as GET does, minus the body.
+	// HEAD honors Range exactly as GET does, minus the body — including omitting
+	// the whole-object checksum from a partial range (#1438).
 	rangeHeader := headerValueFold(req.Headers, "Range")
 	spec := parseByteRange(rangeHeader, obj.Size)
 	if spec.Unsatisfiable {
 		return s3InvalidRangeResponse(rangeHeader, obj.Size), nil
 	}
+	applyChecksumHeaders(headers, obj.Checksum, resolveChecksumMode(req.Headers) && rangeServesStoredChecksum(spec, &obj))
 	status := applyByteRange(spec, obj.Size, headers)
 
 	return &AWSResponse{StatusCode: status, Headers: headers}, nil

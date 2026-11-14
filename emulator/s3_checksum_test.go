@@ -458,28 +458,103 @@ func TestS3Checksum_EmptyBody(t *testing.T) {
 	assert.Equal(t, want, w.Header().Get("x-amz-checksum-crc32"))
 }
 
-// TestS3Checksum_RangedGetReturnsObjectChecksum documents how a checksum composes
-// with a ranged read: the header is the whole object's checksum, so it must not be
-// mistaken for a checksum of the bytes actually served.
-func TestS3Checksum_RangedGetReturnsObjectChecksum(t *testing.T) {
+// TestS3Checksum_RangedReadOmitsObjectChecksum pins #1438: the stored checksum is
+// the whole object's, so a GetObject or HeadObject serving fewer bytes than the
+// object omits it — and x-amz-checksum-type with it — rather than carrying a value
+// an SDK validating the body would reject. A range that covers the whole of a
+// single-part object serves that object's one part, so it keeps the checksum, as
+// does a request with no usable range.
+func TestS3Checksum_RangedReadOmitsObjectChecksum(t *testing.T) {
+	body := []byte("0123456789abcdefghij")
+	cases := []struct {
+		name       string
+		rangeHdr   string
+		wantStatus int
+		wantCksum  bool
+	}{
+		{name: "no range", rangeHdr: "", wantStatus: http.StatusOK, wantCksum: true},
+		{name: "prefix", rangeHdr: "bytes=0-3", wantStatus: http.StatusPartialContent, wantCksum: false},
+		{name: "middle", rangeHdr: "bytes=5-9", wantStatus: http.StatusPartialContent, wantCksum: false},
+		{name: "suffix", rangeHdr: "bytes=-4", wantStatus: http.StatusPartialContent, wantCksum: false},
+		{name: "open-ended tail", rangeHdr: "bytes=10-", wantStatus: http.StatusPartialContent, wantCksum: false},
+		{name: "exact whole object", rangeHdr: "bytes=0-19", wantStatus: http.StatusPartialContent, wantCksum: true},
+		{name: "open-ended from zero", rangeHdr: "bytes=0-", wantStatus: http.StatusPartialContent, wantCksum: true},
+		{name: "clamped past end", rangeHdr: "bytes=0-999", wantStatus: http.StatusPartialContent, wantCksum: true},
+		{name: "suffix longer than object", rangeHdr: "bytes=-50", wantStatus: http.StatusPartialContent, wantCksum: true},
+		{name: "malformed range ignored", rangeHdr: "bytes=9-3", wantStatus: http.StatusOK, wantCksum: true},
+	}
+
 	srv, _ := newS3TestServer(t)
 	putBucket(t, srv, "cks")
-
-	body := []byte("0123456789abcdefghij")
-	want := digestFor(t, "SHA256", body)
+	want := digestFor(t, "CRC32", body)
 	w := s3Request(t, srv, http.MethodPut, "/cks/obj", body, map[string]string{
-		"x-amz-checksum-sha256": want,
+		"x-amz-checksum-crc32": want,
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 
-	w = s3Request(t, srv, http.MethodGet, "/cks/obj", nil, map[string]string{
-		"Range":               "bytes=0-3",
+	for _, method := range []string{http.MethodGet, http.MethodHead} {
+		for _, tc := range cases {
+			t.Run(method+"/"+tc.name, func(t *testing.T) {
+				hdrs := map[string]string{"x-amz-checksum-mode": "ENABLED"}
+				if tc.rangeHdr != "" {
+					hdrs["Range"] = tc.rangeHdr
+				}
+				w := s3Request(t, srv, method, "/cks/obj", nil, hdrs)
+				require.Equal(t, tc.wantStatus, w.Code)
+				if tc.wantCksum {
+					assert.Equal(t, want, w.Header().Get("x-amz-checksum-crc32"))
+					assert.Equal(t, "FULL_OBJECT", w.Header().Get("x-amz-checksum-type"))
+					return
+				}
+				assert.Empty(t, w.Header().Get("x-amz-checksum-crc32"),
+					"a partial range must not carry the whole object's checksum")
+				assert.Empty(t, w.Header().Get("x-amz-checksum-type"))
+			})
+		}
+	}
+}
+
+// TestS3Checksum_RangedReadOfMultipartObjectOmitsChecksum asserts that no range of
+// a multipart object carries its stored checksum, even one spanning every byte: a
+// COMPOSITE value is a checksum of part checksums, which matches no byte range, and
+// S3 returns a checksum on a range only when it aligns with a single part (#1438).
+func TestS3Checksum_RangedReadOfMultipartObjectOmitsChecksum(t *testing.T) {
+	parts := multipartPartBodies()
+	srv, _ := newS3TestServer(t)
+	putBucket(t, srv, "cks")
+
+	w := s3Request(t, srv, http.MethodPost, "/cks/big?uploads", nil, map[string]string{
+		"x-amz-checksum-algorithm": "SHA256",
+	})
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+	uploadID := uploadIDOf(t, w.Body.String())
+	var etags []string
+	total := 0
+	for i, part := range parts {
+		w = s3Request(t, srv, http.MethodPut,
+			fmt.Sprintf("/cks/big?partNumber=%d&uploadId=%s", i+1, uploadID), part, nil)
+		require.Equal(t, http.StatusOK, w.Code)
+		etags = append(etags, w.Header().Get("ETag"))
+		total += len(part)
+	}
+	w = s3Request(t, srv, http.MethodPost, "/cks/big?uploadId="+uploadID, completeBody(etags...), nil)
+	require.Equal(t, http.StatusOK, w.Code, "complete: %s", w.Body.String())
+
+	w = s3Request(t, srv, http.MethodGet, "/cks/big", nil, map[string]string{
 		"x-amz-checksum-mode": "ENABLED",
 	})
-	require.Equal(t, http.StatusPartialContent, w.Code)
-	assert.Equal(t, []byte("0123"), w.Body.Bytes())
-	assert.Equal(t, want, w.Header().Get("x-amz-checksum-sha256"),
-		"the checksum is the full object's, not the range's")
+	require.Equal(t, http.StatusOK, w.Code)
+	require.NotEmpty(t, w.Header().Get("x-amz-checksum-sha256"), "fixture sanity: whole GET carries it")
+
+	for _, rng := range []string{"bytes=0-3", fmt.Sprintf("bytes=0-%d", total-1)} {
+		w = s3Request(t, srv, http.MethodGet, "/cks/big", nil, map[string]string{
+			"x-amz-checksum-mode": "ENABLED",
+			"Range":               rng,
+		})
+		require.Equal(t, http.StatusPartialContent, w.Code, rng)
+		assert.Empty(t, w.Header().Get("x-amz-checksum-sha256"), rng)
+		assert.Empty(t, w.Header().Get("x-amz-checksum-type"), rng)
+	}
 }
 
 // TestS3Checksum_Versioning asserts each version keeps its own checksum.

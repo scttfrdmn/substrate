@@ -133,3 +133,33 @@ func s3InvalidRangeResponse(rangeHeader string, total int64) *AWSResponse {
 		},
 	})
 }
+
+// rangeServesStoredChecksum reports whether a GetObject or HeadObject response
+// serving spec may carry the object's stored checksum (#1438).
+//
+// The stored value is the checksum of the whole object, so it describes the bytes
+// served only when the whole object is served. S3 documents that a part's checksum
+// is returned for "a part number or byte range that aligns with a single part", and
+// omits the header from a range that does not; aws-sdk-go-v2 s3 v1.114 validates any
+// checksum header against the body it received, so a whole-object value on a
+// partial range fails every ranged read.
+//
+// A range is therefore served with the checksum only when there is no usable range
+// (the whole object is served with 200), or when the range covers the whole of an
+// object written in one part — that object's single part is the object. A multipart
+// object's stored value is a COMPOSITE checksum-of-checksums or a FULL_OBJECT value
+// over every part, neither of which is the checksum of any one part, and Substrate
+// records no per-part checksum on the assembled object, so no range of it carries
+// one. GetObject's partNumber parameter is not modelled.
+func rangeServesStoredChecksum(spec byteRangeSpec, obj *S3Object) bool {
+	if !spec.Satisfiable {
+		return true
+	}
+	return spec.Start == 0 && spec.End == obj.Size-1 && !s3ETagIsMultipart(obj.ETag)
+}
+
+// s3ETagIsMultipart reports whether etag has the "<md5>-<parts>" form S3 gives
+// an object assembled by CompleteMultipartUpload.
+func s3ETagIsMultipart(etag string) bool {
+	return strings.Contains(strings.Trim(etag, `"`), "-")
+}
