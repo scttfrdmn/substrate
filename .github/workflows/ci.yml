@@ -195,8 +195,15 @@ jobs:
         run: make discarded-state-check
 
   python:
-    name: Python (pytest-substrate)
+    name: Python ${{ matrix.python-version }} (pytest-substrate)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The floor pyproject.toml declares (requires-python >=3.11, #1466) and the
+        # version lint and the wheel build run on, so the floor is tested rather than
+        # merely declared.
+        python-version: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v7
 
@@ -207,7 +214,7 @@ jobs:
 
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.12"
+          python-version: ${{ matrix.python-version }}
 
       - name: Build substrate binary
         run: go build -o bin/substrate ./cmd/substrate
@@ -221,6 +228,7 @@ jobs:
           pip install -e './python[test]'
 
       - name: Lint (ruff)
+        if: matrix.python-version == '3.12'
         run: ruff check python/src python/tests
 
       - name: Test (pytest)
@@ -229,6 +237,7 @@ jobs:
         run: cd python && pytest tests/ -v
 
       - name: Build wheel
+        if: matrix.python-version == '3.12'
         run: cd python && python -m build --wheel --outdir dist/
 
   benchmark:

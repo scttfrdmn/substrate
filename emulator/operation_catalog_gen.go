@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 67 plugins, 1058 routed operations.
+// 67 plugins, 1068 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -219,6 +219,7 @@ var routedOperations = map[string][]string{
 		"ListChangeSets",
 		"ListExports",
 		"ListImports",
+		"ListStackResources",
 		"ListStacks",
 		"UpdateStack",
 	},
@@ -479,11 +480,17 @@ var routedOperations = map[string][]string{
 	"ecr": {
 		"BatchDeleteImage",
 		"BatchGetImage",
+		"CreatePullThroughCacheRule",
 		"CreateRepository",
+		"CreateRepositoryCreationTemplate",
+		"DeletePullThroughCacheRule",
 		"DeleteRepository",
+		"DeleteRepositoryCreationTemplate",
 		"DeleteRepositoryPolicy",
 		"DescribeImages",
+		"DescribePullThroughCacheRules",
 		"DescribeRepositories",
+		"DescribeRepositoryCreationTemplates",
 		"GetAuthorizationToken",
 		"GetLifecyclePolicy",
 		"GetRepositoryPolicy",
@@ -494,6 +501,9 @@ var routedOperations = map[string][]string{
 		"SetRepositoryPolicy",
 		"TagResource",
 		"UntagResource",
+		"UpdatePullThroughCacheRule",
+		"UpdateRepositoryCreationTemplate",
+		"ValidatePullThroughCacheRule",
 	},
 	"ecs": {
 		"CreateCluster",

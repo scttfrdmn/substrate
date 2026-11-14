@@ -102,7 +102,7 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #
 # Recording a published member in the baseline files it as a defect owed a
 # deletion, and deleting it would drop a member AWS does publish — so the entry is
-# worse than useless, it points at the wrong fix. Fifteen are excluded:
+# worse than useless, it points at the wrong fix. Twenty-six are excluded:
 #
 #   - batch_list_jobs.go batchJobSummary.CreatedAt — Batch's JobSummary publishes
 #     `"createdAt": number` in ListJobs' own Response Syntax, and that struct is
@@ -153,8 +153,15 @@ INTERNAL="scripts/wire-bookkeeping-internal.txt"
 #     publish `Region`, "the name of the AWS Region in which the role was last
 #     used" and "where the service-linked role is being used". A Region member is
 #     the service's own data on both shapes, not substrate scoping a record.
+#   - ecr_types.go ECRPullThroughCacheRule and ECRRepositoryCreationTemplate,
+#     CreatedAt and UpdatedAt, and the same two names on the five ecr_wire.go
+#     structs that render them (#1461) — `API_PullThroughCacheRule` and
+#     `API_RepositoryCreationTemplate` each publish `createdAt` and `updatedAt`,
+#     and each rule operation's own Response Syntax publishes the subset its wire
+#     struct carries. The records' AccountID and Region stay in the baseline and
+#     are discharged by the projected file.
 #
-# Three of the fifteen are declared `time.Time` on the record while the name is
+# Three of the twenty-six are declared `time.Time` on the record while the name is
 # published: ACM's, Redshift Data's and Firehose's. A record's type does not reach the
 # wire on its own; what matters is what the response renders. All three render epoch
 # seconds now, which their JSON protocol publishes: ACM's through acmCertificateOut and
@@ -215,6 +222,17 @@ extract() {
       published["emulator/organizations_types.go\tOrgCreateAccountStatus\tAccountID"] = 1
       published["emulator/iam_types.go\tIAMRoleLastUsed\tRegion"] = 1
       published["emulator/iam_service_linked_roles.go\tIAMSLRRoleUsage\tRegion"] = 1
+      published["emulator/ecr_types.go\tECRPullThroughCacheRule\tCreatedAt"] = 1
+      published["emulator/ecr_types.go\tECRPullThroughCacheRule\tUpdatedAt"] = 1
+      published["emulator/ecr_types.go\tECRRepositoryCreationTemplate\tCreatedAt"] = 1
+      published["emulator/ecr_types.go\tECRRepositoryCreationTemplate\tUpdatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrPullThroughCacheRuleOut\tCreatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrPullThroughCacheRuleOut\tUpdatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrCreatePullThroughCacheRuleOut\tCreatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrDeletePullThroughCacheRuleOut\tCreatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrUpdatePullThroughCacheRuleOut\tUpdatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrRepositoryCreationTemplateOut\tCreatedAt"] = 1
+      published["emulator/ecr_wire.go\tecrRepositoryCreationTemplateOut\tUpdatedAt"] = 1
     }
     FILENAME ~ /_test\.go$/ { next }
     $1 == "type" && $3 == "struct" { t = $2; next }

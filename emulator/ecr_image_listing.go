@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -94,20 +93,11 @@ func ecrImageTagAlreadyExists(repositoryName, tag string) *AWSError {
 // ecrTagsImmutable reports whether a repository's imageTagMutability forbids moving a tag.
 //
 // IMMUTABLE_WITH_EXCLUSION is immutable apart from the tags its imageTagMutabilityExclusionFilters
-// name, and substrate models no exclusion filters (see [ecrImageTagMutabilityValues]), so it reads
+// name, and substrate evaluates no exclusion filters (see [ecrImageTagMutabilityValues]), so it reads
 // as IMMUTABLE: with no filter, no tag is excluded. MUTABLE_WITH_EXCLUSION reads as MUTABLE for the
 // same reason. A record written before the setting existed holds "", the published MUTABLE default.
 func ecrTagsImmutable(mutability string) bool {
 	return mutability == "IMMUTABLE" || mutability == "IMMUTABLE_WITH_EXCLUSION"
-}
-
-// ecrRepositoryMutability returns the imageTagMutability of the repository whose record is data.
-func ecrRepositoryMutability(data []byte) (string, error) {
-	var repo ECRRepository
-	if err := json.Unmarshal(data, &repo); err != nil {
-		return "", fmt.Errorf("ecr repository unmarshal: %w", err)
-	}
-	return repo.ImageTagMutability, nil
 }
 
 // repositoryImageDigests returns the digest of every image record in one repository, sorted, which

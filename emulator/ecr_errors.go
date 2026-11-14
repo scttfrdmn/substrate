@@ -134,6 +134,93 @@ func ecrImageDigestDoesNotMatch(supplied, calculated string) *AWSError {
 	}
 }
 
+// ecrInvalidParameter reports a member outside its published constraint.
+//
+// InvalidParameterException/400 is published on every pull-through-cache and creation-template
+// operation — "The specified parameter is invalid" — and it is the code this plugin already answers
+// for a constraint violation on CreateRepository, so one class of mistake gets one code (#1461).
+func ecrInvalidParameter(msg string) *AWSError {
+	return &AWSError{Code: "InvalidParameterException", Message: msg, HTTPStatus: http.StatusBadRequest}
+}
+
+// ecrValidationException reports a request whose members are each well-formed but do not agree
+// with one another — an authenticated upstream with no credentialArn, say.
+//
+// ValidationException/400 — "There was an exception validating this request" — is published on all
+// five pull-through-cache operations and all four creation-template operations. Which of it and
+// InvalidParameterException a given rule answers is substrate's reading, because no page assigns
+// either code to a case. The split: a member that fails its own published constraint is
+// InvalidParameterException; a request whose members contradict each other is ValidationException
+// (#1461).
+func ecrValidationException(msg string) *AWSError {
+	return &AWSError{Code: "ValidationException", Message: msg, HTTPStatus: http.StatusBadRequest}
+}
+
+// ecrPullThroughCacheRuleAlreadyExists reports a CreatePullThroughCacheRule for a prefix that
+// already has a rule.
+//
+// API_CreatePullThroughCacheRule publishes it at 400: "A pull through cache rule with these
+// settings already exists for the private registry." (#1461).
+func ecrPullThroughCacheRuleAlreadyExists(prefix string) *AWSError {
+	return &AWSError{
+		Code:       "PullThroughCacheRuleAlreadyExistsException",
+		Message:    "A pull through cache rule with the ecrRepositoryPrefix '" + prefix + "' already exists in the registry",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecrPullThroughCacheRuleNotFound reports a prefix with no rule.
+//
+// Published at 400 on DescribePullThroughCacheRules, DeletePullThroughCacheRule,
+// UpdatePullThroughCacheRule and ValidatePullThroughCacheRule: "The pull through cache rule was not
+// found." (#1461).
+func ecrPullThroughCacheRuleNotFound(prefix string) *AWSError {
+	return &AWSError{
+		Code:       "PullThroughCacheRuleNotFoundException",
+		Message:    "No pull through cache rule exists with the ecrRepositoryPrefix '" + prefix + "' in the registry",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecrUnsupportedUpstreamRegistry reports an upstreamRegistryUrl outside the published list.
+//
+// API_CreatePullThroughCacheRule publishes it at 400: "The specified upstream registry isn't
+// supported." (#1461).
+func ecrUnsupportedUpstreamRegistry(url string) *AWSError {
+	return &AWSError{
+		Code:       "UnsupportedUpstreamRegistryException",
+		Message:    "The upstream registry URL '" + url + "' is not supported",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecrTemplateAlreadyExists reports a CreateRepositoryCreationTemplate for a prefix that already has
+// a template.
+//
+// API_CreateRepositoryCreationTemplate publishes it at 400: "The repository creation template
+// already exists. Specify a unique prefix and try again." (#1461).
+func ecrTemplateAlreadyExists(prefix string) *AWSError {
+	return &AWSError{
+		Code:       "TemplateAlreadyExistsException",
+		Message:    "A repository creation template with the prefix '" + prefix + "' already exists in the registry",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ecrTemplateNotFound reports a prefix with no template.
+//
+// Published at 400 on UpdateRepositoryCreationTemplate and DeleteRepositoryCreationTemplate: "The
+// specified repository creation template can't be found." DescribeRepositoryCreationTemplates does
+// not publish it, which is why a `prefixes` entry naming nothing is omitted there rather than
+// refused.
+func ecrTemplateNotFound(prefix string) *AWSError {
+	return &AWSError{
+		Code:       "TemplateNotFoundException",
+		Message:    "No repository creation template exists with the prefix '" + prefix + "' in the registry",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // requireRepository reports the published refusal when name addresses no repository in the
 // caller's registry, and nil when it does.
 //

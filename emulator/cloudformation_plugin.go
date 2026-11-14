@@ -156,6 +156,8 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.listStacks(ctx, req)
 	case "DescribeStackResources":
 		return p.describeStackResources(ctx, req)
+	case "ListStackResources":
+		return p.listStackResources(ctx, req)
 	case "GetTemplate":
 		return p.getTemplate(ctx, req)
 	case "CreateChangeSet":
@@ -688,6 +690,90 @@ func (p *CloudFormationPlugin) describeStackResources(reqCtx *RequestContext, re
 	return cfnXMLResponse(http.StatusOK, resp)
 }
 
+// cfnStackResourcesPageSize is how many StackResourceSummaries one ListStackResources page carries.
+//
+// API_ListStackResources publishes no count — its NextToken is issued "if the output exceeds 1 MB" —
+// and no MaxResults member, so the size is substrate's reading, set to match
+// [cfnStackEventsPageSize]: small enough that a consumer's NextToken loop is exercised by a stack of
+// realistic size, and well under the byte bound for any resource a template can declare.
+const cfnStackResourcesPageSize = 100
+
+// listStackResources answers ListStackResources: the paginated, summary form of
+// DescribeStackResources, for one stack named by name or stack ID (#1446).
+//
+// Each StackResourceSummary is the same derivation DescribeStackResources renders — the status and
+// reason from [cfnResourceStatus], the stack's update time as the resource's — so the two views
+// cannot disagree about a resource. The members are API_StackResourceSummary's: LogicalResourceId,
+// PhysicalResourceId, ResourceType, LastUpdatedTimestamp, ResourceStatus and ResourceStatusReason.
+// DriftInformation and ModuleInfo are Required: No and absent, because substrate keeps no per-resource
+// drift timestamp and models no modules.
+//
+// Order is the stack's own resource order, which is what DescribeStackResources answers too, and the
+// cursor is [decodeOffsetPaginationToken]'s offset, refused with ValidationError when substrate did
+// not issue it — the rule [cfnPaginateEvents] records.
+//
+// AWS answers a deleted stack's resources for 90 days when it is named by stack ID. Substrate removes
+// a deleted stack's record, so a deleted stack is not found here, which is what DescribeStacks and
+// DescribeStackResources already answer for one.
+func (p *CloudFormationPlugin) listStackResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	name, arnErr := cfnStackName(reqCtx, req.Params["StackName"])
+	if arnErr != nil {
+		return nil, arnErr
+	}
+	if name == "" {
+		return nil, cfnMissingParameter("StackName")
+	}
+	stack, err := p.findStack(reqCtx, name)
+	if err != nil {
+		return nil, err
+	}
+	if stack == nil {
+		return nil, cfnStackNotFound(name)
+	}
+
+	type summary struct {
+		LogicalResourceID    string `xml:"LogicalResourceId"`
+		PhysicalResourceID   string `xml:"PhysicalResourceId,omitempty"`
+		ResourceType         string `xml:"ResourceType"`
+		LastUpdatedTimestamp string `xml:"LastUpdatedTimestamp"`
+		ResourceStatus       string `xml:"ResourceStatus"`
+		ResourceStatusReason string `xml:"ResourceStatusReason,omitempty"`
+	}
+	summaries := make([]summary, 0, len(stack.Resources))
+	for _, r := range stack.Resources {
+		status, reason := cfnResourceStatus(*stack, r)
+		summaries = append(summaries, summary{
+			LogicalResourceID:    r.LogicalID,
+			PhysicalResourceID:   r.PhysicalID,
+			ResourceType:         r.Type,
+			LastUpdatedTimestamp: cfnTime(stack.UpdatedAt),
+			ResourceStatus:       status,
+			ResourceStatusReason: reason,
+		})
+	}
+	offset, ok := decodeOffsetPaginationToken(req.Params["NextToken"])
+	if !ok {
+		return nil, cfnInvalidNextToken()
+	}
+	page, next := pageByOffsetToken(summaries, offset, cfnStackResourcesPageSize)
+
+	type result struct {
+		Summaries []summary `xml:"StackResourceSummaries>member"`
+		NextToken string    `xml:"NextToken,omitempty"`
+	}
+	type response struct {
+		XMLName  xml.Name            `xml:"ListStackResourcesResponse"`
+		XMLNS    string              `xml:"xmlns,attr"`
+		Result   result              `xml:"ListStackResourcesResult"`
+		Metadata cfnResponseMetadata `xml:"ResponseMetadata"`
+	}
+	return cfnXMLResponse(http.StatusOK, response{
+		XMLNS:    cfnXMLNS,
+		Result:   result{Summaries: page, NextToken: next},
+		Metadata: cfnMetadata(reqCtx),
+	})
+}
+
 func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// "Running stacks: You can specify either the stack's name or its unique stack
 	// ID." The change-set branch takes a name or ARN too, which cfnChangeSetName
@@ -697,6 +783,18 @@ func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSReque
 		return nil, arnErr
 	}
 	changeSetName := cfnChangeSetName(req.Params["ChangeSetName"])
+
+	// "Valid Values: Original | Processed", and "By default, CloudFormation specifies Processed".
+	// Checked before any lookup, as a request-shape fault; ValidationError for the reason
+	// [ErrCFNInvalidTag] gives.
+	stage := req.Params["TemplateStage"]
+	if stage != "" && stage != cfnTemplateStageOriginal && stage != cfnTemplateStageProcessed {
+		return nil, &AWSError{
+			Code:       "ValidationError",
+			Message:    "1 validation error detected: Value '" + stage + "' at 'templateStage' failed to satisfy constraint: Member must satisfy enum value set: [Original, Processed]",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 
 	var body string
 	switch {
@@ -732,14 +830,42 @@ func (p *CloudFormationPlugin) getTemplate(reqCtx *RequestContext, req *AWSReque
 		Result   result              `xml:"GetTemplateResult"`
 		Metadata cfnResponseMetadata `xml:"ResponseMetadata"`
 	}
-	// Only Original is available: substrate applies no template transforms, so
-	// there is no processed template distinct from the one that was submitted.
+	// "If the template doesn't include transforms, Original and Processed return the same template",
+	// and "for stacks, the Original and Processed templates are always available" — as they are for a
+	// change set "after CloudFormation finishes creating the change set", which substrate's change sets
+	// have done by the time CreateChangeSet answers. So a template with no Transform section reports
+	// both stages and answers the stored body for either.
+	//
+	// A template that declares a Transform is the one case substrate cannot answer honestly: its
+	// Processed stage is the macro's output, and substrate runs no macro. Answering the submitted body
+	// as Processed would tell a caller the transform expanded to nothing, so it is not offered —
+	// StagesAvailable reports Original alone, and an explicit TemplateStage=Processed is refused with
+	// ValidationError. An omitted TemplateStage answers Original rather than being refused, because
+	// that is what every GetTemplate answered before #1446 and StagesAvailable says which stage it is.
+	// This is substrate's reading: AWS publishes no answer for a stage that is not available.
+	stages := []string{cfnTemplateStageOriginal, cfnTemplateStageProcessed}
+	if p.deployer.templateDeclaresTransform(body) {
+		if stage == cfnTemplateStageProcessed {
+			return nil, &AWSError{
+				Code:       "ValidationError",
+				Message:    "The Processed template stage is not available: the template declares a Transform, and substrate does not run transforms",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+		stages = []string{cfnTemplateStageOriginal}
+	}
 	return cfnXMLResponse(http.StatusOK, response{
 		XMLNS:    cfnXMLNS,
-		Result:   result{TemplateBody: body, StagesAvailable: []string{"Original"}},
+		Result:   result{TemplateBody: body, StagesAvailable: stages},
 		Metadata: cfnMetadata(reqCtx),
 	})
 }
+
+// The two GetTemplate TemplateStage values.
+const (
+	cfnTemplateStageOriginal  = "Original"
+	cfnTemplateStageProcessed = "Processed"
+)
 
 // --- Change-set operations ---
 
@@ -842,12 +968,28 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 		return nil, cfnChangeSetNotFound(changeSetName)
 	}
 
+	// ResourceChange, ResourceChangeDetail and ResourceTargetDefinition, member for member with
+	// what [diffCFNResources] derives (#1446). Scope and Details are omitted rather than empty for
+	// an Add or Remove: they "apply only to modified resources".
+	type target struct {
+		Attribute          string `xml:"Attribute"`
+		Name               string `xml:"Name,omitempty"`
+		RequiresRecreation string `xml:"RequiresRecreation,omitempty"`
+	}
+	type detail struct {
+		Target        target `xml:"Target"`
+		Evaluation    string `xml:"Evaluation"`
+		ChangeSource  string `xml:"ChangeSource"`
+		CausingEntity string `xml:"CausingEntity,omitempty"`
+	}
 	type resourceChange struct {
-		Action             string `xml:"Action"`
-		LogicalResourceID  string `xml:"LogicalResourceId"`
-		PhysicalResourceID string `xml:"PhysicalResourceId,omitempty"`
-		ResourceType       string `xml:"ResourceType"`
-		Replacement        string `xml:"Replacement,omitempty"`
+		Action             string   `xml:"Action"`
+		LogicalResourceID  string   `xml:"LogicalResourceId"`
+		PhysicalResourceID string   `xml:"PhysicalResourceId,omitempty"`
+		ResourceType       string   `xml:"ResourceType"`
+		Replacement        string   `xml:"Replacement,omitempty"`
+		Scope              []string `xml:"Scope>member,omitempty"`
+		Details            []detail `xml:"Details>member,omitempty"`
 	}
 	type change struct {
 		Type           string         `xml:"Type"`
@@ -899,15 +1041,27 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 		Metadata: cfnMetadata(reqCtx),
 	}
 	for _, c := range cs.Changes {
-		resp.Result.Changes = append(resp.Result.Changes, change{
-			Type: "Resource",
-			ResourceChange: resourceChange{
-				Action:            c.Action,
-				LogicalResourceID: c.LogicalID,
-				ResourceType:      c.ResourceType,
-				Replacement:       c.Replacement,
-			},
-		})
+		rc := resourceChange{
+			Action:             c.Action,
+			LogicalResourceID:  c.LogicalID,
+			PhysicalResourceID: c.PhysicalID,
+			ResourceType:       c.ResourceType,
+			Replacement:        c.Replacement,
+			Scope:              c.Scope,
+		}
+		for _, d := range c.Details {
+			rc.Details = append(rc.Details, detail{
+				Target: target{
+					Attribute:          d.Target.Attribute,
+					Name:               d.Target.Name,
+					RequiresRecreation: d.Target.RequiresRecreation,
+				},
+				Evaluation:    d.Evaluation,
+				ChangeSource:  d.ChangeSource,
+				CausingEntity: d.CausingEntity,
+			})
+		}
+		resp.Result.Changes = append(resp.Result.Changes, change{Type: "Resource", ResourceChange: rc})
 	}
 	return cfnXMLResponse(http.StatusOK, resp)
 }
@@ -1130,11 +1284,50 @@ func (p *CloudFormationPlugin) detectStackDrift(reqCtx *RequestContext, req *AWS
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
+
+	// "The logical names of any resources you want to use as filters", 1 to 200 of them (#1446).
+	// Substrate passed only the stack name on, so a filtered request checked every resource and
+	// reported a stack drifted by a resource the caller had excluded. A name the stack does not
+	// declare is refused rather than silently matching nothing: a filter that checks no resource
+	// would report IN_SYNC for a resource that does not exist. API_DetectStackDrift publishes no
+	// error of its own, so the code is CloudFormation's common ValidationError, which this plugin
+	// answers for every malformed parameter — substrate's reading, per [ErrCFNInvalidTag].
+	logicalIDs := extractIndexedParams(req.Params, "LogicalResourceIds.member")
+	if len(logicalIDs) > 200 {
+		return nil, &AWSError{
+			Code:       "ValidationError",
+			Message:    "1 validation error detected: Value at 'logicalResourceIds' failed to satisfy constraint: Member must have length less than or equal to 200",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if len(logicalIDs) > 0 {
+		stack, err := p.findStack(reqCtx, stackName)
+		if err != nil {
+			return nil, err
+		}
+		if stack == nil {
+			return nil, cfnStackNotFound(stackName)
+		}
+		declared := make(map[string]bool, len(stack.Resources))
+		for _, r := range stack.Resources {
+			declared[r.LogicalID] = true
+		}
+		for _, id := range logicalIDs {
+			if !declared[id] {
+				return nil, &AWSError{
+					Code:       "ValidationError",
+					Message:    fmt.Sprintf("Resource %s does not exist for stack %s", id, stackName),
+					HTTPStatus: http.StatusBadRequest,
+				}
+			}
+		}
+	}
+
 	// Drift resolves each resource by a state key that embeds the account and
 	// region, so detection has to look where the resources were actually
 	// deployed. On the default identity it would report every resource of another
 	// caller's stack as DELETED.
-	detectionID, err := p.deployerFor(reqCtx, cfnAttribution{}).StartStackDriftDetection(context.Background(), stackName)
+	detectionID, err := p.deployerFor(reqCtx, cfnAttribution{}).StartStackDriftDetection(context.Background(), stackName, logicalIDs...)
 	if err != nil {
 		return nil, cfnMapDeployerError(err)
 	}

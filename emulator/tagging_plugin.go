@@ -1856,13 +1856,15 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 
 	case "ecr":
 		// arn:aws:ecr:{region}:{acct}:repository/{name}
-		name, ok := strings.CutPrefix(resource, "repository/")
-		if !ok {
+		//
+		// Through [ecrParseRepositoryARN] and [ecrRepoKey], which ECR's own three tagging
+		// operations key through since #1113, so the two sides cannot disagree about which
+		// repository an ARN names — including a namespaced one, whose name keeps its `/` (#1465).
+		target, arnErr := ecrParseRepositoryARN(arn)
+		if arnErr != nil {
 			return "", "", unsupportedTagResource("ECR %q is not a repository ARN", resource)
 		}
-		region := parts[3]
-		acct := parts[4]
-		return ecrNamespace, "ecrrepo:" + acct + "/" + region + "/" + name, nil
+		return ecrNamespace, ecrRepoKey(target.AccountID, target.Region, target.Name), nil
 
 	case "ecs":
 		// A cluster, service, task or task definition, keyed by [ecsTagStateKey] — the same

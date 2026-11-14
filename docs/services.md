@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **67 built-in service plugins** routing **1058 operations**. This
+Substrate ships **67 built-in service plugins** routing **1068 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -30,7 +30,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 9 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
 | 10 | Budgets | `budgets` | JSON | 5 |
 | 11 | Cost Explorer | `ce` | JSON | 3 |
-| 12 | CloudFormation | `cloudformation` | Query | 18 |
+| 12 | CloudFormation | `cloudformation` | Query | 19 |
 | 13 | CloudFront | `cloudfront` | REST/XML | 17 |
 | 14 | CloudTrail | `cloudtrail` | JSON | 8 |
 | 15 | CodeBuild | `codebuild` | JSON | 7 |
@@ -41,7 +41,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 20 | Config | `config` | JSON | 25 |
 | 21 | DynamoDB | `dynamodb` | JSON | 26 |
 | 22 | EC2 / VPC | `ec2` | Query | 92 |
-| 23 | ECR | `ecr` | JSON | 17 |
+| 23 | ECR | `ecr` | JSON | 26 |
 | 24 | ECS | `ecs` | JSON | 21 |
 | 25 | EFS | `efs` | REST/JSON | 13 |
 | 26 | ElastiCache | `elasticache` | Query | 17 |
@@ -2489,14 +2489,15 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 | DescribeStacks | One stack by `StackName`, or every stack when omitted; reports `RoleARN` when the stack has one |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
+| ListStackResources | `StackResourceSummary` per resource, from the same derivation as `DescribeStackResources`; pages 100 on `NextToken` (the page publishes only a 1 MB bound, so the size is substrate's), an unissued token is `ValidationError`; a deleted stack is not found (#1446) |
 | DescribeStackEvents | Derived from the stack record rather than stored, so it cannot disagree with `DescribeStackResources` about whether a resource failed — the two are renderings of one fact. Pages 100 events on `NextToken`, the only paging parameter the operation publishes; a stack small enough for one page gets no token |
-| GetTemplate | Returns the stored `TemplateBody` byte-for-byte |
+| GetTemplate | Returns the stored `TemplateBody` byte-for-byte; `TemplateStage` is [validated and honoured](#change-set-detail-template-stages-and-filtered-drift) |
 | CreateChangeSet | `ChangeSetType=UPDATE` only; records `Tags`; see below |
-| DescribeChangeSet | Accepts a bare change-set name or its ARN |
+| DescribeChangeSet | Accepts a bare change-set name or its ARN; each `ResourceChange` carries [`Scope`, `Details` and `PhysicalResourceId`](#change-set-detail-template-stages-and-filtered-drift) |
 | ExecuteChangeSet | Applies the change and its tags, and consumes the set |
 | ListChangeSets | Pending change sets for a stack |
 | DeleteChangeSet | Discards a pending set; deleting an absent set succeeds |
-| DetectStackDrift | Returns a `StackDriftDetectionId` — UUID-shaped within the published maximum length of 36, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) (#856). It used to be substrate's internal `req-…` string, a shape no AWS reference describes |
+| DetectStackDrift | Returns a `StackDriftDetectionId` — UUID-shaped within the published maximum length of 36, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) (#856). It used to be substrate's internal `req-…` string, a shape no AWS reference describes. Honours [`LogicalResourceIds.member.N`](#change-set-detail-template-stages-and-filtered-drift) |
 | DescribeStackDriftDetectionStatus | Resolves that ID to a completed detection |
 | DescribeStackResourceDrifts | Per-resource drift; honours `StackResourceDriftStatusFilters.member.N` |
 | ListExports | Every exported output value in the caller's account and Region, in one page |
@@ -2513,6 +2514,65 @@ to deploy after the template parsed is an `InternalFailure` at 500, because the
 request was well-formed and the failure is substrate's. That distinction is drawn
 from the classification the stack model attaches to a failure, not from its
 message, so a message may be reworded without moving any consumer's error code.
+
+### Change-set detail, template stages, and filtered drift
+
+Three gaps a consumer that proves what a change set does fell into
+([#1446](https://github.com/scttfrdmn/substrate/issues/1446)).
+
+**`DescribeChangeSet`'s `ResourceChange` carries `Scope`, `Details` and `PhysicalResourceId`.**
+The diff used to compare only `Type` and `Properties`, so a template that changed nothing but a
+`DeletionPolicy` produced an empty change set. The rules, from `API_ResourceChange`,
+`API_ResourceChangeDetail`, `API_ResourceTargetDefinition` and the user guide's "Example change sets":
+
+| What changed | Detail(s) |
+|--------------|-----------|
+| A property's template value | `Static` / `DirectModification`, `Target` `Properties` + `Name` |
+| Nothing in the template, but the property `Ref`s (or `Fn::Sub`s) a parameter whose value changed | `Dynamic` / `DirectModification` **and** `Static` / `ParameterReference` with `CausingEntity` the parameter |
+| The `Tags` property | as above, `Target` `Tags` with no `Name`, `RequiresRecreation` `Never` |
+| `DeletionPolicy`, `UpdateReplacePolicy`, `Metadata`, `CreationPolicy`, `UpdatePolicy` | `Static` / `DirectModification`, `Target` that attribute, `RequiresRecreation` `Never` |
+| A property that `Fn::GetAtt`s a resource whose `Properties` or `Tags` change, or that is replaced | `Dynamic` / `ResourceAttribute`, `CausingEntity` `Resource.Attribute` |
+| A property that `Ref`s a resource that will be replaced | `Dynamic` / `ResourceReference`, `CausingEntity` the resource |
+
+A policy- or `Metadata`-only change does not propagate to dependents: it touches nothing an
+`Fn::GetAtt` can read, so a retain-only change set names exactly the resources whose policies
+changed. Values are compared after normalizing numbers (a JSON template decodes `3600` as a float, a
+YAML one as an integer) and map keys, so the same template in the other syntax is no change.
+
+Dependents are followed to a fixpoint. `Replacement` is the most intrusive detail — `Always` and
+`Static` is `True`, `Always` and only `Dynamic` is `Conditional`, `Conditionally` is `Conditional`,
+`Never` is `False`. `Scope` lists the distinct attributes in the API reference's enum order, and
+`Details` lists `Dynamic` before `Static`, as the published samples do. `Add` and `Remove` carry
+neither, since they "apply only to modified resources"; `Modify` and `Remove` carry the deployed
+`PhysicalResourceId`, and `Add` none.
+
+**`RequiresRecreation` is only as good as substrate's table.** It is a property's "Update requires"
+behaviour in the resource-type reference, and substrate does not carry that catalogue: a short table
+lists the properties whose page says *Replacement* for the types the deployer models natively
+(`BucketName` and its two siblings; `QueueName`, `FifoQueue`; `TopicName`, `FifoTopic`; `TableName`,
+`ImportSourceSpecification`; `RoleName`, `Path`; `FunctionName`, `PackageType`, `DurableConfig`,
+`TenancyConfig`; and the EC2 `KeyName`/`InstanceType` pair from the samples), and any other property
+reports `Never`. So `Replacement: False` proves an in-place update only for a property the table
+covers. A `DeletionPolicy`-only change set is `Never` throughout by the rule above, whatever the
+table says. The property-value fields (`Path`, `BeforeValue`, `AfterValue`, `AttributeChangeType`),
+`PolicyAction`, `BeforeContext`/`AfterContext` and `ChangeSource` `Automatic` are not derived.
+
+**`GetTemplate` honours `TemplateStage`.** `Original | Processed` is validated (`ValidationError`
+otherwise). "If the template doesn't include transforms, Original and Processed return the same
+template", and both are reported in `StagesAvailable` — for a stack, and for a change set, which is
+complete by the time `CreateChangeSet` answers. A template that declares a `Transform` is the case
+substrate cannot answer honestly, because it runs no macro: `StagesAvailable` is `Original` alone, an
+explicit `TemplateStage=Processed` is `ValidationError`, and an omitted stage answers `Original`, as
+every `GetTemplate` did before. That last choice is substrate's: AWS publishes no answer for a stage
+that is not available, and answering the submitted body *as* `Processed` would tell a caller the
+transform expanded to nothing.
+
+**`DetectStackDrift` honours `LogicalResourceIds.member.N`.** Only the named resources are checked,
+so the detection's `StackDriftStatus` and `DriftedStackResourceCount` cover them alone. More than the
+published 200, or a name the stack does not declare, is `ValidationError` — the operation publishes no
+error of its own, and a filter matching nothing would report `IN_SYNC` for a resource that does not
+exist. `DescribeStackResourceDrifts` still recomputes every resource, because it is not tied to a
+detection ID.
 
 ### A stack ARN is accepted wherever `StackName` is
 
@@ -17536,14 +17596,23 @@ declares (#739). Both reduce to `ec2containerregistry`, so substrate routes eith
 | DescribeRepositories | Reports [the nine published `Repository` members](#a-repository-response-carries-the-nine-published-members) and no others; a `repositoryNames` entry that names nothing is [refused, not skipped](#every-ecr-refusal-is-a-400); the registry-wide form [pages](#the-three-ecr-listings-page-three-different-ways), and the named form cannot |
 | DeleteRepository | Reports the deleted repository in the same shape; a repository holding images needs [`force`](#every-ecr-refusal-is-a-400), and its images go with it |
 | GetAuthorizationToken | Returns base64("AWS:password") |
-| PutImage | The digest is [the SHA-256 of the manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest); `imageManifest` is required; a repeat that changes nothing is `ImageAlreadyExistsException`, a supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException`, and a tag that would move on an [immutable repository](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is `ImageTagAlreadyExistsException` |
-| BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages`; answers the image under the tag it was asked by |
+| PutImage | The digest is [the SHA-256 of the manifest](#an-ecr-digest-is-the-sha-256-of-its-manifest); `imageManifest` is required; a repeat that changes nothing is `ImageAlreadyExistsException`, a supplied `imageDigest` that is not the manifest's is `ImageDigestDoesNotMatchException`, and a tag that would move on an [immutable repository](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is `ImageTagAlreadyExistsException`; an absent repository governed by a `CREATE_ON_PUSH` template is [created from it](#pull-through-cache-rules-and-repository-creation-templates) |
+| BatchGetImage | Refuses an unknown repository, as do `BatchDeleteImage`, `DescribeImages` and `ListImages` — except one under a pull through cache rule, which it [creates](#pull-through-cache-rules-and-repository-creation-templates); answers the image under the tag it was asked by |
 | BatchDeleteImage | [By tag removes that tag](#an-ecr-digest-is-the-sha-256-of-its-manifest), and the image only with its last; by digest removes the image and every tag, one `imageId` per tag; an entry that matches nothing is reported in `failures` |
 | DescribeImages | [Pages](#the-three-ecr-listings-page-three-different-ways) unless `imageIds` is given, which excludes both members; an `imageIds` entry that names nothing is refused with `ImageNotFoundException`; describes [untagged images](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) and honors `filter` |
 | ListImages | Reports [one entry per digest-and-tag pair](#the-three-ecr-listings-page-three-different-ways), sorted, and pages with no exclusion on either member; an [untagged image](#an-immutable-tag-cannot-move-and-an-untagged-image-is-listed) is one entry with its digest alone, and `filter` is honored |
-| TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members) |
-| UntagResource | `tagKeys` is an array of strings, as published |
-| ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]` |
+| TagResource | `tags` is [an array of `Tag` objects](#ecr-s-tags-is-an-array-with-capitalized-members); `resourceArn` is [parsed whole and must name the caller's registry](#a-repository-arn-is-resolved-where-it-points); a namespaced name keeps its `/` |
+| UntagResource | `tagKeys` is an array of strings, as published; `resourceArn` as for `TagResource` |
+| ListTagsForResource | Reports the published array, ordered by key; an untagged repository reports `[]`; `resourceArn` as for `TagResource` |
+| CreatePullThroughCacheRule | [Pull through cache](#pull-through-cache-rules-and-repository-creation-templates): `upstreamRegistryUrl` must be on the published list (`UnsupportedUpstreamRegistryException`); an authenticated upstream needs a `credentialArn` and a cross-account ECR upstream a `customRoleArn` (`ValidationException`); a taken prefix is `PullThroughCacheRuleAlreadyExistsException` |
+| DescribePullThroughCacheRules | All rules in prefix order, or those `ecrRepositoryPrefixes` names — an unknown one is `PullThroughCacheRuleNotFoundException`; both forms page |
+| UpdatePullThroughCacheRule | Updates `credentialArn` and `customRoleArn`; an omitted one keeps its value; `PullThroughCacheRuleNotFoundException` |
+| DeletePullThroughCacheRule | Echoes the rule; repositories it created stay; `PullThroughCacheRuleNotFoundException` |
+| ValidatePullThroughCacheRule | `isValid: true` unless [seeded](#pull-through-cache-rules-and-repository-creation-templates) with `POST /v1/ecr/pull-through-cache-validation`; no upstream is contacted |
+| CreateRepositoryCreationTemplate | `prefix` and `appliedFor` required; defaults `MUTABLE` and `AES256`; a taken prefix is `TemplateAlreadyExistsException` |
+| DescribeRepositoryCreationTemplates | All templates in prefix order, or those `prefixes` names — an unknown one is omitted, since the page publishes no not-found code; pages |
+| UpdateRepositoryCreationTemplate | Merges: an omitted member keeps its value; `TemplateNotFoundException` |
+| DeleteRepositoryCreationTemplate | Echoes the template; `TemplateNotFoundException` |
 | SetRepositoryPolicy | Stores `policyText` verbatim and echoes it with `registryId`; nothing parses it, so an unparseable document is accepted and no ECR request is ever authorized or refused by one. `force` is unread. `RepositoryNotFoundException` [at 400](#every-ecr-refusal-is-a-400) |
 | GetRepositoryPolicy | `RepositoryPolicyNotFoundException` when the repository exists and no policy has been set — distinct from `RepositoryNotFoundException`, so a caller can tell the two apart |
 | DeleteRepositoryPolicy | Echoes the `policyText` it removed, as published; `RepositoryPolicyNotFoundException` when there is none to delete, so deleting twice refuses the second time |
@@ -17598,9 +17667,11 @@ is what proves the two halves now agree about the wire as well as about the reco
 `API_Repository` publishes nine members, all `Required: No`, and substrate answers eight of them —
 `repositoryName`, `repositoryArn`, `registryId`, `repositoryUri`, `createdAt`, `imageTagMutability`,
 `imageScanningConfiguration` and `encryptionConfiguration`. The ninth,
-`imageTagMutabilityExclusionFilters`, is unmodelled and therefore **absent** rather than present and
-empty, per #1013's rule; AWS's own `CreateRepository` sample response omits it and
-`encryptionConfiguration.kmsKey` as well, so the absences are shapes the page publishes.
+`imageTagMutabilityExclusionFilters`, and `encryptionConfiguration.kmsKey` are **absent** rather than
+present and empty unless the repository has them, per #1013's rule; AWS's own `CreateRepository`
+sample response omits both, so the absences are shapes the page publishes. `CreateRepository` reads
+neither member; a repository created from a [creation template](#pull-through-cache-rules-and-repository-creation-templates)
+carries the template's.
 
 Until #1090 the persisted record was marshalled straight onto the wire at all three sites that answer
 a repository, so each of them also reported fields that are substrate's own:
@@ -17819,6 +17890,114 @@ Published dates substrate does not render, because nothing it models produces th
 `ImageDetail`'s `lastRecordedPullTime`, `lastArchivedAt` and `lastActivatedAt` (no pull is recorded
 and no archive is modeled), and `GetLifecyclePolicy`'s `lastEvaluatedAt` (a lifecycle policy is
 stored, never run).
+
+Pull through cache rules and repository creation templates add four dates, all epoch seconds:
+`createdAt` and `updatedAt` on a rule (`Create` answers no `updatedAt`, `Update` no `createdAt`,
+`Validate` neither — each operation's Response Syntax, not one shared shape) and on a template.
+
+### A repository ARN is resolved where it points
+
+`TagResource`, `UntagResource` and `ListTagsForResource` take a `resourceArn`, and since
+[#1465](https://github.com/scttfrdmn/substrate/issues/1465) and
+[#1113](https://github.com/scttfrdmn/substrate/issues/1113) substrate takes it apart rather than
+reading its last path segment:
+
+- **Everything after `repository/` is the name.** A namespaced repository — `ns/sub/repo`, and every
+  pull-through-cache repository, which is `<prefix>/<upstream-repo>` — is reached by its own ARN. The
+  old parser answered `RepositoryNotFoundException: Repository not found: repo` for it.
+- **The ARN must name the caller's registry.** Before, the ARN's account and Region were discarded
+  and the caller's own repository of that name was tagged, untagged or read. Now an ARN naming another
+  account, or the caller's account in another Region, is refused with
+  `RepositoryNotFoundException`/400 — the code all three operations publish ("ensure that you are
+  performing operations on the correct registry"), and the KMS tagging precedent. That mapping is
+  substrate's reading. The reasons: ECR reaches across accounts only through a repository policy plus
+  an identity policy (user guide, "How Amazon ECR works with IAM"), substrate stores repository
+  policies without evaluating them, and no ECR page confirms the tagging operations work cross-account
+  — so serving a foreign repository would grant access AWS might deny. An ECR endpoint is Regional,
+  and no page says one serves another Region's repository ARN.
+- **A string that is not an ECR repository ARN** — another service's ARN, a bare name, `repository/`
+  with nothing after it, an account that is not twelve digits, no Region — is
+  `InvalidParameterException`/400. `ListTagsForResource` publishes that "the only supported resource
+  is an Amazon ECR repository".
+
+The Resource Groups Tagging API's ECR arm parses through the same function, so the two cannot
+disagree about which repository an ARN names. CloudFormation's ECR tagger keys by physical ID (the
+repository name), not by ARN, so it was not affected.
+
+### Pull through cache rules and repository creation templates
+
+Substrate models the five rule operations and the four template operations as records in the
+caller's registry ([#1461](https://github.com/scttfrdmn/substrate/issues/1461)), validated against
+each page's own constraints:
+
+- **Prefixes** — `ecrRepositoryPrefix` (2–30) and template `prefix` (1–256) — match the published
+  pattern, `ROOT` included. "There is always an assumed `/` applied to the end of the prefix", so
+  `quay` and `quay/` are one rule; the value is echoed as written.
+- **`upstreamRegistryUrl`** must be on `API_CreatePullThroughCacheRule`'s list
+  (`public.ecr.aws`, `registry.k8s.io`, `quay.io`, `registry-1.docker.io`, `ghcr.io`,
+  `registry.gitlab.com`, `<name>.azurecr.io`, `<account>.dkr.ecr.<region>.amazonaws.com`), plus
+  `cgr.dev` for Chainguard, which the page's Valid Values name and the user guide gives the URL of.
+  Anything else is `UnsupportedUpstreamRegistryException`. `upstreamRegistry` is derived from the URL.
+- **Authentication** is the user guide's: Docker Hub, GitHub, GitLab, Azure and Chainguard require a
+  `credentialArn` (which must match the published `ecr-pullthroughcache/` pattern); an ECR upstream in
+  another account requires a `customRoleArn`. A missing one is `ValidationException`. Which of
+  `ValidationException` and `InvalidParameterException` answers what is substrate's reading, since
+  every page publishes both and assigns neither to a case: a member outside its own constraint is
+  `InvalidParameterException`, members that contradict each other are `ValidationException`. The
+  secret itself is not looked up, so `SecretNotFoundException` and its two siblings are never
+  answered.
+- `upstreamRepositoryPrefix` is reported as `ROOT` when omitted for an ECR upstream ("When this field
+  isn't specified, Amazon ECR will use the ROOT") and absent for the others.
+- **`ROOT` and `upstreamRepositoryPrefix` are ECR-to-ECR only.** The user guide documents both on its
+  "Customizing repository prefixes for ECR to ECR pull through cache" page and for no other upstream,
+  and adds "You can set the upstream repository prefix only when the Amazon ECR repository prefix has
+  a non-ROOT value". So a `ROOT` `ecrRepositoryPrefix` or any `upstreamRepositoryPrefix` on a non-ECR
+  upstream, and a non-`ROOT` upstream prefix under a `ROOT` ecr prefix, are `ValidationException`.
+  That the customization is ECR-only is substrate's reading of the page's scope.
+
+**What a pull creates.** A cached repository is created by the first pull, and a pull's one ECR API
+call is `BatchGetImage` — "When an image is pulled, the BatchGetImage API is called once" — which is
+also the only operation that publishes `UnableToGetUpstreamImageException`. So `BatchGetImage` against
+an absent repository that falls under a rule (the longest matching prefix, else a `ROOT` rule)
+creates it, from the longest-prefix `PULL_THROUGH_CACHE` template (else a `ROOT` one), else with the
+user guide's defaults: `MUTABLE`, `AES256`, no policies and no tags. A template contributes every
+member a repository holds: `imageTagMutability`, `imageTagMutabilityExclusionFilters`, encryption type
+and `kmsKey`, `repositoryPolicy`, `lifecyclePolicy` and `resourceTags`. For an **ECR upstream** the
+upstream registry is one substrate holds, so the repository is created only when the upstream
+repository the name maps onto exists — the rule's prefix removed, its `upstreamRepositoryPrefix`
+prepended unless `ROOT`, per the user guide's mapping table. That is what keeps a `ROOT` rule, which
+matches every name, from turning a mistyped `BatchGetImage` into a new repository. For other upstreams
+the content is outside the emulator and the prefix is mandatory. The
+image itself is **not** there: substrate reaches no upstream, so `BatchGetImage` reports each
+requested image under `failures`, as for any repository that lacks it — push the manifest with
+`PutImage` if a test needs one. An existing repository is never re-templated.
+
+**Create on push.** `PutImage` is the call a push makes, so a push to an absent repository governed
+by a `CREATE_ON_PUSH` template creates it from that template first. With no such template it is
+still `RepositoryNotFoundException`: "Amazon ECR will not create a repository with default settings"
+for a push. `PutImage` checks the manifest and digest before it reads the repository, so a push it
+would refuse creates nothing — and a missing manifest is now `InvalidParameterException` even when
+the repository is also missing.
+`REPLICATION` is stored and echoed and never applied, because no replication is modeled.
+
+**Not modelled.** The user guide says a template's role "must be provided when using repository tags
+and/or KMS in the template, otherwise the repository creation will fail"; substrate applies
+`resourceTags` without a `customRoleArn`, because it models no role assumption and no page publishes
+the failure. `ValidatePullThroughCacheRule` contacts no upstream, so it answers `isValid: true` unless
+seeded:
+
+```bash
+# One rule's outcome in one registry. accountId, region and ecrRepositoryPrefix are each optional;
+# empty or "*" is a wildcard, and the most specific seed wins.
+curl -X POST http://localhost:4566/v1/ecr/pull-through-cache-validation \
+  -d '{"accountId":"123456789012","region":"us-east-1","ecrRepositoryPrefix":"docker-hub","isValid":false,"failure":"authentication failed"}'
+curl -X DELETE "http://localhost:4566/v1/ecr/pull-through-cache-validation?accountId=123456789012&region=us-east-1&ecrRepositoryPrefix=docker-hub"
+curl -X DELETE http://localhost:4566/v1/ecr/pull-through-cache-validation   # every seed
+```
+
+A seed with `isValid: true` and a `failure` is refused: `failure` is "the reason the validation
+failed". `TestECR_PullThroughCacheRuleLifecycle` and `TestECR_RepositoryCreationTemplateLifecycle`
+assert every response's raw members against its own page.
 ### CloudFormation resource types
 
 | Type | Ref | Notes |

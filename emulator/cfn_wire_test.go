@@ -111,6 +111,7 @@ func TestCFNWire_StackResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "ListStacks", anchor: "<StackName>" + name + "</StackName>"},
 		{action: "GetTemplate", params: stack, anchor: "<TemplateBody>"},
 		{action: "DescribeStackResources", params: stack, anchor: "<LogicalResourceId>Data</LogicalResourceId>"},
+		{action: "ListStackResources", params: stack, anchor: "<LogicalResourceId>Data</LogicalResourceId>"},
 		{action: "DescribeStackEvents", params: stack, anchor: "<StackName>" + name + "</StackName>"},
 		{action: "ListExports", anchor: "<ListExportsResult>"},
 		{action: "DetectStackDrift", held: drift, anchor: "<StackDriftDetectionId>"},
@@ -137,6 +138,8 @@ func TestCFNWire_ChangeSetResponsesCarryNoBookkeepingMember(t *testing.T) {
 	cfnWireRun(t, ts, []cfnWireCase{
 		{action: "CreateChangeSet", held: created, anchor: "<Id>"},
 		{action: "DescribeChangeSet", params: cs, anchor: "<ChangeSetName>" + csName + "</ChangeSetName>"},
+		// The change set's own GetTemplate, which reads the change-set record rather than the stack's.
+		{action: "GetTemplate", params: map[string]string{"StackName": stackName, "ChangeSetName": csName, "TemplateStage": "Processed"}, anchor: "<TemplateBody>"},
 		{action: "ListChangeSets", params: map[string]string{"StackName": stackName}, anchor: "<ChangeSetName>" + csName + "</ChangeSetName>"},
 		// Last: it removes the record every case above reads.
 		{action: "DeleteChangeSet", params: cs, anchor: "<DeleteChangeSetResponse"},
