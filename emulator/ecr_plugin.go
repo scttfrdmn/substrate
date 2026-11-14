@@ -1290,20 +1290,29 @@ func (p *ECRPlugin) listTagsForResource(ctx *RequestContext, req *AWSRequest) (*
 
 // --- Internal helpers --------------------------------------------------------
 
-// loadRepoByARN loads a repository by ARN, extracting the name from the ARN suffix.
-func (p *ECRPlugin) loadRepoByARN(goCtx context.Context, ctx *RequestContext, arn string) (*ECRRepository, string, error) {
-	// ARN format: arn:aws:ecr:{region}:{acct}:repository/{name}
-	name := arn
-	if idx := strings.LastIndex(arn, "/"); idx >= 0 {
-		name = arn[idx+1:]
+// loadRepoByARN loads the repository an ARN names, in the registry the ARN names.
+//
+// The ARN is taken apart by [ecrParseRepositoryARN]: everything after `repository/` is the name, so
+// a namespaced repository resolves (#1465), and the account and Region are the ARN's own, so an ARN
+// naming another registry is looked up there rather than in the caller's (#1113). A string that is
+// not an ECR repository ARN is InvalidParameterException/400; a well-formed ARN naming a repository
+// that registry does not hold is RepositoryNotFoundException/400 — substrate's reading, recorded at
+// [ecrParseRepositoryARN], since no ECR page publishes a code for a foreign registry. An ARN whose
+// account and Region are the caller's resolves exactly as it did before.
+//
+// The caller argument is unused since #1113 and kept so the three tagging handlers read alike.
+func (p *ECRPlugin) loadRepoByARN(goCtx context.Context, _ *RequestContext, arn string) (*ECRRepository, string, error) {
+	target, awsErr := ecrParseRepositoryARN(arn)
+	if awsErr != nil {
+		return nil, "", awsErr
 	}
-	stateKey := ecrRepoKey(ctx.AccountID, ctx.Region, name)
+	stateKey := ecrRepoKey(target.AccountID, target.Region, target.Name)
 	data, err := p.state.Get(goCtx, ecrNamespace, stateKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("ecr loadRepoByARN state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, "", ecrRepositoryNotFound(name)
+		return nil, "", ecrRepositoryNotFound(target.Name)
 	}
 	var repo ECRRepository
 	if err := json.Unmarshal(data, &repo); err != nil {
