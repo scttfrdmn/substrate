@@ -1,6 +1,9 @@
 package emulator
 
-import "net/http"
+import (
+	"net/http"
+	"strconv"
+)
 
 // sqsInvalidBody returns the refusal for a JSON request body that will not parse (#1007).
 //
@@ -29,6 +32,92 @@ func sqsInvalidBody() *AWSError {
 	return &AWSError{
 		Code:       "ValidationError",
 		Message:    "The input fails to satisfy the constraints specified by an AWS service",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// The errors below are the codes the GetQueueAttributes, ChangeMessageVisibility and
+// ChangeMessageVisibilityBatch references publish, each at HTTP 400 (#1441, #1462). The
+// code is the plain one under both protocols, as [sqsQueueDoesNotExist] records for
+// the same reason: it is what botocore and aws-sdk-go-v2 dispatch on.
+
+// sqsInvalidAttributeName is GetQueueAttributes' refusal of an attribute name it does
+// not define: "The specified attribute doesn't exist".
+func sqsInvalidAttributeName(name string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidAttributeName",
+		Message:    "Unknown Attribute " + name + ".",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsReceiptHandleIsInvalid is the refusal of a receipt handle that names no message
+// of the queue: "The specified receipt handle isn't valid".
+func sqsReceiptHandleIsInvalid(handle string) *AWSError {
+	return &AWSError{
+		Code:       "ReceiptHandleIsInvalid",
+		Message:    "The input receipt handle \"" + handle + "\" is not a valid receipt handle.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsMessageNotInflight is the refusal of a visibility change for a message that is
+// not in flight — never received, or received and already visible again: "The
+// specified message isn't in flight".
+func sqsMessageNotInflight() *AWSError {
+	return &AWSError{
+		Code:       "MessageNotInflight",
+		Message:    "The specified message isn't in flight.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsVisibilityTimeoutOutOfRange is the refusal of a VisibilityTimeout outside the
+// documented range "0 to 43200. Maximum: 12 hours".
+func sqsVisibilityTimeoutOutOfRange(v int) *AWSError {
+	return &AWSError{
+		Code:       "InvalidParameterValue",
+		Message:    "Value " + strconv.Itoa(v) + " for parameter VisibilityTimeout is invalid. Reason: Must be between 0 and 43200, if provided.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsEmptyBatchRequest is the refusal of a batch request with no entries: "The batch
+// request doesn't contain any entries".
+func sqsEmptyBatchRequest(entryName string) *AWSError {
+	return &AWSError{
+		Code:       "EmptyBatchRequest",
+		Message:    "There should be at least one " + entryName + " in the request.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsTooManyEntriesInBatchRequest is the refusal of a batch of more than ten entries,
+// the maximum the reference states for every SQS batch operation.
+func sqsTooManyEntriesInBatchRequest(n int) *AWSError {
+	return &AWSError{
+		Code:       "TooManyEntriesInBatchRequest",
+		Message:    "Maximum number of entries per request are 10. You have sent " + strconv.Itoa(n) + ".",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsBatchEntryIDsNotDistinct is the refusal of a batch in which "Two or more batch
+// entries in the request have the same Id".
+func sqsBatchEntryIDsNotDistinct(id string) *AWSError {
+	return &AWSError{
+		Code:       "BatchEntryIdsNotDistinct",
+		Message:    "Id " + id + " repeated.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sqsInvalidBatchEntryID is the refusal of a batch entry Id that "doesn't abide by the
+// specification": up to 80 alphanumeric characters, hyphens and underscores.
+func sqsInvalidBatchEntryID() *AWSError {
+	return &AWSError{
+		Code:       "InvalidBatchEntryId",
+		Message:    "A batch entry id can only contain alphanumeric characters, hyphens and underscores. It can be at most 80 letters long.",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

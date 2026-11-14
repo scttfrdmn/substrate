@@ -84,6 +84,8 @@ func (p *SQSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.deleteMessageBatch(ctx, req)
 	case "ChangeMessageVisibility":
 		return p.changeMessageVisibility(ctx, req)
+	case "ChangeMessageVisibilityBatch":
+		return p.changeMessageVisibilityBatch(ctx, req)
 	case "PurgeQueue":
 		return p.purgeQueue(ctx, req)
 	default:
@@ -475,8 +477,13 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, sqsQueueDoesNotExist()
 	}
 
+	requested, refusal := sqsRequestedQueueAttributeNames(req)
+	if refusal != nil {
+		return nil, refusal
+	}
+
 	// Build standard attributes.
-	attrs := map[string]string{
+	all := map[string]string{
 		"QueueArn":                      q.QueueARN,
 		"CreatedTimestamp":              strconv.FormatInt(q.CreatedTimestamp, 10),
 		"LastModifiedTimestamp":         strconv.FormatInt(q.LastModifiedTimestamp, 10),
@@ -487,19 +494,33 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		"ReceiveMessageWaitTimeSeconds": getAttrOrDefault(q.Attributes, "ReceiveMessageWaitTimeSeconds", "0"),
 	}
 	for k, v := range q.Attributes {
-		attrs[k] = v
+		all[k] = v
+	}
+
+	// The approximate counts are exact here: substrate's queue metadata has no
+	// propagation delay to model (#1441).
+	visible, notVisible, delayed, err := p.sqsMessageCounts(context.Background(), sqsURLKey(ctx.Region, queueURL), p.tc.Now())
+	if err != nil {
+		return nil, err
+	}
+	all["ApproximateNumberOfMessages"] = strconv.Itoa(visible)
+	all["ApproximateNumberOfMessagesNotVisible"] = strconv.Itoa(notVisible)
+	all["ApproximateNumberOfMessagesDelayed"] = strconv.Itoa(delayed)
+
+	attrs, refusal := sqsSelectQueueAttributes(all, requested)
+	if refusal != nil {
+		return nil, refusal
 	}
 
 	if sqsIsJSONProtocol(req) {
+		if len(attrs) == 0 {
+			return sqsJSONResponse(http.StatusOK, struct{}{})
+		}
 		return sqsJSONResponse(http.StatusOK, map[string]interface{}{"Attributes": attrs})
 	}
 
-	type attrEntry struct {
-		Name  string `xml:"Name"`
-		Value string `xml:"Value"`
-	}
 	type result struct {
-		Attribute []attrEntry `xml:"Attribute"`
+		Attribute []sqsAttributeXML `xml:"Attribute"`
 	}
 	type response struct {
 		XMLName                  xml.Name         `xml:"GetQueueAttributesResponse"`
@@ -508,15 +529,9 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 		ResponseMetadata         responseMetadata `xml:"ResponseMetadata"`
 	}
 
-	attrList := make([]attrEntry, 0, len(attrs))
-	for k, v := range attrs {
-		attrList = append(attrList, attrEntry{Name: k, Value: v})
-	}
-	sort.Slice(attrList, func(i, j int) bool { return attrList[i].Name < attrList[j].Name })
-
 	return sqsXMLResponse(http.StatusOK, response{
 		Xmlns:                    "http://queue.amazonaws.com/doc/2012-11-05/",
-		GetQueueAttributesResult: result{Attribute: attrList},
+		GetQueueAttributesResult: result{Attribute: sqsAttributesXML(attrs)},
 		ResponseMetadata:         responseMetadata{RequestID: ctx.RequestID},
 	})
 }
@@ -979,6 +994,8 @@ func (p *SQSPlugin) sendMessage(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			VisibleAfter:      time.Time{},
 			ReceiveCount:      0,
 			MessageGroupID:    msgGroupID,
+
+			MessageDeduplicationID: dedupID,
 		}
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
 			return nil, fmt.Errorf("sqs sendMessage saveMsg: %w", saveErr)
@@ -1320,10 +1337,15 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 
 	var maxNum int
 	var visTimeout int
+	var requestedSystemNames []string
 	if sqsIsJSONProtocol(req) {
 		var input struct {
-			MaxNumberOfMessages int `json:"MaxNumberOfMessages"`
-			VisibilityTimeout   int `json:"VisibilityTimeout"`
+			MaxNumberOfMessages         int      `json:"MaxNumberOfMessages"`
+			AttributeNames              []string `json:"AttributeNames"`
+			MessageSystemAttributeNames []string `json:"MessageSystemAttributeNames"`
+			// A pointer, because 0 is a value a caller sends — "visible again
+			// immediately" — and must not read as "not specified" (#1462).
+			VisibilityTimeout *int `json:"VisibilityTimeout"`
 		}
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, sqsInvalidBody()
@@ -1335,16 +1357,19 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		if maxNum > 10 {
 			maxNum = 10
 		}
-		visTimeout = input.VisibilityTimeout
-		if visTimeout == 0 {
-			if v := getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30"); v != "" {
-				visTimeout, _ = strconv.Atoi(v)
-			}
-			if visTimeout == 0 {
-				visTimeout = 30
+		// System attributes are selected by the union of the deprecated
+		// AttributeNames and the newer MessageSystemAttributeNames (#1462).
+		requestedSystemNames = append(input.AttributeNames, input.MessageSystemAttributeNames...)
+		if input.VisibilityTimeout != nil {
+			visTimeout = *input.VisibilityTimeout
+		} else {
+			visTimeout = 30
+			if n, parseErr := strconv.Atoi(getAttrOrDefault(q.Attributes, "VisibilityTimeout", "30")); parseErr == nil {
+				visTimeout = n
 			}
 		}
 	} else {
+		requestedSystemNames = sqsQuerySystemAttributeNames(req.Params)
 		maxStr := req.Params["MaxNumberOfMessages"]
 		maxNum = 1
 		if maxStr != "" {
@@ -1370,6 +1395,10 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		}
 	}
 
+	if visTimeout < 0 || visTimeout > sqsMaxVisibilityTimeout {
+		return nil, sqsVisibilityTimeoutOutOfRange(visTimeout)
+	}
+
 	urlKey := sqsURLKey(ctx.Region, queueURL)
 	now := p.tc.Now()
 
@@ -1390,6 +1419,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		ReceiptHandle          string                   `xml:"ReceiptHandle"`
 		MD5OfBody              string                   `xml:"MD5OfBody"`
 		Body                   string                   `xml:"Body"`
+		Attribute              []sqsAttributeXML        `xml:"Attribute,omitempty"`
 		MD5OfMessageAttributes string                   `xml:"MD5OfMessageAttributes,omitempty"`
 		MessageAttribute       []sqsMessageAttributeXML `xml:"MessageAttribute,omitempty"`
 		MessageGroupID         string                   `xml:"MessageGroupId,omitempty"`
@@ -1399,6 +1429,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		ReceiptHandle          string                         `json:"ReceiptHandle"`
 		MD5OfBody              string                         `json:"MD5OfBody"`
 		Body                   string                         `json:"Body"`
+		Attributes             map[string]string              `json:"Attributes,omitempty"`
 		MD5OfMessageAttributes string                         `json:"MD5OfMessageAttributes,omitempty"`
 		MessageAttributes      map[string]SQSMessageAttribute `json:"MessageAttributes,omitempty"`
 		MessageGroupID         string                         `json:"MessageGroupId,omitempty"`
@@ -1440,6 +1471,9 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		newHandle := generateSQSReceiptHandle(ctx.IDs)
 		msg.ReceiptHandle = newHandle
 		msg.VisibleAfter = now.Add(time.Duration(visTimeout) * time.Second)
+		if msg.ReceiveCount == 0 {
+			msg.FirstReceiveTimestamp = now.UnixMilli()
+		}
 		msg.ReceiveCount++
 
 		if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
@@ -1458,6 +1492,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		// checksum the attributes actually in hand. Reusing the send-time digest would
 		// hand them a value their own recomputation could never match.
 		selectedAttrs := sqsSelectMessageAttributes(msg.MessageAttributes, requestedAttrNames)
+		systemAttrs := sqsSelectSystemAttributes(sqsMessageSystemAttributes(msg), requestedSystemNames)
 
 		if sqsIsJSONProtocol(req) {
 			messagesJSON = append(messagesJSON, msgResultJSON{
@@ -1465,6 +1500,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 				ReceiptHandle:          newHandle,
 				MD5OfBody:              msg.MD5OfBody,
 				Body:                   msg.Body,
+				Attributes:             systemAttrs,
 				MD5OfMessageAttributes: sqsMD5OfMessageAttributes(selectedAttrs),
 				MessageAttributes:      selectedAttrs,
 				MessageGroupID:         msg.MessageGroupID,
@@ -1475,6 +1511,7 @@ func (p *SQSPlugin) receiveMessage(ctx *RequestContext, req *AWSRequest) (*AWSRe
 				ReceiptHandle:          newHandle,
 				MD5OfBody:              msg.MD5OfBody,
 				Body:                   msg.Body,
+				Attribute:              sqsAttributesXML(systemAttrs),
 				MD5OfMessageAttributes: sqsMD5OfMessageAttributes(selectedAttrs),
 				MessageAttribute:       sqsMessageAttributesXML(selectedAttrs),
 				MessageGroupID:         msg.MessageGroupID,
@@ -1726,19 +1763,10 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 	if err != nil {
 		return nil, err
 	}
-
-	for _, id := range ids {
-		msg, loadErr := p.loadMsg(context.Background(), urlKey, id)
-		if loadErr != nil || msg == nil {
-			continue
-		}
-		if msg.ReceiptHandle == receiptHandle {
-			msg.VisibleAfter = p.tc.Now().Add(time.Duration(vis) * time.Second)
-			if saveErr := p.saveMsg(context.Background(), urlKey, msg); saveErr != nil {
-				return nil, fmt.Errorf("sqs changeMessageVisibility saveMsg: %w", saveErr)
-			}
-			break
-		}
+	if awsErr, err := p.changeVisibility(context.Background(), urlKey, ids, receiptHandle, vis); err != nil {
+		return nil, fmt.Errorf("sqs changeMessageVisibility: %w", err)
+	} else if awsErr != nil {
+		return nil, awsErr
 	}
 
 	if sqsIsJSONProtocol(req) {
