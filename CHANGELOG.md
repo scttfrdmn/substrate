@@ -10,6 +10,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **S3 `PutBucketOwnershipControls`, `GetBucketOwnershipControls` and `DeleteBucketOwnershipControls` are routed (#1445).** They answered `NotImplemented`/501. Put answers 200 with an empty body and replaces the setting; a body with no `Rule`, or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`, is `MalformedXML`/400. "By default, Amazon S3 sets `OwnershipControls` for all newly created buckets", so `CreateBucket` records `x-amz-object-ownership`, or `BucketOwnerEnforced` when the header is absent; a value outside the enum refuses the create with `InvalidArgument`/400. Get after Delete is `OwnershipControlsNotFoundError`/404; Delete is 204 and idempotent, never touches the bucket, and is authorized as `s3:PutBucketOwnershipControls`, as its page states. `DeleteBucket` clears the setting. It is recorded, not enforced: ACLs are still accepted under `BucketOwnerEnforced` (#1474).
+- **ECR pull through cache rules and repository creation templates are routed (#1461).** Each of the nine operations answered `UnknownOperationException`.
+  - **Rules:** `CreatePullThroughCacheRule`, `DescribePullThroughCacheRules` (`ecrRepositoryPrefixes`, paged), `UpdatePullThroughCacheRule`, `DeletePullThroughCacheRule` and `ValidatePullThroughCacheRule`. Each answers its own page's Response Syntax, which differ. An `upstreamRegistryUrl` off the published list is `UnsupportedUpstreamRegistryException`/400. An authenticated upstream without `credentialArn`, or a cross-account ECR upstream without `customRoleArn`, is `ValidationException`/400. A taken prefix is `PullThroughCacheRuleAlreadyExistsException`/400 and an absent one `PullThroughCacheRuleNotFoundException`/400. `ValidatePullThroughCacheRule` answers `isValid: true` unless seeded with `POST /v1/ecr/pull-through-cache-validation`.
+  - **Templates:** `CreateRepositoryCreationTemplate`, `DescribeRepositoryCreationTemplates` (`prefixes`, paged), `UpdateRepositoryCreationTemplate` (merges) and `DeleteRepositoryCreationTemplate`. A taken prefix is `TemplateAlreadyExistsException`/400 and an absent one `TemplateNotFoundException`/400. A member outside its published constraint is `InvalidParameterException`/400.
+  - **Repositories created on the caller's behalf:** `BatchGetImage` against an absent repository under a rule's prefix creates it from the matching `PULL_THROUGH_CACHE` template (longest prefix, else `ROOT`), else with the published defaults. `PutImage` to an absent repository governed by a `CREATE_ON_PUSH` template creates it from that template. The image a pull would cache is not fetched: no upstream is contacted, so the image is reported under `failures`.
+- **CloudFormation `ListStackResources` is routed, and change sets, `GetTemplate` and `DetectStackDrift` read the members they ignored (#1446).**
+  - **`ListStackResources`:** answers `StackResourceSummaries`, the same derivation as `DescribeStackResources`, and pages 100 per `NextToken`. It answered `InvalidAction`/400.
+  - **`DescribeChangeSet`:** each `ResourceChange` now carries `Scope`, `Details` (`Target` with `Attribute`/`Name`/`RequiresRecreation`, `Evaluation`, `ChangeSource`, `CausingEntity`) and `PhysicalResourceId`. A `DeletionPolicy`, `UpdateReplacePolicy`, `Metadata`, `CreationPolicy` or `UpdatePolicy` change is a Static `Modify`. Before, the diff compared only `Type` and `Properties`, so such a change set was empty. A parameter change is reported through the properties that `Ref` it. A dependent that `Fn::GetAtt`s a modified resource, or `Ref`s a replaced one, is a Dynamic `Modify`. `Replacement` is derived from the details instead of always `False`; `RequiresRecreation` is `Always` only for the replacement properties substrate tabulates, `Never` otherwise.
+  - **`GetTemplate`:** `TemplateStage` outside `Original | Processed` is `ValidationError`/400. `StagesAvailable` reports both stages unless the template declares a `Transform`, which substrate does not run. Then it reports `Original` alone, and an explicit `Processed` is `ValidationError`/400.
+  - **`DetectStackDrift`:** `LogicalResourceIds.member.N` restricts the detection. More than 200, or a name the stack does not declare, is `ValidationError`/400.
+- **pytest-substrate installs on Python 3.11 (#1466).** `requires-python` is `>=3.11` (was `>=3.12`), ruff targets `py311`, and `uv.lock` is regenerated. Nothing in the plugin needed 3.12. CI's Python job runs on 3.11 and 3.12; lint and the wheel build stay on 3.12. The package version stays 0.1.0.
 
 ### Changed
 
@@ -30,6 +40,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - A ranged read no longer carries a checksum header unless it serves the whole of a single-part object.
   - A replay of a recording made before this release diverges at these operations.
   - The routed-operation catalog grows from 1,055 to 1,058.
+
+- **ECR's ARN-addressed operations resolve the repository the ARN names (#1465, #1113).** `TagResource`, `UntagResource` and `ListTagsForResource` took the last path segment as the name and discarded the account and Region.
+  - **Namespaced names:** a repository named `ns/sub/repo` answered `RepositoryNotFoundException: Repository not found: repo` by its own ARN. Everything after `repository/` is now the name, which every pull-through-cache repository needs.
+  - **Foreign registries:** the caller's own repository of that name was tagged, untagged or read. The ARN is now looked up in its own account and Region. Where that registry has no such repository, the answer is `RepositoryNotFoundException`/400; that code is substrate's reading, since no page publishes one for a foreign registry.
+  - **Malformed ARNs:** a string that is not an ECR repository ARN is `InvalidParameterException`/400. That covers another service's ARN, a bare name, `repository/` with no name, an account that is not 12 digits, or no Region.
+  - **Shared parser:** the Resource Groups Tagging API's ECR arm uses the same parser.
+- **Compatibility (#1461, #1465, #1113, #1446, #1466):**
+  - A `BatchGetImage` under a pull-through-cache prefix, or a `PutImage` under a `CREATE_ON_PUSH` template, now creates the repository instead of answering `RepositoryNotFoundException`.
+  - An ECR tagging call whose ARN names another account or Region no longer touches the caller's repository. One with a malformed ARN is `InvalidParameterException` instead of `RepositoryNotFoundException`.
+  - `DescribeChangeSet` adds members, and can report a `Modify` where it reported none. `Replacement` can now be `True` or `Conditional`.
+  - `GetTemplate` reports `StagesAvailable` `Original, Processed` instead of `Original` for a template without a `Transform`.
+  - `StackDeployer.DetectStackDrift` and `StartStackDriftDetection` gain a variadic `logicalIDs` parameter. Existing callers compile unchanged; a method value or interface naming the old signature does not.
+  - The routed-operation catalog grows from 1,058 to 1,068.
 
 ## [v0.125.0] - 2026-11-14
 
