@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -50,9 +51,8 @@ func TestIAMPlugin_UpdateAssumeRolePolicy_ReplacesTheDocument(t *testing.T) {
 	assert.Contains(t, string(body), "<UpdateAssumeRolePolicyResponse")
 	assert.Contains(t, string(body), "<ResponseMetadata>")
 
-	// Read back through GetRole. Substrate stores the document parsed, so the
-	// round trip is by principal rather than by byte: the replacement's Service
-	// principal must be there and the original's must be gone.
+	// Read back through GetRole, which serves the stored text RFC 3986-encoded
+	// (#1452): decoded, it is the replacement byte for byte.
 	var result map[string]any
 	get := iamRequest(t, srv, "GetRole", map[string]any{"RoleName": "worker"})
 	require.Equal(t, http.StatusOK, get.StatusCode)
@@ -60,15 +60,18 @@ func TestIAMPlugin_UpdateAssumeRolePolicy_ReplacesTheDocument(t *testing.T) {
 	role, ok := result["Role"].(map[string]any)
 	require.True(t, ok, "GetRole must report a Role element: %v", result)
 
-	doc, ok := role["AssumeRolePolicyDocument"].(string)
+	encoded, ok := role["AssumeRolePolicyDocument"].(string)
 	require.True(t, ok, "GetRole must report the trust policy: %v", role)
+	doc, err := url.PathUnescape(encoded)
+	require.NoError(t, err)
+	assert.Equal(t, replacement, doc)
 	assert.Contains(t, doc, "ecs-tasks.amazonaws.com")
 	assert.NotContains(t, doc, "lambda.amazonaws.com",
 		"the replacement must displace the original, not merge with it")
 
 	// And it must still parse as a policy document, so a consumer reading it back
 	// can act on it. botocore url-decodes then json.loads every policyDocumentType
-	// member, and unquoting plain JSON is a no-op, so this is what a real SDK sees.
+	// member, so this is what a real SDK sees.
 	var parsed emulator.PolicyDocument
 	require.NoError(t, json.Unmarshal([]byte(doc), &parsed))
 	require.Len(t, parsed.Statement, 1)
@@ -105,47 +108,73 @@ func TestIAMPlugin_UpdateAssumeRolePolicy_SetsAPolicyOnARoleCreatedWithout(t *te
 	assert.Contains(t, role["AssumeRolePolicyDocument"], "123456789012")
 }
 
-// TestIAMPlugin_UpdateAssumeRolePolicy_ReadBackIsNormalized pins the shape of the
-// read-back, so the normalization is a documented property rather than a surprise.
+// TestIAMPlugin_TrustPolicyReadBackIsVerbatim is #1452: the trust policy is served
+// as the text that was submitted, not re-marshaled from its parsed form.
 //
-// Substrate stores the parsed document and re-marshals it, which is what
-// GetRolePolicy and GetUserPolicy already do for inline policies. AWS stores the
-// text and returns the submitted bytes, so a consumer comparing the read-back
-// byte-for-byte against what it sent sees a difference here. Both forms are legal
-// AWS input for the same meaning and unmarshal identically, so a consumer that
-// parses the document is unaffected — which is the case worth pinning, because a
-// change that broke it would look like a passing test.
-func TestIAMPlugin_UpdateAssumeRolePolicy_ReadBackIsNormalized(t *testing.T) {
-	srv := newIAMTestServer(t)
-	require.Equal(t, http.StatusOK,
-		iamRequest(t, srv, "CreateRole", map[string]any{"RoleName": "worker"}).StatusCode)
+// Re-marshaling flattened a lone AWS principal written as {"AWS":"<arn>"} to the
+// bare string "<arn>", a Principal IAM accepts only as "*", so the document read back
+// was not one UpdateAssumeRolePolicy would take, and code converging a trust policy
+// by comparison rewrote one real IAM reports unchanged. The cases cover both writers
+// and a document whose whitespace and list-form members a re-marshal would also
+// have changed.
+//
+// GetRole serves the text RFC 3986-encoded, as its page states; CreateRole and
+// ListRoles, whose pages carry no such note, serve it plain.
+func TestIAMPlugin_TrustPolicyReadBackIsVerbatim(t *testing.T) {
+	const awsPrincipal = `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
+		`"Principal":{"AWS":"arn:aws:iam::444455556666:role/X"},"Action":"sts:AssumeRole"}]}`
+	const formatted = "{\n  \"Version\": \"2012-10-17\",\n  \"Statement\": [{\"Effect\": \"Allow\", " +
+		"\"Principal\": {\"Service\": [\"ec2.amazonaws.com\"]}, \"Action\": [\"sts:AssumeRole\"]}]\n}"
 
-	// A lone AWS principal in map form. PolicyPrincipal marshals this back as the
-	// bare string AWS also accepts.
-	require.Equal(t, http.StatusOK, iamRequest(t, srv, "UpdateAssumeRolePolicy", map[string]any{
-		"RoleName": "worker",
-		"PolicyDocument": `{"Version":"2012-10-17","Statement":[{"Effect":"Allow",` +
-			`"Principal":{"AWS":"123456789012"},"Action":"sts:AssumeRole"}]}`,
-	}).StatusCode)
+	cases := []struct {
+		name   string
+		doc    string
+		update bool
+	}{
+		{name: "CreateRole, lone AWS principal", doc: awsPrincipal},
+		{name: "UpdateAssumeRolePolicy, lone AWS principal", doc: awsPrincipal, update: true},
+		{name: "CreateRole, whitespace and list-form members", doc: formatted},
+		{name: "UpdateAssumeRolePolicy, whitespace and list-form members", doc: formatted, update: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newIAMTestServer(t)
+			create := map[string]any{"RoleName": "worker"}
+			if !tc.update {
+				create["AssumeRolePolicyDocument"] = tc.doc
+			}
+			created := iamRequest(t, srv, "CreateRole", create)
+			require.Equal(t, http.StatusOK, created.StatusCode)
+			if tc.update {
+				require.Equal(t, http.StatusOK, iamRequest(t, srv, "UpdateAssumeRolePolicy", map[string]any{
+					"RoleName": "worker", "PolicyDocument": tc.doc,
+				}).StatusCode)
+			} else {
+				var out map[string]any
+				decodeIAMXML(t, created, &out)
+				role, ok := out["Role"].(map[string]any)
+				require.True(t, ok)
+				assert.Equal(t, tc.doc, role["AssumeRolePolicyDocument"],
+					"CreateRole answers the same trust policy in JSON format, unencoded")
+			}
 
-	var result map[string]any
-	decodeIAMXML(t, iamRequest(t, srv, "GetRole", map[string]any{"RoleName": "worker"}), &result)
-	role, ok := result["Role"].(map[string]any)
-	require.True(t, ok)
-	doc, ok := role["AssumeRolePolicyDocument"].(string)
-	require.True(t, ok)
+			var got map[string]any
+			decodeIAMXML(t, iamRequest(t, srv, "GetRole", map[string]any{"RoleName": "worker"}), &got)
+			role, ok := got["Role"].(map[string]any)
+			require.True(t, ok)
+			encoded, ok := role["AssumeRolePolicyDocument"].(string)
+			require.True(t, ok)
+			assert.NotContains(t, encoded, "{", "GetRole URL-encodes the document")
+			decoded, err := url.PathUnescape(encoded)
+			require.NoError(t, err)
+			assert.Equal(t, tc.doc, decoded, "GetRole answers the submitted text")
 
-	assert.Contains(t, doc, `"Principal":"123456789012"`,
-		"a lone AWS principal round-trips through the bare-string form")
-
-	// The meaning survives, which is what the STS gate reads.
-	var parsed emulator.PolicyDocument
-	require.NoError(t, json.Unmarshal([]byte(doc), &parsed))
-	require.Len(t, parsed.Statement, 1)
-	require.NotNil(t, parsed.Statement[0].Principal)
-	assert.Equal(t, []string{"123456789012"}, parsed.Statement[0].Principal.AWS)
-	assert.False(t, parsed.Statement[0].Principal.All,
-		"a named account must not normalize into the wildcard form")
+			// The meaning survives, which is what the STS gate reads.
+			var parsed emulator.PolicyDocument
+			require.NoError(t, json.Unmarshal([]byte(decoded), &parsed))
+			require.Len(t, parsed.Statement, 1)
+		})
+	}
 }
 
 // TestIAMPlugin_UpdateAssumeRolePolicy_Errors covers the operation's documented

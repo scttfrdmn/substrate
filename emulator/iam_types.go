@@ -43,6 +43,13 @@ type IAMRole struct {
 	Tags                     []IAMTag           `json:"Tags,omitempty"`
 	PermissionsBoundary      *IAMAttachedPolicy `json:"PermissionsBoundary,omitempty"`
 
+	// AssumeRolePolicyDocumentText is the trust policy exactly as CreateRole or
+	// UpdateAssumeRolePolicy received it, which is what GetRole serves (#1452).
+	// AssumeRolePolicyDocument is the same document parsed, for evaluation. Empty on a
+	// record written before #1452 or built by substrate, which serves the parsed form
+	// re-marshaled instead; see iam_policy_text.go.
+	AssumeRolePolicyDocumentText string `json:"AssumeRolePolicyDocumentText,omitempty"`
+
 	// RoleLastUsed records the last time the role was assumed, written by
 	// [STSPlugin.assumeRole] and reported by GetRole (#816).
 	//
@@ -95,6 +102,11 @@ type IAMPolicy struct {
 	CreateDate       time.Time      `json:"CreateDate"`
 	UpdateDate       time.Time      `json:"UpdateDate"`
 	Document         PolicyDocument `json:"Document,omitempty"`
+
+	// DocumentText is the policy document exactly as CreatePolicy received it, which is
+	// what GetPolicyVersion serves (#1452). Empty for a bundled AWS managed policy or a
+	// record written before #1452; see iam_policy_text.go.
+	DocumentText string `json:"DocumentText,omitempty"`
 
 	// Tags are the policy's resource tags, which AWS's `Policy` data type documents as
 	// `Tags.member.N`, max 50, `Required: No`. A record written before #796 has none, which

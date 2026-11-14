@@ -223,12 +223,13 @@ func iamPolicyVersionXML(version iamPolicyVersion, includeDocument bool) (string
 	b.WriteString("</CreateDate>")
 
 	if includeDocument {
-		raw, err := json.Marshal(version.policy.Document)
+		// The text CreatePolicy received, not the parsed form re-marshaled (#1452).
+		text, err := iamPolicyText(version.policy.DocumentText, version.policy.Document)
 		if err != nil {
-			return "", fmt.Errorf("marshal policy document: %w", err)
+			return "", err
 		}
 		b.WriteString("<Document>")
-		b.WriteString(xmlEsc(iamEscapeRFC3986(string(raw))))
+		b.WriteString(iamDocRFC3986.render(text))
 		b.WriteString("</Document>")
 	}
 	return b.String(), nil

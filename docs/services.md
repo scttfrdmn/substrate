@@ -3749,11 +3749,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | GetUser | |
 | DeleteUser | |
 | ListUsers | |
-| CreateRole | Supports trust policy document |
-| GetRole | Reports `AssumeRolePolicyDocument`, re-marshalled from the stored document rather than returned verbatim, so an equivalent form can come back (a `{"AWS":"1234"}` principal reads back as `"1234"`) |
-| UpdateAssumeRolePolicy | Replaces the trust policy in place; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
+| CreateRole | Supports trust policy document; the response carries it as submitted, unencoded — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| GetRole | Reports `AssumeRolePolicyDocument` as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
+| UpdateAssumeRolePolicy | Replaces the trust policy in place, kept as submitted; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles. Refuses a service-linked role with `UnmodifiableEntity`/400 — note 400, not the 409 the conflicts use |
-| ListRoles | |
+| ListRoles | Each role's trust policy as submitted, unencoded — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | CreateServiceLinkedRole | Mints the role under `/aws-service-role/<principal>/` with a trust policy naming the linked service. A duplicate name is `InvalidInput`/400, not `EntityAlreadyExists` (see below) |
 | DeleteServiceLinkedRole | Returns a `DeletionTaskId`; an incomplete task for the same role is returned again rather than duplicated. A role that exists but is not service-linked is `NoSuchEntity`/404 |
 | GetServiceLinkedRoleDeletionStatus | Reports `SUCCEEDED` unless [seeded](#seeding-a-service-linked-role-deletion-outcome); a `FAILED` task also reports the `Reason` and `RoleUsageList` |
@@ -3774,14 +3774,14 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DetachGroupPolicy | Same `PolicyArn` check as `DetachUserPolicy` |
 | ListAttachedGroupPolicies | |
 | PutGroupPolicy | Inline policy |
-| GetGroupPolicy | |
+| GetGroupPolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteGroupPolicy | |
 | ListGroupPolicies | |
 | CreatePolicy | |
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | `DeleteConflict`/409 while attached, naming the users, groups and roles; `InvalidInput` for a malformed ARN or a bundled AWS managed one — see below |
 | ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
-| GetPolicyVersion | Returns the document, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
+| GetPolicyVersion | Returns the document as `CreatePolicy` received it, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
 | ListPolicyVersions | Returns exactly one version — substrate stores one document per policy |
 | SimulatePrincipalPolicy | Evaluates a user's, group's or role's identity policies plus its permissions boundary. See "What the policy simulator evaluates" |
 | SimulateCustomPolicy | Evaluates `PolicyInputList` only; resolves no entity, so it declares no `NoSuchEntity` |
@@ -3789,11 +3789,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteAccessKey | |
 | ListAccessKeys | |
 | PutUserPolicy | Inline policy |
-| GetUserPolicy | |
+| GetUserPolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteUserPolicy | |
 | ListUserPolicies | |
 | PutRolePolicy | Inline policy |
-| GetRolePolicy | |
+| GetRolePolicy | The document as submitted, URL-encoded per RFC 3986 |
 | DeleteRolePolicy | |
 | ListRolePolicies | |
 | PutUserPermissionsBoundary | ARN shape checked, existence not — see below |
@@ -3819,6 +3819,33 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | UntagInstanceProfile | |
 | ListInstanceProfileTags | |
 | GetAccountAuthorizationDetails | Reports the account's users, groups, roles and managed policies with their inline and attached policies in one response. `Filter` selects populations, `MaxItems` counts across all four — see below |
+
+### Policy documents are served as submitted
+
+IAM stores a policy as the text it was given. Substrate now does too
+([#1452](https://github.com/scttfrdmn/substrate/issues/1452)): `CreateRole` and
+`UpdateAssumeRolePolicy` keep the trust policy's text, `CreatePolicy` the managed policy's, and
+`PutUserPolicy`, `PutGroupPolicy` and `PutRolePolicy` store the inline document as written. Every
+read serves that text. Before, substrate kept only the parsed document and re-marshaled it, which
+normalized it: a trust principal submitted as `{"AWS":"arn:aws:iam::444455556666:role/X"}` read back
+as the bare string `"arn:aws:iam::444455556666:role/X"`, a form IAM accepts only for `"*"`. So the
+document `GetRole` answered was not one `UpdateAssumeRolePolicy` would take, and code converging a
+trust policy by comparing `GetRole`'s answer with the document it means to write rewrote one real
+IAM reports unchanged. Whitespace and list-form members are kept the same way.
+
+The parsed form is still what policy evaluation, the `AssumeRole` trust gate and CloudFormation
+drift comparison read, so none of them changed. A record with no stored text (one written before
+#1452, a service-linked role, a bundled AWS managed policy) is served from its parsed form.
+
+**Which operations URL-encode.** Each page carrying the note "Policies returned by this operation
+are URL-encoded compliant with RFC 3986" percent-encodes the text: `GetRole`, `GetRolePolicy`,
+`GetUserPolicy`, `GetGroupPolicy`, `GetPolicyVersion` and `GetAccountAuthorizationDetails`. Only
+RFC 3986's unreserved characters are left bare, so a space is `%20`, never `+`. `CreateRole`'s page
+says instead that "the response includes the same trust policy in JSON format", and `ListRoles`,
+`CreateServiceLinkedRole`, `GetInstanceProfile` and `ListInstanceProfiles` carry no such note, so
+they serve the same text unencoded. botocore decodes every policy-document member automatically;
+an aws-sdk-go-v2 caller decodes `GetRole`'s `AssumeRolePolicyDocument` with `url.PathUnescape` (not
+`url.QueryUnescape`, which reads a literal `+` as a space).
 
 ### What the policy simulator evaluates
 
@@ -4381,18 +4408,13 @@ one shape rather than branching. With 52 bundled managed policies against a defa
 100, **truncation is on the default path** for any account of moderate size — a caller that
 ignores `IsTruncated` here sees a partial account, not an edge case.
 
-**Policy documents follow the per-shape pages, not the operation's blanket note**, and AWS's own
-documentation contradicts itself about this. The operation page states that every policy document
-in the response is URL-encoded per RFC 3986, while **its own sample response renders all of them
-as plain JSON**; of the members, only `PolicyVersion.Document`'s type page repeats the mandate,
-and `PolicyDetail.PolicyDocument` and `RoleDetail.AssumeRolePolicyDocument` carry no such
-sentence. Substrate follows the per-shape pages, so one response carries both conventions:
-`PolicyVersionList[].Document` is percent-encoded, byte-identical to `GetPolicyVersion`'s, while
-the inline documents and the trust policy are plain JSON, byte-identical to `GetUserPolicy`'s and
-`GetRole`'s. That is the invariant this operation exists to protect — a shape must not diverge
-between the operations reporting it — and encoding everything instead would be a breaking wire
-change to five shipped operations. The contradiction is recorded rather than silently resolved;
-`GetRole`'s page shows the same one.
+**Every policy document is URL-encoded per RFC 3986**, as the operation's page states ("Policies
+returned by this operation are URL-encoded compliant with RFC 3986"): the trust policy, the inline
+documents and `PolicyVersionList[].Document` alike, each the submitted text and byte-identical to
+what `GetRole`, `Get{User,Group,Role}Policy` and `GetPolicyVersion` send for it. The page's own
+sample response renders them as plain JSON; substrate follows the note, as it does for the singular
+operations ([#1452](https://github.com/scttfrdmn/substrate/issues/1452)). Before #1452 only
+`PolicyVersionList[].Document` was encoded.
 
 `SAMLProviderList` is a `Filter` value AWS accepts and substrate refuses, because substrate
 models no SAML provider: accepting the filter would select nothing, and a caller reading an empty

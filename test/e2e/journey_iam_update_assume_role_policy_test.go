@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/url"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -114,22 +115,22 @@ func TestJourney_UpdateAssumeRolePolicyTightensARoleInPlace(t *testing.T) {
 	}
 
 	// The SDK's read-back, which is the only way a consumer can assert what it set.
-	// Substrate emits the document as plain JSON rather than URL-encoded JSON:
-	// botocore unquotes then json.loads every policyDocumentType member and
-	// aws-sdk-go-v2 hands back the raw string, and unquoting plain JSON is a no-op,
-	// so both see valid JSON.
-	//
-	// Parsed with substrate's own PolicyDocument rather than an ad-hoc struct,
-	// because the document is re-marshaled from the stored parsed form: a
-	// Principal submitted as {"AWS":"9999…"} comes back as the bare string
-	// "9999…", which is the other form AWS accepts for the same meaning. Comparing
-	// semantically is therefore the assertion that holds; a byte compare against
-	// the submitted text would fail on a normalization, not on a defect.
+	// GetRole serves the trust policy URL-encoded per RFC 3986, as its page states,
+	// and aws-sdk-go-v2 hands back the raw string, so the caller decodes it. Decoded,
+	// it is the submitted text byte for byte (#1452): before, substrate re-marshaled
+	// its parsed form, and the {"AWS": "…"} principal came back flattened to a bare
+	// string — a document IAM would not accept back through this very operation.
 	role, err := iamClient.GetRole(ctx, &iam.GetRoleInput{RoleName: aws.String(roleName)})
 	if err != nil {
 		t.Fatalf("GetRole: %v", err)
 	}
-	doc := aws.ToString(role.Role.AssumeRolePolicyDocument)
+	doc, err := url.PathUnescape(aws.ToString(role.Role.AssumeRolePolicyDocument))
+	if err != nil {
+		t.Fatalf("GetRole trust policy is not RFC 3986-encoded: %v", err)
+	}
+	if doc != tightened {
+		t.Fatalf("GetRole trust policy = %q, want the submitted text %q", doc, tightened)
+	}
 	var parsed emulator.PolicyDocument
 	if err := json.Unmarshal([]byte(doc), &parsed); err != nil {
 		t.Fatalf("GetRole trust policy %q does not parse as JSON: %v", doc, err)
