@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -531,4 +532,67 @@ func TestSQS_ChangeMessageVisibility_TimeoutParameter(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, status)
 		assert.Equal(t, "InvalidParameterValue", code)
 	})
+}
+
+func TestSQS_ChangeMessageVisibility_SaveFailureIsReported(t *testing.T) {
+	for _, op := range []string{"ChangeMessageVisibility", "ChangeMessageVisibilityBatch"} {
+		t.Run(op, func(t *testing.T) {
+			state := newFailingPutStateManager()
+			srv, _ := newSQSTestServerWithState(t, state)
+			q := sqsTestCreateQueue(t, srv, "cmv-fail", nil)
+			sqsTestSend(t, srv, q, "x", nil)
+			got := sqsTestReceive(t, srv, true, q, map[string]any{"VisibilityTimeout": 60}, nil)
+			require.Len(t, got, 1)
+			state.failKey("msg:")
+			body := map[string]any{"QueueUrl": q, "ReceiptHandle": got[0].Handle, "VisibilityTimeout": 0}
+			if op == "ChangeMessageVisibilityBatch" {
+				body = map[string]any{"QueueUrl": q, "Entries": []map[string]any{{"Id": "e", "ReceiptHandle": got[0].Handle, "VisibilityTimeout": 0}}}
+			}
+			resp := sqsJSONRequest(t, srv, op, body)
+			assert.GreaterOrEqual(t, resp.StatusCode, http.StatusInternalServerError)
+			resp.Body.Close() //nolint:errcheck
+		})
+	}
+}
+
+func TestSQS_AttributeSelectionEdgeCases(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+	q := sqsTestCreateQueue(t, srv, "edge-attrs", nil)
+	sqsTestSend(t, srv, q, "x", nil)
+
+	// The bare, unindexed AttributeName the reference's own query examples send.
+	resp := sqsRequest(t, srv, map[string]string{"Action": "GetQueueAttributes", "QueueUrl": q, "AttributeName": "QueueArn"})
+	assert.Contains(t, readBody(t, resp), "QueueArn")
+
+	// A body that is not JSON is refused, not read as "no names".
+	r := sqsJSONRequest(t, srv, "GetQueueAttributes", map[string]any{"QueueUrl": q, "AttributeNames": "All"})
+	status, code := sqsErrorCode(t, r)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "ValidationError", code)
+
+	r = sqsJSONRequest(t, srv, "ChangeMessageVisibilityBatch", map[string]any{"QueueUrl": q, "Entries": "nope"})
+	status, code = sqsErrorCode(t, r)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "ValidationError", code)
+
+	r = sqsJSONRequest(t, srv, "ChangeMessageVisibilityBatch", map[string]any{"QueueUrl": q + "-missing", "Entries": []any{}})
+	status, code = sqsErrorCode(t, r)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "QueueDoesNotExist", code)
+
+	// ".*" selects every system attribute; a name the message lacks selects nothing.
+	got := sqsTestReceive(t, srv, true, q, map[string]any{"MessageSystemAttributeNames": []string{".*"}, "VisibilityTimeout": 0}, nil)
+	require.Len(t, got, 1)
+	assert.Contains(t, got[0].Attributes, "ApproximateReceiveCount")
+	got = sqsTestReceive(t, srv, true, q, map[string]any{"MessageSystemAttributeNames": []string{"SequenceNumber"}}, nil)
+	require.Len(t, got, 1)
+	assert.Nil(t, got[0].Attributes)
+
+	// An Id longer than 80 characters is InvalidBatchEntryId.
+	r = sqsJSONRequest(t, srv, "ChangeMessageVisibilityBatch", map[string]any{"QueueUrl": q, "Entries": []map[string]any{
+		{"Id": strings.Repeat("a", 81), "ReceiptHandle": "h", "VisibilityTimeout": 1},
+	}})
+	status, code = sqsErrorCode(t, r)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidBatchEntryId", code)
 }
