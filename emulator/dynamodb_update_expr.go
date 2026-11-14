@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"fmt"
+	"math/big"
 	"sort"
 	"strconv"
 	"strings"
@@ -166,7 +167,7 @@ func (u *ddbUpdateParser) peek() dynamoToken {
 	return dynamoToken{dynTokEOF, ""}
 }
 
-// clauseKeyword reports the clause a token opens, or "" if it opens none. SET, REMOVE,
+// ddbClauseKeyword reports the clause a token opens, or "" if it opens none. SET, REMOVE,
 // ADD and DELETE are DynamoDB reserved words, so a bare identifier spelled as one is
 // always the keyword; an attribute with such a name has to be written as #name.
 func ddbClauseKeyword(tok dynamoToken) string {
@@ -366,7 +367,7 @@ func ddbLongTypeName(av *AttributeValue) string {
 	}
 }
 
-// evalNode evaluates a SET value against the pre-update snapshot of the item.
+// evalDDBUpdateNode evaluates a SET value against the pre-update snapshot of the item.
 func evalDDBUpdateNode(n *ddbUpdateNode, snapshot map[string]*AttributeValue) (*AttributeValue, error) {
 	switch n.kind {
 	case ddbNodeValue:
@@ -415,11 +416,21 @@ func evalDDBUpdateNode(n *ddbUpdateNode, snapshot map[string]*AttributeValue) (*
 			return nil, ddbInvalidf(ddbMsgIncorrectType)
 		}
 		if n.kind == ddbNodePlus {
-			return &AttributeValue{N: ddbFormatNumber(ar.Add(ar, br))}, nil
+			return ddbNumberResult(ar.Add(ar, br))
 		}
-		return &AttributeValue{N: ddbFormatNumber(ar.Sub(ar, br))}, nil
+		return ddbNumberResult(ar.Sub(ar, br))
 	}
 	return nil, ddbInvalidf("Invalid UpdateExpression: unsupported operand")
+}
+
+// ddbNumberResult is the Number an arithmetic result r stores as, or DynamoDB's
+// ValidationException when r exceeds a Number's precision or range.
+func ddbNumberResult(r *big.Rat) (*AttributeValue, error) {
+	n := ddbFormatNumber(r)
+	if msg := ddbValidateNumber(n); msg != "" {
+		return nil, ddbInvalidf("%s", msg)
+	}
+	return &AttributeValue{N: n}, nil
 }
 
 // setDDBPath writes v at path in item. A nested path needs its parent to exist and be
@@ -450,6 +461,60 @@ func setDDBPath(item map[string]*AttributeValue, path []ddbPathSeg, v *Attribute
 	}
 	parent.M[last.name] = v
 	return nil
+}
+
+// applyDDBRemovals removes every path in removals from item. A list element's index
+// refers to the list as it was before the update, so the indexed removals of each
+// list are grouped by the list's path and applied from the highest index down, each
+// index once: `REMOVE l[0], b, l[2]` on [0,1,2,3] leaves [1,3]. Every other removal
+// is order-independent.
+func applyDDBRemovals(item map[string]*AttributeValue, removals [][]ddbPathSeg) {
+	type listRemovals struct {
+		parent  []ddbPathSeg
+		indexes []int
+	}
+	var lists []*listRemovals
+	byParent := map[string]*listRemovals{}
+	for _, path := range removals {
+		last := path[len(path)-1]
+		if !last.isIdx {
+			removeDDBPath(item, path)
+			continue
+		}
+		key := ddbPathKey(path[:len(path)-1])
+		lr, ok := byParent[key]
+		if !ok {
+			lr = &listRemovals{parent: path[:len(path)-1]}
+			byParent[key] = lr
+			lists = append(lists, lr)
+		}
+		lr.indexes = append(lr.indexes, last.index)
+	}
+	for _, lr := range lists {
+		sort.Sort(sort.Reverse(sort.IntSlice(lr.indexes)))
+		for i, idx := range lr.indexes {
+			if i > 0 && idx == lr.indexes[i-1] {
+				continue
+			}
+			path := append(append([]ddbPathSeg(nil), lr.parent...), ddbPathSeg{index: idx, isIdx: true})
+			removeDDBPath(item, path)
+		}
+	}
+}
+
+// ddbPathKey renders a document path as a string that identifies it, for grouping.
+// A map key and a list index cannot render alike, because a key is written after a
+// NUL and an index in brackets.
+func ddbPathKey(path []ddbPathSeg) string {
+	var b strings.Builder
+	for _, seg := range path {
+		if seg.isIdx {
+			b.WriteString("[" + strconv.Itoa(seg.index) + "]")
+			continue
+		}
+		b.WriteString("\x00" + seg.name)
+	}
+	return b.String()
 }
 
 // removeDDBPath deletes the value at path. Removing an absent attribute does nothing.
@@ -496,7 +561,7 @@ func ddbAddValues(existing, v *AttributeValue) (*AttributeValue, error) {
 		if !eok || !vok {
 			return nil, ddbInvalidf(ddbMsgIncorrectType)
 		}
-		return &AttributeValue{N: ddbFormatNumber(er.Add(er, vr))}, nil
+		return ddbNumberResult(er.Add(er, vr))
 	case "SS":
 		return &AttributeValue{SS: ddbUnion(existing.SS, v.SS, func(s string) string { return s })}, nil
 	case "NS":
@@ -631,40 +696,27 @@ func applyUpdateExpression(item map[string]*AttributeValue, expr string, names m
 		}
 	}
 
-	// REMOVEs of list elements index the pre-update list, so apply them from the
-	// highest index down; everything else is order-independent.
-	order := make([]int, len(actions))
-	for i := range order {
-		order[i] = i
-	}
-	sort.SliceStable(order, func(x, y int) bool {
-		a, b := actions[order[x]], actions[order[y]]
-		if a.clause != "REMOVE" || b.clause != "REMOVE" {
-			return false
-		}
-		la, lb := a.path[len(a.path)-1], b.path[len(b.path)-1]
-		return la.isIdx && lb.isIdx && la.index > lb.index
-	})
-
+	// Writes first, removals second. A SET to an existing list element replaces it in
+	// place and one past the end appends, so neither moves an element the pre-update
+	// list indexed; removals then resolve against those pre-update indexes (#1450).
 	touched := make([]string, 0, len(actions))
 	seen := map[string]bool{}
-	for _, i := range order {
-		act := actions[i]
-		switch {
-		case act.clause == "REMOVE":
-			removeDDBPath(work, act.path)
-		case results[i] == nil: // DELETE emptied the set
-			removeDDBPath(work, act.path)
-		default:
-			if err := setDDBPath(work, act.path, results[i]); err != nil {
-				return nil, err
-			}
-		}
+	var removals [][]ddbPathSeg
+	for i, act := range actions {
 		if top := act.path[0].name; !seen[top] {
 			seen[top] = true
 			touched = append(touched, top)
 		}
+		// A REMOVE, or a DELETE that emptied its set, removes the path.
+		if act.clause == "REMOVE" || results[i] == nil {
+			removals = append(removals, act.path)
+			continue
+		}
+		if err := setDDBPath(work, act.path, results[i]); err != nil {
+			return nil, err
+		}
 	}
+	applyDDBRemovals(work, removals)
 
 	for k := range item {
 		delete(item, k)

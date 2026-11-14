@@ -58,13 +58,153 @@ func (av AttributeValue) MarshalJSON() ([]byte, error) {
 
 // ddbParseNumber reads a DynamoDB Number exactly. DynamoDB numbers carry up to 38
 // significant digits, more than a float64 holds, so they are compared and added as
-// rationals rather than floats.
+// rationals rather than floats. Only the decimal form is accepted — big.Rat would also
+// read "0x10", "1/2" and octal or binary literals, none of which is a Number.
 func ddbParseNumber(s string) (*big.Rat, bool) {
 	s = strings.TrimSpace(s)
-	if s == "" {
+	if _, ok := ddbScanNumber(s); !ok {
 		return nil, false
 	}
 	return new(big.Rat).SetString(s)
+}
+
+// ddbNumberShape describes a decimal number's significant digits.
+type ddbNumberShape struct {
+	// digits is the count of significant digits: leading and trailing zeros trimmed.
+	digits int
+	// exponent is the power of ten of the most significant digit — the exponent of the
+	// number in scientific notation. Meaningless when digits is 0 (the number is zero).
+	exponent int
+}
+
+// ddbScanNumber reports whether s is a decimal number — an optional sign, digits with
+// an optional fraction, and an optional exponent — and describes its significant
+// digits.
+func ddbScanNumber(s string) (ddbNumberShape, bool) {
+	i := 0
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		i++
+	}
+	var intDigits, fracDigits strings.Builder
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		intDigits.WriteByte(s[i])
+		i++
+	}
+	if i < len(s) && s[i] == '.' {
+		i++
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			fracDigits.WriteByte(s[i])
+			i++
+		}
+	}
+	if intDigits.Len()+fracDigits.Len() == 0 {
+		return ddbNumberShape{}, false
+	}
+	exp := 0
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		neg := false
+		if i < len(s) && (s[i] == '+' || s[i] == '-') {
+			neg = s[i] == '-'
+			i++
+		}
+		start := i
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			// Saturate rather than overflow: any exponent this large is out of range.
+			if exp < 1_000_000 {
+				exp = exp*10 + int(s[i]-'0')
+			}
+			i++
+		}
+		if i == start {
+			return ddbNumberShape{}, false
+		}
+		if neg {
+			exp = -exp
+		}
+	}
+	if i != len(s) {
+		return ddbNumberShape{}, false
+	}
+	mantissa := strings.TrimLeft(intDigits.String()+fracDigits.String(), "0")
+	if mantissa == "" {
+		return ddbNumberShape{}, true // zero
+	}
+	trimmed := strings.TrimRight(mantissa, "0")
+	// The mantissa's last digit has power exp - len(frac); its first, that plus
+	// len(mantissa) - 1.
+	return ddbNumberShape{
+		digits:   len(trimmed),
+		exponent: exp - fracDigits.Len() + len(mantissa) - 1,
+	}, true
+}
+
+// ddbValidateNumber checks a Number against DynamoDB's limits: "up to 38 digits of
+// precision", and a magnitude from 1E-130 to 9.9999999999999999999999999999999999999E+125.
+// It returns the ValidationException message DynamoDB uses, or "" when n is valid.
+func ddbValidateNumber(n string) string {
+	shape, ok := ddbScanNumber(strings.TrimSpace(n))
+	switch {
+	case !ok:
+		return "A value provided cannot be converted into a number"
+	case shape.digits == 0:
+		return ""
+	case shape.exponent > 125:
+		return "Number overflow. Attempting to store a number with magnitude larger than supported range"
+	case shape.exponent < -130:
+		return "Number underflow. Attempting to store a number with magnitude smaller than supported range"
+	case shape.digits > 38:
+		return "Attempting to store more than 38 significant digits in a Number"
+	}
+	return ""
+}
+
+// dynamodbValidateNumbers checks every Number and Number-set member in the given
+// attribute maps, at any depth, and returns DynamoDB's ValidationException for the
+// first that is not a valid Number (#1454).
+func dynamodbValidateNumbers(maps ...map[string]*AttributeValue) error {
+	for _, m := range maps {
+		for _, av := range m {
+			if err := dynamodbValidateAVNumbers(av); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// dynamodbValidateAVNumbers is [dynamodbValidateNumbers] for one value.
+func dynamodbValidateAVNumbers(av *AttributeValue) error {
+	if av == nil {
+		return nil
+	}
+	check := func(n string) error {
+		if msg := ddbValidateNumber(n); msg != "" {
+			return &AWSError{Code: "ValidationException", Message: msg, HTTPStatus: http.StatusBadRequest}
+		}
+		return nil
+	}
+	if av.N != "" {
+		if err := check(av.N); err != nil {
+			return err
+		}
+	}
+	for _, n := range av.NS {
+		if err := check(n); err != nil {
+			return err
+		}
+	}
+	for _, v := range av.L {
+		if err := dynamodbValidateAVNumbers(v); err != nil {
+			return err
+		}
+	}
+	for _, v := range av.M {
+		if err := dynamodbValidateAVNumbers(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ddbFormatNumber writes r in the plain decimal form DynamoDB returns: no exponent, no
@@ -227,8 +367,8 @@ func ddbBinaryStrings(bs [][]byte) []string {
 
 // dynamodbBinaryKeyPrefix marks a Binary key attribute in a state-key component.
 //
-// String and Number keys are encoded as their bare value, exactly as before #1454, so
-// every existing table's state keys are unchanged. Binary keys used to encode as the
+// String keys are encoded as their bare value and Number keys as their canonical
+// decimal form, so every existing state key written in that form is unchanged. Binary keys used to encode as the
 // empty string — every Binary key of a table mapped to one item. They now encode as
 // this prefix followed by the standard base64 of the bytes, which is distinct per value.
 // A table's key attribute has one declared type, which substrate now enforces
@@ -243,7 +383,10 @@ func dynamodbKeyComponent(av *AttributeValue) string {
 	case av.S != nil:
 		return *av.S
 	case av.N != "":
-		return av.N
+		// Canonical, as DynamoDB stores numbers with "leading and trailing zeroes
+		// trimmed": "1.0" and "1" are one key. A number already in canonical form —
+		// which is how SDKs write them — encodes byte-for-byte as before.
+		return ddbCanonicalNumber(av.N)
 	case av.B != nil:
 		return dynamodbBinaryKeyPrefix + base64.StdEncoding.EncodeToString(av.B)
 	}

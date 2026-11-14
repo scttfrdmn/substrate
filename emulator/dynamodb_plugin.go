@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"sort"
 	"strconv"
@@ -715,6 +716,10 @@ func (p *DynamoDBPlugin) putItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.Item, input.ExpressionAttributeValues); err != nil {
+		return nil, err
+	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
@@ -789,6 +794,10 @@ func (p *DynamoDBPlugin) getItem(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.Key); err != nil {
+		return nil, err
+	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
@@ -827,6 +836,10 @@ func (p *DynamoDBPlugin) deleteItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.Key, input.ExpressionAttributeValues); err != nil {
+		return nil, err
 	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
@@ -895,6 +908,10 @@ func (p *DynamoDBPlugin) updateItem(ctx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.Key, input.ExpressionAttributeValues); err != nil {
+		return nil, err
 	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
@@ -1074,6 +1091,9 @@ func (p *DynamoDBPlugin) batchWriteItem(ctx *RequestContext, req *AWSRequest) (*
 				key = writeReq.DeleteRequest.Key
 			default:
 				continue
+			}
+			if err := dynamodbValidateNumbers(key); err != nil {
+				return nil, err
 			}
 			ik, err := dynamodbItemKeyFor(tbl, key)
 			if err != nil {
@@ -1265,6 +1285,9 @@ func (p *DynamoDBPlugin) transactWriteItems(reqCtx *RequestContext, req *AWSRequ
 		if tbl == nil {
 			return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Table not found: " + op.tableName, HTTPStatus: http.StatusBadRequest}
 		}
+		if err := dynamodbValidateNumbers(op.key, op.vals); err != nil {
+			return nil, err
+		}
 		ik, err := dynamodbItemKeyFor(tbl, op.key)
 		if err != nil {
 			return nil, err
@@ -1376,6 +1399,10 @@ func (p *DynamoDBPlugin) scan(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.ExpressionAttributeValues, input.ExclusiveStartKey); err != nil {
+		return nil, err
+	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
@@ -1468,6 +1495,10 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	// A Number outside DynamoDB's format, precision or range is refused (#1454).
+	if err := dynamodbValidateNumbers(input.ExpressionAttributeValues, input.ExclusiveStartKey); err != nil {
+		return nil, err
+	}
 
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
@@ -1498,8 +1529,27 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 
-	// Filter items matching PK (and SK condition if present).
-	var matchingKeys []string
+	// Sort by SK (ScanIndexForward).
+	// Use the schema's sort key for ordering even when there is no SK condition.
+	sortKey := skAttr
+	if sortKey == "" {
+		for _, ks := range keySchema {
+			if ks.KeyType == "RANGE" {
+				sortKey = ks.AttributeName
+				break
+			}
+		}
+	}
+
+	// Filter items matching PK (and SK condition if present). Each item is loaded once
+	// and its sort-key value read once, so the sort below compares values in hand.
+	type queryMatch struct {
+		ik   string
+		item map[string]*AttributeValue
+		sk   *AttributeValue
+		num  *big.Rat // the sort key as a number, when it is a Number
+	}
+	var matches []queryMatch
 	for _, ik := range itemKeys {
 		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
 		if loadErr != nil || item == nil {
@@ -1522,33 +1572,28 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 			}
 		}
 
-		matchingKeys = append(matchingKeys, ik)
-	}
-
-	// Sort by SK (ScanIndexForward).
-	// Use the schema's sort key for ordering even when there is no SK condition.
-	sortKey := skAttr
-	if sortKey == "" {
-		for _, ks := range keySchema {
-			if ks.KeyType == "RANGE" {
-				sortKey = ks.AttributeName
-				break
+		m := queryMatch{ik: ik, item: item}
+		if sortKey != "" {
+			m.sk = item[sortKey]
+			if avTypeName(m.sk) == "N" {
+				m.num, _ = ddbParseNumber(m.sk.N)
 			}
 		}
+		matches = append(matches, m)
 	}
+
 	forward := input.ScanIndexForward == nil || *input.ScanIndexForward
 	if sortKey != "" {
-		sort.SliceStable(matchingKeys, func(i, j int) bool {
-			itemI, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[i])
-			itemJ, _ := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, matchingKeys[j])
-			if itemI == nil || itemJ == nil {
-				return false
-			}
+		sort.SliceStable(matches, func(i, j int) bool {
 			// Typed order: a Number sort key sorts numerically and a Binary one by
 			// unsigned bytes (#1454).
-			c, ok := avOrder(itemI[sortKey], itemJ[sortKey])
-			if !ok {
-				c = strings.Compare(dynamodbKeyComponent(itemI[sortKey]), dynamodbKeyComponent(itemJ[sortKey]))
+			var c int
+			if mi, mj := matches[i], matches[j]; mi.num != nil && mj.num != nil {
+				c = mi.num.Cmp(mj.num)
+			} else if oc, ok := avOrder(mi.sk, mj.sk); ok {
+				c = oc
+			} else {
+				c = strings.Compare(dynamodbKeyComponent(mi.sk), dynamodbKeyComponent(mj.sk))
 			}
 			if forward {
 				return c < 0
@@ -1562,24 +1607,21 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 	if input.ExclusiveStartKey != nil {
 		_, startPK, _, startSK, _ := extractPrimaryKey(input.ExclusiveStartKey, tbl.KeySchema)
 		startKey := dynamodbItemKey(startPK, startSK)
-		for i, k := range matchingKeys {
-			if k == startKey {
+		for i, m := range matches {
+			if m.ik == startKey {
 				startIdx = i + 1
 				break
 			}
 		}
 	}
-	matchingKeys = matchingKeys[startIdx:]
+	matches = matches[startIdx:]
 
 	var items []map[string]*AttributeValue
 	var lastEvaluatedKey map[string]*AttributeValue
 	scannedCount := 0
 
-	for i, ik := range matchingKeys {
-		item, loadErr := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, input.TableName, ik)
-		if loadErr != nil || item == nil {
-			continue
-		}
+	for i, m := range matches {
+		item := m.item
 		scannedCount++
 
 		// Apply filter expression.
@@ -1597,7 +1639,7 @@ func (p *DynamoDBPlugin) query(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		items = append(items, projected)
 
 		if input.Limit > 0 && len(items) >= input.Limit {
-			if i+1 < len(matchingKeys) {
+			if i+1 < len(matches) {
 				lastEvaluatedKey = extractKeyFromItem(item, tbl.KeySchema)
 			}
 			break
@@ -2955,358 +2997,4 @@ func (p *DynamoDBPlugin) executePartiQLStatement(
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
-}
-
-// tokenizePartiQL extracts the verb, table name, WHERE clause, and SET clause
-// from a simple PartiQL statement. Only basic patterns are supported.
-func tokenizePartiQL(stmt string) (verb, tableName, whereClause, setClause string) {
-	stmt = strings.TrimSpace(stmt)
-	upper := strings.ToUpper(stmt)
-
-	if strings.HasPrefix(upper, "SELECT") {
-		// SELECT * FROM "table" [WHERE ...]
-		fromIdx := strings.Index(upper, " FROM ")
-		if fromIdx < 0 {
-			return "SELECT", "", "", ""
-		}
-		rest := strings.TrimSpace(stmt[fromIdx+6:])
-		tableName = extractPartiQLTableName(rest)
-		whereClause = extractPartiQLClause(rest, "WHERE")
-		return "SELECT", tableName, whereClause, ""
-	}
-
-	if strings.HasPrefix(upper, "INSERT") {
-		// INSERT INTO "table" VALUE {...}
-		intoIdx := strings.Index(upper, " INTO ")
-		if intoIdx < 0 {
-			return "INSERT", "", "", ""
-		}
-		rest := strings.TrimSpace(stmt[intoIdx+6:])
-		tableName = extractPartiQLTableName(rest)
-		valueClause := extractPartiQLClause(rest, "VALUE")
-		return "INSERT", tableName, "", valueClause
-	}
-
-	if strings.HasPrefix(upper, "UPDATE") {
-		// UPDATE "table" SET ... WHERE ...
-		rest := strings.TrimSpace(stmt[6:])
-		tableName = extractPartiQLTableName(rest)
-		setClause = extractPartiQLClause(rest, "SET")
-		// The SET clause ends where the WHERE clause begins.
-		if w := strings.Index(strings.ToUpper(setClause), " WHERE "); w >= 0 {
-			setClause = strings.TrimSpace(setClause[:w])
-		}
-		whereClause = extractPartiQLClause(rest, "WHERE")
-		return "UPDATE", tableName, whereClause, setClause
-	}
-
-	if strings.HasPrefix(upper, "DELETE") {
-		// DELETE FROM "table" WHERE ...
-		fromIdx := strings.Index(upper, " FROM ")
-		if fromIdx < 0 {
-			return "DELETE", "", "", ""
-		}
-		rest := strings.TrimSpace(stmt[fromIdx+6:])
-		tableName = extractPartiQLTableName(rest)
-		whereClause = extractPartiQLClause(rest, "WHERE")
-		return "DELETE", tableName, whereClause, ""
-	}
-
-	return "", "", "", ""
-}
-
-// extractPartiQLTableName returns the table name from the leading part of a
-// PartiQL statement fragment. Table names may be quoted or unquoted.
-func extractPartiQLTableName(s string) string {
-	s = strings.TrimSpace(s)
-	if len(s) == 0 {
-		return ""
-	}
-	if s[0] == '"' {
-		end := strings.Index(s[1:], `"`)
-		if end < 0 {
-			return s[1:]
-		}
-		return s[1 : end+1]
-	}
-	// Unquoted: read until space.
-	if idx := strings.IndexAny(s, " \t"); idx >= 0 {
-		return s[:idx]
-	}
-	return s
-}
-
-// extractPartiQLClause returns the text following keyword in a statement.
-func extractPartiQLClause(stmt, keyword string) string {
-	upper := strings.ToUpper(stmt)
-	prefix := " " + keyword + " "
-	idx := strings.Index(upper, prefix)
-	if idx < 0 {
-		prefix = keyword + " "
-		if strings.HasPrefix(upper, prefix) {
-			idx = -len(keyword)
-		} else {
-			return ""
-		}
-	}
-	return strings.TrimSpace(stmt[idx+len(prefix):])
-}
-
-func (p *DynamoDBPlugin) partiQLSelect(
-	ctx *RequestContext,
-	tbl *DynamoDBTable,
-	whereClause string,
-	_ []*AttributeValue,
-) ([]map[string]*AttributeValue, error) {
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
-	if err != nil {
-		return nil, err
-	}
-
-	var results []map[string]*AttributeValue
-	for _, k := range keys {
-		item, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, k)
-		if err != nil || item == nil {
-			continue
-		}
-		if whereClause != "" {
-			ok, _ := evalDynamoCondition(whereClause, nil, nil, item)
-			if !ok {
-				continue
-			}
-		}
-		results = append(results, item)
-	}
-	return results, nil
-}
-
-func (p *DynamoDBPlugin) partiQLInsert(
-	ctx *RequestContext,
-	tbl *DynamoDBTable,
-	valueClause string,
-	_ []*AttributeValue,
-) ([]map[string]*AttributeValue, error) {
-	// valueClause should be a JSON object like {"pk": {"S": "val"}, ...}
-	var item map[string]*AttributeValue
-	if err := json.Unmarshal([]byte(valueClause), &item); err != nil {
-		return nil, &AWSError{
-			Code:       "ValidationException",
-			Message:    "Failed to parse VALUE clause as item: " + err.Error(),
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-
-	ik, err := dynamodbItemKeyFor(tbl, item)
-	if err != nil {
-		return nil, err
-	}
-
-	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tbl.TableName, ik)
-	defer unlock()
-	old, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik)
-	if err != nil {
-		return nil, err
-	}
-	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName, ik, old, item); err != nil {
-		return nil, fmt.Errorf("dynamodb partiQLInsert: %w", err)
-	}
-	return nil, nil
-}
-
-func (p *DynamoDBPlugin) partiQLUpdate(
-	ctx *RequestContext,
-	tbl *DynamoDBTable,
-	whereClause, setClause string,
-	_ []*AttributeValue,
-) ([]map[string]*AttributeValue, error) {
-	var (
-		updateExpr string
-		names      map[string]string
-		values     map[string]*AttributeValue
-	)
-	if setClause != "" {
-		var err error
-		updateExpr, names, values, err = partiQLSetToUpdateExpression(setClause)
-		if err != nil {
-			return nil, &AWSError{
-				Code:       "ValidationException",
-				Message:    "Failed to apply SET clause: " + err.Error(),
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-	}
-
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, k := range keys {
-		if err := p.partiQLUpdateOne(ctx, tbl.TableName, k, whereClause, updateExpr, names, values); err != nil {
-			return nil, err
-		}
-	}
-	return nil, nil
-}
-
-// partiQLUpdateOne applies a PartiQL UPDATE to one item under the item's stripe. An
-// item that does not exist or does not match the WHERE clause is left alone.
-func (p *DynamoDBPlugin) partiQLUpdateOne(
-	ctx *RequestContext,
-	tableName, ik, whereClause, updateExpr string,
-	names map[string]string,
-	values map[string]*AttributeValue,
-) error {
-	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tableName, ik)
-	defer unlock()
-	current, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
-	if err != nil {
-		return err
-	}
-	if current == nil {
-		return nil
-	}
-	if whereClause != "" {
-		if ok, _ := evalDynamoCondition(whereClause, nil, nil, current); !ok {
-			return nil
-		}
-	}
-	item := copyItem(current)
-	if updateExpr != "" {
-		if _, applyErr := applyUpdateExpression(item, updateExpr, names, values); applyErr != nil {
-			return &AWSError{
-				Code:       "ValidationException",
-				Message:    "Failed to apply SET clause: " + applyErr.Error(),
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-	}
-	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, current, item); err != nil {
-		return fmt.Errorf("dynamodb partiQLUpdate: %w", err)
-	}
-	return nil
-}
-
-// partiQLSetToUpdateExpression rewrites a PartiQL SET clause — `a = 'x', "b" = 5` —
-// as an update expression over placeholders, so it is applied by the same code as
-// UpdateItem. Each value must be a literal: a single-quoted string (” escapes a
-// quote), a number, or true/false. A double-quoted right-hand side is read as a string,
-// as substrate has always accepted it.
-func partiQLSetToUpdateExpression(setClause string) (string, map[string]string, map[string]*AttributeValue, error) {
-	names := map[string]string{}
-	values := map[string]*AttributeValue{}
-	var actions []string
-	for i, part := range partiQLSplitTopLevel(setClause, ',') {
-		eq := partiQLIndexTopLevel(part, '=')
-		if eq < 0 {
-			return "", nil, nil, fmt.Errorf("SET action missing '=': %q", strings.TrimSpace(part))
-		}
-		lhs := strings.Trim(strings.TrimSpace(part[:eq]), `"`)
-		rhs := strings.TrimSpace(part[eq+1:])
-		if lhs == "" {
-			return "", nil, nil, fmt.Errorf("SET action missing attribute name: %q", strings.TrimSpace(part))
-		}
-		av, err := partiQLLiteral(rhs)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		n, v := "#p"+strconv.Itoa(i), ":p"+strconv.Itoa(i)
-		names[n] = lhs
-		values[v] = av
-		actions = append(actions, n+" = "+v)
-	}
-	return "SET " + strings.Join(actions, ", "), names, values, nil
-}
-
-// partiQLLiteral reads one PartiQL literal value.
-func partiQLLiteral(s string) (*AttributeValue, error) {
-	switch {
-	case len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'':
-		v := strings.ReplaceAll(s[1:len(s)-1], "''", "'")
-		return &AttributeValue{S: &v}, nil
-	case len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"':
-		v := s[1 : len(s)-1]
-		return &AttributeValue{S: &v}, nil
-	case strings.EqualFold(s, "true"), strings.EqualFold(s, "false"):
-		b := strings.EqualFold(s, "true")
-		return &AttributeValue{BOOL: &b}, nil
-	}
-	if _, ok := ddbParseNumber(s); ok {
-		return &AttributeValue{N: s}, nil
-	}
-	return nil, fmt.Errorf("unsupported value in SET clause: %q", s)
-}
-
-// partiQLSplitTopLevel splits s at sep where sep is outside quotes.
-func partiQLSplitTopLevel(s string, sep byte) []string {
-	var parts []string
-	start := 0
-	for {
-		i := partiQLIndexTopLevel(s[start:], sep)
-		if i < 0 {
-			return append(parts, s[start:])
-		}
-		parts = append(parts, s[start:start+i])
-		start += i + 1
-	}
-}
-
-// partiQLIndexTopLevel returns the index of the first sep in s outside quotes, or -1.
-func partiQLIndexTopLevel(s string, sep byte) int {
-	var quote byte
-	for i := 0; i < len(s); i++ {
-		c := s[i]
-		switch {
-		case quote != 0:
-			if c == quote {
-				quote = 0
-			}
-		case c == '\'' || c == '"':
-			quote = c
-		case c == sep:
-			return i
-		}
-	}
-	return -1
-}
-
-func (p *DynamoDBPlugin) partiQLDelete(
-	ctx *RequestContext,
-	tbl *DynamoDBTable,
-	whereClause string,
-	_ []*AttributeValue,
-) ([]map[string]*AttributeValue, error) {
-	keys, err := p.loadItemKeys(context.Background(), ctx.AccountID, ctx.Region, tbl.TableName)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, k := range keys {
-		if err := p.partiQLDeleteOne(ctx, tbl.TableName, k, whereClause); err != nil {
-			return nil, err
-		}
-	}
-	return nil, nil
-}
-
-// partiQLDeleteOne applies a PartiQL DELETE to one item under the item's stripe.
-func (p *DynamoDBPlugin) partiQLDeleteOne(ctx *RequestContext, tableName, ik, whereClause string) error {
-	unlock := p.locks.lockItem(ctx.AccountID, ctx.Region, tableName, ik)
-	defer unlock()
-	current, err := p.loadItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik)
-	if err != nil {
-		return err
-	}
-	if current == nil {
-		return nil
-	}
-	if whereClause != "" {
-		if ok, _ := evalDynamoCondition(whereClause, nil, nil, current); !ok {
-			return nil
-		}
-	}
-	if err := p.commitItem(context.Background(), ctx.AccountID, ctx.Region, tableName, ik, current, nil); err != nil {
-		return fmt.Errorf("dynamodb partiQLDelete: %w", err)
-	}
-	return nil
 }

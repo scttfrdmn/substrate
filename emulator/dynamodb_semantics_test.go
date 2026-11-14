@@ -405,6 +405,40 @@ func TestDynamoDB_UpdateExpression_Functions(t *testing.T) {
 			want:    map[string]any{"m": map[string]any{"M": map[string]any{"x": av("keep"), "y": av("new")}}},
 		},
 		{
+			// Review of #1479: a comparator that ordered only index REMOVEs among
+			// themselves was not transitive across the non-index REMOVE between them.
+			name:    "REMOVE list indexes around a non-index REMOVE",
+			initial: map[string]any{"a": map[string]any{"L": []any{avn("0"), avn("1"), avn("2"), avn("3")}}, "b": av("x")},
+			expr:    "REMOVE a[0], b, a[2]",
+			want:    map[string]any{"a": map[string]any{"L": []any{avn("1"), avn("3")}}},
+			absent:  []string{"b"},
+		},
+		{
+			name:    "REMOVE indexes in two lists and a repeated index",
+			initial: map[string]any{"a": map[string]any{"L": []any{avn("0"), avn("1"), avn("2")}}, "c": map[string]any{"L": []any{av("x"), av("y")}}},
+			expr:    "REMOVE c[0], a[2], a[0], a[2]",
+			want:    map[string]any{"a": map[string]any{"L": []any{avn("1")}}, "c": map[string]any{"L": []any{av("y")}}},
+		},
+		{
+			name:    "SET a list element and REMOVE another by pre-update index",
+			initial: map[string]any{"a": map[string]any{"L": []any{avn("0"), avn("1"), avn("2"), avn("3")}}},
+			expr:    "SET a[0] = :x REMOVE a[1]",
+			values:  map[string]any{":x": av("x")},
+			want:    map[string]any{"a": map[string]any{"L": []any{av("x"), avn("2"), avn("3")}}},
+		},
+		{
+			name:    "arithmetic past the Number range is a ValidationException",
+			initial: map[string]any{"n": avn("9.9999999999999999999999999999999999999E+125")},
+			expr:    "SET n = n + n",
+			wantErr: "Number overflow",
+		},
+		{
+			name:    "an invalid Number expression value is a ValidationException",
+			expr:    "SET n = :v",
+			values:  map[string]any{":v": avn("0x10")},
+			wantErr: "A value provided cannot be converted into a number",
+		},
+		{
 			name:    "actions read the pre-update item",
 			initial: map[string]any{"a": avn("1"), "b": avn("2"), "c": avn("3")},
 			expr:    "REMOVE a SET b = a, c = b",
@@ -953,4 +987,140 @@ func TestDynamoDB_PartiQLUpdateSetsLiteralValues(t *testing.T) {
 	assert.Equal(t, av("Bob's"), got["name"])
 	assert.Equal(t, avn("42"), got["age"])
 	assert.Equal(t, map[string]any{"BOOL": true}, got["ok"])
+}
+
+func TestDynamoDB_PartiQLWhereClause(t *testing.T) {
+	setup := func(t *testing.T) *emulator.Server {
+		t.Helper()
+		srv := newDynamoDBTestServer(t)
+		ddbCreateTable(t, srv, "pw", [3]string{"pk", "S", "HASH"})
+		for _, k := range []string{"k1", "k2", "k3"} {
+			ddbMustOK(t, srv, "PutItem", map[string]any{"TableName": "pw", "Item": map[string]any{"pk": av(k), "n": avn("1")}})
+		}
+		return srv
+	}
+	get := func(t *testing.T, srv *emulator.Server, k string) map[string]any {
+		t.Helper()
+		return ddbGet(t, srv, "pw", map[string]any{"pk": av(k)})
+	}
+
+	t.Run("UPDATE with a quoted-literal WHERE updates only the match", func(t *testing.T) {
+		srv := setup(t)
+		ddbMustOK(t, srv, "ExecuteStatement", map[string]any{"Statement": `UPDATE "pw" SET a = 1 WHERE pk = 'k1'`})
+		assert.Equal(t, avn("1"), get(t, srv, "k1")["a"])
+		assert.NotContains(t, get(t, srv, "k2"), "a")
+	})
+	t.Run("a SET literal containing WHERE is kept whole", func(t *testing.T) {
+		srv := setup(t)
+		ddbMustOK(t, srv, "ExecuteStatement", map[string]any{"Statement": `UPDATE "pw" SET note = 'x WHERE y' WHERE pk = 'k2'`})
+		assert.Equal(t, av("x WHERE y"), get(t, srv, "k2")["note"])
+		assert.NotContains(t, get(t, srv, "k1"), "note")
+	})
+	t.Run("DELETE with a WHERE deletes only the match", func(t *testing.T) {
+		srv := setup(t)
+		ddbMustOK(t, srv, "ExecuteStatement", map[string]any{"Statement": `DELETE FROM "pw" WHERE pk = 'k2'`})
+		assert.Nil(t, get(t, srv, "k2"))
+		assert.NotNil(t, get(t, srv, "k1"))
+		assert.NotNil(t, get(t, srv, "k3"))
+	})
+	t.Run("SELECT with WHERE on a string and a number", func(t *testing.T) {
+		srv := setup(t)
+		out := ddbMustOK(t, srv, "ExecuteStatement", map[string]any{"Statement": `SELECT * FROM "pw" WHERE pk = 'k3' AND n = 1`})
+		assert.Len(t, out["Items"], 1)
+		out = ddbMustOK(t, srv, "ExecuteStatement", map[string]any{"Statement": `SELECT * FROM "pw" WHERE pk != 'k3'`})
+		assert.Len(t, out["Items"], 2)
+	})
+	t.Run("? parameters are substituted in statement order", func(t *testing.T) {
+		srv := setup(t)
+		ddbMustOK(t, srv, "ExecuteStatement", map[string]any{
+			"Statement":  `UPDATE "pw" SET a = ? WHERE pk = ?`,
+			"Parameters": []any{avn("7"), av("k3")},
+		})
+		assert.Equal(t, avn("7"), get(t, srv, "k3")["a"])
+		assert.NotContains(t, get(t, srv, "k1"), "a")
+	})
+	for _, tc := range []struct {
+		name   string
+		stmt   string
+		params []any
+	}{
+		{"an unterminated literal", `DELETE FROM "pw" WHERE pk = 'k1`, nil},
+		{"a clause that does not parse", `UPDATE "pw" SET a = 1 WHERE pk = = 'k1'`, nil},
+		{"too few parameters", `DELETE FROM "pw" WHERE pk = ?`, nil},
+	} {
+		t.Run("refuses "+tc.name, func(t *testing.T) {
+			srv := setup(t)
+			req := map[string]any{"Statement": tc.stmt}
+			if tc.params != nil {
+				req["Parameters"] = tc.params
+			}
+			status, body := ddbCall(t, srv, "ExecuteStatement", req)
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, "ValidationException", ddbErrCode(body))
+			for _, k := range []string{"k1", "k2", "k3"} {
+				assert.NotNil(t, get(t, srv, k), "a refused statement changes nothing")
+			}
+		})
+	}
+}
+
+func TestDynamoDB_NumberKeysAreCanonical(t *testing.T) {
+	srv, state := newDynamoDBStateServer(t)
+	ddbCreateTable(t, srv, "nc", [3]string{"id", "N", "HASH"})
+	ddbMustOK(t, srv, "PutItem", map[string]any{"TableName": "nc", "Item": map[string]any{"id": avn("1.0"), "v": av("first")}})
+
+	got := ddbGet(t, srv, "nc", map[string]any{"id": avn("1")})
+	require.NotNil(t, got, "1.0 and 1 are one key")
+	assert.Equal(t, av("first"), got["v"])
+
+	ddbMustOK(t, srv, "PutItem", map[string]any{"TableName": "nc", "Item": map[string]any{"id": avn("1E0"), "v": av("second")}})
+	scan := ddbMustOK(t, srv, "Scan", map[string]any{"TableName": "nc"})
+	assert.EqualValues(t, 1, scan["Count"], "a second spelling of the same number overwrites")
+
+	raw, err := state.Get(context.Background(), "dynamodb", "item:123456789012/us-east-1/nc/1")
+	require.NoError(t, err)
+	assert.NotNil(t, raw, "stored under the canonical form")
+}
+
+func TestDynamoDB_NumberFormatIsValidated(t *testing.T) {
+	cases := []struct {
+		n       string
+		wantErr string // "" when valid
+	}{
+		{"42", ""},
+		{"-1.5e3", ""},
+		{".5", ""},
+		{"1E-130", ""},
+		{"9.9999999999999999999999999999999999999E+125", ""},
+		{"12345678901234567890123456789012345678", ""},
+		{"0x10", "A value provided cannot be converted into a number"},
+		{"1/2", "A value provided cannot be converted into a number"},
+		{"0b101", "A value provided cannot be converted into a number"},
+		{"1e", "A value provided cannot be converted into a number"},
+		{"abc", "A value provided cannot be converted into a number"},
+		{"123456789012345678901234567890123456789", "Attempting to store more than 38 significant digits in a Number"},
+		{"1E126", "Number overflow"},
+		{"1E-131", "Number underflow"},
+	}
+	srv := newDynamoDBTestServer(t)
+	ddbCreateTable(t, srv, "nf", [3]string{"pk", "S", "HASH"})
+	for _, tc := range cases {
+		t.Run(tc.n, func(t *testing.T) {
+			status, body := ddbCall(t, srv, "PutItem", map[string]any{"TableName": "nf", "Item": map[string]any{"pk": av(tc.n), "n": avn(tc.n)}})
+			if tc.wantErr == "" {
+				assert.Equal(t, http.StatusOK, status, "%v", body)
+				return
+			}
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, "ValidationException", ddbErrCode(body))
+			assert.Contains(t, fmt.Sprint(body), tc.wantErr)
+		})
+	}
+	t.Run("in a number set inside a map", func(t *testing.T) {
+		status, body := ddbCall(t, srv, "PutItem", map[string]any{"TableName": "nf", "Item": map[string]any{
+			"pk": av("deep"), "m": map[string]any{"M": map[string]any{"ns": map[string]any{"NS": []any{"1", "0x2"}}}},
+		}})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "ValidationException", ddbErrCode(body))
+	})
 }
