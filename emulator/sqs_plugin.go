@@ -498,14 +498,17 @@ func (p *SQSPlugin) getQueueAttributes(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	// The approximate counts are exact here: substrate's queue metadata has no
-	// propagation delay to model (#1441).
-	visible, notVisible, delayed, err := p.sqsMessageCounts(context.Background(), sqsURLKey(ctx.Region, queueURL), p.tc.Now())
-	if err != nil {
-		return nil, err
+	// propagation delay to model (#1441). They cost a scan of the queue's messages, so
+	// they are counted only when a request asks for one of them.
+	if sqsWantsMessageCounts(requested) {
+		visible, notVisible, delayed, err := p.sqsMessageCounts(context.Background(), sqsURLKey(ctx.Region, queueURL), p.tc.Now())
+		if err != nil {
+			return nil, err
+		}
+		all["ApproximateNumberOfMessages"] = strconv.Itoa(visible)
+		all["ApproximateNumberOfMessagesNotVisible"] = strconv.Itoa(notVisible)
+		all["ApproximateNumberOfMessagesDelayed"] = strconv.Itoa(delayed)
 	}
-	all["ApproximateNumberOfMessages"] = strconv.Itoa(visible)
-	all["ApproximateNumberOfMessagesNotVisible"] = strconv.Itoa(notVisible)
-	all["ApproximateNumberOfMessagesDelayed"] = strconv.Itoa(delayed)
 
 	attrs, refusal := sqsSelectQueueAttributes(all, requested)
 	if refusal != nil {
@@ -1744,26 +1747,37 @@ func (p *SQSPlugin) changeMessageVisibility(ctx *RequestContext, req *AWSRequest
 	var vis int
 	if sqsIsJSONProtocol(req) {
 		var input struct {
-			ReceiptHandle     string `json:"ReceiptHandle"`
-			VisibilityTimeout int    `json:"VisibilityTimeout"`
+			ReceiptHandle string `json:"ReceiptHandle"`
+			// A pointer, because VisibilityTimeout is required ("Required: Yes") and an
+			// absent one must not read as 0.
+			VisibilityTimeout *int `json:"VisibilityTimeout"`
 		}
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, sqsInvalidBody()
 		}
+		if input.VisibilityTimeout == nil {
+			return nil, sqsMissingVisibilityTimeout()
+		}
 		receiptHandle = input.ReceiptHandle
-		vis = input.VisibilityTimeout
+		vis = *input.VisibilityTimeout
 	} else {
 		receiptHandle = req.Params["ReceiptHandle"]
-		visStr := req.Params["VisibilityTimeout"]
-		vis, _ = strconv.Atoi(visStr)
+		n, present, refusal := sqsQueryVisibilityTimeout(req.Params, "VisibilityTimeout")
+		if refusal != nil {
+			return nil, refusal
+		}
+		if !present {
+			return nil, sqsMissingVisibilityTimeout()
+		}
+		vis = n
 	}
 
 	urlKey := sqsURLKey(ctx.Region, queueURL)
-	ids, err := p.loadMsgIDs(context.Background(), urlKey)
+	byHandle, err := p.sqsMessagesByHandle(context.Background(), urlKey)
 	if err != nil {
 		return nil, err
 	}
-	if awsErr, err := p.changeVisibility(context.Background(), urlKey, ids, receiptHandle, vis); err != nil {
+	if awsErr, err := p.changeVisibility(context.Background(), urlKey, byHandle, receiptHandle, vis); err != nil {
 		return nil, fmt.Errorf("sqs changeMessageVisibility: %w", err)
 	} else if awsErr != nil {
 		return nil, awsErr

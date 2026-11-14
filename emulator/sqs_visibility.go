@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -17,39 +18,80 @@ const sqsMaxVisibilityTimeout = 43200
 // sqsMaxBatchEntries is the most entries one SQS batch request may carry.
 const sqsMaxBatchEntries = 10
 
+// sqsMessagesByHandle loads a queue's messages once and indexes them by their current
+// receipt handle, so a batch resolves every entry's handle without rescanning the
+// queue.
+func (p *SQSPlugin) sqsMessagesByHandle(ctx context.Context, urlKey string) (map[string]*SQSMessage, error) {
+	ids, err := p.loadMsgIDs(ctx, urlKey)
+	if err != nil {
+		return nil, err
+	}
+	byHandle := make(map[string]*SQSMessage, len(ids))
+	for _, id := range ids {
+		msg, err := p.loadMsg(ctx, urlKey, id)
+		if err != nil {
+			return nil, err
+		}
+		if msg != nil && msg.ReceiptHandle != "" {
+			byHandle[msg.ReceiptHandle] = msg
+		}
+	}
+	return byHandle, nil
+}
+
 // changeVisibility sets the visibility timeout of the message receiptHandle names to
 // vis seconds from now. It returns the AWS refusal — as the first result, so a batch
 // can report it per entry — when the handle names no message of the queue
 // (ReceiptHandleIsInvalid), when the message is not in flight (MessageNotInflight), or
 // when vis is outside 0..43200. Before #1462 an unknown handle answered 200 and changed
 // nothing, so a consumer extending a lease it had already lost was never told.
-func (p *SQSPlugin) changeVisibility(ctx context.Context, urlKey string, ids []string, receiptHandle string, vis int) (*AWSError, error) {
+func (p *SQSPlugin) changeVisibility(ctx context.Context, urlKey string, byHandle map[string]*SQSMessage, receiptHandle string, vis int) (*AWSError, error) {
 	if vis < 0 || vis > sqsMaxVisibilityTimeout {
 		return sqsVisibilityTimeoutOutOfRange(vis), nil
 	}
-	if receiptHandle == "" {
+	msg, ok := byHandle[receiptHandle]
+	if receiptHandle == "" || !ok {
 		return sqsReceiptHandleIsInvalid(receiptHandle), nil
 	}
 	now := p.tc.Now()
-	for _, id := range ids {
-		msg, err := p.loadMsg(ctx, urlKey, id)
-		if err != nil {
-			return nil, err
-		}
-		if msg == nil || msg.ReceiptHandle != receiptHandle {
-			continue
-		}
-		// In flight: received, and still inside its visibility timeout.
-		if msg.ReceiveCount == 0 || msg.VisibleAfter.IsZero() || !now.Before(msg.VisibleAfter) {
-			return sqsMessageNotInflight(), nil
-		}
-		msg.VisibleAfter = now.Add(time.Duration(vis) * time.Second)
-		if err := p.saveMsg(ctx, urlKey, msg); err != nil {
-			return nil, err
-		}
-		return nil, nil
+	// In flight: received, and still inside its visibility timeout.
+	if msg.ReceiveCount == 0 || msg.VisibleAfter.IsZero() || !now.Before(msg.VisibleAfter) {
+		return sqsMessageNotInflight(), nil
 	}
-	return sqsReceiptHandleIsInvalid(receiptHandle), nil
+	msg.VisibleAfter = now.Add(time.Duration(vis) * time.Second)
+	if err := p.saveMsg(ctx, urlKey, msg); err != nil {
+		return nil, err
+	}
+	return nil, nil
+}
+
+// sqsQueryVisibilityTimeout reads a query-protocol VisibilityTimeout parameter. A
+// value that is present but is not an integer is InvalidParameterValue; an absent one
+// is reported by ok, so the caller can apply the operation's own rule for it.
+func sqsQueryVisibilityTimeout(params map[string]string, name string) (vis int, present bool, refusal *AWSError) {
+	raw, ok := params[name]
+	if !ok {
+		return 0, false, nil
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil {
+		return 0, true, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Value " + raw + " for parameter VisibilityTimeout is invalid. Reason: Must be an integer.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return n, true, nil
+}
+
+// sqsMissingVisibilityTimeout is ChangeMessageVisibility's refusal of a request without
+// its required VisibilityTimeout.
+func sqsMissingVisibilityTimeout() *AWSError {
+	return &AWSError{
+		Code:       "MissingParameter",
+		Message:    "The request must contain the parameter VisibilityTimeout.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // sqsValidBatchEntryID reports whether id is a valid batch entry Id: 1 to 80
@@ -133,7 +175,13 @@ func (p *SQSPlugin) changeMessageVisibilityBatch(ctx *RequestContext, req *AWSRe
 			if !ok {
 				break
 			}
-			vis, _ := strconv.Atoi(req.Params[prefix+"VisibilityTimeout"])
+			// VisibilityTimeout is optional in a batch entry ("Required: No"), and
+			// absent it is 0, as the JSON protocol's omitted member decodes. A value
+			// that is present must be an integer.
+			vis, _, refusal := sqsQueryVisibilityTimeout(req.Params, prefix+"VisibilityTimeout")
+			if refusal != nil {
+				return nil, refusal
+			}
 			entries = append(entries, sqsVisibilityBatchEntry{
 				ID: id, ReceiptHandle: req.Params[prefix+"ReceiptHandle"], VisibilityTimeout: vis,
 			})
@@ -149,7 +197,7 @@ func (p *SQSPlugin) changeMessageVisibilityBatch(ctx *RequestContext, req *AWSRe
 	}
 
 	urlKey := sqsURLKey(ctx.Region, queueURL)
-	ids, err := p.loadMsgIDs(context.Background(), urlKey)
+	byHandle, err := p.sqsMessagesByHandle(context.Background(), urlKey)
 	if err != nil {
 		return nil, err
 	}
@@ -160,7 +208,7 @@ func (p *SQSPlugin) changeMessageVisibilityBatch(ctx *RequestContext, req *AWSRe
 	successes := make([]successEntry, 0, len(entries))
 	failures := make([]sqsBatchResultErrorEntry, 0)
 	for _, e := range entries {
-		awsErr, err := p.changeVisibility(context.Background(), urlKey, ids, e.ReceiptHandle, e.VisibilityTimeout)
+		awsErr, err := p.changeVisibility(context.Background(), urlKey, byHandle, e.ReceiptHandle, e.VisibilityTimeout)
 		if err != nil {
 			return nil, fmt.Errorf("sqs changeMessageVisibilityBatch: %w", err)
 		}

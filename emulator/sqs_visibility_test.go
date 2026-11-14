@@ -474,3 +474,61 @@ func TestSQS_ChangeMessageVisibilityBatch(t *testing.T) {
 		}
 	}
 }
+
+func TestSQS_ChangeMessageVisibility_TimeoutParameter(t *testing.T) {
+	setup := func(t *testing.T, name string) (*emulator.Server, string, string) {
+		t.Helper()
+		srv, _ := newSQSTestServer(t)
+		q := sqsTestCreateQueue(t, srv, name, nil)
+		sqsTestSend(t, srv, q, "x", nil)
+		got := sqsTestReceive(t, srv, false, q, nil, map[string]string{"VisibilityTimeout": "60"})
+		require.Len(t, got, 1)
+		return srv, q, got[0].Handle
+	}
+
+	t.Run("query batch refuses a non-integer VisibilityTimeout", func(t *testing.T) {
+		srv, q, handle := setup(t, "cmvb-nonint")
+		status, code := sqsErrorCode(t, sqsRequest(t, srv, map[string]string{
+			"Action": "ChangeMessageVisibilityBatch", "QueueUrl": q,
+			"ChangeMessageVisibilityBatchRequestEntry.1.Id":                "e1",
+			"ChangeMessageVisibilityBatchRequestEntry.1.ReceiptHandle":     handle,
+			"ChangeMessageVisibilityBatchRequestEntry.1.VisibilityTimeout": "soon",
+		}))
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Empty(t, sqsTestReceive(t, srv, false, q, nil, nil), "nothing was changed")
+	})
+	t.Run("query batch entry without VisibilityTimeout is 0, as the member is optional", func(t *testing.T) {
+		srv, q, handle := setup(t, "cmvb-absent")
+		resp := sqsRequest(t, srv, map[string]string{
+			"Action": "ChangeMessageVisibilityBatch", "QueueUrl": q,
+			"ChangeMessageVisibilityBatchRequestEntry.1.Id":            "e1",
+			"ChangeMessageVisibilityBatchRequestEntry.1.ReceiptHandle": handle,
+		})
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		resp.Body.Close() //nolint:errcheck
+		assert.Len(t, sqsTestReceive(t, srv, false, q, nil, nil), 1)
+	})
+	for _, proto := range sqsProtocols {
+		t.Run(proto.name+"/ChangeMessageVisibility requires VisibilityTimeout", func(t *testing.T) {
+			srv, q, handle := setup(t, "cmv-missing-"+proto.name)
+			var status int
+			var code string
+			if proto.json {
+				status, code = sqsErrorCode(t, sqsJSONRequest(t, srv, "ChangeMessageVisibility", map[string]any{"QueueUrl": q, "ReceiptHandle": handle}))
+			} else {
+				status, code = sqsErrorCode(t, sqsRequest(t, srv, map[string]string{"Action": "ChangeMessageVisibility", "QueueUrl": q, "ReceiptHandle": handle}))
+			}
+			assert.Equal(t, http.StatusBadRequest, status)
+			assert.Equal(t, "MissingParameter", code)
+		})
+	}
+	t.Run("query ChangeMessageVisibility refuses a non-integer VisibilityTimeout", func(t *testing.T) {
+		srv, q, handle := setup(t, "cmv-nonint")
+		status, code := sqsErrorCode(t, sqsRequest(t, srv, map[string]string{
+			"Action": "ChangeMessageVisibility", "QueueUrl": q, "ReceiptHandle": handle, "VisibilityTimeout": "1.5",
+		}))
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+	})
+}

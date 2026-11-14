@@ -59,6 +59,18 @@ func sqsRequestedQueueAttributeNames(req *AWSRequest) ([]string, *AWSError) {
 	return sqsQueryList(req.Params, "AttributeName"), nil
 }
 
+// sqsWantsMessageCounts reports whether a GetQueueAttributes request names "All" or
+// one of the three ApproximateNumberOfMessages* attributes.
+func sqsWantsMessageCounts(requested []string) bool {
+	for _, n := range requested {
+		switch n {
+		case "All", "ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible", "ApproximateNumberOfMessagesDelayed":
+			return true
+		}
+	}
+	return false
+}
+
 // sqsMessageCounts counts a queue's messages by state at now, using the rules
 // ReceiveMessage applies: a message whose DelayUntil is in the future is delayed; one
 // whose VisibleAfter is in the future is in flight (received, inside its visibility
