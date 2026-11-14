@@ -542,7 +542,9 @@ func TestCFNPlugin_GetTemplate(t *testing.T) {
 	}
 	require.NoError(t, xml.Unmarshal([]byte(body), &doc))
 	assert.Equal(t, cfnBucketTemplate, doc.TemplateBody)
-	assert.Equal(t, []string{"Original"}, doc.Stages)
+	// "For stacks, the Original and Processed templates are always available", and with no
+	// Transform the two are the same template (#1446).
+	assert.Equal(t, []string{"Original", "Processed"}, doc.Stages)
 
 	t.Run("unknown stack", func(t *testing.T) {
 		code, body := cfnAction(t, ts, "GetTemplate", map[string]string{"StackName": "absent"})

@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
-	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -26,6 +25,12 @@ type cfnTemplate struct {
 	Conditions               map[string]interface{} `json:"Conditions,omitempty"     yaml:"Conditions,omitempty"`
 	Resources                map[string]cfnResource `json:"Resources"                yaml:"Resources"`
 	Outputs                  map[string]cfnOutput   `json:"Outputs,omitempty"        yaml:"Outputs,omitempty"`
+
+	// Transform is the template's top-level Transform section — a macro name such as
+	// "AWS::Serverless-2016-10-31", or a list of them. Substrate runs no macro; the section is
+	// decoded only so GetTemplate can tell a template whose Processed stage would differ from
+	// its Original one (#1446).
+	Transform interface{} `json:"Transform,omitempty" yaml:"Transform,omitempty"`
 }
 
 // cfnMappings is the template's Mappings section: a mapping name, a top-level
@@ -110,6 +115,14 @@ type cfnResource struct {
 	// it is parsed so a template that declares it round-trips rather than being
 	// silently dropped, and so DescribeStackResources can report it.
 	UpdateReplacePolicy string `json:"UpdateReplacePolicy,omitempty" yaml:"UpdateReplacePolicy,omitempty"`
+
+	// Metadata, CreationPolicy and UpdatePolicy are the three remaining resource
+	// attributes a change set's Scope publishes. Substrate deploys none of them; they
+	// are decoded so a change to one is reported by CreateChangeSet rather than being
+	// invisible to the diff (#1446).
+	Metadata       interface{} `json:"Metadata,omitempty"       yaml:"Metadata,omitempty"`
+	CreationPolicy interface{} `json:"CreationPolicy,omitempty" yaml:"CreationPolicy,omitempty"`
+	UpdatePolicy   interface{} `json:"UpdatePolicy,omitempty"   yaml:"UpdatePolicy,omitempty"`
 }
 
 // CloudFormation deletion policies, as the DeletionPolicy attribute reference
@@ -747,6 +760,54 @@ type CFNResourceChange struct {
 
 	// Replacement is "True", "False", or "Conditional" for Modify actions.
 	Replacement string `json:"Replacement,omitempty"`
+
+	// PhysicalID is the resource's physical ID, for a Modify or Remove of a resource the
+	// stack has deployed. An Add has none: "Resources that you are adding don't have
+	// physical IDs because they haven't been created." A record written before #1446
+	// carries none either, and renders without the member.
+	PhysicalID string `json:"PhysicalResourceId,omitempty"`
+
+	// Scope is "which resource attribute is triggering this update", for a Modify: the
+	// distinct Target.Attribute values of Details. Empty for Add and Remove.
+	Scope []string `json:"Scope,omitempty"`
+
+	// Details is the list of ResourceChangeDetail structures for a Modify (#1446).
+	Details []CFNResourceChangeDetail `json:"Details,omitempty"`
+}
+
+// CFNResourceChangeDetail is one ResourceChangeDetail of a Modify: the field that will
+// change, whether CloudFormation can determine its value now, and what caused it.
+type CFNResourceChangeDetail struct {
+	// Target is the field that will change.
+	Target CFNResourceTargetDefinition `json:"Target"`
+
+	// Evaluation is "Static" when the new value is known before execution and "Dynamic"
+	// when it depends on an intrinsic resolved during the update.
+	Evaluation string `json:"Evaluation"`
+
+	// ChangeSource is the group CausingEntity belongs to: "DirectModification",
+	// "ParameterReference", "ResourceReference" or "ResourceAttribute" — the four the
+	// emulator derives.
+	ChangeSource string `json:"ChangeSource"`
+
+	// CausingEntity names the parameter, resource or resource attribute that caused the
+	// change; empty for a DirectModification, as published.
+	CausingEntity string `json:"CausingEntity,omitempty"`
+}
+
+// CFNResourceTargetDefinition is a ResourceTargetDefinition: which attribute of the
+// resource changes, the property name when the attribute is Properties, and whether
+// the change recreates the resource.
+type CFNResourceTargetDefinition struct {
+	// Attribute is one of Properties, Metadata, CreationPolicy, UpdatePolicy,
+	// DeletionPolicy, UpdateReplacePolicy or Tags.
+	Attribute string `json:"Attribute"`
+
+	// Name is the property name when Attribute is Properties, and empty otherwise.
+	Name string `json:"Name,omitempty"`
+
+	// RequiresRecreation is "Never", "Conditionally" or "Always".
+	RequiresRecreation string `json:"RequiresRecreation,omitempty"`
 }
 
 // CFNDriftResult holds the result of a stack drift detection operation.
@@ -1865,8 +1926,13 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 		return nil, cfnErrf(ErrCFNTemplateInvalid, "cfn CreateChangeSet: parse new template: %w", err)
 	}
 
-	// Diff resources.
-	changes := diffCFNResources(oldTmpl.Resources, newTmpl.Resources)
+	// Diff resources: the two templates, the parameter values each resolves against, and
+	// the physical IDs the stack's resources were deployed under.
+	physical := make(map[string]string, len(stack.Resources))
+	for _, r := range stack.Resources {
+		physical[r.LogicalID] = r.PhysicalID
+	}
+	changes := diffCFNResources(oldTmpl, newTmpl, stack.Parameters, params, physical)
 
 	cs := &CFNChangeSet{
 		ChangeSetName: changeSetName,
@@ -1997,7 +2063,12 @@ func (d *StackDeployer) DeleteChangeSet(ctx context.Context, stackName, changeSe
 // DetectStackDrift checks whether stack resources still exist in their
 // respective service state. Returns IN_SYNC if all resources exist, DRIFTED if
 // any resource has been deleted outside of CloudFormation.
-func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) (*CFNDriftResult, error) {
+//
+// logicalIDs, when given, restricts detection to those resources — DetectStackDrift's
+// LogicalResourceIds filter (#1446) — so the result, its count and its status cover only
+// them. A name the stack does not declare matches nothing here; the wire handler refuses
+// one before calling. With no logicalIDs every resource is checked, as before.
+func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string, logicalIDs ...string) (*CFNDriftResult, error) {
 	if d.state == nil {
 		return nil, cfnErrf(ErrCFNStateRequired, "cfn DetectStackDrift: state manager required")
 	}
@@ -2019,7 +2090,18 @@ func (d *StackDeployer) DetectStackDrift(ctx context.Context, stackName string) 
 		DetectedAt:  d.tc.Now(),
 	}
 
+	var only map[string]bool
+	if len(logicalIDs) > 0 {
+		only = make(map[string]bool, len(logicalIDs))
+		for _, id := range logicalIDs {
+			only[id] = true
+		}
+	}
+
 	for _, dr := range stack.Resources {
+		if only != nil && !only[dr.LogicalID] {
+			continue
+		}
 		entry := CFNResourceDriftEntry{
 			LogicalID:    dr.LogicalID,
 			ResourceType: dr.Type,
@@ -2085,7 +2167,10 @@ func (d *StackDeployer) DescribeStackResourceDrifts(ctx context.Context, stackNa
 // detection ID. The operation runs synchronously, but the IN_PROGRESS record is
 // persisted before detection runs so a concurrent
 // [StackDeployer.DescribeStackDriftDetectionStatus] read can observe it.
-func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName string) (string, error) {
+//
+// logicalIDs is passed to [StackDeployer.DetectStackDrift], so the recorded status and
+// drifted-resource count cover only those resources when any are given (#1446).
+func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName string, logicalIDs ...string) (string, error) {
 	if d.state == nil {
 		return "", cfnErrf(ErrCFNStateRequired, "cfn StartStackDriftDetection: state manager required")
 	}
@@ -2121,7 +2206,7 @@ func (d *StackDeployer) StartStackDriftDetection(ctx context.Context, stackName 
 		return "", err
 	}
 
-	result, err := d.DetectStackDrift(ctx, stackName)
+	result, err := d.DetectStackDrift(ctx, stackName, logicalIDs...)
 	if err != nil {
 		failed := &CFNDriftDetectionStatus{
 			StackDriftDetectionID: detectionID,
@@ -2206,68 +2291,6 @@ func (d *StackDeployer) saveChangeSetNames(ctx context.Context, stackName string
 		return fmt.Errorf("cfn saveChangeSetNames: %w", err)
 	}
 	return d.state.Put(ctx, cfnNamespace, d.changeSetNamesKey(stackName), data)
-}
-
-// diffCFNResources compares old and new template resource maps and returns
-// the list of changes (Add, Modify, Remove).
-func diffCFNResources(oldRes, newRes map[string]cfnResource) []CFNResourceChange {
-	var changes []CFNResourceChange
-
-	// Added and Modified.
-	for logicalID, newR := range newRes {
-		oldR, exists := oldRes[logicalID]
-		if !exists {
-			changes = append(changes, CFNResourceChange{
-				Action:       "Add",
-				LogicalID:    logicalID,
-				ResourceType: newR.Type,
-			})
-			continue
-		}
-		if oldR.Type != newR.Type {
-			// Type changed → replacement (remove old + add new).
-			changes = append(changes, CFNResourceChange{
-				Action:       "Remove",
-				LogicalID:    logicalID,
-				ResourceType: oldR.Type,
-			})
-			changes = append(changes, CFNResourceChange{
-				Action:       "Add",
-				LogicalID:    logicalID,
-				ResourceType: newR.Type,
-			})
-			continue
-		}
-		if !reflect.DeepEqual(oldR.Properties, newR.Properties) {
-			changes = append(changes, CFNResourceChange{
-				Action:       "Modify",
-				LogicalID:    logicalID,
-				ResourceType: newR.Type,
-				Replacement:  "False",
-			})
-		}
-	}
-
-	// Removed.
-	for logicalID, oldR := range oldRes {
-		if _, exists := newRes[logicalID]; !exists {
-			changes = append(changes, CFNResourceChange{
-				Action:       "Remove",
-				LogicalID:    logicalID,
-				ResourceType: oldR.Type,
-			})
-		}
-	}
-
-	// Sort for deterministic output.
-	sort.Slice(changes, func(i, j int) bool {
-		if changes[i].Action != changes[j].Action {
-			return changes[i].Action < changes[j].Action
-		}
-		return changes[i].LogicalID < changes[j].LogicalID
-	})
-
-	return changes
 }
 
 // cfnDriftCheckers maps CFN resource types to functions that check whether the
@@ -6435,6 +6458,26 @@ func (d *StackDeployer) parseCFNTemplate(cfn string) (*cfnTemplate, error) {
 		return nil, fmt.Errorf("invalid CloudFormation template (JSON: %w)", err)
 	}
 	return &tmpl, nil
+}
+
+// templateDeclaresTransform reports whether a template body declares a top-level Transform
+// section. A body that does not parse declares none: GetTemplate answers whatever was stored, and a
+// stored body has already been through CreateStack's parse.
+func (d *StackDeployer) templateDeclaresTransform(body string) bool {
+	tmpl, err := d.parseCFNTemplate(body)
+	if err != nil {
+		return false
+	}
+	switch t := tmpl.Transform.(type) {
+	case nil:
+		return false
+	case string:
+		return t != ""
+	case []interface{}:
+		return len(t) > 0
+	default:
+		return true
+	}
 }
 
 // xmlUnmarshalIAM strips the IAM namespace from body and unmarshals into dst.
