@@ -269,16 +269,15 @@ func TestJourney_EC2InvalidBlockDeviceMappingRefused(t *testing.T) {
 			apiErr.ErrorCode(), apiErr.ErrorMessage())
 	}
 
-	// The refusal writes nothing. Without the validator's placement ahead of
-	// ensureDefaultVPC this launch left a VPC, subnet, security group, internet
-	// gateway and route table behind, which the next request in the same test would
-	// have seen.
+	// The refusal writes nothing. The account's default VPC is the one VPC it holds —
+	// seeded on its first EC2 request (#1464), not by the launch — so a refused launch
+	// leaves exactly that and no more.
 	vpcs, err := client.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{})
 	if err != nil {
 		t.Fatalf("DescribeVpcs: %v", err)
 	}
-	if len(vpcs.Vpcs) != 0 {
-		t.Fatalf("a refused launch left %d VPCs behind, want 0", len(vpcs.Vpcs))
+	if len(vpcs.Vpcs) != 1 || !aws.ToBool(vpcs.Vpcs[0].IsDefault) {
+		t.Fatalf("a refused launch left %d VPCs, want only the default one", len(vpcs.Vpcs))
 	}
 	vols, err := client.DescribeVolumes(ctx, &ec2.DescribeVolumesInput{})
 	if err != nil {

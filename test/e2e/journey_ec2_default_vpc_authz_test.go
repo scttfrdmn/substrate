@@ -100,9 +100,9 @@ func journeyDeniedResource(t *testing.T, err error) string {
 // TestJourney_EC2DefaultVPCSubnetGuardrail is #673 at the tier the guardrail is
 // written at: a launch that omits SubnetId.
 //
-// Substrate resolves such a launch's subnet and security group from the default VPC,
-// creating them if the account has none — and until #673 that happened *after* the
-// authorization decision, so the decision named neither. A policy scoped to one subnet
+// Substrate resolves such a launch's subnet and security group from the default VPC —
+// seeded on the account's first EC2 request as of #1464 — and until #673 that happened
+// *after* the authorization decision, so the decision named neither. A policy scoped to one subnet
 // therefore permitted a launch into a subnet it never mentioned, which is precisely
 // what a subnet guardrail exists to prevent. Every getting-started example and most
 // CDK-generated launches take exactly this shape.
@@ -123,10 +123,7 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 	admin := ec2.NewFromConfig(adminCfg, func(o *ec2.Options) { o.RetryMaxAttempts = 1 })
 	iamClient := iam.NewFromConfig(adminCfg, func(o *iam.Options) { o.RetryMaxAttempts = 1 })
 
-	// A subnet of the caller's own, in a VPC CreateVpc does not mark as default. No
-	// security group is created: once the default VPC exists, its own group is then the
-	// only one in the account, which is what makes the default-group lookup below
-	// resolve to a known ID rather than to whichever group sorts first.
+	// A subnet of the caller's own, in a VPC CreateVpc does not mark as default.
 	vpc, err := admin.CreateVpc(ctx, &ec2.CreateVpcInput{CidrBlock: aws.String("10.0.0.0/16")})
 	if err != nil {
 		t.Fatalf("CreateVpc: %v", err)
@@ -160,6 +157,43 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 		})
 	}
 
+	// The default VPC is seeded on the account's first EC2 request (#1464), so by now it
+	// exists, and the subnet and group a subnet-less launch resolves to are read back
+	// through the API rather than assumed — these are the ARNs a consumer would write.
+	defaults, err := admin.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{Filters: []ec2types.Filter{
+		{Name: aws.String("default-for-az"), Values: []string{"true"}},
+		{Name: aws.String("availability-zone"), Values: []string{journeyDefaultVPCRegion + "a"}},
+	}})
+	if err != nil {
+		t.Fatalf("DescribeSubnets: %v", err)
+	}
+	if len(defaults.Subnets) != 1 {
+		t.Fatalf("want the default VPC's zone-a subnet, got %d subnets", len(defaults.Subnets))
+	}
+	defaultSubnet := aws.ToString(defaults.Subnets[0].SubnetId)
+	groups, err := admin.DescribeSecurityGroups(ctx, &ec2.DescribeSecurityGroupsInput{Filters: []ec2types.Filter{
+		{Name: aws.String("vpc-id"), Values: []string{aws.ToString(defaults.Subnets[0].VpcId)}},
+		{Name: aws.String("group-name"), Values: []string{"default"}},
+	}})
+	if err != nil {
+		t.Fatalf("DescribeSecurityGroups: %v", err)
+	}
+	if len(groups.SecurityGroups) != 1 {
+		t.Fatalf("want the default VPC's default group, got %d groups", len(groups.SecurityGroups))
+	}
+	defaultSG := aws.ToString(groups.SecurityGroups[0].GroupId)
+	vpcCount := func() int {
+		t.Helper()
+		vpcs, err := admin.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{})
+		if err != nil {
+			t.Fatalf("DescribeVpcs: %v", err)
+		}
+		return len(vpcs.Vpcs)
+	}
+	if got := vpcCount(); got != 2 {
+		t.Fatalf("there are %d VPCs, want the default one and the caller's own", got)
+	}
+
 	// --- the fail-before: a policy allowing exactly one subnet ---
 	//
 	// Generous about security groups and strict about subnets, so the only thing the
@@ -170,37 +204,25 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 		arn("network-interface/*"), arn("instance/*")))
 
 	_, err = launch(launcher)
-	if got := journeyDeniedResource(t, err); got != arn("subnet/*") {
-		t.Errorf("the denial names %q, want the default subnet the launch would create, %q",
-			got, arn("subnet/*"))
+	if got := journeyDeniedResource(t, err); got != arn("subnet/"+defaultSubnet) {
+		t.Errorf("the denial names %q, want the default subnet the launch lands in, %q",
+			got, arn("subnet/"+defaultSubnet))
 	}
 	if got := journeyEC2InstanceCount(t, ctx, admin); got != 0 {
 		t.Fatalf("after the refusal there are %d instances, want 0", got)
 	}
-	// And no default VPC was created on the way to the refusal, which authorization
-	// running before the handler is what guarantees.
-	vpcs, err := admin.DescribeVpcs(ctx, &ec2.DescribeVpcsInput{})
-	if err != nil {
-		t.Fatalf("DescribeVpcs: %v", err)
-	}
-	if len(vpcs.Vpcs) != 1 {
-		t.Fatalf("after the refusal there are %d VPCs, want only the caller's own", len(vpcs.Vpcs))
+	if got := vpcCount(); got != 2 {
+		t.Fatalf("after the refusal there are %d VPCs, want the same two", got)
 	}
 
-	// --- naming the two wildcards permits it, and it creates the default VPC ---
-	//
-	// subnet/* and security-group/* are resources this launch will *create*, which is
-	// why they are wildcards on the same reasoning instance/* and network-interface/*
-	// already are.
+	// --- a policy naming the subnet wildcard permits it ---
 	putPolicy(allow(imageARN, arn("subnet/*"), arn("security-group/*"),
 		arn("network-interface/*"), arn("instance/*")))
 
 	if _, err = launch(launcher); err != nil {
-		t.Fatalf("a policy naming the wildcards the launch will create must permit it: %v", err)
+		t.Fatalf("a policy naming subnet/* must permit the launch: %v", err)
 	}
 
-	// The default subnet and group the launch resolved, read back through the API
-	// rather than assumed — these are the ARNs a consumer would have to write.
 	described, err := admin.DescribeInstances(ctx, &ec2.DescribeInstancesInput{})
 	if err != nil {
 		t.Fatalf("DescribeInstances: %v", err)
@@ -209,15 +231,12 @@ func TestJourney_EC2DefaultVPCSubnetGuardrail(t *testing.T) {
 		t.Fatalf("want exactly one instance, got %+v", described.Reservations)
 	}
 	instance := described.Reservations[0].Instances[0]
-	defaultSubnet := aws.ToString(instance.SubnetId)
-	if defaultSubnet == "" || defaultSubnet == approvedSubnet {
-		t.Fatalf("the launch landed in %q, want a freshly created default subnet", defaultSubnet)
+	if got := aws.ToString(instance.SubnetId); got != defaultSubnet {
+		t.Fatalf("the launch landed in %q, want the default subnet %q", got, defaultSubnet)
 	}
-	if len(instance.SecurityGroups) != 1 {
-		t.Fatalf("the instance carries %d security groups, want the default VPC's one",
-			len(instance.SecurityGroups))
+	if len(instance.SecurityGroups) != 1 || aws.ToString(instance.SecurityGroups[0].GroupId) != defaultSG {
+		t.Fatalf("the instance carries %+v, want the default VPC's group %s", instance.SecurityGroups, defaultSG)
 	}
-	defaultSG := aws.ToString(instance.SecurityGroups[0].GroupId)
 
 	// --- the guardrail: a Deny on the resolved default subnet ---
 	//
