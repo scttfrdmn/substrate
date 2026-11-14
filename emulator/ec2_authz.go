@@ -631,15 +631,14 @@ func ec2AuthzTemplateData(state StateManager, reqCtx *RequestContext, req *AWSRe
 // what keeps the decision and the launch from disagreeing about where an instance
 // lands.
 //
-// The read is [ec2LookupDefaultVPC] rather than ensureDefaultVPC: the latter creates
-// nine records, and calling it here would let a request the policy is about to refuse
-// create a VPC.
+// The read is [ec2LookupDefaultVPC], which writes nothing: the decision must not create
+// a VPC for a request the policy is about to refuse.
 //
 // A launch whose default VPC does not exist yet is authorized against subnet/* and
-// security-group/*, because it is about to create both. A Deny on subnet/* still
-// matches, and a least-privilege Allow naming one specific subnet correctly refuses a
-// launch that will mint a different one. Substrate's fixtures all start from empty
-// state, so that is the common case rather than a corner.
+// security-group/*. That is an account's very first EC2 request, decided before
+// [EC2Plugin.seedDefaultVPC] runs (#1464), and the seed is about to create both. A Deny
+// on subnet/* still matches, and a least-privilege Allow naming one specific subnet
+// correctly refuses a launch that will land in a different one.
 func (m *ec2AuthzLaunchMembers) resolveDefaultVPC(state StateManager, reqCtx *RequestContext) {
 	if m.subnetID != "" {
 		return

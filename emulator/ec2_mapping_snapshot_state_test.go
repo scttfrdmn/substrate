@@ -130,8 +130,9 @@ func TestEC2_MappingSnapshot_RegisterImageRefusesAnUnusableSnapshot(t *testing.T
 }
 
 // TestEC2_MappingSnapshot_RefusalWritesNothing pins the ordering the rest of the launch
-// validator already honors: the refusal runs before ensureDefaultVPC, which commits a VPC,
-// subnet, security group, gateway, route table and four index mutations.
+// validator already honors: the refusal runs before the launch's first write — which, until the
+// default VPC became a seed (#1464), committed a VPC, subnet, security group, gateway, route
+// table and four index mutations.
 //
 // State left behind by a refused launch is worse than no rule at all, because the next request
 // in the same test sees it.

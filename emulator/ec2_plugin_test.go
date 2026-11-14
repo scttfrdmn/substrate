@@ -3335,7 +3335,7 @@ func TestEC2_DescribeRouteTables_VpcFilter(t *testing.T) {
 func TestEC2_DefaultVPC_IGWRoute(t *testing.T) {
 	ts := newEC2TestServer(t)
 
-	// RunInstances with no SubnetId triggers ensureDefaultVPC.
+	// RunInstances with no SubnetId lands in the default VPC.
 	run := ec2Request(t, ts, map[string]string{
 		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
 		"MinCount": "1", "MaxCount": "1",

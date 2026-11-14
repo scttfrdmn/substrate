@@ -121,6 +121,16 @@ type EC2Instance struct {
 	// still describes correctly (#455).
 	NetworkInterfaces []EC2NetworkInterface `json:"network_interfaces,omitempty"`
 
+	// InstanceLifecycle is AWS's Instance.instanceLifecycle: "spot" for an instance launched
+	// as a Spot Instance — by RunInstances with InstanceMarketOptions.MarketType=spot, by
+	// RequestSpotInstances, or as a persistent request's replacement — and empty for an
+	// On-Demand instance, which AWS reports by omitting the member (#1436).
+	InstanceLifecycle string `json:"instanceLifecycle,omitempty"`
+
+	// SpotInstanceRequestID is the sir- request that launched the instance, or empty when it
+	// is not a Spot Instance (#1436).
+	SpotInstanceRequestID string `json:"spotInstanceRequestId,omitempty"`
+
 	// EverTagged records that this instance has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
 }

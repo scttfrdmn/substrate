@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"net"
@@ -238,6 +239,12 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	// Spot placement score operations
 	case "GetSpotPlacementScores":
 		return p.getSpotPlacementScores(ctx, req)
+	case "RequestSpotInstances":
+		return p.requestSpotInstances(ctx, req)
+	case "DescribeSpotInstanceRequests":
+		return p.describeSpotInstanceRequests(ctx, req)
+	case "CancelSpotInstanceRequests":
+		return p.cancelSpotInstanceRequests(ctx, req)
 	// Launch template operations
 	case "CreateLaunchTemplate":
 		return p.createLaunchTemplate(ctx, req)
@@ -335,11 +342,44 @@ func (p *EC2Plugin) runInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // the request's checked TagSpecification.N tags, and the fleet path passes those plus
 // its own fleet-ID tag. See [EC2Plugin.runInstances] for why the check lives with the
 // parse rather than here.
+//
+// A request carrying InstanceMarketOptions.MarketType=spot launches Spot Instances, each
+// with its own Spot Instance request (#1436); a seeded capacity shortfall refuses it with
+// InsufficientInstanceCapacity — see [ec2SpotUnfulfilledError].
 func (p *EC2Plugin) runInstancesWithTags(
 	reqCtx *RequestContext,
 	req *AWSRequest,
 	tags []EC2Tag,
 ) (*AWSResponse, error) {
+	spot, awsErr := ec2SpotLaunchFromRunInstances(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	instances, reservationID, _, err := p.launchInstances(reqCtx, req, tags, spot)
+	if err != nil {
+		var unfulfilled *ec2SpotUnfulfilledError
+		if errors.As(err, &unfulfilled) {
+			return nil, unfulfilled.runInstancesError()
+		}
+		return nil, err
+	}
+	return p.runInstancesResponse(instances, reservationID, reqCtx)
+}
+
+// launchInstances is RunInstances' launch, returning the instances it wrote and, for a Spot
+// launch, the Spot Instance requests that track them.
+//
+// spot is nil for an On-Demand launch. Otherwise each instance is a Spot Instance: a new
+// request is written for each one, or — for a persistent request's replacement — the request
+// spot.replacing names is re-pointed at it. A seeded capacity shortfall answers
+// [ec2SpotUnfulfilledError] before anything is written, and each caller turns that into its
+// own published outcome.
+func (p *EC2Plugin) launchInstances(
+	reqCtx *RequestContext,
+	req *AWSRequest,
+	tags []EC2Tag,
+	spot *ec2SpotLaunch,
+) ([]EC2Instance, string, []EC2SpotInstanceRequest, error) {
 	imageID := req.Params["ImageId"]
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
@@ -360,7 +400,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// MaxCount's default, which is all it can affect here.
 	_, maxCount, countErr := resolveInstanceCounts(req.Params)
 	if countErr != nil {
-		return nil, countErr
+		return nil, "", nil, countErr
 	}
 
 	keyName := req.Params["KeyName"]
@@ -393,7 +433,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	if pgName := req.Params["Placement.GroupName"]; pgName != "" {
 		pgKey := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, pgName)
 		if data, _ := p.state.Get(context.Background(), ec2Namespace, pgKey); data == nil {
-			return nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
+			return nil, "", nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
 		}
 	}
 
@@ -471,7 +511,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
 		version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
 		if awsErr != nil {
-			return nil, awsErr
+			return nil, "", nil, awsErr
 		}
 		ltData := version.Data
 		if imageID == "" {
@@ -535,10 +575,10 @@ func (p *EC2Plugin) runInstancesWithTags(
 			// log, can still carry a reserved key or more than the limit, and this is
 			// the launch that would otherwise apply them.
 			if awsErr := ec2CheckTagRules(ltData.TagSpecifications); awsErr != nil {
-				return nil, awsErr
+				return nil, "", nil, awsErr
 			}
 			if awsErr := ec2CheckTagLimit(nil, ltData.TagSpecifications); awsErr != nil {
-				return nil, awsErr
+				return nil, "", nil, awsErr
 			}
 			tags = append(append([]EC2Tag{}, ltData.TagSpecifications...), tags...)
 		}
@@ -569,7 +609,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// serializes, i.e. absent from the wire — launched successfully here and
 	// failed on real AWS (#412).
 	if imageID == "" {
-		return nil, ec2MissingParameter("ImageId")
+		return nil, "", nil, ec2MissingParameter("ImageId")
 	}
 
 	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
@@ -586,18 +626,19 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// merge, for the same two reasons that position exists at all. An AMI that reaches
 	// this launch through a template is refused at RunInstances time rather than
 	// materialized, and CreateFleet inherits the rule for free by going through
-	// runInstancesWithTags. And it is ahead of the ensureDefaultVPC branch below, which
-	// commits a VPC, subnet, security group, gateway and route table: refusing past
-	// that point would leave state behind for the next request in the same test to see.
+	// runInstancesWithTags. And it is ahead of the first write below: refusing past that
+	// point would leave state behind for the next request in the same test to see. (The
+	// default-VPC branch once committed a VPC and its resources here; it no longer writes
+	// anything, the VPC being seeded before dispatch as of #1464.)
 	//
 	// CreateLaunchTemplate deliberately does not carry this rule. It reports mapping
 	// problems through AWS's documented warning member rather than refusing, and an AMI
 	// named in a template is not yet a launch — so a refusal there would be one AWS
 	// does not make. The template's AMI is checked here, when it is used.
-	_, imageFound := p.resolveImage(reqCtx, imageID)
+	launchedImage, imageFound := p.resolveImage(reqCtx, imageID)
 	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
 		// The not-found refusal says where an AMI comes from (#1432); the code is unchanged.
-		return nil, ec2AMINotFoundHint(awsErr)
+		return nil, "", nil, ec2AMINotFoundHint(awsErr)
 	}
 
 	// Block device mappings are validated here for two reasons that fix the position
@@ -605,17 +646,16 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// this launch through a template is refused at RunInstances time rather than
 	// materialized — and one validator here covers requests, templates, template
 	// versions and fleet launches alike, since a fleet reaches mappings only through a
-	// template. And it is before the ensureDefaultVPC branch below, which commits a
-	// VPC, subnet, security group, internet gateway, route table and four index
-	// mutations: a refusal past that point leaves state behind, which is worse than no
-	// validation at all because the next request in the same test sees it.
+	// template. And it is before the first write below: a refusal past that point leaves
+	// state behind, which is worse than no validation at all because the next request in
+	// the same test sees it.
 	//
 	// peekSnapshotStatus, not observeSnapshotStatus: a launch is not a poll, and the
 	// countdown advances in one place, so observing here would spend one of a test's
 	// seeded observations per mapping — see [ec2CheckMappingSnapshot].
 	resolveSnapshot := p.ec2SnapshotResolver(reqCtx)
 	if awsErr := ec2CheckBlockDeviceMappings(blockDeviceMappings, resolveSnapshot, p.peekSnapshotStatus); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 
 	// A mapping that names a snapshot and no size takes the snapshot's, which the
@@ -632,14 +672,14 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// by a replayed event log, can still carry a reserved key or more than the limit.
 	// A new volume starts with no tags, so the resolved set is the whole count (#670).
 	if awsErr := ec2CheckTagRules(volumeTags); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 	if awsErr := ec2CheckTagLimit(nil, volumeTags); awsErr != nil {
-		return nil, awsErr
+		return nil, "", nil, awsErr
 	}
 
 	// The groups the request or its template named are checked for existence here,
-	// before the ensureDefaultVPC branch below writes anything (#673). The membership
+	// before anything below is written (#673). The membership
 	// check has to wait for the subnet's VPC, but existence does not, and a launch
 	// naming a group that does not exist was previously refused *after* nine records
 	// had been committed — a VPC, subnet, security group, internet gateway, route
@@ -649,7 +689,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// with no IAM configured, so this stands on its own regardless of the
 	// authorization change beside it.
 	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, ""); sgCheckErr != nil {
-		return nil, sgCheckErr
+		return nil, "", nil, sgCheckErr
 	}
 
 	// A launch naming no subnet lands in the default VPC, which HandleRequest has already
@@ -657,7 +697,7 @@ func (p *EC2Plugin) runInstancesWithTags(
 	if subnetID == "" {
 		vpc, subnet, err := p.resolveLaunchDefaultSubnet(reqCtx)
 		if err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		subnetID = subnet.SubnetID
 		if sgID == "" {
@@ -690,12 +730,32 @@ func (p *EC2Plugin) runInstancesWithTags(
 	// ran above, before the default VPC could be created; this pass adds the
 	// membership half and covers the default group the branch above may have supplied.
 	if sgCheckErr := p.ec2CheckSecurityGroups(reqCtx, securityGroupIDs, targetVPCID); sgCheckErr != nil {
-		return nil, sgCheckErr
+		return nil, "", nil, sgCheckErr
+	}
+
+	// A Spot launch is checked last, after every refusal a launch shares, so a malformed
+	// request is refused for what is wrong with it rather than for capacity — and before the
+	// first write, so a capacity shortfall leaves nothing behind (#1436).
+	if spot != nil {
+		if awsErr := ec2CheckTagRules(spot.tags); awsErr != nil {
+			return nil, "", nil, awsErr
+		}
+		if awsErr := ec2CheckTagLimit(nil, spot.tags); awsErr != nil {
+			return nil, "", nil, awsErr
+		}
+		code, seedErr := p.spotRequestOutcomeSeed(instanceType)
+		if seedErr != nil {
+			return nil, "", nil, seedErr
+		}
+		if code != "" {
+			return nil, "", nil, &ec2SpotUnfulfilledError{statusCode: code}
+		}
 	}
 
 	reservationID := generateReservationID(reqCtx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 	var instances []EC2Instance
+	var spotRequests []EC2SpotInstanceRequest
 
 	for i := 0; i < maxCount; i++ {
 		inst := EC2Instance{
@@ -717,6 +777,14 @@ func (p *EC2Plugin) runInstancesWithTags(
 
 			DisableAPITermination: disableAPITermination,
 			AvailabilityZone:      placementAZ,
+		}
+		if spot != nil {
+			inst.InstanceLifecycle = ec2InstanceLifecycleSpot
+			if spot.replacing != nil {
+				inst.SpotInstanceRequestID = spot.replacing.SpotInstanceRequestID
+			} else {
+				inst.SpotInstanceRequestID = generateSpotInstanceRequestID(reqCtx.IDs)
+			}
 		}
 
 		// Look up VPCID from subnet and decide whether to assign a public IP.
@@ -757,26 +825,33 @@ func (p *EC2Plugin) runInstancesWithTags(
 
 		data, err := json.Marshal(inst)
 		if err != nil {
-			return nil, fmt.Errorf("ec2 runInstances marshal: %w", err)
+			return nil, "", nil, fmt.Errorf("ec2 runInstances marshal: %w", err)
 		}
 		stateKey := "instance:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + inst.InstanceID
 		if err := p.state.Put(context.Background(), ec2Namespace, stateKey, data); err != nil {
-			return nil, fmt.Errorf("ec2 runInstances state.Put: %w", err)
+			return nil, "", nil, fmt.Errorf("ec2 runInstances state.Put: %w", err)
 		}
 		// Update instance_ids list.
 		if err := p.appendToList(reqCtx.AccountID+"/"+reqCtx.Region, "instance_ids", inst.InstanceID); err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		// Materialize this instance's volumes, after the instance so they can carry
 		// its ID and its zone. Each instance of a multi-count launch gets its own
 		// volumes with their own IDs — two instances cannot share one EBS volume.
 		if err := p.ec2CreateLaunchVolumes(reqCtx.IDs, &inst, blockDeviceMappings, volumeTags, now); err != nil {
-			return nil, err
+			return nil, "", nil, err
 		}
 		instances = append(instances, inst)
+		if spot != nil {
+			sir, err := p.fulfillSpotRequest(reqCtx, spot, inst, launchedImage, now)
+			if err != nil {
+				return nil, "", nil, err
+			}
+			spotRequests = append(spotRequests, sir)
+		}
 	}
 
-	return p.runInstancesResponse(instances, reservationID, reqCtx)
+	return instances, reservationID, spotRequests, nil
 }
 
 // ec2GroupItem is one groupSet>item entry, mirroring AWS's GroupIdentifier.
@@ -862,6 +937,11 @@ type ec2InstanceItem struct {
 	BlockDeviceMappings []ec2BlockDeviceMappingItem `xml:"blockDeviceMapping>item,omitempty"`
 
 	NetworkInterfaces []ec2NetworkInterfaceItem `xml:"networkInterfaceSet>item,omitempty"`
+
+	// InstanceLifecycle and SpotInstanceRequestID are Instance's instanceLifecycle and
+	// spotInstanceRequestId, both omitted for an On-Demand instance (#1436).
+	InstanceLifecycle     string `xml:"instanceLifecycle,omitempty"`
+	SpotInstanceRequestID string `xml:"spotInstanceRequestId,omitempty"`
 }
 
 // ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
@@ -892,6 +972,9 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 		Groups:              p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs),
 		BlockDeviceMappings: mappings,
 		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
+
+		InstanceLifecycle:     inst.InstanceLifecycle,
+		SpotInstanceRequestID: inst.SpotInstanceRequestID,
 	}
 	// Echo the IAM instance profile set at launch (#331), resolved against IAM state so
 	// two describes of one instance report one id (#1291). The stored value is the name
@@ -1115,6 +1198,12 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		return ec2FilterAccepts(values, inst.SubnetID)
 	case "key-name":
 		return ec2FilterAccepts(values, inst.KeyName)
+	case "instance-lifecycle":
+		// An On-Demand instance carries no lifecycle — AWS omits the member — so it matches
+		// no value of the filter (#1436).
+		return inst.InstanceLifecycle != "" && ec2FilterAccepts(values, inst.InstanceLifecycle)
+	case "spot-instance-request-id":
+		return inst.SpotInstanceRequestID != "" && ec2FilterAccepts(values, inst.SpotInstanceRequestID)
 	case "availability-zone":
 		// The reference names this filter "availability-zone", not
 		// "placement.availability-zone" — the placement family's filters are
@@ -1346,6 +1435,13 @@ func (p *EC2Plugin) terminateInstances(reqCtx *RequestContext, req *AWSRequest) 
 		// state real EC2 never reaches (#666).
 		if err := p.ec2DeleteInstanceVolumes(reqCtx.AccountID, reqCtx.Region, inst.InstanceID); err != nil {
 			return nil, err
+		}
+		// A Spot Instance's request is settled — closed, or for an active persistent request a
+		// replacement launched — after the instance itself is written terminated (#1436).
+		if inst.SpotInstanceRequestID != "" {
+			if err := p.onSpotInstanceTerminated(reqCtx, inst); err != nil {
+				return nil, err
+			}
 		}
 
 		// `shutting-down`, which `API_TerminateInstances`' sample response publishes as
@@ -3318,6 +3414,13 @@ func ec2TaggableResource(state StateManager, reqCtx *RequestContext, id string) 
 		return ec2Taggable{
 			stateKey: ec2CapacityReservationStateKey(acct, region, id),
 			arnType:  "capacity-reservation", arnID: id,
+		}, true
+	case strings.HasPrefix(id, "sir-"):
+		// A Spot Instance request (#1436): "To tag the Spot Instance request after it has been
+		// created, see CreateTags." The ARN type is spot-instances-request, with the account.
+		return ec2Taggable{
+			stateKey: ec2SpotRequestStateKey(acct, region, id),
+			arnType:  "spot-instances-request", arnID: id,
 		}, true
 	case strings.HasPrefix(id, "pg-"):
 		// AWS does not settle whether CreateTags takes a placement group by ID or by

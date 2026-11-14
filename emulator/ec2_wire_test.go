@@ -724,3 +724,27 @@ func TestEC2Wire_FleetResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "DeleteFleets", params: map[string]string{"FleetId.1": id, "TerminateInstances": "true"}, anchor: id},
 	})
 }
+
+// TestEC2Wire_SpotInstanceRequestResponsesCarryNoBookkeepingMember covers the three Spot request
+// operations #1436 routed: the request record carries account_id and region, and none of its
+// responses may render them.
+func TestEC2Wire_SpotInstanceRequestResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	p, ctx, state := setupEC2WirePlugin(t)
+
+	created := ec2Wire(t, p, ctx, "RequestSpotInstances", map[string]string{
+		"Type":                             "persistent",
+		"LaunchSpecification.ImageId":      emulator.BundledImageID(ec2WireRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"),
+		"LaunchSpecification.InstanceType": "t3.micro",
+	})
+	id := ec2WireElement(t, "RequestSpotInstances", created, "spotInstanceRequestId")
+	ec2WireRequireScoped(t, state, ec2WireKey("spot_request", id), "account_id")
+
+	ec2WireRun(t, p, ctx, []ec2WireCase{
+		{action: "RequestSpotInstances", held: created, anchor: "<spotInstanceRequestId>" + id + "</spotInstanceRequestId>"},
+		{action: "DescribeSpotInstanceRequests", params: map[string]string{"SpotInstanceRequestId.1": id},
+			anchor: "<spotInstanceRequestId>" + id + "</spotInstanceRequestId>"},
+		{action: "CancelSpotInstanceRequests", params: map[string]string{"SpotInstanceRequestId.1": id},
+			anchor: "<state>cancelled</state>"},
+	})
+}
