@@ -47,7 +47,7 @@ func cfnDescribeEC2(t *testing.T, d *emulator.StackDeployer, params map[string]s
 // the default all-traffic rule rather than duplicating it — and that a stack built in that order
 // still deletes cleanly now that DeleteVpc and DeleteInternetGateway check dependents.
 func TestCFN_PublicVPCDeploysAndTearsDown(t *testing.T) {
-	d, _, _, _ := newSweepDeployer(t)
+	d, _, _, store := newSweepDeployer(t)
 	ctx := context.Background()
 
 	result, err := d.Deploy(ctx, cfnPublicVPCTemplate, "public", nil)
@@ -87,7 +87,24 @@ func TestCFN_PublicVPCDeploysAndTearsDown(t *testing.T) {
 	assert.Equal(t, []string{"-1 0.0.0.0/0"}, egress(ids["AllOut"]), "the declared rule replaces the default, once")
 	assert.Equal(t, []string{"tcp 10.0.0.0/8"}, egress(ids["Narrow"]), "declared egress removes the default")
 
+	gatewayOps := func(ops []string) []string {
+		var out []string
+		for _, op := range ops {
+			switch op {
+			case "CreateVpc", "CreateInternetGateway", "AttachInternetGateway",
+				"DetachInternetGateway", "DeleteInternetGateway", "DeleteVpc":
+				out = append(out, op)
+			}
+		}
+		return out
+	}
+	created := sweepOperations(t, store, "public")
+	assert.Equal(t, []string{"CreateVpc", "CreateInternetGateway", "AttachInternetGateway"}, gatewayOps(created),
+		"the attachment's Refs to the VPC and the gateway order it after both (#1420)")
+
 	require.NoError(t, d.DeleteStack(ctx, "public"))
+	assert.Equal(t, []string{"DetachInternetGateway", "DeleteInternetGateway", "DeleteVpc"},
+		gatewayOps(sweepOperations(t, store, "public")[len(created):]), "and delete it before either")
 	var vpcs struct {
 		IDs []string `xml:"vpcSet>item>vpcId"`
 	}
