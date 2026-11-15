@@ -23,7 +23,7 @@ import (
 // ValidationException/400. The API Reference pages now gloss the same code more generally ("The
 // request failed data validation for this data stream …"), which fits the refusal equally.
 //
-// Readings substrate makes where no page states the behaviour:
+// Readings substrate makes where no page states the behavior:
 //
 //   - **A stream with no recorded mode is PROVISIONED.** Every stream substrate created before #1118
 //     was implicitly provisioned, so its record carries no StreamMode and reads back as PROVISIONED;
@@ -31,7 +31,7 @@ import (
 //   - **An on-demand stream starts with four shards.** The quotas page publishes that "new data
 //     streams created with the on-demand capacity mode have 4 MB/s of write … throughput", and a shard
 //     takes 1 MB/s of writes, so four shards is the shard count that throughput implies. On-demand
-//     auto-scaling is resource-internal and not modelled: the count changes only when the stream is
+//     auto-scaling is resource-internal and not modeled: the count changes only when the stream is
 //     switched back to PROVISIONED and resharded.
 //   - **ShardCount alongside ON_DEMAND is refused** with InvalidArgumentException, whose gloss is
 //     "A specified parameter exceeds its restrictions, is not supported, or can't be used". The page
@@ -40,7 +40,7 @@ import (
 //   - **UpdateStreamMode to the mode the stream already has succeeds and changes nothing.**
 //   - **A switch keeps the stream's shards**, and starts the same UPDATING transition a reshard does
 //     (#1119), since the operation is asynchronous like the reshards. The quota of two switches per
-//     24 hours and WarmThroughputMiBps are not modelled.
+//     24 hours and WarmThroughputMiBps are not modeled.
 
 // Stream capacity modes, the Valid Values of API_StreamModeDetails.
 const (
@@ -88,7 +88,7 @@ func kinesisRenderStreamModeDetails(stream KinesisStream) kinesisStreamModeDetai
 
 // kinesisCreateStreamCapacity resolves CreateStream's capacity mode and shard count. The mode it
 // returns is empty when StreamModeDetails was omitted, so such a stream's record is byte-identical to
-// one written before the mode was modelled. A provisioned stream with no positive ShardCount gets one
+// one written before the mode was modeled. A provisioned stream with no positive ShardCount gets one
 // shard, as every provisioned stream always has.
 func kinesisCreateStreamCapacity(details *kinesisStreamModeDetails, shardCount *int) (string, int, *AWSError) {
 	mode := ""

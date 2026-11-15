@@ -29,7 +29,7 @@ type KinesisStream struct {
 	Shards []KinesisShard `json:"Shards,omitempty"`
 
 	// StreamMode is the stream's capacity mode, PROVISIONED or ON_DEMAND (#1118). Empty reads as
-	// PROVISIONED, which is what every stream created before the mode was modelled is; see
+	// PROVISIONED, which is what every stream created before the mode was modeled is; see
 	// kinesis_stream_mode.go.
 	StreamMode string `json:"StreamMode,omitempty"`
 
