@@ -323,7 +323,7 @@ func (p *OrganizationsPlugin) listParents(reqCtx *orgCaller, req *AWSRequest) (*
 	// explicitly not a child. Answering a malformed ID with InvalidInputException
 	// rather than ChildNotFoundException tells the caller its ID is the wrong shape
 	// instead of sending it looking for an entity that could never exist.
-	if !isOrgOUID(input.ChildID) && !isOrgAccountID(input.ChildID) {
+	if !isOrgOUID(input.ChildID) && !isAccountID(input.ChildID) {
 		return nil, orgInvalidInput("INVALID_PATTERN",
 			"the ChildId must be a 12-digit account ID or an organizational unit ID: "+input.ChildID)
 	}

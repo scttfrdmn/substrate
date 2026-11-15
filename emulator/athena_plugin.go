@@ -337,9 +337,9 @@ func (p *AthenaPlugin) stopQueryExecution(ctx *RequestContext, req *AWSRequest) 
 // listQueryExecutions returns IDs of all query executions, optionally filtered by workgroup.
 func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		WorkGroup  string `json:"WorkGroup"`
-		MaxResults int    `json:"MaxResults"`
-		NextToken  string `json:"NextToken"`
+		WorkGroup  string  `json:"WorkGroup"`
+		MaxResults *int    `json:"MaxResults"`
+		NextToken  *string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -349,9 +349,10 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 
 	// Before the query index is read, so the refusal does not depend on what the store holds — see
 	// athena_pagination.go for the code's provenance and the ordering argument (#1086).
-	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
-	if !tokenOK {
-		return nil, athenaInvalidPaginationToken("ListQueryExecutions")
+	maxResults, offset, pageErr := athenaListParams("ListQueryExecutions", athenaListQueryExecutionsMaxResults,
+		body.MaxResults, body.NextToken)
+	if pageErr != nil {
+		return nil, pageErr
 	}
 
 	goCtx := context.Background()
@@ -381,15 +382,10 @@ func (p *AthenaPlugin) listQueryExecutions(ctx *RequestContext, req *AWSRequest)
 		ids = filtered
 	}
 
-	maxResults := body.MaxResults
-	if maxResults <= 0 {
-		maxResults = athenaListDefaultPageSize
-	}
-
 	// The index is appended to in submission order, which is stable across calls and is what
 	// [pageByOffsetToken]'s offset relies on. The workgroup filter above preserves that order, so the
 	// offset counts the records this request can see rather than every query in the account.
-	page, nextToken := pageByOffsetToken(ids, offset, maxResults)
+	page, nextToken := athenaPageIDs(ids, offset, maxResults)
 	if page == nil {
 		page = []string{}
 	}
@@ -603,8 +599,8 @@ func (p *AthenaPlugin) deleteWorkGroup(ctx *RequestContext, req *AWSRequest) (*A
 // listWorkGroups returns all Athena workgroups.
 func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		MaxResults int    `json:"MaxResults"`
-		NextToken  string `json:"NextToken"`
+		MaxResults *int    `json:"MaxResults"`
+		NextToken  *string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &body); err != nil {
@@ -613,9 +609,10 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 	}
 
 	// Before the workgroup-names index is read, for the reason listQueryExecutions states (#1086).
-	offset, tokenOK := decodeOffsetPaginationToken(body.NextToken)
-	if !tokenOK {
-		return nil, athenaInvalidPaginationToken("ListWorkGroups")
+	maxResults, offset, pageErr := athenaListParams("ListWorkGroups", athenaListWorkGroupsMaxResults,
+		body.MaxResults, body.NextToken)
+	if pageErr != nil {
+		return nil, pageErr
 	}
 
 	goCtx := context.Background()
@@ -636,11 +633,6 @@ func (p *AthenaPlugin) listWorkGroups(ctx *RequestContext, req *AWSRequest) (*AW
 	// named `primary` is already in the list and must not appear twice.
 	if !slices.Contains(names, athenaPrimaryWorkGroupName) {
 		names = append([]string{athenaPrimaryWorkGroupName}, names...)
-	}
-
-	maxResults := body.MaxResults
-	if maxResults <= 0 {
-		maxResults = athenaListDefaultPageSize
 	}
 
 	// The index is appended to in creation order, which is stable across calls and is what

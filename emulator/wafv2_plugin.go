@@ -203,6 +203,7 @@ func (p *WAFv2Plugin) createWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
+		ARN   string `json:"ARN"`
 		ID    string `json:"Id"`
 		Name  string `json:"Name"`
 		Scope string `json:"Scope"`
@@ -220,12 +221,25 @@ func (p *WAFv2Plugin) getWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	} else if err := wafv2ValidateScopeValue(input.Scope); err != nil {
 		return nil, err
 	}
+	// API_GetWebACL publishes ARN as the alternative to the Name/Id/Scope triple. It resolves through
+	// the one ARN-to-record path GetWebACLForResource also uses (#1161), and takes precedence when both
+	// are sent.
+	if input.ARN != "" {
+		acl, err := p.loadWebACLByARN(reqCtx, input.ARN)
+		if err != nil {
+			return nil, err
+		}
+		return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
+			"WebACL":    wafv2WebACLToWire(*acl),
+			"LockToken": acl.LockToken,
+		})
+	}
 	// API_GetWebACL marks ARN, Id, Name and Scope all Required: No — the ARN alone identifies a
-	// web ACL, and the Name/Id/Scope triple is the alternative. Substrate models only the
-	// triple, so a request supplying none of the four has addressed nothing, which is not a
-	// complaint about one member (#1063).
+	// web ACL, and the Name/Id/Scope triple is the alternative. With no ARN the triple is read,
+	// so a request supplying none of the four has addressed nothing, which is not a complaint
+	// about one member (#1063).
 	if input.ID == "" {
-		return nil, wafv2ValidationError("the request identifies no web ACL; supply Name, Id and Scope")
+		return nil, wafv2ValidationError("the request identifies no web ACL; supply ARN, or Name, Id and Scope")
 	}
 
 	acl, err := p.loadWebACLByID(reqCtx.AccountID, reqCtx.Region, input.Scope, input.ID)
@@ -349,8 +363,9 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		Scope string `json:"Scope"`
-		Limit int    `json:"Limit"`
+		Scope      string `json:"Scope"`
+		Limit      *int   `json:"Limit"`
+		NextMarker string `json:"NextMarker"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -360,6 +375,11 @@ func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err := wafv2ValidateScope(input.Scope); err != nil {
 		return nil, err
 	}
+	// Limit and NextMarker are read and refused before any state is read; see wafv2_list.go (#1161).
+	limit, offset, err := wafv2ListParams(input.Limit, input.NextMarker)
+	if err != nil {
+		return nil, err
+	}
 
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, wafv2Namespace, wafv2WebACLIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope))
@@ -367,11 +387,16 @@ func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, fmt.Errorf("wafv2 listWebACLs load index: %w", err)
 	}
 
-	summaries := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
+	// The page is cut from the sorted ID index first, so only its records are loaded (see wafv2_list.go).
+	pageIDs, next := pageByOffsetToken(ids, offset, limit)
+	summaries := make([]map[string]interface{}, 0, len(pageIDs))
+	for _, id := range pageIDs {
 		acl, err := p.loadWebACLByID(reqCtx.AccountID, reqCtx.Region, input.Scope, id)
+		if wafv2IsNonexistent(err) {
+			continue // an index entry outliving its record, which is not a fault
+		}
 		if err != nil {
-			continue
+			return nil, err
 		}
 		summaries = append(summaries, map[string]interface{}{
 			"Id":          acl.ID,
@@ -382,9 +407,11 @@ func (p *WAFv2Plugin) listWebACLs(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		})
 	}
 
-	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
-		"WebACLs": summaries,
-	})
+	out := map[string]interface{}{"WebACLs": summaries}
+	if next != "" {
+		out["NextMarker"] = next
+	}
+	return wafv2JSONResponse(http.StatusOK, out)
 }
 
 func (p *WAFv2Plugin) associateWebACL(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -464,10 +491,15 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("wafv2 getWebACLForResource unmarshal arn: %w", err)
 	}
 
+	// The association stores the ARN; the answer is the record it names, in GetWebACL's projection
+	// (#1161). An ARN that names no stored web ACL — deleted since it was associated, or never one
+	// substrate minted — is the not-found refusal; see wafv2_list.go.
+	acl, err := p.loadWebACLByARN(reqCtx, webACLArn)
+	if err != nil {
+		return nil, err
+	}
 	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
-		"WebACL": map[string]interface{}{
-			"ARN": webACLArn,
-		},
+		"WebACL": wafv2WebACLToWire(*acl),
 	})
 }
 
@@ -643,7 +675,9 @@ func (p *WAFv2Plugin) deleteIPSet(reqCtx *RequestContext, req *AWSRequest) (*AWS
 
 func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		Scope string `json:"Scope"`
+		Scope      string `json:"Scope"`
+		Limit      *int   `json:"Limit"`
+		NextMarker string `json:"NextMarker"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -653,6 +687,11 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if err := wafv2ValidateScope(input.Scope); err != nil {
 		return nil, err
 	}
+	// The same pagination rule as listWebACLs; see wafv2_list.go (#1161).
+	limit, offset, err := wafv2ListParams(input.Limit, input.NextMarker)
+	if err != nil {
+		return nil, err
+	}
 
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, wafv2Namespace, wafv2IPSetIDsKey(reqCtx.AccountID, reqCtx.Region, input.Scope))
@@ -660,11 +699,16 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return nil, fmt.Errorf("wafv2 listIPSets load index: %w", err)
 	}
 
-	summaries := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
+	// The page is cut from the sorted ID index first, so only its records are loaded (see wafv2_list.go).
+	pageIDs, next := pageByOffsetToken(ids, offset, limit)
+	summaries := make([]map[string]interface{}, 0, len(pageIDs))
+	for _, id := range pageIDs {
 		ipset, err := p.loadIPSetByID(reqCtx.AccountID, reqCtx.Region, input.Scope, id)
+		if wafv2IsNonexistent(err) {
+			continue // an index entry outliving its record, which is not a fault
+		}
 		if err != nil {
-			continue
+			return nil, err
 		}
 		summaries = append(summaries, map[string]interface{}{
 			"Id":          ipset.ID,
@@ -675,9 +719,11 @@ func (p *WAFv2Plugin) listIPSets(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		})
 	}
 
-	return wafv2JSONResponse(http.StatusOK, map[string]interface{}{
-		"IPSets": summaries,
-	})
+	out := map[string]interface{}{"IPSets": summaries}
+	if next != "" {
+		out["NextMarker"] = next
+	}
+	return wafv2JSONResponse(http.StatusOK, out)
 }
 
 // loadWebACLByID loads a WAFv2WebACL from state by ID or returns a not-found error.

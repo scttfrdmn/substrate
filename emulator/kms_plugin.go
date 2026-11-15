@@ -464,7 +464,7 @@ func (p *KMSPlugin) describeKey(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 
 func (p *KMSPlugin) listKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		Limit  int    `json:"Limit"`
+		Limit  *int   `json:"Limit"`
 		Marker string `json:"Marker"`
 	}
 	if len(req.Body) > 0 {
@@ -472,8 +472,9 @@ func (p *KMSPlugin) listKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 			return nil, kmsInvalidBody()
 		}
 	}
-	if input.Limit <= 0 {
-		input.Limit = 100
+	limit, limitOK := kmsListKeysLimit.resolve(input.Limit)
+	if !limitOK {
+		return nil, kmsInvalidLimit(kmsListKeysLimit, *input.Limit)
 	}
 
 	// Pagination via base64 offset marker. A marker substrate did not issue is refused rather
@@ -494,7 +495,7 @@ func (p *KMSPlugin) listKeys(ctx *RequestContext, req *AWSRequest) (*AWSResponse
 	if err != nil {
 		return nil, err
 	}
-	page, nextMarker := pageByOffsetToken(ids, offset, input.Limit)
+	page, nextMarker := pageByOffsetToken(ids, offset, limit)
 
 	type keyEntry struct {
 		KeyID  string `json:"KeyId"`
@@ -1421,7 +1422,7 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		KeyID  string `json:"KeyId"`
-		Limit  int    `json:"Limit"`
+		Limit  *int   `json:"Limit"`
 		Marker string `json:"Marker"`
 	}
 	if len(req.Body) > 0 {
@@ -1429,8 +1430,9 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			return nil, kmsInvalidBody()
 		}
 	}
-	if input.Limit <= 0 {
-		input.Limit = 100
+	limit, limitOK := kmsListAliasesLimit.resolve(input.Limit)
+	if !limitOK {
+		return nil, kmsInvalidLimit(kmsListAliasesLimit, *input.Limit)
 	}
 
 	// Pagination. API_ListAliases publishes InvalidMarkerException too, so an unissued marker is
@@ -1447,7 +1449,7 @@ func (p *KMSPlugin) listAliases(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	page, nextMarker := pageByOffsetToken(names, offset, input.Limit)
+	page, nextMarker := pageByOffsetToken(names, offset, limit)
 
 	type aliasEntry struct {
 		AliasName   string `json:"AliasName"`

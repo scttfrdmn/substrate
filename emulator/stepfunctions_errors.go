@@ -260,3 +260,64 @@ func sfnInvalidDefinition(reason string) *AWSError {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// sfnListMaxResults is the `maxResults` constraint ListStateMachines, ListExecutions and
+// ListActivities each publish (#1131): "Valid Range: Minimum value of 0. Maximum value of 1000.",
+// with "The default is 100 and the maximum allowed page size is 1000. A value of 0 uses the default."
+//
+// So 0 is a legal value that means 100, and the `<= 0 → 100` idiom these three carried was already
+// conformant for it — recorded here so that a later sweep does not "fix" a 0 into a refusal. What it
+// got wrong was the rest of the range: a negative value was answered as the default rather than
+// refused, and a value above 1000 was honored.
+var sfnListMaxResults = pageSizeRange{member: "maxResults", min: 0, max: 1000, def: 100, zeroIsDefault: true}
+
+// sfnPageByName cuts one page of a sorted name or ARN listing whose cursor is the first item of the
+// next page, the cursor all three Step Functions list operations issue.
+//
+// It is the slicing the three handlers each wrote out by hand, hoisted so they cannot disagree. It is
+// not [pageByOffsetToken] because this cursor is the item itself rather than an offset, and changing
+// the wire form of an issued token is #1540's decision, not this one's. As before, a token that names
+// no item starts the listing over; #1540 owns refusing it with the published InvalidToken.
+func sfnPageByName(items []string, token string, size int) ([]string, string) {
+	offset := 0
+	if token != "" {
+		for i, item := range items {
+			if item == token {
+				offset = i
+				break
+			}
+		}
+	}
+	page := items[offset:]
+	if len(page) > size {
+		return page[:size], page[size]
+	}
+	return page, ""
+}
+
+// sfnInvalidMaxResults reports a ListStateMachines or ListActivities `maxResults` outside 0–1000.
+//
+// Neither page publishes a validation code — each lists InvalidToken alone — so the code is
+// ValidationError/400 from the common list, the reading [sfnInvalidBody] records for this plugin. The
+// message is substrate's. See page_size_range.go for why the value is refused rather than clamped.
+func sfnInvalidMaxResults(value int) *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    sfnListMaxResults.outOfRange(value),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// sfnListExecutionsInvalidMaxResults reports a ListExecutions `maxResults` outside 0–1000.
+//
+// API_ListExecutions is the one list page in the plugin that publishes ValidationException/400 on the
+// page itself — "The input does not satisfy the constraints specified by an AWS service." — and the
+// handler already answers it for the stateMachineArn/mapRunArn constraint, so an out-of-range page
+// size takes the page's own code rather than the common list's. The message is substrate's.
+func sfnListExecutionsInvalidMaxResults(value int) *AWSError {
+	return &AWSError{
+		Code:       "ValidationException",
+		Message:    sfnListMaxResults.outOfRange(value),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}

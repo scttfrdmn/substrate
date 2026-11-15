@@ -132,8 +132,8 @@ func TestRAMPlugin_ShareCRUD(t *testing.T) {
 		t.Fatalf("DeleteResourceShare: %v", err)
 	}
 
-	// GetResourceShares after delete — should return empty.
-	resp, err = p.HandleRequest(ctx, ramRequest(t, "POST", "/getresourceshares", nil))
+	// GetResourceShares after delete — no ACTIVE share remains; the deleted one is DELETED (#1171).
+	resp, err = p.HandleRequest(ctx, ramRequest(t, "POST", "/getresourceshares", map[string]any{"resourceOwner": "SELF", "resourceShareStatus": "ACTIVE"}))
 	if err != nil {
 		t.Fatalf("GetResourceShares after delete: %v", err)
 	}
@@ -162,7 +162,8 @@ func TestRAMPlugin_GetResourceShares_Filters(t *testing.T) {
 
 	// Filter by name.
 	resp, err := p.HandleRequest(ctx, ramRequest(t, "POST", "/getresourceshares", map[string]any{
-		"name": "share-alpha",
+		"resourceOwner": "SELF",
+		"name":          "share-alpha",
 	}))
 	if err != nil {
 		t.Fatalf("GetResourceShares filtered: %v", err)
@@ -263,7 +264,7 @@ func TestRAMPlugin_ListPrincipals_ListResources(t *testing.T) {
 	}
 
 	// ListPrincipals.
-	resp, err := p.HandleRequest(ctx, ramRequest(t, "POST", "/listprincipals", nil))
+	resp, err := p.HandleRequest(ctx, ramRequest(t, "POST", "/listprincipals", map[string]any{"resourceOwner": "SELF"}))
 	if err != nil {
 		t.Fatalf("ListPrincipals: %v", err)
 	}
@@ -281,7 +282,7 @@ func TestRAMPlugin_ListPrincipals_ListResources(t *testing.T) {
 	}
 
 	// ListResources.
-	resp, err = p.HandleRequest(ctx, ramRequest(t, "POST", "/listresources", nil))
+	resp, err = p.HandleRequest(ctx, ramRequest(t, "POST", "/listresources", map[string]any{"resourceOwner": "SELF"}))
 	if err != nil {
 		t.Fatalf("ListResources: %v", err)
 	}

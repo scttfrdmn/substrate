@@ -166,7 +166,10 @@ type QuickSightDataSet struct {
 	Region string `json:"Region"`
 }
 
-func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest, _ string) (*AWSResponse, error) {
+func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest, pathAccount string) (*AWSResponse, error) {
+	if err := quicksightCheckPathAccount(ctx, pathAccount); err != nil {
+		return nil, err
+	}
 	var body struct {
 		DataSourceID string `json:"DataSourceId"`
 		Name         string `json:"Name"`
@@ -191,7 +194,7 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 	}
 
 	goCtx := context.Background()
-	key := "datasource:" + ctx.AccountID + "/" + body.DataSourceID
+	key := quicksightDataSourceKey(ctx.AccountID, ctx.Region, body.DataSourceID)
 	data, err := json.Marshal(ds)
 	if err != nil {
 		return nil, fmt.Errorf("createDataSource: marshal: %w", err)
@@ -215,9 +218,12 @@ func (p *QuickSightPlugin) createDataSource(ctx *RequestContext, req *AWSRequest
 	})
 }
 
-func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest, _, dataSourceID string) (*AWSResponse, error) {
+func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest, pathAccount, dataSourceID string) (*AWSResponse, error) {
+	if err := quicksightCheckPathAccount(ctx, pathAccount); err != nil {
+		return nil, err
+	}
 	goCtx := context.Background()
-	key := "datasource:" + ctx.AccountID + "/" + dataSourceID
+	key := quicksightDataSourceKey(ctx.AccountID, ctx.Region, dataSourceID)
 	data, err := p.state.Get(goCtx, quicksightNamespace, key)
 	if err != nil {
 		// A store fault is not an absent data source. Answering ResourceNotFoundException for it would
@@ -249,7 +255,10 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 	})
 }
 
-func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _ string) (*AWSResponse, error) {
+func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, pathAccount string) (*AWSResponse, error) {
+	if err := quicksightCheckPathAccount(ctx, pathAccount); err != nil {
+		return nil, err
+	}
 	var body struct {
 		DataSetID string `json:"DataSetId"`
 		Name      string `json:"Name"`
@@ -276,7 +285,7 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 	}
 
 	goCtx := context.Background()
-	key := "dataset:" + ctx.AccountID + "/" + body.DataSetID
+	key := quicksightDataSetKey(ctx.AccountID, ctx.Region, body.DataSetID)
 	data, err := json.Marshal(ds)
 	if err != nil {
 		return nil, fmt.Errorf("createDataSet: marshal: %w", err)
@@ -300,9 +309,12 @@ func (p *QuickSightPlugin) createDataSet(ctx *RequestContext, req *AWSRequest, _
 // now ResourceNotFoundException/404, as API_DescribeIngestion publishes. The status is COMPLETED
 // unless a seed says otherwise (POST /v1/quicksight/ingestion-status), and RowInfo is reported only
 // when a seed supplies it, since substrate ingests no rows to count.
-func (p *QuickSightPlugin) describeIngestion(ctx *RequestContext, _ *AWSRequest, _, dataSetID, ingestionID string) (*AWSResponse, error) {
+func (p *QuickSightPlugin) describeIngestion(ctx *RequestContext, _ *AWSRequest, pathAccount, dataSetID, ingestionID string) (*AWSResponse, error) {
+	if err := quicksightCheckPathAccount(ctx, pathAccount); err != nil {
+		return nil, err
+	}
 	goCtx := context.Background()
-	key := "dataset:" + ctx.AccountID + "/" + dataSetID
+	key := quicksightDataSetKey(ctx.AccountID, ctx.Region, dataSetID)
 	data, err := p.state.Get(goCtx, quicksightNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("describeIngestion: get: %w", err)

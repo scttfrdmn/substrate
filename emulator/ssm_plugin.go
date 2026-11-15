@@ -453,14 +453,15 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 		Path           string `json:"Path"`
 		Recursive      bool   `json:"Recursive"`
 		WithDecryption bool   `json:"WithDecryption"`
-		MaxResults     int    `json:"MaxResults"`
+		MaxResults     *int   `json:"MaxResults"`
 		NextToken      string `json:"NextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, ssmInvalidBody()
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 10
+	maxResults, maxOK := ssmGetParametersByPathMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, ssmInvalidMaxResults(ssmGetParametersByPathMaxResults, *input.MaxResults)
 	}
 	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
 	if !tokenOK {
@@ -500,17 +501,9 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 
 	// Pagination. The token was validated before the parameter paths were read, so a token
 	// substrate could not have issued is refused rather than answered with page one (#915).
-	// An offset past the end is a token substrate did issue over a listing that has since
-	// shrunk, and clamps to a final empty page.
-	if offset > len(matched) {
-		offset = len(matched)
-	}
-	page := matched[offset:]
-	var nextToken string
-	if len(page) > input.MaxResults {
-		page = page[:input.MaxResults]
-		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
-	}
+	// pageByOffsetToken clamps an offset past the end to a final empty page: that is a token
+	// substrate did issue over a listing that has since shrunk.
+	page, nextToken := pageByOffsetToken(matched, offset, maxResults)
 
 	type paramItem struct {
 		Name    string `json:"Name"`
@@ -545,7 +538,7 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 
 func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		MaxResults int    `json:"MaxResults"`
+		MaxResults *int   `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -553,8 +546,9 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 			return nil, ssmInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 10
+	maxResults, maxOK := ssmDescribeParametersMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, ssmInvalidMaxResults(ssmDescribeParametersMaxResults, *input.MaxResults)
 	}
 	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
 	if !tokenOK {
@@ -570,15 +564,7 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 
 	// See getParametersByPath: the token is validated before any state is read, and an
 	// offset past the end clamps to a final empty page rather than being refused (#915).
-	if offset > len(paths) {
-		offset = len(paths)
-	}
-	page := paths[offset:]
-	var nextToken string
-	if len(page) > input.MaxResults {
-		page = page[:input.MaxResults]
-		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
-	}
+	page, nextToken := pageByOffsetToken(paths, offset, maxResults)
 
 	type paramMeta struct {
 		Name        string `json:"Name"`

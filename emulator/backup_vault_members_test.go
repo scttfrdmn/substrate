@@ -194,6 +194,7 @@ func TestBackupVault_ListBackupVaultsPagesAndFilters(t *testing.T) {
 		{"nextToken": base64.StdEncoding.EncodeToString([]byte("05"))},
 		{"vaultType": "SOME_VAULT"},
 		{"shared": "maybe"},
+		{"shared": "1"},
 	} {
 		status, code, _, err := h.call(http.MethodGet, "/backup-vaults/", params, nil)
 		require.NoError(t, err)

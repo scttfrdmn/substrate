@@ -34,9 +34,12 @@ import "net/http"
 // common-errors page carries nothing about one either.
 //
 // The published Length constraint on NextToken — minimum 1, maximum 1024 on both the request and the
-// response — needs no check of its own. The encoder emits an offset in decimal base64, a handful of
-// characters, so every token longer than 1024 already fails the round trip; and the minimum of 1 is
-// why an empty NextToken is an *absent* token, the start of the listing, rather than an invalid one.
+// response — is enforced at both ends (#1185). The maximum needs no check of its own: the encoder emits
+// an offset in decimal base64, a handful of characters, so every token longer than 1024 already fails
+// the round trip. The minimum does, because a round trip cannot see it — an empty string is what
+// [decodeOffsetPaginationToken] reads as the start of the listing. So the member is decoded as a
+// pointer, and an explicit `"NextToken": ""` is refused with the same code while an absent member is
+// still the start of the listing.
 //
 // # Ordering
 //
@@ -51,12 +54,34 @@ import "net/http"
 // [athenaLoadStringIndex] reported a store failure as an empty index, which is why a sealed store
 // could not assert the ordering; it now returns the failure, so a sealed read is an error.
 //
-// # Not fixed here, so that the conversion is not read as having fixed it
+// # MaxResults: two ranges, not one (#1185)
 //
-// Both operations take a caller-supplied MaxResults whose published Valid Range is 0–50 for
-// ListQueryExecutions and 1–50 for ListWorkGroups. Substrate accepts a value above the maximum and
-// silently rewrites one at or below zero to [athenaListDefaultPageSize]; that is the unenforced
-// page-size class, a separate defect from the token, and it is left exactly as it was.
+// This section was headed "Not fixed here" until #1185. The two handlers shared one preamble —
+// `if maxResults <= 0 { maxResults = 50 }` — which encoded an assumption the pages contradict:
+// API_ListQueryExecutions publishes "Valid Range: Minimum value of 0. Maximum value of 50." and
+// API_ListWorkGroups "Valid Range: Minimum value of 1. Maximum value of 50." So one shared line could
+// not be right for both. A 0 on ListQueryExecutions is a legal value that was rewritten to the widest
+// page; a 0 on ListWorkGroups is out of range and was accepted; and above 50 nothing was enforced.
+//
+// Each operation now has its own [pageSizeRange], and a value outside it is refused with
+// InvalidRequestException/400, the code both pages publish and gloss as "a required parameter may be
+// missing or out of range" — this case named outright, so the refusal is the page's own vocabulary.
+// An absent MaxResults keeps [athenaListDefaultPageSize], so every recorded request that omitted it
+// replays byte-identically.
+//
+// **A MaxResults of 0 on ListQueryExecutions is honored as written, and ends the walk**: the page
+// carries no query execution IDs and **no NextToken**. A token resuming at the same position would be the
+// only other honest cursor, and it never advances: a paginator that follows it asks for zero items
+// forever, and the SDK paginators that refuse a repeated token fail instead. So the zero page is a
+// complete answer to a request for zero items, and a caller wanting the records asks again without the
+// 0 (or with a token from a non-zero page). Neither page says what 0 means — unlike Step Functions', no sentence maps
+// it to a default — so substrate answers what the caller asked for: at most zero items. The response
+// element publishes `QueryExecutionIds` with "Array Members: Minimum number of 1 item", which a zero
+// page cannot meet. Substrate reads that minimum as describing a page with something on it rather than
+// as forbidding the empty list, because the same empty list is also the only honest answer for a
+// workgroup with no queries, and substrate already gave it there; the alternative readings — refusing
+// a value the request's own range permits, or emitting an item the caller did not ask for — each
+// contradict a published constraint more directly than an empty list does.
 //
 // [#671]: https://github.com/scttfrdmn/substrate/issues/671
 
@@ -67,6 +92,54 @@ import "net/http"
 // the largest page an unbounded request could legitimately receive. Named rather than repeated as a
 // literal so that the unverified part of the page size is visible at both sites.
 const athenaListDefaultPageSize = 50
+
+// athenaListQueryExecutionsMaxResults and athenaListWorkGroupsMaxResults are the two operations'
+// published MaxResults ranges, which differ at the low end; see this file's comment.
+var (
+	athenaListQueryExecutionsMaxResults = pageSizeRange{member: "MaxResults", min: 0, max: 50, def: athenaListDefaultPageSize}
+	athenaListWorkGroupsMaxResults      = pageSizeRange{member: "MaxResults", min: 1, max: 50, def: athenaListDefaultPageSize}
+)
+
+// athenaListParams resolves a listing's MaxResults and NextToken, refusing either when it is not one
+// the operation accepts.
+//
+// MaxResults is judged first, then the token; both before any state is read, for the ordering this
+// file records. An explicit empty NextToken is refused for the published minimum length of 1, while an
+// absent one is the start of the listing.
+func athenaListParams(operation string, r pageSizeRange, maxResults *int, nextToken *string) (int, int, *AWSError) {
+	size, ok := r.resolve(maxResults)
+	if !ok {
+		return 0, 0, &AWSError{
+			Code:       "InvalidRequestException",
+			Message:    r.outOfRange(*maxResults),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if nextToken == nil {
+		return size, 0, nil
+	}
+	if *nextToken == "" {
+		return 0, 0, athenaInvalidPaginationToken(operation)
+	}
+	offset, ok := decodeOffsetPaginationToken(*nextToken)
+	if !ok {
+		return 0, 0, athenaInvalidPaginationToken(operation)
+	}
+	return size, offset, nil
+}
+
+// athenaPageIDs cuts one ListQueryExecutions page, honoring a MaxResults of 0 as a final page with no
+// items.
+//
+// [pageByOffsetToken] reads a page size of 0 as "no limit", which is the opposite of what a caller who
+// sent 0 asked for, so that case is answered here: an empty page and no token, so the walk ends rather
+// than being handed a cursor that never advances. See this file's comment.
+func athenaPageIDs(ids []string, offset, maxResults int) ([]string, string) {
+	if maxResults > 0 {
+		return pageByOffsetToken(ids, offset, maxResults)
+	}
+	return []string{}, ""
+}
 
 // athenaInvalidPaginationToken refuses a NextToken that no previous call to operation returned.
 //

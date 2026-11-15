@@ -58,7 +58,7 @@ func (p *OrganizationsPlugin) closeAccount(reqCtx *orgCaller, req *AWSRequest) (
 	// ^\d{12}$, so anything else is a malformed request rather than a missing
 	// account. Answering AccountNotFoundException for "not-an-id" would send a
 	// caller looking for an account it never named.
-	if !isOrgAccountID(input.AccountID) {
+	if !isAccountID(input.AccountID) {
 		return nil, orgInvalidInput("INVALID_PATTERN",
 			"an account ID must be 12 digits, got "+input.AccountID)
 	}

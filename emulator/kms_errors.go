@@ -809,3 +809,31 @@ func kmsInvalidMarker() *AWSError {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// kmsListKeysLimit and kmsListAliasesLimit are the two KMS list operations' published `Limit`
+// constraints, kept as two values because the pages publish two (#1131).
+//
+// API_ListKeys: "If you include a value, it must be between 1 and 1000, inclusive. If you do not
+// include a value, it defaults to 100." API_ListAliases: "If you include a value, it must be between
+// 1 and 100, inclusive. If you do not include a value, it defaults to 50." The maximum differs and so
+// does the default, which is how one shared 100 came to serve both and gave ListAliases a default
+// twice the published one: sixty aliases were one page from substrate and two from KMS.
+var (
+	kmsListKeysLimit    = pageSizeRange{member: "Limit", min: 1, max: 1000, def: 100}
+	kmsListAliasesLimit = pageSizeRange{member: "Limit", min: 1, max: 100, def: 50}
+)
+
+// kmsInvalidLimit reports a list operation's `Limit` outside its published range.
+//
+// Neither list page publishes a code for this — their Errors sections are DependencyTimeoutException,
+// InvalidArnException, InvalidMarkerException, KMSInternalException and NotFoundException — so the
+// code is ValidationError/400 from CommonErrors.html, the reading [kmsInvalidPendingWindow] records
+// for every out-of-range value in this plugin. The message is substrate's and names the range, for
+// that helper's reason. See page_size_range.go for why the value is refused rather than clamped.
+func kmsInvalidLimit(r pageSizeRange, value int) *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    r.outOfRange(value),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
