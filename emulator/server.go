@@ -520,6 +520,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		cp.Post("/v1/ec2/capacity-reservation-outcomes", s.handleEC2SeedCapacityReservationOutcome)
 		cp.Delete("/v1/ec2/capacity-reservation-outcomes", s.handleEC2ClearCapacityReservationOutcome)
 
+		// EventBridge Scheduler invocation-outcome control-plane endpoints (#1501).
+		cp.Post("/v1/scheduler/invocation-outcome", s.handleSchedulerSeedInvocationOutcome)
+		cp.Delete("/v1/scheduler/invocation-outcome", s.handleSchedulerClearInvocationOutcome)
+
 		// Auto Scaling launch-failure control-plane endpoints (#1460).
 		cp.Post("/v1/autoscaling/launch-failure", s.handleAutoScalingSeedLaunchFailure)
 		cp.Delete("/v1/autoscaling/launch-failure", s.handleAutoScalingClearLaunchFailure)

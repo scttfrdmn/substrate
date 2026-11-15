@@ -176,6 +176,13 @@ func RegisterDefaultPlugins(
 		cfnOpts["auth_controller"] = settings.auth
 	}
 
+	// Scheduler invokes its schedules' targets on the simulated clock as each target's RoleArn, so it
+	// authorizes those calls itself, as CloudFormation does for a stack's resource calls (#1501).
+	schedulerOpts := map[string]any{}
+	if settings.auth != nil {
+		schedulerOpts["auth_controller"] = settings.auth
+	}
+
 	rdsOpts := map[string]any{}
 	if rdsExec != nil {
 		rdsOpts["rds_executor"] = rdsExec
@@ -210,7 +217,7 @@ func RegisterDefaultPlugins(
 		{&EventBridgePlugin{}, "eventbridge", nil},
 		{&AccountPlugin{}, "account", nil},
 		{&ConfigServicePlugin{}, "config", nil},
-		{&SchedulerPlugin{}, "scheduler", nil},
+		{&SchedulerPlugin{}, "scheduler", schedulerOpts},
 		{&CloudWatchPlugin{}, "cloudwatch", nil},
 		{&ACMPlugin{}, "acm", nil},
 		{&APIGatewayPlugin{}, "apigateway", nil},

@@ -1851,3 +1851,44 @@ func AutoScalingMatchInstanceTypesForTest(req *AutoScalingInstanceRequirements, 
 	}
 	return out
 }
+
+// SchedOccurrencesForTest returns up to n occurrences of a schedule expression evaluated in tz,
+// for a configuration armed at armed with the given StartDate and EndDate (#1501). An expression
+// substrate cannot evaluate is an error.
+func SchedOccurrencesForTest(expr, tz string, armed time.Time, start, end *time.Time, n int) ([]time.Time, error) {
+	e, err := parseSchedExpression(expr, tz)
+	if err != nil {
+		return nil, err
+	}
+	var out []time.Time
+	next := e.first(armed, start, end)
+	for next != nil && len(out) < n {
+		out = append(out, *next)
+		if e.kind == schedExprAt {
+			break
+		}
+		next = e.next(*next, end)
+	}
+	return out, nil
+}
+
+// SchedTargetFailureForTest reads a dispatched target's answer as the Scheduler plugin does: ok is
+// false when the answer is a success, and otherwise code, message and retryable describe the
+// failure (#1501).
+func SchedTargetFailureForTest(resp *AWSResponse, err error) (code, message string, retryable, ok bool) {
+	f := schedTargetFailure(resp, err)
+	if f == nil {
+		return "", "", false, false
+	}
+	return f.Code, f.Message, f.retryable(), true
+}
+
+// SchedQueryParamsForTest flattens a universal target's JSON Input into Query form parameters, as
+// the Scheduler plugin does for an awsQuery (or, with ec2, an EC2-protocol) target (#1501).
+func SchedQueryParamsForTest(input string, ec2 bool) (map[string]string, error) {
+	params, failure := schedQueryParams(input, ec2)
+	if failure != nil {
+		return nil, fmt.Errorf("%s: %s", failure.Code, failure.Message)
+	}
+	return params, nil
+}

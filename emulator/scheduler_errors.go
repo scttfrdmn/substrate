@@ -176,7 +176,49 @@ func schedulerValidateTarget(target *schedulerTargetInput) *AWSError {
 	if target.RoleArn == "" {
 		return schedulerValidation(schedulerRequiredMessage("target.roleArn"))
 	}
-	return schedulerValidateLength("target.roleArn", target.RoleArn, schedulerTargetARNMaxLength)
+	if err := schedulerValidateLength("target.roleArn", target.RoleArn, schedulerTargetARNMaxLength); err != nil {
+		return err
+	}
+	return schedulerValidateTargetParameters(target)
+}
+
+// schedulerDeadLetterARNPattern is `API_DeadLetterConfig`'s published Arn pattern.
+var schedulerDeadLetterARNPattern = regexp.MustCompile( //nolint:gochecknoglobals // immutable compiled pattern
+	`^arn:aws[a-z-]*:sqs:[a-z0-9\-]+:\d{12}:[a-zA-Z0-9\-_]+$`)
+
+// schedulerValidateTargetParameters checks the three target objects substrate decodes since #1501
+// against their published constraints: DeadLetterConfig.Arn's length (1–1600) and pattern,
+// EventBridgeParameters' two Required: Yes members (DetailType 1–128, Source 1–256), and
+// SqsParameters.MessageGroupId's length (1–128).
+func schedulerValidateTargetParameters(target *schedulerTargetInput) *AWSError {
+	if d := target.DeadLetterConfig; d != nil && d.Arn != "" {
+		if err := schedulerValidateLength("target.deadLetterConfig.arn", d.Arn, schedulerTargetARNMaxLength); err != nil {
+			return err
+		}
+		if !schedulerDeadLetterARNPattern.MatchString(d.Arn) {
+			return schedulerValidation(fmt.Sprintf("1 validation error detected: Value '%s' at "+
+				"'target.deadLetterConfig.arn' failed to satisfy constraint: Member must satisfy regular "+
+				`expression pattern: arn:aws[a-z-]*:sqs:[a-z0-9\-]+:\d{12}:[a-zA-Z0-9\-_]+`, d.Arn))
+		}
+	}
+	if e := target.EventBridgeParameters; e != nil {
+		if e.DetailType == "" {
+			return schedulerValidation(schedulerRequiredMessage("target.eventBridgeParameters.detailType"))
+		}
+		if err := schedulerValidateLength("target.eventBridgeParameters.detailType", e.DetailType, 128); err != nil {
+			return err
+		}
+		if e.Source == "" {
+			return schedulerValidation(schedulerRequiredMessage("target.eventBridgeParameters.source"))
+		}
+		if err := schedulerValidateLength("target.eventBridgeParameters.source", e.Source, 256); err != nil {
+			return err
+		}
+	}
+	if s := target.SqsParameters; s != nil {
+		return schedulerValidateLength("target.sqsParameters.messageGroupId", s.MessageGroupID, 128)
+	}
+	return nil
 }
 
 // schedulerValidateFlexibleTimeWindow checks the window's required mode and its optional bound.

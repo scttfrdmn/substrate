@@ -245,9 +245,11 @@ in `server.go` so `recordControlPlaneWrites` records them and they replay.
 
 Work that must happen as simulated time passes, rather than on a request, implements
 `ClockDrivenPlugin.RunDue` (`emulator/clock_driven.go`); the registry runs it before
-every top-level request, live and on replay. Lambda's event-source mappings are the
-only user today — prefer reconciling inside the request that causes the change, or
-on the next observation, when the published behaviour allows it.
+every top-level request, live and on replay. Lambda's event-source mappings
+(`lambda_esm_clock.go`) and EventBridge Scheduler's due schedules (`scheduler_clock.go`,
+which also authorizes each dispatch as the target's role) are the users today — prefer
+reconciling inside the request that causes the change, or on the next observation,
+when the published behaviour allows it.
 
 ### Concurrency
 

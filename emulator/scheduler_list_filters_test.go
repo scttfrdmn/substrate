@@ -145,13 +145,18 @@ func TestScheduler_ListSchedulesStateFilterIsAppliedBeforeTheCut(t *testing.T) {
 
 // TestScheduler_ListSchedulesStateFilterScopesToItsGroup keeps the group selector honest alongside the
 // moved filter: ScheduleGroup still chooses which index is loaded, so a state-filtered listing of one
-// group cannot answer another group's schedules.
+// group cannot answer another group's schedules, and an absent ScheduleGroup lists every group.
 func TestScheduler_ListSchedulesStateFilterScopesToItsGroup(t *testing.T) {
 	srv := newSchedulerTestServer(t)
 	ts := httptest.NewServer(srv)
 	t.Cleanup(ts.Close)
 
 	createSchedInState(t, ts, "in-default", "ENABLED")
+
+	// The group must exist before a schedule can be created in it (#1501).
+	resp := schedulerRequest(t, ts, http.MethodPost, "/schedule-groups/team-b", "")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.NoError(t, resp.Body.Close())
 
 	// A schedule in a second group, created through the published lowerCamel groupName key that
 	// CreateSchedule reads — which is not the PascalCase ScheduleGroup that ListSchedules reads
@@ -163,11 +168,15 @@ func TestScheduler_ListSchedulesStateFilterScopesToItsGroup(t *testing.T) {
 		"Target": {"Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn", "RoleArn": "arn:aws:iam::123456789012:role/role"},
 		"FlexibleTimeWindow": {"Mode": "OFF"}
 	}`
-	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/in-team-b?groupName=team-b", body)
+	resp = schedulerRequest(t, ts, http.MethodPost, "/schedules/in-team-b?groupName=team-b", body)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	require.NoError(t, resp.Body.Close())
 
+	// No ScheduleGroup filter lists every group's schedules, group by group (#1501).
 	names, _ := schedListNames(t, ts, "?State=ENABLED")
+	assert.Equal(t, []string{"in-default", "in-team-b"}, names, "every group")
+
+	names, _ = schedListNames(t, ts, "?State=ENABLED&ScheduleGroup=default")
 	assert.Equal(t, []string{"in-default"}, names, "the default group only")
 
 	names, _ = schedListNames(t, ts, "?State=ENABLED&ScheduleGroup=team-b")
