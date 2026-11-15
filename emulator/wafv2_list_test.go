@@ -139,13 +139,13 @@ func TestWAFv2List_GetWebACLForResourceAnswersTheWholeWebACL(t *testing.T) {
 	}, acl["VisibilityConfig"], "VisibilityConfig is Required: Yes")
 	assert.Equal(t, direct.WebACL, acl, "the same record GetWebACL reports")
 
-	// An association whose web ACL has been deleted names nothing.
-	wafv2ListCall(t, ts, "DeleteWebACL", map[string]any{
-		"Name": "for-resource", "Scope": "REGIONAL", "Id": id, "LockToken": lockToken,
-	}, nil)
-	status, raw := cicdCall(t, ts, wafv2ListHost, wafv2ListTarget, "GetWebACLForResource", map[string]any{"ResourceArn": resource})
+	// An associated web ACL cannot be deleted (#1541), so an association never names a deleted ACL.
+	deleteBody := map[string]any{"Name": "for-resource", "Scope": "REGIONAL", "Id": id, "LockToken": lockToken}
+	status, raw := cicdCall(t, ts, wafv2ListHost, wafv2ListTarget, "DeleteWebACL", deleteBody)
 	assert.Equal(t, http.StatusBadRequest, status, "%s", raw)
-	assert.Equal(t, "WAFNonexistentItemException", cicdCode(t, raw), "%s", raw)
+	assert.Equal(t, "WAFAssociatedItemException", cicdCode(t, raw), "%s", raw)
+	wafv2ListCall(t, ts, "DisassociateWebACL", map[string]any{"ResourceArn": resource}, nil)
+	wafv2ListCall(t, ts, "DeleteWebACL", deleteBody, nil)
 }
 
 // GetWebACL resolves its ARN member through the path GetWebACLForResource uses, for both scopes, so

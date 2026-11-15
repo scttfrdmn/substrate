@@ -271,30 +271,6 @@ func sfnInvalidDefinition(reason string) *AWSError {
 // refused, and a value above 1000 was honored.
 var sfnListMaxResults = pageSizeRange{member: "maxResults", min: 0, max: 1000, def: 100, zeroIsDefault: true}
 
-// sfnPageByName cuts one page of a sorted name or ARN listing whose cursor is the first item of the
-// next page, the cursor all three Step Functions list operations issue.
-//
-// It is the slicing the three handlers each wrote out by hand, hoisted so they cannot disagree. It is
-// not [pageByOffsetToken] because this cursor is the item itself rather than an offset, and changing
-// the wire form of an issued token is #1540's decision, not this one's. As before, a token that names
-// no item starts the listing over; #1540 owns refusing it with the published InvalidToken.
-func sfnPageByName(items []string, token string, size int) ([]string, string) {
-	offset := 0
-	if token != "" {
-		for i, item := range items {
-			if item == token {
-				offset = i
-				break
-			}
-		}
-	}
-	page := items[offset:]
-	if len(page) > size {
-		return page[:size], page[size]
-	}
-	return page, ""
-}
-
 // sfnInvalidMaxResults reports a ListStateMachines or ListActivities `maxResults` outside 0–1000.
 //
 // Neither page publishes a validation code — each lists InvalidToken alone — so the code is

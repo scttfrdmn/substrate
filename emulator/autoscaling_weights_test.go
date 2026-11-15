@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -608,10 +609,15 @@ func TestAutoScaling_WeightsAreStoredCanonically(t *testing.T) {
 	}
 	e.mustASG("CreateAutoScalingGroup", params)
 	_, body := e.asg("DescribeAutoScalingGroups", map[string]string{"AutoScalingGroupNames.member.1": "c"})
-	assert.Contains(t, string(body), "<WeightedCapacity>4</WeightedCapacity>")
-	assert.Contains(t, string(body), "<WeightedCapacity>7</WeightedCapacity>")
-	assert.NotContains(t, string(body), "+4")
-	assert.NotContains(t, string(body), "007")
+	// Only the WeightedCapacity elements are read: the body also carries generated identifiers (the
+	// group ARN's UUID, instance, launch template and subnet IDs), any of which may contain "007" (#1529).
+	// The overrides and the launched instance each carry one, so the distinct values are compared.
+	weights := map[string]bool{}
+	for _, m := range regexp.MustCompile(`<WeightedCapacity>([^<]*)</WeightedCapacity>`).FindAllSubmatch(body, -1) {
+		weights[string(m[1])] = true
+	}
+	assert.Equal(t, map[string]bool{"4": true, "7": true}, weights,
+		"each weight is echoed as its canonical integer, never +4 or 007")
 	assert.Len(t, e.group("c").Instances, 1, "one 4-unit m5.large")
 }
 

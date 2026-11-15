@@ -268,7 +268,7 @@ func TestBackupWire_PlanResponsesCarryNoBookkeepingMember(t *testing.T) {
 	require.NoError(t, json.Unmarshal(created, &plan), "decode CreateBackupPlan: %s", created)
 	require.NotEmpty(t, plan.BackupPlanID, "CreateBackupPlan must report a plan id")
 
-	arn := backupWireARN("backup-plan", plan.BackupPlanID)
+	arn := backupWireARN("plan", plan.BackupPlanID)
 	require.Contains(t, string(created), arn,
 		"CreateBackupPlan must report the ARN, so the absence assertion is about the member name")
 	backupWireRequireScoped(t, state, "plan:"+backupWireAccount+"/"+backupWireRegion+"/"+plan.BackupPlanID)

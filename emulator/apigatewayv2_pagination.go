@@ -1,6 +1,9 @@
 package emulator
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 )
@@ -62,4 +65,23 @@ func apigwv2PageParams(req *AWSRequest) (pageSize, offset int, awsErr *AWSError)
 func apigwv2Page[T any](items []T, pageSize, offset int) apigwV2ItemsOut[T] {
 	page, next := pageByOffsetToken(items, offset, pageSize)
 	return apigwV2ItemsOut[T]{Items: page, NextToken: next}
+}
+
+// apigwv2LoadListed reads one record a v2 listing's index names. found is false only when the index
+// entry outlived its record, which the listing skips; a store fault or a record that does not decode
+// is an error, so it fails the listing rather than shortening a page without saying so (#1538), as
+// GetApiMappings already did.
+func apigwv2LoadListed[T any](ctx context.Context, state StateManager, key, op string) (T, bool, error) {
+	var out T
+	data, err := state.Get(ctx, apigatewayv2Namespace, key)
+	if err != nil {
+		return out, false, fmt.Errorf("apigatewayv2 %s state.Get %s: %w", op, key, err)
+	}
+	if data == nil {
+		return out, false, nil
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return out, false, fmt.Errorf("apigatewayv2 %s unmarshal %s: %w", op, key, err)
+	}
+	return out, true, nil
 }

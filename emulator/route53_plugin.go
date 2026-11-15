@@ -99,12 +99,19 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	zoneID := "Z" + suffix
 	fullID := "/hostedzone/" + zoneID
 
+	defaults := r53DefaultRecordSets(zoneID, name)
 	zone := Route53HostedZone{
-		ID:              fullID,
-		Name:            name,
-		Config:          Route53ZoneConfig{Comment: xmlReq.Config.Comment, PrivateZone: isPrivate},
-		CallerReference: xmlReq.CallerReference,
-		AccountID:       reqCtx.AccountID,
+		ID:                     fullID,
+		Name:                   name,
+		Config:                 Route53ZoneConfig{Comment: xmlReq.Config.Comment, PrivateZone: isPrivate},
+		CallerReference:        xmlReq.CallerReference,
+		ResourceRecordSetCount: int64(len(defaults)),
+		AccountID:              reqCtx.AccountID,
+	}
+	for _, rrset := range defaults {
+		if err := p.putRecordSet(zoneID, rrset); err != nil {
+			return nil, fmt.Errorf("route53 createHostedZone default %s: %w", rrset.Type, err)
+		}
 	}
 	data, err := json.Marshal(zone)
 	if err != nil {
@@ -152,23 +159,17 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	resp := xmlResponse{
 		XMLNS: r53XMLNS,
 		HostedZone: xmlZone{
-			ID:              fullID,
-			Name:            name,
-			CallerReference: xmlReq.CallerReference,
+			ID:                     fullID,
+			Name:                   name,
+			CallerReference:        xmlReq.CallerReference,
+			ResourceRecordSetCount: zone.ResourceRecordSetCount,
 		},
 		ChangeInfo: xmlChangeInfo{
 			ID:          changeInfo.ID,
 			Status:      changeInfo.Status,
 			SubmittedAt: changeInfo.SubmittedAt.Format(time.RFC3339),
 		},
-		DelegationSet: xmlDelegationSet{
-			NameServers: []string{
-				"ns-1.awsdns-01.com.",
-				"ns-2.awsdns-02.net.",
-				"ns-3.awsdns-03.org.",
-				"ns-4.awsdns-04.co.uk.",
-			},
-		},
+		DelegationSet: xmlDelegationSet{NameServers: r53DefaultNameServers()},
 	}
 	resp.HostedZone.Config.Comment = xmlReq.Config.Comment
 	resp.HostedZone.Config.PrivateZone = isPrivate
@@ -269,11 +270,9 @@ func (p *Route53Plugin) getHostedZone(_ *RequestContext, _ *AWSRequest, zoneID s
 	item.Config.Comment = zone.Config.Comment
 	item.Config.PrivateZone = zone.Config.PrivateZone
 	return r53XMLResponse(http.StatusOK, xmlResponse{
-		XMLNS:      r53XMLNS,
-		HostedZone: item,
-		DelegationSet: xmlDelegationSet{
-			NameServers: []string{"ns-1.awsdns-01.com.", "ns-2.awsdns-02.net.", "ns-3.awsdns-03.org.", "ns-4.awsdns-04.co.uk."},
-		},
+		XMLNS:         r53XMLNS,
+		HostedZone:    item,
+		DelegationSet: xmlDelegationSet{NameServers: r53DefaultNameServers()},
 	})
 }
 
@@ -282,11 +281,12 @@ func (p *Route53Plugin) getHostedZone(_ *RequestContext, _ *AWSRequest, zoneID s
 // API_DeleteHostedZone publishes NoSuchHostedZone (404), "No hosted zone exists with the ID that you
 // specified", and HostedZoneNotEmpty (400), "The hosted zone contains resource records that are not
 // SOA or NS records": "You can delete a hosted zone only if it contains only the default SOA and NS
-// records". Substrate creates no SOA or NS record with a zone, so every record set a zone holds was
-// written by ChangeResourceRecordSets and blocks the delete, except a SOA or NS at the zone's apex:
-// there is one record set per name and type, so a caller's write there is the default record
-// modified, which the page does not count against the delete. The HostedZoneNotEmpty message is
-// substrate's own; the page publishes none.
+// records". CreateHostedZone stores those two record sets (#1537), so every other record set a zone
+// holds was written by ChangeResourceRecordSets and blocks the delete. A SOA or NS at the zone's apex
+// does not: there is one record set per name and type, so a caller's write there is the default
+// record modified, which the page does not count against the delete. A delete that goes ahead removes
+// the default record sets and the zone's record-set index with the zone. The HostedZoneNotEmpty
+// message is substrate's own; the page publishes none.
 func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
 	zone, err := p.loadHostedZone(zoneID)
@@ -303,6 +303,9 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 			Message:    fmt.Sprintf("The hosted zone %s contains the record set %s, which is not its SOA or NS record.", zoneID, blocking),
 			HTTPStatus: http.StatusBadRequest,
 		}
+	}
+	if err := p.deleteZoneRecordSets(id); err != nil {
+		return nil, err
 	}
 	if err := p.state.Delete(context.Background(), route53Namespace, "hostedzone:"+id); err != nil {
 		return nil, fmt.Errorf("route53 deleteHostedZone delete: %w", err)
@@ -413,7 +416,8 @@ func r53CanonicalName(name string) string {
 
 func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
-	if err := p.requireHostedZone(zoneID); err != nil {
+	zone, err := p.loadHostedZone(zoneID)
+	if err != nil {
 		return nil, err
 	}
 
@@ -442,6 +446,15 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 	}
 	if err := xml.NewDecoder(bytes.NewReader(req.Body)).Decode(&xmlReq); err != nil {
 		return nil, &AWSError{Code: "MalformedXML", Message: "could not parse change batch: " + err.Error(), HTTPStatus: http.StatusBadRequest}
+	}
+
+	// The page calls a change batch transactional — "Route 53 validates the changes in the request and
+	// then either makes all or none of the changes" — so a refused change is found before any is made.
+	for _, change := range xmlReq.ChangeBatch.Changes {
+		rrs := change.ResourceRecordSet
+		if strings.EqualFold(change.Action, "DELETE") && r53IsApexDefault(rrs.Type, rrs.Name, zone.Name) {
+			return nil, r53DefaultRecordDeleteError(rrs.Type, zone.Name)
+		}
 	}
 
 	for _, change := range xmlReq.ChangeBatch.Changes {
@@ -487,6 +500,10 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 				return nil, fmt.Errorf("route53 changeResourceRecordSets removeFromList: %w", err)
 			}
 		}
+	}
+
+	if err := p.storeRecordSetCount(id, zone); err != nil {
+		return nil, err
 	}
 
 	changeInfo := Route53ChangeInfo{

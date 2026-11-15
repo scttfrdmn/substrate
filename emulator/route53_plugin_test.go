@@ -295,14 +295,14 @@ func TestRoute53_ChangeResourceRecordSets_Create(t *testing.T) {
 	if err := xml.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listResult.ResourceRecordSets) != 1 {
-		t.Fatalf("expected 1 RRSet, got %d", len(listResult.ResourceRecordSets))
+	if len(listResult.ResourceRecordSets) != 3 {
+		t.Fatalf("expected the default NS and SOA plus www.example.com, got %d", len(listResult.ResourceRecordSets))
 	}
-	if listResult.ResourceRecordSets[0].Name != "www.example.com" {
-		t.Errorf("expected www.example.com, got %q", listResult.ResourceRecordSets[0].Name)
+	if listResult.ResourceRecordSets[2].Name != "www.example.com" {
+		t.Errorf("expected www.example.com, got %q", listResult.ResourceRecordSets[2].Name)
 	}
-	if listResult.ResourceRecordSets[0].Type != "A" {
-		t.Errorf("expected A, got %q", listResult.ResourceRecordSets[0].Type)
+	if listResult.ResourceRecordSets[2].Type != "A" {
+		t.Errorf("expected A, got %q", listResult.ResourceRecordSets[2].Type)
 	}
 }
 
@@ -344,8 +344,8 @@ func TestRoute53_ChangeResourceRecordSets_Upsert(t *testing.T) {
 	if err := xml.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listResult.ResourceRecordSets) != 1 {
-		t.Errorf("expected 1 RRSet after upsert, got %d", len(listResult.ResourceRecordSets))
+	if len(listResult.ResourceRecordSets) != 3 {
+		t.Errorf("expected the default NS and SOA plus one upserted record set, got %d", len(listResult.ResourceRecordSets))
 	}
 }
 
@@ -382,8 +382,8 @@ func TestRoute53_ChangeResourceRecordSets_Delete(t *testing.T) {
 	if err := xml.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listResult.ResourceRecordSets) != 0 {
-		t.Errorf("expected 0 RRSets after delete, got %d", len(listResult.ResourceRecordSets))
+	if len(listResult.ResourceRecordSets) != 2 {
+		t.Errorf("expected only the default NS and SOA after delete, got %d", len(listResult.ResourceRecordSets))
 	}
 }
 
@@ -425,8 +425,8 @@ func TestRoute53_ListResourceRecordSets(t *testing.T) {
 	if err := xml.NewDecoder(listResp.Body).Decode(&listResult); err != nil {
 		t.Fatalf("decode list: %v", err)
 	}
-	if len(listResult.ResourceRecordSets) != 3 {
-		t.Fatalf("expected 3 RRSets, got %d", len(listResult.ResourceRecordSets))
+	if len(listResult.ResourceRecordSets) != 5 {
+		t.Fatalf("expected the default NS and SOA plus 3 record sets, got %d", len(listResult.ResourceRecordSets))
 	}
 }
 

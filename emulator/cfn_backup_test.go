@@ -68,7 +68,7 @@ func TestCFN_BackupPlanAndSelectionReachTheBackupPlugin(t *testing.T) {
 	require.NotEmpty(t, selectionID)
 
 	// #1182's shapes, now from the plugin's own response.
-	assert.Equal(t, "arn:aws:backup:us-east-1:123456789012:backup-plan:"+planID, created.Outputs["PlanArn"])
+	assert.Equal(t, "arn:aws:backup:us-east-1:123456789012:plan:"+planID, created.Outputs["PlanArn"])
 	assert.NotEmpty(t, created.Outputs["VersionId"])
 	assert.Equal(t, selectionID, created.Outputs["SelectionId"], "Ref returns BackupSelectionId")
 	assert.Equal(t, selectionID, created.Outputs["SelectionAttrId"])

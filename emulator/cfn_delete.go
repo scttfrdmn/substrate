@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -448,11 +449,13 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 
 	// --- Everything else -----------------------------------------------------
 	"AWS::Route53::HostedZone": pathDeleter("route53", "/2013-04-01/hostedzone/"),
-	"AWS::Route53::RecordSet": func(_ *StackDeployer, dr DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+	"AWS::Route53::RecordSet": func(d *StackDeployer, dr DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
 		// A record set has no delete operation of its own: it is removed by a
 		// change batch carrying Action DELETE, the mirror of the UPSERT that
 		// created it. The record is keyed by type and name, which is why both
-		// come from the template rather than from the physical ID alone.
+		// come from the template rather than from the physical ID alone. A
+		// record set that is the zone's default SOA or NS cannot be deleted
+		// (#1537), so its delete restores the default instead.
 		zone := resolveStringProp(props, "HostedZoneId", "", cctx)
 		if zone == "" || dr.PhysicalID == "" {
 			return nil
@@ -460,10 +463,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 		rtype := resolveStringProp(props, "Type", "A", cctx)
 		body := `<ChangeResourceRecordSetsRequest ` +
 			`xmlns="https://route53.amazonaws.com/doc/2013-04-01/">` +
-			`<ChangeBatch><Changes><Change><Action>DELETE</Action>` +
-			`<ResourceRecordSet><Name>` + dr.PhysicalID + `</Name>` +
-			`<Type>` + rtype + `</Type></ResourceRecordSet>` +
-			`</Change></Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+			`<ChangeBatch><Changes>` + d.cfnRecordSetDeleteChange(zone, dr.PhysicalID, rtype) +
+			`</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
 		return &AWSRequest{Service: "route53", Operation: "POST",
 			Path: "/2013-04-01/hostedzone/" + zone + "/rrset", Body: []byte(body),
 			Headers: map[string]string{"Content-Type": "application/xml"},
@@ -475,8 +476,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	// zone that still holds record sets (#1416) a group could be skipped; now a skipped group
 	// would leave its zone undeletable and the stack stuck in DELETE_FAILED. The batch for the
 	// first zone is the delete; any other zone's batch is a pre-step (cfnDeletePreSteps).
-	"AWS::Route53::RecordSetGroup": func(_ *StackDeployer, _ DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
-		batches := cfnRecordSetGroupDeleteBatches(props, cctx)
+	"AWS::Route53::RecordSetGroup": func(d *StackDeployer, _ DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+		batches := d.cfnRecordSetGroupDeleteBatches(props, cctx)
 		if len(batches) == 0 {
 			return nil
 		}
@@ -534,10 +535,10 @@ type cfnDeletePreStepFunc func(d *StackDeployer, dr DeployedResource,
 var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 	// A record set group whose elements name more than one zone deletes the other zones'
 	// record sets first; the first zone's batch is the group's own delete request.
-	"AWS::Route53::RecordSetGroup": func(_ *StackDeployer, _ DeployedResource,
+	"AWS::Route53::RecordSetGroup": func(d *StackDeployer, _ DeployedResource,
 		props map[string]interface{}, cctx *cfnContext,
 	) []*AWSRequest {
-		batches := cfnRecordSetGroupDeleteBatches(props, cctx)
+		batches := d.cfnRecordSetGroupDeleteBatches(props, cctx)
 		if len(batches) < 2 {
 			return nil
 		}
@@ -656,8 +657,10 @@ var cfnDeleteInertTypes = map[string]string{
 // group's record sets, one per zone in the order the zones first appear. Each element
 // is resolved with the group's zone filled in ([cfnRecordSetInGroup]) and keyed by
 // the Name and Type (default A) deployRoute53RecordSet upserted. An element that
-// resolves to no zone or no name wrote nothing addressable and contributes nothing.
-func cfnRecordSetGroupDeleteBatches(props map[string]interface{}, cctx *cfnContext) []*AWSRequest {
+// resolves to no zone or no name wrote nothing addressable and contributes nothing, and
+// one that is its zone's default SOA or NS restores the default
+// ([StackDeployer.cfnRecordSetDeleteChange]).
+func (d *StackDeployer) cfnRecordSetGroupDeleteBatches(props map[string]interface{}, cctx *cfnContext) []*AWSRequest {
 	rsList, _ := props["RecordSets"].([]interface{})
 	var zones []string
 	changes := map[string]string{}
@@ -675,8 +678,7 @@ func cfnRecordSetGroupDeleteBatches(props map[string]interface{}, cctx *cfnConte
 		if _, seen := changes[zone]; !seen {
 			zones = append(zones, zone)
 		}
-		changes[zone] += `<Change><Action>DELETE</Action><ResourceRecordSet><Name>` + name +
-			`</Name><Type>` + resolveStringProp(rs, "Type", "A", cctx) + `</Type></ResourceRecordSet></Change>`
+		changes[zone] += d.cfnRecordSetDeleteChange(zone, name, resolveStringProp(rs, "Type", "A", cctx))
 	}
 	batches := make([]*AWSRequest, 0, len(zones))
 	for _, zone := range zones {
@@ -688,6 +690,43 @@ func cfnRecordSetGroupDeleteBatches(props map[string]interface{}, cctx *cfnConte
 			Params:  map[string]string{}})
 	}
 	return batches
+}
+
+// cfnRecordSetDeleteChange builds the one change that removes a record set a stack wrote: a DELETE
+// keyed by name and type, or, for the zone's own apex SOA or NS, an UPSERT of the default record set.
+// Every zone holds those two from its creation and a change batch cannot delete them (#1537), so a
+// stack that wrote one modified the default, and deleting the stack's resource undoes the
+// modification. The zone's name is read from Route 53's state; a zone that cannot be read takes the
+// DELETE, whose own refusal (NoSuchHostedZone for a zone already gone) is what the delete reports.
+func (d *StackDeployer) cfnRecordSetDeleteChange(zoneID, name, rtype string) string {
+	del := `<Change><Action>DELETE</Action><ResourceRecordSet><Name>` + name +
+		`</Name><Type>` + rtype + `</Type></ResourceRecordSet></Change>`
+	t := strings.ToUpper(rtype)
+	if t != "SOA" && t != "NS" {
+		return del
+	}
+	id := r53ZoneSuffix(zoneID)
+	data, err := d.state.Get(context.Background(), route53Namespace, "hostedzone:"+id)
+	if err != nil || data == nil {
+		return del
+	}
+	var zone Route53HostedZone
+	if json.Unmarshal(data, &zone) != nil || !r53IsApexDefault(rtype, name, zone.Name) {
+		return del
+	}
+	for _, rrset := range r53DefaultRecordSets(id, zone.Name) {
+		if rrset.Type != t {
+			continue
+		}
+		var values strings.Builder
+		for _, rr := range rrset.ResourceRecords {
+			values.WriteString(`<ResourceRecord><Value>` + rr.Value + `</Value></ResourceRecord>`)
+		}
+		return `<Change><Action>UPSERT</Action><ResourceRecordSet><Name>` + name + `</Name><Type>` + t +
+			`</Type><TTL>` + strconv.FormatInt(rrset.TTL, 10) + `</TTL><ResourceRecords>` + values.String() +
+			`</ResourceRecords></ResourceRecordSet></Change>`
+	}
+	return del
 }
 
 // queryDeleter builds a deleter for a query-protocol API: one action name and one

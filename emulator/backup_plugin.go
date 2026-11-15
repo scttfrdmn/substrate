@@ -124,7 +124,9 @@ func (p *BackupPlugin) createBackupVault(reqCtx *RequestContext, req *AWSRequest
 
 	now := p.tc.Now()
 	vault := BackupVault{
-		BackupVaultName:        name,
+		BackupVaultName: name,
+		// backup-vault is the published segment for a vault, and plan the one for a plan
+		// ([backupPlanARN]); the asymmetry is AWS's, so neither is to be "fixed" to match the other.
 		BackupVaultArn:         fmt.Sprintf("arn:aws:backup:%s:%s:backup-vault:%s", reqCtx.Region, reqCtx.AccountID, name),
 		EncryptionKeyArn:       input.EncryptionKeyArn,
 		CreationDate:           now,
@@ -312,7 +314,7 @@ func (p *BackupPlugin) createBackupPlan(reqCtx *RequestContext, req *AWSRequest)
 
 	plan := BackupPlan{
 		BackupPlanID:     planID,
-		BackupPlanArn:    fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", reqCtx.Region, reqCtx.AccountID, planID),
+		BackupPlanArn:    backupPlanARN(reqCtx.Region, reqCtx.AccountID, planID),
 		BackupPlanName:   input.BackupPlan.BackupPlanName,
 		Rules:            input.BackupPlan.Rules,
 		VersionID:        versionID,
@@ -714,7 +716,30 @@ func (p *BackupPlugin) loadPlan(acct, region, planID string) (*BackupPlan, error
 	if err := json.Unmarshal(data, &plan); err != nil {
 		return nil, fmt.Errorf("backup loadPlan unmarshal: %w", err)
 	}
+	// The ARN is derived from the key rather than read back, so a plan stored before #1181 with the
+	// backup-plan segment reports the published one.
+	plan.BackupPlanArn = backupPlanARN(region, acct, plan.BackupPlanID)
 	return &plan, nil
+}
+
+// backupPlanARN builds a backup plan's ARN in the shape AWS publishes (#1181). API_CreateBackupPlan
+// glosses BackupPlanArn with the example
+// arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50, and
+// AWS::Backup::BackupPlan's BackupPlanArn attribute quotes the same: the resource segment is plan.
+// Until #1181 substrate spelled it backup-plan. A vault's segment really is backup-vault
+// (API_CreateBackupVault's arn:aws:backup:us-east-1:123456789012:backup-vault:aBackupVault).
+func backupPlanARN(region, acct, planID string) string {
+	return fmt.Sprintf("arn:aws:backup:%s:%s:plan:%s", region, acct, planID)
+}
+
+// backupLegacyPlanARN matches a plan ARN in the pre-#1181 shape, capturing everything before the
+// resource segment and the plan ID.
+var backupLegacyPlanARN = regexp.MustCompile(`^(arn:[^:]+:backup:[^:]*:[^:]*:)backup-plan:(.+)$`)
+
+// backupPublishedPlanARN rewrites a pre-#1181 plan ARN into the published shape and leaves any other
+// string as it is. It is how a stack record written before #1181 reports the published ARN.
+func backupPublishedPlanARN(arn string) string {
+	return backupLegacyPlanARN.ReplaceAllString(arn, "${1}plan:${2}")
 }
 
 // loadSelection loads a BackupSelection from state or returns a not-found error.

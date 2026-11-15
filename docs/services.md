@@ -7250,6 +7250,14 @@ they are **seedable** through `POST`/`DELETE /v1/lambda/invoke-error` — which 
 substrate offers in place of running the work, and which answers instantly and reproducibly
 where a real handler would not.
 
+**A cold start costs the caller nothing beyond its own invoke.** The readiness check is an HTTP
+request to a path the runtime interface emulator does not route, which its HTTP server answers 404
+without reaching the function. Until [#1129](https://github.com/scttfrdmn/substrate/issues/1129) the
+check POSTed `{}` to the invocation endpoint, so on the image path every cold start ran the handler
+once with an event the caller never sent, before the caller's own. The emulator publishes no
+readiness endpoint, and its invocation handler runs the function for any method, so the probe cannot
+be that endpoint.
+
 ### Which operations drop a warm container
 
 This applies only when Docker execution is configured. Without it there is no executor
@@ -13696,11 +13704,11 @@ Auto Scaling itself is free; the EC2 instances a group launches are costed as EC
 
 | Operation | Notes |
 |-----------|-------|
-| CreateHostedZone | Returns HTTP 201; zone IDs prefixed `/hostedzone/Z` |
+| CreateHostedZone | Returns HTTP 201; zone IDs prefixed `/hostedzone/Z`. Stores the zone's [default SOA and NS record sets](#the-default-soa-and-ns-record-sets), so `ResourceRecordSetCount` starts at 2 |
 | GetHostedZone | |
 | DeleteHostedZone | `NoSuchHostedZone`/404 for an absent zone, and `HostedZoneNotEmpty`/400 for a zone holding any record set but its apex SOA and NS — see [Deleting a hosted zone](#deleting-a-hosted-zone) |
 | ListHostedZones | A zone record that cannot be read or decoded is an error, not a zone left out |
-| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
+| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A batch that deletes the zone's default SOA or NS is `InvalidChangeBatch`/400 and makes no change. A name with and without its trailing dot is one record set |
 | ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A record set that cannot be read or decoded is an error, not a record set left out |
 
 ### CloudFormation resource types
@@ -13728,10 +13736,11 @@ held ([#1416](https://github.com/scttfrdmn/substrate/issues/1416)). `API_DeleteH
 `HostedZoneNotEmpty` (400) for *"The hosted zone contains resource records that are not SOA or NS
 records"*: *"You can delete a hosted zone only if it contains only the default SOA and NS records."*
 
-Substrate creates no SOA or NS record with a zone, so every record set a zone holds was written by
-`ChangeResourceRecordSets`, and each one blocks the delete except an SOA or NS at the zone's apex. A
+Every record set a zone holds besides its [defaults](#the-default-soa-and-ns-record-sets) was written
+by `ChangeResourceRecordSets`, and each one blocks the delete except an SOA or NS at the zone's apex. A
 zone has one record set per name and type, so a write there modifies the default record rather than
-adding one. The `HostedZoneNotEmpty` message is substrate's own; the page publishes none.
+adding one. A delete that goes ahead removes the default record sets, and the zone's record-set index,
+with the zone. The `HostedZoneNotEmpty` message is substrate's own; the page publishes none.
 
 The two listings, and the delete's own check, skip an index entry whose record is gone, since the index
 outlived it. A record that is there but cannot be read or decoded is an error, answered as a 500, where
@@ -13741,6 +13750,41 @@ it used to be left out of the listing silently
 A CloudFormation stack delete still converges: an `AWS::Route53::RecordSetGroup`'s delete removes its
 record sets with a `ChangeResourceRecordSets` `DELETE` batch per zone, where the sweep used to skip the
 group, so the zone it lives in can then be deleted.
+
+### The default SOA and NS record sets
+
+`API_CreateHostedZone`: *"For public hosted zones, Route 53 automatically creates a default SOA record
+and four NS records for the zone."* Both of the page's example responses report
+`<ResourceRecordSetCount>2</ResourceRecordSetCount>`, the private-zone one included, so substrate stores
+the two record sets for a private zone too. Until
+[#1537](https://github.com/scttfrdmn/substrate/issues/1537) a new zone held no record sets and reported
+a count of 0.
+
+| Record set | Name | TTL | Value |
+|------------|------|-----|-------|
+| NS | the zone's name | 172800 | the four name servers `GetHostedZone`'s `DelegationSet` reports |
+| SOA | the zone's name | 900 | `ns-1.awsdns-01.com. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400` |
+
+The SOA's timers are the Developer Guide's example (*"NS and SOA records that Amazon Route 53 creates
+for a public hosted zone"*: serial 1, refresh 7200, retry 900, expire 1209600, minimum TTL 86400), and
+its TTL is that page's default of 900 seconds. The same page says only that the administrator's
+address is *"an amazon.com email address that is not monitored"*; `awsdns-hostmaster.amazon.com.` is the
+address real zones report. The NS TTL is the value *"Making Route 53 the DNS service for a domain
+that's in use"* calls *"the typical TTL setting for the NS record"*.
+
+`ResourceRecordSetCount` is recounted after every change batch, and `GetHostedZone`, `ListHostedZones`
+and `CreateHostedZone` report it.
+
+A change batch may `UPSERT` either default, and a name with or without its trailing dot is the same
+record set: `API_CreateHostedZone` says Route 53 treats the two spellings as identical. A batch that
+`DELETE`s either is refused with `InvalidChangeBatch`/400, the code `API_ChangeResourceRecordSets`
+publishes for a rejected batch; the Developer Guide's *"Deleting records"* says *"You can't delete the
+records that have a value of NS or SOA for Type"*. The page calls a batch transactional, so a refused
+batch makes none of its changes. The message is substrate's own.
+
+A CloudFormation `AWS::Route53::RecordSet` or `RecordSetGroup` element that writes the zone's apex SOA
+or NS modifies the default, so its delete restores the default with an `UPSERT` rather than sending a
+`DELETE` the zone would refuse, and the stack tears down.
 
 ### The account a hosted zone carries reaches no response
 
@@ -18291,6 +18335,10 @@ no default, maximum or minimum for `maxResults` and no order, so these readings 
   *"One of the parameters in the request is invalid"*, and both are checked before any state is read.
 - `nextToken` is the base64 offset the v1 collections use, and the last page carries none. Elements are in
   ascending ID (or stage name), so the offset is stable between pages.
+- A record that cannot be read or decoded fails the listing with a 500, rather than being left out of a
+  page that then reports fewer elements without saying so. Only an index entry whose record is gone is
+  skipped. `GetApiMappings` always did this; the other five did from
+  [#1538](https://github.com/scttfrdmn/substrate/issues/1538).
 
 ### An update changes only what it names
 
@@ -18594,16 +18642,16 @@ routes both.
 | DescribeStateMachine | Addressed by ARN — see below |
 | UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996, #1073) |
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995). Answers `{}`; the page publishes an empty body (#1206) |
-| ListStateMachines | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
+| ListStateMachines | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused. [A `nextToken` it did not issue is `InvalidToken`](#list-tokens-are-issued-not-names) |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
 | StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it; twelve of the fourteen published response members are answered — see below (#1071) |
 | DescribeExecution | Addressed by ARN. The execution runs to a terminal status at `StartExecution`, so this reports rather than advances it; `error` and `cause` are answered on a failed execution — see below (#1071) |
 | StopExecution | Addressed by ARN |
-| ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
+| ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused. [A `nextToken` it did not issue is `InvalidToken`](#list-tokens-are-issued-not-names) |
 | GetExecutionHistory | Addressed by ARN. Each event's `timestamp` is epoch seconds and its `type` a published per-state value (#1323) |
 | CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; `name` is checked against the same published constraints as `CreateStateMachine`'s, and a repeat is **idempotent** on the name alone — see below (#1072) |
 | DescribeActivity | Addressed by ARN — see below |
-| ListActivities | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
+| ListActivities | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused. [A `nextToken` it did not issue is `InvalidToken`](#list-tokens-are-issued-not-names) |
 | DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995). Answers `{}`; the page publishes an empty body (#1206) |
 | TagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
 | UntagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
@@ -19248,6 +19296,22 @@ survive the structural validation above.
 
 Step Functions state transitions: $0.025 per 1,000 transitions.
 
+
+### List tokens are issued, not names
+
+`ListStateMachines`, `ListExecutions` and `ListActivities` each describe `nextToken` as *"a unique
+pagination token for each page"* and publish `InvalidToken`/400, *"The provided token is not valid."*
+The token used to be the next item's bare name, and a name that matched nothing was read as page one
+([#1540](https://github.com/scttfrdmn/substrate/issues/1540)). It is now an opaque cursor naming the last
+item the previous page returned and the listing that issued it, checked before any state is read: a
+token no call to that operation issued — a bare name, another listing's token, another state machine's
+execution token — is `InvalidToken`/400.
+
+State machines and activities resume at the first name after the cursor, so deleting one between two
+pages, including the one the cursor names, costs no other its place. Executions are listed in start
+order and are never removed from their state machine, so their cursor resumes after the named
+execution. The pages' 24-hour expiry is not modeled. Tokens recorded before #1540 are bare names and
+are now refused.
 ---
 
 ## ECR
@@ -23863,11 +23927,11 @@ associated with a regional Web ACL.
 | CreateWebACL | `Name`, `Scope` and `DefaultAction` are read; `Rules` and `VisibilityConfig` are stored as opaque objects |
 | GetWebACL | `Scope` defaults to `REGIONAL`; resolvable by `ARN` or by the `Name`+`Id`+`Scope` triple. Seven of `API_WebACL`'s members and nothing it does not publish; the lock token is answered once, at the top level |
 | UpdateWebACL | Requires a matching `LockToken`; [merges rather than replaces](#updatewebacl-merges-so-a-member-can-never-be-cleared) |
-| DeleteWebACL | Requires a matching `LockToken` |
+| DeleteWebACL | Requires a matching `LockToken`; [refuses an ACL still associated with a resource](#a-web-acl-in-use-cannot-be-deleted) with `WAFAssociatedItemException`/400 |
 | ListWebACLs | [Pages by `Limit` and `NextMarker`](#both-list-operations-page-by-limit-and-nextmarker) |
-| AssociateWebACL | Records the association; the resource ARN is not checked against any service's state |
+| AssociateWebACL | Records the association. `WebACLArn` must name a web ACL (`WAFNonexistentItemException`/400); the resource ARN is not checked against any service's state |
 | DisassociateWebACL | |
-| GetWebACLForResource | [Reports the associated WebACL in full](#getwebaclforresource-reports-the-web-acl-itself) |
+| GetWebACLForResource | [Reports the associated WebACL in full](#getwebaclforresource-reports-the-web-acl-itself), and no `WebACL` for a resource with no association |
 | CreateIPSet | `Name`, `Scope`, `IPAddressVersion` and `Addresses` are read; a CIDR is not validated |
 | GetIPSet | All six members `API_IPSet` publishes and nothing it does not; the lock token is answered once, at the top level |
 | UpdateIPSet | Requires a matching `LockToken`; merges |
@@ -23897,12 +23961,23 @@ where AWS publishes the full `WebACL`, whose `DefaultAction` and `VisibilityConf
 The association's ARN is now resolved to the stored record and answered through the projection
 `GetWebACL` uses, so the two report one ACL identically.
 
-An association whose Web ACL has since been deleted answers `WAFNonexistentItemException`/400, as a
-resource with no association does. The page also says "If there is no associated resource, AWS WAF
-returns a null web ACL", which substrate does not adopt for either case: substrate's no-association
-answer predates this change. On AWS the dangling case does not arise, because `DeleteWebACL` publishes
-`WAFAssociatedItemException` for an ACL still associated with a resource; substrate's `DeleteWebACL` does
-not refuse that yet.
+A resource with no association answers 200 with no `WebACL` member: the page says *"If there is no
+associated resource, AWS WAF returns a null web ACL."* It answered `WAFNonexistentItemException`/400
+until [#1541](https://github.com/scttfrdmn/substrate/issues/1541), which settled the reading from the
+page. An association whose Web ACL is gone would still answer that code, but the API can no longer
+reach the case: see [A web ACL in use cannot be deleted](#a-web-acl-in-use-cannot-be-deleted).
+
+### A web ACL in use cannot be deleted
+
+`API_DeleteWebACL`: *"Before deleting any web ACL, first disassociate it from all resources."* It
+publishes `WAFAssociatedItemException`/400. `DeleteWebACL` now refuses an ACL that a resource is
+associated with through `AssociateWebACL`, and leaves it in place
+([#1541](https://github.com/scttfrdmn/substrate/issues/1541)). The page orders no checks; the
+association is checked before the lock token, so a stale token learns the same thing. The message,
+which names the resource, is substrate's own.
+
+`AssociateWebACL` now requires `WebACLArn` (`Required: Yes`) and refuses one naming no web ACL with
+`WAFNonexistentItemException`/400, which the page publishes, so an association always names a live ACL.
 
 ### UpdateWebACL merges, so a member can never be cleared
 
@@ -24007,7 +24082,7 @@ The published path is given for every operation because one of them cannot be re
 | DescribeBackupVault | `GET /backup-vaults/{backupVaultName}` | [Nine of the seventeen published members](#the-backup-vault-is-projected-onto-the-published-shape), including `VaultState`, `VaultType` and `Locked`, and nothing Substrate does not publish |
 | DeleteBackupVault | `DELETE /backup-vaults/{backupVaultName}` | Answers `{}`, which is the published empty body. Its published precondition [cannot fail here](#which-backup-preconditions-are-enforced) |
 | ListBackupVaults | `GET /backup-vaults/` | `BackupVaultList` of [nine of the thirteen published `BackupVaultListMember` members](#the-backup-vault-is-projected-onto-the-published-shape) per vault. [Pages by `maxResults` and `nextToken`, and applies `vaultType` and `shared`](#listbackupvaults-pages-and-filters); a bad value is `InvalidParameterValueException`/400 |
-| CreateBackupPlan | `PUT /backup/plans/` | [Routed on the published verb only](#the-backup-plan-operations-are-routed-on-their-published-verbs). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read. A repeated `CreatorRequestId` returns the existing plan, as published (#1173). The plan ARN [uses the wrong resource segment](#arn-shapes) |
+| CreateBackupPlan | `PUT /backup/plans/` | [Routed on the published verb only](#the-backup-plan-operations-are-routed-on-their-published-verbs). `BackupPlanName` is required; `Rules` are stored unvalidated and `AdvancedBackupSettings` is not read. A repeated `CreatorRequestId` returns the existing plan, as published (#1173). The plan ARN uses the [published `plan` segment](#arn-shapes) |
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Reachable over that path since #1176](#getbackupplan-is-reachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
 | DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId`. A plan that still has selections is [refused](#which-backup-preconditions-are-enforced) with `InvalidRequestException`/400 |
@@ -24251,7 +24326,7 @@ no transient failure to report.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| `AWS::Backup::BackupPlan` | the plan ID | Deployed through `CreateBackupPlan`, so `GetBackupPlan` and `ListBackupPlans` report the stack's plan ([#1428](https://github.com/scttfrdmn/substrate/issues/1428)). The template's `BackupPlanRule` is sent as the API's `Rules`, and a rule's `TargetBackupVault` as `TargetBackupVaultName`; every other member has the same name on both pages and is sent as declared. `BackupPlan` is `Required: Yes`, and a template without it fails the resource. `Ref` and `Fn::GetAtt BackupPlanId` return the plan ID the plugin minted, `VersionId` the version `CreateBackupPlan` answered, and `BackupPlanArn` the response's ARN, with the plugin's `backup-plan` segment (#1181). An `UpdateStack` keeps the ID: an unchanged plan makes no call, and a changed `BackupPlan` goes through `UpdateBackupPlan`, which answers a new `VersionId`. A change to `BackupPlanTags` alone makes no call, since Backup's `TagResource` is not routed |
+| `AWS::Backup::BackupPlan` | the plan ID | Deployed through `CreateBackupPlan`, so `GetBackupPlan` and `ListBackupPlans` report the stack's plan ([#1428](https://github.com/scttfrdmn/substrate/issues/1428)). The template's `BackupPlanRule` is sent as the API's `Rules`, and a rule's `TargetBackupVault` as `TargetBackupVaultName`; every other member has the same name on both pages and is sent as declared. `BackupPlan` is `Required: Yes`, and a template without it fails the resource. `Ref` and `Fn::GetAtt BackupPlanId` return the plan ID the plugin minted, `VersionId` the version `CreateBackupPlan` answered, and `BackupPlanArn` the response's ARN, with the published `plan` segment (#1181). An `UpdateStack` keeps the ID: an unchanged plan makes no call, and a changed `BackupPlan` goes through `UpdateBackupPlan`, which answers a new `VersionId`. A change to `BackupPlanTags` alone makes no call, since Backup's `TagResource` is not routed |
 | `AWS::Backup::BackupSelection` | the selection ID | Deployed through `CreateBackupSelection` on the plan `BackupPlanId` names, with `BackupSelection` sent as declared — the template's and the API's members have the same names ([#1428](https://github.com/scttfrdmn/substrate/issues/1428)). `Fn::GetAtt BackupPlanId` and `SelectionId` are the response's own members; `Id` is the same selection ID, since the API has no second identifier for a selection (substrate's reading). Both properties are *Update requires: Replacement*, so a changed selection is a new one and the old one is deleted once the update succeeds. A stack delete removes the selection before the plan — the selection's `Ref` to the plan orders it — which `DeleteBackupPlan` requires |
 
 `AWS::Backup::BackupVault` is not deployed.
@@ -24261,14 +24336,17 @@ no transient failure to report.
 | Resource | Substrate | Published |
 |----------|-----------|-----------|
 | vault | `arn:aws:backup:{region}:{account}:backup-vault:{name}` | the same |
-| plan | `arn:aws:backup:{region}:{account}:backup-plan:{planId}` | `…:plan:{planId}` |
+| plan | `arn:aws:backup:{region}:{account}:plan:{planId}` | the same |
 | selection | none — a selection carries no ARN | AWS publishes none either |
 
-The two segments really are spelled differently by the same service: `backup-vault` for a vault and
-`plan` for a plan, each published as a worked example rather than as a format string. Substrate's
-vault matches; its plan does not, in the API handler and in the CloudFormation deployer alike, so an
-IAM policy or an ARN parser written against Substrate's plan ARN matches nothing on AWS
-([#1181](https://github.com/scttfrdmn/substrate/issues/1181)).
+The two segments really are spelled differently by the same service: `backup-vault` for a vault
+(`API_CreateBackupVault`'s `arn:aws:backup:us-east-1:123456789012:backup-vault:aBackupVault`) and `plan`
+for a plan (`API_CreateBackupPlan`'s and `AWS::Backup::BackupPlan`'s
+`arn:aws:backup:us-east-1:123456789012:plan:8F81F553-…`), each published as a worked example rather than
+as a format string. Substrate spelled a plan's segment `backup-plan` until
+[#1181](https://github.com/scttfrdmn/substrate/issues/1181), so an IAM policy or an ARN parser written
+against it matched nothing on AWS. The ARN is derived from the plan's ID when it is read, so a plan
+stored before the fix, and a CloudFormation stack record holding one, report the published form.
 
 The published example differs in one more way the table does not show: AWS's sample is
 `arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50`, an **uppercase**
@@ -24657,7 +24735,7 @@ ingestion progress, observation by observation, and settle to a failure where a 
 | Operation | Notes |
 |-----------|-------|
 | CreateDataSource | `POST /accounts/{AwsAccountId}/data-sources`. Answers HTTP 201 with the four published members; `CreationStatus` is `CREATION_SUCCESSFUL`, or `CREATION_IN_PROGRESS` while [a seed's countdown runs](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions). `Name` and `Type` are `Required: Yes` and unchecked, so a data source can have neither |
-| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Answers five of `API_DataSource`'s members, plus `ErrorInfo` for a seeded `CREATION_FAILED`, and none it does not publish. Each describe is one observation of [the seeded creation](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions). It adds [a `Status` body member the API binds to the status line](#status-is-bound-to-the-status-line-not-the-body) |
+| DescribeDataSource | `GET /accounts/{AwsAccountId}/data-sources/{DataSourceId}`. Answers five of `API_DataSource`'s members, plus `ErrorInfo` for a seeded `CREATION_FAILED`, and none it does not publish. Each describe is one observation of [the seeded creation](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions). [`Status` is the status line, not a body member](#status-is-bound-to-the-status-line-not-the-body) |
 | CreateDataSet | `POST /accounts/{AwsAccountId}/data-sets`. Answers HTTP 201 with `DataSetId`, `Arn`, `IngestionId` and `RequestId`; `PhysicalTableMap`, `ImportMode` and the rest of the definition are not read |
 | DescribeIngestion | `GET /accounts/{AwsAccountId}/data-sets/{DataSetId}/ingestions/{IngestionId}`. Answers the data set's one ingestion, the one `CreateDataSet` minted, and refuses any other ID; each describe is one observation of [the seeded ingestion](#a-data-sources-creation-and-an-ingestion-are-seeded-progressions) |
 
@@ -24738,11 +24816,14 @@ DELETE /v1/quicksight/data-source-status   (all seeds; ?dataSourceId=… for one
 
 ### Status is bound to the status line, not the body
 
-Every QuickSight Response Syntax opens with `HTTP/1.1 {Status}` rather than a literal code, because
-`Status` is bound to the status line: an SDK populates the field from the HTTP status it already
-received. Both describes emit `Status` as a JSON body member as well, which is invisible through an
-SDK and visible as an unpublished extra member to anything reading the raw body.
-[#1179](https://github.com/scttfrdmn/substrate/issues/1179). The two creates emit no `Status`.
+Every QuickSight Response Syntax opens with `HTTP/1.1 {Status}` rather than a literal code, and each
+page lists `Status`, *"The HTTP status of the request"*, under the HTTP response rather than among the
+members *"returned in JSON format"*: an SDK populates the field from the HTTP status it already received.
+`DescribeDataSource` and `DescribeIngestion` used to emit `Status` as a JSON body member as well, which
+was invisible through an SDK and visible as an unpublished extra member to anything reading the raw
+body — a recorded event log, a fixture diff. Neither does now
+([#1179](https://github.com/scttfrdmn/substrate/issues/1179)), and the creates never did. A new handler
+answers its status through the response's status code, never through a `Status` member.
 
 ### What a refusal reports
 
