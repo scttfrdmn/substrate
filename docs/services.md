@@ -7753,7 +7753,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone`, and a [seeded transient state](#seeding-an-instance-state-progression) both in `instanceState` and to its own `instance-state-name` filter. Paginates on `MaxResults`/`NextToken`, with no published range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
-| ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` or `shutting-down` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
+| ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
 | CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
@@ -8292,8 +8292,10 @@ Three kinds of AMI resolve, and nothing else does.
 3. **Any other `/aws/service/…` AMI parameter path**, which resolves to its
    family's entry above — a Windows path to the Windows image, an Ubuntu path to
    Ubuntu 24.04, an ECS path to ECS-on-AL2023, anything else to Amazon Linux 2023 —
-   **in the architecture the path names**: a path with an `/arm64/` segment or an
-   `-arm64` suffix resolves to the family's arm64 image, any other to its x86_64 one.
+   **in the architecture the path names**: a path carrying `arm64` as a token anywhere —
+   delimited by `/`, `-` or `_`, as in `.../arm64/hvm/...`, `al2023-ami-kernel-6.1-arm64`,
+   `amzn2-ami-hvm-arm64-gp2` or EKS's `.../amazon-linux-2-arm64/recommended/image_id` —
+   resolves to the family's arm64 image, any other to its x86_64 one.
    Before #1497 every unlisted path resolved to x86_64, so a Graviton launch that
    discovered its AMI correctly was handed an image of the wrong architecture. Substrate has answered every AMI-shaped `/aws/service/` path since
    it gained `GetParameter`, and this is why: an unlisted path must still resolve
@@ -8600,7 +8602,8 @@ code for the identifier the request used ([#1469](https://github.com/scttfrdmn/s
 Both codes are in EC2's published error table; the messages are real EC2's, observed (the name
 form is quoted verbatim in hashicorp/packer#7968 and aws/karpenter-provider-aws#2101). That holds
 for `CreateLaunchTemplateVersion`, `ModifyLaunchTemplate`, `DescribeLaunchTemplateVersions`,
-`DeleteLaunchTemplateVersions`, `DeleteLaunchTemplate` and `RunInstances`' `LaunchTemplate.*`.
+`DeleteLaunchTemplateVersions`, `DeleteLaunchTemplate`, `RunInstances`' `LaunchTemplate.*` and
+`CreateFleet`'s launch template configs (whose codes were already these, with messages of their own).
 Before #1469 all of them answered the ID code, so a request naming its template by name — how
 most IaC names one — was refused with a code about an ID it never sent, and `RunInstances` did
 not refuse at all: it skipped the template and failed, if it failed, on whatever the template
@@ -8628,8 +8631,9 @@ those operations discarded it.
   is evaluated separately", so an option the launch names wins and the rest come from the template.
   A `SourceVersion`-derived template version is different: `MetadataOptions` is one parameter, so a
   version naming any option replaces the source's whole.
-- **Every instance reports `metadataOptions`**, from `RunInstances` and `DescribeInstances`, with
-  `state` `applied`. `httpEndpoint`, `httpProtocolIpv6` and `instanceMetadataTags` are always
+- **Every instance reports `metadataOptions`**, with `state` `pending` from `RunInstances` — what
+  every example output on the CLI's run-instances page shows — and `applied` from
+  `DescribeInstances`. `httpEndpoint`, `httpProtocolIpv6` and `instanceMetadataTags` are always
   present, at the launch's value or at the published default (`enabled`, `disabled`, `disabled`).
   `httpTokens` and `httpPutResponseHopLimit` are present **only when the launch or its template
   stated them**: their defaults come from the AMI's `ImdsSupport` (`required` and a hop limit of 2
@@ -12803,8 +12807,11 @@ that report its architecture: an `arm64` AMI selects only the AWS Graviton famil
 only the Intel and AMD ones ([#1497](https://github.com/scttfrdmn/substrate/issues/1497)). So
 `CpuManufacturers=["amazon-web-services"]` launches Graviton types from an arm64 AMI, `t4g` counting
 as burstable, and `intel` on an arm64 AMI matches nothing and records the Failed activity AWS would.
-An AMI that does not resolve, or reports an architecture no catalog type does (`i386`, the `mac`
-values), does not narrow — the launch then fails on the AMI itself. The manufacturer is the catalog
+Any other architecture narrows as `x86_64`: an AMI that does not resolve (the launch then fails on
+the AMI itself), and one reporting an architecture no catalog type does — `i386`, which an AMI
+registered without `Architecture` reports, or the `mac` values. So Graviton types are chosen only for
+an AMI that says `arm64`, and a group that chose an x86 type before the Graviton families existed
+chooses the same one now, rather than a 1-vCPU Graviton `.medium`. The manufacturer is the catalog
 family's processor as the guide pages publish it: `intel`, `amd`, or `amazon-web-services`.
 
 **A zone-only group uses the default VPC.** A group naming `AvailabilityZones` and no

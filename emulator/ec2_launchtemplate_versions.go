@@ -573,18 +573,12 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	if overlay.UserData != "" {
 		out.UserData = overlay.UserData
 	}
-	if overlay.SubnetID != "" {
-		out.SubnetID = overlay.SubnetID
-	}
-	if overlay.AssociatePublicIPAddress != "" {
-		out.AssociatePublicIPAddress = overlay.AssociatePublicIPAddress
-	}
 	if len(overlay.SecurityGroupIDs) > 0 {
 		out.SecurityGroupIDs = overlay.SecurityGroupIDs
 	}
-	if len(overlay.NetworkInterfaceGroups) > 0 {
-		out.NetworkInterfaceGroups = overlay.NetworkInterfaceGroups
-	}
+	// SubnetID, AssociatePublicIPAddress and NetworkInterfaceGroups are not overlaid on their
+	// own: [parseLaunchTemplateData] sets them only from the primary of a non-empty interface
+	// list, so they are replaced with that list below.
 	if len(overlay.TagSpecifications) > 0 {
 		out.TagSpecifications = overlay.TagSpecifications
 	}

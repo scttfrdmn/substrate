@@ -69,10 +69,14 @@ func ltInstanceMetadata(t *testing.T, ts *httptest.Server, params map[string]str
 		full[k] = v
 	}
 	var run struct {
-		ID string `xml:"instancesSet>item>instanceId"`
+		ID    string `xml:"instancesSet>item>instanceId"`
+		State string `xml:"instancesSet>item>metadataOptions>state"`
 	}
 	ec2DescribeXML(t, ts, full, &run)
 	require.NotEmpty(t, run.ID)
+	// The CLI's run-instances example output reports "State": "pending" for every launch; the
+	// describe below reports applied.
+	assert.Equal(t, "pending", run.State, "RunInstances reports the options pending")
 	return run.ID, ltDescribeInstanceMetadata(t, ts, run.ID)
 }
 

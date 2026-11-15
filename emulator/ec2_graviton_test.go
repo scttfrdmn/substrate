@@ -200,9 +200,14 @@ func TestAutoScaling_GravitonMatching(t *testing.T) {
 		{"an x86_64 AMI with no manufacturer named never reaches Graviton", "x86_64", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(1), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(4096), Max: f(4096)},
 		}, []string{"c5.large", "c5a.large"}},
-		{"an architecture no catalog type reports does not narrow", "i386", emulator.AutoScalingInstanceRequirements{
-			VCpuCount: emulator.AutoScalingRange{Min: f(1), Max: f(1)}, MemoryMiB: emulator.AutoScalingRange{Min: f(2048), Max: f(2048)},
-		}, []string{"c6g.medium", "c7g.medium", "c8g.medium", "c9g.medium"}},
+		// Anything but arm64 narrows as x86_64, so a group whose AMI says nothing useful keeps
+		// the type it chose before the Graviton families existed — not a 1-vCPU c6g.medium.
+		{"i386 narrows as x86_64", "i386", emulator.AutoScalingInstanceRequirements{
+			VCpuCount: emulator.AutoScalingRange{Min: f(1)}, MemoryMiB: emulator.AutoScalingRange{Min: f(2048), Max: f(4096)},
+		}, []string{"c5.large", "c5a.large"}},
+		{"an empty architecture narrows as x86_64", "", emulator.AutoScalingInstanceRequirements{
+			VCpuCount: emulator.AutoScalingRange{Min: f(1)}, MemoryMiB: emulator.AutoScalingRange{Min: f(2048), Max: f(4096)},
+		}, []string{"c5.large", "c5a.large"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -292,4 +297,39 @@ func TestAutoScaling_GravitonAMIRefusesAnX86Selection(t *testing.T) {
 	assert.Equal(t, "Failed", acts[0].StatusCode)
 	assert.Equal(t, "No instance types match the instance requirements of the mixed instances policy. Launching EC2 instance failed.",
 		acts[0].StatusMessage)
+}
+
+// TestAutoScaling_RegisteredImageWithoutArchitectureStaysX86 is the regression the review of
+// #1497 found: an AMI registered without Architecture reports RegisterImage's published
+// default, i386, which no catalog type reports. Left unnarrowed it would select the new 1-vCPU
+// Graviton .medium types for a group that chose c5.large before; it narrows as x86_64 instead.
+func TestAutoScaling_RegisteredImageWithoutArchitectureStaysX86(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	var img struct {
+		ID string `xml:"imageId"`
+	}
+	e.ec2XML("RegisterImage", map[string]string{"Name": "no-arch", "RootDeviceName": "/dev/sda1"}, &img)
+	require.NotEmpty(t, img.ID)
+	e.ec2XML("CreateLaunchTemplate", map[string]string{
+		"LaunchTemplateName": "no-arch-lt", "LaunchTemplateData.ImageId": img.ID,
+	}, nil)
+
+	const (
+		mip = "MixedInstancesPolicy."
+		ir  = mip + "LaunchTemplate.Overrides.member.1.InstanceRequirements."
+	)
+	e.mustASG("CreateAutoScalingGroup", map[string]string{
+		"AutoScalingGroupName": "no-arch",
+		"MinSize":              "0",
+		"MaxSize":              "1",
+		"DesiredCapacity":      "1",
+		"VPCZoneIdentifier":    e.subnetA,
+		mip + "LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName": "no-arch-lt",
+		ir + "VCpuCount.Min": "1",
+		ir + "MemoryMiB.Min": "2048",
+	})
+	g := e.group("no-arch")
+	require.Len(t, g.Instances, 1)
+	assert.Equal(t, "c5.large", g.Instances[0].InstanceType, "the x86 choice it made before the Graviton families")
 }

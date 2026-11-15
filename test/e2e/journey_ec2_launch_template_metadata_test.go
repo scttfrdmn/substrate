@@ -75,8 +75,9 @@ func TestJourney_EC2LaunchTemplateMetadataOptions(t *testing.T) {
 		t.Fatalf("RunInstances: %v", err)
 	}
 	id := aws.ToString(run.Instances[0].InstanceId)
-	if got := run.Instances[0].MetadataOptions; got == nil || got.HttpTokens != types.HttpTokensStateRequired {
-		t.Fatalf("the launched instance does not require IMDSv2: %+v", got)
+	if got := run.Instances[0].MetadataOptions; got == nil || got.HttpTokens != types.HttpTokensStateRequired ||
+		got.State != types.InstanceMetadataOptionsStatePending {
+		t.Fatalf("the launched instance does not require IMDSv2, pending: %+v", got)
 	}
 
 	mod, err := client.ModifyInstanceMetadataOptions(ctx, &ec2.ModifyInstanceMetadataOptionsInput{

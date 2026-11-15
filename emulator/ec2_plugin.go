@@ -976,8 +976,9 @@ type ec2InstanceItem struct {
 	InstanceLifecycle     string `xml:"instanceLifecycle,omitempty"`
 	SpotInstanceRequestID string `xml:"spotInstanceRequestId,omitempty"`
 
-	// MetadataOptions is Instance's metadataOptions, rendered for every instance since #1471;
-	// see [ec2InstanceMetadataOptionsFor] for which members and why.
+	// MetadataOptions is Instance's metadataOptions, rendered for every instance since #1471,
+	// `pending` from RunInstances and `applied` from DescribeInstances; see
+	// [ec2InstanceMetadataOptionsFor] for which members and why.
 	MetadataOptions *ec2InstanceMetadataOptionsXML `xml:"metadataOptions"`
 }
 
@@ -987,10 +988,16 @@ type ec2InstanceItem struct {
 // mappings is the instance's block device set, resolved by the caller: both callers
 // read every volume in the account and region once and bucket by instance, because a
 // per-instance read would turn one List into an instances × volumes scan.
+//
+// metadataState is the metadataOptions state to report. It is the one member the two
+// responses deliberately differ on: every example output on the CLI's run-instances page
+// reports `"State": "pending"` for a launch, and DescribeInstances reports `applied` once
+// the options are in force — which here is by the next observation (#1471).
 func (p *EC2Plugin) ec2InstanceItemFor(
 	reqCtx *RequestContext,
 	inst EC2Instance,
 	mappings []ec2BlockDeviceMappingItem,
+	metadataState string,
 ) ec2InstanceItem {
 	item := ec2InstanceItem{
 		InstanceID:          inst.InstanceID,
@@ -1012,7 +1019,7 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 
 		InstanceLifecycle:     inst.InstanceLifecycle,
 		SpotInstanceRequestID: inst.SpotInstanceRequestID,
-		MetadataOptions:       ec2InstanceMetadataOptionsFor(inst.MetadataOptions, ec2MetadataOptionsApplied),
+		MetadataOptions:       ec2InstanceMetadataOptionsFor(inst.MetadataOptions, metadataState),
 	}
 	// Echo the IAM instance profile set at launch (#331), resolved against IAM state so
 	// two describes of one instance report one id (#1291). The stored value is the name
@@ -1176,7 +1183,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		// variable is a copy, so nothing here reaches state.
 		inst.State = ec2ReportedTransition(inst.State)
 		resp.Instances = append(resp.Instances,
-			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID]))
+			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsPending))
 	}
 
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1369,7 +1376,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 
-		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID])
+		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsApplied)
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
 			resMap[inst.ReservationID] = &ec2ReservationItem{
@@ -6712,11 +6719,8 @@ func parseLaunchTemplateData(params map[string]string) (EC2LaunchTemplateData, *
 	case strings.EqualFold(disableAPITermination, "false"):
 		disableAPITermination = "false"
 	default:
-		return EC2LaunchTemplateData{}, &AWSError{
-			Code:       "InvalidParameterValue",
-			Message:    "Value (" + disableAPITermination + ") for parameter " + ltPrefix + "DisableApiTermination is invalid. Valid values: true, false",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		return EC2LaunchTemplateData{}, ec2InvalidParameterValue(ltPrefix+"DisableApiTermination",
+			disableAPITermination, "Valid values: true, false.")
 	}
 
 	interfaces := ec2ParseNetworkInterfaces(params, ltPrefix)

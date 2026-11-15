@@ -3,6 +3,7 @@ package emulator
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -271,10 +272,14 @@ var bundledImageFamilyDefaults = []struct {
 }
 
 // bundledImagePathIsARM reports whether an AMI parameter path names the arm64 architecture,
-// as a path segment ("/arm64/") or as the leaf's suffix ("-arm64") — the two places the AWS
-// and Canonical paths put it.
+// as a token anywhere in it — delimited by '/', '-' or '_'. The published paths put it in
+// every position: a segment (Canonical's ".../arm64/hvm/..."), a leaf suffix
+// ("al2023-ami-kernel-default-arm64"), mid-leaf ("amzn2-ami-hvm-arm64-gp2") and mid-segment
+// (EKS's ".../amazon-linux-2-arm64/recommended/image_id"). A token match rather than a
+// substring one keeps a hypothetical "notarm64x" from counting.
 func bundledImagePathIsARM(name string) bool {
-	return strings.Contains(name, "/arm64/") || strings.HasSuffix(name, "-arm64")
+	tokens := strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '-' || r == '_' })
+	return slices.Contains(tokens, "arm64")
 }
 
 // BundledImageID returns the AMI ID substrate resolves for an SSM public parameter in one

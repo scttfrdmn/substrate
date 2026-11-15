@@ -81,35 +81,19 @@ func (o EC2InstanceMetadataOptions) overlay(over EC2InstanceMetadataOptions) EC2
 	return out
 }
 
-// ec2MetadataOptionValues are the published value sets, keyed by member name. Every shape
-// listed in the file comment publishes the same ones: "Valid Values: optional | required"
-// for HttpTokens and "Valid Values: disabled | enabled" for the other three strings.
-var ec2MetadataOptionValues = map[string][]string{ //nolint:gochecknoglobals // read-only reference data from the API reference.
-	"HttpTokens":           {"optional", "required"},
-	"HttpEndpoint":         {"disabled", "enabled"},
-	"HttpProtocolIpv6":     {"disabled", "enabled"},
-	"InstanceMetadataTags": {"disabled", "enabled"},
+// ec2MetadataOptionValues returns a string option's published value set. Every shape listed
+// in the file comment publishes the same ones: "Valid Values: optional | required" for
+// HttpTokens and "Valid Values: disabled | enabled" for the other three strings.
+func ec2MetadataOptionValues(member string) []string {
+	if member == "HttpTokens" {
+		return []string{"optional", "required"}
+	}
+	return []string{"disabled", "enabled"}
 }
 
 // ec2MetadataOptionsHopLimitMax is HttpPutResponseHopLimit's upper bound: "Possible values:
 // Integers from 1 to 64".
 const ec2MetadataOptionsHopLimitMax = 64
-
-// ec2InvalidMetadataOption returns the refusal for a metadata option outside its published
-// values.
-//
-// The code is EC2's documented InvalidParameterValue ("A value specified in a parameter is not
-// valid, is unsupported, or cannot be used"); the message is substrate's, in the "Value (…) for
-// parameter … is invalid" form [ec2UnknownInstanceAttribute] captured, and names the parameter
-// as the request spelled it so a caller can find it.
-func ec2InvalidMetadataOption(param, value string, valid []string) *AWSError {
-	return &AWSError{
-		Code: "InvalidParameterValue",
-		Message: fmt.Sprintf("Value (%s) for parameter %s is invalid. Valid values: %s",
-			value, param, strings.Join(valid, ", ")),
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
 
 // ec2ParseMetadataOptions reads the five options from the parameters under prefix —
 // "LaunchTemplateData.MetadataOptions." for a template, "MetadataOptions." for RunInstances,
@@ -117,7 +101,8 @@ func ec2InvalidMetadataOption(param, value string, valid []string) *AWSError {
 // present against its published values.
 //
 // A member sent empty is treated as absent rather than refused, which is how every other
-// optional EC2 parameter here reads an empty value.
+// optional EC2 parameter here reads an empty value. A refusal is [ec2InvalidParameterValue],
+// naming the parameter as the request spelled it.
 func ec2ParseMetadataOptions(params map[string]string, prefix string) (EC2InstanceMetadataOptions, *AWSError) {
 	var out EC2InstanceMetadataOptions
 	for _, m := range []struct {
@@ -133,20 +118,17 @@ func ec2ParseMetadataOptions(params map[string]string, prefix string) (EC2Instan
 		if v == "" {
 			continue
 		}
-		if !containsStr(ec2MetadataOptionValues[m.name], v) {
-			return EC2InstanceMetadataOptions{}, ec2InvalidMetadataOption(prefix+m.name, v, ec2MetadataOptionValues[m.name])
+		if valid := ec2MetadataOptionValues(m.name); !containsStr(valid, v) {
+			return EC2InstanceMetadataOptions{}, ec2InvalidParameterValue(prefix+m.name, v,
+				"Valid values: "+strings.Join(valid, ", ")+".")
 		}
 		*m.dst = v
 	}
 	if raw := params[prefix+"HttpPutResponseHopLimit"]; raw != "" {
 		n, err := strconv.Atoi(strings.TrimSpace(raw))
 		if err != nil || n < 1 || n > ec2MetadataOptionsHopLimitMax {
-			return EC2InstanceMetadataOptions{}, &AWSError{
-				Code: "InvalidParameterValue",
-				Message: fmt.Sprintf("Value (%s) for parameter %sHttpPutResponseHopLimit is invalid. "+
-					"Possible values are integers from 1 to %d", raw, prefix, ec2MetadataOptionsHopLimitMax),
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return EC2InstanceMetadataOptions{}, ec2InvalidParameterValue(prefix+"HttpPutResponseHopLimit", raw,
+				fmt.Sprintf("Possible values: integers from 1 to %d.", ec2MetadataOptionsHopLimitMax))
 		}
 		out.HTTPPutResponseHopLimit = n
 	}
@@ -252,7 +234,7 @@ const (
 // in subsequent describe-instances API calls" — with the transition settled by the time of the
 // next observation, so no test depends on how long one takes.
 //
-// A terminated or shutting-down instance is refused with IncorrectInstanceState, the code EC2's
+// A terminated instance is refused with IncorrectInstanceState, the code EC2's
 // error table gives an instance "in an incorrect state for the requested action"; the reference
 // names a running or stopped instance as what the operation modifies. The message is
 // substrate's.
@@ -269,8 +251,9 @@ func (p *EC2Plugin) modifyInstanceMetadataOptions(reqCtx *RequestContext, req *A
 	if err != nil || awsErr != nil {
 		return nil, errOrAWS(err, awsErr)
 	}
-	switch inst.State.Name {
-	case "terminated", "shutting-down":
+	// The stored record holds the settled state only (see ec2_instance_state_control.go), so
+	// terminated is the one state this can see; shutting-down is an observation, never stored.
+	if inst.State.Name == ec2StateTerminated {
 		return nil, &AWSError{
 			Code:       "IncorrectInstanceState",
 			Message:    "The instance '" + instID + "' is not in a state from which its metadata options can be modified",

@@ -35,10 +35,13 @@ import (
 //     a type is a candidate only when its supportedArchitectures carries the AMI's
 //     architecture (#1497). An arm64 AMI selects only Graviton types and an x86_64 AMI only
 //     Intel and AMD ones, which is also why adding the Graviton families moved no x86
-//     group's choice. An AMI that does not resolve, or whose architecture no catalog type
-//     reports (i386, the mac values), does not narrow: the first launch then fails on the
-//     AMI itself, or the catalog lacks the families that would answer, and neither is a
-//     question this filter can settle.
+//     group's choice. Any architecture other than arm64 narrows as x86_64 — an AMI that
+//     does not resolve, an empty one, and i386 (RegisterImage's published default, which
+//     an AMI registered without Architecture reports) or the mac values, none of which a
+//     catalog type reports. Graviton types are therefore chosen only for an AMI that says
+//     arm64, and every group that chose before #1497 chooses the same type now; letting an
+//     unknown architecture through unnarrowed would hand an x86 group a 1-vCPU Graviton
+//     `.medium`, the smallest match the catalog now has.
 //   - **Local storage** is [asgFamilyHasInstanceStore], transcribed from the accelerated
 //     page's instance store table rather than read off the `d` naming option, which several
 //     of those families carry storage without.
@@ -135,15 +138,15 @@ func asgMatchesAny(patterns []string, value string) bool {
 }
 
 // asgMatchInstanceTypes returns the catalog types satisfying req and able to run an AMI of
-// architecture arch, in launch-priority order. An empty arch, or one no catalog type
-// reports, does not narrow; see the file comment's Architecture entry.
+// architecture arch, in launch-priority order. Anything but arm64 — empty or unknown
+// included — narrows as x86_64; see the file comment's Architecture entry.
 func asgMatchInstanceTypes(req *AutoScalingInstanceRequirements, arch string) []ec2InstanceTypeInfo {
-	if arch != ec2ArchX86 && arch != ec2ArchARM64 {
-		arch = ""
+	if arch != ec2ArchARM64 {
+		arch = ec2ArchX86
 	}
 	var out []ec2InstanceTypeInfo
 	for _, info := range ec2InstanceTypeCatalog {
-		if arch != "" && !containsStr(info.SupportedArchs, arch) {
+		if !containsStr(info.SupportedArchs, arch) {
 			continue
 		}
 		if asgTypeSatisfies(req, info) {
