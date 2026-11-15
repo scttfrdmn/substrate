@@ -16712,27 +16712,38 @@ same values.
 | `P/OnDemand`, `P/Spot` | P |
 | `X/OnDemand`, `X/Spot` | X |
 
-- **Which instances count.** An instance counts while its stored state is `running`, and
-  under `…/Spot` when its `InstanceLifecycle` is `spot`. Pending, stopping, stopped,
-  shutting-down and terminated instances do not count, following the On-Demand quota
-  page ("Instances that are in the pending, stopping, stopped, and hibernated states do
-  not count"). AWS also counts an open Spot request's vCPUs against the Spot quota;
-  substrate fulfills a Spot request at once or refuses it, so it never holds one to count.
-  An instance's vCPUs are its type's default vCPU count from the
-  [instance-type catalog](#ec2); a type outside the catalog counts nowhere, and so do
+- **Which instances count.** An instance counts while it reports `running`, and under
+  `…/Spot` when its `InstanceLifecycle` is `spot`. Pending, stopping, stopped,
+  shutting-down and terminated instances do not count, following the On-Demand quota page
+  ("Instances that are in the pending, stopping, stopped, and hibernated states do not
+  count"). What an instance reports is what `DescribeInstances` would report at that
+  moment, so an instance an [instance-state seed](#ec2) still has reporting `pending` does
+  not count. The seed's countdown is peeked, never spent: reading usage does not move a
+  poll loop along. An instance's vCPUs are its type's default vCPU count from the
+  [instance-type catalog](#ec2). A type outside the catalog counts nowhere, and so do
   Trn, DL, HPC and High Memory types, which have no `Class` value.
-- **Which classes have a metric.** A class has a metric once any instance in the account
-  and region has counted against it, and keeps it after that instance stops or
-  terminates, so its usage then reads 0. A class nothing has launched into has no metric:
-  `ListMetrics` omits it and a query for it gets no datapoint.
-- **Which datapoint is reported.** Substrate keeps no usage history, so each query gets
-  exactly one datapoint, carrying the usage at request time. The window's `StartTime` is
-  rounded down the way CloudWatch rounds it (to the minute, or to 5 minutes or an hour for
-  a start 15 or 63 days back); periods are laid end to end from there; and the datapoint
-  is stamped with the latest period start that is no later than the simulated clock and
-  earlier than `EndTime`, which is exclusive. A window that opens after the clock has no
-  datapoint. A window wholly in the past still gets the usage as of the request, at its
-  last period, because there is no older value to report.
+- **Open Spot requests count.** Spot quotas cover the vCPUs "your running Spot Instances
+  are either using or will use pending the fulfillment of open Spot Instance requests",
+  and the quota's usage metric is the one that "reflects quota usage". So an `open` Spot
+  request with no instance adds its instance type's vCPUs to its `…/Spot` class. Substrate
+  holds one after a `/v1/ec2/spot-request-outcomes` seed leaves it unfulfilled, or after a
+  persistent request's replacement launch is refused. Once a request is fulfilled its
+  instance counts instead, so nothing is counted twice.
+- **Which classes have a metric.** A class has a metric once any instance or Spot request
+  in the account and region has counted against it, and keeps it after that instance
+  stops or terminates, so its usage then reads 0. A class nothing has launched into has no
+  metric: `ListMetrics` omits it and a query for it gets no datapoint.
+- **Which datapoint is reported.** Substrate keeps no usage history, so it knows the usage
+  only as of the request, and only the period holding the simulated clock can carry it.
+  The window's `StartTime` is rounded down the way CloudWatch rounds it (to the minute, or
+  to 5 minutes or an hour for a start 15 or 63 days back), and periods are laid end to end
+  from there. The current period is the one holding the clock. A query gets that period's
+  datapoint when the window reaches it: the window opens no later than the clock, and its
+  exclusive `EndTime` falls after the period's start. Any other window gets no datapoint.
+  That includes a window wholly in the past, which would otherwise be stamped with usage
+  it was never measured at. `EndTime` only has to reach the current period, not pass the
+  clock, because a caller's `EndTime=now` is computed a moment before substrate reads its
+  clock.
 - **Which statistic.** The usage is treated as sampled every minute of the period at its
   current value. `Maximum`, `Minimum`, `Average`, `IQM` and percentile, trimmed-mean and
   winsorized-mean statistics are the value itself; `SampleCount` is the period's minute

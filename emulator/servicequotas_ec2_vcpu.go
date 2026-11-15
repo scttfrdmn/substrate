@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -40,6 +41,19 @@ type ec2VCPUQuotaClass struct {
 
 	// OnDemandDefault and SpotDefault are AWS's published new-account defaults.
 	OnDemandDefault, SpotDefault float64
+
+	// OnDemandApplied is the On-Demand quota's applied value when it differs from
+	// OnDemandDefault, and nil when the applied value is the default. Only Standard sets it;
+	// see [ec2StandardOnDemandAppliedValue].
+	OnDemandApplied *float64
+}
+
+// onDemandApplied returns the On-Demand quota's applied value.
+func (c ec2VCPUQuotaClass) onDemandApplied() float64 {
+	if c.OnDemandApplied != nil {
+		return *c.OnDemandApplied
+	}
+	return c.OnDemandDefault
 }
 
 // ec2VCPUQuotaClasses are the classes substrate publishes, in the order ListServiceQuotas
@@ -65,6 +79,7 @@ var ec2VCPUQuotaClasses = []ec2VCPUQuotaClass{
 		SpotCode:        "L-34B43A08",
 		SpotName:        "All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests",
 		OnDemandDefault: 5,
+		OnDemandApplied: func() *float64 { v := float64(ec2StandardOnDemandAppliedValue); return &v }(),
 		SpotDefault:     5,
 	},
 	{
@@ -123,7 +138,8 @@ func ec2VCPUUsageClass(class, purchase string) string {
 }
 
 // ec2VCPUUsageDimensions returns the four dimensions of an EC2 vCPU usage metric, in the
-// order the usage-metrics page lists them.
+// order the usage-metrics page lists them. It is the one spelling of them: a quota's
+// UsageMetric, a ListMetrics entry and the identity check on a query all derive from it.
 func ec2VCPUUsageDimensions(usageClass string) []cwDimension {
 	return []cwDimension{
 		{Name: "Service", Value: "EC2"},
@@ -152,14 +168,9 @@ func ec2VCPUServiceQuotas() []ServiceQuota {
 			Adjustable:  true,
 			Unit:        "None",
 			UsageMetric: &ServiceQuotaMetric{
-				MetricNamespace: awsUsageNamespace,
-				MetricName:      awsUsageResourceCount,
-				MetricDimensions: map[string]string{
-					"Service":  "EC2",
-					"Type":     "Resource",
-					"Resource": "vCPU",
-					"Class":    usageClass,
-				},
+				MetricNamespace:               awsUsageNamespace,
+				MetricName:                    awsUsageResourceCount,
+				MetricDimensions:              cwDimensionMap(ec2VCPUUsageDimensions(usageClass)),
 				MetricStatisticRecommendation: "Maximum",
 			},
 		}
@@ -170,11 +181,7 @@ func ec2VCPUServiceQuotas() []ServiceQuota {
 		return q
 	}
 	for _, c := range ec2VCPUQuotaClasses {
-		applied := c.OnDemandDefault
-		if c.OnDemandCode == "L-1216C47A" {
-			applied = ec2StandardOnDemandAppliedValue
-		}
-		quotas = append(quotas, row(c.OnDemandCode, c.OnDemandName, applied, c.OnDemandDefault,
+		quotas = append(quotas, row(c.OnDemandCode, c.OnDemandName, c.onDemandApplied(), c.OnDemandDefault,
 			ec2VCPUUsageClass(c.Name, ec2UsagePurchaseOnDemand)))
 	}
 	for _, c := range ec2VCPUQuotaClasses {
@@ -227,110 +234,207 @@ func ec2VCPUQuotaClassOf(instanceType string) string {
 
 // ec2VCPUUsage is the account's EC2 vCPU usage in one region, by AWS/Usage Class value.
 type ec2VCPUUsage struct {
-	// VCPUs is the vCPU count of the running instances in each class.
+	// VCPUs is the vCPU count counting against each class: running instances, and for a Spot
+	// class the open requests awaiting fulfillment.
 	VCPUs map[string]float64
 
-	// Published is the set of classes that have a metric at all: those any instance in the
-	// account and region, in any state, has counted against.
+	// Published is the set of classes that have a metric at all: those any instance or Spot
+	// request in the account and region, in any state, has counted against.
 	Published map[string]bool
 }
 
-// ec2VCPUUsageFor derives the account's vCPU usage in region from EC2's stored instances.
+// ec2UsageInstance is the part of a stored [EC2Instance] the usage derivation reads. Decoding
+// into it rather than the whole record skips the interfaces, tags, user data and the rest,
+// which is most of an instance's bytes.
+type ec2UsageInstance struct {
+	InstanceID        string           `json:"instance_id"`
+	InstanceType      string           `json:"instance_type"`
+	State             EC2InstanceState `json:"state"`
+	InstanceLifecycle string           `json:"instanceLifecycle,omitempty"`
+}
+
+// ec2UsageSpotRequest is the part of a stored [EC2SpotInstanceRequest] the usage derivation
+// reads.
+type ec2UsageSpotRequest struct {
+	State               string                  `json:"state"`
+	InstanceID          string                  `json:"instance_id,omitempty"`
+	LaunchSpecification ec2UsageSpotRequestSpec `json:"launch_specification"`
+}
+
+// ec2UsageSpotRequestSpec is the part of a request's launch specification the usage
+// derivation reads.
+type ec2UsageSpotRequestSpec struct {
+	InstanceType string `json:"instance_type"`
+}
+
+// ec2VCPUUsageFor derives the account's vCPU usage in region from EC2's stored instances and
+// Spot requests.
 //
 // It is a shared StateManager read rather than a routed DescribeInstances, because it is a
 // derived observation and not an act: nothing is launched or changed, so there is no request
 // for the registry to authorize or record, and the CloudWatch read that calls this is itself
-// recorded. It reads the EC2 plugin's key shape, "instance:{account}/{region}/{id}", and the
-// stored record — which always holds the settled state, whatever an instance-state seed has
-// a DescribeInstances observation report (see ec2_instance_state_control.go).
+// recorded. It reads the EC2 plugin's key shapes, "instance:{account}/{region}/{id}" and
+// "spot_request:{account}/{region}/{id}".
 //
-// An instance counts while its stored state is running. The On-Demand quota page is explicit
-// that "Instances that are in the pending, stopping, stopped, and hibernated states do not
-// count towards your On-Demand Instance quotas", and the usage metric "returns information on
-// instances that are running". The same rule is applied to Spot. AWS also counts an open Spot
-// request's would-be vCPUs against the Spot quota; substrate fulfills a Spot request in the
-// request that makes it or refuses it outright, so it never holds an open, unfulfilled one to
-// count.
+// An instance counts while it reports running. "Instances that are in the pending, stopping,
+// stopped, and hibernated states do not count towards your On-Demand Instance quotas", and the
+// usage metric "returns information on instances that are running"; the same rule is applied
+// to Spot. What an instance reports is what a DescribeInstances at this moment would report:
+// the stored record's settled state, unless an instance-state seed has the instance still
+// reporting its transient state (pending, stopping, shutting-down) — see
+// ec2_instance_state_control.go. The seed's countdown is peeked, never advanced, so reading
+// usage spends none of a test's seeded observations and a poll loop sees the same sequence
+// whether or not usage was read in between.
 //
-// An instance's vCPUs are its type's default vCPU count from the seeded instance-type
-// catalog. A type the catalog does not carry counts nowhere, since there is no figure to count.
+// An open Spot request awaiting fulfillment counts against its Spot class too. Spot quotas
+// are "the number of vCPUs that your running Spot Instances are either using or will use
+// pending the fulfillment of open Spot Instance requests", and a quota's UsageMetric is "the
+// CloudWatch metric that reflects quota usage", so the metric a preflight compares against the
+// quota carries both. Substrate holds such a request after a capacity or price seed leaves it
+// unfulfilled, or after a persistent request's replacement launch is refused. "After a pending
+// Spot Instance request is fulfilled, the request no longer counts towards the quota because
+// the running instance is counted", so a request with an instance counts nothing of its own. A
+// request counts its launch specification's instance type once: substrate files one request
+// per instance.
 //
-// A class is published — has a metric, and is listed by ListMetrics — once any instance has
-// counted against it, and stays published after that instance stops or terminates, so its
-// usage then reads 0 rather than vanishing. A class nothing has ever launched into has no
-// metric: that is what a real account that has never used, say, P instances shows.
+// vCPUs are the type's default vCPU count from the seeded instance-type catalog. A type the
+// catalog does not carry counts nowhere, since there is no figure to count.
+//
+// A class is published — has a metric, and is listed by ListMetrics — once any instance or
+// request has counted against it, and stays published after that instance stops or
+// terminates, so its usage then reads 0 rather than vanishing. A class nothing has ever
+// launched into has no metric: that is what a real account that has never used, say, P
+// instances shows.
+//
+// The publication set is derived here rather than kept as a marker written at launch. A
+// marker would need a write in every EC2 launch path and would be absent from any state a
+// launch did not produce — an event log recorded before it existed, or a record a test wrote
+// straight into the StateManager — so a class would read as never used while instances of it
+// ran. Deriving it costs one small decode per record, which [ec2UsageInstance] keeps cheap.
 func ec2VCPUUsageFor(ctx context.Context, state StateManager, accountID, region string) (ec2VCPUUsage, error) {
 	usage := ec2VCPUUsage{VCPUs: map[string]float64{}, Published: map[string]bool{}}
-	keys, err := state.List(ctx, ec2Namespace, "instance:"+accountID+"/"+region+"/")
-	if err != nil {
-		return usage, fmt.Errorf("ec2 vCPU usage: list instances: %w", err)
-	}
-	for _, key := range keys {
-		data, err := state.Get(ctx, ec2Namespace, key)
-		if err != nil {
-			return usage, fmt.Errorf("ec2 vCPU usage: get %s: %w", key, err)
-		}
-		if data == nil {
-			continue
-		}
-		var inst EC2Instance
-		if err := json.Unmarshal(data, &inst); err != nil {
-			return usage, fmt.Errorf("ec2 vCPU usage: decode %s: %w", key, err)
-		}
-		class := ec2VCPUQuotaClassOf(inst.InstanceType)
-		info, known := ec2InstanceTypeIndex[inst.InstanceType]
+	count := func(instanceType, purchase string, counts bool) {
+		class := ec2VCPUQuotaClassOf(instanceType)
+		info, known := ec2InstanceTypeIndex[instanceType]
 		if class == "" || !known {
-			continue
+			return
+		}
+		usageClass := ec2VCPUUsageClass(class, purchase)
+		usage.Published[usageClass] = true
+		if counts {
+			usage.VCPUs[usageClass] += float64(info.VCpus)
+		}
+	}
+
+	err := ec2ForEachStored(ctx, state, "instance:"+accountID+"/"+region+"/", func(key string, data []byte) error {
+		var inst ec2UsageInstance
+		if err := json.Unmarshal(data, &inst); err != nil {
+			return fmt.Errorf("ec2 vCPU usage: decode %s: %w", key, err)
+		}
+		reported, err := ec2PeekInstanceState(ctx, state, inst.InstanceID, inst.State)
+		if err != nil {
+			return err
 		}
 		purchase := ec2UsagePurchaseOnDemand
 		if inst.InstanceLifecycle == ec2InstanceLifecycleSpot {
 			purchase = ec2UsagePurchaseSpot
 		}
-		usageClass := ec2VCPUUsageClass(class, purchase)
-		usage.Published[usageClass] = true
-		if inst.State.Name == "running" {
-			usage.VCPUs[usageClass] += float64(info.VCpus)
+		count(inst.InstanceType, purchase, reported.Name == ec2StateRunning)
+		return nil
+	})
+	if err != nil {
+		return usage, err
+	}
+
+	err = ec2ForEachStored(ctx, state, "spot_request:"+accountID+"/"+region+"/", func(key string, data []byte) error {
+		var r ec2UsageSpotRequest
+		if err := json.Unmarshal(data, &r); err != nil {
+			return fmt.Errorf("ec2 vCPU usage: decode %s: %w", key, err)
+		}
+		if r.State == ec2SpotStateOpen && r.InstanceID == "" {
+			count(r.LaunchSpecification.InstanceType, ec2UsagePurchaseSpot, true)
+		}
+		return nil
+	})
+	return usage, err
+}
+
+// ec2ForEachStored calls fn with each EC2 record under prefix, in key order, skipping a key
+// deleted between the list and the read.
+func ec2ForEachStored(ctx context.Context, state StateManager, prefix string, fn func(key string, data []byte) error) error {
+	keys, err := state.List(ctx, ec2Namespace, prefix)
+	if err != nil {
+		return fmt.Errorf("ec2 vCPU usage: list %s: %w", prefix, err)
+	}
+	for _, key := range keys {
+		data, err := state.Get(ctx, ec2Namespace, key)
+		if err != nil {
+			return fmt.Errorf("ec2 vCPU usage: get %s: %w", key, err)
+		}
+		if data == nil {
+			continue
+		}
+		if err := fn(key, data); err != nil {
+			return err
 		}
 	}
-	return usage, nil
+	return nil
+}
+
+// ec2PeekInstanceState returns the state an observation of the instance would report now,
+// without spending the observation: [EC2Plugin.observeInstanceState]'s answer, through the
+// progression's peek rather than its advance.
+func ec2PeekInstanceState(ctx context.Context, state StateManager, instanceID string, settled EC2InstanceState) (EC2InstanceState, error) {
+	seed, seen, err := ec2InstanceProgressions.peek(ctx, state, instanceID)
+	if err != nil {
+		return settled, fmt.Errorf("ec2 vCPU usage: peek %s: %w", instanceID, err)
+	}
+	if seed == nil || seed.TransientObservations <= 0 || seen >= seed.TransientObservations {
+		return settled, nil
+	}
+	if transient, ok := ec2TransientStateFor(settled); ok {
+		return transient, nil
+	}
+	return settled, nil
 }
 
 // ec2VCPUUsageClassFromDimensions reports the Class value of a metric identity that is
 // exactly an EC2 vCPU usage metric — namespace AWS/Usage, name ResourceCount, and precisely
-// the four dimensions Service=EC2, Type=Resource, Resource=vCPU and a Class substrate
-// publishes, in any order.
+// the dimensions [ec2VCPUUsageDimensions] gives a Class substrate publishes, in any order.
 //
 // "CloudWatch treats each unique combination of dimensions as a separate metric", so a
-// query naming a subset or a superset of the four names a different metric, and gets none
-// of this one's data.
+// query naming a subset or a superset of them names a different metric, and gets none of
+// this one's data.
 func ec2VCPUUsageClassFromDimensions(namespace, metricName string, dims []cwDimension) (string, bool) {
-	if namespace != awsUsageNamespace || metricName != awsUsageResourceCount || len(dims) != 4 {
+	if namespace != awsUsageNamespace || metricName != awsUsageResourceCount {
 		return "", false
 	}
-	got := make(map[string]string, len(dims))
-	for _, d := range dims {
-		got[d.Name] = d.Value
-	}
-	if len(got) != 4 || got["Service"] != "EC2" || got["Type"] != "Resource" || got["Resource"] != "vCPU" {
-		return "", false
-	}
+	got := cwDimensionMap(dims)
 	class := got["Class"]
-	for _, c := range ec2VCPUUsageClassNames() {
-		if c == class {
-			return class, true
-		}
+	if !ec2VCPUUsageClassSet[class] || len(got) != len(dims) {
+		return "", false
 	}
-	return "", false
+	if !maps.Equal(got, cwDimensionMap(ec2VCPUUsageDimensions(class))) {
+		return "", false
+	}
+	return class, true
 }
 
-// ec2VCPUUsageClassNames returns every Class value substrate publishes, On-Demand first, in
-// the order of [ec2VCPUQuotaClasses].
-func ec2VCPUUsageClassNames() []string {
+// ec2VCPUUsageClassNames is every Class value substrate publishes, On-Demand first, in the
+// order of [ec2VCPUQuotaClasses], and ec2VCPUUsageClassSet is the same values as a set. Both
+// are computed once from the table and only ever read.
+var ec2VCPUUsageClassNames, ec2VCPUUsageClassSet = buildEC2VCPUUsageClassNames()
+
+// buildEC2VCPUUsageClassNames builds [ec2VCPUUsageClassNames] and [ec2VCPUUsageClassSet].
+func buildEC2VCPUUsageClassNames() ([]string, map[string]bool) {
 	names := make([]string, 0, 2*len(ec2VCPUQuotaClasses))
+	set := make(map[string]bool, 2*len(ec2VCPUQuotaClasses))
 	for _, purchase := range []string{ec2UsagePurchaseOnDemand, ec2UsagePurchaseSpot} {
 		for _, c := range ec2VCPUQuotaClasses {
-			names = append(names, ec2VCPUUsageClass(c.Name, purchase))
+			name := ec2VCPUUsageClass(c.Name, purchase)
+			names = append(names, name)
+			set[name] = true
 		}
 	}
-	return names
+	return names, set
 }

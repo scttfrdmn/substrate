@@ -23,20 +23,26 @@ import (
 //
 // # Which datapoint is reported
 //
-// Substrate keeps no usage history, so it knows a class's usage only as of the request.
-// It therefore reports exactly one datapoint per query, carrying the usage at request time,
-// and stamps it with the start of the period that contains the request — or, when the
-// requested window ends earlier, the start of the window's last period:
+// Substrate keeps no usage history, so it knows a class's usage only as of the request, and
+// only the period containing the request can honestly carry it. A query therefore gets at
+// most one datapoint — the current period's — and a window that does not reach the current
+// period gets none, rather than today's usage stamped on a past period it was not measured in:
 //
 //   - The window's start is rounded down as CloudWatch rounds it: to the minute for a start
 //     less than 15 days before the simulated clock, to the 5-minute clock interval for one
 //     15 to 63 days before, and to the hour beyond that.
 //   - Periods are laid end to end from that rounded start, as CloudWatch's own timestamps
 //     are (the GetMetricData examples report StartTime, StartTime+Period, …).
-//   - The datapoint is at the latest period start that is no later than the simulated clock
-//     and strictly earlier than EndTime, which "is exclusive". If no period start qualifies —
-//     the window opens after the clock, or closes before its rounded start — there is no
-//     datapoint.
+//   - The current period is the one holding the simulated clock. Its datapoint is reported
+//     when the window reaches it: the window opens no later than the clock, and its EndTime,
+//     which "is exclusive", falls after the period's start. Otherwise — a window wholly in the
+//     past, or one that opens after the clock — the result has no datapoint.
+//
+// The second condition asks that EndTime fall inside or after the current period, not after
+// the clock itself. A caller computes EndTime from its own clock a moment before substrate
+// reads the simulated one, so "EndTime=now" arrives a few milliseconds behind it; requiring
+// EndTime past the clock would turn the commonest query there is into an empty one. The
+// datapoint is still only ever the current period's.
 //
 // The statistic is computed as if the usage had been sampled every minute of that period at
 // the value it has now — usage metrics "are collected every minute". Maximum, Minimum,
@@ -117,14 +123,33 @@ func cwUsageDatapointAt(now, start, end time.Time, period time.Duration) (time.T
 		return time.Time{}, false
 	}
 	s := cwRoundStart(start, now)
-	if now.Before(s) || !end.After(s) {
+	if now.Before(s) {
 		return time.Time{}, false
 	}
-	k := int64(now.Sub(s) / period)
-	if kEnd := int64((end.Sub(s) - time.Nanosecond) / period); kEnd < k {
-		k = kEnd
+	current := s.Add(now.Sub(s) / period * period)
+	if !end.After(current) {
+		return time.Time{}, false
 	}
-	return s.Add(time.Duration(k) * period), true
+	return current, true
+}
+
+// cwPeriodCount is the number of period starts in [start, end): the ceiling of the window's
+// length over the period, since a partial period at the end still starts before EndTime.
+func cwPeriodCount(start, end time.Time, period time.Duration) int64 {
+	span := end.Sub(start)
+	if span <= 0 || period <= 0 {
+		return 0
+	}
+	return int64((span + period - 1) / period)
+}
+
+// cwDimensionMap returns dims keyed by name.
+func cwDimensionMap(dims []cwDimension) map[string]string {
+	m := make(map[string]string, len(dims))
+	for _, d := range dims {
+		m[d.Name] = d.Value
+	}
+	return m
 }
 
 // cwUsageSamples is the number of one-minute samples a period holds, and at least one.
@@ -373,7 +398,7 @@ func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequ
 		}
 		wanted[s] = true
 	}
-	if n := int64(end.Sub(cwRoundStart(start, p.tc.Now().UTC())) / period); n > cwMaxStatisticsDatapoints {
+	if n := cwPeriodCount(cwRoundStart(start, p.tc.Now().UTC()), end, period); n > cwMaxStatisticsDatapoints {
 		return nil, &AWSError{
 			Code: "InvalidParameterCombination",
 			Message: fmt.Sprintf("You have requested up to %d datapoints, which exceeds the limit of %d.",
@@ -462,7 +487,7 @@ func (p *CloudWatchPlugin) usageMetrics(ctx *RequestContext, namespace, metricNa
 		return nil, err
 	}
 	var metrics cwList
-	for _, class := range ec2VCPUUsageClassNames() {
+	for _, class := range ec2VCPUUsageClassNames {
 		if !usage.Published[class] {
 			continue
 		}

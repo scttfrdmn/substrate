@@ -268,13 +268,19 @@ func TestCWUsage_DatapointWindows(t *testing.T) {
 		want       *time.Time
 	}{
 		{"the period containing the clock", at(yesterday, 23, 52, 30), at(today, 0, 7, 30), 300, ptrTime(at(today, 0, 7, 0))},
-		{"EndTime is exclusive", at(yesterday, 23, 50, 0), at(today, 0, 5, 0), 300, ptrTime(at(today, 0, 0, 0))},
+		// A caller's EndTime=now is computed a moment before substrate reads its clock; the
+		// window still reaches the current period, so it still gets that period's datapoint.
+		{"EndTime a moment before the clock", at(yesterday, 23, 52, 30), at(today, 0, 7, 29), 300, ptrTime(at(today, 0, 7, 0))},
+		// Periods from 23:50 put the clock in [00:05, 00:10); EndTime is exclusive, so a window
+		// ending at 00:05 stops short of it.
+		{"a window ending where the current period starts", at(yesterday, 23, 50, 0), at(today, 0, 5, 0), 300, nil},
 		{"a window past the clock stops at the clock", at(today, 0, 0, 0), at(today, 1, 0, 0), 300, ptrTime(at(today, 0, 5, 0))},
 		{"one-minute periods", at(today, 0, 0, 0), at(today, 0, 30, 0), 60, ptrTime(at(today, 0, 7, 0))},
 		{"a window that opens after the clock", at(today, 0, 8, 0), at(today, 0, 20, 0), 60, nil},
-		// No history is kept, so a window wholly in the past reports the usage as of the
-		// request, at the window's last period.
-		{"a window wholly in the past", at(yesterday, 23, 0, 30), at(yesterday, 23, 2, 0), 60, ptrTime(at(yesterday, 23, 1, 0))},
+		// No history is kept, so a window wholly in the past has no datapoint rather than
+		// today's usage stamped on a period it was not measured in.
+		{"a window wholly in the past", at(yesterday, 23, 0, 30), at(yesterday, 23, 2, 0), 60, nil},
+		{"a window that closed an hour ago", at(yesterday, 22, 0, 0), at(yesterday, 23, 0, 0), 300, nil},
 		// A start 15 to 63 days back rounds to the 5-minute clock interval, and one further
 		// back to the hour.
 		{"a start 20 days back", cwUsageNow.AddDate(0, 0, -20), cwUsageNow, 86400, ptrTime(at(today, 0, 5, 0))},
@@ -351,7 +357,21 @@ func TestCWUsage_GetMetricStatisticsRefusals(t *testing.T) {
 			b["StartTime"] = cwUsageNow.Add(-48 * time.Hour).Unix()
 			b["Period"] = 60
 		}), "InvalidParameterCombinationException"},
+		// 00:07:30 yesterday rounds to 00:07:00, so [00:07:00, 00:07:30) the next day holds
+		// 1,440 whole minutes and the start of a 1,441st.
+		{"1,441 period starts, the last one partial", base(func(b map[string]any) {
+			b["StartTime"] = cwUsageNow.Add(-24 * time.Hour).Unix()
+			b["Period"] = 60
+		}), "InvalidParameterCombinationException"},
 	}
+	t.Run("exactly 1,440 period starts", func(t *testing.T) {
+		status, raw := cwUsageJSON(t, ts, "GetMetricStatistics", base(func(b map[string]any) {
+			b["StartTime"] = cwUsageNow.Add(-24*time.Hour - 30*time.Second).Unix()
+			b["EndTime"] = cwUsageNow.Add(-30 * time.Second).Unix()
+			b["Period"] = 60
+		}))
+		assert.Equal(t, http.StatusOK, status, string(raw))
+	})
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			status, raw := cwUsageJSON(t, ts, "GetMetricStatistics", tc.body)
@@ -434,4 +454,84 @@ func TestCWUsage_QueryProtocolAndDeterminism(t *testing.T) {
 	assert.Contains(t, first, "<GetMetricStatisticsResult><Label>ResourceCount</Label><Datapoints><member>"+
 		"<Timestamp>2026-03-01T00:07:00.000Z</Timestamp><Maximum>4</Maximum><Unit>None</Unit></member>")
 	assert.Equal(t, first, send())
+}
+
+// cwUsageControl sends a control-plane request and fails on a non-2xx answer.
+func cwUsageControl(t *testing.T, ts *emulator.TestServer, method, path, body string) {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+	require.NoError(t, err)
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close() //nolint:errcheck
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	require.Less(t, resp.StatusCode, 300, "%s %s: %s", method, path, raw)
+}
+
+// cwUsageSpot reads the Standard/Spot usage over the window around the frozen clock.
+func cwUsageSpot(t *testing.T, ts *emulator.TestServer) []float64 {
+	t.Helper()
+	got := cwUsageGetMetricData(t, ts, cwUsageNow.Add(-5*time.Minute), cwUsageNow.Add(time.Minute),
+		cwUsageQuery("spot", "Standard/Spot", "Maximum"))
+	return got["spot"].Values
+}
+
+// TestCWUsage_OpenSpotRequestsCount checks that an open Spot request awaiting fulfillment
+// counts against its Spot class, and stops counting once its instance runs — so a fulfilled
+// request and its instance are not counted twice.
+func TestCWUsage_OpenSpotRequestsCount(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTimeAt(cwUsageNow)
+
+	// A capacity seed leaves the requests open with no instance.
+	cwUsageControl(t, ts, http.MethodPost, "/v1/ec2/spot-request-outcomes",
+		`{"instanceType":"*","statusCode":"capacity-not-available"}`)
+	cwUsageEC2(t, ts, map[string]string{
+		"Action": "RequestSpotInstances", "InstanceCount": "2", "Type": "one-time",
+		"LaunchSpecification.ImageId": ec2TestImage, "LaunchSpecification.InstanceType": "m5.large",
+	})
+	assert.Equal(t, []float64{4}, cwUsageSpot(t, ts), "two open m5.large requests will use 4 vCPU")
+
+	// With the seed gone, the next describe fulfills them; the running instances now carry the
+	// 4 vCPU and the fulfilled requests carry none.
+	cwUsageControl(t, ts, http.MethodDelete, "/v1/ec2/spot-request-outcomes", "")
+	body := cwUsageEC2(t, ts, map[string]string{"Action": "DescribeSpotInstanceRequests"})
+	require.Equal(t, 2, strings.Count(body, "<state>active</state>"), body)
+	assert.Equal(t, []float64{4}, cwUsageSpot(t, ts))
+}
+
+// TestCWUsage_PendingInstancesDoNotCount checks that an instance an instance-state seed has
+// still reporting pending does not count, and that reading usage spends none of the seed's
+// observations.
+func TestCWUsage_PendingInstancesDoNotCount(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTimeAt(cwUsageNow)
+
+	cwUsageControl(t, ts, http.MethodPost, "/v1/ec2/instance-state",
+		`{"instanceId":"*","transientObservations":2}`)
+	ids := cwUsageLaunch(t, ts, "m5.large", 1, true)
+	describe := func() string {
+		var out struct {
+			State string `xml:"reservationSet>item>instancesSet>item>instanceState>name"`
+		}
+		require.NoError(t, xml.Unmarshal([]byte(cwUsageEC2(t, ts, map[string]string{
+			"Action": "DescribeInstances", "InstanceId.1": ids[0],
+		})), &out))
+		return out.State
+	}
+
+	// Usage is read three times before any describe; none of those reads may spend one of the
+	// two pending observations.
+	for range 3 {
+		assert.Equal(t, []float64{0}, cwUsageSpot(t, ts), "a pending instance does not count")
+	}
+	assert.Equal(t, "pending", describe())
+	assert.Equal(t, []float64{0}, cwUsageSpot(t, ts))
+	assert.Equal(t, "pending", describe())
+	assert.Equal(t, []float64{2}, cwUsageSpot(t, ts), "the countdown is spent, so it reports running")
+	assert.Equal(t, "running", describe())
 }
