@@ -982,7 +982,7 @@ func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSReque
 	// cannot both pass the check.
 	p.mappingMu.Lock()
 	defer p.mappingMu.Unlock()
-	if err := p.requireMappingKeyFree(ctx, domainName, body.APIMappingKey); err != nil {
+	if err := p.requireMappingKeyFree(ctx, domainName, body.APIMappingKey, ""); err != nil {
 		return nil, err
 	}
 

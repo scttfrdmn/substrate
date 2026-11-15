@@ -37,6 +37,7 @@ func TestAPIGatewayV2Mappings_Lifecycle(t *testing.T) {
 	apiID := agwv2API(t, p, ctx, "mappings")
 	agwv2DefaultStage(t, p, ctx, apiID)
 	otherAPI := agwv2API(t, p, ctx, "mappings-other")
+	agwv2DefaultStage(t, p, ctx, otherAPI)
 	agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{"domainName": "m.example.com"})
 
 	first := agwv2Mapping(t, p, ctx, "m.example.com", apiID, "v1")

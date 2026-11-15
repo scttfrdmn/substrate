@@ -26,9 +26,23 @@ func (d *StackDeployer) deployKinesisStream(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "Name", logicalID, cctx)
 
-	body := map[string]interface{}{
-		"StreamName": name,
-		"ShardCount": 1,
+	// ShardCount, StreamModeDetails and MaxRecordSizeInKiB are forwarded as declared (#1118, #1418).
+	// All three are Required: No on AWS::Kinesis::Stream and the page publishes no default for
+	// ShardCount, so a provisioned stream declaring none keeps the one shard substrate has always
+	// given it, and an ON_DEMAND stream declaring none sends none, as CreateStream requires.
+	body := map[string]interface{}{"StreamName": name}
+	mode := ""
+	if details, ok := props["StreamModeDetails"].(map[string]interface{}); ok {
+		mode = resolveStringProp(details, "StreamMode", "", cctx)
+		body["StreamModeDetails"] = map[string]string{"StreamMode": mode}
+	}
+	if n, ok := cfnIntProp(props, "ShardCount", cctx); ok {
+		body["ShardCount"] = n
+	} else if mode != kinesisStreamModeOnDemand {
+		body["ShardCount"] = 1
+	}
+	if n, ok := cfnIntProp(props, "MaxRecordSizeInKiB", cctx); ok {
+		body["MaxRecordSizeInKiB"] = n
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

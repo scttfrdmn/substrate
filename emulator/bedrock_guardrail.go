@@ -93,30 +93,55 @@ func bedrockGuardrailBlocklistKey(accountID, region, guardrailID, version string
 }
 
 // guardrailBlocklist returns the terms the most specific matching seed names, or nil when none does.
+//
+// One List over the seed prefix finds every candidate, and the most specific is chosen in memory, so
+// a guarded call costs one List and at most one Get. Specificity is ranked by dimension in the order
+// the file comment gives — guardrail ID, then version, then account, then Region — an exact match
+// outranking "*" in each.
 func (p *BedrockRuntimePlugin) guardrailBlocklist(goCtx context.Context, accountID, region, guardrailID, version string) ([]string, error) {
-	id := bedrockGuardrailID(guardrailID)
-	for _, g := range []string{id, bedrockGuardrailWildcard} {
-		for _, v := range []string{version, bedrockGuardrailWildcard} {
-			for _, a := range []string{accountID, bedrockGuardrailWildcard} {
-				for _, r := range []string{region, bedrockGuardrailWildcard} {
-					key := bedrockGuardrailBlocklistKey(a, r, g, v)
-					data, err := p.state.Get(goCtx, bedrockRuntimeCtrlNamespace, key)
-					if err != nil {
-						return nil, fmt.Errorf("bedrock guardrail blocklist %s: %w", key, err)
-					}
-					if data == nil {
-						continue
-					}
-					var seed bedrockGuardrailBlocklistSeed
-					if err := json.Unmarshal(data, &seed); err != nil {
-						return nil, fmt.Errorf("bedrock guardrail blocklist %s unmarshal: %w", key, err)
-					}
-					return seed.Terms, nil
-				}
+	keys, err := p.state.List(goCtx, bedrockRuntimeCtrlNamespace, bedrockGuardrailBlocklistPrefix)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock guardrail blocklist list: %w", err)
+	}
+	// The key is {account}/{region}/{id}/{version}; the rank's dimensions run most significant first.
+	want := [4]string{bedrockGuardrailID(guardrailID), version, accountID, region}
+	best, bestRank := "", -1
+	for _, key := range keys {
+		parts := strings.Split(strings.TrimPrefix(key, bedrockGuardrailBlocklistPrefix), "/")
+		if len(parts) != 4 {
+			continue
+		}
+		got := [4]string{parts[2], parts[3], parts[0], parts[1]}
+		rank, matches := 0, true
+		for i := range want {
+			rank <<= 1
+			switch got[i] {
+			case want[i]:
+				rank |= 1
+			case bedrockGuardrailWildcard:
+			default:
+				matches = false
 			}
 		}
+		if matches && rank > bestRank {
+			best, bestRank = key, rank
+		}
 	}
-	return nil, nil
+	if best == "" {
+		return nil, nil
+	}
+	data, err := p.state.Get(goCtx, bedrockRuntimeCtrlNamespace, best)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock guardrail blocklist %s: %w", best, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var seed bedrockGuardrailBlocklistSeed
+	if err := json.Unmarshal(data, &seed); err != nil {
+		return nil, fmt.Errorf("bedrock guardrail blocklist %s unmarshal: %w", best, err)
+	}
+	return seed.Terms, nil
 }
 
 // guardrailIntervenes reports whether the guardrail blocks any of texts: whether a seeded term is a

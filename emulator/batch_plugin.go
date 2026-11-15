@@ -26,6 +26,9 @@ type BatchPlugin struct {
 	// seedMu serializes a job progression's read-modify-write of its observation counter; see
 	// [progression.observe].
 	seedMu sync.Mutex
+	// queueMu serializes SubmitJob's queue check and job write against DeleteJobQueue, per
+	// queue (#1422); see batch_submit.go.
+	queueMu batchQueueMutex
 }
 
 // Name returns the service name "batch".
@@ -613,6 +616,9 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 			return nil, batchClientError(required.member + " is required")
 		}
 	}
+	// Held from the queue check to the job's write; see batch_submit.go.
+	unlock := p.queueMu.lock(ctx, batchNameFromIdentifier(body.JobQueue))
+	defer unlock()
 	if err := p.batchRequireSubmittableQueue(ctx, body.JobQueue); err != nil {
 		return nil, err
 	}
@@ -948,6 +954,10 @@ func (p *BatchPlugin) registerJobDefinition(ctx *RequestContext, req *AWSRequest
 	}
 
 	if err := p.putBatchRecord(ctx, "job-definition", name, def); err != nil {
+		return nil, err
+	}
+	// SubmitJob resolves a bare name to its latest ACTIVE revision through this index (#1422).
+	if err := p.setRevisionActive(ctx, body.JobDefinitionName, revision, true); err != nil {
 		return nil, err
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{

@@ -406,15 +406,27 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 	// A decrement lowers desired by each instance's weight — its capacity units, one per
 	// instance for an unweighted group — and holds it at MinSize, never below (#1526).
 	//
-	// The refusal is for a group whose desired capacity already equals its minimum, which is
-	// what the observed message says ("Currently, desiredSize equals minSize"). It used to be
-	// the full decrement taken below MinSize, which refused a weighted group whose member
-	// outweighs its desired capacity. AWS does not: in a vcpu-weighted group at MinSize 0 and
-	// DesiredCapacity 1, a decrementing terminate of a member of weight 2 succeeded, desired
-	// became 0 and the instance terminated (observed against us-west-2, recorded on #1526). So
-	// a decrement that would overshoot the minimum is clamped to it, which is the reading for
-	// a MinSize above zero too, where no observation has been made.
-	if decrement && g.DesiredCapacity <= g.MinSize {
+	// When every member being terminated weighs one, the refusal is the documented one for an
+	// unweighted group: the full decrement taken below MinSize is refused, exactly as before
+	// #1526. Clamping there would terminate more instances than desired can lose and then
+	// launch a replacement, which no observation supports.
+	//
+	// A weighted decrement is refused only when desired already equals its minimum, which is
+	// what the observed message says ("Currently, desiredSize equals minSize"). AWS does not
+	// refuse a weighted member that outweighs desired's room above MinSize: in a vcpu-weighted
+	// group at MinSize 0 and DesiredCapacity 1, a decrementing terminate of a member of weight
+	// 2 succeeded, desired became 0 and the instance terminated (observed against us-west-2,
+	// recorded on #1526). So such a decrement is clamped to MinSize, which is the reading for a
+	// MinSize above zero too, where no observation has been made.
+	decrementBy := 0
+	for i := range members {
+		decrementBy += members[i].weightOf()
+	}
+	refuse := g.DesiredCapacity <= g.MinSize
+	if decrementBy == len(members) {
+		refuse = g.DesiredCapacity-decrementBy < g.MinSize
+	}
+	if decrement && refuse {
 		// Observed wording.
 		return nil, asgValidationError("Currently, desiredSize equals minSize (%d). Terminating instance without replacement will violate group's min size constraint. Either set shouldDecrementDesiredCapacity flag to false or lower group's min size.", g.MinSize)
 	}

@@ -316,6 +316,56 @@ func TestKinesisLimits_TheRequestsOwnLimitsComeBeforeTheStream(t *testing.T) {
 	assert.Equal(t, "InvalidArgumentException", code, raw)
 }
 
+// TestKinesisMode_CloudFormationForwardsTheStreamsCapacityProperties: AWS::Kinesis::Stream's
+// ShardCount, StreamModeDetails and MaxRecordSizeInKiB reach CreateStream, where the deploy used to
+// send ShardCount 1 and nothing else.
+func TestKinesisMode_CloudFormationForwardsTheStreamsCapacityProperties(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, props       string
+		wantMode          string
+		wantShards, wantK float64
+	}{
+		{"nothing declared", `{"Name":"cfn-plain"}`, "PROVISIONED", 1, 1024},
+		{"a shard count", `{"Name":"cfn-shards","ShardCount":3}`, "PROVISIONED", 3, 1024},
+		{"on demand", `{"Name":"cfn-od","StreamModeDetails":{"StreamMode":"ON_DEMAND"},"MaxRecordSizeInKiB":2048}`,
+			"ON_DEMAND", 4, 2048},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, registry := newFullTestDeployerWithRegistry(t)
+			result, err := d.Deploy(t.Context(),
+				`{"Resources":{"S":{"Type":"AWS::Kinesis::Stream","Properties":`+tc.props+`}}}`, "kinesis-cfn", nil)
+			require.NoError(t, err)
+			require.Len(t, result.Resources, 1)
+			require.Empty(t, result.Resources[0].Error)
+
+			var name struct {
+				Name string `json:"Name"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(tc.props), &name))
+			resp, err := registry.RouteRequest(&emulator.RequestContext{
+				RequestID: "test-request", AccountID: "123456789012", Region: "us-east-1",
+			}, kinesisRequest(t, "DescribeStreamSummary", map[string]any{"StreamName": name.Name}))
+			require.NoError(t, err)
+			var out struct {
+				Summary struct {
+					OpenShardCount     float64 `json:"OpenShardCount"`
+					MaxRecordSizeInKiB float64 `json:"MaxRecordSizeInKiB"`
+					StreamModeDetails  struct {
+						StreamMode string `json:"StreamMode"`
+					} `json:"StreamModeDetails"`
+				} `json:"StreamDescriptionSummary"`
+			}
+			require.NoError(t, json.Unmarshal(resp.Body, &out), "%s", resp.Body)
+			assert.Equal(t, tc.wantMode, out.Summary.StreamModeDetails.StreamMode)
+			assert.Equal(t, tc.wantShards, out.Summary.OpenShardCount)
+			assert.Equal(t, tc.wantK, out.Summary.MaxRecordSizeInKiB)
+		})
+	}
+}
+
 // kinesisLimitsAbbrev shortens a response body for an assertion message, since a 500-record
 // success answers 500 results.
 func kinesisLimitsAbbrev(s string) string {

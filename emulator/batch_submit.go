@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // What SubmitJob checks before it accepts a job, and what deleting a queue does to its jobs (#1422).
@@ -23,22 +26,48 @@ import (
 //   - **The definition** is resolved as the page states: "definition-name, definition-name:revision, or
 //     the Amazon Resource Name (ARN) for the job definition, with or without the revision … If the
 //     revision is not specified, then the latest active revision is used." A named revision must exist
-//     and be ACTIVE; a bare name needs at least one ACTIVE revision. Otherwise ClientException.
+//     and be ACTIVE; a bare name needs at least one ACTIVE revision. Otherwise ClientException. A bare
+//     name resolves through the name's index of ACTIVE revisions ([batchActiveRevisionsKey]), which
+//     RegisterJobDefinition adds to and DeregisterJobDefinition removes from, so resolution is two
+//     reads at most.
 //
 // The job keeps the queue and definition identifiers as sent, so a describe reports what the caller
 // sent, as before. The messages are substrate's own.
 //
 // API_DeleteJobQueue: "All jobs in the queue are eventually terminated when you delete a job queue."
 // Substrate ends them **at delete time**, since the page publishes no interval and a delete is the one
-// request that can do it deterministically: every job of the queue that an observation would still
-// report as SUBMITTED, PENDING, RUNNABLE, STARTING or RUNNING is written FAILED, which is what
-// API_TerminateJob says terminating a job does. The job is peeked, not observed, so the delete spends
-// none of a caller's polling budget, and a job that already reports SUCCEEDED or FAILED is left as it
-// is. No page publishes a statusReason for such a job, so [batchQueueDeletedReason] is substrate's.
+// request that can do it deterministically. Each job of the queue is ended by [BatchPlugin.endJob],
+// the rule TerminateJob uses — a job that would report SUBMITTED, PENDING, RUNNABLE, STARTING or
+// RUNNING is written FAILED, and one TerminateJob or CancelJob already ended is left — so the two
+// operations agree on what ending a job means. The jobs are failed before the queue is deleted, so a
+// delete that fails partway leaves the queue in place for a retry to finish. No page publishes a
+// statusReason for such a job, so [batchQueueDeletedReason] is substrate's.
+//
+// A queue's check in SubmitJob and its job's write hold the queue's stripe of [batchQueueMutex], as
+// DeleteJobQueue does from its check to its delete, so a job cannot be submitted to a queue between
+// the delete's job sweep and the queue's removal.
 
 // batchQueueDeletedReason is the statusReason a job ended by its queue's deletion reports. Substrate's
 // wording; no Batch page publishes one.
 const batchQueueDeletedReason = "Job terminated because its job queue was deleted."
+
+// batchQueueLockStripes is the number of mutexes in [batchQueueMutex].
+const batchQueueLockStripes = 64
+
+// batchQueueMutex is a striped mutex set serializing SubmitJob against DeleteJobQueue per queue, the
+// pattern of [s3KeyMutex]. It is process-local, as that one is.
+type batchQueueMutex struct {
+	stripes [batchQueueLockStripes]sync.Mutex
+}
+
+// lock acquires the stripe guarding one queue and returns its unlock function.
+func (m *batchQueueMutex) lock(ctx *RequestContext, queueName string) func() {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(ctx.AccountID + "/" + ctx.Region + "/" + queueName))
+	mu := &m.stripes[h.Sum32()%batchQueueLockStripes]
+	mu.Lock()
+	return mu.Unlock
+}
 
 // batchRequireSubmittableQueue resolves a SubmitJob jobQueue and refuses one that cannot take a job.
 func (p *BatchPlugin) batchRequireSubmittableQueue(ctx *RequestContext, identifier string) error {
@@ -67,58 +96,75 @@ func (p *BatchPlugin) batchRequireActiveDefinition(ctx *RequestContext, identifi
 		if _, err := strconv.Atoi(name[colon+1:]); err != nil {
 			return batchClientError(fmt.Sprintf("job definition %s does not name a revision", identifier))
 		}
-		var def BatchJobDefinition
-		found, err := p.loadBatchRecord(ctx, "job-definition", name, &def)
+	} else {
+		// A bare name is its latest ACTIVE revision.
+		active, err := p.loadActiveRevisions(ctx, name)
 		if err != nil {
 			return err
 		}
-		if !found {
-			return batchClientError(fmt.Sprintf("job definition %s does not exist", identifier))
+		if len(active) == 0 {
+			return batchClientError(fmt.Sprintf("job definition %s has no ACTIVE revision", identifier))
 		}
-		if def.Status != "ACTIVE" {
-			return batchClientError(fmt.Sprintf("job definition %s is %s", identifier, def.Status))
-		}
-		return nil
+		name = fmt.Sprintf("%s:%d", name, active[len(active)-1])
 	}
-
-	// A bare name is its latest ACTIVE revision, so the revisions are tried from the highest down.
-	highest, err := p.highestJobDefinitionRevision(ctx, name)
+	var def BatchJobDefinition
+	found, err := p.loadBatchRecord(ctx, "job-definition", name, &def)
 	if err != nil {
 		return err
 	}
-	for revision := highest; revision >= 1; revision-- {
-		var def BatchJobDefinition
-		found, err := p.loadBatchRecord(ctx, "job-definition", fmt.Sprintf("%s:%d", name, revision), &def)
-		if err != nil {
-			return err
-		}
-		if found && def.Status == "ACTIVE" {
-			return nil
-		}
+	if !found {
+		return batchClientError(fmt.Sprintf("job definition %s does not exist", identifier))
 	}
-	return batchClientError(fmt.Sprintf("job definition %s has no ACTIVE revision", identifier))
+	if def.Status != "ACTIVE" {
+		return batchClientError(fmt.Sprintf("job definition %s is %s", identifier, def.Status))
+	}
+	return nil
 }
 
-// highestJobDefinitionRevision reads the highest revision a name has been registered at, or 0. It
-// reads the counter [BatchPlugin.nextJobDefinitionRevision] advances, without advancing it.
-func (p *BatchPlugin) highestJobDefinitionRevision(ctx *RequestContext, name string) (int, error) {
-	key := "job-definition_revisions:" + ctx.AccountID + "/" + ctx.Region + "/" + name
-	data, err := p.state.Get(context.Background(), batchNamespace, key)
+// batchActiveRevisionsKey is the state key of a job definition name's ACTIVE revisions, ascending.
+func batchActiveRevisionsKey(ctx *RequestContext, name string) string {
+	return "job-definition_active:" + ctx.AccountID + "/" + ctx.Region + "/" + name
+}
+
+// loadActiveRevisions reads a name's ACTIVE revisions, ascending.
+func (p *BatchPlugin) loadActiveRevisions(ctx *RequestContext, name string) ([]int, error) {
+	data, err := p.state.Get(context.Background(), batchNamespace, batchActiveRevisionsKey(ctx, name))
 	if err != nil {
-		return 0, fmt.Errorf("batch job definition revisions get: %w", err)
+		return nil, fmt.Errorf("batch active revisions get: %w", err)
 	}
 	if data == nil {
-		return 0, nil
+		return nil, nil
 	}
-	var highest int
-	if err := json.Unmarshal(data, &highest); err != nil {
-		return 0, fmt.Errorf("batch job definition revisions unmarshal: %w", err)
+	var revisions []int
+	if err := json.Unmarshal(data, &revisions); err != nil {
+		return nil, fmt.Errorf("batch active revisions unmarshal: %w", err)
 	}
-	return highest, nil
+	return revisions, nil
 }
 
-// failQueueJobs ends every job of a deleted queue that an observation would still report as
-// unfinished, writing it FAILED with [batchQueueDeletedReason]. See the file comment.
+// setRevisionActive adds a revision to, or removes it from, its name's ACTIVE revisions.
+func (p *BatchPlugin) setRevisionActive(ctx *RequestContext, name string, revision int, active bool) error {
+	revisions, err := p.loadActiveRevisions(ctx, name)
+	if err != nil {
+		return err
+	}
+	revisions = slices.DeleteFunc(revisions, func(r int) bool { return r == revision })
+	if active {
+		revisions = append(revisions, revision)
+		slices.Sort(revisions)
+	}
+	data, err := json.Marshal(revisions)
+	if err != nil {
+		return fmt.Errorf("batch active revisions marshal: %w", err)
+	}
+	if err := p.state.Put(context.Background(), batchNamespace, batchActiveRevisionsKey(ctx, name), data); err != nil {
+		return fmt.Errorf("batch active revisions put: %w", err)
+	}
+	return nil
+}
+
+// failQueueJobs ends every job of a deleted queue, by name or ARN, through [BatchPlugin.endJob] with
+// [batchQueueDeletedReason]. See the file comment.
 func (p *BatchPlugin) failQueueJobs(ctx *RequestContext, queueName string) error {
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, batchNamespace, "job_ids:"+ctx.AccountID+"/"+ctx.Region)
@@ -141,21 +187,8 @@ func (p *BatchPlugin) failQueueJobs(ctx *RequestContext, queueName string) error
 		if batchNameFromIdentifier(job.JobQueue) != queueName {
 			continue
 		}
-		observed, err := batchJobObserved(goCtx, p.state, &p.seedMu, job, false)
-		if err != nil {
-			return fmt.Errorf("batch deleteJobQueue peek job %s: %w", id, err)
-		}
-		if batchJobTerminal(observed.Status) {
-			continue
-		}
-		job.Status = "FAILED"
-		job.StatusReason = batchQueueDeletedReason
-		updated, err := json.Marshal(job)
-		if err != nil {
-			return fmt.Errorf("batch deleteJobQueue marshal job %s: %w", id, err)
-		}
-		if err := p.state.Put(goCtx, batchNamespace, key, updated); err != nil {
-			return fmt.Errorf("batch deleteJobQueue put job %s: %w", id, err)
+		if err := p.endJob(goCtx, key, job, batchQueueDeletedReason, batchJobTransientStates); err != nil {
+			return fmt.Errorf("batch deleteJobQueue end job %s: %w", id, err)
 		}
 	}
 	return nil

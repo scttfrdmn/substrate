@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -200,18 +202,20 @@ func TestBatchSubmit_DeletingAQueueFailsItsUnfinishedJobs(t *testing.T) {
 	}
 	running := submit("doomed")
 	byARN := submit("arn:aws:batch:us-east-1:123456789012:job-queue/doomed")
-	finished := submit("doomed")
+	unseeded := submit("doomed")
+	terminated := submit("doomed")
 	elsewhere := submit("kept")
 
-	// Every job but finished is seeded to hold RUNNING; finished is unseeded, so its first
-	// observation reports SUCCEEDED, which the delete must leave alone.
-	for _, id := range []string{running, byARN, elsewhere} {
+	// Every seeded job holds RUNNING. unseeded is ended the way TerminateJob would end it, since
+	// the delete and TerminateJob share one rule; terminated was already ended by TerminateJob,
+	// and keeps its own reason.
+	for _, id := range []string{running, byARN, terminated, elsewhere} {
 		batchSeedJobStatus(t, ts, fmt.Sprintf(`{"jobId":%q,"transientObservations":{"RUNNING":100}}`, id))
 	}
-	status, reason := batchDescribeStatus(t, ts, finished)
-	require.Equal(t, "SUCCEEDED", status, reason)
+	code, body := post("/v1/terminatejob", map[string]any{"jobId": terminated, "reason": "stopped by the test"})
+	require.Equal(t, http.StatusOK, code, "%s", body)
 
-	code, body := post("/v1/updatejobqueue", map[string]any{"jobQueue": "doomed", "state": "DISABLED"})
+	code, body = post("/v1/updatejobqueue", map[string]any{"jobQueue": "doomed", "state": "DISABLED"})
 	require.Equal(t, http.StatusOK, code, "%s", body)
 	code, body = post("/v1/deletejobqueue", map[string]any{"jobQueue": "doomed"})
 	require.Equal(t, http.StatusOK, code, "%s", body)
@@ -221,7 +225,8 @@ func TestBatchSubmit_DeletingAQueueFailsItsUnfinishedJobs(t *testing.T) {
 	}{
 		{running, "FAILED", "Job terminated because its job queue was deleted."},
 		{byARN, "FAILED", "Job terminated because its job queue was deleted."},
-		{finished, "SUCCEEDED", ""},
+		{unseeded, "FAILED", "Job terminated because its job queue was deleted."},
+		{terminated, "FAILED", "stopped by the test"},
 		{elsewhere, "RUNNING", ""},
 	} {
 		status, reason := batchDescribeStatus(t, ts, tc.id)
@@ -232,4 +237,80 @@ func TestBatchSubmit_DeletingAQueueFailsItsUnfinishedJobs(t *testing.T) {
 	// The queue is gone, so a further submission to it is refused.
 	code, raw := batchSubmitStatus(post, "doomed", "d")
 	assert.Equal(t, http.StatusBadRequest, code, raw)
+}
+
+// TestBatchSubmit_ASubmissionRacingTheDeleteIsFailedOrRefused: SubmitJob and DeleteJobQueue hold
+// the queue's lock, so every job a concurrent SubmitJob accepted is one the delete's sweep failed,
+// and every later one is refused.
+func TestBatchSubmit_ASubmissionRacingTheDeleteIsFailedOrRefused(t *testing.T) {
+	t.Parallel()
+	p := &emulator.BatchPlugin{}
+	ctx, _ := wireSetup(t, p, "req-batch-race")
+	post := batchPluginPoster(t, p, ctx)
+	batchEnsureSubmittable(t, post, "race", "d")
+	// The submissions race the disable and the delete. A submission that passed its ENABLED check
+	// before the disable either wrote its job before the delete's sweep, which fails it, or holds the
+	// lock the delete waits on, so it cannot write after the sweep.
+	const n = 16
+	accepted := make(chan string, n)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for range n {
+			s, body := batchSubmitStatus(post, "race", "d")
+			if s == http.StatusOK {
+				var out struct {
+					JobID string `json:"jobId"`
+				}
+				if json.Unmarshal([]byte(body), &out) == nil {
+					accepted <- out.JobID
+				}
+			}
+		}
+	}()
+	status, raw := post("/v1/updatejobqueue", map[string]any{"jobQueue": "race", "state": "DISABLED"})
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+	status, raw = post("/v1/deletejobqueue", map[string]any{"jobQueue": "race"})
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+	<-done
+	close(accepted)
+
+	for id := range accepted {
+		status, raw := post("/v1/describejobs", map[string]any{"jobs": []string{id}})
+		require.Equal(t, http.StatusOK, status)
+		assert.Contains(t, string(raw), `"status":"FAILED"`, "an accepted job was failed by the delete: %s", raw)
+	}
+}
+
+// TestBatchSubmit_AFailedJobSweepLeavesTheQueueForARetry:the jobs are failed before the queue is
+// deleted, so a store fault partway through leaves the queue in place and a retry finishes.
+func TestBatchSubmit_AFailedJobSweepLeavesTheQueueForARetry(t *testing.T) {
+	t.Parallel()
+	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+	p := &emulator.BatchPlugin{}
+	ctx, _ := wireSetup(t, p, "req-batch-retry")
+	require.NoError(t, p.Initialize(t.Context(), emulator.PluginConfig{
+		State: fault, Logger: emulator.NewDefaultLogger(slog.LevelError, false),
+		Options: map[string]any{"time_controller": emulator.NewTimeController(time.Unix(1700000000, 0).UTC())},
+	}))
+	post := batchPluginPoster(t, p, ctx)
+	batchEnsureSubmittable(t, post, "q", "d")
+	status, body := batchSubmitStatus(post, "q", "d")
+	require.Equal(t, http.StatusOK, status, body)
+	status, raw := post("/v1/updatejobqueue", map[string]any{"jobQueue": "q", "state": "DISABLED"})
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+
+	fault.failPut = "job:"
+	_, err := p.HandleRequest(ctx, &emulator.AWSRequest{
+		Service: "batch", HTTPMethod: http.MethodPost, Path: "/v1/deletejobqueue",
+		Body: []byte(`{"jobQueue":"q"}`), Headers: map[string]string{}, Params: map[string]string{},
+	})
+	require.Error(t, err, "a store fault failing a job fails the delete")
+	status, raw = post("/v1/describejobqueues", map[string]any{"jobQueues": []string{"q"}})
+	require.Equal(t, http.StatusOK, status)
+	assert.Contains(t, string(raw), `"jobQueueName":"q"`, "the queue survives the failed delete")
+
+	fault.failPut = ""
+	status, raw = post("/v1/deletejobqueue", map[string]any{"jobQueue": "q"})
+	assert.Equal(t, http.StatusOK, status, "the retry finishes: %s", raw)
 }

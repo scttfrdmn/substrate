@@ -2959,8 +2959,8 @@ would be refused anyway, and reporting the detach's own error names what went wr
 A profile declaring no roles dispatches only its own delete.
 
 Coverage is stated rather than implied. Of the 109 resource types the deployer
-dispatches, 89 have a delete request and 11 are state-only types whose stub record
-is removed. The remaining 9 sweep to a no-op and are reported as `DELETE_SKIPPED`
+dispatches, 90 have a delete request and 11 are state-only types whose stub record
+is removed. The remaining 8 sweep to a no-op and are reported as `DELETE_SKIPPED`
 naming the reason:
 
 | Type | Why the sweep is a no-op |
@@ -2969,7 +2969,6 @@ naming the reason:
 | `AWS::ECS::CapacityProvider` | the deploy records no state to remove |
 | `AWS::SSM::Association` | the deploy records no state to remove |
 | `AWS::SecretsManager::SecretTargetAttachment` | the deploy records no state to remove |
-| `AWS::Route53::RecordSetGroup` | its record sets are dispatches the stack does not record individually |
 | `AWS::ECR::LifecyclePolicy` | `DeleteLifecyclePolicy` is not routed; deleting the repository removes the policy |
 | `AWS::ApiGateway::UsagePlanKey` | `DeleteUsagePlanKey` is not routed; the key goes with its usage plan |
 | `AWS::Cognito::IdentityPoolRoleAttachment` | Cognito models no `DeleteIdentityPoolRoles` |
@@ -12909,7 +12908,7 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 | UpdateAutoScalingGroup | Any subset of Create's members; a member not sent is unchanged, inside `MixedInstancesPolicy` too (overrides are replaced as a list when any is sent, distribution members one by one, an empty `SpotMaxPrice` clears it, a `LaunchTemplateSpecification` carrying only `Version` re-points the existing template). A new `MinSize` above, or `MaxSize` below, the current desired capacity moves it there when no `DesiredCapacity` is named, as the reference states. Reconciles before answering |
 | DeleteAutoScalingGroup | `ResourceInUse`/400 while instances remain unless `ForceDelete`, which terminates them through EC2. A `ForceDelete` whose termination fails fails the request and leaves the group, still owning its instances |
 | SetDesiredCapacity | Outside `MinSize`–`MaxSize` is `ValidationError`/400. `HonorCooldown=true` inside `DefaultCooldown` of the group's last activity is `ScalingActivityInProgress`/400. Scales out or in before answering |
-| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` lowers desired by the instance's weight, held at `MinSize` and never below (#1526), and a group whose desired capacity already equals `MinSize` is `ValidationError`/400 (observed wording). AWS was observed clamping a weighted decrement at a `MinSize` of 0 and terminating rather than refusing; that it clamps the same way above 0 is substrate's reading. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
+| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` lowers desired by the instance's weight, held at `MinSize` and never below (#1526). When every instance terminated weighs one, desired less the full decrement below `MinSize` is `ValidationError`/400, as before; a weighted decrement is refused only when desired already equals `MinSize` (both observed wording). AWS was observed clamping a weighted decrement at a `MinSize` of 0 and terminating rather than refusing; that it clamps the same way above 0 is substrate's reading. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
 | SuspendProcesses | The nine published processes, all of them when `ScalingProcesses` is omitted. `Launch`, `Terminate`, `HealthCheck` and `ReplaceUnhealthy` change what a reconciliation does; the others are recorded and echoed |
 | ResumeProcesses | |
 | DescribeScalingActivities | Most recent first; `AutoScalingGroupName`, `ActivityIds`, `IncludeDeletedGroups` (which adds `AutoScalingGroupState`), `Filters` `Status`/`StartTimeLowerBound`/`StartTimeUpperBound`. Pages on `NextToken`/`MaxRecords` (default and max 100). An observation |
@@ -12970,8 +12969,10 @@ at desired, which is at most `MaxSize`, so capacity stays below `MaxSize` plus o
 The On-Demand/Spot split and zone balance are computed in units, for the size the launch or
 termination leaves the group at. A scale-in terminates only an instance whose weight fits in the
 excess over desired, so the group never drops below it (AWS publishes no finer rule). A decrementing
-`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight, held at zero. It is
-refused, as before, when desired less the full decrement would fall below `MinSize`.
+`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight. When every instance it
+terminates weighs one, it is refused, as before, when desired less the full decrement would fall below
+`MinSize`. A weighted decrement is held at `MinSize` instead, and refused only when desired already
+equals `MinSize` (#1526).
 Changing an override's weight reconciles to desired, and an instance whose type no override names any
 more keeps its last weight, as the instance-weighting guide states. A weighted group's members report
 `WeightedCapacity` (a string) in `DescribeAutoScalingGroups` and `DescribeAutoScalingInstances`; the
@@ -13107,6 +13108,10 @@ The two listings, and the delete's own check, skip an index entry whose record i
 outlived it. A record that is there but cannot be read or decoded is an error, answered as a 500, where
 it used to be left out of the listing silently
 ([#1417](https://github.com/scttfrdmn/substrate/issues/1417)).
+
+A CloudFormation stack delete still converges: an `AWS::Route53::RecordSetGroup`'s delete removes its
+record sets with a `ChangeResourceRecordSets` `DELETE` batch per zone, where the sweep used to skip the
+group, so the zone it lives in can then be deleted.
 
 ### The account a hosted zone carries reaches no response
 
@@ -16874,8 +16879,10 @@ Two checks were added in [#1514](https://github.com/scttfrdmn/substrate/issues/1
   fires schedules with, which accepts the three forms and every wildcard the User Guide's
   `schedule-types` page publishes (`, - * / ? L W #`), so a refusal is an expression the clock could never
   fire. AWS refuses such input with `ValidationException` but publishes neither which inputs nor the
-  message, so which inputs are refused is substrate's reading and the messages are its own. Zones resolve
-  from the IANA database embedded in the binary, so the answer does not depend on the host.
+  message, so which inputs are refused is substrate's reading and the messages are its own. A zone must
+  be named exactly, case included, in the copy of the IANA database (release 2026c) embedded in the
+  binary, which the clock also evaluates it with. The host's zoneinfo is never consulted and `Local` is
+  refused, so acceptance and firing times do not depend on the host.
 
 ### `UpdateSchedule` replaces the schedule, it does not merge into it
 
@@ -17625,7 +17632,7 @@ no error (#529).
 | CreateApiMapping | Mints an `apiMappingId`. `apiId` and `stage` are required (`400 BadRequestException`); the domain, the API and the stage must exist (`404 NotFoundException`); and an `apiMappingKey` another mapping of the domain already uses, the empty key included, is `409 ConflictException` (#566, #1423) |
 | GetApiMappings | The domain's mappings in ascending mapping ID, in the `items` envelope; pages by `maxResults`/`nextToken`. `404 NotFoundException` for a domain that does not exist |
 | GetApiMapping | `404 NotFoundException` for a mapping, or a domain, that does not exist |
-| UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping` |
+| UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping`, and the mapping it leaves is held to `CreateApiMapping`'s checks: an empty `apiId` or `stage` is `400 BadRequestException`, an absent API or stage `404 NotFoundException`, and another mapping's key `409 ConflictException` |
 | DeleteApiMapping | `204`, and the mapping leaves `GetApiMappings`. Same refusals as `GetApiMapping`, so deleting twice is refused the second time |
 | TagResource | `POST /v2/tags/{resource-arn}` with `{"tags": {…}}`; **201** with no body. Merges onto an API's tags (see *An API's tags*). `404 NotFoundException` for an API that does not exist, `400 BadRequestException` for a body that does not decode or an ARN that names no API |
 | GetTags | `GET /v2/tags/{resource-arn}`; answers `{"tags": {…}}`, an empty map for an untagged API. Same refusals as `TagResource` |
@@ -19852,7 +19859,7 @@ millisecond. The stored record keeps its `time.Time`, so a recorded run replays 
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::Kinesis::Stream | StreamName | |
+| AWS::Kinesis::Stream | StreamName | Forwards `ShardCount`, `StreamModeDetails` and `MaxRecordSizeInKiB` as declared. A provisioned stream declaring no `ShardCount` gets one shard, and an `ON_DEMAND` one sends none |
 
 ### A shard iterator carries its account and Region only inside the token
 
@@ -22019,13 +22026,18 @@ these is now that refusal:
 The job keeps the queue and definition identifiers as they were sent. The messages are substrate's own.
 
 `API_DeleteJobQueue` says *"All jobs in the queue are eventually terminated when you delete a job
-queue."* Substrate ends them **at delete time**, since the page publishes no interval: every job of the
-queue, submitted by name or by ARN, that an observation would still report `SUBMITTED`, `PENDING`,
-`RUNNABLE`, `STARTING` or `RUNNING` is recorded `FAILED`, which is what `API_TerminateJob` says
-terminating a job does. The job is peeked rather than observed, so the delete spends no observation,
-and a job that already reports `SUCCEEDED` or `FAILED` — including an unseeded job, whose first
-observation reports `SUCCEEDED` — is left as it is. No page publishes a `statusReason` for such a job, so
-the one it reports, *"Job terminated because its job queue was deleted."*, is substrate's.
+queue."* Substrate ends them **at delete time**, since the page publishes no interval. Every job of the
+queue, submitted by name or by ARN, is ended by the rule `TerminateJob` uses, so the two agree: a job
+that would report `SUBMITTED`, `PENDING`, `RUNNABLE`, `STARTING` or `RUNNING` is recorded `FAILED`, and
+one `TerminateJob` or `CancelJob` already ended keeps its status and reason. As with `TerminateJob`, an
+unseeded job's record is still `SUBMITTED`, so it is ended too. The state is peeked rather than
+observed, so the delete spends no observation. No page publishes a `statusReason` for such a job, so the
+one it reports, *"Job terminated because its job queue was deleted."*, is substrate's.
+
+The jobs are failed before the queue is deleted, so a delete that fails partway leaves the queue for a
+retry to finish. `SubmitJob` and `DeleteJobQueue` serialize on the queue, so no job is accepted between
+the delete's job sweep and the queue's removal. A bare definition name resolves through an index of the
+name's `ACTIVE` revisions, which `RegisterJobDefinition` and `DeregisterJobDefinition` maintain.
 
 ### A describe filter takes a name or an ARN
 

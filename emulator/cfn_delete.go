@@ -448,6 +448,19 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 			Headers: map[string]string{"Content-Type": "application/xml"},
 			Params:  map[string]string{}}
 	},
+	// A record set group's record sets are not recorded as resources of their own, so the
+	// group deletes them: one change batch per zone, carrying a DELETE for every element,
+	// keyed by the same name and type the deploy upserted. Until DeleteHostedZone refused a
+	// zone that still holds record sets (#1416) a group could be skipped; now a skipped group
+	// would leave its zone undeletable and the stack stuck in DELETE_FAILED. The batch for the
+	// first zone is the delete; any other zone's batch is a pre-step (cfnDeletePreSteps).
+	"AWS::Route53::RecordSetGroup": func(_ *StackDeployer, _ DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+		batches := cfnRecordSetGroupDeleteBatches(props, cctx)
+		if len(batches) == 0 {
+			return nil
+		}
+		return batches[0]
+	},
 	"AWS::CertificateManager::Certificate": jsonBodyDeleter("acm", "DeleteCertificate",
 		"CertificateArn"),
 	"AWS::CloudFront::Distribution": pathDeleter("cloudfront", "/2020-05-31/distribution/"),
@@ -498,6 +511,18 @@ type cfnDeletePreStepFunc func(d *StackDeployer, dr DeployedResource,
 // dispatched after a failed detach would be refused anyway, and reporting the detach's
 // own error names what actually went wrong.
 var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
+	// A record set group whose elements name more than one zone deletes the other zones'
+	// record sets first; the first zone's batch is the group's own delete request.
+	"AWS::Route53::RecordSetGroup": func(_ *StackDeployer, _ DeployedResource,
+		props map[string]interface{}, cctx *cfnContext,
+	) []*AWSRequest {
+		batches := cfnRecordSetGroupDeleteBatches(props, cctx)
+		if len(batches) < 2 {
+			return nil
+		}
+		return batches[1:]
+	},
+
 	// DeleteInstanceProfile is refused while the profile holds a role, and DeleteRole
 	// is now refused while a profile holds it — correctly, per both references. So the
 	// stack could not converge from either side until something made the detach call
@@ -566,10 +591,9 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // ECS::CapacityProvider, SSM::Association, SecretsManager::SecretTargetAttachment)
 // write no state at all: their deploy returns a DeployedResource and nothing else,
 // so there is nothing for a sweep to remove and they are reported as skipped.
-// Route53::RecordSetGroup is state-only in the same sense but not inert — it
-// dispatches one RecordSet per child, and those children are not recorded as
-// resources of their own, so the record sets it wrote outlive the sweep. That gap
-// is reported rather than hidden; see cfnDeleteInertTypes.
+// Route53::RecordSetGroup records no resource of its own either, but it dispatches one
+// RecordSet per child, so its delete removes those record sets; see its entry in
+// cfnResourceDeleters.
 var cfnStubDeleteTypes = map[string]bool{
 	"AWS::Athena::WorkGroup":         true,
 	"AWS::Backup::BackupPlan":        true,
@@ -598,9 +622,6 @@ var cfnDeleteInertTypes = map[string]string{
 	"AWS::ECS::CapacityProvider":                  "the deploy records no state to remove",
 	"AWS::SSM::Association":                       "the deploy records no state to remove",
 	"AWS::SecretsManager::SecretTargetAttachment": "the deploy records no state to remove",
-	"AWS::Route53::RecordSetGroup": "the group's record sets were created as " +
-		"AWS::Route53::RecordSet dispatches that the stack does not record, so they " +
-		"are not swept",
 	"AWS::ECR::LifecyclePolicy": "ECR's DeleteLifecyclePolicy is not routed; deleting " +
 		"the repository removes its lifecycle policy with it",
 	"AWS::ApiGateway::UsagePlanKey": "API Gateway's DeleteUsagePlanKey is not routed, " +
@@ -609,6 +630,44 @@ var cfnDeleteInertTypes = map[string]string{
 		"DeleteIdentityPoolRoles; the roles are removed with the identity pool",
 	"AWS::SecretsManager::RotationSchedule": "Secrets Manager's CancelRotateSecret is " +
 		"not routed, so the schedule stays until the secret is deleted",
+}
+
+// cfnRecordSetGroupDeleteBatches builds the change batches that delete a record set
+// group's record sets, one per zone in the order the zones first appear. Each element
+// is resolved with the group's zone filled in ([cfnRecordSetInGroup]) and keyed by
+// the Name and Type (default A) deployRoute53RecordSet upserted. An element that
+// resolves to no zone or no name wrote nothing addressable and contributes nothing.
+func cfnRecordSetGroupDeleteBatches(props map[string]interface{}, cctx *cfnContext) []*AWSRequest {
+	rsList, _ := props["RecordSets"].([]interface{})
+	var zones []string
+	changes := map[string]string{}
+	for _, raw := range rsList {
+		rs, ok := raw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		rs = cfnRecordSetInGroup(props, rs)
+		zone := resolveStringProp(rs, "HostedZoneId", "", cctx)
+		name := resolveStringProp(rs, "Name", "", cctx)
+		if zone == "" || name == "" {
+			continue
+		}
+		if _, seen := changes[zone]; !seen {
+			zones = append(zones, zone)
+		}
+		changes[zone] += `<Change><Action>DELETE</Action><ResourceRecordSet><Name>` + name +
+			`</Name><Type>` + resolveStringProp(rs, "Type", "A", cctx) + `</Type></ResourceRecordSet></Change>`
+	}
+	batches := make([]*AWSRequest, 0, len(zones))
+	for _, zone := range zones {
+		body := `<ChangeResourceRecordSetsRequest xmlns="https://route53.amazonaws.com/doc/2013-04-01/">` +
+			`<ChangeBatch><Changes>` + changes[zone] + `</Changes></ChangeBatch></ChangeResourceRecordSetsRequest>`
+		batches = append(batches, &AWSRequest{Service: "route53", Operation: "POST",
+			Path: "/2013-04-01/hostedzone/" + zone + "/rrset", Body: []byte(body),
+			Headers: map[string]string{"Content-Type": "application/xml"},
+			Params:  map[string]string{}})
+	}
+	return batches
 }
 
 // queryDeleter builds a deleter for a query-protocol API: one action name and one

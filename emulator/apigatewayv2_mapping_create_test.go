@@ -69,6 +69,59 @@ func TestAPIGatewayV2CreateMapping_Refusals(t *testing.T) {
 	}
 }
 
+// UpdateApiMapping holds the mapping it leaves to CreateApiMapping's checks.
+func TestAPIGatewayV2UpdateMapping_Refusals(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		patch      func(apiID string) map[string]any
+		wantCode   string
+		wantStatus int
+	}{
+		{"an empty apiId", func(string) map[string]any { return map[string]any{"apiId": ""} },
+			"BadRequestException", http.StatusBadRequest},
+		{"an empty stage", func(string) map[string]any { return map[string]any{"stage": ""} },
+			"BadRequestException", http.StatusBadRequest},
+		{"an absent API", func(string) map[string]any { return map[string]any{"apiId": "nosuchapi"} },
+			"NotFoundException", http.StatusNotFound},
+		{"an absent stage", func(string) map[string]any { return map[string]any{"stage": "prod"} },
+			"NotFoundException", http.StatusNotFound},
+		{"another mapping's key", func(string) map[string]any { return map[string]any{"apiMappingKey": "v2"} },
+			"ConflictException", http.StatusConflict},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p, ctx := setupAPIGatewayV2Plugin(t)
+			apiID := agwv2API(t, p, ctx, "update-mapping")
+			agwv2DefaultStage(t, p, ctx, apiID)
+			agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{"domainName": "u.example.com"})
+			id := agwv2Mapping(t, p, ctx, "u.example.com", apiID, "v1")
+			agwv2Mapping(t, p, ctx, "u.example.com", apiID, "v2")
+
+			_, err := p.HandleRequest(ctx, apigwv2Request(t, http.MethodPatch,
+				"/v2/domainnames/u.example.com/apimappings/"+id, tc.patch(apiID)))
+			var awsErr *emulator.AWSError
+			require.Truef(t, errors.As(err, &awsErr), "the update must be refused, got %v", err)
+			assert.Equal(t, tc.wantCode, awsErr.Code, awsErr.Message)
+			assert.Equal(t, tc.wantStatus, awsErr.HTTPStatus)
+
+			got, _ := agwv2Wire(t, p, ctx, "GET", "/v2/domainnames/u.example.com/apimappings/"+id, nil)
+			assert.Equal(t, "v1", got["apiMappingKey"], "a refused update changes nothing")
+			assert.Equal(t, apiID, got["apiId"])
+		})
+	}
+
+	// The mapping's own key is not a conflict with itself.
+	p, ctx := setupAPIGatewayV2Plugin(t)
+	apiID := agwv2API(t, p, ctx, "update-self")
+	agwv2DefaultStage(t, p, ctx, apiID)
+	agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{"domainName": "s.example.com"})
+	id := agwv2Mapping(t, p, ctx, "s.example.com", apiID, "v1")
+	agwv2Wire(t, p, ctx, http.MethodPatch, "/v2/domainnames/s.example.com/apimappings/"+id,
+		map[string]any{"apiMappingKey": "v1"})
+}
+
 func TestAPIGatewayV2CreateMapping_KeysConflictPerDomain(t *testing.T) {
 	t.Parallel()
 	p, ctx := setupAPIGatewayV2Plugin(t)

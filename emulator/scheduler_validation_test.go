@@ -290,6 +290,10 @@ func TestSchedulerValidation_AnUnevaluableExpressionOrZoneIsRefused(t *testing.T
 		{"an at that is not a timestamp", "at(tomorrow)", "", false},
 		{"no form at all", "every five minutes", "", false},
 		{"a zone that is not IANA", "rate(5 minutes)", "Mars/Olympus_Mons", false},
+		{"the host's own zone", "cron(0 9 * * ? *)", "Local", false},
+		{"a zone in the wrong case", "cron(0 9 * * ? *)", "america/new_york", false},
+		{"UTC by name", "cron(0 9 * * ? *)", "UTC", true},
+		{"an Etc zone", "cron(0 9 * * ? *)", "Etc/GMT+5", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
