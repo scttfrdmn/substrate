@@ -1375,6 +1375,38 @@ what ELB's own Common Errors page publishes — the rule is shared, the vocabula
 permissive. That is evidence of the divergence, not noise, so it is recorded here: those tests now
 page at the documented minimum of twenty and create twenty-odd records to reach a second page.
 
+### Eight JSON list operations refuse a page size outside the published range
+
+[#1131](https://github.com/scttfrdmn/substrate/issues/1131). Eight handlers read their page size as
+`if MaxResults <= 0 { MaxResults = n }` and compared it with no maximum, so an explicit 0 or -1 was
+answered with substrate's default page and a value above the published maximum was honoured. The same
+rule as ELB's now applies to each (`emulator/page_size_range.go`): an absent member takes the default,
+a value inside the Valid Range is honoured, and a value outside it is refused. No page in the set
+publishes a clamp, and none publishes a code tied to the page size, so the code is each service's own
+validation code — the operation's page where it publishes one, otherwise the Common Errors page the
+operation links. The messages are substrate's own.
+
+| Operation | Member | Valid Range | Absent | Out of range |
+|---|---|---|---|---|
+| Secrets Manager `ListSecrets`, `ListSecretVersionIds` | `MaxResults` | 1–100 | 100 (none published) | `InvalidParameterException` / 400 |
+| Step Functions `ListStateMachines`, `ListActivities` | `maxResults` | 0–1000 | 100 (published) | `ValidationError` / 400 |
+| Step Functions `ListExecutions` | `maxResults` | 0–1000 | 100 (published) | `ValidationException` / 400, which the page publishes |
+| Systems Manager `GetParametersByPath` | `MaxResults` | 1–10 | 10 (none published) | `ValidationError` / 400 |
+| Systems Manager `DescribeParameters` | `MaxResults` | 1–50 | 10 (none published) | `ValidationError` / 400 |
+| KMS `ListKeys` | `Limit` | 1–1000 | 100 (published) | `ValidationError` / 400 |
+| KMS `ListAliases` | `Limit` | 1–100 | **50** (published) | `ValidationError` / 400 |
+
+**KMS `ListAliases` defaults to 50.** Its page says "If you do not include a value, it defaults to 50";
+substrate shared `ListKeys`' 100, so sixty aliases were one page here and two on KMS. The two KMS
+operations now carry separate constants.
+
+**Step Functions' 0 was already right.** Its pages publish a minimum of 0 and say "A value of 0 uses the
+default", so 0 still means 100. Only a negative value, or one above 1000, is refused.
+
+**What a refusal changes.** A request that omits the member answers exactly as before. A request that
+sent an out-of-range value, which used to succeed, is now refused; a recording that contains one
+replays to the refusal.
+
 ### A pagination token substrate never issued is refused, not answered with page one
 
 [#915](https://github.com/scttfrdmn/substrate/issues/915) is the second half of the tier-2 defect
@@ -1548,10 +1580,11 @@ AWS attributes to a pagination token, and Athena's common-errors page carries no
 NextToken is not a token returned by a previous ListWorkGroups request
 ```
 
-**The published Length constraint needs no check of its own.** `NextToken` is Length 1–1024 on both the
+**The published Length constraint is enforced at both ends.** `NextToken` is Length 1–1024 on both the
 request and the response, and the encoder emits an offset in decimal base64 — a handful of characters —
-so every token longer than 1024 already fails the issuability round trip. The minimum of 1 is why an
-empty `NextToken` is an *absent* token, the start of the listing, rather than an invalid one.
+so every token longer than 1024 already fails the issuability round trip. The minimum of 1 needs a
+check of its own, because the round trip reads an empty string as the start of the listing: an absent
+`NextToken` is that start, and an explicit `"NextToken": ""` is refused with the same code (#1185).
 
 **A token from the other Athena listing is issuable and is not refused.** Both encode an offset the same
 way, so `ListQueryExecutions`' token decodes cleanly under `ListWorkGroups`. Nothing in the token can
@@ -1559,11 +1592,18 @@ distinguish them; what the refusal contributes is the operation name in the mess
 crossed the two listings can see which one a token belongs to. The same shape is still live at Batch,
 whose three describes share one paginator.
 
-**The page size is the caller's, and its published range is not enforced.** Both operations publish a
-`MaxResults` — Valid Range 0–50 for `ListQueryExecutions`, 1–50 for `ListWorkGroups` — and substrate
-honours a value above the maximum and silently rewrites one at or below zero to 50. That is the
-unenforced page-size class, a different defect from the token, and this change leaves it exactly as it
-was; it is named here so the conversion is not read as having fixed it.
+**The two page sizes have two ranges, and each is enforced
+([#1185](https://github.com/scttfrdmn/substrate/issues/1185)).** `ListQueryExecutions` publishes
+`MaxResults` Valid Range **0–50** and `ListWorkGroups` **1–50**; the two shared one preamble that
+rewrote anything at or below zero to 50 and honoured anything above. Now a value outside the operation's
+own range is `InvalidRequestException`/400, which both pages gloss as "a required parameter may be
+missing or out of range". An absent `MaxResults` is still 50. A `MaxResults` of **0** on
+`ListQueryExecutions` is legal and is honoured as written: an empty `QueryExecutionIds` with a
+`NextToken` that resumes at the same position when records remain there. The response publishes
+`QueryExecutionIds` with "Array Members: Minimum number of 1 item", which a zero page cannot meet;
+substrate reads that minimum as describing a non-empty page rather than forbidding the empty list it
+already answers for a workgroup with no queries. An explicit empty `NextToken` (`""`) is refused for
+the published minimum length of 1, while an absent one is still the start of the listing.
 
 **Both validate the token before they read any state, and that is counted rather than sealed.** Neither
 operation resolves a resource first, so neither has a `NotFound` whose precedence has to be preserved —
@@ -14408,7 +14448,7 @@ SNS publish: $0.0000005 per message.
 | UpdateSecret | Rewrites `Description` and `KmsKeyId`; a value creates a new version under the caller's `ClientRequestToken`, and a token already in use is `ResourceExistsException` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels). Answers `VersionId` only when it created a version. Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
-| ListSecrets | Base64 offset pagination; scoped to the caller's account and Region |
+| ListSecrets | Base64 offset pagination; `MaxResults` outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused; scoped to the caller's account and Region |
 | DescribeSecret | The read path for a secret's tags; reports only the members it has a value for, plus `DeletedDate` while a recovery window is open |
 | ListSecretVersionIds | Every version with its staging labels; deprecated versions only with `IncludeDeprecated`; pages by `MaxResults`/`NextToken` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels) |
 | TagResource | Appends to the existing list rather than replacing it; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
@@ -14810,11 +14850,11 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 | PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/` |
 | GetParameter | Supports WithDecryption; reports the parameter's ARN |
 | GetParameters | Batch get |
-| GetParametersByPath | Recursive path traversal; paginates on `MaxResults`/`NextToken` and refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
+| GetParametersByPath | Recursive path traversal; paginates on `MaxResults`/`NextToken` (`MaxResults` 1–10, default 10, refused outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range)) and refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | GetParameterHistory | |
 | DeleteParameter | |
 | DeleteParameters | |
-| DescribeParameters | Paginates on `MaxResults`/`NextToken`; refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
+| DescribeParameters | Paginates on `MaxResults`/`NextToken` (`MaxResults` 1–50, default 10, refused outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range)); refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | AddTagsToResource | `ResourceType` is required and is resolved — see below |
 | RemoveTagsFromResource | Removes only the named keys |
 | ListTagsForResource | Reports `TagList` sorted by key; an empty list, never `null` |
@@ -14915,7 +14955,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 |-----------|-------|
 | CreateKey | Answers the same `KeyMetadata` shape `DescribeKey` does, from the same builder; validates `KeySpec`/`KeyUsage` and their pairing, and refuses an `Origin`, `CustomKeyStoreId` or `XksKeyId` substrate does not model rather than discarding it; records the `Policy` it was given, and refuses one outside 1–32768 bytes or not a JSON object — see below |
 | DescribeKey | Accepts all four `KeyId` forms; answers 16 of `KeyMetadata`'s 26 members, including `AWSAccountId`, `KeyManager`, `Origin` and the key's algorithm list; reports `DeletionDate` while a key is pending deletion, and reports no rotation flag — see below |
-| ListKeys | |
+| ListKeys | `Limit` defaults to 100; outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
 | EnableKey | Refuses a key pending deletion, so recovery stays two calls — see below |
 | DisableKey | Same refusal as `EnableKey` |
 | ScheduleKeyDeletion | Waiting period range-checked at 7–30; refuses a key already pending deletion — see below |
@@ -14931,7 +14971,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | CreateAlias | Refuses a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; enforces its own published `AliasName` pattern and the reserved `alias/aws/` prefix; refuses a name the account and Region already hold — see below |
 | DeleteAlias | Accepts a name with or without the `alias/` prefix, because its published pattern — unlike the other two — does not require it; an alias the account and Region do not hold is `NotFoundException`/400, its page's one reachable refusal (#1107) — see below |
 | UpdateAlias | Refuses an alias that does not exist, a `TargetKeyId` outside the caller's account and Region, one naming no key, and one pending deletion; refuses a move between two key types or two key usages. The alias's **current** key may be pending deletion — see below |
-| ListAliases | Reports one entry per alias, so a repeated `CreateAlias` no longer duplicates a row |
+| ListAliases | Reports one entry per alias, so a repeated `CreateAlias` no longer duplicates a row. `Limit` defaults to the published 50; outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
 | Encrypt | Returns ciphertext blob (base64-encoded stub); reports the `EncryptionAlgorithm` used and refuses one the key's spec does not admit; refuses a disabled key and a key pending deletion, with a different code for each; refuses a `Plaintext` outside the published 1–4096 bytes before the key is read, and one past the smaller per-spec maximum after — see below |
 | Decrypt | Returns plaintext (stub pass-through); same algorithm handling and same refusals as `Encrypt`, and refuses a `KeyId` naming a key other than the ciphertext's — see below |
 | GenerateDataKey | Same refusals as `Encrypt`, minus the algorithm members, plus a refusal of any key spec but `SYMMETRIC_DEFAULT` — see below |
@@ -17875,16 +17915,16 @@ routes both.
 | DescribeStateMachine | Addressed by ARN — see below |
 | UpdateStateMachine | Addressed by ARN; a supplied definition is checked the same way `CreateStateMachine` checks one (#996, #1073) |
 | DeleteStateMachine | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200`; synchronous, so no `DELETING` status is observable (#995). Answers `{}`; the page publishes an empty body (#1206) |
-| ListStateMachines | Scoped to the caller's own account and Region |
+| ListStateMachines | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
 | StartExecution | Returns RUNNING status immediately; the execution ARN is minted in the **state machine's** account and Region |
 | StartSyncExecution | EXPRESS only — a `STANDARD` state machine is `StateMachineTypeNotSupported`/400 (#996); the express execution ARN is minted in the state machine's account and Region, and no record is stored for it; twelve of the fourteen published response members are answered — see below (#1071) |
 | DescribeExecution | Addressed by ARN. The execution runs to a terminal status at `StartExecution`, so this reports rather than advances it; `error` and `cause` are answered on a failed execution — see below (#1071) |
 | StopExecution | Addressed by ARN |
-| ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below |
+| ListExecutions | Exactly one of `stateMachineArn` or `mapRunArn` — see below; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
 | GetExecutionHistory | Addressed by ARN. Each event's `timestamp` is epoch seconds and its `type` a published per-state value (#1323) |
 | CreateActivity | `tags` is an array of `{key, value}` objects; the ARN is minted from the caller's account and Region; `name` is checked against the same published constraints as `CreateStateMachine`'s, and a repeat is **idempotent** on the name alone — see below (#1072) |
 | DescribeActivity | Addressed by ARN — see below |
-| ListActivities | Scoped to the caller's own account and Region |
+| ListActivities | Scoped to the caller's own account and Region; `maxResults` 0 is the default of 100, and outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused |
 | DeleteActivity | Addressed by ARN; **idempotent** — an ARN naming nothing is a `200` (#995). Answers `{}`; the page publishes an empty body (#1206) |
 | TagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
 | UntagResource | State machine or activity — see below. Answers `{}`, the published empty body (#1206) |
@@ -22081,11 +22121,11 @@ is `2017-05-18` and appears in no wire field.
 | GetQueryExecution | Reports `QueryExecutionId`, `Query`, `WorkGroup`, `Status` and `ResultConfiguration.OutputLocation`, and nothing else; each call is [one observation of a seeded progression](#a-query-progresses-under-a-seed) |
 | GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text) once the query has `SUCCEEDED`, and refuses it with `InvalidRequestException`/400 before; `MaxResults` and `NextToken` are not read |
 | StopQueryExecution | Writes `CANCELLED` ([#1154](https://github.com/scttfrdmn/substrate/issues/1154)); accepted for any stored execution, including one already `SUCCEEDED` |
-| ListQueryExecutions | `MaxResults` defaults to 50 and is not clamped |
+| ListQueryExecutions | `MaxResults` defaults to 50; 0–50 is honoured, 0 as an empty page, and anything else is `InvalidRequestException` (#1185) |
 | CreateWorkGroup | `Name` and `Description` are read; `Configuration` and `Tags` are discarded |
 | GetWorkGroup | Reports `Name`, `State` and `Description`, and nothing else; [synthesises the `primary` workgroup](#the-primary-workgroup-and-what-is-synthesised-about-it) when no record was written for it |
 | DeleteWorkGroup | Refuses `primary` with `InvalidRequestException`/400 and *"The primary workgroup cannot be deleted"*, which `API_DeleteWorkGroup` itself states; `RecursiveDeleteOption` is not read |
-| ListWorkGroups | `MaxResults` defaults to 50 and is not clamped; [the `primary` workgroup is prepended](#the-primary-workgroup-and-what-is-synthesised-about-it) and pages like any other entry |
+| ListWorkGroups | `MaxResults` defaults to 50; outside 1–50 is `InvalidRequestException` (#1185); [the `primary` workgroup is prepended](#the-primary-workgroup-and-what-is-synthesised-about-it) and pages like any other entry |
 
 ### A query progresses under a seed
 
@@ -22527,13 +22567,13 @@ has nothing to multiply.
 | Operation | Notes |
 |-----------|-------|
 | CreatePipeline | `pipeline.name` required; `stages` are stored as opaque objects and never validated |
-| GetPipeline | `version` is [decoded and ignored](#getpipelineexecution-checks-the-executions-pipeline-and-getpipeline-answers-the-current-version) |
+| GetPipeline | `version` [answers that stored version](#getpipelineexecution-requires-and-checks-its-pipeline-and-getpipeline-answers-the-version-asked-for) |
 | UpdatePipeline | Merges `roleArn` and `stages`, increments `version`; reports no `metadata` |
 | DeletePipeline | |
 | ListPipelines | Reports name, version and timestamps; `maxResults` and `nextToken` are not read. A pipeline whose record cannot be loaded is skipped |
 | StartPipelineExecution | The execution is `Succeeded` before the call returns unless [a seed makes it progress](#an-execution-progresses-under-a-seed); `clientRequestToken` and `variables` are not read |
 | GetPipelineState | Reports every stage as `Succeeded` with an [empty `pipelineExecutionId`](#getpipelinestate-reports-a-shape-no-execution-produced) |
-| GetPipelineExecution | An execution belonging to another pipeline is `PipelineExecutionNotFoundException`, as the page glosses the code ([#1156](https://github.com/scttfrdmn/substrate/issues/1156)) |
+| GetPipelineExecution | Both members are required (`ValidationException`); an execution belonging to another pipeline is `PipelineExecutionNotFoundException`, as the page glosses the code ([#1156](https://github.com/scttfrdmn/substrate/issues/1156), [#1160](https://github.com/scttfrdmn/substrate/issues/1160)) |
 
 ### An execution progresses under a seed
 
@@ -22561,18 +22601,25 @@ stored. `ListPipelineExecutions` is not routed, so `GetPipelineExecution` is the
 `clientRequestToken` is the published idempotency member and is not read, so a retried start mints a
 second execution where AWS would return the first.
 
-### GetPipelineExecution checks the execution's pipeline, and GetPipeline answers the current version
+### GetPipelineExecution requires and checks its pipeline, and GetPipeline answers the version asked for
 
-Executions are keyed by ID alone, so `getPipelineExecution` now compares the execution's pipeline with
+Executions are keyed by ID alone, so `getPipelineExecution` compares the execution's pipeline with
 the request's `pipelineName`. An execution that belongs to another pipeline answers
 `PipelineExecutionNotFoundException`/400, as the page's own gloss of the code states: *"…or an
-execution ID does not belong to the specified pipeline."* A request that omits `pipelineName`, which is
-`Required: Yes`, is still answered, rather than refused; that is
-[#1160](https://github.com/scttfrdmn/substrate/issues/1160)'s.
+execution ID does not belong to the specified pipeline."* Both `pipelineName` and `pipelineExecutionId`
+are `Required: Yes`, and a request that omits either is refused with `ValidationException`/400, which
+the page publishes ([#1160](https://github.com/scttfrdmn/substrate/issues/1160)). Before, an absent
+`pipelineName` skipped the ownership check and any execution answered.
 
-`getPipeline` decodes `version` and always reports the current one, so a request for version 1 of a
-pipeline updated three times answers version 4 at HTTP 200 rather than the published
-`PipelineVersionNotFoundException`. [#1160](https://github.com/scttfrdmn/substrate/issues/1160).
+`GetPipeline` honours `version` ([#1160](https://github.com/scttfrdmn/substrate/issues/1160)). Every
+write of a pipeline — `CreatePipeline`'s version 1 and each `UpdatePipeline` — also stores that
+version's snapshot at `pipeline_version:{account}/{region}/{name}/{version}`, and `GetPipeline` with a
+`version` answers that snapshot: its `stages`, `roleArn` and `version`, with `metadata.updated` the time
+that version was written. A version that does not exist, or one below the published minimum of 1, is
+`PipelineVersionNotFoundException`/400. `DeletePipeline` removes the history with the pipeline.
+
+A pipeline created before this change has no history: its current version still answers, and any
+earlier version is `PipelineVersionNotFoundException`.
 
 ### The account and Region a record carries reach no response
 
@@ -22943,33 +22990,45 @@ associated with a regional Web ACL.
 | GetWebACL | `Scope` defaults to `REGIONAL`; resolvable by `ARN` or by the `Name`+`Id`+`Scope` triple. Seven of `API_WebACL`'s members and nothing it does not publish; the lock token is answered once, at the top level |
 | UpdateWebACL | Requires a matching `LockToken`; [merges rather than replaces](#updatewebacl-merges-so-a-member-can-never-be-cleared) |
 | DeleteWebACL | Requires a matching `LockToken` |
-| ListWebACLs | [Does not paginate](#neither-list-operation-paginates) |
+| ListWebACLs | [Pages by `Limit` and `NextMarker`](#both-list-operations-page-by-limit-and-nextmarker) |
 | AssociateWebACL | Records the association; the resource ARN is not checked against any service's state |
 | DisassociateWebACL | |
-| GetWebACLForResource | [Reports an ARN where a WebACL is published](#getwebaclforresource-reports-an-arn-not-a-web-acl) |
+| GetWebACLForResource | [Reports the associated WebACL in full](#getwebaclforresource-reports-the-web-acl-itself) |
 | CreateIPSet | `Name`, `Scope`, `IPAddressVersion` and `Addresses` are read; a CIDR is not validated |
 | GetIPSet | All six members `API_IPSet` publishes and nothing it does not; the lock token is answered once, at the top level |
 | UpdateIPSet | Requires a matching `LockToken`; merges |
 | DeleteIPSet | Requires a matching `LockToken` |
-| ListIPSets | [Does not paginate](#neither-list-operation-paginates) |
+| ListIPSets | [Pages by `Limit` and `NextMarker`](#both-list-operations-page-by-limit-and-nextmarker) |
 
-### Neither list operation paginates
+### Both list operations page by Limit and NextMarker
 
-`ListWebACLs` and `ListIPSets` declare a `Limit int` member on their shared input struct and read
-neither it nor any cursor: every call returns the whole set and no `NextMarker` is ever emitted. Both
-pages publish `Limit` with a Valid Range of 1–100 and `NextMarker` on request and response.
+[#1161](https://github.com/scttfrdmn/substrate/issues/1161). `ListWebACLs` and `ListIPSets` read
+neither `Limit` nor a cursor, so every call returned the whole set and a consumer's `NextMarker` loop
+ran once whatever the data. Both pages publish `Limit` with a Valid Range of 1–100 and `NextMarker` on
+request and response, and both are now read:
 
-A consumer that walks `NextMarker` until it is absent works here by accident — one page, no marker,
-loop exits — so a paging bug in the consumer cannot be caught, and a caller that sends `Limit: 1` is
-silently given everything. [#1161](https://github.com/scttfrdmn/substrate/issues/1161).
+- **`Limit`** bounds the page. Neither page publishes a default; an absent `Limit` is 100, the
+  published maximum, so a listing of up to 100 objects answers exactly what it did. A `Limit` outside
+  1–100 is `WAFInvalidParameterException`/400, the rule [Eight JSON list operations refuse a page size
+  outside the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range)
+  records, with the code both pages publish for "a parameter name or value that isn't valid".
+- **`NextMarker`** is emitted only when objects remain, and resumes after them. A marker substrate did
+  not issue is the same `WAFInvalidParameterException`, rather than page one.
+- A record that cannot be read fails the listing instead of being skipped.
 
-### GetWebACLForResource reports an ARN, not a Web ACL
+### GetWebACLForResource reports the Web ACL itself
 
-The response is `{"WebACL": {"ARN": "…"}}`, a one-member object where AWS publishes the full `WebACL`
-shape. `DefaultAction`, `Id`, `Name` and `VisibilityConfig` are all `Required: Yes` on that shape, so
-the body is not a valid `WebACL` at all, and a caller reading the returned ACL's rules or capacity gets
-a zero value rather than a refusal. Substrate holds the whole record — `GetWebACL` reports it — so this
-is a lookup that was not done. [#1161](https://github.com/scttfrdmn/substrate/issues/1161).
+[#1161](https://github.com/scttfrdmn/substrate/issues/1161). The response was `{"WebACL": {"ARN": "…"}}`,
+where AWS publishes the full `WebACL`, whose `DefaultAction` and `VisibilityConfig` are `Required: Yes`.
+The association's ARN is now resolved to the stored record and answered through the projection
+`GetWebACL` uses, so the two report one ACL identically.
+
+An association whose Web ACL has since been deleted answers `WAFNonexistentItemException`/400, as a
+resource with no association does. The page also says "If there is no associated resource, AWS WAF
+returns a null web ACL", which substrate does not adopt for either case: substrate's no-association
+answer predates this change. On AWS the dangling case does not arise, because `DeleteWebACL` publishes
+`WAFAssociatedItemException` for an ACL still associated with a resource; substrate's `DeleteWebACL` does
+not refuse that yet.
 
 ### UpdateWebACL merges, so a member can never be cleared
 
@@ -23078,7 +23137,7 @@ The published path is given for every operation because one of them cannot be re
 | GetBackupPlan | `GET /backup/plans/{backupPlanId}/` | [Reachable over that path since #1176](#getbackupplan-is-reachable-over-its-published-path); `versionId` and `MaxScheduledRunsPreview` are not read |
 | UpdateBackupPlan | `POST /backup/plans/{backupPlanId}` | Routed on the published verb, but [merges where AWS replaces and answers members no page publishes](#two-backup-plan-responses-carry-the-wrong-members) |
 | DeleteBackupPlan | `DELETE /backup/plans/{backupPlanId}` | Answers the [four published members](#two-backup-plan-responses-carry-the-wrong-members) — `BackupPlanArn`, `BackupPlanId`, `DeletionDate`, `VersionId`. A plan that still has selections is [refused](#which-backup-preconditions-are-enforced) with `InvalidRequestException`/400 |
-| ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; `includeDeleted`, `maxResults` and `nextToken` are ignored |
+| ListBackupPlans | `GET /backup/plans/` | Five of the nine published `BackupPlansListMember` members per plan; [pages by `maxResults` and `nextToken`](#listbackupplans-pages), and `includeDeleted` is accepted but lists nothing more |
 | CreateBackupSelection | `PUT /backup/plans/{backupPlanId}/selections/` | [Routed on the published verb only](#the-backup-plan-operations-are-routed-on-their-published-verbs); refuses an unknown plan. `SelectionName` is required; `Conditions`, `ListOfTags` and `NotResources` are not read |
 | ListBackupSelections | `GET /backup/plans/{backupPlanId}/selections/` | `BackupSelectionsList` of the six published `BackupSelectionsListMember` members per selection — `IamRoleArn` and `CreatorRequestId` when the create sent them. Pages by `maxResults` (1 to 1000, the default 1000) and `nextToken`; a bad value is `InvalidParameterValueException`/400, and an unknown plan `ResourceNotFoundException`/400 (#1408) |
 | GetBackupSelection | `GET /backup/plans/{backupPlanId}/selections/{selectionId}` | Answers `BackupPlanId`, `SelectionId`, `CreationDate` and a three-member `BackupSelection`. A selection whose plan is gone is `ResourceNotFoundException` |
@@ -23222,6 +23281,24 @@ was one page with no `NextToken`, and both filters matched every vault.
 
 A vault whose record cannot be read is an error rather than skipped, since a skipped vault would
 shorten the list and shift every later offset.
+
+### ListBackupPlans pages
+
+[#1184](https://github.com/scttfrdmn/substrate/issues/1184). `API_ListBackupPlans` publishes
+`includeDeleted`, `maxResults` and `nextToken`, and the handler took no request at all. It now reads
+all three, with the vault listing's rules:
+
+- **`maxResults`** (Valid Range 1–1000) bounds the page; with none it is 1000, so a request with no
+  pagination parameters answers what it did. Outside the range, or not an integer, is
+  `InvalidParameterValueException`/400.
+- **`nextToken`** is an offset over the plan-ID index, which is kept sorted. It is omitted on the last
+  page, and one substrate did not issue is `InvalidParameterValueException` — the only validation code
+  the page publishes — rather than page one.
+- **`includeDeleted`** must be a boolean, but **`true` lists the same plans as `false`**:
+  `DeleteBackupPlan` removes the record, so substrate keeps no deleted plan to return, where AWS would
+  answer one with its `DeletionDate`.
+
+A plan whose record cannot be read or decoded fails the listing; it used to be skipped.
 
 ### The account and Region a record carries reach no response
 
@@ -23655,14 +23732,26 @@ Every other QuickSight operation is unrouted: the updates and deletes
 the whole analysis, dashboard, template, namespace, user and group surface. QuickSight resources are
 not scanned by the Resource Groups Tagging API either, so `Tags` on a create is dropped.
 
-### The account in the path is discarded, and the Region is not in the key
+### The account in the path is the caller's, and the Region is in the key
 
-`AwsAccountId` is `Required: Yes` on every QuickSight operation, is extracted from the path, and is
-then discarded by every handler — the state key is built from the caller's own account instead. So a
-call naming account B reads and writes account A's data sources, and a data source created in one
-Region is visible in every other, because the key omits the Region. The rest of the emulator keys a
-regional resource by account **and** Region; QuickSight is the exception.
-[#1167](https://github.com/scttfrdmn/substrate/issues/1167).
+[#1167](https://github.com/scttfrdmn/substrate/issues/1167). `AwsAccountId` is `Required: Yes` in every
+QuickSight URI, "Fixed length of 12", Pattern `^[0-9]{12}$`. Every handler used to discard it and use
+the caller's account, so a call naming account B wrote account A's data sources and answered 201. Now:
+
+- A path account that does not match the pattern is `InvalidParameterValueException`/400.
+- A well-formed path account that is not the caller's is `AccessDeniedException` at **401**, the status
+  every QuickSight page publishes for that code (not the 403 most services use). Substrate models no
+  cross-account QuickSight access, so every mismatch is refused. The message is the page's gloss.
+
+The state keys carry the Region: `datasource:{account}/{region}/{DataSourceId}` and
+`dataset:{account}/{region}/{DataSetId}`. The pages gloss both IDs "unique per AWS Region for each AWS
+account", so the same ID in two Regions is two resources, and one Region's data source is not visible
+from another.
+
+**Compatibility.** State written before this change sits at the old keys, which omit the Region, and is
+unreachable after it. A recording made before it replays to `ResourceNotFoundException` at the first
+describe of something it created. Nothing migrates the old keys, since a key without a Region cannot say
+which Region it belonged to.
 
 ### A data source's creation and an ingestion are seeded progressions
 
@@ -23790,13 +23879,13 @@ RAM reports as `ASSOCIATED` gains no permission on the resource anywhere else in
 | Operation | Notes |
 |-----------|-------|
 | CreateResourceShare | Answers HTTP 200 with `{"resourceShare"}`; `name` is the one `Required: Yes` member and is checked. [Two members AWS does not publish are included, and `clientToken` is never echoed](#the-resource-share-record-diverges-from-the-published-shape) |
-| GetResourceShares | Filters by `name` and `resourceShareArns`; [`resourceOwner` is `Required: Yes` and ignored](#resourceowner-is-required-and-ignored). `maxResults`, `nextToken`, `resourceShareStatus`, `tagFilters` and `permissionArn` are ignored and no `nextToken` is emitted |
-| UpdateResourceShare | Replaces `name` and `allowExternalPrincipals` and refreshes `lastUpdatedTime`; `clientToken` is not read |
-| DeleteResourceShare | [A hard delete](#a-delete-removes-the-record-rather-than-marking-it-deleted), answering `{"returnValue": true}` |
-| AssociateResourceShare | Records each principal and resource ARN and answers `resourceShareAssociations` of five members, each `ASSOCIATED`. `clientToken` and `sources` are not read |
-| DisassociateResourceShare | [Also reports `ASSOCIATED`](#a-disassociation-still-reports-associated) |
-| ListPrincipals | `principals` of `id`, `resourceShareArn` and `status`, all `ASSOCIATED`, where `Principal` publishes five members. The published `resourceOwner` is ignored here too |
-| ListResources | `resources` of `arn`, `resourceShareArn` and `status`, all `AVAILABLE`, where `Resource` publishes eight members |
+| GetResourceShares | [`resourceOwner` is required and read](#resourceowner-is-required-and-read); filters by `name`, `resourceShareArns` and `resourceShareStatus`. `maxResults`, `nextToken`, `tagFilters` and `permissionArn` are ignored and no `nextToken` is emitted |
+| UpdateResourceShare | Replaces `name` and `allowExternalPrincipals` and refreshes `lastUpdatedTime`; `clientToken` is not read. A `DELETED` share is `OperationNotPermittedException` |
+| DeleteResourceShare | [A soft delete](#a-delete-marks-the-share-deleted), answering `{"returnValue": true}` |
+| AssociateResourceShare | Records each principal and resource ARN and answers `resourceShareAssociations` of five members, each `ASSOCIATED`. `clientToken` and `sources` are not read. A `DELETED` share is `InvalidStateTransitionException` |
+| DisassociateResourceShare | [Reports `DISASSOCIATED`](#a-disassociation-reports-disassociated) |
+| ListPrincipals | `principals` of `id` and `resourceShareArn`, where `Principal` publishes five members and no `status`. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principals`, `resourceArn`, `resourceShareArns` and `resourceType` filter. `maxResults` and `nextToken` are not read |
+| ListResources | `resources` of `arn`, `resourceShareArn` and `status`, all `AVAILABLE`, where `Resource` publishes eight members. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principal`, `resourceArns`, `resourceShareArns`, `resourceType` and `resourceRegionScope` filter. `maxResults` and `nextToken` are not read |
 
 The invitation surface is unrouted — `GetResourceShareInvitations`,
 `AcceptResourceShareInvitation`, `RejectResourceShareInvitation` — as is the permission surface
@@ -23822,36 +23911,58 @@ same token returning the same share, and the same token with different parameter
 `IdempotentParameterMismatch` — does not hold: the same request twice creates two shares with
 different ARNs. [#1170](https://github.com/scttfrdmn/substrate/issues/1170).
 
-### resourceOwner is required and ignored
+### resourceOwner is required and read
 
-`resourceOwner` is `Required: Yes` on `GetResourceShares`, `ListPrincipals` and `ListResources`, with
-the values `SELF` and `OTHER-ACCOUNTS`. It is decoded and discarded, so every call behaves as `SELF`
-and a request for shares owned by other accounts answers the caller's own.
-[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171). `resourceOwner` is `Required: Yes` on
+`GetResourceShares`, `ListPrincipals` and `ListResources`, with the values `SELF` and `OTHER-ACCOUNTS`.
+It was decoded and discarded (the two list operations read no request at all), so every call behaved as
+`SELF`. Now an absent `resourceOwner` is `ValidationError`/400 and any other value
+`InvalidParameterException`/400. `SELF` answers the caller's own shares. `OTHER-ACCOUNTS` answers an
+**empty list**, because nothing in substrate is shared across accounts: a share's principals are
+recorded, but no other account's view is derived from them.
 
-### A disassociation still reports ASSOCIATED
+The published filters apply. A resource's `resourceType` is derived from its ARN as
+`service:resource-type` (`ec2:subnet`) and compared case-insensitively; this is substrate's reading of
+an ARN rather than RAM's catalog, so a type RAM would reject matches nothing rather than being refused.
+A resource's `resourceRegionScope` is `GLOBAL` when its ARN has no Region and `REGIONAL` otherwise.
 
-`DisassociateResourceShare` builds its response through the same helper as the association, which
-hard-codes `status: "ASSOCIATED"`. The published `ResourceShareAssociationStatus` enum is
-`ASSOCIATING | ASSOCIATED | FAILED | DISASSOCIATING | DISASSOCIATED`, so the one state that says the
-call did what it was asked is never reported. The association records themselves are not removed
-either, so `ListPrincipals` still lists a disassociated principal.
-[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+A share whose record cannot be read or decoded fails the request; it used to be skipped.
 
-### A delete removes the record rather than marking it deleted
+### A disassociation reports DISASSOCIATED
 
-RAM publishes a `DELETED` share status, and `DeleteResourceShare` here deletes the state entry and
-removes it from the share index, so the share does not appear in `GetResourceShares` in any status
-and a subsequent read answers not-found rather than a deleted share.
-[#1171](https://github.com/scttfrdmn/substrate/issues/1171).
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171). `DisassociateResourceShare` answered
+through the association's helper, which hard-coded `status: "ASSOCIATED"`, so the response confirming a
+disassociation said the principal was still associated. It now reports `DISASSOCIATED`, the settled
+state, as an association reports the settled `ASSOCIATED`; the transitional `ASSOCIATING` and
+`DISASSOCIATING` the enum also publishes are not modeled.
+
+### A delete marks the share DELETED
+
+[#1171](https://github.com/scttfrdmn/substrate/issues/1171). `DeleteResourceShare` used to delete the
+record, so a later `GetResourceShares` reported the share absent. It now sets the share's status to
+`DELETED` and `lastUpdatedTime` to the moment of deletion. The RAM User Guide says "The deleted
+resource share disappears after two hours. Until then, it remains visible in the console with a deleted
+status", and substrate applies that window on the simulated clock:
+
+- For two hours, `GetResourceShares` lists the share as `DELETED` with no `resourceShareStatus` filter
+  or with `DELETED`. Its principals and resources are not listed by `ListPrincipals` or
+  `ListResources`, since deleting a share ends the sharing.
+- In that window, a second delete, an associate or a disassociate is `InvalidStateTransitionException`/400,
+  which each of those pages publishes. `UpdateResourceShare` does not publish that code and answers
+  `OperationNotPermittedException`/400, which it does.
+- After two hours the share is neither listed nor addressable: `UnknownResourceException`, as for a
+  share that never existed.
 
 ### What a refusal reports
 
 | Condition | Code | Status |
 |-----------|------|--------|
 | a body that will not parse | `ValidationError` | 400 |
-| `name` or `resourceShareArn` absent | `ValidationError` | 400 |
-| a resource share that does not exist | `UnknownResourceException` | 400 |
+| `name`, `resourceShareArn` or `resourceOwner` absent | `ValidationError` | 400 |
+| `resourceOwner`, `resourceShareStatus` or `resourceRegionScope` outside its published values | `InvalidParameterException` | 400 |
+| a resource share that does not exist, or was deleted more than two hours ago | `UnknownResourceException` | 400 |
+| delete, associate or disassociate on a `DELETED` share | `InvalidStateTransitionException` | 400 |
+| update on a `DELETED` share | `OperationNotPermittedException` | 400 |
 
 `ValidationError`/400 is the spelling RAM's consolidated common-errors list publishes, and
 `UnknownResourceException`/400 matches its own page.

@@ -107,7 +107,7 @@ var (
 // ValidationError at 400, for the reasons this file's preamble gives: neither page lists a code for
 // a page size, and their Errors sections link the common list that publishes ValidationError —
 // "The input doesn't meet the required format or constraints." The message is substrate's. See
-// page_size_range.go for why the value is refused rather than clamped or honoured.
+// page_size_range.go for why the value is refused rather than clamped or honored.
 func ssmInvalidMaxResults(r pageSizeRange, value int) *AWSError {
 	return &AWSError{
 		Code:       "ValidationError",

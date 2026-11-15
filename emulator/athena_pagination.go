@@ -69,7 +69,7 @@ import "net/http"
 // An absent MaxResults keeps [athenaListDefaultPageSize], so every recorded request that omitted it
 // replays byte-identically.
 //
-// **A MaxResults of 0 on ListQueryExecutions is honoured as written**: the page carries no query
+// **A MaxResults of 0 on ListQueryExecutions is honored as written**: the page carries no query
 // execution IDs, and carries a NextToken that resumes at the same position when records remain there
 // (none when they do not). Neither page says what 0 means — unlike Step Functions', no sentence maps
 // it to a default — so substrate answers what the caller asked for: at most zero items. The response
@@ -125,7 +125,7 @@ func athenaListParams(operation string, r pageSizeRange, maxResults *int, nextTo
 	return size, offset, nil
 }
 
-// athenaPageIDs cuts one ListQueryExecutions page, honouring a MaxResults of 0 as a page with no items.
+// athenaPageIDs cuts one ListQueryExecutions page, honoring a MaxResults of 0 as a page with no items.
 //
 // [pageByOffsetToken] reads a page size of 0 as "no limit", which is the opposite of what a caller who
 // sent 0 asked for, so that case is answered here: an empty page, and a token that resumes at the same

@@ -7,7 +7,7 @@ import "fmt"
 // Eight JSON list handlers in four services (Secrets Manager, Step Functions, Systems Manager and
 // KMS) used one idiom: `if input.MaxResults <= 0 { input.MaxResults = <n> }`, and nothing compared
 // the value against a maximum. So an explicit 0 or -1 was answered with substrate's default page, a
-// value above the published maximum was honoured, and KMS ListAliases' default was 100 where its page
+// value above the published maximum was honored, and KMS ListAliases' default was 100 where its page
 // publishes 50 — two pages from KMS for sixty aliases, one from substrate, and the caller's token loop
 // was never entered.
 //
@@ -26,7 +26,7 @@ import "fmt"
 //     doesn't meet the required format or constraints."), the reading [ssmInvalidBody] and
 //     [kmsInvalidPendingWindow] already record.
 //
-// No page in the set publishes a clamp, and none says a value above the maximum is honoured, so
+// No page in the set publishes a clamp, and none says a value above the maximum is honored, so
 // neither is substrate's to choose. The messages are substrate's own; AWS publishes none for a range
 // violation on these pages.
 //
@@ -35,7 +35,7 @@ import "fmt"
 // difference the old idiom erased, and it is what keeps every recorded request that omits the member
 // replaying byte-identically: only a request that sent an out-of-range value answers differently.
 //
-// **A published "0 uses the default" is honoured, not refused.** The three Step Functions pages give
+// **A published "0 uses the default" is honored, not refused.** The three Step Functions pages give
 // `maxResults` "Valid Range: Minimum value of 0. Maximum value of 1000." and say "The default is 100
 // and the maximum allowed page size is 1000. A value of 0 uses the default." So 0 is legal there and
 // means the default, which is what the old idiom did — those sites were already conformant at the low

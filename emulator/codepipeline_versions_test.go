@@ -1,6 +1,6 @@
 package emulator_test
 
-// GetPipeline honours `version` from a kept version history, and GetPipelineExecution refuses a
+// GetPipeline honors `version` from a kept version history, and GetPipelineExecution refuses a
 // request that omits a required member (#1160). Over the wire.
 
 import (

@@ -268,7 +268,7 @@ func sfnInvalidDefinition(reason string) *AWSError {
 // So 0 is a legal value that means 100, and the `<= 0 → 100` idiom these three carried was already
 // conformant for it — recorded here so that a later sweep does not "fix" a 0 into a refusal. What it
 // got wrong was the rest of the range: a negative value was answered as the default rather than
-// refused, and a value above 1000 was honoured.
+// refused, and a value above 1000 was honored.
 var sfnListMaxResults = pageSizeRange{member: "maxResults", min: 0, max: 1000, def: 100, zeroIsDefault: true}
 
 // sfnInvalidMaxResults reports a ListStateMachines or ListActivities `maxResults` outside 0–1000.
