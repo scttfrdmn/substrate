@@ -12752,12 +12752,12 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 
 | Operation | Notes |
 |-----------|-------|
-| CreateAutoScalingGroup | `LaunchTemplate` or `MixedInstancesPolicy` (exactly one), `MinSize`/`MaxSize`/`DesiredCapacity` (default `MinSize`), `VPCZoneIdentifier` or `AvailabilityZones`, `Tags.member.N` with `PropagateAtLaunch`, `CapacityRebalance`, `NewInstancesProtectedFromScaleIn`, `TerminationPolicies`. Launches the desired capacity before answering. Refuses `AlreadyExists`/400, and `ValidationError`/400 for contradictory sizes, a missing or unknown launch template or version, an unknown subnet, a reserved `aws:` tag key and a launch configuration. More than 50 tags is `LimitExceeded`/400. With IAM enforced, the caller's `ec2:RunInstances` is checked first (see below) |
+| CreateAutoScalingGroup | `LaunchTemplate` or `MixedInstancesPolicy` (exactly one), `MinSize`/`MaxSize`/`DesiredCapacity` (default `MinSize`) in the units `DesiredCapacityType` names (see below), `VPCZoneIdentifier` or `AvailabilityZones`, `Tags.member.N` with `PropagateAtLaunch`, `CapacityRebalance`, `NewInstancesProtectedFromScaleIn`, `TerminationPolicies`. Launches the desired capacity before answering. Refuses `AlreadyExists`/400, and `ValidationError`/400 for contradictory sizes, a missing or unknown launch template or version, an unknown subnet, a reserved `aws:` tag key and a launch configuration. More than 50 tags is `LimitExceeded`/400. With IAM enforced, the caller's `ec2:RunInstances` is checked first (see below) |
 | DescribeAutoScalingGroups | `AutoScalingGroupNames.member.N`, `Filters` `tag-key`/`tag-value`/`tag:<key>` (another name is `ValidationError`), `IncludeInstances`. Pages on `NextToken`/`MaxRecords` (default 50, max 100). An observation: reconciles each group it returns first |
 | UpdateAutoScalingGroup | Any subset of Create's members; a member not sent is unchanged, inside `MixedInstancesPolicy` too (overrides are replaced as a list when any is sent, distribution members one by one, an empty `SpotMaxPrice` clears it, a `LaunchTemplateSpecification` carrying only `Version` re-points the existing template). A new `MinSize` above, or `MaxSize` below, the current desired capacity moves it there when no `DesiredCapacity` is named, as the reference states. Reconciles before answering |
 | DeleteAutoScalingGroup | `ResourceInUse`/400 while instances remain unless `ForceDelete`, which terminates them through EC2. A `ForceDelete` whose termination fails fails the request and leaves the group, still owning its instances |
 | SetDesiredCapacity | Outside `MinSize`–`MaxSize` is `ValidationError`/400. `HonorCooldown=true` inside `DefaultCooldown` of the group's last activity is `ScalingActivityInProgress`/400. Scales out or in before answering |
-| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` below `MinSize` is `ValidationError`/400. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
+| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` lowers desired by the instance's weight, and below `MinSize` is `ValidationError`/400. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
 | SuspendProcesses | The nine published processes, all of them when `ScalingProcesses` is omitted. `Launch`, `Terminate`, `HealthCheck` and `ReplaceUnhealthy` change what a reconciliation does; the others are recorded and echoed |
 | ResumeProcesses | |
 | DescribeScalingActivities | Most recent first; `AutoScalingGroupName`, `ActivityIds`, `IncludeDeletedGroups` (which adds `AutoScalingGroupState`), `Filters` `Status`/`StartTimeLowerBound`/`StartTimeUpperBound`. Pages on `NextToken`/`MaxRecords` (default and max 100). An observation |
@@ -12796,8 +12796,35 @@ requirements the smallest match (vCPU, then memory, then name). On-Demand and Sp
 setup overview publishes — base capacity first, then the percentage above it rounded up in favor of
 On-Demand — and a Spot launch is a launch with `InstanceMarketOptions.MarketType=spot`, which EC2
 reports as `instanceLifecycle` `spot`. As for a CreateFleet Spot pool, no `sir-` Spot Instance
-request is written: the group is the record that tracks the capacity. `WeightedCapacity` is echoed
-and every instance counts as one unit.
+request is written: the group is the record that tracks the capacity.
+
+**Capacity units and weights.** `MinSize`, `MaxSize`, `DesiredCapacity` and `OnDemandBaseCapacity`
+are in the group's units, and each instance contributes its weight
+([#1502](https://github.com/scttfrdmn/substrate/issues/1502)). With `DesiredCapacityType` `vcpu` or
+`memory-mib`, the weight is the instance type's vCPUs or MiB from EC2's catalog. Both need an
+`InstanceRequirements` override, since API_CreateAutoScalingGroup supports `DesiredCapacityType`
+"for attribute-based instance type selection only"; without one, Create refuses with
+`ValidationError`/400 (AWS's observed wording), as does an Update that sends `DesiredCapacityType`
+or changes the launch configuration. A group recorded before this rule with `vcpu` or `memory-mib`
+and no `InstanceRequirements` override keeps counting instances. With `units`, an override's
+`WeightedCapacity` is the weight of every instance launched from it: an `InstanceRequirements`
+override's weight covers each type it matches, and an override naming no type covers the template's.
+It must be an integer from 1 to 999 and present on every override or on none, else
+`ValidationError`/400. A spelling such as `+4` or `007` is accepted as the live service accepts it,
+and stored as `4` or `7`. Without weights, every instance counts as one. A scale-out launches until the
+summed weight reaches desired, and the last launch may overshoot: weights "do not change which instance
+types Amazon EC2 Auto Scaling chooses to launch", so the first candidate still launches. Launching stops
+at desired, which is at most `MaxSize`, so capacity stays below `MaxSize` plus one instance's weight.
+The On-Demand/Spot split and zone balance are computed in units, for the size the launch or
+termination leaves the group at. A scale-in terminates only an instance whose weight fits in the
+excess over desired, so the group never drops below it (AWS publishes no finer rule). A decrementing
+`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight, held at zero. It is
+refused, as before, when desired less the full decrement would fall below `MinSize`.
+Changing an override's weight reconciles to desired, and an instance whose type no override names any
+more keeps its last weight, as the instance-weighting guide states. A weighted group's members report
+`WeightedCapacity` (a string) in `DescribeAutoScalingGroups` and `DescribeAutoScalingInstances`; the
+published shapes constrain it to 1–999, and a `memory-mib` group reports the MiB anyway, since no page
+says what AWS reports instead.
 
 **Requirements select by the AMI's architecture.** API_InstanceRequirements' `CpuManufacturers` note
 says "Instances will be launched with a compatible CPU architecture based on the Amazon Machine Image
@@ -12869,8 +12896,8 @@ run as the group's service-linked role and are not checked against the caller.
 **Not emulated.** Launch configurations (refused with `ValidationError`), scaling policies, lifecycle
 hooks, warm pools, instance refresh, load-balancer and target-group registration (the names are
 echoed), Capacity Rebalancing (echoed; no rebalance recommendation is ever sent),
-`MaxInstanceLifetime` (echoed, not enforced), `DesiredCapacityType` other than `units`, and the
-CloudFormation `AWS::AutoScaling::AutoScalingGroup` resource type.
+`MaxInstanceLifetime` (echoed, not enforced), and the CloudFormation
+`AWS::AutoScaling::AutoScalingGroup` resource type.
 
 ### Cost
 

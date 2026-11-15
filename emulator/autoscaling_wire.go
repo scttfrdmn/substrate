@@ -167,6 +167,7 @@ type asgInstanceXML struct {
 	LaunchTemplate       *asgLaunchTemplateSpecXML `xml:"LaunchTemplate,omitempty"`
 	ImageID              string                    `xml:"ImageId,omitempty"`
 	ProtectedFromScaleIn bool                      `xml:"ProtectedFromScaleIn"`
+	WeightedCapacity     string                    `xml:"WeightedCapacity,omitempty"`
 }
 
 // asgInstanceDetailsXML is an AutoScalingInstanceDetails, the account-scoped view.
@@ -180,6 +181,7 @@ type asgInstanceDetailsXML struct {
 	LaunchTemplate       *asgLaunchTemplateSpecXML `xml:"LaunchTemplate,omitempty"`
 	ImageID              string                    `xml:"ImageId,omitempty"`
 	ProtectedFromScaleIn bool                      `xml:"ProtectedFromScaleIn"`
+	WeightedCapacity     string                    `xml:"WeightedCapacity,omitempty"`
 }
 
 // asgLifecycleState is the LifecycleState a member reports. Substrate's launches and
@@ -292,6 +294,7 @@ func asgGroupToXML(g *AutoScalingGroup, includeInstances bool) asgGroupXML {
 				LaunchTemplate:       asgSpecXML(&lt),
 				ImageID:              inst.ImageID,
 				ProtectedFromScaleIn: inst.ProtectedFromScaleIn,
+				WeightedCapacity:     asgWeightedCapacityXML(g, &inst),
 			})
 		}
 		out.Instances = asgListOf(insts)

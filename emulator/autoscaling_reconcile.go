@@ -35,6 +35,11 @@ type asgCandidate struct {
 
 	// imageID is the override's AMI, empty to take the template's.
 	imageID string
+
+	// weight is the capacity units an instance launched from this candidate contributes, zero
+	// when that is the launched type's and known only once it has launched; see
+	// [AutoScalingGroup.overrideWeight].
+	weight int
 }
 
 // asgAutoScalingGroupTagKey is the reserved tag every instance a group launches carries:
@@ -95,7 +100,7 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 		if awsErr != nil {
 			return nil, awsErr
 		}
-		return []asgCandidate{{spec: spec}}, nil
+		return []asgCandidate{{spec: spec, weight: g.overrideWeight(nil, "")}}, nil
 	}
 	m := g.MixedInstancesPolicy
 	if m == nil {
@@ -106,7 +111,7 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 		return nil, awsErr
 	}
 	if len(m.Overrides) == 0 {
-		return []asgCandidate{{spec: base}}, nil
+		return []asgCandidate{{spec: base, weight: g.overrideWeight(nil, "")}}, nil
 	}
 	var out []asgCandidate
 	archOf := map[string]string{} // AMI ID → architecture, resolved once per call.
@@ -118,7 +123,8 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 			}
 		}
 		if ov.InstanceRequirements == nil {
-			out = append(out, asgCandidate{spec: spec, instanceType: ov.InstanceType, imageID: ov.ImageID})
+			out = append(out, asgCandidate{spec: spec, instanceType: ov.InstanceType, imageID: ov.ImageID,
+				weight: g.overrideWeight(&ov, ov.InstanceType)})
 			continue
 		}
 		image := ov.ImageID
@@ -131,7 +137,8 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 			archOf[image] = arch
 		}
 		for _, info := range asgMatchInstanceTypes(ov.InstanceRequirements, arch) {
-			out = append(out, asgCandidate{spec: spec, instanceType: info.InstanceType, imageID: ov.ImageID})
+			out = append(out, asgCandidate{spec: spec, instanceType: info.InstanceType, imageID: ov.ImageID,
+				weight: g.overrideWeight(&ov, info.InstanceType)})
 		}
 	}
 	return out, nil
@@ -405,7 +412,7 @@ func (p *AutoScalingPlugin) launchOne(reqCtx *RequestContext, g *AutoScalingGrou
 	}
 	got := instances[0]
 	g.LaunchSeq++
-	return AutoScalingInstance{
+	inst := AutoScalingInstance{
 		InstanceID:           got.InstanceID,
 		InstanceType:         got.InstanceType,
 		AvailabilityZone:     got.AvailabilityZone,
@@ -417,7 +424,15 @@ func (p *AutoScalingPlugin) launchOne(reqCtx *RequestContext, g *AutoScalingGrou
 		Spot:                 spot,
 		LaunchSeq:            g.LaunchSeq,
 		LaunchTime:           p.tc.Now().UTC(),
-	}, nil
+	}
+	// The candidate's weight when it has one; otherwise the launched type's, which for a
+	// candidate taking the template's type is known only now.
+	if cand.weight > 0 {
+		inst.setWeight(cand.weight)
+	} else if w, ok := g.typeWeight(inst.InstanceType); ok {
+		inst.setWeight(w)
+	}
+	return inst, nil
 }
 
 // terminateEC2 terminates instances through EC2's own termination path, so volume settlement
@@ -581,7 +596,8 @@ func (p *AutoScalingPlugin) reconcileGroup(reqCtx *RequestContext, g *AutoScalin
 	if err := p.refreshMembership(reqCtx, g); err != nil {
 		return err
 	}
-	switch have := len(g.Instances); {
+	g.refreshWeights()
+	switch have := g.capacity(); {
 	case have < g.DesiredCapacity && !g.suspended("Launch"):
 		if err := p.scaleOut(reqCtx, g, cause); err != nil {
 			return err
@@ -610,7 +626,9 @@ func asgPrefixCause(cause, clause string) string {
 	return cause + "  " + clause
 }
 
-// scaleOut launches until the group reaches its desired capacity, or until one launch fails.
+// scaleOut launches until the group's capacity — its members' summed weight — reaches its
+// desired capacity, or until one launch fails. The last launch may overshoot, as a weighted
+// group's does (autoscaling_weights.go).
 //
 // A failure — seeded through `POST /v1/autoscaling/launch-failure`, or EC2's own refusal of
 // the launch — records one Failed activity and stops, leaving the capacity unmet. Every later
@@ -621,7 +639,7 @@ func asgPrefixCause(cause, clause string) string {
 // changes capacity always records its attempt, and a poll loop over a seeded group sees one
 // failure rather than one per poll.
 func (p *AutoScalingPlugin) scaleOut(reqCtx *RequestContext, g *AutoScalingGroup, cause string) error {
-	from := len(g.Instances)
+	from := g.capacity()
 	to := g.DesiredCapacity
 	now := asgCauseTime(p.tc.Now())
 	clause := fmt.Sprintf("At %s an instance was started in response to a difference between desired and actual capacity, increasing the capacity from %d to %d.", now, from, to)
@@ -655,9 +673,10 @@ func (p *AutoScalingPlugin) scaleOut(reqCtx *RequestContext, g *AutoScalingGroup
 		return fail(asgActivityMessage(awsErr))
 	}
 
-	for len(g.Instances) < g.DesiredCapacity {
-		pl := asgChoosePlacement(g, pls)
-		spot := asgLaunchSpot(g)
+	t := g.tally()
+	for t.capacity < g.DesiredCapacity {
+		pl := asgChoosePlacement(t, pls)
+		spot := asgLaunchSpot(g, t, cands[0])
 		inst, err := p.launchOne(reqCtx, g, cands[0], pl, spot)
 		if err != nil {
 			var launchErr *AWSError
@@ -667,6 +686,7 @@ func (p *AutoScalingPlugin) scaleOut(reqCtx *RequestContext, g *AutoScalingGroup
 			return fail(asgActivityMessage(launchErr))
 		}
 		g.Instances = append(g.Instances, inst)
+		t.add(&inst)
 		g.LastLaunchFailure = ""
 		if _, err := p.record(reqCtx, g, "Successful",
 			"Launching a new EC2 instance: "+inst.InstanceID,
@@ -678,17 +698,13 @@ func (p *AutoScalingPlugin) scaleOut(reqCtx *RequestContext, g *AutoScalingGroup
 	return nil
 }
 
-// asgChoosePlacement picks where the next launch goes: the zone holding the fewest members,
+// asgChoosePlacement picks where the next launch goes: the zone holding the least capacity,
 // ties to the zone listed first, then that zone's least-used subnet. Balancing across zones
 // is what "attempts to balance your capacity evenly across your specified Availability
-// Zones" asks; the tie-break is substrate's, chosen so the answer is stable.
-func asgChoosePlacement(g *AutoScalingGroup, pls []asgPlacement) asgPlacement {
-	perAZ := map[string]int{}
-	perSubnet := map[string]int{}
-	for _, inst := range g.Instances {
-		perAZ[inst.AvailabilityZone]++
-		perSubnet[inst.SubnetID]++
-	}
+// Zones" asks, so it is capacity — summed weight — that is balanced, which for an unweighted
+// group is the member count; the tie-break is substrate's, chosen so the answer is stable.
+func asgChoosePlacement(t *asgTally, pls []asgPlacement) asgPlacement {
+	perAZ, perSubnet := t.perAZ, t.perSubnet
 	best := -1
 	for i, pl := range pls {
 		if best < 0 {
@@ -706,29 +722,30 @@ func asgChoosePlacement(g *AutoScalingGroup, pls []asgPlacement) asgPlacement {
 	return pls[best]
 }
 
-// asgLaunchSpot reports whether the group's next launch is a Spot Instance: it is when the
-// group already holds the On-Demand count [asgTargetOnDemand] asks for at its next size.
-func asgLaunchSpot(g *AutoScalingGroup) bool {
+// asgLaunchSpot reports whether the group's next launch, of cand, is a Spot Instance: it is
+// when the group already holds the On-Demand capacity [asgTargetOnDemand] asks for at the
+// capacity that launch brings it to. Both are in the group's units, as OnDemandBaseCapacity
+// is (API_InstancesDistribution). A candidate whose weight is the launched type's, known only
+// once it has launched, counts as one.
+func asgLaunchSpot(g *AutoScalingGroup, t *asgTally, cand asgCandidate) bool {
 	if g.MixedInstancesPolicy == nil {
 		return false
 	}
-	onDemand := 0
-	for _, inst := range g.Instances {
-		if !inst.Spot {
-			onDemand++
-		}
-	}
-	return onDemand >= asgTargetOnDemand(len(g.Instances)+1, g.MixedInstancesPolicy.InstancesDistribution)
+	w := max(cand.weight, 1)
+	return t.onDemand >= asgTargetOnDemand(t.capacity+w, g.MixedInstancesPolicy.InstancesDistribution)
 }
 
 // scaleIn terminates unprotected members until the group is down to its desired capacity.
 // A group whose remaining members are all protected stays above it, as real Auto Scaling
-// does — protection is "from termination by Amazon EC2 Auto Scaling when scaling in".
+// does — protection is "from termination by Amazon EC2 Auto Scaling when scaling in". A
+// weighted group terminates only a member whose weight fits in the excess, so it never goes
+// below desired, and stays above it when none fits (autoscaling_weights.go).
 func (p *AutoScalingPlugin) scaleIn(reqCtx *RequestContext, g *AutoScalingGroup, cause string) error {
-	from := len(g.Instances)
+	t := g.tally()
+	from := t.capacity
 	to := g.DesiredCapacity
-	for len(g.Instances) > g.DesiredCapacity {
-		victim := p.asgSelectVictim(g)
+	for t.capacity > g.DesiredCapacity {
+		victim := p.asgSelectVictim(g, t, t.capacity-g.DesiredCapacity)
 		if victim < 0 {
 			return nil
 		}
@@ -748,6 +765,7 @@ func (p *AutoScalingPlugin) scaleIn(reqCtx *RequestContext, g *AutoScalingGroup,
 			return recErr
 		}
 		g.Instances = append(g.Instances[:victim:victim], g.Instances[victim+1:]...)
+		t.remove(&inst)
 		if _, err := p.record(reqCtx, g, "Successful", "Terminating EC2 instance: "+inst.InstanceID,
 			asgPrefixCause(cause, clause), asgDetails(inst.AvailabilityZone, inst.SubnetID), ""); err != nil {
 			return err
@@ -757,7 +775,8 @@ func (p *AutoScalingPlugin) scaleIn(reqCtx *RequestContext, g *AutoScalingGroup,
 }
 
 // asgSelectVictim returns the index of the member the group's termination policies choose,
-// or -1 when every member is protected.
+// or -1 when every member is protected or weighs more than excess, the capacity the group
+// holds above its desired capacity.
 //
 // The order is the termination-policy guide's, as far as it is observable here. For a
 // mixed-instances group the purchase option is chosen first, so the group "trends toward the
@@ -767,11 +786,19 @@ func (p *AutoScalingPlugin) scaleIn(reqCtx *RequestContext, g *AutoScalingGroup,
 // order, each narrowing the field; Default is outdated launch template, then oldest version
 // of the current one, then closest to the next billing hour. Where real Auto Scaling would
 // "terminate one at random", substrate takes the lowest instance ID, so a replay chooses the
-// same instance.
-func (p *AutoScalingPlugin) asgSelectVictim(g *AutoScalingGroup) int {
+// same instance. Purchase option and zonal balance are judged in capacity units, which for an
+// unweighted group are member counts.
+//
+// The purchase option mirrors [asgLaunchSpot]'s rule, for the size the termination leaves:
+// an On-Demand member goes when, without it, the group still holds the On-Demand capacity
+// [asgTargetOnDemand] asks for at its capacity less that member's weight — the smallest
+// On-Demand weight in the field, which is the On-Demand termination that keeps the most.
+// Otherwise a Spot member goes. For an unweighted group this is the rule it always was.
+func (p *AutoScalingPlugin) asgSelectVictim(g *AutoScalingGroup, t *asgTally, excess int) int {
 	var field []int
-	for i, inst := range g.Instances {
-		if !inst.ProtectedFromScaleIn {
+	for i := range g.Instances {
+		inst := &g.Instances[i]
+		if !inst.ProtectedFromScaleIn && inst.weightOf() <= excess {
 			field = append(field, i)
 		}
 	}
@@ -780,22 +807,20 @@ func (p *AutoScalingPlugin) asgSelectVictim(g *AutoScalingGroup) int {
 	}
 
 	if m := g.MixedInstancesPolicy; m != nil {
-		onDemand := 0
-		for _, inst := range g.Instances {
-			if !inst.Spot {
-				onDemand++
+		odWeight := 0
+		for _, i := range field {
+			if w := g.Instances[i].weightOf(); !g.Instances[i].Spot && (odWeight == 0 || w < odWeight) {
+				odWeight = w
 			}
 		}
-		wantSpot := onDemand <= asgTargetOnDemand(len(g.Instances)-1, m.InstancesDistribution)
+		wantSpot := odWeight == 0 ||
+			t.onDemand-odWeight < asgTargetOnDemand(t.capacity-odWeight, m.InstancesDistribution)
 		if narrowed := asgFilter(field, func(i int) bool { return g.Instances[i].Spot == wantSpot }); len(narrowed) > 0 {
 			field = narrowed
 		}
 	}
 
-	perAZ := map[string]int{}
-	for _, inst := range g.Instances {
-		perAZ[inst.AvailabilityZone]++
-	}
+	perAZ := t.perAZ
 	bestAZ := ""
 	for _, i := range field {
 		az := g.Instances[i].AvailabilityZone

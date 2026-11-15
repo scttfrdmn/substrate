@@ -119,7 +119,7 @@ func asgApplyCommon(params map[string]string, g *AutoScalingGroup) *AWSError {
 	}
 	if v, ok := params["DesiredCapacityType"]; ok && v != "" {
 		switch v {
-		case "units", "vcpu", "memory-mib":
+		case asgCapacityUnits, asgCapacityVCPU, asgCapacityMemoryMiB:
 		default:
 			return asgValidationError("DesiredCapacityType must be one of units, vcpu or memory-mib.")
 		}
@@ -262,6 +262,9 @@ func (p *AutoScalingPlugin) createAutoScalingGroup(reqCtx *RequestContext, req *
 	if awsErr := asgApplyCommon(req.Params, g); awsErr != nil {
 		return nil, awsErr
 	}
+	if awsErr := asgCheckCapacityType(g); awsErr != nil {
+		return nil, awsErr
+	}
 
 	tags := asgParseTags(req.Params)
 	if awsErr := asgCheckTagKeys(tags); awsErr != nil {
@@ -362,6 +365,15 @@ func (p *AutoScalingPlugin) updateAutoScalingGroup(reqCtx *RequestContext, req *
 	}
 	if awsErr := asgApplyCommon(req.Params, &next); awsErr != nil {
 		return nil, awsErr
+	}
+	// The capacity type is checked only when the request changes it or the launch
+	// configuration it depends on. A vcpu or memory-mib group recorded before the check
+	// existed (#1502) is held to it when it is next reconfigured, not on every update: it
+	// counts instances meanwhile (see [AutoScalingGroup.weightBasis]).
+	if _, typeSent := req.Params["DesiredCapacityType"]; typeSent || launchChanged {
+		if awsErr := asgCheckCapacityType(&next); awsErr != nil {
+			return nil, awsErr
+		}
 	}
 	// The launch configuration is re-validated only when the request touches it or where the
 	// group launches, so an update of, say, HealthCheckType does not start failing because

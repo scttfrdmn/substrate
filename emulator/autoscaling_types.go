@@ -147,7 +147,8 @@ type AutoScalingOverride struct {
 	// ImageID replaces the template's AMI for this override.
 	ImageID string `json:"image_id,omitempty"`
 
-	// WeightedCapacity is echoed; substrate counts every instance as one unit.
+	// WeightedCapacity is the capacity units an instance launched from this override counts
+	// toward a units group's desired capacity; see autoscaling_weights.go.
 	WeightedCapacity string `json:"weighted_capacity,omitempty"`
 }
 
@@ -254,6 +255,12 @@ type AutoScalingInstance struct {
 	// NewestInstance.
 	LaunchSeq int64 `json:"launch_seq"`
 
+	// Weight is the capacity units the instance contributes, zero reading as one: its vCPUs or
+	// MiB in a vcpu or memory-mib group, its override's WeightedCapacity in a weighted units
+	// group. It is kept on the member because a type no override names any more keeps its last
+	// weight; see autoscaling_weights.go.
+	Weight int `json:"weight,omitempty"`
+
 	// LaunchTime is when the group launched the instance, on the simulated clock.
 	LaunchTime time.Time `json:"launch_time"`
 }
@@ -266,7 +273,8 @@ type AutoScalingGroup struct {
 	// ARN is the group's ARN, carrying a UUID minted at creation.
 	ARN string `json:"arn"`
 
-	// MinSize, MaxSize and DesiredCapacity are the group's three size properties.
+	// MinSize, MaxSize and DesiredCapacity are the group's three size properties, in the
+	// group's capacity units.
 	MinSize int `json:"min_size"`
 	// MaxSize is the group's maximum size.
 	MaxSize int `json:"max_size"`
@@ -312,7 +320,8 @@ type AutoScalingGroup struct {
 	// DefaultInstanceWarmup is echoed.
 	DefaultInstanceWarmup *int `json:"default_instance_warmup,omitempty"`
 
-	// DesiredCapacityType is echoed; only "units" is modeled.
+	// DesiredCapacityType is units, vcpu or memory-mib, empty reading as units: the unit
+	// MinSize, MaxSize and DesiredCapacity are in.
 	DesiredCapacityType string `json:"desired_capacity_type,omitempty"`
 
 	// ServiceLinkedRoleARN defaults to AWSServiceRoleForAutoScaling.
