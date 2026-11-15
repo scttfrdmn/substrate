@@ -143,6 +143,10 @@ func TestEC2_ResolveSSMImageID_Refusals(t *testing.T) {
 		{"another account's parameter", "resolve:ssm:arn:aws:ssm:us-east-1:210987654321:parameter/golden", "InvalidParameterValue"},
 		{"another Region's parameter", "resolve:ssm:arn:aws:ssm:eu-west-1:123456789012:parameter/golden", "InvalidParameterValue"},
 		{"an empty reference", "resolve:ssm:", "InvalidParameterValue"},
+		{"a trailing separator with no selector", "resolve:ssm:golden:", "InvalidParameterValue"},
+		{"an ARN with a trailing separator", "resolve:ssm:arn:aws:ssm:us-east-1:123456789012:parameter/golden:", "InvalidParameterValue"},
+		{"an ARN whose resource is not parameter/", "resolve:ssm:arn:aws:ssm:us-east-1:123456789012:parametergolden", "InvalidParameterValue"},
+		{"an ARN of another service", "resolve:ssm:arn:aws:s3:us-east-1:123456789012:parameter/golden", "InvalidParameterValue"},
 		{"a value that is not an AMI", "resolve:ssm:not-an-ami", "InvalidAMIID.Malformed"},
 	}
 	for _, tc := range tests {
@@ -228,7 +232,25 @@ func TestAutoScaling_ResolveSSMImage(t *testing.T) {
 		status, code, msg := e.asgErr("CreateAutoScalingGroup", absGroupParams(e, "abs", "ssm-abs-lt"))
 		assert.Equal(t, http.StatusBadRequest, status)
 		assert.Equal(t, "ValidationError", code)
-		assert.Contains(t, msg, "resolve:ssm:/asg/arm-ami")
+		assert.Equal(t, "A mixed instances policy that uses attribute-based instance type selection cannot use a "+
+			"Systems Manager parameter as its AMI: launch template ssm-abs-lt version 1 has ImageId "+
+			"resolve:ssm:/asg/arm-ami. Specify an AMI ID in the launch template.", msg)
+	})
+
+	t.Run("an override's own resolve:ssm: ImageId is refused and named", func(t *testing.T) {
+		t.Parallel()
+		e := newASGEnv(t)
+		e.ssmPut("/asg/arm-ami", "String", ec2TestImageArm, false)
+		e.ec2XML("CreateLaunchTemplate", map[string]string{
+			"LaunchTemplateName": "plain-abs-lt", "LaunchTemplateData.ImageId": ec2TestImageArm,
+		}, nil)
+		params := absGroupParams(e, "abs-ov", "plain-abs-lt")
+		params["MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.ImageId"] = "resolve:ssm:/asg/arm-ami"
+		status, code, msg := e.asgErr("CreateAutoScalingGroup", params)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "ValidationError", code)
+		assert.Equal(t, "A mixed instances policy that uses attribute-based instance type selection cannot use a "+
+			"Systems Manager parameter as its AMI: the override's ImageId is resolve:ssm:/asg/arm-ami. Specify an AMI ID.", msg)
 	})
 
 	t.Run("attribute-based selection narrows by the resolved AMI's architecture", func(t *testing.T) {
@@ -254,6 +276,55 @@ func TestAutoScaling_ResolveSSMImage(t *testing.T) {
 		require.Len(t, insts, 1)
 		assert.Equal(t, "c6g.large", insts[0].Type, "an arm64 type, chosen for the resolved arm64 AMI")
 	})
+}
+
+// TestEC2_ResolveSSMImageID_OpenSpotRequest pins that a Spot request a seeded shortfall leaves
+// open reports the AMI its resolve:ssm: ImageId named, and that AMI's product description, as a
+// fulfilled request does from its instance.
+func TestEC2_ResolveSSMImageID_OpenSpotRequest(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	const windows = "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base"
+	resp, err := http.Post(e.ts.URL+"/v1/ec2/spot-request-outcomes", "application/json",
+		bytes.NewReader([]byte(`{"statusCode":"capacity-not-available"}`)))
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	var created struct {
+		IDs []string `xml:"spotInstanceRequestSet>item>spotInstanceRequestId"`
+	}
+	e.ec2XML("RequestSpotInstances", map[string]string{
+		"LaunchSpecification.ImageId": "resolve:ssm:" + windows, "LaunchSpecification.InstanceType": "m5.large",
+		"LaunchSpecification.SubnetId": e.subnetA,
+	}, &created)
+	require.Len(t, created.IDs, 1)
+
+	var doc struct {
+		Items []ec2DescribedSpotRequest `xml:"spotInstanceRequestSet>item"`
+	}
+	e.ec2XML("DescribeSpotInstanceRequests", map[string]string{"SpotInstanceRequestId.1": created.IDs[0]}, &doc)
+	require.Len(t, doc.Items, 1)
+	assert.Equal(t, "open", doc.Items[0].State)
+	assert.Equal(t, emulator.BundledImageID("us-east-1", windows), doc.Items[0].ImageID, "the AMI, not the reference")
+	assert.Equal(t, "Windows", doc.Items[0].Product, "the resolved AMI's platform")
+}
+
+// TestEC2_ResolveSSMImageID_StoreFailureIsAnError pins that a parameter whose stored record does
+// not decode is an error, not an absent parameter and not a fall back to the bundled catalog.
+func TestEC2_ResolveSSMImageID_StoreFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	ts := newEC2TestServerWithState(t, state)
+	// A public parameter's name, so a fallback to the bundled catalog would launch.
+	const name = "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64"
+	require.NoError(t, state.Put(t.Context(), "ssm", "parameter:123456789012/us-east-1/"+name, []byte("{not json")))
+
+	status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": "resolve:ssm:" + name, "MinCount": "1", "MaxCount": "1",
+	})
+	assert.Equal(t, http.StatusInternalServerError, status)
+	assert.NotEqual(t, "InvalidParameterValue", code, "a store failure is not an unresolvable reference")
 }
 
 // absGroupParams is a mixed-instances group selecting 2-vCPU, 4 GiB types by attributes.

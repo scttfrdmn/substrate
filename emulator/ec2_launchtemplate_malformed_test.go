@@ -1,14 +1,18 @@
 package emulator_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/scttfrdmn/substrate/emulator"
 )
 
 // Launch-template identifiers of the wrong shape (#1507).
@@ -211,4 +215,83 @@ func TestEC2_DeleteLaunchTemplateVersions_MalformedIsPerItem(t *testing.T) {
 			assert.Equal(t, int64(0), doc.Failed[1].Version, "an alias has no number to echo")
 		})
 	}
+}
+
+// TestEC2_LaunchTemplate_StoredMalformedNameStaysReachable pins that the shape rule does not lock
+// out a template already in state under a name the rule refuses — one created before the rule,
+// or written by a replayed event log. Every operation finds it by that name; only a new name is
+// held to the rule, at CreateLaunchTemplate.
+func TestEC2_LaunchTemplate_StoredMalformedNameStaysReachable(t *testing.T) {
+	t.Parallel()
+	const acct, region, name = "123456789012", "us-east-1", "ab"
+	seed := func(t *testing.T) (*httptest.Server, string) {
+		t.Helper()
+		state := emulator.NewMemoryStateManager()
+		ts := newEC2TestServerWithState(t, state)
+		ltID := createLaunchTemplate(t, ts, "seeded-under-ab", map[string]string{
+			"LaunchTemplateData.ImageId": ec2TestImage, "LaunchTemplateData.InstanceType": "t3.small",
+		})
+		ctx := t.Context()
+		key := "lt:" + acct + "/" + region + "/" + ltID
+		raw, err := state.Get(ctx, "ec2", key)
+		require.NoError(t, err)
+		var rec map[string]any
+		require.NoError(t, json.Unmarshal(raw, &rec))
+		rec["launchTemplateName"] = name
+		raw, err = json.Marshal(rec)
+		require.NoError(t, err)
+		require.NoError(t, state.Put(ctx, "ec2", key, raw))
+		require.NoError(t, state.Delete(ctx, "ec2", "lt_by_name:"+acct+"/"+region+"/seeded-under-ab"))
+		require.NoError(t, state.Put(ctx, "ec2", "lt_by_name:"+acct+"/"+region+"/"+name, []byte(ltID)))
+		return ts, ltID
+	}
+
+	ok := func(t *testing.T, ts *httptest.Server, params map[string]string) {
+		t.Helper()
+		status, code, msg := ec2ErrorDetail(t, ts, params)
+		assert.Equal(t, http.StatusOK, status, "%s: %s", code, msg)
+	}
+	t.Run("described, versioned, modified and launched by name", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := seed(t)
+		ok(t, ts, map[string]string{"Action": "DescribeLaunchTemplates", "LaunchTemplateName.1": name})
+		ok(t, ts, map[string]string{"Action": "DescribeLaunchTemplateVersions", "LaunchTemplateName": name})
+		ok(t, ts, map[string]string{"Action": "RunInstances", "LaunchTemplate.LaunchTemplateName": name,
+			"MinCount": "1", "MaxCount": "1"})
+		ok(t, ts, map[string]string{"Action": "CreateLaunchTemplateVersion", "LaunchTemplateName": name,
+			"LaunchTemplateData.InstanceType": "t3.medium"})
+		ok(t, ts, map[string]string{"Action": "ModifyLaunchTemplate", "LaunchTemplateName": name, "SetDefaultVersion": "2"})
+	})
+	t.Run("its versions are deleted by name", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := seed(t)
+		ok(t, ts, map[string]string{"Action": "CreateLaunchTemplateVersion", "LaunchTemplateName": name,
+			"LaunchTemplateData.InstanceType": "t3.medium"})
+		resp := ec2Request(t, ts, map[string]string{
+			"Action": "DeleteLaunchTemplateVersions", "LaunchTemplateName": name, "LaunchTemplateVersion.1": "2",
+		})
+		defer resp.Body.Close() //nolint:errcheck
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Contains(t, string(body), "<successfullyDeletedLaunchTemplateVersionSet><item>")
+		assert.NotContains(t, string(body), "launchTemplateNameMalformed")
+	})
+	t.Run("it is deleted by name", func(t *testing.T) {
+		t.Parallel()
+		ts, _ := seed(t)
+		ok(t, ts, map[string]string{"Action": "DeleteLaunchTemplate", "LaunchTemplateName": name})
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{"Action": "DeleteLaunchTemplate", "LaunchTemplateName": name})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, ltMalformedNameCode, code, "once gone, the name is judged by its shape")
+	})
+	t.Run("a new template under the name is still refused", func(t *testing.T) {
+		t.Parallel()
+		ts := newEC2TestServer(t)
+		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
+			"Action": "CreateLaunchTemplate", "LaunchTemplateName": name, "LaunchTemplateData.ImageId": ec2TestImage,
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, ltMalformedNameCode, code)
+	})
 }

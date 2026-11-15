@@ -650,15 +650,24 @@ func (p *EC2Plugin) launchInstances(
 	}
 
 	// An ImageId of resolve:ssm:<parameter>, from the request or the template, resolves to
-	// the AMI the parameter holds now (#1506); see ec2_ssm_image.go. It is resolved here,
+	// the AMI the parameter holds now (#1506); see ec2_ssm_image.go. It is resolved once, here,
 	// after the merge and before the AMI's existence is checked, so every rule below holds
 	// the resolved AMI to the same standard as a literal one, and the instance reports the
 	// AMI ID — what DescribeInstances' imageId is — rather than the parameter.
-	resolvedImageID, awsErr := ec2ResolveSSMImageID(context.Background(), p.state, reqCtx, imageID)
-	if awsErr != nil {
-		return nil, "", nil, awsErr
+	resolvedImageID, launchedImage, imageFound, resolveErr := p.resolveLaunchImage(reqCtx, imageID)
+	if resolveErr != nil {
+		return nil, "", nil, resolveErr
 	}
 	imageID = resolvedImageID
+	// A persistent Spot request relaunches from these parameters, and its launch specification
+	// reports "The ID of the AMI" (API_LaunchSpecification). So a reference the request named
+	// directly is replaced by the AMI it resolved to now: a replacement launches the AMI the
+	// request was fulfilled with, and DescribeSpotInstanceRequests reports an AMI ID. That is
+	// substrate's reading — neither page mentions Systems Manager parameters. A reference that
+	// arrived through a template stays with the template, which the replacement names again.
+	if spot != nil && spot.launchParams != nil && ec2IsSSMImageID(spot.launchParams["ImageId"]) {
+		spot.launchParams["ImageId"] = imageID
+	}
 
 	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
 	// string beginning "ami-", and from several that did not, so a template naming a
@@ -683,7 +692,6 @@ func (p *EC2Plugin) launchInstances(
 	// problems through AWS's documented warning member rather than refusing, and an AMI
 	// named in a template is not yet a launch — so a refusal there would be one AWS
 	// does not make. The template's AMI is checked here, when it is used.
-	launchedImage, imageFound := p.resolveImage(reqCtx, imageID)
 	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
 		// The not-found refusal says where an AMI comes from (#1432); the code is unchanged.
 		return nil, "", nil, ec2AMINotFoundHint(awsErr)
@@ -803,7 +811,7 @@ func (p *EC2Plugin) launchInstances(
 			return nil, "", nil, seedErr
 		}
 		if code != "" {
-			return nil, "", nil, &ec2SpotUnfulfilledError{statusCode: code}
+			return nil, "", nil, &ec2SpotUnfulfilledError{statusCode: code, imageID: imageID, image: launchedImage}
 		}
 	}
 
@@ -7386,47 +7394,49 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 	}
 	filters := extractEC2Filters(req.Params)
 
-	// Every named identifier's shape is checked before any is looked up — IDs, then names, each
-	// list in request order — so a malformed one is InvalidLaunchTemplateId.Malformed or
-	// InvalidLaunchTemplateName.MalformedException rather than the NotFound it used to share
-	// (#1507). Syntax before existence is the [ec2IDFilter] order.
-	for _, id := range filterIDs {
-		if !ec2LaunchTemplateIDKind.wellFormed(id) {
-			return nil, ec2LaunchTemplateIDMalformed(id)
-		}
-	}
-	for _, name := range filterNames {
-		if !ec2LaunchTemplateNameWellFormed(name) {
-			return nil, ec2LaunchTemplateNameMalformed()
-		}
-	}
-
 	switch {
 	case len(filterIDs) > 0 || len(filterNames) > 0:
+		// Every named identifier is looked up first, and an identifier that names nothing is
+		// then refused by its shape before by its absence (#1507): IDs, then names, each list in
+		// request order, so a malformed one anywhere is InvalidLaunchTemplateId.Malformed or
+		// InvalidLaunchTemplateName.MalformedException rather than the NotFound it used to share,
+		// even after a missing one. A stored template is answered whatever its identifier looks
+		// like; see [ec2LaunchTemplateIdentifierMalformed].
+		//
 		// Dedup by ID: a request may name the same template by both spellings, and
 		// answering with it twice would be a shape AWS never produces.
 		seen := map[string]bool{}
-		for _, id := range filterIDs {
-			lt := p.resolveLaunchTemplate(goCtx, ctx, id, "")
+		missingID, missingName := false, false
+		var malformed *AWSError
+		add := func(ltID, ltName string) {
+			lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
 			if lt == nil {
-				return nil, ec2DescribeLaunchTemplatesNotFound(true)
+				if malformed == nil {
+					malformed = ec2LaunchTemplateIdentifierMalformed(ltID, ltName)
+				}
+				missingID = missingID || ltID != ""
+				missingName = missingName || ltName != ""
+				return
 			}
 			if seen[lt.LaunchTemplateID] {
-				continue
+				return
 			}
 			seen[lt.LaunchTemplateID] = true
 			lts = append(lts, *lt)
 		}
+		for _, id := range filterIDs {
+			add(id, "")
+		}
 		for _, name := range filterNames {
-			lt := p.resolveLaunchTemplate(goCtx, ctx, "", name)
-			if lt == nil {
-				return nil, ec2DescribeLaunchTemplatesNotFound(false)
-			}
-			if seen[lt.LaunchTemplateID] {
-				continue
-			}
-			seen[lt.LaunchTemplateID] = true
-			lts = append(lts, *lt)
+			add("", name)
+		}
+		switch {
+		case malformed != nil:
+			return nil, malformed
+		case missingID:
+			return nil, ec2DescribeLaunchTemplatesNotFound(true)
+		case missingName:
+			return nil, ec2DescribeLaunchTemplatesNotFound(false)
 		}
 	default:
 		idsKey := "lt_ids:" + ctx.AccountID + "/" + ctx.Region

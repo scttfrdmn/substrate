@@ -181,10 +181,9 @@ func (p *AutoScalingPlugin) asgPrepareLaunch(reqCtx *RequestContext, g *AutoScal
 			}
 		}
 	}
-	if awsErr := p.asgRefuseSSMImageWithAttributes(reqCtx, g); awsErr != nil {
-		return nil, nil, awsErr
-	}
-	cands, awsErr := p.asgCandidates(reqCtx, g)
+	// Create and update are where an attribute-based policy on a resolve:ssm: template is
+	// refused (#1506); see [AutoScalingPlugin.asgCandidatesFor].
+	cands, awsErr := p.asgCandidatesFor(reqCtx, g, true)
 	if awsErr != nil {
 		return nil, nil, awsErr
 	}
@@ -196,50 +195,6 @@ func (p *AutoScalingPlugin) asgPrepareLaunch(reqCtx *RequestContext, g *AutoScal
 		g.AvailabilityZones = azs
 	}
 	return cands, pls, nil
-}
-
-// asgRefuseSSMImageWithAttributes refuses a mixed-instances group that selects types by
-// attributes from a launch template whose AMI is a resolve:ssm: parameter (#1506).
-//
-// The rule is the Auto Scaling user guide's, on "Use AWS Systems Manager parameters instead of
-// AMI IDs in launch templates": "Creating or updating mixed instances groups with
-// attribute-based instance type selection using a launch template that specifies a Systems
-// Manager parameter is not supported." It is checked where CreateAutoScalingGroup and
-// UpdateAutoScalingGroup validate a group's launch configuration, because that is the call the
-// guide names. A group with no InstanceRequirements override is unaffected, and an override's
-// own literal ImageId takes the template's place, as it does at launch.
-//
-// The code is ValidationError, Auto Scaling's one client-error code for a request it refuses;
-// the message is **substrate's own**. No capture was found — a consumer's note records only that
-// the refusal reads "expecting ami-..." — so the wording states the guide's rule instead of
-// imitating one.
-func (p *AutoScalingPlugin) asgRefuseSSMImageWithAttributes(reqCtx *RequestContext, g *AutoScalingGroup) *AWSError {
-	m := g.MixedInstancesPolicy
-	if m == nil {
-		return nil
-	}
-	for _, ov := range m.Overrides {
-		if ov.InstanceRequirements == nil || (ov.ImageID != "" && !ec2IsSSMImageID(ov.ImageID)) {
-			continue
-		}
-		image := ov.ImageID
-		if image == "" {
-			spec := m.LaunchTemplateSpecification
-			if ov.LaunchTemplateSpecification != nil {
-				spec = *ov.LaunchTemplateSpecification
-			}
-			_, specImage, awsErr := p.asgResolveSpecImage(reqCtx, spec)
-			if awsErr != nil {
-				return awsErr
-			}
-			image = specImage
-		}
-		if ec2IsSSMImageID(image) {
-			return asgValidationError("A mixed instances policy that uses attribute-based instance type selection "+
-				"cannot use a launch template whose ImageId is a Systems Manager parameter (%s); specify an AMI ID.", image)
-		}
-	}
-	return nil
 }
 
 func (p *AutoScalingPlugin) createAutoScalingGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

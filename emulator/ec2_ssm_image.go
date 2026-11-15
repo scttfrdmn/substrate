@@ -78,6 +78,11 @@ type ec2SSMImageReference struct {
 // A parameter name cannot contain a colon — SSM's naming rule allows letters, numbers and
 // `. - _ /` — so in the name form everything after the first colon is the selector, and in the
 // ARN form everything after the sixth colon is.
+//
+// A separator with nothing after it — "resolve:ssm:golden-ami:" — is malformed rather than "no
+// selector": every published form either omits the colon or follows it with a version or label.
+// So is an ARN whose resource is not "parameter/" followed by a name, such as "parameterfoo":
+// SSM's parameter ARN is arn:aws:ssm:region:account:parameter/name.
 func ec2ParseSSMImageReference(imageID string) (ec2SSMImageReference, bool) {
 	rest, ok := strings.CutPrefix(imageID, ec2SSMImagePrefix)
 	if !ok || rest == "" {
@@ -88,18 +93,21 @@ func ec2ParseSSMImageReference(imageID string) (ec2SSMImageReference, bool) {
 		if len(parts) < 6 || parts[2] != "ssm" {
 			return ec2SSMImageReference{}, false
 		}
-		name, isParam := strings.CutPrefix(parts[5], "parameter")
+		name, isParam := strings.CutPrefix(parts[5], "parameter/")
 		if !isParam || name == "" {
 			return ec2SSMImageReference{}, false
 		}
 		ref := ec2SSMImageReference{name: ec2NormalizeSSMName(name), region: parts[3], accountID: parts[4], isARN: true}
 		if len(parts) == 7 {
+			if parts[6] == "" {
+				return ec2SSMImageReference{}, false
+			}
 			ref.selector = parts[6]
 		}
 		return ref, true
 	}
-	name, selector, _ := strings.Cut(rest, ":")
-	if name == "" {
+	name, selector, hasSelector := strings.Cut(rest, ":")
+	if name == "" || (hasSelector && selector == "") {
 		return ec2SSMImageReference{}, false
 	}
 	return ec2SSMImageReference{name: ec2NormalizeSSMName(name), selector: selector}, true
@@ -117,11 +125,16 @@ func ec2NormalizeSSMName(name string) string {
 // ec2ResolveSSMImageID returns the AMI ID an ImageId names: imageID itself when it does not
 // begin resolve:ssm:, and otherwise the value of the Systems Manager parameter it names.
 //
-// It is a free function over the StateManager, as [ec2LookupLaunchTemplate] is, because three
-// readers need the same answer: the launch, the authorization decision that runs before it, and
-// Auto Scaling's attribute-based selection, which narrows by the AMI's architecture. Two
-// resolvers could disagree about which AMI a launch uses.
-func ec2ResolveSSMImageID(goCtx context.Context, state StateManager, reqCtx *RequestContext, imageID string) (string, *AWSError) {
+// It is the one implementation of the resolution. The launch reaches it through
+// [EC2Plugin.resolveLaunchImage], which every launch path calls once; Auto Scaling's
+// attribute-based selection reaches it the same way, and the authorization decision, which runs
+// before the handler and holds only the StateManager, calls it directly. A Spot request left open
+// by a seeded shortfall reuses the launch's answer rather than resolving again.
+//
+// The error is an *AWSError for a reference that does not resolve, and a wrapped Go error when
+// SSM's state cannot be read or a stored record cannot be decoded. A store failure is never
+// reported as an absent parameter, and never falls back to the bundled public parameters.
+func ec2ResolveSSMImageID(goCtx context.Context, state StateManager, reqCtx *RequestContext, imageID string) (string, error) {
 	if !ec2IsSSMImageID(imageID) {
 		return imageID, nil
 	}
@@ -134,10 +147,13 @@ func ec2ResolveSSMImageID(goCtx context.Context, state StateManager, reqCtx *Req
 	}
 
 	data, err := state.Get(goCtx, ssmNamespace, ssmParameterStateKey(reqCtx.AccountID, reqCtx.Region, ref.name))
-	if err == nil && data != nil {
+	if err != nil {
+		return "", fmt.Errorf("ec2 resolve %s: read SSM parameter %s: %w", imageID, ref.name, err)
+	}
+	if data != nil {
 		var param SSMParameter
-		if json.Unmarshal(data, &param) != nil {
-			return "", ec2SSMImageUnresolved(imageID, "names a parameter whose record cannot be read")
+		if err := json.Unmarshal(data, &param); err != nil {
+			return "", fmt.Errorf("ec2 resolve %s: decode SSM parameter %s: %w", imageID, ref.name, err)
 		}
 		if param.Type != "String" {
 			return "", ec2SSMImageUnresolved(imageID, "names a parameter of type "+param.Type+"; an AMI parameter must be of type String")
@@ -174,6 +190,24 @@ func ec2CheckSSMSelector(imageID, selector string, current int64) *AWSError {
 		return ec2SSMImageUnresolved(imageID, fmt.Sprintf("names version %d of a parameter at version %d, and substrate keeps no parameter history", n, current))
 	}
 	return nil
+}
+
+// resolveLaunchImage turns the ImageId a launch names into the AMI ID it names and that AMI's
+// record: a resolve:ssm: reference is resolved ([ec2ResolveSSMImageID]) and the result looked up
+// ([EC2Plugin.resolveImage]). found reports whether the AMI exists; the ID is returned either way,
+// so a caller can refuse it by the ID's own shape and name.
+//
+// It is the single point a launch's ImageId passes through, so every reader past it — the
+// existence and architecture checks, the instance record, a Spot request's launch specification
+// and product description, and Auto Scaling's architecture narrowing — sees the AMI, never the
+// reference.
+func (p *EC2Plugin) resolveLaunchImage(reqCtx *RequestContext, imageID string) (string, EC2Image, bool, error) {
+	resolved, err := ec2ResolveSSMImageID(context.Background(), p.state, reqCtx, imageID)
+	if err != nil {
+		return "", EC2Image{}, false, err
+	}
+	img, found := p.resolveImage(reqCtx, resolved)
+	return resolved, img, found, nil
 }
 
 // ec2SSMImageUnresolved is the refusal for a resolve:ssm: ImageId that does not resolve to an

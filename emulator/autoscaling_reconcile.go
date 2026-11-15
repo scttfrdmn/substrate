@@ -95,6 +95,27 @@ func (p *AutoScalingPlugin) asgResolveSpecImage(reqCtx *RequestContext, spec Aut
 // asgCandidates returns every launch candidate a group has, in priority order. A
 // mixed-instances group with no override has one candidate, its template's own type.
 func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScalingGroup) ([]asgCandidate, *AWSError) {
+	return p.asgCandidatesFor(reqCtx, g, false)
+}
+
+// asgCandidatesFor is [AutoScalingPlugin.asgCandidates], refusing, when creating is set, an
+// InstanceRequirements override whose AMI is a resolve:ssm: Systems Manager parameter (#1506).
+//
+// The rule is the Auto Scaling user guide's, on "Use AWS Systems Manager parameters instead of
+// AMI IDs in launch templates": "Creating or updating mixed instances groups with
+// attribute-based instance type selection using a launch template that specifies a Systems
+// Manager parameter is not supported." So it applies where CreateAutoScalingGroup and
+// UpdateAutoScalingGroup validate a group — creating is set there — and not to the launches a
+// group makes later, when a template version it picks up may carry a reference; those narrow by
+// the resolved AMI instead ([AutoScalingPlugin.asgImageArchitecture]). The check reads the image
+// the selection already computed for the override, so a template is resolved once.
+//
+// The code is ValidationError, Auto Scaling's one client-error code for a request it refuses;
+// the message is **substrate's own**. No capture was found — a consumer's note records only that
+// the refusal reads "expecting ami-..." — so the wording states the guide's rule and names where
+// the parameter came from, the override's ImageId or the launch template's, instead of imitating
+// one.
+func (p *AutoScalingPlugin) asgCandidatesFor(reqCtx *RequestContext, g *AutoScalingGroup, creating bool) ([]asgCandidate, *AWSError) {
 	if g.LaunchTemplate != nil {
 		spec, awsErr := p.asgResolveSpec(reqCtx, *g.LaunchTemplate)
 		if awsErr != nil {
@@ -131,6 +152,9 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 		if image == "" {
 			image = specImage
 		}
+		if creating && ec2IsSSMImageID(image) {
+			return nil, asgSSMImageWithAttributes(ov.ImageID != "", spec, image)
+		}
 		arch, seen := archOf[image]
 		if !seen {
 			arch = p.asgImageArchitecture(reqCtx, image)
@@ -142,6 +166,18 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 		}
 	}
 	return out, nil
+}
+
+// asgSSMImageWithAttributes is the refusal [AutoScalingPlugin.asgCandidatesFor] makes, naming
+// the source of the parameter: the override's own ImageId, or the launch template version the
+// override launches from.
+func asgSSMImageWithAttributes(fromOverride bool, spec AutoScalingLaunchTemplateSpec, image string) *AWSError {
+	const rule = "A mixed instances policy that uses attribute-based instance type selection cannot use a Systems Manager parameter as its AMI"
+	if fromOverride {
+		return asgValidationError("%s: the override's ImageId is %s. Specify an AMI ID.", rule, image)
+	}
+	return asgValidationError("%s: launch template %s version %s has ImageId %s. Specify an AMI ID in the launch template.",
+		rule, spec.LaunchTemplateName, spec.Version, image)
 }
 
 // asgImageArchitecture returns the architecture of the AMI a candidate would launch — the
@@ -157,21 +193,17 @@ func (p *AutoScalingPlugin) asgImageArchitecture(reqCtx *RequestContext, imageID
 	if imageID == "" {
 		return ""
 	}
-	// A resolve:ssm: ImageId narrows by the AMI it resolves to now, through the resolver the
-	// launch itself uses (#1506), so the type chosen here can run the image the launch gets.
-	// One that does not resolve narrows as an unknown architecture; the launch then fails with
-	// EC2's own refusal, which names the parameter.
-	resolved, awsErr := ec2ResolveSSMImageID(context.Background(), p.state, reqCtx, imageID)
-	if awsErr != nil {
-		return ""
-	}
-	imageID = resolved
 	ec2, err := p.ec2()
 	if err != nil {
 		return ""
 	}
-	img, ok := ec2.resolveImage(reqCtx, imageID)
-	if !ok {
+	// A resolve:ssm: ImageId narrows by the AMI it resolves to now, through the lookup the
+	// launch itself makes ([EC2Plugin.resolveLaunchImage], #1506), so the type chosen here can
+	// run the image the launch gets. A reference that does not resolve, or a store that cannot
+	// be read, narrows as an unknown architecture: the launch that follows makes the same
+	// lookup and fails with its error, which names the parameter, in the group's activity.
+	_, img, ok, resolveErr := ec2.resolveLaunchImage(reqCtx, imageID)
+	if resolveErr != nil || !ok {
 		return ""
 	}
 	return img.Architecture

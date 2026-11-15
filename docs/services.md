@@ -8488,11 +8488,22 @@ with or without its leading slash names one parameter, as SSM stores it.
 | a parameter of type `StringList` or `SecureString` | `InvalidParameterValue` — the user guide requires type `String` |
 | `:N` naming an older version | `InvalidParameterValue` — substrate's SSM keeps no parameter history |
 | `:label` | `InvalidParameterValue` — `LabelParameterVersion` records nothing here |
+| a trailing `:` with no selector, or an ARN whose resource is not `parameter/`*name* | `InvalidParameterValue` — not a published form |
 | an ARN in another account or Region | `InvalidParameterValue` — substrate models no parameter sharing |
 
 Each refusal is HTTP 400 and its **message is substrate's own**: no capture of real EC2 refusing an
 unresolvable `resolve:ssm:` `ImageId` was found, and the reference publishes none. A value that is not
-an AMI is refused by the AMI rule itself, as `InvalidAMIID.Malformed`. The user guide also requires
+an AMI is refused by the AMI rule itself, as `InvalidAMIID.Malformed`. SSM state that cannot be read,
+or a stored parameter that does not decode, is an internal error — never "does not exist", and never a
+fall back to the bundled parameters.
+
+The reference is resolved once per launch, after the template merge, and every reader past that point
+sees the AMI: the instance's `imageId`, the existence and architecture checks, and a Spot request's
+`launchSpecification.imageId` and `productDescription`. That includes a `RequestSpotInstances` request
+a [seeded shortfall](#seeding-a-spot-request-outcome) leaves open, and a persistent request's
+replacements, which launch the AMI it was fulfilled with. Neither `RequestSpotLaunchSpecification` nor
+`LaunchSpecification` mentions Systems Manager parameters — both say "The ID of the AMI" — so reporting
+the AMI ID there is substrate's reading. The user guide also requires
 data type `aws:ec2:image`; substrate's SSM does not store `DataType`, so that half is not checked.
 
 `DescribeLaunchTemplateVersions` reads the reference back **as stored**, and reports the resolved AMI
@@ -8504,7 +8515,9 @@ Auto Scaling launches resolve the same way, and its attribute-based selection na
 `InstanceRequirements` override uses a template with a `resolve:ssm:` `ImageId` is refused with
 `ValidationError`, as the Auto Scaling user guide states ("Creating or updating mixed instances groups
 with attribute-based instance type selection using a launch template that specifies a Systems Manager
-parameter is not supported"); that message is substrate's own too.
+parameter is not supported"); that message is substrate's own too, and names where the parameter came
+from — the override's own `ImageId`, or the launch template and version. A group already created whose
+template later gains such a version is not refused at launch; it narrows by the resolved AMI.
 
 Not modeled: the `ssm:GetParameters` permission the user guides say a launch needs, the rule that only
 `instant` EC2 Fleets accept a parameter, and validation of the reference at `CreateLaunchTemplate`
@@ -8966,8 +8979,9 @@ not refuse at all: it skipped the template and failed, if it failed, on whatever
 would have supplied. `DescribeLaunchTemplates`' list form answers the same two codes with its own
 message; see [Which selectors assert existence](#which-selectors-assert-existence).
 
-**An identifier of the wrong shape is refused before the lookup** ([#1507](https://github.com/scttfrdmn/substrate/issues/1507)),
-with the error table's two Malformed codes, on every operation above and on `DescribeLaunchTemplates`:
+**An identifier of the wrong shape that names no template is refused as Malformed**
+([#1507](https://github.com/scttfrdmn/substrate/issues/1507)), with the error table's two codes, on
+every operation above and on `DescribeLaunchTemplates`:
 
 | Identifier | Rule | Code | Message |
 |---|---|---|---|
@@ -8979,13 +8993,25 @@ name message is the error table's own description of the code, since no observed
 The ID's length is not checked, as for every [EC2 resource ID](#explicit-resource-ids): substrate
 mints `lt-` and 16 hex characters where AWS mints 17. The rule is applied to the identifier the
 request resolves by — the ID when it names one, the name otherwise — so the syntax answer and the
-not-found answer are about the same identifier. `DescribeLaunchTemplates` checks every listed ID
-and then every listed name before looking any up. `CreateLaunchTemplate` applies the name rule to
-the template it creates, which it accepted unchecked before.
+not-found answer are about the same identifier. `DescribeLaunchTemplates` looks every listed
+identifier up, then refuses a malformed one that named nothing before a missing well-formed one —
+IDs, then names, each in request order. `CreateLaunchTemplate` applies the name rule to the template
+it creates, which it accepted unchecked before.
+
+The shape is judged only for an identifier that resolves to nothing. A template already in state is
+found and acted on by its identifier whatever that identifier looks like — one created before the
+rule existed, or one a recorded event log writes on replay, so an older recording still replays and
+its templates stay reachable. A new name is held to the rule where it is introduced, at
+`CreateLaunchTemplate`. For an identifier AWS could have issued, the two orders give the same answer.
+
+CloudFormation's `AWS::EC2::LaunchTemplate` with no `LaunchTemplateName` gets a generated
+`{stack}-{logicalId}-{suffix}` name, as the Template Reference says ("If you do not specify a name,
+CloudFormation creates a name for you"). It used the logical ID verbatim, which a short one such as
+`LT` would now fail the name rule with.
 
 `DeleteLaunchTemplateVersions` is the exception: it publishes a per-version
 `ResponseError.code` for exactly this — `launchTemplateIdMalformed` and
-`launchTemplateNameMalformed` — so a malformed identifier fails each requested version in
+`launchTemplateNameMalformed` — so a malformed identifier naming nothing fails each requested version in
 `unsuccessfullyDeletedLaunchTemplateVersionSet` at HTTP 200, with the messages above. A template
 that does not exist is still the whole-request NotFound; the enum's `launchTemplateIdDoesNotExist`
 and `launchTemplateNameDoesNotExist` are not raised, because no capture shows which form real EC2

@@ -100,7 +100,9 @@ func (d *StackDeployer) deployEC2LaunchTemplate(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "LaunchTemplateName", logicalID, cctx)
+	// "If you do not specify a name, CloudFormation creates a name for you" (AWS::EC2::LaunchTemplate),
+	// so an omitted name is generated rather than the logical ID, which can fail the name rule (#1507).
+	name := resolveStringProp(props, "LaunchTemplateName", cfnGeneratedName(cctx, "AWS::EC2::LaunchTemplate", logicalID), cctx)
 
 	params := cfnLaunchTemplateDataParams(props, cctx)
 	params["Action"] = "CreateLaunchTemplate"

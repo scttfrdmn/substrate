@@ -209,6 +209,11 @@ type ec2SpotLaunch struct {
 // ec2SpotUnfulfilledError reports a Spot launch that a seeded outcome left unfulfilled.
 type ec2SpotUnfulfilledError struct {
 	statusCode string
+	// imageID and image are the AMI the launch resolved before the shortfall, so a request
+	// left open reports the AMI the launch would have used — a resolve:ssm: reference already
+	// resolved (#1506) — without resolving it a second time.
+	imageID string
+	image   EC2Image
 }
 
 // Error implements error.
@@ -534,7 +539,7 @@ func (p *EC2Plugin) requestSpotInstances(reqCtx *RequestContext, req *AWSRequest
 		if !errors.As(err, &unfulfilled) {
 			return nil, err
 		}
-		requests, err = p.openSpotRequests(reqCtx, spot, run, count, unfulfilled.statusCode, nowTime.Format(time.RFC3339))
+		requests, err = p.openSpotRequests(reqCtx, spot, run, count, unfulfilled, nowTime.Format(time.RFC3339))
 		if err != nil {
 			return nil, err
 		}
@@ -552,10 +557,15 @@ func (p *EC2Plugin) requestSpotInstances(reqCtx *RequestContext, req *AWSRequest
 }
 
 // openSpotRequests writes count open requests a seeded outcome left unfulfilled.
+//
+// The AMI is the one the launch resolved before the shortfall ([ec2SpotUnfulfilledError]), so a
+// resolve:ssm: ImageId is reported as the AMI ID it named, and its product description is that
+// AMI's — the same values a fulfilled request records from its instance (#1506).
 func (p *EC2Plugin) openSpotRequests(
-	reqCtx *RequestContext, spot *ec2SpotLaunch, run map[string]string, count int, code, now string,
+	reqCtx *RequestContext, spot *ec2SpotLaunch, run map[string]string, count int,
+	unfulfilled *ec2SpotUnfulfilledError, now string,
 ) ([]EC2SpotInstanceRequest, error) {
-	img, _ := p.resolveImage(reqCtx, run["ImageId"])
+	code, img := unfulfilled.statusCode, unfulfilled.image
 	instanceType := run["InstanceType"]
 	if instanceType == "" {
 		instanceType = "t3.micro"
@@ -574,7 +584,7 @@ func (p *EC2Plugin) openSpotRequests(
 			CreateTime:                   now,
 			ProductDescription:           ec2SpotProductDescription(img),
 			LaunchSpecification: EC2SpotLaunchSpecification{
-				ImageID:          run["ImageId"],
+				ImageID:          unfulfilled.imageID,
 				InstanceType:     instanceType,
 				KeyName:          run["KeyName"],
 				SubnetID:         run["SubnetId"],
