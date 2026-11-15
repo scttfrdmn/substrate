@@ -3,8 +3,6 @@ package emulator
 import (
 	"fmt"
 	"net/http"
-	"net/url"
-	"strings"
 	"time"
 )
 
@@ -95,33 +93,22 @@ func s3AuthzCreateSideEffectActions(req *AWSRequest, requestTags map[string]stri
 }
 
 // s3AuthzCopySourceARN returns the ARN of the object a CopyObject or UploadPartCopy request reads,
-// and false for any other request or one whose x-amz-copy-source names no object.
+// and false for any other request or one whose x-amz-copy-source does not parse.
 //
-// The header is the source bucket and key separated by a slash, URL-encoded, with an optional
-// leading slash and an optional `?versionId=` suffix, or the URL-encoded ARN of an object accessed
-// through an access point (API_CopyObject, API_UploadPartCopy). The version suffix is not part of the
-// object's ARN and is dropped. An access-point ARN is already the resource a policy names, so it is
-// used as it stands. The bucket and key are split by [parseS3CopySource], the handlers' own parser,
-// so authorization and the copy cannot read different sources.
+// The header is read by [parseS3CopySource], the parser both handlers use, so the object s3:GetObject
+// is evaluated against is the object the copy reads: the bucket and URL-decoded key before the first
+// unencoded "?", without the version suffix, which is not part of an object's ARN. A header that does
+// not parse — no key, or an access-point ARN substrate does not model — needs no second pass, because
+// the handler refuses it with the same parser's answer before reading anything.
 func s3AuthzCopySourceARN(req *AWSRequest) (string, bool) {
 	if _, _, op := parseS3Operation(req); op != "CopyObject" && op != "UploadPartCopy" {
 		return "", false
 	}
-	raw := headerValueFold(req.Headers, "x-amz-copy-source")
-	if raw == "" {
+	src, errResp := parseS3CopySource(headerValueFold(req.Headers, "x-amz-copy-source"))
+	if errResp != nil {
 		return "", false
 	}
-	if i := strings.Index(raw, "?versionId="); i >= 0 {
-		raw = raw[:i]
-	}
-	if decoded, err := url.QueryUnescape(raw); err == nil && strings.HasPrefix(decoded, "arn:") {
-		return decoded, true
-	}
-	bucket, key, errResp := parseS3CopySource(raw)
-	if errResp != nil || bucket == "" || key == "" {
-		return "", false
-	}
-	return "arn:aws:s3:::" + bucket + "/" + key, true
+	return src.ARN(), true
 }
 
 // checkS3CopySource runs the second authorization pass a copy needs: s3:GetObject on the source

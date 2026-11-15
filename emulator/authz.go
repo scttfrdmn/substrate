@@ -1184,9 +1184,9 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 func buildS3ARN(req *AWSRequest) string {
 	path := strings.TrimPrefix(req.Path, "/")
 	if path == "" {
-		return "arn:aws:s3:::*"
+		return s3ResourceARN("*")
 	}
-	return "arn:aws:s3:::" + path
+	return s3ResourceARN(path)
 }
 
 // authzAWSResourceTagPrefix is the global condition-key prefix every service reports a

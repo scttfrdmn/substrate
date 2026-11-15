@@ -114,7 +114,8 @@ func s3InvalidBucketACLWithOwnershipResponse() *AWSResponse {
 		http.StatusBadRequest)
 }
 
-// s3ACLOwnerID is the canonical user ID substrate reports as a bucket's owner; see [s3DefaultACL].
+// s3ACLOwnerID is the canonical user ID substrate reports as a bucket's owner, derived here and
+// nowhere else: [s3DefaultACL] and the Object Ownership checks both call it.
 func s3ACLOwnerID(bucket string) string { return bucket + "-owner" }
 
 // s3ACLGrantsOnlyOwner reports whether every grant in acl names the bucket owner.
@@ -198,30 +199,27 @@ func s3ACLNamesEmailGrantee(acl S3AccessControlList) bool {
 	return false
 }
 
-// s3HeadersNameEmailGrantee reports whether any x-amz-grant-* header names an emailAddress grantee.
+// s3HeadersNameEmailGrantee reports whether any x-amz-grant-* header names an emailAddress grantee,
+// read through [s3ParseGrantees] so the refusal and the ACL resolver split the header one way.
 func s3HeadersNameEmailGrantee(headers map[string]string) bool {
-	for _, gh := range s3GrantHeaders {
-		for _, entry := range strings.Split(headerValueFold(headers, gh.name), ",") {
-			kind, _, found := strings.Cut(strings.TrimSpace(entry), "=")
-			if found && strings.EqualFold(strings.TrimSpace(kind), "emailAddress") {
-				return true
-			}
-		}
-	}
-	return false
+	return s3ACLNamesEmailGrantee(S3AccessControlList{Grants: s3GrantsFromHeaders(headers)})
 }
 
-// s3BucketRegion returns the Region a bucket was created in, or "" when it has no readable record.
-func (p *S3Plugin) s3BucketRegion(ctx context.Context, bucket string) (string, error) {
-	raw, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
-	if err != nil {
-		return "", fmt.Errorf("get bucket: %w", err)
-	}
-	if raw == nil {
-		return "", nil
+// s3BucketRegion returns the Region in a bucket's stored record. record is the record the caller
+// already read, or nil to have it read here; a bucket with no readable record has Region "".
+func (p *S3Plugin) s3BucketRegion(ctx context.Context, bucket string, record []byte) (string, error) {
+	if record == nil {
+		raw, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
+		if err != nil {
+			return "", fmt.Errorf("get bucket: %w", err)
+		}
+		if raw == nil {
+			return "", nil
+		}
+		record = raw
 	}
 	var b S3Bucket
-	if err := json.Unmarshal(raw, &b); err != nil {
+	if err := json.Unmarshal(record, &b); err != nil {
 		return "", fmt.Errorf("unmarshal bucket: %w", err)
 	}
 	return b.Region, nil
@@ -231,12 +229,14 @@ func (p *S3Plugin) s3BucketRegion(ctx context.Context, bucket string) (string, e
 // it may, checking in order: Object Ownership (400 AccessControlListNotSupported), an email-address
 // grantee (405, or 400 outside the notice's Regions), and Block Public Access (403).
 //
-// acl is the ACL the request resolved to, or nil for a create that named none, which proceeds
-// without consulting the bucket at all — there is nothing for any of the three checks to find.
-// fromBody says the ACL came from an XML body. The error return is reserved for a state-store
-// failure.
-func (p *S3Plugin) s3ACLWriteRefusal(ctx context.Context, bucket string, headers map[string]string,
-	acl *S3AccessControlList, fromBody bool) (*AWSResponse, error) {
+// bucketRecord is the bucket's stored record when the caller has already read it, which every
+// caller but PutObjectAcl has; it is decoded only for an email grantee's Region, and read here only
+// if the caller passed nil and the Region is needed. acl is the ACL the request resolved to, or nil
+// for a create that named none, which proceeds without consulting the bucket at all — there is
+// nothing for any of the three checks to find. fromBody says the ACL came from an XML body. The
+// error return is reserved for a state-store failure.
+func (p *S3Plugin) s3ACLWriteRefusal(ctx context.Context, bucket string, bucketRecord []byte,
+	headers map[string]string, acl *S3AccessControlList, fromBody bool) (*AWSResponse, error) {
 	if acl == nil {
 		return nil, nil
 	}
@@ -248,7 +248,7 @@ func (p *S3Plugin) s3ACLWriteRefusal(ctx context.Context, bucket string, headers
 		return s3ACLNotSupportedResponse(), nil
 	}
 	if s3HeadersNameEmailGrantee(headers) || s3ACLNamesEmailGrantee(*acl) {
-		region, err := p.s3BucketRegion(ctx, bucket)
+		region, err := p.s3BucketRegion(ctx, bucket, bucketRecord)
 		if err != nil {
 			return nil, err
 		}

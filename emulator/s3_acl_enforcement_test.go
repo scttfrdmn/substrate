@@ -393,3 +393,17 @@ func TestS3_EmailGranteeIsRefused(t *testing.T) {
 		})
 	}
 }
+
+// TestS3_EmptyEmailGranteeIsSkipped asserts an emailAddress entry with no value is skipped, as an
+// empty id or uri is, by the refusal and the ACL resolver alike: both read the header through one
+// splitter, so neither can refuse what the other ignores.
+func TestS3_EmptyEmailGranteeIsSkipped(t *testing.T) {
+	t.Parallel()
+	srv, _ := newS3TestServer(t)
+	createBucketWithACL(t, srv, "empty-email", nil)
+	putObjectWithACL(t, srv, "empty-email", "a", map[string]string{"x-amz-grant-read": `emailAddress=""`})
+	assert.Equal(t, []string{ownerGrant("empty-email")}, getObjectACLGrants(t, srv, "empty-email", "a"))
+
+	putObjectWithACL(t, srv, "empty-email", "b", map[string]string{"x-amz-grant-read": `emailAddress="", id="other"`})
+	assert.Equal(t, []string{ownerGrant("empty-email"), "other/READ"}, getObjectACLGrants(t, srv, "empty-email", "b"))
+}

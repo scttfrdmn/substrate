@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"strings"
@@ -245,24 +246,34 @@ func cfgsvcPolicyAdmitsConfig(raw []byte) bool {
 		document = []byte(wrapper.Policy)
 	}
 
+	// Statement is decoded by the rule every policy decoder shares, so a single-object
+	// Statement — which the IAM grammar allows — is read as a one-element list rather than
+	// failing to decode and passing as unreadable (#1477).
 	var policy struct {
-		Statement []struct {
-			Effect    string          `json:"Effect"`
-			Principal json.RawMessage `json:"Principal"`
-			Action    json.RawMessage `json:"Action"`
-		} `json:"Statement"`
+		Statement json.RawMessage `json:"Statement"`
 	}
 	if err := json.Unmarshal(document, &policy); err != nil {
+		// Unreadable passes, per the file header: AWS Config's docs describe the refusal
+		// (InsufficientDeliveryPolicyException) only for a policy that does not grant Config
+		// access, and S3's PutBucketPolicy refuses a document that is not JSON, so a stored
+		// policy this cannot read is one substrate's reader failed on, not the consumer.
 		return true
 	}
-	// A document that parsed but carries no statements is not a policy that admits
-	// anything, and an empty Statement array is a mistake rather than a parser
-	// limitation — so unlike an unreadable document, this one is refused.
-	if len(policy.Statement) == 0 {
+	// A document carrying no statements is not a policy that admits anything, and an
+	// empty or absent Statement is a mistake rather than a parser limitation — so unlike
+	// an unreadable document, this one is refused.
+	if len(policy.Statement) == 0 || string(bytes.TrimSpace(policy.Statement)) == "null" {
+		return false
+	}
+	statements, err := decodePolicyStatementList[cfgsvcPolicyStatement](policy.Statement)
+	if err != nil {
+		return true
+	}
+	if len(statements) == 0 {
 		return false
 	}
 
-	for _, stmt := range policy.Statement {
+	for _, stmt := range statements {
 		if !strings.EqualFold(stmt.Effect, "Allow") {
 			continue
 		}
@@ -271,6 +282,14 @@ func cfgsvcPolicyAdmitsConfig(raw []byte) bool {
 		}
 	}
 	return false
+}
+
+// cfgsvcPolicyStatement is the part of a bucket-policy statement the delivery-policy check reads.
+// Principal and Action stay raw, so a form the IAM types would refuse is still judged permissively.
+type cfgsvcPolicyStatement struct {
+	Effect    string          `json:"Effect"`
+	Principal json.RawMessage `json:"Principal"`
+	Action    json.RawMessage `json:"Action"`
 }
 
 // cfgsvcPrincipalCoversConfig reports whether a statement's Principal covers the

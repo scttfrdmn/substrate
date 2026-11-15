@@ -6632,9 +6632,27 @@ permissions" table names, not under their operation names, which are not IAM act
 says "you must have `s3:PutObject` permission to write the object copy to the destination bucket".
 The source permission comes from both copy pages — "you must have `s3:GetObject` permission to read
 the source object that is being copied" — and is checked in a second pass against the object
-`x-amz-copy-source` names, after its `?versionId=` suffix is dropped and its key URL-decoded. An
-access-point ARN as the copy source is evaluated as it stands. Until #1489 no copy checked its
-source, so a caller allowed to write could copy an object it was not allowed to read.
+`x-amz-copy-source` names. Until #1489 no copy checked its source, so a caller allowed to write could
+copy an object it was not allowed to read.
+
+**One parser reads `x-amz-copy-source`**, for the authorization pass and for both `CopyObject` and
+`UploadPartCopy`, so the object a policy is evaluated against is the object the copy reads. The
+header "must be URL-encoded", so a `?` belonging to the key arrives as `%3F`, and the first unencoded
+`?` begins the suffix: "append `?versionId=<version-id>` to the value". The split is made before
+decoding, which is what keeps a key spelled `k%3FversionId%3Dv` from being read as key `k` at
+version `v`.
+
+| Copy source | Answer |
+|---|---|
+| `bucket/key`, with or without a leading `/` | the current version |
+| `bucket/key?versionId=v` | version `v` of the key, also for `UploadPartCopy` |
+| a version that does not exist, or a key whose current version is a delete marker | `404 NoSuchKey`, as `GetObject` answers; the copy page says a delete-marker current version "behaves as if the object was deleted" |
+| a `versionId` naming a delete marker | `400 InvalidRequest`; the `UploadPartCopy` page says "HTTP 400 Bad Request", the code is substrate's reading and the message its own |
+| no key | `400 InvalidArgument` |
+| an access-point or Outposts ARN | `501 NotImplemented`, S3's code for unimplemented functionality, with substrate's own message: substrate models no access points |
+
+A copy source the parser refuses needs no authorization pass, because the handler refuses it before
+reading anything.
 
 ### Object Ownership
 
