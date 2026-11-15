@@ -16635,7 +16635,7 @@ EventBridge custom events: $1.00 per million events.
 | CreateSchedule | `POST /schedules/{Name}` | Answers **200**, not 201 — see below. A `GroupName` that does not exist is `ResourceNotFoundException`/404 — see [Schedule groups and tags](#schedule-groups-and-tags). Arms the schedule's timer — see [A due schedule invokes its target](#a-due-schedule-invokes-its-target) |
 | GetSchedule | `GET /schedules/{Name}` | Reports every member the create or update set, including `ActionAfterCompletion`, `StartDate`, `EndDate` and `KmsKeyArn` — see [The completion and window members are kept](#the-completion-and-window-members-are-kept) — and `Target.DeadLetterConfig`, `Target.SqsParameters` and `Target.EventBridgeParameters` |
 | UpdateSchedule | `PUT /schedules/{Name}` | Replaces the whole configuration, as the page publishes — see below. Re-arms the timer |
-| DeleteSchedule | `DELETE /schedules/{Name}` | Removes the timer with the record, so a deleted schedule never fires |
+| DeleteSchedule | `DELETE /schedules/{Name}` | Removes the timer with the record, so a deleted schedule never fires. A schedule that does not exist is `ResourceNotFoundException`/404, as the page publishes; it answered 200 before [#1501](https://github.com/scttfrdmn/substrate/issues/1501) |
 | ListSchedules | `GET /schedules` | Filters and cursor read from the published `ScheduleGroup`, `NamePrefix`, `State`, `MaxResults` and `NextToken` keys — [not the lowerCamel ones the sibling operations use](#the-query-string-is-read-in-the-published-spelling-which-differs-per-operation). An absent `ScheduleGroup` lists **every group's** schedules, ordered by group then name; a group that does not exist lists none. A `NextToken` no previous call returned answers [`ValidationException` / 400](#eventbridge-schedulers-one-listing-refuses-a-token-the-parameter-is-not-documented-to-accept) rather than page one. All three filters are applied [before the page is cut](#a-published-filter-selects-what-the-page-is-cut-from), so a page carries `min(MaxResults, remaining matches)` and never an empty array alongside a cursor |
 | CreateScheduleGroup | `POST /schedule-groups/{Name}` | `Tags` (Key 1–128, Value 1–256, at most 200). A taken name, including `default`, is `ConflictException`/409. Answers `ScheduleGroupArn` |
 | GetScheduleGroup | `GET /schedule-groups/{Name}` | `Arn`, `Name`, `State` (`ACTIVE`), `CreationDate`, `LastModificationDate`. `default` exists without a create. A missing group is `ResourceNotFoundException`/404, "Schedule group *name* does not exist." |
@@ -16801,13 +16801,23 @@ to 100 per schedule per request; the rest fire on the next request.
 - **`FlexibleTimeWindow`.** A `FLEXIBLE` window spreads invocations across the window, and the guide adds
   60-second precision; both are nondeterministic by nature. Substrate fires every occurrence at its
   scheduled time exactly, the window's start.
-- **`State: DISABLED`.** A disabled schedule fires nothing, and its missed occurrences are not made up.
-  Re-enabling is an `UpdateSchedule`, which re-arms the timer from the update. A one-time schedule
-  re-enabled after its instant fires at once: *"When re-enabling a one-time schedule after its original
-  scheduled time has passed, the schedule may immediately invoke its target"* (`troubleshooting.html`).
-- **`UpdateSchedule`** re-arms the timer as a fresh configuration, so a `rate()` schedule with no
-  `StartDate` fires again at the update. The one thing an update keeps is a one-time schedule's firing:
-  an update that leaves its `at()` expression and zone unchanged does not invoke it a second time.
+- **`State: DISABLED`.** A disabled schedule fires nothing, and its missed occurrences are not made up:
+  re-enabling (an `UpdateSchedule`) resumes the series at its first occurrence after the update. A
+  one-time schedule re-enabled after its instant fires at once: *"When re-enabling a one-time schedule
+  after its original scheduled time has passed, the schedule may immediately invoke its target"*
+  (`troubleshooting.html`).
+- **`UpdateSchedule`** replaces the configuration, and `API_UpdateSchedule` publishes nothing about the
+  series, so substrate's reading is that an update keeping the expression, `ScheduleExpressionTimezone`
+  and `StartDate` keeps the series: a `rate()` schedule with no `StartDate` keeps its anchor (it neither
+  restarts nor fires at the update), a one-time schedule that has fired is not fired again, and an
+  invocation being retried keeps being retried. A new `EndDate` re-clips the series. An update that
+  changes any of the three starts a new series from the update. An update setting
+  `ActionAfterCompletion: DELETE` on a schedule that has already finished deletes it on the next request.
+- **Cost of a request.** A request with nothing due reads one key, `sched_wake`, the earliest time any
+  timer needs attention. When something is due, each timer is read and only the due ones load their
+  schedule. A finished schedule kept under `NONE` keeps its timer — it is how an update knows a
+  one-time schedule has fired — but never comes due again. A schedule whose stored record will not
+  decode is set aside with a warning rather than stopping the others.
 
 #### Universal targets
 
@@ -16818,15 +16828,22 @@ Amazon Cognito Identity Provider, use cognitoidentityprovider (not cognito-idp)"
 to its plugin (`ssm`, `autoscaling`, `sfn` → Step Functions, `cloudwatch`, `cloudwatchlogs`,
 `elasticloadbalancingv2`, and the rest of `schedulerSDKServices` in `emulator/scheduler_targets.go`). The
 `apiAction` is matched case-insensitively against the plugin's routed operations. The `Input` becomes a
-request in the plugin's own protocol, by one generic rule per protocol rather than a table per
-operation:
+request in the plugin's own protocol, by one generic rule per protocol plus, for Query and EC2, the
+shape facts a JSON object cannot carry:
 
 | Protocol | Request |
 |----------|---------|
 | JSON | The `Input` is the body, under the plugin's `X-Amz-Target` — `ssm:putParameter` sends `AmazonSSM.PutParameter` |
-| Query | The `Input` is flattened into form parameters with the operation's `Action` and the service's API `Version`: a structure member is `Parent.Member`, a list element `Parent.member.N`, a boolean `true`/`false`, an empty list the bare name. `autoscaling:updateAutoScalingGroup` with `{"AutoScalingGroupName": "g", "MinSize": 0}` sends `AutoScalingGroupName=g&MinSize=0` |
-| EC2 | The same, with `Parent.N` for a list element. The ec2 protocol's renamed list members (`TagSpecifications` is sent as `TagSpecification`) live in the service model, which substrate does not carry |
-| REST | Only `lambda:invoke` is bound: `FunctionName` and `Qualifier` to the URI, `InvocationType` to its header (`Event` when absent), `Payload` to the body. Any other REST action is **recorded as intent** — logged, counted as delivered and not dispatched |
+| Query | The `Input` is flattened into form parameters with the operation's `Action` and the service's API `Version`: a structure member is `Parent.Member`, a list element `Parent.member.N`, a boolean `true`/`false`, an empty list the bare name. `autoscaling:updateAutoScalingGroup` with `{"AutoScalingGroupName": "g", "MinSize": 0}` sends `AutoScalingGroupName=g&MinSize=0`. A **map** member is `Parent.entry.N.key`/`.value` with the model's key and value names — `sns:createTopic`'s `Attributes` is `Attributes.entry.1.key=DisplayName`, `sns:publish`'s `MessageAttributes` is `MessageAttributes.entry.1.Name`/`.Value.StringValue` — and flattened and renamed lists and renamed members follow the model |
+| EC2 | The same, with `Parent.N` for a list element and the ec2 protocol's member names: `TagSpecifications` is sent as `TagSpecification.1.Tag.1.Key`, `InstanceIds` as `InstanceId.1` |
+| REST | Only `lambda:invoke` is bound: `FunctionName` and `Qualifier` to the URI, `InvocationType` to its header (`Event` when absent), `Payload` to the body. A qualified `FunctionName` (`…:function:name:alias`, `name:2`) sends its version or alias as the `Qualifier`; one that contradicts an explicit `Qualifier` fails with `InvalidParameterValueException`, *"The derived qualifier from the function name does not match the specified qualifier."*, as the guide's troubleshooting section shows Lambda answering. Any other REST action is **recorded as intent** — logged, counted as delivered and not dispatched |
+
+The shape facts come from `emulator/scheduler_query_model_gen.go`, which `make scheduler-query-model`
+generates from the botocore models bundled with the locally installed AWS CLI v2 (the header records the
+model versions). It walks the input shape of every operation substrate routes for the twelve Query and
+EC2 SDK services and records only the paths whose serialization departs from the generic rule — a map, a
+flattened or renamed list, a renamed member. CI has no AWS CLI, so the table has no drift check;
+regenerate it when a Query plugin routes a new operation.
 
 A universal target naming a service substrate does not emulate is recorded as intent too. An `Input`
 that is not a JSON object fails the invocation with `ValidationException`, as the guide's
@@ -16866,11 +16883,13 @@ consulted.
 
 `API_RetryPolicy`: *"Retry attempts with exponential backoff continue until either the maximum number of
 attempts is made or until the duration of the MaximumEventAgeInSeconds is reached."* AWS publishes
-neither the backoff's intervals nor a default policy, so three readings are substrate's own: a target
-with no `RetryPolicy` has the published maxima (185 retries, 86,400 seconds); retry *n* is due
-60·2^(n−1) seconds after the attempt before it, capped at 15 minutes; and event age is measured from the
-occurrence's scheduled time. A `RetryPolicy` sent without `MaximumRetryAttempts` reads as 0, which is
-also what `GetSchedule` reports for it.
+neither the backoff's intervals nor a default — `API_RetryPolicy`, `API_Target`, the CLI reference and
+`AWS::Scheduler::Schedule RetryPolicy` list both members as optional with a range and nothing more — so
+three readings are substrate's own: each member a target omits, whether it omits the whole
+`RetryPolicy` or one member, takes its published maximum (185 retries, 86,400 seconds), and an explicit
+`MaximumRetryAttempts: 0` means no retries; retry *n* is due 60·2^(n−1) seconds after the attempt
+before it, capped at 15 minutes; and event age is measured from the occurrence's scheduled time.
+`GetSchedule` reports the members as sent, so an omitted one is absent rather than an invented default.
 
 A throttle, a timeout and any 5xx answer are **retryable**; any other answer — a validation error, a
 missing resource, a denial — is **permanent** and is not retried. `configuring-schedule-dlq.html`
@@ -16891,12 +16910,14 @@ POST /v1/scheduler/invocation-outcome
  "errorMessage": "Rate exceeded", "retryable": true, "failAttempts": 2}
 ```
 
-`scheduleName` is a schedule's name or `"*"`; `groupName` is optional and, absent, matches the name in
-any group. Each matching attempt fails with the seeded error without calling the target. `failAttempts`
+`scheduleName` is a schedule's name or `"*"`; `groupName` is optional and, absent, matches any group,
+so `{"groupName": "aegc-dev", "scheduleName": "*"}` affects only that group's schedules. The most
+specific seed applies: the schedule's own, its name in any group, its group's wildcard, the global
+wildcard. Each matching attempt fails with the seeded error without calling the target. `failAttempts`
 bounds how many attempts of each invocation fail (zero or absent fails every one), and `retryable`
 overrides the classification of `errorCode`. `DELETE /v1/scheduler/invocation-outcome` clears one seed by
-`scheduleName` and `groupName`, or all of them. Seeds are control-plane writes, so a replay re-applies
-them in position.
+`scheduleName` and `groupName`, a group's seeds by `groupName` alone, or all of them. Seeds are
+control-plane writes, so a replay re-applies them in position.
 
 #### Completion and `ActionAfterCompletion`
 
@@ -16925,7 +16946,7 @@ mapping's polls.
   Substrate's CloudWatch records only metric names, so a metric would carry no value a test could
   assert on, and none is emitted. The invocation is observable through its target's effect and the
   dead-letter queue ([#1513](https://github.com/scttfrdmn/substrate/issues/1513)).
-- The REST and EC2 universal-target bindings noted above
+- The REST universal-target bindings noted above
   ([#1511](https://github.com/scttfrdmn/substrate/issues/1511)), and the templated targets recorded as
   intent ([#1512](https://github.com/scttfrdmn/substrate/issues/1512)).
 - An observable `DELETING` window, `ClientToken` idempotency and the quotas

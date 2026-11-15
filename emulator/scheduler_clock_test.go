@@ -358,6 +358,34 @@ func TestSchedulerClock_RetriesThenTheDeadLetterQueue(t *testing.T) {
 			steps:     []time.Duration{time.Hour, 60 * time.Second},
 			wantFound: true,
 		},
+		{
+			name:      "an omitted MaximumRetryAttempts takes the default, not zero",
+			seed:      map[string]any{"scheduleName": "lease-state", "errorCode": "ThrottlingException", "failAttempts": 1},
+			retry:     map[string]any{"MaximumEventAgeInSeconds": 3600},
+			steps:     []time.Duration{time.Hour, 60 * time.Second},
+			wantFound: true,
+		},
+		{
+			name:  "an explicit zero MaximumRetryAttempts dead-letters the first failure",
+			seed:  map[string]any{"scheduleName": "lease-state", "errorCode": "ThrottlingException"},
+			retry: map[string]any{"MaximumRetryAttempts": 0},
+			steps: []time.Duration{time.Hour}, condition: "MaximumRetryAttempts", code: "ThrottlingException",
+			retries: "0", dlqLetters: 1,
+		},
+		{
+			name:  "a group-scoped wildcard seed applies in its group",
+			seed:  map[string]any{"scheduleName": "*", "groupName": "aegc-dev", "errorCode": "ValidationException"},
+			retry: map[string]any{"MaximumRetryAttempts": 0},
+			steps: []time.Duration{time.Hour},
+			code:  "ValidationException", retries: "0", dlqLetters: 1,
+		},
+		{
+			name:      "another group's wildcard seed does not apply",
+			seed:      map[string]any{"scheduleName": "*", "groupName": "other", "errorCode": "ValidationException"},
+			retry:     map[string]any{"MaximumRetryAttempts": 0},
+			steps:     []time.Duration{time.Hour},
+			wantFound: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -590,4 +618,155 @@ func TestSchedulerClock_SeedEndpointRefusals(t *testing.T) {
 		status, out := e.do(http.MethodDelete, "localhost", "/v1/scheduler/invocation-outcome"+q, "", "", nil)
 		assert.Equal(t, http.StatusOK, status, "%s", out)
 	}
+}
+
+// seed posts an invocation-outcome seed.
+func (e *schedEnv) seed(body string) {
+	e.t.Helper()
+	status, out := e.do(http.MethodPost, "localhost", "/v1/scheduler/invocation-outcome", "application/json", "", []byte(body))
+	require.Equal(e.t, http.StatusOK, status, "%s", out)
+}
+
+// A group-scoped wildcard is cleared by its group, and clearing it leaves the other group's seeds.
+func TestSchedulerClock_AGroupScopedSeedIsClearedByItsGroup(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	e.createLeaseGroup()
+	e.seed(`{"groupName":"aegc-dev","scheduleName":"*","errorCode":"ValidationException"}`)
+	e.seed(`{"groupName":"default","scheduleName":"*","errorCode":"ValidationException"}`)
+	status, out := e.do(http.MethodDelete, "localhost", "/v1/scheduler/invocation-outcome?groupName=aegc-dev", "", "", nil)
+	require.Equal(t, http.StatusOK, status, "%s", out)
+
+	e.mustSched(http.MethodPost, "/schedules/lease-state", leaseSchedule(nil))
+	e.mustSched(http.MethodPost, "/schedules/in-default", leaseSchedule(map[string]any{
+		"GroupName": nil,
+		"Target": map[string]any{"Arn": "arn:aws:scheduler:::aws-sdk:ssm:putParameter", "RoleArn": schedRoleARN,
+			"Input": `{"Name": "/aegc/default", "Value": "v", "Type": "String"}`},
+	}))
+	e.ts.AdvanceTime(time.Hour)
+	_, found := e.parameter("/aegc/dev/state")
+	assert.True(t, found, "aegc-dev's wildcard was cleared")
+	_, found = e.parameter("/aegc/default")
+	assert.False(t, found, "default's wildcard was not")
+}
+
+// One schedule whose record will not decode does not stop the schedules after it (#1501 review).
+func TestSchedulerClock_ACorruptScheduleDoesNotStopTheOthers(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	for _, name := range []string{"a-bad", "b-good"} {
+		e.mustSched(http.MethodPost, "/schedules/"+name, leaseSchedule(map[string]any{
+			"GroupName": nil,
+			"Target": map[string]any{"Arn": "arn:aws:scheduler:::aws-sdk:ssm:putParameter", "RoleArn": schedRoleARN,
+				"Input": `{"Name": "/` + name + `", "Value": "v", "Type": "String"}`},
+		}))
+	}
+	require.NoError(t, e.ts.StateManager().Put(t.Context(), "scheduler",
+		"sched:123456789012/us-east-1/default/a-bad", []byte("{not json")))
+
+	e.ts.AdvanceTime(time.Hour)
+	_, found := e.parameter("/b-good")
+	assert.True(t, found, "the schedule after the corrupt one fired")
+	_, found = e.parameter("/a-bad")
+	assert.False(t, found)
+	assert.Equal(t, []string{"ssm:PutParameter"}, e.clockDispatches())
+}
+
+// An update that keeps a rate() expression keeps its series: it neither restarts nor fires at the
+// update. An update that changes the expression starts a new series from the update.
+func TestSchedulerClock_AnUpdateKeepsARateSeriesAnchor(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	queueURL, queueARN := e.createQueue("rate-anchor")
+	body := func(expr, description string) map[string]any {
+		return map[string]any{
+			"ScheduleExpression": expr, "Description": description,
+			"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
+			"Target":             map[string]any{"Arn": queueARN, "RoleArn": schedRoleARN, "Input": "<aws.scheduler.scheduled-time>"},
+		}
+	}
+	bodies := func() []string {
+		var out []string
+		for _, m := range e.receive(queueURL) {
+			out = append(out, m.Body)
+		}
+		return out
+	}
+	e.mustSched(http.MethodPost, "/schedules/every-ten", body("rate(10 minutes)", "one"))
+	require.Equal(t, []string{"2026-11-16T11:00:00Z"}, bodies(), "no StartDate: the first occurrence is at creation")
+
+	e.ts.AdvanceTime(5 * time.Minute)
+	e.mustSched(http.MethodPut, "/schedules/every-ten", body("rate(10 minutes)", "two"))
+	assert.Len(t, bodies(), 1, "an update keeping the expression does not fire")
+	e.ts.AdvanceTime(5 * time.Minute)
+	assert.ElementsMatch(t, []string{"2026-11-16T11:00:00Z", "2026-11-16T11:10:00Z"}, bodies(), "the series kept its anchor")
+
+	e.ts.AdvanceTime(2 * time.Minute)
+	e.mustSched(http.MethodPut, "/schedules/every-ten", body("rate(15 minutes)", "three"))
+	assert.Contains(t, bodies(), "2026-11-16T11:12:00Z", "a changed expression starts a new series at the update")
+}
+
+// An update that keeps an at() expression keeps the invocation being retried, and an update that
+// sets ActionAfterCompletion DELETE on a finished schedule deletes it on the next run.
+func TestSchedulerClock_AnUpdateKeepsRetriesAndCanDeleteAFinishedSchedule(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	e.createLeaseGroup()
+	e.seed(`{"scheduleName":"lease-state","errorCode":"ThrottlingException","failAttempts":1}`)
+	e.mustSched(http.MethodPost, "/schedules/lease-state", leaseSchedule(nil))
+
+	e.ts.AdvanceTime(time.Hour + 30*time.Second)
+	_, found := e.parameter("/aegc/dev/state")
+	require.False(t, found, "the first attempt failed; its retry is due at 12:01")
+	e.mustSched(http.MethodPut, "/schedules/lease-state", leaseSchedule(map[string]any{"Description": "renewed"}))
+	e.ts.AdvanceTime(30 * time.Second)
+	_, found = e.parameter("/aegc/dev/state")
+	require.True(t, found, "the retry survived the update")
+	e.mustSched(http.MethodGet, "/schedules/lease-state?groupName=aegc-dev", nil)
+
+	e.mustSched(http.MethodPut, "/schedules/lease-state", leaseSchedule(map[string]any{"ActionAfterCompletion": "DELETE"}))
+	status, _ := e.sched(http.MethodGet, "/schedules/lease-state?groupName=aegc-dev", nil)
+	assert.Equal(t, http.StatusNotFound, status, "the finished schedule is deleted on the next run")
+	assert.Equal(t, []string{"ssm:PutParameter"}, e.clockDispatches(), "and is not invoked again")
+}
+
+// The wake key holds the earliest due time, so a request with nothing due reads nothing else; it
+// is cleared once nothing is left to come due.
+func TestSchedulerClock_TheWakeTracksTheEarliestDue(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	e.createLeaseGroup()
+	wake := func() string {
+		t.Helper()
+		data, err := e.ts.StateManager().Get(t.Context(), "scheduler", "sched_wake")
+		require.NoError(t, err)
+		return string(data)
+	}
+	e.mustSched(http.MethodPost, "/schedules/lease-state", leaseSchedule(nil))
+	assert.JSONEq(t, `{"at":"2026-11-16T12:00:00Z"}`, wake())
+	e.mustSched(http.MethodPost, "/schedules/earlier", leaseSchedule(map[string]any{"ScheduleExpression": "at(2026-11-16T11:30:00)"}))
+	assert.JSONEq(t, `{"at":"2026-11-16T11:30:00Z"}`, wake(), "a sooner schedule lowers it")
+
+	e.ts.AdvanceTime(time.Hour)
+	e.mustSched(http.MethodGet, "/schedules?ScheduleGroup=aegc-dev", nil)
+	assert.Empty(t, wake(), "both fired and finished with NONE: nothing is left to come due")
+}
+
+// A universal target's map member reaches an awsQuery service as entry.N.key/value.
+func TestSchedulerClock_UniversalSNSCreateTopicSendsAttributesAsAMap(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	e.mustSched(http.MethodPost, "/schedules/make-topic", map[string]any{
+		"ScheduleExpression": schedLeaseExpiry,
+		"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
+		"Target": map[string]any{"Arn": "arn:aws:scheduler:::aws-sdk:sns:createTopic", "RoleArn": schedRoleARN,
+			"Input": `{"Name": "lease-topic", "Attributes": {"DisplayName": "Lease"}}`},
+	})
+	e.ts.AdvanceTime(time.Hour)
+	status, out := e.query("sns.us-east-1.amazonaws.com", map[string]string{
+		"Action": "GetTopicAttributes", "Version": "2010-03-31",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:lease-topic",
+	})
+	require.Equal(t, http.StatusOK, status, "%s", out)
+	assert.Contains(t, string(out), "<key>DisplayName</key><value>Lease</value>")
 }

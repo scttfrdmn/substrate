@@ -18,12 +18,14 @@ import (
 //	 "errorMessage": "Rate exceeded", "retryable": true, "failAttempts": 2}
 //
 // scheduleName is a schedule's name or "*" for every schedule; groupName is optional and, absent,
-// matches the name in any group. Each matching attempt fails with errorCode and errorMessage
-// without calling the target. failAttempts bounds how many attempts of each invocation fail — the
-// next one calls the target — and zero or absent fails every attempt. retryable overrides the
-// classification substrate gives errorCode (a throttle or a 5xx code is retryable, anything else
-// permanent). DELETE /v1/scheduler/invocation-outcome clears one seed by the same two query keys,
-// or every seed with neither. The seeds live in the state manager, so a reset clears them and a
+// matches any group, so {"groupName": "g", "scheduleName": "*"} affects only group g's schedules.
+// The most specific seed applies: the schedule's own, its name in any group, its group's wildcard,
+// the global wildcard. Each matching attempt fails with errorCode and errorMessage without calling
+// the target. failAttempts bounds how many attempts of each invocation fail — the next one calls
+// the target — and zero or absent fails every attempt. retryable overrides the classification
+// substrate gives errorCode (a throttle or a 5xx code is retryable, anything else permanent).
+// DELETE /v1/scheduler/invocation-outcome clears one seed by the same two query keys, a group's
+// seeds by groupName alone, or every seed with neither. The seeds live in the state manager, so a reset clears them and a
 // replay re-applies them from the recorded control-plane writes.
 
 // schedulerCtrlNamespace is the state namespace of the Scheduler seeds.
@@ -61,21 +63,29 @@ func (s *schedulerSeededOutcome) retryableFor() *bool {
 	return &r
 }
 
-// schedulerCtrlKey is the state key of a seed.
+// schedulerCtrlKeyPrefix begins every seed's state key.
+const schedulerCtrlKeyPrefix = "outcome:"
+
+// schedulerCtrlKey is the state key of a seed: outcome:{group}/{name}, with "*" for an absent
+// group (any group) and for a wildcard name, so a group-scoped wildcard (`outcome:g/*`) is a key
+// of its own and affects only that group.
 func schedulerCtrlKey(groupName, scheduleName string) string {
-	if scheduleName == "" || scheduleName == "*" {
-		return "outcome:*"
-	}
 	if groupName == "" {
 		groupName = "*"
 	}
-	return "outcome:" + groupName + "/" + scheduleName
+	if scheduleName == "" {
+		scheduleName = "*"
+	}
+	return schedulerCtrlKeyPrefix + groupName + "/" + scheduleName
 }
 
-// resolveSeededOutcome returns the seed that applies to a schedule, nil when none does: the
-// schedule's own, then its name in any group, then the wildcard.
+// resolveSeededOutcome returns the seed that applies to a schedule, nil when none does, most
+// specific first: the schedule's own, its name in any group, its group's wildcard, the wildcard.
 func (p *SchedulerPlugin) resolveSeededOutcome(ctx context.Context, groupName, name string) (*schedulerSeededOutcome, error) {
-	for _, key := range []string{schedulerCtrlKey(groupName, name), schedulerCtrlKey("", name), schedulerCtrlKey("", "*")} {
+	for _, key := range []string{
+		schedulerCtrlKey(groupName, name), schedulerCtrlKey("", name),
+		schedulerCtrlKey(groupName, "*"), schedulerCtrlKey("", "*"),
+	} {
 		data, err := p.state.Get(ctx, schedulerCtrlNamespace, key)
 		if err != nil {
 			return nil, fmt.Errorf("scheduler resolve outcome seed: %w", err)
@@ -127,15 +137,21 @@ func (s *Server) handleSchedulerSeedInvocationOutcome(w http.ResponseWriter, r *
 // handleSchedulerClearInvocationOutcome serves DELETE /v1/scheduler/invocation-outcome.
 func (s *Server) handleSchedulerClearInvocationOutcome(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
+	group := q.Get("groupName")
 	if name := q.Get("scheduleName"); name != "" {
-		if err := s.state.Delete(r.Context(), schedulerCtrlNamespace, schedulerCtrlKey(q.Get("groupName"), name)); err != nil {
+		if err := s.state.Delete(r.Context(), schedulerCtrlNamespace, schedulerCtrlKey(group, name)); err != nil {
 			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 			return
 		}
 		writeJSONDebug(w, s.logger, map[string]any{"ok": true})
 		return
 	}
-	keys, err := s.state.List(r.Context(), schedulerCtrlNamespace, "outcome:")
+	// A groupName alone clears that group's seeds, its wildcard included; neither clears them all.
+	prefix := schedulerCtrlKeyPrefix
+	if group != "" {
+		prefix += group + "/"
+	}
+	keys, err := s.state.List(r.Context(), schedulerCtrlNamespace, prefix)
 	if err != nil {
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return

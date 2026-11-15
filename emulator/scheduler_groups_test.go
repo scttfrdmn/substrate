@@ -115,6 +115,8 @@ func TestSchedulerGroups_Refusals(t *testing.T) {
 		{"delete of a missing group", http.MethodDelete, "/schedule-groups/missing", nil, http.StatusNotFound, "ResourceNotFoundException"},
 		{"delete of the default group", http.MethodDelete, "/schedule-groups/default", nil, http.StatusBadRequest, "ValidationException"},
 		{"a NextToken no listing issued", http.MethodGet, "/schedule-groups?NextToken=garbage", nil, http.StatusBadRequest, "ValidationException"},
+		{"delete of a missing schedule", http.MethodDelete, "/schedules/missing", nil, http.StatusNotFound, "ResourceNotFoundException"},
+		{"delete of a schedule in a missing group", http.MethodDelete, "/schedules/s?groupName=missing", nil, http.StatusNotFound, "ResourceNotFoundException"},
 		{"a schedule in a missing group", http.MethodPost, "/schedules/s", leaseSchedule(map[string]any{"GroupName": "missing"}), http.StatusNotFound, "ResourceNotFoundException"},
 		{"a dead-letter queue that is not an SQS ARN", http.MethodPost, "/schedules/s", leaseSchedule(map[string]any{
 			"GroupName": nil, "Target": map[string]any{"Arn": "arn:aws:sqs:us-east-1:123456789012:q", "RoleArn": schedRoleARN,
@@ -169,6 +171,29 @@ func TestSchedulerGroups_Tags(t *testing.T) {
 			assert.Contains(t, string(body), tc.code)
 		})
 	}
+}
+
+// A default-group schedule stored before groups were indexed still lists with no ScheduleGroup:
+// the listing materializes the default group before walking the group index (#1501 review).
+func TestSchedulerGroups_APreGroupsDefaultScheduleStillLists(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	state := e.ts.StateManager()
+	rec := `{"name":"legacy","group_name":"default","schedule_expression":"rate(1 day)","state":"DISABLED",` +
+		`"target":{"arn":"arn:aws:sqs:us-east-1:123456789012:q","role_arn":"` + schedRoleARN + `"},` +
+		`"flexible_time_window":{"mode":"OFF"},"arn":"arn:aws:scheduler:us-east-1:123456789012:schedule/default/legacy",` +
+		`"creation_date":"2026-01-01T00:00:00Z","last_modification_date":"2026-01-01T00:00:00Z",` +
+		`"account_id":"123456789012","region":"us-east-1"}`
+	require.NoError(t, state.Put(t.Context(), "scheduler", "sched:123456789012/us-east-1/default/legacy", []byte(rec)))
+	require.NoError(t, state.Put(t.Context(), "scheduler", "sched_names:123456789012/us-east-1/default", []byte(`["legacy"]`)))
+
+	var out struct {
+		Schedules []struct{ Name, GroupName string }
+	}
+	require.NoError(t, json.Unmarshal(e.mustSched(http.MethodGet, "/schedules", nil), &out))
+	require.Len(t, out.Schedules, 1)
+	assert.Equal(t, "legacy", out.Schedules[0].Name)
+	assert.Equal(t, "default", out.Schedules[0].GroupName)
 }
 
 // The three target objects a due schedule acts on are kept and reported (#1501).

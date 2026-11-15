@@ -3,6 +3,7 @@ package emulator
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -36,16 +37,20 @@ import (
 //   - JSON (awsJson1_0/1_1): the Input is the body, under the plugin's X-Amz-Target.
 //   - Query (awsQuery): the Input is flattened into form parameters — a structure member becomes
 //     `Parent.Member`, a list element `Parent.member.N`, and a scalar its string form — with the
-//     operation's Action and the service's API Version. This is the generic rule botocore's query
-//     serializer applies to a JSON-shaped input, so it serves every Query operation rather than
-//     the two the consumer that asked for it uses.
-//   - EC2 (the ec2 protocol): the same flattening with `Parent.N` for a list element. The ec2
-//     protocol renames some list members (`TagSpecifications` is sent as `TagSpecification`), and
-//     those renames live in the service model, which substrate does not carry; an Input relying on
-//     one reaches EC2 under its JSON name.
+//     operation's Action and the service's API Version. That is botocore's query serializer's
+//     generic rule. Where an operation's input shape departs from it — a map
+//     (`Parent.entry.N.key`/`.value`, with the model's key and value names), a flattened or
+//     renamed list, a renamed member — [schedQueryModel] says so. That table is generated from
+//     the botocore models by cmd/gen-scheduler-query-model, because a JSON object cannot say
+//     whether it is a structure or a map, and substrate carries no shapes of its own.
+//   - EC2 (the ec2 protocol): the same, with `Parent.N` for a list element and the ec2 protocol's
+//     member names (queryName, or the capitalized locationName: `TagSpecifications` is sent as
+//     `TagSpecification`), also from [schedQueryModel].
 //   - REST: only Lambda's Invoke is bound (FunctionName and Qualifier to the URI, InvocationType to
 //     its header, Payload to the body), because a REST operation's URI and header bindings live in
-//     the service model too. Any other REST action is recorded as intent and not dispatched.
+//     the service model too. A qualified FunctionName's version or alias is the Qualifier, and one
+//     that contradicts an explicit Qualifier is refused as Lambda refuses it. Any other REST action
+//     is recorded as intent and not dispatched.
 //
 // A universal target whose service substrate does not emulate is also recorded as intent.
 //
@@ -182,7 +187,7 @@ func buildUniversalCall(rec *SchedulerRecord, spec, input string) schedTargetCal
 	case routing.Protocol == "JSON":
 		call.req = schedJSONRequest(svc.plugin, routing.TargetPrefix, op, []byte(input))
 	case strings.Contains(routing.Protocol, "Query"):
-		params, failure := schedQueryParams(input, svc.plugin == "ec2")
+		params, failure := schedQueryParams(input, sdkID, op, svc.plugin == "ec2")
 		if failure != nil {
 			call.invalid = failure
 			return call
@@ -211,7 +216,22 @@ func buildUniversalCall(rec *SchedulerRecord, spec, input string) schedTargetCal
 			// The SDK's Payload is a blob; in a JSON Input it is a string holding the event.
 			payload = []byte(s)
 		}
-		call.req = schedLambdaInvoke(lambdaFunctionNameFromRef(in.FunctionName), in.Qualifier, in.InvocationType, payload)
+		name, derived := lambdaParseFunctionRef(in.FunctionName)
+		qualifier := in.Qualifier
+		switch {
+		case derived != "" && qualifier != "" && derived != qualifier:
+			// The refusal the guide's troubleshooting section shows Lambda answering for
+			// {"FunctionName": "MyFunction:2", "Qualifier": "1"}.
+			call.invalid = &schedFailure{
+				Code:    "InvalidParameterValueException",
+				Message: "The derived qualifier from the function name does not match the specified qualifier.",
+				Status:  http.StatusBadRequest,
+			}
+			return call
+		case qualifier == "":
+			qualifier = derived
+		}
+		call.req = schedLambdaInvoke(name, qualifier, in.InvocationType, payload)
 		if acct, region, ok := lambdaARNAccountRegion(in.FunctionName); ok {
 			call.accountID, call.region = acct, region
 		}
@@ -269,16 +289,23 @@ func schedLambdaInvoke(name, qualifier, invocationType string, payload []byte) *
 	}
 }
 
-// lambdaFunctionNameFromRef reduces a FunctionName — a name, a partial ARN or a full ARN — to the
-// name the invoke path carries.
-func lambdaFunctionNameFromRef(ref string) string {
+// lambdaParseFunctionRef splits a FunctionName — `name`, `name:qualifier`, a partial ARN
+// (`account:function:name[:qualifier]`) or a full ARN — into the name the invoke path carries and
+// the version or alias it names, empty when it names none (`API_Invoke`'s FunctionName forms).
+func lambdaParseFunctionRef(ref string) (name, qualifier string) {
 	parts := strings.Split(ref, ":")
 	for i, p := range parts {
 		if p == "function" && i+1 < len(parts) {
-			return parts[i+1]
+			if i+2 < len(parts) {
+				return parts[i+1], parts[i+2]
+			}
+			return parts[i+1], ""
 		}
 	}
-	return ref
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return ref, ""
 }
 
 // lambdaARNAccountRegion reads the account and Region of a full function ARN.
@@ -300,9 +327,34 @@ func schedInvalidInput(err error) *schedFailure {
 	}
 }
 
-// schedQueryParams flattens a JSON Input into Query form parameters. ec2 selects the ec2
-// protocol's list form.
-func schedQueryParams(input string, ec2 bool) (map[string]string, *schedFailure) {
+// schedQueryHint is one input path's departure from the generic Query rule, read from the
+// botocore service model by cmd/gen-scheduler-query-model into [schedQueryModel].
+//
+// A path is the input's JSON member names joined by ".", with "[]" for a list element and "{}"
+// for a map value: `Attributes`, `TagSpecifications[].Tags`.
+type schedQueryHint struct {
+	// Name is the member's wire name when it differs from its JSON name (awsQuery's locationName;
+	// the ec2 protocol's queryName or capitalized locationName).
+	Name string
+	// List is a list's member name when it is not "member".
+	List string
+	// Flat marks a flattened list or map, whose elements carry no "member" or "entry" segment.
+	Flat bool
+	// Map marks a map, which serializes as `Parent.entry.N.Key` and `Parent.entry.N.Value`.
+	Map bool
+	// Key and Value are a map's key and value names.
+	Key, Value string
+}
+
+// schedQueryParams flattens a JSON Input into the Query form parameters of sdkID's operation op.
+// ec2 selects the ec2 protocol's rules.
+//
+// The generic rule — a structure member is `Parent.Member`, a list element `Parent.member.N`
+// (`Parent.N` on ec2) — is botocore's query serializer's. Where the operation's input shape departs
+// from it (a map, a flattened or renamed list, a renamed member), [schedQueryModel] says so,
+// because a JSON object cannot say whether it is a structure or a map. An operation the table does
+// not hold has no departures in the model, or is not in it at all, and gets the generic rule.
+func schedQueryParams(input, sdkID, op string, ec2 bool) (map[string]string, *schedFailure) {
 	dec := json.NewDecoder(bytes.NewReader([]byte(input)))
 	dec.UseNumber()
 	var v any
@@ -313,54 +365,102 @@ func schedQueryParams(input string, ec2 bool) (map[string]string, *schedFailure)
 	if !ok {
 		return nil, schedInvalidInput(fmt.Errorf("the Input is a %T, not an object", v))
 	}
-	out := map[string]string{}
-	schedFlattenQuery(out, "", obj, ec2)
-	return out, nil
+	f := schedQueryFlattener{out: map[string]string{}, hints: schedQueryModel[sdkID][op], ec2: ec2}
+	f.value("", "", obj)
+	return f.out, nil
 }
 
-// schedFlattenQuery writes v under prefix into out.
-func schedFlattenQuery(out map[string]string, prefix string, v any, ec2 bool) {
-	join := func(a, b string) string {
-		if a == "" {
-			return b
-		}
-		return a + "." + b
+// schedQueryFlattener writes one Input's form parameters.
+type schedQueryFlattener struct {
+	out   map[string]string
+	hints map[string]schedQueryHint
+	ec2   bool
+}
+
+func schedJoin(a, b string) string {
+	if a == "" {
+		return b
 	}
+	return a + "." + b
+}
+
+func schedSortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// value writes v, found at the model path path, under the wire prefix prefix.
+func (f *schedQueryFlattener) value(prefix, path string, v any) {
+	h := f.hints[path]
 	switch t := v.(type) {
 	case map[string]any:
-		keys := make([]string, 0, len(t))
-		for k := range t {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for _, k := range keys {
-			schedFlattenQuery(out, join(prefix, k), t[k], ec2)
-		}
-	case []any:
-		if len(t) == 0 {
-			if !ec2 {
-				// An empty list is sent as the bare member name, which is how botocore's query
-				// serializer distinguishes "clear this list" from "leave it unchanged".
-				out[prefix] = ""
+		if h.Map {
+			base := prefix + ".entry"
+			if h.Flat {
+				base = prefix
+			}
+			for i, k := range schedSortedKeys(t) {
+				entry := base + "." + strconv.Itoa(i+1)
+				f.out[entry+"."+h.Key] = k
+				f.value(entry+"."+h.Value, path+"{}", t[k])
 			}
 			return
 		}
-		for i, e := range t {
-			idx := strconv.Itoa(i + 1)
-			if ec2 {
-				schedFlattenQuery(out, join(prefix, idx), e, ec2)
-			} else {
-				schedFlattenQuery(out, join(prefix, "member."+idx), e, ec2)
+		for _, k := range schedSortedKeys(t) {
+			child := schedJoin(path, k)
+			wire := k
+			if ch := f.hints[child]; ch.Name != "" {
+				wire = ch.Name
+			}
+			f.value(schedJoin(prefix, wire), child, t[k])
+		}
+	case []any:
+		if f.ec2 {
+			for i, e := range t {
+				f.value(prefix+"."+strconv.Itoa(i+1), path+"[]", e)
+			}
+			return
+		}
+		if len(t) == 0 {
+			// An empty list is sent as the bare member name, which is how botocore's query
+			// serializer distinguishes "clear this list" from "leave it unchanged".
+			f.out[prefix] = ""
+			return
+		}
+		listPrefix := prefix + "." + schedOr(h.List, "member")
+		if h.Flat {
+			listPrefix = prefix
+			if h.List != "" {
+				// A flattened list with a named member replaces the last segment with that name.
+				if i := strings.LastIndex(prefix, "."); i >= 0 {
+					listPrefix = prefix[:i+1] + h.List
+				} else {
+					listPrefix = h.List
+				}
 			}
 		}
+		for i, e := range t {
+			f.value(listPrefix+"."+strconv.Itoa(i+1), path+"[]", e)
+		}
 	case json.Number:
-		out[prefix] = t.String()
+		f.out[prefix] = t.String()
 	case bool:
-		out[prefix] = strconv.FormatBool(t)
+		f.out[prefix] = strconv.FormatBool(t)
 	case string:
-		out[prefix] = t
+		f.out[prefix] = t
 	case nil:
 	}
+}
+
+func schedOr(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
 
 // buildTemplatedCall builds a templated target's request from its resource ARN.
@@ -455,7 +555,8 @@ func (f *schedFailure) retryable() bool {
 // the body, so both are read.
 func schedTargetFailure(resp *AWSResponse, err error) *schedFailure {
 	if err != nil {
-		if awsErr, ok := err.(*AWSError); ok { //nolint:errorlint // plugins return *AWSError unwrapped
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) {
 			return &schedFailure{Code: awsErr.Code, Message: awsErr.Message, Status: awsErr.HTTPStatus}
 		}
 		return &schedFailure{

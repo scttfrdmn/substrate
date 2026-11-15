@@ -135,6 +135,13 @@ func parseSchedRate(body string) (time.Duration, error) {
 // first returns the schedule's first occurrence for a configuration that took effect at armed,
 // or nil when it has none. start and end are the schedule's StartDate and EndDate.
 func (e *schedExpression) first(armed time.Time, start, end *time.Time) *time.Time {
+	return e.firstFrom(armed, armed, start, end)
+}
+
+// firstFrom returns the first occurrence at or after from of a schedule whose rate series is
+// anchored at anchor (the moment it was first armed, used when there is no StartDate), or nil when
+// there is none. It is how an update that keeps the expression keeps the series' phase.
+func (e *schedExpression) firstFrom(anchor, from time.Time, start, end *time.Time) *time.Time {
 	switch e.kind {
 	case schedExprAt:
 		// StartDate and EndDate are ignored for a one-time schedule, as the guide states. An
@@ -144,21 +151,19 @@ func (e *schedExpression) first(armed time.Time, start, end *time.Time) *time.Ti
 		t := e.at
 		return &t
 	case schedExprRate:
-		anchor := armed
 		if start != nil {
 			anchor = *start
 		}
 		t := anchor
-		if t.Before(armed) {
-			steps := armed.Sub(anchor) / e.every
+		if t.Before(from) {
+			steps := from.Sub(anchor) / e.every
 			t = anchor.Add(steps * e.every)
-			if t.Before(armed) {
+			if t.Before(from) {
 				t = t.Add(e.every)
 			}
 		}
 		return clipSchedEnd(&t, end)
 	case schedExprCron:
-		from := armed
 		if start != nil && start.After(from) {
 			from = *start
 		}

@@ -1872,6 +1872,18 @@ func SchedOccurrencesForTest(expr, tz string, armed time.Time, start, end *time.
 	return out, nil
 }
 
+// SchedTargetRequestForTest builds the request a schedule in us-east-1/123456789012 with the given
+// target ARN and Input would make (#1501). failureCode is set when the Input is refused before any
+// dispatch, and intent when the target is recorded rather than dispatched.
+func SchedTargetRequestForTest(targetARN, input string) (req *AWSRequest, failureCode, intent string) {
+	rec := &SchedulerRecord{AccountID: "123456789012", Region: "us-east-1", Target: SchedulerTarget{ARN: targetARN}}
+	call := buildTargetCall(rec, input)
+	if call.invalid != nil {
+		failureCode = call.invalid.Code
+	}
+	return call.req, failureCode, call.intent
+}
+
 // SchedTargetFailureForTest reads a dispatched target's answer as the Scheduler plugin does: ok is
 // false when the answer is a success, and otherwise code, message and retryable describe the
 // failure (#1501).
@@ -1883,10 +1895,11 @@ func SchedTargetFailureForTest(resp *AWSResponse, err error) (code, message stri
 	return f.Code, f.Message, f.retryable(), true
 }
 
-// SchedQueryParamsForTest flattens a universal target's JSON Input into Query form parameters, as
-// the Scheduler plugin does for an awsQuery (or, with ec2, an EC2-protocol) target (#1501).
-func SchedQueryParamsForTest(input string, ec2 bool) (map[string]string, error) {
-	params, failure := schedQueryParams(input, ec2)
+// SchedQueryParamsForTest flattens a universal target's JSON Input into the Query form parameters
+// of sdkID's operation op, as the Scheduler plugin does for an awsQuery (or, for "ec2", an
+// EC2-protocol) target (#1501).
+func SchedQueryParamsForTest(input, sdkID, op string) (map[string]string, error) {
+	params, failure := schedQueryParams(input, sdkID, op, sdkID == "ec2")
 	if failure != nil {
 		return nil, fmt.Errorf("%s: %s", failure.Code, failure.Message)
 	}

@@ -98,11 +98,12 @@ type SchedulerEventBridgeParameters struct {
 
 // SchedulerRetryPolicy configures retry behavior for a schedule target.
 type SchedulerRetryPolicy struct {
-	// MaximumEventAgeInSeconds is the maximum age in seconds of an event
-	// before it is discarded.
-	MaximumEventAgeInSeconds int32 `json:"maximum_event_age_in_seconds"`
-	// MaximumRetryAttempts is the maximum number of retry attempts.
-	MaximumRetryAttempts int32 `json:"maximum_retry_attempts"`
+	// MaximumEventAgeInSeconds is the maximum age in seconds of an event before it is discarded;
+	// nil when the request named none, so the default applies (an explicit value is kept as sent).
+	MaximumEventAgeInSeconds *int32 `json:"maximum_event_age_in_seconds,omitempty"`
+	// MaximumRetryAttempts is the maximum number of retry attempts; nil when the request named
+	// none, so the default applies, where an explicit 0 means no retries.
+	MaximumRetryAttempts *int32 `json:"maximum_retry_attempts,omitempty"`
 }
 
 // SchedulerFlexibleTimeWindow configures the flexible time window for a schedule.
@@ -172,10 +173,12 @@ type schedulerEventBridgeInput struct {
 	Source     string `json:"Source"`
 }
 
-// schedulerRetryPolicyInput is the `RetryPolicy` object as AWS publishes it.
+// schedulerRetryPolicyInput is the `RetryPolicy` object as AWS publishes it. Both members are
+// `Required: No`, so they are pointers: an absent member takes the default (see
+// scheduler_clock.go), and an explicit 0 retry attempts means none.
 type schedulerRetryPolicyInput struct {
-	MaximumEventAgeInSeconds int32 `json:"MaximumEventAgeInSeconds"`
-	MaximumRetryAttempts     int32 `json:"MaximumRetryAttempts"`
+	MaximumEventAgeInSeconds *int32 `json:"MaximumEventAgeInSeconds"`
+	MaximumRetryAttempts     *int32 `json:"MaximumRetryAttempts"`
 }
 
 // schedulerFlexibleTimeWindowInput is the `FlexibleTimeWindow` object as AWS publishes it.
@@ -647,7 +650,17 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if err := p.removeSchedule(context.Background(), ctx.AccountID, ctx.Region, groupName, name); err != nil {
+	goCtx := context.Background()
+	// `API_DeleteSchedule` publishes ResourceNotFoundException/404; a delete of a schedule that
+	// does not exist answered 200 until #1501.
+	existing, err := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, name))
+	if err != nil {
+		return nil, fmt.Errorf("scheduler deleteSchedule state.Get: %w", err)
+	}
+	if existing == nil {
+		return nil, schedulerNotFound(name, groupName)
+	}
+	if err := p.removeSchedule(goCtx, ctx.AccountID, ctx.Region, groupName, name); err != nil {
 		return nil, fmt.Errorf("scheduler deleteSchedule: %w", err)
 	}
 
@@ -686,6 +699,11 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	goCtx := context.Background()
 	groups := []string{groupName}
 	if groupName == "" {
+		// The default group is materialized first, so a default-group schedule stored before
+		// groups were indexed (#1501) still lists: the group index is what this listing walks.
+		if err := p.ensureDefaultGroup(goCtx, ctx.AccountID, ctx.Region); err != nil {
+			return nil, err
+		}
 		var err error
 		if groups, err = p.groupNames(goCtx, ctx.AccountID, ctx.Region); err != nil {
 			return nil, fmt.Errorf("scheduler listSchedules groups: %w", err)
@@ -810,8 +828,8 @@ type schedWireTarget struct {
 
 // schedWireRetryPolicy is the wire-format representation of a retry policy.
 type schedWireRetryPolicy struct {
-	MaximumEventAgeInSeconds int32 `json:"MaximumEventAgeInSeconds"`
-	MaximumRetryAttempts     int32 `json:"MaximumRetryAttempts"`
+	MaximumEventAgeInSeconds *int32 `json:"MaximumEventAgeInSeconds,omitempty"`
+	MaximumRetryAttempts     *int32 `json:"MaximumRetryAttempts,omitempty"`
 }
 
 // schedWireFlexibleTimeWindow is the wire-format flexible time window.
