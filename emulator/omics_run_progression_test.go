@@ -366,7 +366,7 @@ func TestOmicsRun_AStoreFaultIsAnError(t *testing.T) {
 			seed, err := json.Marshal(map[string]any{"runId": "*", "pendingObservations": 3})
 			require.NoError(t, err)
 			require.NoError(t, fault.Put(context.Background(), "omics-run-ctrl", "status:*", seed))
-			started := omicsDirect(t, p, ctx, http.MethodPost, "/run", `{"name":"fault"}`)
+			started := omicsDirect(t, p, ctx, http.MethodPost, "/run", `{"name":"fault","requestId":"fault","roleArn":"arn:aws:iam::123456789012:role/omics","outputUri":"s3://omics-out/fault"}`)
 			var out struct {
 				ID string `json:"id"`
 			}

@@ -48,7 +48,7 @@ func cloudfrontConfigServer(t *testing.T, createBody string) (*emulator.TestServ
 // and substrate answered the same fields for both.
 func TestCloudFront_ADistributionConfigCarriesOnlyItsOwnMembers(t *testing.T) {
 	ts, distID := cloudfrontConfigServer(t,
-		`<DistributionConfig><Comment>a described distribution</Comment><Enabled>true</Enabled></DistributionConfig>`)
+		`<DistributionConfig><CallerReference>described</CallerReference><Comment>a described distribution</Comment><Enabled>true</Enabled></DistributionConfig>`)
 
 	status, config := cloudfrontRequest(t, ts, http.MethodGet,
 		"/2020-05-31/distribution/"+distID+"/config", "", "")
@@ -67,18 +67,20 @@ func TestCloudFront_ADistributionConfigCarriesOnlyItsOwnMembers(t *testing.T) {
 	assert.NotContains(t, config, "<Id>", "Id is a Distribution member, published one level up")
 	assert.NotContains(t, config, "<ARN>", "ARN is a Distribution member, published one level up")
 
-	// The three Required: Yes members substrate records no value for. Asserted absent so the
-	// recorded divergence is pinned: if a later change starts answering them, it answers them
-	// deliberately rather than with an invented empty shape.
-	for _, member := range []string{"CallerReference", "Origins", "DefaultCacheBehavior"} {
+	// CallerReference is Required: Yes and, since #1116, required by the create, so it is answered.
+	assert.Contains(t, config, "<CallerReference>described</CallerReference>",
+		"the create's CallerReference is answered back (#1116)")
+
+	// The two Required: Yes members substrate records no value for when the create omits them.
+	// Asserted absent so the recorded divergence is pinned: if a later change starts answering
+	// them, it answers them deliberately rather than with an invented empty shape.
+	for _, member := range []string{"Origins", "DefaultCacheBehavior"} {
 		assert.NotContains(t, config, "<"+member+">",
 			"%s is Required: Yes and CreateDistribution records no value for it", member)
 	}
 
 	// The anchor: the sibling operation returns a Distribution, where both members are
-	// published and must appear. (That document carries Comment and Enabled too, which are
-	// DistributionConfig members rather than Distribution ones — a separate leak, in a
-	// separate function, not this issue's.)
+	// published and must appear.
 	status, dist := cloudfrontRequest(t, ts, http.MethodGet, "/2020-05-31/distribution/"+distID, "", "")
 	require.Equal(t, http.StatusOK, status, "GetDistribution: %s", dist)
 	assert.Contains(t, dist, "<Id>"+distID+"</Id>", "Distribution publishes Id as Required: Yes")
@@ -91,7 +93,7 @@ func TestCloudFront_ADistributionConfigCarriesOnlyItsOwnMembers(t *testing.T) {
 // unconditionally, so a distribution created without one must answer an empty element rather
 // than drop the member.
 func TestCloudFront_AnEmptyCommentIsStillAnswered(t *testing.T) {
-	ts, distID := cloudfrontConfigServer(t, `<DistributionConfig><Enabled>true</Enabled></DistributionConfig>`)
+	ts, distID := cloudfrontConfigServer(t, `<DistributionConfig><CallerReference>no-comment</CallerReference><Enabled>true</Enabled></DistributionConfig>`)
 
 	status, config := cloudfrontRequest(t, ts, http.MethodGet,
 		"/2020-05-31/distribution/"+distID+"/config", "", "")
@@ -113,7 +115,7 @@ func TestCloudFront_AnEmptyCommentIsStillAnswered(t *testing.T) {
 // UnknownOperationException, so NoSuchDistribution means the empty ID reached the handler.
 func TestCloudFront_AnEmptyDistributionIDIsRefusedNotAnswered(t *testing.T) {
 	ts, distID := cloudfrontConfigServer(t,
-		`<DistributionConfig><Comment>present</Comment><Enabled>true</Enabled></DistributionConfig>`)
+		`<DistributionConfig><CallerReference>present</CallerReference><Comment>present</Comment><Enabled>true</Enabled></DistributionConfig>`)
 
 	for _, tc := range []struct {
 		name      string

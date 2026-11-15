@@ -29,17 +29,17 @@ func TestOmicsWire_RunResponsesCarryNoBookkeepingMember(t *testing.T) {
 
 	started := call(http.MethodPost, "/run", map[string]any{
 		"workflowId": "1234567", "workflowType": "PRIVATE", "name": "wire-run",
-		"roleArn": "arn:aws:iam::123456789012:role/wire", "outputUri": "s3://wire-bucket/out",
+		"roleArn": "arn:aws:iam::123456789012:role/wire", "outputUri": "s3://wire-bucket/out", "requestId": "wire-req",
 	})
 	var run struct {
 		ID string `json:"id"`
 	}
 	require.NoError(t, json.Unmarshal(started, &run), "decode StartRun: %s", started)
 	require.NotEmpty(t, run.ID, "StartRun must report an id: %s", started)
-	wireRequireHeld(t, state, "omics", "run:123456789012/us-east-1/"+run.ID, "accountID", "region")
+	wireRequireHeld(t, state, "omics", "run:123456789012/us-east-1/"+run.ID, "accountID", "region", "requestId")
 
 	got := call(http.MethodGet, "/run/"+run.ID, nil)
-	wireRunJSON(t, []string{"AccountID", "Region"}, []wireCase{
+	wireRunJSON(t, []string{"AccountID", "Region", "requestId"}, []wireCase{
 		{op: "StartRun", held: started, anchor: `"id":"` + run.ID + `"`},
 		{op: "GetRun", held: got, anchor: `"name":"wire-run"`},
 		{op: "ListRuns", call: func() []byte { return call(http.MethodGet, "/run", nil) }, anchor: `"id":"` + run.ID + `"`},
@@ -48,7 +48,7 @@ func TestOmicsWire_RunResponsesCarryNoBookkeepingMember(t *testing.T) {
 	// After the walk. GetRun answers the published members the record models, and no others.
 	var out map[string]json.RawMessage
 	require.NoError(t, json.Unmarshal(got, &out), "decode GetRun: %s", got)
-	require.Equal(t, []string{"id", "name", "outputUri", "roleArn", "status", "workflowId", "workflowType"},
+	require.Equal(t, []string{"arn", "id", "name", "networkingMode", "outputUri", "roleArn", "runOutputUri", "status", "uuid", "workflowId", "workflowType"},
 		slices.Sorted(maps.Keys(out)), "GetRun: %s", got)
 }
 

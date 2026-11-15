@@ -142,8 +142,8 @@ func TestCloudFrontCreate_RecordsWhatTheBodyHolds(t *testing.T) {
 		body string
 		want string
 	}{
-		{"a wrapped configuration", "<CreateDistributionRequest><DistributionConfig><Comment>w</Comment><Enabled>false</Enabled></DistributionConfig></CreateDistributionRequest>",
-			"<DistributionConfig><Comment>w</Comment><Enabled>false</Enabled><Aliases><Quantity>0</Quantity></Aliases></DistributionConfig>"},
+		{"a wrapped configuration", "<CreateDistributionRequest><DistributionConfig><CallerReference>w</CallerReference><Comment>w</Comment><Enabled>false</Enabled></DistributionConfig></CreateDistributionRequest>",
+			"<DistributionConfig><CallerReference>w</CallerReference><Comment>w</Comment><Enabled>false</Enabled><Aliases><Quantity>0</Quantity></Aliases></DistributionConfig>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

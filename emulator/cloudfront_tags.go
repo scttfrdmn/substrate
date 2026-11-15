@@ -44,11 +44,12 @@ import (
 // tagging. See this file's preamble for the types deliberately refused and why.
 const cfDistributionResourceType = "distribution"
 
-// CloudFront state-key prefixes. The namespace holds six kinds: a distribution record, the
+// CloudFront state-key prefixes. The namespace holds seven kinds: a distribution record, the
 // per-account index of distribution IDs, an invalidation record, the per-distribution index of
-// invalidation IDs, an origin access control record and the per-account index of origin access
-// control IDs. Only the distribution stores tags — the reference says so, in the sentence this
-// file's preamble quotes — hence [cfKeyIsTaggable] in front of the merge.
+// invalidation IDs, an origin access control record, the per-account index of origin access
+// control IDs, and a CallerReference's entry in the per-account reference index (#1116). Only the
+// distribution stores tags — the reference says so, in the sentence this file's preamble quotes —
+// hence [cfKeyIsTaggable] in front of the merge.
 //
 // Every prefix is tested colon-terminated, because "cfdist" is a prefix of "cfdist_ids",
 // "cfinval" of "cfinval_ids" and "cfoac" of "cfoac_ids". A bare-prefix test would report the
@@ -60,6 +61,7 @@ const (
 	cfInvalIDsKeyPrefix = "cfinval_ids:"
 	cfOACKeyPrefix      = "cfoac:"
 	cfOACIDsKeyPrefix   = "cfoac_ids:"
+	cfCallerRefPrefix   = "cfref:"
 )
 
 // cfGlobalRegion is the Region AWS attributes a CloudFront distribution to when a per-Region

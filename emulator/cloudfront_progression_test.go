@@ -23,10 +23,13 @@ import (
 // cfProgSeedPath is the distribution-status seed endpoint.
 const cfProgSeedPath = "/v1/cloudfront/distribution-status"
 
-// cfProgConfig is a configuration CreateDistribution accepts and UpdateDistribution can be sent
-// back as read: GetDistributionConfig answers it with the defaults the update requires.
-const cfProgConfig = `<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">` +
-	`<CallerReference>prog</CallerReference><Comment>prog</Comment><Enabled>true</Enabled></DistributionConfig>`
+// cfProgConfig is a configuration CreateDistribution accepts under CallerReference ref (#1116), and
+// that UpdateDistribution can be sent back as read: GetDistributionConfig answers it with the
+// defaults the update requires.
+func cfProgConfig(ref string) string {
+	return `<DistributionConfig xmlns="http://cloudfront.amazonaws.com/doc/2020-05-31/">` +
+		`<CallerReference>` + ref + `</CallerReference><Comment>prog</Comment><Enabled>true</Enabled></DistributionConfig>`
+}
 
 // cfProgStatus matches the Status element of a distribution document.
 var cfProgStatus = regexp.MustCompile(`<Status>([^<]*)</Status>`)
@@ -60,9 +63,9 @@ func cfProgSeed(t *testing.T, ts *emulator.TestServer, body string) {
 }
 
 // cfProgCreate creates a distribution and returns its ID, ETag and the Status the create reported.
-func cfProgCreate(t *testing.T, ts *emulator.TestServer) (id, etag, status string) {
+func cfProgCreate(t *testing.T, ts *emulator.TestServer, ref string) (id, etag, status string) {
 	t.Helper()
-	code, body, etag := cfProgCall(t, ts, http.MethodPost, "/2020-05-31/distribution", "", cfProgConfig)
+	code, body, etag := cfProgCall(t, ts, http.MethodPost, "/2020-05-31/distribution", "", cfProgConfig(ref))
 	require.Equal(t, http.StatusCreated, code, "CreateDistribution: %s", body)
 	id = regexp.MustCompile(`<Id>([^<]+)</Id>`).FindStringSubmatch(body)[1]
 	return id, etag, cfProgStatus.FindStringSubmatch(body)[1]
@@ -95,7 +98,7 @@ func cfProgUpdate(t *testing.T, ts *emulator.TestServer, id, etag string, enable
 func TestCloudFrontProgression_AnUnseededDistributionIsDeployedAtOnce(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
-	id, etag, created := cfProgCreate(t, ts)
+	id, etag, created := cfProgCreate(t, ts, "prog")
 	assert.Equal(t, "Deployed", created, "the default window is zero observations, as before #1381")
 	got, _ := cfProgGet(t, ts, id)
 	assert.Equal(t, "Deployed", got)
@@ -108,7 +111,7 @@ func TestCloudFrontProgression_ASeededWindowIsObservedAfterCreateAndAfterUpdate(
 	ts := emulator.StartTestServer(t)
 	cfProgSeed(t, ts, `{"distributionId":"*","inProgressObservations":2}`)
 
-	id, etag, created := cfProgCreate(t, ts)
+	id, etag, created := cfProgCreate(t, ts, "prog")
 	assert.Equal(t, "InProgress", created, "the create's response peeks at the first observation")
 	var seen []string
 	for range 3 {
@@ -136,8 +139,8 @@ func TestCloudFrontProgression_ListDistributionsObservesEachDistributionOnce(t *
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 	cfProgSeed(t, ts, `{"distributionId":"*","inProgressObservations":1}`)
-	cfProgCreate(t, ts)
-	cfProgCreate(t, ts)
+	cfProgCreate(t, ts, "prog-1")
+	cfProgCreate(t, ts, "prog-2")
 
 	list := func() []string {
 		code, body, _ := cfProgCall(t, ts, http.MethodGet, "/2020-05-31/distribution", "", "")
@@ -155,8 +158,8 @@ func TestCloudFrontProgression_ListDistributionsObservesEachDistributionOnce(t *
 func TestCloudFrontProgression_AnIDSeedWinsAndClearingRestoresDeployed(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
-	idA, _, _ := cfProgCreate(t, ts)
-	idB, _, _ := cfProgCreate(t, ts)
+	idA, _, _ := cfProgCreate(t, ts, "prog-a")
+	idB, _, _ := cfProgCreate(t, ts, "prog-b")
 	cfProgSeed(t, ts, `{"distributionId":"*","inProgressObservations":1}`)
 	cfProgSeed(t, ts, `{"distributionId":"`+idA+`","inProgressObservations":3}`)
 
@@ -197,7 +200,7 @@ func TestCloudFrontProgression_ADisabledDistributionDeletesDuringTheWindow(t *te
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 	cfProgSeed(t, ts, `{"distributionId":"*","inProgressObservations":5}`)
-	id, etag, _ := cfProgCreate(t, ts)
+	id, etag, _ := cfProgCreate(t, ts, "prog")
 
 	disabled, etag := cfProgUpdate(t, ts, id, etag, false)
 	require.Equal(t, "InProgress", disabled, "the disable is an update, so it is in progress")
@@ -212,7 +215,7 @@ func TestCloudFrontProgression_ADisabledDistributionDeletesDuringTheWindow(t *te
 func TestCloudFrontProgression_ASeededWindowReplaysIdentically(t *testing.T) {
 	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
 	cfProgSeed(t, ts, `{"distributionId":"*","inProgressObservations":2}`)
-	id, etag, _ := cfProgCreate(t, ts)
+	id, etag, _ := cfProgCreate(t, ts, "prog")
 	for range 3 {
 		cfProgGet(t, ts, id)
 	}
@@ -276,7 +279,7 @@ func TestCloudFrontProgression_AStoreFaultIsAnError(t *testing.T) {
 			require.NoError(t, err)
 			require.NoError(t, fault.inner.Put(context.Background(), "cloudfront-dist-ctrl", "status:*", seed))
 			resp, err := p.HandleRequest(ctx, &emulator.AWSRequest{
-				Service: "cloudfront", HTTPMethod: http.MethodPost, Path: "/2020-05-31/distribution", Body: []byte(cfProgConfig),
+				Service: "cloudfront", HTTPMethod: http.MethodPost, Path: "/2020-05-31/distribution", Body: []byte(cfProgConfig("prog")),
 				Headers: map[string]string{"Content-Type": "application/xml"}, Params: map[string]string{},
 			})
 			require.NoError(t, err, "the healthy create")
@@ -325,7 +328,7 @@ func TestCloudFrontProgression_ADeleteCountdownFaultIsAnError(t *testing.T) {
 		}
 		return p.HandleRequest(ctx, &emulator.AWSRequest{Service: "cloudfront", HTTPMethod: method, Path: path, Body: []byte(body), Headers: headers, Params: map[string]string{}})
 	}
-	resp, err := call(http.MethodPost, "/2020-05-31/distribution", "", cfProgConfig)
+	resp, err := call(http.MethodPost, "/2020-05-31/distribution", "", cfProgConfig("prog"))
 	require.NoError(t, err)
 	id := regexp.MustCompile(`<Id>([^<]+)</Id>`).FindStringSubmatch(string(resp.Body))[1]
 	cfgResp, err := call(http.MethodGet, "/2020-05-31/distribution/"+id+"/config", "", "")

@@ -9,7 +9,9 @@ package emulator
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
 	"strings"
 )
@@ -88,13 +90,23 @@ func (d *StackDeployer) deployCloudFrontDistribution(
 	// the request.
 	comment := resolveNestedStringProp(props, "DistributionConfig", "Comment", logicalID, cctx)
 
-	body := []byte(`<DistributionConfig><Comment>` + comment + `</Comment><Enabled>true</Enabled></DistributionConfig>`)
+	// Built as the plugin's own configuration tree and marshaled by the plugin's own renderer, so
+	// the deployer cannot send a document the plugin would not write (and a Comment carrying `&`
+	// or `<` is escaped rather than breaking the document).
+	cfg := cfConfigNode{XMLName: xml.Name{Local: "DistributionConfig"}}
+	cfg.setText("CallerReference", cfnDistributionCallerReference(cctx, logicalID))
+	cfg.setText("Comment", comment)
+	cfg.setText("Enabled", "true")
+	body, err := cfMarshalConfig(cfg)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployCloudFrontDistribution marshal: %w", err)
+	}
 
 	req := &AWSRequest{
 		Service:   "cloudfront",
 		Operation: "POST",
 		Path:      "/2020-05-31/distribution",
-		Body:      body,
+		Body:      []byte(body),
 		Headers:   map[string]string{},
 		Params:    map[string]string{},
 	}
@@ -121,6 +133,34 @@ func (d *StackDeployer) deployCloudFrontDistribution(
 		}
 	}
 	return dr, cost, nil
+}
+
+// cfnDistributionCallerReference derives the CallerReference a stack's distribution is created with.
+//
+// CreateDistribution requires one and refuses one already used (#1116), and
+// AWS::CloudFront::Distribution has no property for it: CloudFormation supplies its own. The value
+// is {stack}-{logicalId}-{suffix}, where the suffix is the first 16 hex characters of SHA-256 over
+// the stack's ARN, the logical ID and the physical ID the previous deployment recorded for the
+// resource ("" on a first create).
+//
+// Three properties, and the inputs are chosen for them. A replay of the deployment derives the same
+// reference, because every input is recorded state rather than a draw. A replacement (#1427) gets a
+// fresh one, because the distribution it replaces is its prior physical ID — so the replacement can
+// be created while the old distribution still holds the old reference, as an update requires. And
+// nothing is drawn from the deployment's mint, so the internal request IDs, and every identifier
+// minted after this resource, are what they were before #1116: an older recording of the stack
+// replays unchanged.
+//
+// One collision remains. Substrate derives a stack's ARN from its name, so a stack deleted with its
+// distribution retained (DeletionPolicy: Retain) and re-created under the same name derives the
+// retained distribution's reference again, and the create answers the published
+// DistributionAlreadyExists. Real CloudFormation mints a fresh stack ID there; substrate's stack
+// IDs are not minted, which is the older and wider divergence this inherits.
+func cfnDistributionCallerReference(cctx *cfnContext, logicalID string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		cfnStackARN(cctx.region, cctx.accountID, cctx.stackName), logicalID, cctx.priorPhysicalID,
+	}, "\x00")))
+	return cctx.stackName + "-" + logicalID + "-" + hex.EncodeToString(sum[:8])
 }
 
 // cfnOAIIDChars are the characters an origin access identity's ID is built from.

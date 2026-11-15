@@ -981,7 +981,8 @@ func generateReplayID() string {
 //
 // The second half was missing until #886. Most of what a plugin mutates lives in
 // the state manager, but a few plugins hold their own — the S3 version-ID counter,
-// the SES v2 message counter, the HealthOmics random source — and nothing reset
+// the SES v2 message counter, and (until #1166 moved it onto the request mint) the
+// HealthOmics random source — and nothing reset
 // those. So replaying one stream twice in a single process minted different
 // identifiers each time from identical recorded events, which is the property the
 // event log exists to rule out.

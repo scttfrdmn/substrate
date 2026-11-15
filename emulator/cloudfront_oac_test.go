@@ -363,7 +363,7 @@ func TestCloudFront_CreateDistributionWithTagsTagsTheDistributionItCreates(t *te
 	p, ctx := setupCloudFrontPlugin(t)
 
 	body := `<DistributionConfigWithTags>` +
-		cfDistributionConfigXML +
+		cfTestConfigXML("oac-tagged") +
 		`<Tags><Items>` +
 		`<Tag><Key>env</Key><Value>test</Value></Tag>` +
 		`<Tag><Key>owner</Key><Value>substrate</Value></Tag>` +
@@ -458,7 +458,7 @@ func TestReplay_ACloudFrontCreateReplaysWithTheIdentifiersItMinted(t *testing.T)
 		ID string `xml:"Id"`
 	}
 	distBody, _ := cfReplayCall(t, ts, http.MethodPost, "/2020-05-31/distribution",
-		cfDistributionConfigXML)
+		cfTestConfigXML("oac-replay"))
 	require.NoError(t, xml.Unmarshal(distBody, &dist))
 	require.NotEmpty(t, dist.ID)
 
