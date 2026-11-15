@@ -1,0 +1,57 @@
+{
+  "metadata": {"apiVersion": "2010-03-31", "protocol": "query"},
+  "operations": {
+    "CreateTopic": {"input": {"shape": "CreateTopicInput"}},
+    "Publish": {"input": {"shape": "PublishInput"}},
+    "SetTopicAttributes": {"input": {"shape": "SetTopicAttributesInput"}},
+    "ListTopics": {},
+    "NotRoutedBySubstrate": {"input": {"shape": "CreateTopicInput"}}
+  },
+  "shapes": {
+    "CreateTopicInput": {
+      "type": "structure",
+      "members": {
+        "Name": {"shape": "String"},
+        "Attributes": {"shape": "AttributeMap"},
+        "Tags": {"shape": "TagList"},
+        "Renamed": {"shape": "String", "locationName": "WireName"},
+        "Flat": {"shape": "FlatList"},
+        "FlatNamed": {"shape": "FlatNamedList"},
+        "Named": {"shape": "NamedList"},
+        "Nested": {"shape": "ListOfLists"},
+        "Loop": {"shape": "Recursive"}
+      }
+    },
+    "PublishInput": {
+      "type": "structure",
+      "members": {
+        "Message": {"shape": "String"},
+        "MessageAttributes": {"shape": "MessageAttributeMap", "locationName": "MessageAttributes"},
+        "FlatMap": {"shape": "FlatMap"}
+      }
+    },
+    "SetTopicAttributesInput": {
+      "type": "structure",
+      "members": {"AttributeName": {"shape": "String"}, "AttributeValue": {"shape": "String"}}
+    },
+    "AttributeMap": {"type": "map", "key": {"shape": "String"}, "value": {"shape": "String"}},
+    "MessageAttributeMap": {
+      "type": "map",
+      "key": {"shape": "String", "locationName": "Name"},
+      "value": {"shape": "MessageAttributeValue", "locationName": "Value"}
+    },
+    "MessageAttributeValue": {
+      "type": "structure",
+      "members": {"DataType": {"shape": "String"}, "Values": {"shape": "NamedList"}}
+    },
+    "FlatMap": {"type": "map", "key": {"shape": "String"}, "value": {"shape": "String"}, "flattened": true},
+    "TagList": {"type": "list", "member": {"shape": "Tag"}},
+    "Tag": {"type": "structure", "members": {"Key": {"shape": "String"}, "Value": {"shape": "String"}}},
+    "FlatList": {"type": "list", "member": {"shape": "String"}, "flattened": true},
+    "FlatNamedList": {"type": "list", "member": {"shape": "String", "locationName": "item"}, "flattened": true},
+    "NamedList": {"type": "list", "member": {"shape": "String", "locationName": "item"}},
+    "ListOfLists": {"type": "list", "member": {"shape": "NamedList"}},
+    "Recursive": {"type": "structure", "members": {"Again": {"shape": "Recursive", "locationName": "Deeper"}}},
+    "String": {"type": "string"}
+  }
+}

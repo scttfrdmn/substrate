@@ -16842,8 +16842,10 @@ The shape facts come from `emulator/scheduler_query_model_gen.go`, which `make s
 generates from the botocore models bundled with the locally installed AWS CLI v2 (the header records the
 model versions). It walks the input shape of every operation substrate routes for the twelve Query and
 EC2 SDK services and records only the paths whose serialization departs from the generic rule — a map, a
-flattened or renamed list, a renamed member. CI has no AWS CLI, so the table has no drift check;
-regenerate it when a Query plugin routes a new operation.
+flattened or renamed list, a renamed member. `go run ./cmd/gen-scheduler-query-model -check` reports
+a stale table, but CI has no AWS CLI to run it against, so regenerate it when a Query plugin routes a new
+operation. The emitter itself is tested in CI against fixture models in
+`cmd/gen-scheduler-query-model/testdata`.
 
 A universal target naming a service substrate does not emulate is recorded as intent too. An `Input`
 that is not a JSON object fails the invocation with `ValidationException`, as the guide's
