@@ -180,8 +180,9 @@ func TestS3_DeleteBucket_ClearsBucketScopedConfiguration(t *testing.T) {
 			state := emulator.NewMemoryStateManager()
 			srv := newS3TestServerWithState(t, state)
 
+			// ObjectWriter, so the bucket-ACL row's configure is accepted (#1474).
 			require.Equal(t, http.StatusOK,
-				s3Request(t, srv, http.MethodPut, "/recycled", nil, nil).Code)
+				s3Request(t, srv, http.MethodPut, "/recycled", nil, s3ACLsEnabled(nil)).Code)
 			sub.configure(t, srv)
 
 			stored, err := state.Get(context.Background(), "s3", sub.stateKey)
@@ -216,7 +217,7 @@ func TestS3_DeleteBucket_RecreatedBucketDoesNotInheritBPA(t *testing.T) {
 	t.Parallel()
 	srv, _ := newS3TestServer(t)
 
-	s3Request(t, srv, http.MethodPut, "/bpa-recycled", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/bpa-recycled", nil, s3ACLsEnabled(nil))
 	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut,
 		"/bpa-recycled?publicAccessBlock",
 		[]byte(`<PublicAccessBlockConfiguration>`+
@@ -236,7 +237,7 @@ func TestS3_DeleteBucket_RecreatedBucketDoesNotInheritBPA(t *testing.T) {
 	require.Equal(t, http.StatusNoContent,
 		s3Request(t, srv, http.MethodDelete, "/bpa-recycled", nil, nil).Code)
 	require.Equal(t, http.StatusOK,
-		s3Request(t, srv, http.MethodPut, "/bpa-recycled", nil, nil).Code)
+		s3Request(t, srv, http.MethodPut, "/bpa-recycled", nil, s3ACLsEnabled(nil)).Code)
 
 	w := s3Request(t, srv, http.MethodPut, "/bpa-recycled/obj", []byte("x"),
 		map[string]string{"x-amz-acl": "public-read"})
@@ -694,7 +695,7 @@ func TestS3_DeleteBucket_ClearsObjectScopedLeftovers(t *testing.T) {
 	srv := newS3TestServerWithState(t, state)
 
 	require.Equal(t, http.StatusOK,
-		s3Request(t, srv, http.MethodPut, "/leftovers", nil, nil).Code)
+		s3Request(t, srv, http.MethodPut, "/leftovers", nil, s3ACLsEnabled(nil)).Code)
 	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/leftovers/obj",
 		[]byte("x"), map[string]string{"x-amz-acl": "public-read"}).Code)
 

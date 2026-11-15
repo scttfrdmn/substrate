@@ -5378,7 +5378,7 @@ STS operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); tags the bucket from `CreateBucketConfiguration`'s `<Tags>` — see [Tag sets](#tag-sets); records `x-amz-object-ownership`, or the `BucketOwnerEnforced` default — see [Object Ownership](#object-ownership) |
+| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); tags the bucket from `CreateBucketConfiguration`'s `<Tags>` — see [Tag sets](#tag-sets); records `x-amz-object-ownership`, or the `BucketOwnerEnforced` default, and refuses an ACL granting others under it with `400 InvalidBucketAclWithObjectOwnership` — see [Object Ownership](#object-ownership) |
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
@@ -5393,8 +5393,8 @@ STS operations are free.
 | ListObjectVersions | `GET /{bucket}?versions`; honours `prefix`, and reports every version in one response — `max-keys` is echoed as 1000 and `key-marker` / `version-id-marker` are not read, so the result is never truncated. Keys come out lexicographically and versions within a key newest-first; a key in a bucket that was never versioned is reported as one version with `VersionId` `null`; a delete marker is reported under `<DeleteMarker>` rather than `<Version>` |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists); records the `x-amz-tagging` tag set for the assembled object — see [Tag sets](#tag-sets) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
-| UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
-| ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list |
+| UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part); authorized as `s3:PutObject` plus `s3:GetObject` on the source — see [Multipart and copy permissions](#multipart-and-copy-permissions) |
+| ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list; authorized as `s3:ListMultipartUploadParts` — see [Multipart and copy permissions](#multipart-and-copy-permissions) |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes, including a seedable `409 ConditionalRequestConflict` that invalidates the upload — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists); applies the upload's recorded tag set — see [Tag sets](#tag-sets) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
@@ -5404,10 +5404,10 @@ STS operations are free.
 | PutPublicAccessBlock | Records the configuration and enforces `BlockPublicAcls` / `BlockPublicPolicy`; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
 | GetPublicAccessBlock | `404 NoSuchPublicAccessBlockConfiguration` when the bucket has none — see [Block Public Access](#block-public-access) |
 | DeletePublicAccessBlock | Idempotent; removes only the configuration, never the bucket — see [Block Public Access](#block-public-access) |
-| GetBucketAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
-| PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
-| GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
-| PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
+| GetBucketAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists); the owner-only one whatever is stored when the bucket is `BucketOwnerEnforced` — see [Object Ownership](#object-ownership) |
+| PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `400 AccessControlListNotSupported` on a `BucketOwnerEnforced` bucket — see [Object Ownership](#object-ownership); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
+| GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists); the owner-only one whatever is stored when the bucket is `BucketOwnerEnforced` — see [Object Ownership](#object-ownership) |
+| PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `400 AccessControlListNotSupported` on a `BucketOwnerEnforced` bucket — see [Object Ownership](#object-ownership); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
 | GetBucketNotificationConfiguration | Reports the stored configuration in the API's element names; an unconfigured bucket is an empty `NotificationConfiguration` — see [Event notifications](#event-notifications) |
 | PutBucketNotificationConfiguration | Dispatches to Lambda, SQS and SNS on `PutObject`/`DeleteObject`; a body naming no recognized element is `400 MalformedXML` — see [Event notifications](#event-notifications) |
 | PutBucketTagging | Replaces the tag set; `400 InvalidTag` past 50 tags or a published length limit — see [Tag sets](#tag-sets) |
@@ -5427,7 +5427,7 @@ STS operations are free.
 | PutBucketEncryption | `PUT /{bucket}?encryption`; records the default `ServerSideEncryptionConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse or has no `Rule`, `400 InvalidArgument` for an unpublished `SSEAlgorithm` or a `KMSMasterKeyID` beside a non-KMS algorithm — see [Bucket default encryption](#bucket-default-encryption) |
 | GetBucketEncryption | `GET /{bucket}?encryption`; answers the recorded configuration, or the SSE-S3 default every bucket has — see [Bucket default encryption](#bucket-default-encryption) |
 | DeleteBucketEncryption | `DELETE /{bucket}?encryption`; `204`, idempotent, resets the default to SSE-S3 and never deletes the bucket — see [Bucket default encryption](#bucket-default-encryption) |
-| PutBucketOwnershipControls | `PUT /{bucket}?ownershipControls`; `200`, empty body, replacing the setting; `400 MalformedXML` for a body with no `Rule` or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`. Recorded, not enforced — see [Object Ownership](#object-ownership) |
+| PutBucketOwnershipControls | `PUT /{bucket}?ownershipControls`; `200`, empty body, replacing the setting; `400 MalformedXML` for a body with no `Rule` or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`; `400 InvalidBucketAclWithObjectOwnership` setting `BucketOwnerEnforced` on a bucket whose ACL grants others. Enforced — see [Object Ownership](#object-ownership) |
 | GetBucketOwnershipControls | `GET /{bucket}?ownershipControls`; a new bucket answers `BucketOwnerEnforced`, or what `CreateBucket`'s `x-amz-object-ownership` named; `404 OwnershipControlsNotFoundError` after `DeleteBucketOwnershipControls` — see [Object Ownership](#object-ownership) |
 | DeleteBucketOwnershipControls | `DELETE /{bucket}?ownershipControls`; `204`, idempotent, removes only the setting and never the bucket — see [Object Ownership](#object-ownership) |
 | SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
@@ -6270,9 +6270,11 @@ setting's third bullet says "PUT Bucket calls fail if the request includes a pub
 ACL", but the configuration that refuses such a call is the **account-level** one — a
 bucket-level configuration cannot exist before the bucket does. Substrate models no
 account-level Block Public Access, so gating this one operation would mean modeling a
-control the emulator does not otherwise have. A bucket created with `--acl public-read`
-therefore succeeds and reports the public grant, and the next `PutBucketAcl` on it is
-subject to whatever configuration has since been written.
+control the emulator does not otherwise have. A bucket created with `--acl public-read` and
+`x-amz-object-ownership: ObjectWriter` therefore succeeds and reports the public grant, and the next
+`PutBucketAcl` on it is subject to whatever configuration has since been written. Without the
+ownership header the create is refused anyway, by Object Ownership rather than by Block Public
+Access — see [Object Ownership](#object-ownership).
 
 **A public policy is decided by assuming public and then trying to disqualify —
 not by looking for `Principal: "*"`.** This is stronger than wildcard-detection and is
@@ -6409,11 +6411,27 @@ omits `x-amz-grant-write` (the permissions table gives `WRITE` no object meaning
 substrate records it there anyway rather than inventing a rejection no error code is
 documented for.
 
-**An `emailAddress` grantee is skipped, not refused.** S3 ended support for it — "As of
-October 1, 2025, Amazon S3 has discontinued support for Email Grantee Access Control
-Lists (ACLs) … the request will receive an `HTTP 405` (Method Not Allowed) error" — and
-substrate's clock is past that date, but the 405 is Region-conditional and applies to the
-XML body form too, so returning it is tracked separately rather than guessed at.
+**An email-address grantee is refused** ([#507](https://github.com/scttfrdmn/substrate/issues/507)),
+whether it arrives as `emailAddress=` in an `x-amz-grant-*` header or as an
+`AmazonCustomerByEmail` grantee in an XML body. Every ACL-bearing operation's API reference
+carries the same notice: "As of October 1, 2025, Amazon S3 has discontinued support for Email
+Grantee Access Control Lists (ACLs). If you attempt to use an Email Grantee ACL in a request after
+October 1, 2025, the request will receive an `HTTP 405` (Method Not Allowed) error", in eight
+named Regions. Substrate's clock is past that date, so the refusal is Region-gated by the bucket's
+Region:
+
+| Bucket Region | Answer |
+|---------------|--------|
+| `us-east-1`, `us-west-1`, `us-west-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-northeast-1`, `eu-west-1`, `sa-east-1` | `405 MethodNotAllowed` |
+| any other | `400 InvalidArgument` |
+
+The notice publishes a status and nothing else. `MethodNotAllowed` is the code S3's error list
+gives HTTP 405, and the message is substrate's own. Outside the eight Regions email grantees were
+never supported, so the notice says nothing about them; the `400 InvalidArgument` there is
+substrate's reading, not a capture. Either way nothing is written, which replaces the silent skip
+that stored the rest of the ACL and dropped the grantee. `PutObject`, `CopyObject`,
+`CreateMultipartUpload`, `CreateBucket`, `PutBucketAcl` and `PutObjectAcl` all refuse it. On a
+bucket whose Object Ownership disables ACLs, the Object Ownership refusal below answers first.
 
 **The two forms are documented mutually exclusive** — "If you use these ACL-specific
 headers, you cannot use the `x-amz-acl` header to set a canned ACL" — but no error code
@@ -6646,13 +6664,46 @@ must have the `s3:PutBucketOwnershipControls` permission", and there is no
 `s3:DeleteBucketOwnershipControls` action. A `CreateBucket` naming `x-amz-object-ownership` also
 needs `s3:PutBucketOwnershipControls`; see [Tag sets](#tag-sets) for the second authorization pass.
 
-**Recorded, not enforced.** Under `BucketOwnerEnforced` real S3 disables ACLs: a write naming an
-ACL other than `bucket-owner-full-control` fails with `400 AccessControlListNotSupported`, and
-setting `BucketOwnerEnforced` on a bucket whose ACL grants others fails with `400
-InvalidBucketAclWithObjectOwnership`. Substrate keeps accepting ACLs whatever the setting, so a
-bucket reporting `BucketOwnerEnforced` still honours one. Enforcing it by default would change the
-answer every existing ACL caller gets, so it is tracked separately in
-[#1474](https://github.com/scttfrdmn/substrate/issues/1474).
+**Enforced** ([#1474](https://github.com/scttfrdmn/substrate/issues/1474)). Under
+`BucketOwnerEnforced`, the default for every new bucket, ACLs are disabled: "Requests to set ACLs or
+update ACLs fail with a `400` error and return the `AccessControlListNotSupported` error code.
+Requests to read ACLs are still supported. Requests to read ACLs always return a response that shows
+full control for the bucket owner" (Object Ownership troubleshooting).
+
+| Request on a `BucketOwnerEnforced` bucket | Answer |
+|---|---|
+| `PutBucketAcl`, `PutObjectAcl`, or `PutObject` / `CopyObject` / `CreateMultipartUpload` with an ACL header, naming any ACL other than bucket owner full control | `400 AccessControlListNotSupported`, "The bucket does not allow ACLs"; nothing is written |
+| The same, with the `bucket-owner-full-control` canned ACL, or grants of `FULL_CONTROL` to the bucket owner and nobody else (an `x-amz-grant-full-control` header or an XML body) | accepted |
+| `PutObject` / `CopyObject` / `CreateMultipartUpload` naming no ACL | accepted |
+| `GetBucketAcl`, `GetObjectAcl` | `200`, the owner's `FULL_CONTROL` only |
+| `CreateBucket` with an ACL granting anyone but the owner (`BucketOwnerEnforced` named or defaulted) | `400 InvalidBucketAclWithObjectOwnership`; no bucket is created |
+| `PutBucketOwnershipControls(BucketOwnerEnforced)` on a bucket whose ACL grants anyone but the owner | `400 InvalidBucketAclWithObjectOwnership`; the setting is unchanged |
+
+The accepted forms are the guide's: buckets with ACLs disabled accept "`PUT` requests that do not
+specify an ACL or `PUT` requests with bucket owner full control ACLs, for example, the
+`bucket-owner-full-control` canned ACL or equivalent forms of this ACL expressed in XML". The canned
+`private` is refused, being no bucket owner full control ACL. `PutBucketAcl` and `PutObjectAcl` sent
+with no ACL resolve to `private`, so they are refused too. The Object Ownership check comes before
+the email-grantee refusal and before Block Public Access, so a public ACL on such a bucket is a 400,
+not a 403. The messages are the ones the troubleshooting page shows.
+
+`CreateBucket` answers `InvalidBucketAclWithObjectOwnership` rather than
+`AccessControlListNotSupported` because the troubleshooting page names that code for it: "if your
+`CreateBucket` request sets Bucket owner enforced and specifies a bucket ACL that provides access to
+an external AWS account, your request fails with a `400` error and returns the
+InvalidBucketAclWithObjectOwnership error code". An ACL granting only the owner, `private` included,
+is accepted at create. `PutBucketOwnershipControls` reads only the bucket's ACL; object ACLs do not
+block the setting.
+
+A stored ACL is kept while ACLs are disabled, not deleted, and is reported again when the bucket
+returns to `ObjectWriter` or `BucketOwnerPreferred`: "you can re-enable ACLs at any time after you
+disable them, and your preexisting bucket and object ACLs are restored".
+
+`BucketOwnerPreferred` and `ObjectWriter` keep ACLs enabled, as does a bucket whose ownership controls
+`DeleteBucketOwnershipControls` removed. That last case is how every bucket behaved before Object
+Ownership existed, and it is substrate's reading. **To write ACLs, create the bucket with
+`x-amz-object-ownership: ObjectWriter`** (or `BucketOwnerPreferred`), or set it afterwards with
+`PutBucketOwnershipControls`, as on AWS.
 
 ### CORS configuration
 

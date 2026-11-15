@@ -34,9 +34,12 @@ const pabAllTrue = `<?xml version="1.0" encoding="UTF-8"?>
 </PublicAccessBlockConfiguration>`
 
 // newPABBucket creates a bucket for a public-access-block test and returns its name.
+//
+// It opts into ObjectWriter, because the BlockPublicAcls tests write ACLs and a new bucket's default
+// BucketOwnerEnforced would refuse every one of them before Block Public Access is consulted (#1474).
 func newPABBucket(t *testing.T, srv *emulator.Server, name string) string {
 	t.Helper()
-	w := s3Request(t, srv, http.MethodPut, "/"+name, nil, nil)
+	w := s3Request(t, srv, http.MethodPut, "/"+name, nil, s3ACLsEnabled(nil))
 	require.Equal(t, http.StatusOK, w.Code, "CreateBucket %s: %s", name, w.Body.String())
 	return name
 }

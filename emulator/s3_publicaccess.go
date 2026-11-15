@@ -84,25 +84,6 @@ func (p *S3Plugin) s3BlocksPublicPolicy(ctx context.Context, bucket string) (boo
 	return cfg != nil && cfg.BlockPublicPolicy, nil
 }
 
-// s3RequestACLDenied returns the 403 to send when a create operation named a
-// public ACL on a bucket that blocks them, or nil when the write may proceed.
-//
-// A nil acl — the request named none — proceeds without consulting the bucket at
-// all. That short-circuit is safe rather than convenient: [s3RequestACL] returns
-// nil only when [s3RequestNamesACL] found none of the six headers in any case, so
-// there is nothing for either half of [S3Plugin.s3PublicACLDenied] to find, and the
-// resolved default ACL grants only the owner.
-//
-// PutObject, CopyObject, CreateMultipartUpload and CreateBucket all go through
-// here; PutBucketAcl and PutObjectAcl call s3PublicACLDenied directly, because an
-// ACL is never absent from those two — an empty body resolves to private.
-func (p *S3Plugin) s3RequestACLDenied(ctx context.Context, bucket string, acl *S3AccessControlList, headers map[string]string) (*AWSResponse, error) {
-	if acl == nil {
-		return nil, nil
-	}
-	return p.s3PublicACLDenied(ctx, bucket, *acl, headers)
-}
-
 // s3PublicACLDenied returns the 403 to send when a bucket blocks public ACLs and
 // the request carries one, or nil when the request may proceed.
 //

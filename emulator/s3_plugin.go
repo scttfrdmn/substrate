@@ -605,6 +605,12 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 	if ownErr != nil {
 		return ownErr, nil
 	}
+	// A bucket created with BucketOwnerEnforced — the default — cannot also be given an ACL
+	// granting anyone but its owner (#1474), and an email grantee is refused (#507). Both
+	// before anything is written; see s3_acl_enforcement.go.
+	if refusal := s3CreateBucketACLRefusal(req.Headers, bucket, ownership, region); refusal != nil {
+		return refusal, nil
+	}
 
 	b := S3Bucket{
 		Name:         bucket,
@@ -1017,7 +1023,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	// accepted such an upload with a 200 until this fix, which meant a bucket real S3
 	// would have refused took the object.
 	objectACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, objectACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, bucket, req.Headers, objectACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -1632,7 +1638,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	// before the body is written, so a refused copy leaves the destination key exactly
 	// as it was — the same all-or-nothing property PutObject has.
 	dstACL := s3RequestACL(req.Headers, dstBucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, dstBucket, dstACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, dstBucket, req.Headers, dstACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -2008,7 +2014,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	// against an upload whose Complete was always going to be refused. Nothing has been
 	// written at this point, so the refusal leaves no upload behind.
 	uploadACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, uploadACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, bucket, req.Headers, uploadACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -3590,6 +3596,17 @@ func (p *S3Plugin) getBucketACL(_ *RequestContext, _ *AWSRequest, bucket string)
 			"The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// A bucket with ACLs disabled reports the owner-full-control ACL whatever is stored
+	// (#1474): "Requests to read ACLs always return a response that shows full control
+	// for the bucket owner." The stored ACL is kept, to be restored if ACLs are re-enabled.
+	disabled, err := p.s3ACLsDisabled(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return s3XMLResponse(http.StatusOK, s3DefaultACL(bucket))
+	}
+
 	raw, err := p.state.Get(ctx, s3Namespace, "bucket_acl:"+bucket)
 	if err != nil {
 		return nil, fmt.Errorf("get bucket acl: %w", err)
@@ -3635,11 +3652,12 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLBucket)
 	}
 
-	// BlockPublicAcls rejects a PutBucketAcl carrying a public ACL, without
-	// modifying the ACL already in place (#458). The check runs after the ACL is
-	// resolved from whichever of the three forms the caller used, so a canned
-	// header, an XML grant and an x-amz-grant-* header are all covered.
-	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+	// A bucket whose Object Ownership disables ACLs refuses the write (#1474), an email
+	// grantee is refused (#507), and BlockPublicAcls rejects a public ACL (#458) — each
+	// without modifying the ACL already in place. The checks run after the ACL is
+	// resolved from whichever of the three forms the caller used, so a canned header,
+	// an XML grant and an x-amz-grant-* header are all covered.
+	if denied, err := p.s3ACLWriteRefusal(ctx, bucket, req.Headers, &acl, len(req.Body) > 0); err != nil {
 		return nil, err
 	} else if denied != nil {
 		return denied, nil
@@ -3672,6 +3690,16 @@ func (p *S3Plugin) getObjectACL(_ *RequestContext, _ *AWSRequest, bucket, key st
 	if existing == nil {
 		return s3ErrorResponse("NoSuchKey",
 			"The specified key does not exist.", http.StatusNotFound), nil
+	}
+
+	// As GetBucketAcl: the bucket's Object Ownership decides, there being no per-object
+	// setting (#1474).
+	disabled, err := p.s3ACLsDisabled(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return s3XMLResponse(http.StatusOK, s3DefaultACL(bucket))
 	}
 
 	raw, err := p.state.Get(ctx, s3Namespace, "object_acl:"+bucket+"/"+key)
@@ -3716,9 +3744,9 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLObject)
 	}
 
-	// The configuration consulted is the *bucket's*: Block Public Access has no
-	// per-object setting (#458).
-	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+	// The configuration consulted is the *bucket's*: neither Object Ownership (#1474) nor
+	// Block Public Access (#458) has a per-object setting.
+	if denied, err := p.s3ACLWriteRefusal(ctx, bucket, req.Headers, &acl, len(req.Body) > 0); err != nil {
 		return nil, err
 	} else if denied != nil {
 		return denied, nil

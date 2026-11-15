@@ -262,8 +262,9 @@ func TestS3_DeleteBucket_StateFaultsPropagate(t *testing.T) {
 			}
 			srv := newS3TestServerWithState(t, state)
 
+			// ObjectWriter, so a seed that writes an ACL is accepted (#1474).
 			require.Equal(t, http.StatusOK,
-				s3Request(t, srv, http.MethodPut, "/"+bucket, nil, nil).Code)
+				s3Request(t, srv, http.MethodPut, "/"+bucket, nil, s3ACLsEnabled(nil)).Code)
 			if tt.seed != nil {
 				tt.seed(t, srv)
 			}

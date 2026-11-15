@@ -543,7 +543,7 @@ func TestS3Plugin_BucketPolicy_Delete(t *testing.T) {
 func TestS3Plugin_BucketAcl_PutGet(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 
-	w := s3Request(t, srv, http.MethodPut, "/acl-bucket", nil, nil)
+	w := s3Request(t, srv, http.MethodPut, "/acl-bucket", nil, s3ACLsEnabled(nil))
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Get default ACL.
@@ -567,7 +567,7 @@ func TestS3Plugin_ObjectAcl_PutGet(t *testing.T) {
 	srv, _ := newS3TestServer(t)
 
 	// Create bucket and object.
-	s3Request(t, srv, http.MethodPut, "/obj-acl-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/obj-acl-bucket", nil, s3ACLsEnabled(nil))
 	w := s3Request(t, srv, http.MethodPut, "/obj-acl-bucket/myobj.txt", []byte("data"), nil)
 	require.Equal(t, http.StatusOK, w.Code)
 

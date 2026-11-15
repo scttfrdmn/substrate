@@ -325,6 +325,9 @@ type S3Grantee struct {
 	ID          string `xml:"ID,omitempty" json:"ID,omitempty"`
 	URI         string `xml:"URI,omitempty" json:"URI,omitempty"`
 	DisplayName string `xml:"DisplayName,omitempty" json:"DisplayName,omitempty"`
+	// EmailAddress is read from an AmazonCustomerByEmail grantee so the request can be refused
+	// (#507); no stored ACL carries one.
+	EmailAddress string `xml:"EmailAddress,omitempty" json:"EmailAddress,omitempty"`
 }
 
 // S3NotificationConfiguration holds event notification configurations for an S3
