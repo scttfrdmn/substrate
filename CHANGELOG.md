@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Service Quotas publishes EC2's vCPU quotas for On-Demand and Spot, and `ListAWSDefaultServiceQuotas` is routed (#1498).** `GetServiceQuota` for `L-34B43A08` was `NoSuchResourceException`, and `ListAWSDefaultServiceQuotas` was `UnknownOperationException`.
+  - **Quotas:** besides `L-1216C47A`, EC2 now has `L-34B43A08` ("All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests", 5 vCPU) and the F, G and VT, Inf, P and X quotas for both On-Demand and Spot (`L-74FC7D96`, `L-DB2E81BA`, `L-1945791B`, `L-417A185B`, `L-7295265B`, `L-88CF9481`, `L-3819A6DF`, `L-B5D1601B`, `L-7212CCBC`, `L-E3A00192`; 0 vCPU each). Codes, names and defaults come from the instance-type quotas page. DL, HPC, High Memory and Trn are not published.
+  - **Members:** every quota now carries `QuotaArn`. A default's ARN names no account, as the CLI reference's examples show. Each EC2 quota carries a `UsageMetric`: `AWS/Usage` `ResourceCount`, with `Service=EC2`, `Type=Resource`, `Resource=vCPU`, the class's `Class` and `MetricStatisticRecommendation` `Maximum`.
+  - **Listings:** `ListServices`, `ListServiceQuotas` and `ListAWSDefaultServiceQuotas` paginate on `MaxResults` (1–100, else `IllegalArgumentException`/400) and `NextToken` (`InvalidPaginationTokenException`/400 for a token substrate did not issue). `ListServiceQuotas` filters on `QuotaCode` and `QuotaAppliedAtLevel`.
+  - **Not enforced:** a launch beyond a quota still succeeds. Opt-in enforcement is #1499.
+- **CloudWatch reports EC2 vCPU usage in `AWS/Usage`, and `GetMetricStatistics` is routed (#1498).** `ResourceCount` with `Service=EC2`, `Type=Resource`, `Resource=vCPU` and `Class` `Standard/OnDemand`, `Standard/Spot`, `G/OnDemand`, … reports the vCPUs counting against that class. Before, `GetMetricData` returned no values while instances ran, and `GetMetricStatistics` was `UnknownOperationException`.
+  - **Derivation:** the usage is derived at request time from EC2's stored instances and Spot requests, using catalog vCPU counts. An instance counts while it reports `running`, under `…/Spot` when its `InstanceLifecycle` is `spot`. An instance an instance-state seed still has reporting `pending` does not count, and reading usage spends none of the seed's observations. An open Spot request with no instance counts its instance type against its Spot class, as the Spot quota page says it does.
+  - **Datapoint:** at most one per query, for the period holding the simulated clock. Periods are laid from the rounded `StartTime`. A window that does not reach the current period, including any window wholly in the past, gets none.
+  - **Statistics:** `Maximum`, `Minimum`, `Average` and percentiles are the value. `SampleCount` is `Period`/60. `Sum` is the value times that count.
+  - **Discovery:** a class has a metric once anything has counted against it, and then reads 0 rather than vanishing. `ListMetrics` lists those classes and honors a `Dimensions` filter.
+  - **`GetMetricStatistics`:** validates its required members, `Statistics` against `ExtendedStatistics`, `Period`, and the ceiling of 1,440 period starts before `EndTime` (`MissingParameter`, `InvalidParameterCombination` and `InvalidParameterValue`, all 400). It answers `Label` and `Datapoints`, which are empty for every other metric.
+- **Compatibility (Service Quotas and CloudWatch):** `GetMetricData`'s result shape, `ListMetrics`' dimension filtering, EC2's Service Quotas `ServiceName` and `Unit`, and `L-1216C47A`'s default all change; see Changed. The routed-operation catalog grows from 1,088 to 1,090.
+
+### Changed
+
+- **`GetMetricData` answers one `MetricDataResult` per query (#1498).** It answered an empty `MetricDataResults` list whatever was asked. Each result now carries `Id`, `Label`, `Timestamps`, `Values` and `StatusCode` `Complete`, and the lists are empty for any metric but an EC2 vCPU usage metric. A query with `ReturnData=false` gets only `Id` and `StatusCode`, as the reference's examples show. A `NextToken` is `InvalidNextToken`/400, since substrate never issues one.
+- **`ListMetrics` honors a `Dimensions` filter (#1498).** A metric published through `PutMetricData` is recorded without dimensions, so any dimension filter now excludes it; the filter used to be ignored.
+- **EC2's Service Quotas `ServiceName` is `Amazon Elastic Compute Cloud (Amazon EC2)`, and `L-1216C47A`'s `Unit` is `None` (#1498).** Both are what the CLI reference's examples show. They were `Amazon Elastic Compute Cloud` and `vCPU`. `L-1216C47A`'s applied value is still 32.
+- **`GetAWSDefaultServiceQuota` reports AWS's default rather than the applied value (#1498).** The two differ only for `L-1216C47A`, which now answers 5 where it answered 32.
+
 ## [v0.126.0] - 2026-11-14
 
 ### Added
