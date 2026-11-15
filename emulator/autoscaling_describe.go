@@ -404,13 +404,17 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 		members = append(members, g.Instances[idx])
 	}
 	// A decrement lowers desired by each instance's weight — its capacity units, one per
-	// instance for an unweighted group. The minimum-size check is against the full decrement,
-	// before the result is held at zero, so an unweighted group is refused exactly as it was.
-	decrementBy := 0
-	for i := range members {
-		decrementBy += members[i].weightOf()
-	}
-	if decrement && g.DesiredCapacity-decrementBy < g.MinSize {
+	// instance for an unweighted group — and holds it at MinSize, never below (#1526).
+	//
+	// The refusal is for a group whose desired capacity already equals its minimum, which is
+	// what the observed message says ("Currently, desiredSize equals minSize"). It used to be
+	// the full decrement taken below MinSize, which refused a weighted group whose member
+	// outweighs its desired capacity. AWS does not: in a vcpu-weighted group at MinSize 0 and
+	// DesiredCapacity 1, a decrementing terminate of a member of weight 2 succeeded, desired
+	// became 0 and the instance terminated (observed against us-west-2, recorded on #1526). So
+	// a decrement that would overshoot the minimum is clamped to it, which is the reading for
+	// a MinSize above zero too, where no observation has been made.
+	if decrement && g.DesiredCapacity <= g.MinSize {
 		// Observed wording.
 		return nil, asgValidationError("Currently, desiredSize equals minSize (%d). Terminating instance without replacement will violate group's min size constraint. Either set shouldDecrementDesiredCapacity flag to false or lower group's min size.", g.MinSize)
 	}
@@ -433,7 +437,7 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 		now := asgCauseTime(p.tc.Now())
 		cause := "At " + now + " instance " + id + " was taken out of service in response to a user request."
 		if decrement {
-			g.DesiredCapacity = max(g.DesiredCapacity-inst.weightOf(), 0)
+			g.DesiredCapacity = max(g.DesiredCapacity-inst.weightOf(), g.MinSize)
 			// The published sample: "…in response to a user request, shrinking the capacity
 			// from 4 to 3." The capacity is in the group's units.
 			cause = fmt.Sprintf("At %s instance %s was taken out of service in response to a user request, shrinking the capacity from %d to %d.", now, id, from, t.capacity)

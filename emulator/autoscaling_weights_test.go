@@ -518,6 +518,50 @@ func TestAutoScaling_DecrementBelowMinimumIsStillRefused(t *testing.T) {
 	assert.Len(t, e.group("p").Instances, 2, "the refusal terminated nothing")
 }
 
+// TestAutoScaling_AWeightedDecrementIsClampedAtMinSize is #1526: a decrementing terminate whose
+// instance outweighs what desired has left above MinSize clamps desired at MinSize and terminates,
+// as AWS was observed to do at MinSize 0, rather than being refused. Only a group already at
+// MinSize refuses.
+func TestAutoScaling_AWeightedDecrementIsClampedAtMinSize(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name             string
+		minSize, desired int
+		wantDesired      int
+		wantRefused      bool
+	}{
+		{"the observed case: MinSize 0, desired 1, weight 2", 0, 1, 0, false},
+		{"a decrement that lands on MinSize", 1, 3, 1, false},
+		{"a decrement that would overshoot MinSize", 2, 3, 2, false},
+		{"a group already at MinSize", 2, 2, 2, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			e := newASGEnv(t)
+			e.mustASG("CreateAutoScalingGroup", e.irGroup("w", "vcpu", tc.minSize, 32, tc.desired, nil))
+			g := e.group("w")
+			require.NotEmpty(t, g.Instances)
+			victim := g.Instances[0]
+			require.Equal(t, "2", victim.Weighted, "every member weighs two vCPUs")
+			before := len(g.Instances)
+
+			params := map[string]string{"InstanceId": victim.InstanceID, "ShouldDecrementDesiredCapacity": "true"}
+			if tc.wantRefused {
+				_, code, msg := e.asgErr("TerminateInstanceInAutoScalingGroup", params)
+				assert.Equal(t, "ValidationError", code)
+				assert.Contains(t, msg, "desiredSize equals minSize")
+				assert.Len(t, e.group("w").Instances, before, "the refusal terminated nothing")
+				return
+			}
+			e.mustASG("TerminateInstanceInAutoScalingGroup", params)
+			g = e.group("w")
+			assert.Equal(t, tc.wantDesired, g.Desired, "desired is held at MinSize, never below")
+			assert.NotContains(t, asgInstanceIDs(g), victim.InstanceID, "the instance is terminated")
+		})
+	}
+}
+
 // TestAutoScaling_WeightsAreStoredCanonically accepts a weight the reference's pattern would
 // exclude only by its spelling, as the live service does, and echoes the integer.
 func TestAutoScaling_WeightsAreStoredCanonically(t *testing.T) {
