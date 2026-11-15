@@ -372,10 +372,13 @@ func TestCFN_StampedStackIDIsTheStackTheAPIReports(t *testing.T) {
 
 // TestCFN_StampIsIdempotent pins that re-deploying a stack does not accumulate tags.
 //
-// The stamp is an upsert through the same writer CreateTags uses, so a second deployment
-// rewrites the three values rather than appending three more. That matters because an
-// UpdateStack re-creates unchanged resources here, so the second pass is the normal case
-// rather than an edge one.
+// The stamp is an upsert through the same writer CreateTags uses, so a deployment that
+// reaches a resource again rewrites the three values rather than appending three more.
+//
+// Until #1427 a second deployment of the same template minted a second gateway, and this
+// test asserted only that the first one's tags were untouched. An unchanged resource is now
+// kept: the gateway keeps its ID, no second gateway exists, and it still carries exactly the
+// three tags.
 func TestCFN_StampIsIdempotent(t *testing.T) {
 	f := newCFNStampFixture(t, nil)
 	const stackName = "twice-stack"
@@ -386,10 +389,9 @@ func TestCFN_StampIsIdempotent(t *testing.T) {
 	igw := physicalIDs(t, first)["Igw"]
 	require.Len(t, f.tagsFor(t, igw), 3)
 
-	// A second deployment of the same template mints a second gateway; the first one's tags
-	// must be untouched and un-duplicated.
-	_, err = f.deployer.Deploy(context.Background(), tmpl, stackName, nil)
+	second, err := f.deployer.Deploy(context.Background(), tmpl, stackName, nil)
 	require.NoError(t, err)
+	assert.Equal(t, igw, physicalIDs(t, second)["Igw"], "the unchanged gateway is kept, not re-minted")
 	assert.Len(t, f.tagsFor(t, igw), 3, "the stamp upserts rather than appends")
 }
 

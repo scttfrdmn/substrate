@@ -121,10 +121,12 @@ const cfnGeneratedNameSuffixLen = 12
 // The name is {stackName}-{logicalID}-{suffix}, the shape CloudFormation
 // documents. The suffix is *derived* — FNV-64a over the account, Region, stack
 // name and logical ID — where CloudFormation uses a random one. That divergence
-// is deliberate and load-bearing: UpdateStack in substrate is a re-Deploy of the
-// whole template (see clearUnchangedRedeploys), so a name regenerated per
-// deploy would mint a fresh resource on every update and leak the one it
-// replaced. Deriving it makes the name stable for a given (account, Region,
+// is deliberate and load-bearing. Through v0.127.0 UpdateStack re-created every
+// resource, so a name regenerated per deploy minted a fresh resource on every
+// update and leaked the one it replaced. An unchanged resource is now kept (#1427),
+// but a changed one whose type has no update path is still re-created, and its
+// generated name must come out the same for the re-create to be the same resource
+// rather than a replacement. Deriving it makes the name stable for a given (account, Region,
 // stack, logical ID) while still differing between stacks, which is the property
 // #560 needs, and keeps the emulator deterministic by construction.
 //

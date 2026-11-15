@@ -20,10 +20,79 @@ import (
 // (#388). Each handler dispatches the real API action, so the deployed resource
 // is observable through the corresponding Describe call.
 
+// cfnLaunchTemplateMetadataOptions are the five MetadataOptions members of an
+// AWS::EC2::LaunchTemplate's LaunchTemplateData, spelled as both the template and
+// RequestLaunchTemplateData spell them. HttpPutResponseHopLimit is the integer one and is
+// rendered separately.
+var cfnLaunchTemplateMetadataOptions = []string{"HttpEndpoint", "HttpProtocolIpv6", "HttpTokens", "InstanceMetadataTags"}
+
+// cfnLaunchTemplateDataParams renders a template's LaunchTemplateData as the
+// LaunchTemplateData.* query parameters CreateLaunchTemplate and CreateLaunchTemplateVersion
+// both take.
+//
+// MetadataOptions and DisableApiTermination are forwarded since #1508. EC2 has stored and
+// validated both since #1471, so an instance launched from the template receives them, but the
+// deployer forwarded only the five members below and dropped both: a CDK template with
+// requireImdsv2 — which emits MetadataOptions.HttpTokens: required — launched instances that did
+// not require IMDSv2. The values are not checked here. EC2's own check runs on the request, and a
+// value it refuses fails the resource with EC2's code and message, which is what a CloudFormation
+// deploy reports for a property the service rejects.
+//
+// HttpPutResponseHopLimit is an Integer on the template's MetadataOptions page, and a template
+// may write it as a number or as a string (a Ref to a Number parameter resolves to one). A whole
+// number is rendered as one, so 2.0 out of the JSON decoder is sent as "2" rather than in a float
+// form EC2 would refuse; anything else is sent as it resolved, for EC2 to refuse.
+func cfnLaunchTemplateDataParams(props map[string]interface{}, cctx *cfnContext) map[string]string {
+	params := map[string]string{}
+	data, ok := props["LaunchTemplateData"].(map[string]interface{})
+	if !ok {
+		return params
+	}
+	for cfnKey, param := range map[string]string{
+		"ImageId":      "LaunchTemplateData.ImageId",
+		"InstanceType": "LaunchTemplateData.InstanceType",
+		"KeyName":      "LaunchTemplateData.KeyName",
+		"UserData":     "LaunchTemplateData.UserData",
+	} {
+		if v := resolveStringProp(data, cfnKey, "", cctx); v != "" {
+			params[param] = v
+		}
+	}
+	for i, sg := range resolveStringList(data["SecurityGroupIds"], cctx) {
+		params[fmt.Sprintf("LaunchTemplateData.SecurityGroupId.%d", i+1)] = sg
+	}
+	if v, ok := data["DisableApiTermination"]; ok && !isCFNNoValue(v, cctx) {
+		if s := resolveValue(v, cctx); s != "" {
+			params["LaunchTemplateData.DisableApiTermination"] = s
+		}
+	}
+	meta, ok := resolveNested(data["MetadataOptions"], cctx).(map[string]interface{})
+	if !ok {
+		return params
+	}
+	for _, key := range cfnLaunchTemplateMetadataOptions {
+		if v := resolveValue(meta[key], cctx); v != "" {
+			params["LaunchTemplateData.MetadataOptions."+key] = v
+		}
+	}
+	if raw, present := meta["HttpPutResponseHopLimit"]; present && raw != nil {
+		if n, isInt := cfnIntProp(meta, "HttpPutResponseHopLimit", cctx); isInt {
+			params["LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit"] = strconv.Itoa(n)
+		} else if s := resolveValue(raw, cctx); s != "" {
+			params["LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit"] = s
+		}
+	}
+	return params
+}
+
 // deployEC2LaunchTemplate creates an EC2 launch template for the given CFN
 // resource. Its Ref is the launch template ID, which is what
 // AWS::AutoScaling::AutoScalingGroup and CreateFleet consume — a stub's
 // synthesized ARN is not a usable launch template reference.
+//
+// DefaultVersionNumber and LatestVersionNumber are recorded from CreateLaunchTemplate's own
+// response (#1508), so Fn::GetAtt on either answers the template's version rather than the empty
+// string. An update that changes LaunchTemplateData adds a version: see updateEC2LaunchTemplate.
 func (d *StackDeployer) deployEC2LaunchTemplate(
 	ctx context.Context,
 	logicalID string,
@@ -33,25 +102,9 @@ func (d *StackDeployer) deployEC2LaunchTemplate(
 ) (DeployedResource, float64, error) {
 	name := resolveStringProp(props, "LaunchTemplateName", logicalID, cctx)
 
-	params := map[string]string{
-		"Action":             "CreateLaunchTemplate",
-		"LaunchTemplateName": name,
-	}
-	if data, ok := props["LaunchTemplateData"].(map[string]interface{}); ok {
-		for cfnKey, param := range map[string]string{
-			"ImageId":      "LaunchTemplateData.ImageId",
-			"InstanceType": "LaunchTemplateData.InstanceType",
-			"KeyName":      "LaunchTemplateData.KeyName",
-			"UserData":     "LaunchTemplateData.UserData",
-		} {
-			if v := resolveStringProp(data, cfnKey, "", cctx); v != "" {
-				params[param] = v
-			}
-		}
-		for i, sg := range resolveStringList(data["SecurityGroupIds"], cctx) {
-			params[fmt.Sprintf("LaunchTemplateData.SecurityGroupId.%d", i+1)] = sg
-		}
-	}
+	params := cfnLaunchTemplateDataParams(props, cctx)
+	params["Action"] = "CreateLaunchTemplate"
+	params["LaunchTemplateName"] = name
 
 	resp, cost, routeErr := d.dispatch(ctx, &AWSRequest{
 		Service:   "ec2",
@@ -69,6 +122,11 @@ func (d *StackDeployer) deployEC2LaunchTemplate(
 	if resp != nil {
 		dr.PhysicalID = extractXMLField(resp.Body, "launchTemplateId")
 		dr.ARN = fmt.Sprintf("arn:aws:ec2:%s:%s:launch-template/%s", cctx.region, cctx.accountID, dr.PhysicalID)
+		dr.Metadata = map[string]interface{}{
+			"LaunchTemplateId":     dr.PhysicalID,
+			"DefaultVersionNumber": extractXMLField(resp.Body, "defaultVersionNumber"),
+			"LatestVersionNumber":  extractXMLField(resp.Body, "latestVersionNumber"),
+		}
 	}
 	return dr, cost, nil
 }

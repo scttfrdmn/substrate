@@ -45,11 +45,11 @@ func requireNoIntrinsic(t *testing.T, doc string) {
 }
 
 // TestCFN_IAMPolicyDocumentResolvesIntrinsics resolves the Resource through Fn::Sub over the
-// pseudo-parameters rather than Fn::GetAtt.
+// pseudo-parameters, which reference no resource.
 //
-// AWS::IAM::Policy carries typePriority 0, so it deploys before every other resource and an
-// Fn::GetAtt from it finds nothing deployed yet; that ordering is its own defect, not this walk's.
-// The Fn::GetAtt form is asserted on AWS::SNS::TopicPolicy below, which deploys after its topic.
+// The Fn::GetAtt form is TestCFN_IAMPolicyGetAttResolvesAfterItsTarget. It could not be written
+// here when this test was: AWS::IAM::Policy carries typePriority 0, and until #1420 the deploy
+// order was the priority order, so the policy deployed before the queue its GetAtt named.
 func TestCFN_IAMPolicyDocumentResolvesIntrinsics(t *testing.T) {
 	const tmpl = `{"Resources":{
 		"ReadData":{"Type":"AWS::IAM::Policy","Properties":{

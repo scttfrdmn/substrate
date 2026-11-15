@@ -503,8 +503,9 @@ func TestCFNCloudFrontOAI_TwoInOneStackDiffer(t *testing.T) {
 // TestCFNCloudFrontOAI_RedeployIsStable is the half that rules out crypto/rand.
 //
 // generateCloudFrontID already produces exactly this shape, and reusing it would have been the
-// shorter change — but UpdateStack in substrate re-deploys the whole template, so a random ID would
-// change on every update and every bucket policy naming the old one would silently stop matching.
+// shorter change — but a random ID would differ between two deployments of the same template, and
+// a replay or a changed resource's re-create would hand every bucket policy naming the old one an
+// ID that silently stops matching.
 // Two deployers are used rather than two Deploy calls on one, so nothing carried over in memory can
 // account for the agreement.
 func TestCFNCloudFrontOAI_RedeployIsStable(t *testing.T) {

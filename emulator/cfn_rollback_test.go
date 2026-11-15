@@ -246,12 +246,12 @@ func TestCFN_RetainDoesNotSurviveACreateRollback(t *testing.T) {
 // TestCFN_AnUnchangedRedeployIsNotAFailedCreate pins the guard that keeps rollback
 // from eating the resources it was asked to keep.
 //
-// StackDeployer.UpdateStack is a re-Deploy of the whole template, so a resource the
-// update leaves alone is created a *second* time and its plugin refuses the duplicate.
-// Real CloudFormation issues no create call at all for an unchanged resource, so there
-// is no real refusal here to model — and reading it as a failure would make every
-// update of an unchanged template roll back. This is the defect the rollback work
-// introduced and this test is what pins it shut.
+// Through v0.127.0 an update re-created every resource, so a resource the update left
+// alone was created a *second* time and its plugin refused the duplicate; reading that
+// as a failure would have rolled back every update of an unchanged template. Since
+// #1427 an unchanged resource is kept and no create is issued, which is what real
+// CloudFormation does, so this now pins the stronger property: nothing fails because
+// nothing is called.
 func TestCFN_AnUnchangedRedeployIsNotAFailedCreate(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()
@@ -344,15 +344,12 @@ func TestCFN_ARepeatedForeignCollisionIsStillAFailure(t *testing.T) {
 	assert.Contains(t, second.StatusReason, "BucketAlreadyExists")
 }
 
-// TestCFN_AFailedUpdateRollsBackToThePreviousTemplate pins UPDATE_ROLLBACK_COMPLETE,
-// and the approximation behind it.
+// TestCFN_AFailedUpdateRollsBackToThePreviousTemplate pins UPDATE_ROLLBACK_COMPLETE.
 //
-// UpdateStack is a re-Deploy, so the previous template is the only description of the
-// previous state substrate holds; the rollback re-deploys it. That converges on the
-// previous template's *declared* state, which is not identical to CloudFormation's
-// per-resource restore — see StackDeployer.rollbackFailedUpdate. What is asserted here
-// is the part that does hold: the status, and that the resource the failed update
-// declared is not left behind.
+// The rollback converges on the record the update started from — see
+// StackDeployer.rollbackFailedUpdate, and TestCFN_AFailedUpdateRestoresWhatItReplaced for
+// the replaced and changed-in-place cases (#1427). What is asserted here is the status,
+// and that the resources the previous template declared are still there.
 func TestCFN_AFailedUpdateRollsBackToThePreviousTemplate(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()

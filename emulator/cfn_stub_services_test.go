@@ -97,8 +97,8 @@ func TestCFN_UnmodelledGetAttIsRefused(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			d, _, _, _ := newSweepDeployer(t)
-			// The reader is a CloudWatch alarm because its deploy priority (4) is later than every
-			// target's, so the target is deployed before the attribute is resolved.
+			// The reader's Fn::GetAtt orders it after the target (#1420), so the target is deployed
+			// before the attribute is resolved.
 			tmpl := `{"Resources": {
 				"Target": ` + tc.resource + `,
 				"Reader": {"Type": "AWS::CloudWatch::Alarm", "Properties": {

@@ -155,9 +155,10 @@ func TestCFNMethodID_RefResolvesToTheMethodID(t *testing.T) {
 }
 
 // TestCFNMethodID_AnUpdateDoesNotMoveAMethodID is the determinism guarantee
-// cfnNameSuffix exists for. UpdateStack in substrate is a re-Deploy of the whole
-// template, so a random suffix would report a different PhysicalResourceId on
-// every update for a resource nothing changed.
+// cfnNameSuffix exists for. Through v0.127.0 UpdateStack re-created every resource,
+// so a random suffix reported a different PhysicalResourceId on every update for a
+// resource nothing changed. An unchanged resource is now kept outright (#1427); the
+// suffix stays derived for a changed resource's re-create and for replay.
 func TestCFNMethodID_AnUpdateDoesNotMoveAMethodID(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()

@@ -156,10 +156,11 @@ func TestCFNGeneratedName_RefAndGetAttResolveToIt(t *testing.T) {
 }
 
 // TestCFNGeneratedName_UpdateDoesNotMoveAPhysicalID is why the suffix is derived
-// rather than random. UpdateStack in substrate is a re-Deploy of the whole
-// template (clearUnchangedRedeploys exists for that reason), so a name
-// regenerated per deploy would mint a new resource on every update and leak the
-// one it replaced. This is the gate a crypto/rand suffix fails.
+// rather than random. Through v0.127.0 UpdateStack re-created every resource, so a
+// name regenerated per deploy minted a new resource on every update and leaked the
+// one it replaced. Since #1427 an unchanged resource is kept outright, so the update
+// below would pass either way; the suffix still has to be derived for the re-create
+// of a changed resource, and for a replayed stack to arrive at the same names.
 func TestCFNGeneratedName_UpdateDoesNotMoveAPhysicalID(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()

@@ -83,6 +83,14 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::Lambda::Function": {"DurableConfig": "Always", "FunctionName": "Always", "PackageType": "Always", "TenancyConfig": "Always"},
 	// From the "Example change sets" page's own sample, which reports these two.
 	"AWS::EC2::Instance": {"KeyName": "Always", "InstanceType": "Conditionally"},
+	// The types #1427 and #1428 give an update path, whose replacement decision reads this
+	// table too ([cfnRequiresReplacement]); each from its own page's "Update requires" lines.
+	"AWS::Transfer::Server": {"Domain": "Always"},
+	"AWS::FSx::FileSystem": {"BackupId": "Always", "FileSystemType": "Always", "KmsKeyId": "Always",
+		"SecurityGroupIds": "Always", "SubnetIds": "Always"},
+	"AWS::MSK::Cluster":            {"ClusterName": "Always"},
+	"AWS::EC2::LaunchTemplate":     {"LaunchTemplateName": "Always"},
+	"AWS::Backup::BackupSelection": {"BackupPlanId": "Always", "BackupSelection": "Always"},
 }
 
 // cfnRequiresRecreation reports a Target's RequiresRecreation.

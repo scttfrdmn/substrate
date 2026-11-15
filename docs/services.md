@@ -2486,8 +2486,8 @@ Two separate things had to change, and each fixes a different failure. An intern
 mint seeded from its own ID, which is what makes a replayed *internal* event reproduce. And the
 internal ID is itself derived from the stack request's ID, which is what makes a replayed
 `CreateStack` reproduce — replaying it re-runs the whole deployment, so the internal IDs must come
-out the same way twice. The sequence is reproducible because a deploy orders resources by type
-priority and then by logical ID, never by map iteration. Both halves are load-bearing and were
+out the same way twice. The sequence is reproducible because a deploy orders resources by their
+dependencies, breaking ties by type priority and then by logical ID, never by map iteration. Both halves are load-bearing and were
 measured that way: dropping the mint produces seven differences in a four-resource stack, dropping
 the derived request ID produces six. Notably the replay reported every event as a **success** — a
 200 describing four resources that were not the recorded ones, which is the silent-wrong-answer
@@ -2592,9 +2592,12 @@ behaviour in the resource-type reference, and substrate does not carry that cata
 lists the properties whose page says *Replacement* for the types the deployer models natively
 (`BucketName` and its two siblings; `QueueName`, `FifoQueue`; `TopicName`, `FifoTopic`; `TableName`,
 `ImportSourceSpecification`; `RoleName`, `Path`; `FunctionName`, `PackageType`, `DurableConfig`,
-`TenancyConfig`; and the EC2 `KeyName`/`InstanceType` pair from the samples), and any other property
-reports `Never`. So `Replacement: False` proves an in-place update only for a property the table
-covers. A `DeletionPolicy`-only change set is `Never` throughout by the rule above, whatever the
+`TenancyConfig`; the EC2 `KeyName`/`InstanceType` pair from the samples; and, since #1427 and #1428,
+Transfer's `Domain`, FSx's `BackupId`/`FileSystemType`/`KmsKeyId`/`SecurityGroupIds`/`SubnetIds`,
+MSK's `ClusterName`, a launch template's `LaunchTemplateName` and both of a backup selection's
+properties), and any other property reports `Never`. So `Replacement: False` proves an in-place
+update only for a property the table covers. The same table decides whether `UpdateStack` replaces
+a changed resource — see [What an update does with each resource](#what-an-update-does-with-each-resource). A `DeletionPolicy`-only change set is `Never` throughout by the rule above, whatever the
 table says. The property-value fields (`Path`, `BeforeValue`, `AfterValue`, `AttributeChangeType`),
 `PolicyAction`, `BeforeContext`/`AfterContext` and `ChangeSource` `Automatic` are not derived.
 
@@ -2877,9 +2880,8 @@ corrected here rather than repeated, because both were checkable and neither hel
 (#819):
 
 - **A redeploy does not recognise a resource by its physical ID.** It matches on
-  logical ID, and recognition of an unchanged resource is `clearUnchangedRedeploys`,
-  whose reason the physical ID cannot be the key is that a refused create returns
-  none at all.
+  logical ID against the previous record, and the physical ID cannot be the key
+  because a refused create returns none at all.
 - **Not *every* tag state key is composed from the physical ID.** The four ELBv2
   types find their record by ARN and bypass the stamp's target resolver entirely.
 
@@ -2895,13 +2897,16 @@ composed from it and it is stable across a redeploy.
 record: a bucket a stack created is gone once its stack is, and `s3api head-bucket`
 answers 404.
 
-The sweep is the exact inverse of the deploy — resources are ordered by descending
-deploy priority, ties by descending logical ID — so a resource is deleted before
-whatever it was created after. Substrate deploys in priority order rather than from
-a dependency graph, and inverting that order is what makes the teardown observable:
-the recorded event sequence for a stack of an IAM role, a bucket, a queue and a
-topic reads `CreateRole, CreateBucket, CreateQueue, CreateTopic` and then
-`DeleteTopic, DeleteQueue, DeleteBucket, DeleteRole`.
+The sweep is the exact inverse of the deploy's [dependency order](#deploy-order-follows-references-and-dependson),
+so a resource is deleted before whatever it depends on — "Resource A is deleted before
+resource B" when A references B. For four independent resources the order is the
+tie-break order reversed: the recorded event sequence for a stack of an IAM role, a
+bucket, a queue and a topic reads `CreateRole, CreateBucket, CreateQueue, CreateTopic`
+and then `DeleteTopic, DeleteQueue, DeleteBucket, DeleteRole`. A topic that a role
+references is created first and deleted last, whatever the two types' priorities say.
+The order is recomputed from the stack's template rather than read off its record, so a
+stack recorded before [#1420](https://github.com/scttfrdmn/substrate/issues/1420) also
+sweeps in dependency order.
 
 `DeletionPolicy` and `UpdateReplacePolicy` are parsed from both the JSON and YAML
 template paths, and a value outside `Delete`/`Retain`/`RetainExceptOnCreate`/
@@ -2913,7 +2918,9 @@ default is `Delete`, **except** `Snapshot` for `AWS::RDS::DBCluster` and for an
 assumed `Delete` would destroy a database the template asked to be snapshotted.
 `Snapshot` does not retain: substrate deletes the resource and records in the
 per-resource reason that no snapshot was taken, since no snapshot resource is
-modelled for any of the eight Snapshot-capable types.
+modelled for any of the eight Snapshot-capable types. `UpdateReplacePolicy` governs
+the delete of a resource an update replaced; see [What an update does with each
+resource](#what-an-update-does-with-each-resource).
 
 A resource already absent — deleted out of band between the deploy and the sweep —
 is a **success**, not a failure: a stack must not be wedged by a resource someone
@@ -2958,8 +2965,8 @@ A pre-step failure fails that resource: a delete dispatched after a failed detac
 would be refused anyway, and reporting the detach's own error names what went wrong.
 A profile declaring no roles dispatches only its own delete.
 
-Coverage is stated rather than implied. Of the 109 resource types the deployer
-dispatches, 90 have a delete request and 11 are state-only types whose stub record
+Coverage is stated rather than implied. Of the 114 resource types the deployer
+dispatches, 99 have a delete request and 7 are state-only types whose stub record
 is removed. The remaining 8 sweep to a no-op and are reported as `DELETE_SKIPPED`
 naming the reason:
 
@@ -3037,31 +3044,118 @@ Two divergences are substrate's own, both deliberate:
   template contains rather than only the first. The stack status is the same either
   way, and the status is what a caller keys off. Under `DO_NOTHING` those later
   resources are therefore left in place too.
-- A failed `UpdateStack` reports `UPDATE_ROLLBACK_COMPLETE` by **re-deploying the
-  stored previous template**, since that is the only description of the previous
-  state substrate holds. It converges on the previous template's *declared* state
-  rather than restoring properties field by field, so a resource the failed update
-  replaced may keep a new physical ID. A previous record that cannot be read leaves
-  the stack at `UPDATE_FAILED` with the reason logged rather than a rollback
-  attempted against nothing.
-
-Because an update is a re-deploy, an unchanged resource's create is re-issued and
-the plugin refuses it as already existing. That refusal is **not** a failure of the
-update: substrate clears it when the stack's previous deployment created that
-logical ID successfully *and* the template still declares it identically. A rename
-into a name another stack owns, a resource that failed the previous time, and a
-record belonging to another account or region are all left standing as real
-failures — without that guard every `UpdateStack` would roll back the resources it
-was asked to keep.
+- A failed `UpdateStack` reports `UPDATE_ROLLBACK_COMPLETE` by converging on the
+  **record the update started from**. A resource the update kept is untouched; one it
+  changed in place has the previous declaration applied again; one it created — an
+  addition, or the replacement for a resource whose change required one — is
+  deleted, and the resource it replaced, which a successful update would only then
+  have deleted, is the stack's again under its original physical ID. What remains
+  approximate is a property the previous template never declared: applying the
+  previous declaration again leaves whatever the failed update set it to. A previous
+  record that cannot be read leaves the stack at `UPDATE_FAILED` with the reason
+  logged rather than a rollback attempted against nothing.
 
 A refused resource's follow-up configuration requests are not sent either. A bucket
 whose name S3 rejected has no `PUT ?versioning` issued against it, so the event log
 holds only the request a real client would have made.
 
+### What an update does with each resource
+
+`UpdateStack` (and `ExecuteChangeSet`, which routes through it) compares each
+resource with the stack's previous deployment and does what the resource's "Update
+requires" lines say ([#1427](https://github.com/scttfrdmn/substrate/issues/1427)).
+Until #1427 an update re-issued every resource's create, so a type whose create
+mints its identifier — a Transfer server, an FSx file system, a KMS key, a
+certificate, an internet gateway — came out of every update as a second resource with
+a new ID, and the first stayed behind.
+
+- **Unchanged.** A resource whose declaration resolves to the same values it resolved
+  to last time keeps its physical resource, and no call is made for it. The comparison
+  is on **resolved** values, property by property, so a resource whose text is
+  unchanged but which references a parameter whose value changed, or a sibling that was
+  replaced and so has a new ID, is treated as changed; and since the order is the
+  dependency order, every dependency has been decided first.
+- **Changed, and the type's update is modeled.** The change goes through the service's
+  own update operation and the physical ID stands. The types are
+  `AWS::Transfer::Server` (`UpdateServer`), `AWS::Backup::BackupPlan`
+  (`UpdateBackupPlan`) and `AWS::EC2::LaunchTemplate` (`CreateLaunchTemplateVersion`).
+- **Changed, and a changed property is *Update requires: Replacement*.** A new resource
+  is created; the references to it resolve to the new ID; and once the whole update
+  has succeeded the old one is deleted — "CloudFormation creates the replacement
+  resource first … By default, CloudFormation then deletes the old resource." Its
+  `UpdateReplacePolicy` governs that delete, so `Retain` keeps it. The replacement
+  table covers the properties each modeled type's page marks Replacement.
+- **Changed, and AWS updates the property in place through an operation substrate does
+  not route.** `AWS::FSx::FileSystem` and `AWS::MSK::Cluster` fail the resource with a
+  reason naming the property, and the update rolls back. A new resource would be a new
+  ID where AWS keeps the old one.
+- **Changed, any other type.** The resource is created again, which is what every
+  update did before; when that yields a new physical ID, the old resource is deleted
+  after the update succeeds, as a replacement is. Which types still re-create on
+  change rather than update in place is tracked in
+  [#1545](https://github.com/scttfrdmn/substrate/issues/1545).
+
+A delete of a replaced resource that fails does not fail the update. The stack still
+reports `UPDATE_COMPLETE`, with a status reason naming the resource that could not be
+deleted, which is what the troubleshooting guide's "Resource removed from stack but not
+deleted" describes; the per-resource outcome is on the result's `ResourceDeletions`.
+
+A re-created resource whose plugin refuses it as already existing — a fixed-name
+resource whose inputs changed but whose type has no update path — is **not** a failure
+of the update when the stack's previous deployment created that logical ID
+successfully *and* the template still declares it identically: the previous record
+stands. A rename into a name another stack owns, a resource that failed the previous
+time, and a record belonging to another account or region are all left standing as real
+failures.
+
+A resource removed from the template is not yet deleted by the update; see
+[#1547](https://github.com/scttfrdmn/substrate/issues/1547).
+
 ### Templates
 
-113 resource types are supported; each service section below lists the types it
+114 resource types are supported; each service section below lists the types it
 backs under **CloudFormation resource types**. A template body may be JSON or YAML.
+
+#### Deploy order follows references and `DependsOn`
+
+A stack's resources deploy in **dependency order**
+([#1420](https://github.com/scttfrdmn/substrate/issues/1420)). The `DependsOn` attribute
+page states the rule: a resource that references another "in the form of target
+properties `!Ref`, `!GetAtt`, and `!Sub`" is created after it, updated after it and
+deleted before it, and `DependsOn` — "a single string or list of strings" — adds an edge
+of the same kind. Every form counts: `Ref`, both forms of `Fn::GetAtt`, and both forms
+of `Fn::Sub`, including a `${Logical.Attribute}` inside the string. AWS Config's
+recorder, delivery channel and rule carry the order their pages state without a
+`DependsOn`: a channel follows the stack's recorder, and a rule follows both.
+
+Until #1420 the order was the deployer's type priority and then the logical ID, and
+`DependsOn` was parsed and never read. `AWS::IAM::Policy`, the one type at priority 0,
+deployed before everything, so an `Fn::GetAtt` in its `PolicyDocument` to a queue, a
+bucket or a table — the grant CDK emits — found nothing deployed and stored the literal
+`Queue.Arn`. The priorities now only break ties between resources that are ready at the
+same time, and a template whose references they already agreed with deploys exactly as
+it did before.
+
+A reference to, or a `DependsOn` naming, a resource skipped by a false `Condition` is
+not an edge: that resource does not deploy.
+
+Two templates are refused at the **request**, before anything deploys or any stack
+record is written, as CloudFormation refuses them — a `CreateStack` leaves no stack, an
+`UpdateStack` leaves the stack as it was, and a `CreateChangeSet` records nothing. Both
+are `ValidationError` at 400, with AWS's message:
+
+| Template | Message |
+|---|---|
+| A `DependsOn` naming a resource the template does not declare | `Template format error: Unresolved resource dependencies [Ghost] in the Resources block of the template` |
+| Resources that depend on each other, directly or through others | `Circular dependency between resources: [A, B]` |
+
+The first is quoted by the AWS re:Post Knowledge Center article on template validation
+errors; the second by the AWS CDK reference, and CLI reports show it as the
+`ValidationError` `CreateStack` and `CreateChangeSet` answer. The circular message lists
+every resource that cannot be ordered — those on the cycle and those depending on one —
+sorted; which resources AWS lists is not published, and that choice is substrate's.
+A `Ref` to a name the template declares nowhere is not yet refused this way; see
+[#1548](https://github.com/scttfrdmn/substrate/issues/1548).
 
 **Every intrinsic function resolves.** `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`,
 `Fn::Select`, `Fn::Split`, `Fn::Base64`, `Fn::If`, `Fn::Equals`, `Fn::And`,
@@ -3646,19 +3740,17 @@ than papering over it — the alternative is tracking, per resource, which keys 
 which is real state in the event stream for an ambiguity AWS does not resolve either, since a
 propagated tag on a real resource carries no provenance a caller can read.
 
-Three further consequences worth knowing before writing an assertion:
+Two further consequences worth knowing before writing an assertion:
 
 - **Propagation runs after the whole stack is deployed**, not per resource like the
-  `aws:cloudformation:*` stamp. It has to: an update re-creates every resource in the template,
-  and a resource that already exists is refused and *then* recognised as an unchanged redeploy —
-  so at stamp time it still looks failed. A tag added to an existing stack must reach exactly
-  those resources.
-- **A resource whose redeploy was refused may report no physical ID**, and the previous stack
-  record supplies it. That is sound only where it is used: the refusal was dismissed because the
-  record shows this stack deployed that logical ID from an identical declaration.
-- **An update re-creates an unnamed resource rather than retagging it.** A VPC the template does
-  not name is minted afresh on every update and carries the new tags; the old one keeps the old
-  ones until it is swept. That is the deployer's redeploy model rather than anything about tags.
+  `aws:cloudformation:*` stamp. It has to: an update keeps an unchanged resource without a call
+  ([#1427](https://github.com/scttfrdmn/substrate/issues/1427)), so the per-resource stamp never
+  runs for it, and a tag added to an existing stack must reach exactly those resources. Since a
+  kept resource is the same record, a tag the caller set on it directly is read and preserved.
+- **A changed resource that is re-created carries the new tags; the one it replaced is deleted.**
+  A VPC whose declaration changes is minted afresh (see
+  [What an update does with each resource](#what-an-update-does-with-each-resource)); an
+  unchanged one keeps its ID and is retagged in place.
 
 #### Propagation can leave a resource over its service's tag quota
 
@@ -3819,8 +3911,9 @@ not until #856's dispatch fix: the deployer turns each resource into an internal
 request, and those requests carried no mint, so a replayed stack reported
 different `PhysicalResourceId` values and a different `state_hash_after` for
 `CreateStack`. The internal request IDs now derive from the stack request's own
-ID, in the order a deploy already uses — type priority, then logical ID — so a
-replayed `CreateStack` re-runs the deployment and arrives at the same IDs.
+ID, in the order a deploy already uses — dependency order, ties broken by type
+priority and then logical ID — so a replayed `CreateStack` re-runs the deployment
+and arrives at the same IDs.
 
 ### The account, Region and dates a stack carries reach no response
 
@@ -12166,7 +12259,7 @@ catalog AMI, because a catalog entry is not a record the account wrote.
 | AWS::EC2::SecurityGroupEgress | GroupId | Standalone rule; supports `DestinationSecurityGroupId` |
 | AWS::EC2::Instance | InstanceId | Passes through `IamInstanceProfile`, `KeyName`, and `SecurityGroupIds` |
 | AWS::EC2::InternetGateway | InternetGatewayId | |
-| AWS::EC2::LaunchTemplate | LaunchTemplateId | Ref is the real `lt-…` ID, usable by `CreateFleet` |
+| AWS::EC2::LaunchTemplate | LaunchTemplateId | Ref is the real `lt-…` ID, usable by `CreateFleet`. `LaunchTemplateData` forwards `ImageId`, `InstanceType`, `KeyName`, `UserData`, `SecurityGroupIds`, `DisableApiTermination` and the five `MetadataOptions` members — `HttpTokens`, `HttpPutResponseHopLimit`, `HttpEndpoint`, `HttpProtocolIpv6`, `InstanceMetadataTags` — with intrinsics resolved and the hop limit sent as an integer; a value EC2 refuses fails the resource with EC2's code ([#1508](https://github.com/scttfrdmn/substrate/issues/1508)). `Fn::GetAtt` answers `LaunchTemplateId`, `DefaultVersionNumber` and `LatestVersionNumber`. On `UpdateStack` a changed `LaunchTemplateData` adds a version through `CreateLaunchTemplateVersion`: the ID stays, `LatestVersionNumber` follows the new version, and `DefaultVersionNumber` stays, since "the default version of a launch template cannot be specified in AWS CloudFormation". A changed `LaunchTemplateName` replaces the template; a change to `TagSpecifications` or `VersionDescription` alone makes no call |
 
 ### Cost
 
@@ -23507,9 +23600,10 @@ no transient failure to report.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| `AWS::Backup::BackupPlan` | the plan ID | A stub, by decision: the plan is written to the CloudFormation stub namespace rather than to Backup's own, so it is invisible to `GetBackupPlan` and `ListBackupPlans`. Dispatching `CreateBackupPlan` waits for its route to settle on `PUT` (#1172) and for `AWS::Backup::BackupSelection`, the one consumer of this `Ref`, to be deployed. `BackupPlan` is `Required: Yes`, and a template without it fails the resource. `Ref` and `Fn::GetAtt BackupPlanId` return a UUID-shaped plan ID derived from the account, Region, stack and logical ID, so an `UpdateStack` keeps it. `VersionId` is derived from the same scope plus the declared properties, so it changes when the plan does. `BackupPlanArn` uses the plugin's `backup-plan` segment (#1181) ([#1182](https://github.com/scttfrdmn/substrate/issues/1182)) |
+| `AWS::Backup::BackupPlan` | the plan ID | Deployed through `CreateBackupPlan`, so `GetBackupPlan` and `ListBackupPlans` report the stack's plan ([#1428](https://github.com/scttfrdmn/substrate/issues/1428)). The template's `BackupPlanRule` is sent as the API's `Rules`, and a rule's `TargetBackupVault` as `TargetBackupVaultName`; every other member has the same name on both pages and is sent as declared. `BackupPlan` is `Required: Yes`, and a template without it fails the resource. `Ref` and `Fn::GetAtt BackupPlanId` return the plan ID the plugin minted, `VersionId` the version `CreateBackupPlan` answered, and `BackupPlanArn` the response's ARN, with the plugin's `backup-plan` segment (#1181). An `UpdateStack` keeps the ID: an unchanged plan makes no call, and a changed `BackupPlan` goes through `UpdateBackupPlan`, which answers a new `VersionId`. A change to `BackupPlanTags` alone makes no call, since Backup's `TagResource` is not routed |
+| `AWS::Backup::BackupSelection` | the selection ID | Deployed through `CreateBackupSelection` on the plan `BackupPlanId` names, with `BackupSelection` sent as declared — the template's and the API's members have the same names ([#1428](https://github.com/scttfrdmn/substrate/issues/1428)). `Fn::GetAtt BackupPlanId` and `SelectionId` are the response's own members; `Id` is the same selection ID, since the API has no second identifier for a selection (substrate's reading). Both properties are *Update requires: Replacement*, so a changed selection is a new one and the old one is deleted once the update succeeds. A stack delete removes the selection before the plan — the selection's `Ref` to the plan orders it — which `DeleteBackupPlan` requires |
 
-`AWS::Backup::BackupVault` and `AWS::Backup::BackupSelection` are not deployed.
+`AWS::Backup::BackupVault` is not deployed.
 
 ### ARN shapes
 
@@ -24985,6 +25079,15 @@ mount name. The other three blocks are sent but not read. `FileSystemTypeVersion
 
 [#1203](https://github.com/scttfrdmn/substrate/issues/1203).
 
+On `UpdateStack` an unchanged file system keeps its ID and no `CreateFileSystem` is sent
+([#1427](https://github.com/scttfrdmn/substrate/issues/1427)). A change to `BackupId`,
+`FileSystemType`, `KmsKeyId`, `SecurityGroupIds` or `SubnetIds` — the properties the resource
+marks *Update requires: Replacement* — creates a new file system and deletes the old one once the
+update succeeds. A change to any other property **fails the resource** with a reason naming the
+property, and the update rolls back onto the original file system: AWS applies those in place
+through `UpdateFileSystem`, which substrate does not route ([#1546](https://github.com/scttfrdmn/substrate/issues/1546)), and a new file system would be a new ID
+where AWS keeps the old one.
+
 ### Cost
 
 `CreateFileSystem` is attributed $0.00013, a file-system hour prorated across a single API call.
@@ -25305,6 +25408,13 @@ attributes, `Arn` resolves; `CurrentVersion` does not, so a template that reads 
 gets nothing. Since #1196 the cluster record holds a `currentVersion`, but the deployer does not resolve
 the attribute from it.
 [#1203](https://github.com/scttfrdmn/substrate/issues/1203).
+
+On `UpdateStack` an unchanged cluster keeps its ARN and no create is sent
+([#1427](https://github.com/scttfrdmn/substrate/issues/1427)). A changed `ClusterName`, the one property
+the resource marks *Update requires: Replacement*, creates a new cluster and deletes the old one once
+the update succeeds. A change to any other property **fails the resource** with a reason naming it, and
+the update rolls back: AWS applies those in place through MSK's `Update*` cluster operations ([#1546](https://github.com/scttfrdmn/substrate/issues/1546)), none of
+which substrate routes.
 
 ### Cost
 
@@ -26263,6 +26373,15 @@ was `s-` followed by the lower-cased logical ID, which matches neither the publi
 19 nor `s-([0-9a-f]{17})`, and `DescribeServer` answered `ResourceNotFoundException` for it. Now the
 plugin mints the ID, and `DescribeServer` answers it. `Ref` returns the server ARN, as AWS publishes
 ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)).
+
+On `UpdateStack` the server keeps its ID ([#1427](https://github.com/scttfrdmn/substrate/issues/1427)).
+An unchanged server makes no call. A change to any property but `Domain` goes through `UpdateServer`,
+with the template's properties sent as its members minus the three it does not take — `Domain`,
+`Tags` and `CreateWithHostKey` — and `DescribeServer` reports the new values. `Domain` is
+*Update requires: Replacement*, so a changed `Domain` creates a new server and deletes the old one
+once the update succeeds. Two gaps: a property removed from the template is not reset, since
+`UpdateServer` leaves an omitted member as it is; and a change to `Tags` alone makes no call, since
+`TagResource` is not routed.
 
 ### The two delete operations answer an empty JSON object
 

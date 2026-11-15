@@ -46,8 +46,9 @@ import (
 // Two earlier justifications for that are corrected here rather than left standing, because
 // both were checkable and neither held (#837). A redeploy does *not* recognize a resource by
 // its physical ID: deployedResource matches on logical ID with no physical-ID fallback, and
-// recognition is clearUnchangedRedeploys, whose own comment gives the reason the physical ID
-// cannot be the key — a refused create returns none at all. And the stamp claim was "every"
+// recognition is by logical ID against the previous record (cfnBaseline, #1427), for the reason
+// the retired clearUnchangedRedeploys gave — a refused create returns no physical ID at all.
+// And the stamp claim was "every"
 // key, which the four ELBv2 types disprove: cfnStampELBResource finds the record by ARN and
 // bypasses cfnResolveStampTarget entirely.
 func cfnRefValue(dr DeployedResource, cctx *cfnContext) (string, bool) {

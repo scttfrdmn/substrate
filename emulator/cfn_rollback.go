@@ -145,13 +145,14 @@ func cfnFailedResources(resources []DeployedResource) []string {
 // cfnCreateExistsCodes is the set of error codes that mean "a resource of this name
 // already exists", as the plugins reachable from Deploy actually spell it.
 //
-// It exists because [StackDeployer.UpdateStack] is a re-Deploy of the whole template:
-// a resource the update leaves alone is created a second time and its plugin refuses
-// the duplicate. Real CloudFormation issues no create call at all for an unchanged
-// resource, so there is no real refusal being modeled here — the refusal is an
-// artifact of substrate's re-deploy, and reading it as a failed resource would make
-// every update of an unchanged template roll back and delete what it was asked to
-// keep.
+// It exists because [StackDeployer.UpdateStack] re-creates a changed resource whose type
+// has no update path in substrate, and its plugin refuses the duplicate. Until #1427 an
+// update re-created *every* resource, so this was what kept an unchanged template from
+// rolling back; an unchanged resource is now kept without a call, and the set matters
+// only for a resource whose declaration is unchanged while its inputs are not, or one a
+// rollback re-applies (see [cfnResourcePlan.clearsRefusal]). Real CloudFormation issues
+// no create call in either case, so there is no real refusal being modeled here — the
+// refusal is an artifact of substrate's re-create.
 //
 // Every entry was harvested by deploying a template twice against the default
 // registry and recording the code that came back, the same way
@@ -167,11 +168,11 @@ func cfnFailedResources(resources []DeployedResource) []string {
 // reporting the refusal, so the conservative side is the safe one.
 //
 // The two Step Functions entries changed meaning in #1072 and are kept deliberately.
-// Both create operations now model the idempotency AWS publishes, so a re-Deploy of an
+// Both create operations now model the idempotency AWS publishes, so a re-create of an
 // unchanged state machine or activity answers the existing ARN and reaches no refusal
 // for this map to clear. ActivityAlreadyExists fires only for the one condition its page
-// publishes, a changed EncryptionConfiguration (#1199), which a re-Deploy of an unchanged
-// template does not send — and StateMachineAlreadyExists now fires only for a genuinely
+// publishes, a changed EncryptionConfiguration (#1199), which a re-create of an unchanged
+// declaration does not send — and StateMachineAlreadyExists now fires only for a genuinely
 // different definition or type, the case the paragraph above argues an entry should be
 // absent for. Neither is removed: the entries cost nothing while the code is unreachable,
 // and dropping the live one would surface a refusal on the update path, which is
@@ -215,61 +216,6 @@ func (d *StackDeployer) previousStack(ctx context.Context, stackName string) (*C
 		return nil, nil
 	}
 	return prev, nil
-}
-
-// clearUnchangedRedeploys drops the duplicate-name refusal from every resource this
-// stack already deployed and whose *declaration* the template still spells the same
-// way, in place.
-//
-// Three conditions, each load-bearing. Without a previous record for the stack, a
-// first-time collision with a resource some *other* stack owns would be cleared — a
-// real failure that CloudFormation reports. The previous record must show the slot
-// deployed successfully, or there is nothing this stack owns to be re-creating.
-//
-// The third is the declaration, and it is why the physical ID cannot be the key: a
-// refused create returns no physical ID at all (measured — an already-taken
-// LaunchTemplate name comes back with PhysicalID empty), so comparing IDs would never
-// match for any type whose identifier the service generates. Comparing the declared
-// Type and Properties instead distinguishes the two cases that matter: an unchanged
-// redeploy declares the resource identically, while a template edited to point the
-// slot at an existing foreign resource declares it differently and must still fail.
-//
-// The comparison is on *declared* properties, before intrinsics resolve. A resolved
-// comparison would find spurious differences, since a Ref to a sibling resolves to a
-// freshly generated ID on every deploy.
-func (d *StackDeployer) clearUnchangedRedeploys(
-	prev *CFNStackState, declared map[string]cfnResource, resources []DeployedResource,
-) {
-	if prev == nil || prev.TemplateBody == "" {
-		return
-	}
-	prevTmpl, err := d.parseCFNTemplate(prev.TemplateBody)
-	if err != nil {
-		// The previous template is unreadable, so nothing can be shown unchanged. The
-		// refusals stand, which is the pre-existing behavior.
-		d.logger.Warn("cfn: previous template does not parse; cannot tell an unchanged "+
-			"redeploy from a new collision", "stack", prev.StackName, "error", err.Error())
-		return
-	}
-	deployed := make(map[string]bool, len(prev.Resources))
-	for _, r := range prev.Resources {
-		if r.Error == "" {
-			deployed[r.LogicalID] = true
-		}
-	}
-	for i := range resources {
-		r := &resources[i]
-		if r.Error == "" || !cfnCreateIsExists(r.Error) || !deployed[r.LogicalID] {
-			continue
-		}
-		if !cfnSameDeclaration(prevTmpl.Resources[r.LogicalID], declared[r.LogicalID]) {
-			continue
-		}
-		d.logger.Debug("cfn: resource already exists and its declaration is unchanged; "+
-			"not a failure of this deployment",
-			"logical_id", r.LogicalID, "type", r.Type)
-		r.Error = ""
-	}
 }
 
 // cfnSameDeclaration reports whether two template declarations of the same logical ID
@@ -463,22 +409,51 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 	return result, nil
 }
 
-// rollbackFailedUpdate converges a failed update back onto the template that was
-// deployed before it, and reports UPDATE_ROLLBACK_COMPLETE.
+// rollbackFailedUpdate converges a failed update back onto the record it was applied
+// to, and reports UPDATE_ROLLBACK_COMPLETE.
 //
-// This is a **re-deploy of the previous template**, not a per-resource restore.
-// UpdateStack is itself a re-deploy, so the previous template is the only
-// description of the previous state substrate holds; converging on it reaches that
-// template's *declared* state, which is not identical to CloudFormation's rollback.
-// A resource the failed update had replaced may come back with a new physical ID,
-// and a property the previous template never declared keeps whatever the failed
-// update set it to. Recording that divergence is the point: an undocumented
-// approximation is worse than a documented one.
+// The update compared each resource with prev, so what it did to each is known
+// (#1427), and the rollback undoes exactly that:
+//
+//   - A resource the update kept is untouched, and stays.
+//   - A resource the update changed in place keeps its physical ID; the rollback applies
+//     prev's declaration to it again, through the same update path.
+//   - A resource the update created — an addition, or the replacement for a resource
+//     whose change required one — is deleted. The resource it replaced was never deleted,
+//     because a replaced resource is deleted only once an update succeeds, so prev's
+//     record of it is the stack's again with its original physical ID.
+//
+// That is CloudFormation's rollback in outline: "CloudFormation creates the replacement
+// resource first", and a rollback returns the stack to its previous resources. What
+// remains approximate is a property prev never declared: re-applying prev's declaration
+// leaves whatever the failed update set it to, since substrate has no record of the
+// value it had before.
 func (d *StackDeployer) rollbackFailedUpdate(
-	ctx context.Context, prev CFNStackState, failures []string, streamID string,
+	ctx context.Context, prev CFNStackState, failed *DeployResult, outcome *cfnDeployOutcome,
+	failures []string, streamID string,
 ) (*DeployResult, error) {
-	d.logger.Warn("cfn: stack update failed; rolling back to the previous template",
+	d.logger.Warn("cfn: stack update failed; rolling back to the previous deployment",
 		"stack", prev.StackName, "failures", len(failures))
+
+	previous := make(map[string]DeployedResource, len(prev.Resources))
+	for _, r := range prev.Resources {
+		if r.Error == "" {
+			previous[r.LogicalID] = r
+		}
+	}
+	force := map[string]bool{}
+	var created []DeployedResource
+	for _, r := range failed.Resources {
+		if r.Error != "" || outcome == nil || !outcome.dispatched[r.LogicalID] {
+			continue
+		}
+		old, had := previous[r.LogicalID]
+		if had && old.Type == r.Type && old.PhysicalID == r.PhysicalID {
+			force[r.LogicalID] = true
+			continue
+		}
+		created = append(created, r)
+	}
 
 	// DO_NOTHING so the re-deploy reports its own failures instead of rolling back:
 	// a create rollback here would delete the resources the previous template
@@ -486,10 +461,20 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	// The previous template's tags go back with it. A rollback converges on the stack
 	// as it was, and the tags are part of that: leaving the failed update's tags in
 	// place would report a stack tagged by an operation that did not survive.
-	result, err := d.DeployWithOptions(ctx, prev.TemplateBody, streamID, prev.Parameters,
-		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing, Tags: prev.Tags})
+	result, _, err := d.deploy(ctx, prev.TemplateBody, streamID, prev.Parameters,
+		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing, Tags: prev.Tags}, &prev, force)
 	if err != nil {
 		return nil, fmt.Errorf("roll back update of stack %s: %w", prev.StackName, err)
+	}
+
+	// The failed update's own resources go last, once nothing restored refers to them,
+	// with the declarations they were created from. RetainExceptOnCreate deletes here:
+	// this is the rollback of the operation that created them.
+	if len(created) > 0 && outcome != nil {
+		sweep := CFNStackState{StackName: prev.StackName, TemplateBody: outcome.templateBody,
+			Parameters: outcome.params, Resources: created}
+		result.ResourceDeletions = d.sweepResources(ctx, &sweep, failed.Resources, streamID,
+			cfnCreateRollbackOp)
 	}
 
 	reason := strings.Join(failures, "; ")
@@ -499,6 +484,9 @@ func (d *StackDeployer) rollbackFailedUpdate(
 		// status: the previous template no longer describes what is deployed.
 		status = cfnStackUpdateRollbackFailed
 		reason += " (rollback also failed: " + strings.Join(reDeployFailures, "; ") + ")"
+	}
+	if undeleted := cfnFailedDeletions(result.ResourceDeletions); len(undeleted) > 0 {
+		reason += " (the rollback could not delete: " + strings.Join(undeleted, "; ") + ")"
 	}
 	result.Status = status
 	result.StatusReason = reason

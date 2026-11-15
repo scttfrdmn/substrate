@@ -160,11 +160,11 @@ func (d *StackDeployer) cfgsvcCFNRecorderARN(
 // one, and TagResource does not accept a channel. Synthesizing one would be an
 // invention with nothing behind it.
 //
-// Two ordering facts from the page are modeled by typePriority rather than by
-// DependsOn — which substrate parses and does not act on — so a template need not
-// declare them: "Before you can create a delivery channel, you must create a
-// configuration recorder" (recorder 2, channel 3), and the channel must exist before
-// a rule is put (rule 4).
+// Two ordering facts from the page are modeled as implied dependency edges
+// (cfnImpliedDependencies, #1420), so a template need not declare them with DependsOn:
+// "Before you can create a delivery channel, you must create a configuration
+// recorder", and the channel must exist before a rule is put. A template may still
+// declare DependsOn, which the deployer now honors, and the two agree.
 //
 // A caveat a fixture author needs: a real PutDeliveryChannel refuses a bucket whose
 // policy does not admit Config (InsufficientDeliveryPolicyException), and substrate
