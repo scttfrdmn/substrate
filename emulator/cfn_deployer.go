@@ -3001,6 +3001,11 @@ func (d *StackDeployer) deployResource(
 	default:
 		dr, cost, err = d.dispatchResource(ctx, logicalID, res, streamID, cctx)
 	}
+	if err == nil && dr.Error == "" {
+		// The attributes only the service's record holds, read once it exists, so Fn::GetAtt
+		// on a later resource or an Output answers them.
+		d.recordEC2Attributes(ctx, &dr)
+	}
 	failures := cctx.takeFailures()
 	if err != nil || len(failures) == 0 {
 		// Stamped after the helper has run and before the result is reported, so

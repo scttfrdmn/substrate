@@ -147,7 +147,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **API Gateway v2 listings report a record they cannot read (#1538).** `GetApis`, `GetRoutes`, `GetIntegrations`, `GetStages` and `GetAuthorizers` skipped a record whose read faulted or that did not decode, so a page came back short without saying so. They now fail with a wrapped error (500), as `GetApiMappings` already did. Only an index entry whose record is gone is skipped.
 - **QuickSight's two describes no longer write `Status` into the body (#1179).** Every QuickSight Response Syntax opens with `HTTP/1.1 {Status}`, and each page lists `Status`, "The HTTP status of the request", apart from the members "returned in JSON format". The SDK fills it from the status line. `DescribeDataSource` and `DescribeIngestion` also wrote it into the JSON, where only a raw-body reader, such as a recorded event log, saw it.
 - **`TestAutoScaling_WeightsAreStoredCanonically` no longer fails when a generated ID contains `007` (#1529).** It asserted that the whole `DescribeAutoScalingGroups` body lacked `007` and `+4`. The body also carries the group ARN's UUID and other generated IDs. It now reads only the `WeightedCapacity` elements.
+- **`Fn::GetAtt` answers the EC2 attributes CDK templates read (#1545).** `!GetAtt SG.GroupId` resolved to "", so a standalone `AWS::EC2::SecurityGroupIngress` written that way, the form CDK emits, failed with `MissingParameter`. The same was true of every ID attribute and most other attributes of the common EC2 types. Each is published in its type's "Return values" section.
+  - **IDs:** `GroupId`, `VpcId`, `SubnetId`, `InstanceId`, `InternetGatewayId`, `RouteTableId` and `NatGatewayId` answer the physical ID.
+  - **From EC2's record:** read once the resource deploys:
+    - a security group's `VpcId` (the default VPC's for a group with no `VpcId`);
+    - a VPC's `CidrBlock` and `DefaultSecurityGroup`;
+    - a subnet's `VpcId`, `CidrBlock`, `AvailabilityZone` and `AvailabilityZoneId`;
+    - an instance's `VpcId`, `PrivateIp`, `PrivateDnsName`, `PublicIp` and `PublicDnsName`.
 
+    A resource deployed before this release gets them from the first update that changes it.
+  - **Still empty:** #1591 lists them, among them a VPC's `DefaultNetworkAcl`, an IAM role's `RoleId` and an ELBv2 load balancer's `CanonicalHostedZoneID`.
 
 ## [v0.128.0] - 2026-11-15
 
