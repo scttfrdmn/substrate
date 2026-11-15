@@ -7,6 +7,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -99,6 +100,8 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	zoneID := "Z" + suffix
 	fullID := "/hostedzone/" + zoneID
 
+	// The zone is written first, then its defaults and their index, then the account's zone index, so a
+	// failure partway leaves no record set without its zone.
 	defaults := r53DefaultRecordSets(zoneID, name)
 	zone := Route53HostedZone{
 		ID:                     fullID,
@@ -107,18 +110,21 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 		CallerReference:        xmlReq.CallerReference,
 		ResourceRecordSetCount: int64(len(defaults)),
 		AccountID:              reqCtx.AccountID,
+		DefaultRecordSets:      true,
 	}
+	if err := p.putZone(zoneID, zone); err != nil {
+		return nil, fmt.Errorf("route53 createHostedZone: %w", err)
+	}
+	index := make([]string, 0, len(defaults))
 	for _, rrset := range defaults {
-		if err := p.putRecordSet(zoneID, rrset); err != nil {
+		key, err := p.putRecordSet(zoneID, rrset)
+		if err != nil {
 			return nil, fmt.Errorf("route53 createHostedZone default %s: %w", rrset.Type, err)
 		}
+		index = append(index, key)
 	}
-	data, err := json.Marshal(zone)
-	if err != nil {
-		return nil, fmt.Errorf("route53 createHostedZone marshal: %w", err)
-	}
-	if err := p.state.Put(context.Background(), route53Namespace, "hostedzone:"+zoneID, data); err != nil {
-		return nil, fmt.Errorf("route53 createHostedZone state.Put: %w", err)
+	if err := p.saveList(zoneID, "rrset_keys", index); err != nil {
+		return nil, fmt.Errorf("route53 createHostedZone: %w", err)
 	}
 	if err := p.appendToList(reqCtx.AccountID, "hostedzone_ids", zoneID); err != nil {
 		return nil, err
@@ -351,16 +357,12 @@ func (p *Route53Plugin) requireHostedZone(zoneID string) error {
 
 // loadHostedZone reads the zone a zone ID names, refusing an absent one as [requireHostedZone] does.
 func (p *Route53Plugin) loadHostedZone(zoneID string) (Route53HostedZone, error) {
-	data, err := p.state.Get(context.Background(), route53Namespace, "hostedzone:"+r53ZoneSuffix(zoneID))
+	zone, found, err := r53LoadZone(context.Background(), p.state, zoneID)
 	if err != nil {
-		return Route53HostedZone{}, fmt.Errorf("route53 get hosted zone %s: %w", zoneID, err)
+		return Route53HostedZone{}, err
 	}
-	if data == nil {
+	if !found {
 		return Route53HostedZone{}, &AWSError{Code: "NoSuchHostedZone", Message: "No hosted zone found with ID: " + zoneID, HTTPStatus: http.StatusNotFound}
-	}
-	var zone Route53HostedZone
-	if err := json.Unmarshal(data, &zone); err != nil {
-		return Route53HostedZone{}, fmt.Errorf("route53 decode hosted zone %s: %w", zoneID, err)
 	}
 	return zone, nil
 }
@@ -373,7 +375,6 @@ func (p *Route53Plugin) nonDefaultRecordSet(id, zoneName string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("route53 deleteHostedZone list: %w", err)
 	}
-	apex := r53CanonicalName(zoneName)
 	for _, k := range keys {
 		rrset, found, err := p.loadRecordSet(id, k)
 		if err != nil {
@@ -382,7 +383,7 @@ func (p *Route53Plugin) nonDefaultRecordSet(id, zoneName string) (string, error)
 		if !found {
 			continue
 		}
-		if (rrset.Type == "SOA" || rrset.Type == "NS") && r53CanonicalName(rrset.Name) == apex {
+		if r53IsApexDefault(rrset.Type, rrset.Name, zoneName) {
 			continue
 		}
 		return k, nil
@@ -448,19 +449,34 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 		return nil, &AWSError{Code: "MalformedXML", Message: "could not parse change batch: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
+	index, err := p.loadList(id, "rrset_keys")
+	if err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets list: %w", err)
+	}
+
 	// The page calls a change batch transactional — "Route 53 validates the changes in the request and
-	// then either makes all or none of the changes" — so a refused change is found before any is made.
+	// then either makes all or none of the changes" — so every refusal is found before any change is
+	// made.
+	apex := make([]r53ApexChange, 0, len(xmlReq.ChangeBatch.Changes))
 	for _, change := range xmlReq.ChangeBatch.Changes {
 		rrs := change.ResourceRecordSet
-		if strings.EqualFold(change.Action, "DELETE") && r53IsApexDefault(rrs.Type, rrs.Name, zone.Name) {
-			return nil, r53DefaultRecordDeleteError(rrs.Type, zone.Name)
+		if !r53RRTypes[rrs.Type] {
+			return nil, r53InvalidType(rrs.Type)
+		}
+		apex = append(apex, r53ApexChange{action: change.Action, rrType: rrs.Type, name: rrs.Name})
+	}
+	if zone.DefaultRecordSets {
+		if awsErr := r53CheckApexDefaults(index, apex, zone.Name); awsErr != nil {
+			return nil, awsErr
 		}
 	}
 
+	// The index is held in memory across the batch and written once. Each change first finds every
+	// index entry naming its record set, including one written under a pre-#1537 key.
 	for _, change := range xmlReq.ChangeBatch.Changes {
 		rrs := change.ResourceRecordSet
 		key := r53RRSetKey(rrs.Type, rrs.Name)
-		fullKey := "rrset:" + id + ":" + key
+		existing := r53MatchingKeys(index, key)
 
 		switch strings.ToUpper(change.Action) {
 		case "CREATE", "UPSERT":
@@ -482,28 +498,31 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 					EvaluateTargetHealth: evalHealth,
 				}
 			}
-			data, marshalErr := json.Marshal(rrset)
-			if marshalErr != nil {
-				return nil, fmt.Errorf("route53 changeRRSet marshal: %w", marshalErr)
+			if _, err := p.putRecordSet(id, rrset); err != nil {
+				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 			}
-			if err := p.state.Put(context.Background(), route53Namespace, fullKey, data); err != nil {
-				return nil, fmt.Errorf("route53 changeRRSet put: %w", err)
+			// A record set stored under an older key is migrated: its old record goes.
+			stale := slices.DeleteFunc(slices.Clone(existing), func(k string) bool { return k == key })
+			if index, err = p.deleteRecordSetKeys(id, index, stale); err != nil {
+				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 			}
-			if err := p.appendToList(id, "rrset_keys", key); err != nil {
-				return nil, err
+			if !slices.Contains(index, key) {
+				index = append(index, key)
 			}
 		case "DELETE":
-			if err := p.state.Delete(context.Background(), route53Namespace, fullKey); err != nil {
-				return nil, fmt.Errorf("route53 changeRRSet delete: %w", err)
-			}
-			if err := p.removeFromList(id, "rrset_keys", key); err != nil {
-				return nil, fmt.Errorf("route53 changeResourceRecordSets removeFromList: %w", err)
+			if index, err = p.deleteRecordSetKeys(id, index, existing); err != nil {
+				return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 			}
 		}
 	}
 
-	if err := p.storeRecordSetCount(id, zone); err != nil {
-		return nil, err
+	if err := p.saveList(id, "rrset_keys", index); err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
+	}
+	// The count follows the deduplicated index the batch just wrote, so no record set is re-read.
+	zone.ResourceRecordSetCount = int64(len(index))
+	if err := p.putZone(id, zone); err != nil {
+		return nil, fmt.Errorf("route53 changeResourceRecordSets: %w", err)
 	}
 
 	changeInfo := Route53ChangeInfo{

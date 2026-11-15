@@ -215,3 +215,27 @@ func TestRoute53Defaults_ACloudFormationApexNSDeleteRestoresTheDefault(t *testin
 	assert.Contains(t, string(data), "172800")
 	assert.NotContains(t, string(data), "ns-9.example.net.")
 }
+
+// A zone that cannot be read fails the apex record set's delete, rather than falling back to a DELETE
+// the zone would refuse.
+func TestRoute53Defaults_ACloudFormationApexDeleteReportsAZoneReadFault(t *testing.T) {
+	t.Parallel()
+	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+	d := newCFNRoute53Deployer(t, fault)
+	ctx := context.Background()
+	result, err := d.Deploy(ctx, `{"Resources": {
+		"Zone": {"Type": "AWS::Route53::HostedZone", "Properties": {"Name": "fault.example.com"}},
+		"ApexNS": {"Type": "AWS::Route53::RecordSet", "Properties": {
+			"HostedZoneId": {"Ref": "Zone"}, "Name": "fault.example.com", "Type": "NS", "TTL": "60",
+			"ResourceRecords": "ns-9.example.net."}}}}`, "r53-apex-fault", nil)
+	require.NoError(t, err)
+	require.Equal(t, "CREATE_COMPLETE", result.Status)
+
+	fault.failGet = "hostedzone:"
+	for _, del := range d.DeleteStackResourcesForTest(ctx, "r53-apex-fault") {
+		if del.LogicalID == "ApexNS" {
+			assert.Equal(t, "DELETE_FAILED", del.Status, "%+v", del)
+			assert.Contains(t, del.Reason, "store fault")
+		}
+	}
+}

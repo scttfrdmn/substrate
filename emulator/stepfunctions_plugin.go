@@ -938,7 +938,25 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 
-	page, nextToken, tokenOK := sfnPageOrdered(sfnTokenExecutions+"\x00"+input.StateMachineArn, ids, after, maxResults)
+	// statusFilter is applied before the page is cut, so a page is up to maxResults matching
+	// executions and a nextToken means another matching one remains. The records the filter reads are
+	// kept for the page below.
+	loaded := map[string]*ExecutionState{}
+	var match func(string) (bool, error)
+	if input.StatusFilter != "" {
+		match = func(execName string) (bool, error) {
+			exec, err := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
+			if err != nil {
+				return false, err
+			}
+			loaded[execName] = exec
+			return exec != nil && exec.Status == input.StatusFilter, nil
+		}
+	}
+	page, nextToken, tokenOK, err := sfnPageOrdered(sfnTokenExecutions+"\x00"+input.StateMachineArn, ids, after, maxResults, match)
+	if err != nil {
+		return nil, err
+	}
 	if !tokenOK {
 		return nil, sfnInvalidToken()
 	}
@@ -953,11 +971,12 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 	}
 	entries := make([]execEntry, 0, len(page))
 	for _, execName := range page {
-		exec, loadErr := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
-		if loadErr != nil || exec == nil {
-			continue
+		exec, cached := loaded[execName]
+		var loadErr error
+		if !cached {
+			exec, loadErr = p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
 		}
-		if input.StatusFilter != "" && exec.Status != input.StatusFilter {
+		if loadErr != nil || exec == nil {
 			continue
 		}
 		e := execEntry{

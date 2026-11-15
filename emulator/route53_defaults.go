@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -12,9 +13,9 @@ import (
 //
 // API_CreateHostedZone: "For public hosted zones, Route 53 automatically creates a default SOA record
 // and four NS records for the zone", and both of its example responses, the private-zone one
-// included, report <ResourceRecordSetCount>2</ResourceRecordSetCount> — so a private zone gets the
-// two record sets too. The Developer Guide's "NS and SOA records that Amazon Route 53 creates for a
-// public hosted zone" publishes their shape:
+// included, report a ResourceRecordSetCount of 2 — so a private zone gets the two record sets too.
+// The Developer Guide's "NS and SOA records that Amazon Route 53 creates for a public hosted zone"
+// publishes their shape:
 //
 //   - the NS record set "has the same name as your hosted zone" and "lists the four name servers that
 //     are the authoritative name servers for your hosted zone" — the four GetHostedZone's
@@ -28,6 +29,11 @@ import (
 // use" calls "the typical TTL setting for the NS record". The administrator's address is
 // awsdns-hostmaster.amazon.com., the amazon.com address real zones report; the page names only its
 // domain.
+//
+// A zone created before #1537 holds no defaults and its record carries no DefaultRecordSets flag.
+// Substrate does not backfill them: such a zone is treated as having none, so no change batch is
+// refused for its apex SOA or NS, its CloudFormation deletes send a plain DELETE, and its count is what
+// its index holds. Backfilling would rewrite a stored zone as a side effect of an unrelated request.
 const (
 	r53DefaultSOATTL     = 900
 	r53DefaultNSTTL      = 172800
@@ -65,32 +71,139 @@ func r53IsApexDefault(rrType, name, zoneName string) bool {
 	return (t == "SOA" || t == "NS") && r53CanonicalName(name) == r53CanonicalName(zoneName)
 }
 
-// r53DefaultRecordDeleteError refuses a change batch that deletes a zone's default SOA or NS record
-// set. API_ChangeResourceRecordSets publishes InvalidChangeBatch (400) for a change batch it rejects;
-// the Developer Guide's "Deleting records" says "You can't delete the records that have a value of NS
-// or SOA for Type", and API_DeleteHostedZone says deleting the zone is how they go ("You can delete a
-// hosted zone only if it contains only the default SOA and NS records"). The message is substrate's
-// own; no page publishes the wording.
-func r53DefaultRecordDeleteError(rrType, zoneName string) *AWSError {
+// r53RRTypes is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
+// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"). The values are
+// upper case, and an enum member is matched exactly, so "a" is not "A".
+var r53RRTypes = map[string]bool{
+	"SOA": true, "A": true, "TXT": true, "NS": true, "CNAME": true, "MX": true, "NAPTR": true,
+	"PTR": true, "SRV": true, "SPF": true, "AAAA": true, "CAA": true, "DS": true, "TLSA": true,
+	"SSHFP": true, "SVCB": true, "HTTPS": true,
+}
+
+// r53InvalidType refuses a record set Type outside [r53RRTypes] with InvalidInput (400), "The input is
+// not valid.", which API_ChangeResourceRecordSets publishes. The message is substrate's own.
+func r53InvalidType(rrType string) *AWSError {
 	return &AWSError{
-		Code: "InvalidChangeBatch",
-		Message: fmt.Sprintf("The change batch deletes the %s record set at %s, which is one of the hosted zone's "+
-			"default record sets; it is removed only with the hosted zone.", strings.ToUpper(rrType), zoneName),
+		Code:       "InvalidInput",
+		Message:    fmt.Sprintf("%q is not a valid resource record set Type; the valid values are upper case.", rrType),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
 
-// putRecordSet stores one record set in zone id and indexes it.
-func (p *Route53Plugin) putRecordSet(id string, rrset Route53ResourceRecordSet) error {
+// The InvalidChangeBatch messages for a batch that would leave a zone without its apex SOA or NS.
+// No API page publishes them; they are what Route 53 answers, as Terraform's AWS provider reports
+// quote it (hashicorp/terraform-provider-aws#37863 and #45241): "InvalidChangeBatch: [A HostedZone
+// must contain at least one NS record for the zone itself., A HostedZone must contain exactly one SOA
+// record.]". The message for a second apex NS record set is substrate's own.
+const (
+	r53MsgExactlyOneSOA  = "A HostedZone must contain exactly one SOA record."
+	r53MsgAtLeastOneNS   = "A HostedZone must contain at least one NS record for the zone itself."
+	r53MsgSecondApexNSet = "The hosted zone already has an NS record set at its apex; a second cannot be created."
+)
+
+// r53ApexChange is the part of one change the apex check reads.
+type r53ApexChange struct {
+	action, rrType, name string
+}
+
+// r53CheckApexDefaults refuses a change batch that would leave a zone holding its defaults without
+// exactly one apex SOA, or without an apex NS (#1537). It evaluates the batch's end state rather than
+// each change, so a batch that deletes the SOA and creates its replacement is accepted. index is the
+// zone's record-set index before the batch. A CREATE of a record set that already exists counts as a
+// second one; an UPSERT replaces; a DELETE removes. The batch is transactional, so a refusal makes no
+// change.
+func r53CheckApexDefaults(index []string, changes []r53ApexChange, zoneName string) *AWSError {
+	count := map[string]int{}
+	for _, t := range []string{"SOA", "NS"} {
+		if len(r53MatchingKeys(index, r53RRSetKey(t, zoneName))) > 0 {
+			count[t] = 1
+		}
+	}
+	for _, c := range changes {
+		if !r53IsApexDefault(c.rrType, c.name, zoneName) {
+			continue
+		}
+		t := strings.ToUpper(c.rrType)
+		switch strings.ToUpper(c.action) {
+		case "CREATE":
+			count[t]++
+		case "UPSERT":
+			count[t] = max(count[t], 1)
+		case "DELETE":
+			count[t] = max(count[t]-1, 0)
+		}
+	}
+	var msgs []string
+	if count["NS"] == 0 {
+		msgs = append(msgs, r53MsgAtLeastOneNS)
+	}
+	if count["NS"] > 1 {
+		msgs = append(msgs, r53MsgSecondApexNSet)
+	}
+	if count["SOA"] != 1 {
+		msgs = append(msgs, r53MsgExactlyOneSOA)
+	}
+	if len(msgs) == 0 {
+		return nil
+	}
+	return &AWSError{Code: "InvalidChangeBatch", Message: strings.Join(msgs, ", "), HTTPStatus: http.StatusBadRequest}
+}
+
+// r53MatchingKeys returns the index entries that name the record set key names, in index order.
+//
+// Before #1537 a record set's key was its Type and Name exactly as the request spelled them, so
+// "NS:Example.com." and "ns:example.com" were two keys for one record set. An index entry is matched
+// by canonicalizing it the way [r53RRSetKey] does, so a record set written under its old key is still
+// found: a DELETE removes it, and a CREATE or UPSERT replaces it under the canonical key rather than
+// writing a second. This is the migrate-on-access the CloudFormation stack keys use (cfn_scope.go).
+func r53MatchingKeys(index []string, key string) []string {
+	var out []string
+	for _, k := range index {
+		rrType, name, ok := strings.Cut(k, ":")
+		if ok && r53RRSetKey(rrType, name) == key {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// putRecordSet stores one record set in zone id under its canonical key, which it returns. The caller
+// owns the index.
+func (p *Route53Plugin) putRecordSet(id string, rrset Route53ResourceRecordSet) (string, error) {
 	key := r53RRSetKey(rrset.Type, rrset.Name)
 	data, err := json.Marshal(rrset)
 	if err != nil {
-		return fmt.Errorf("route53 marshal record set %s: %w", key, err)
+		return "", fmt.Errorf("route53 marshal record set %s: %w", key, err)
 	}
 	if err := p.state.Put(context.Background(), route53Namespace, "rrset:"+id+":"+key, data); err != nil {
-		return fmt.Errorf("route53 put record set %s: %w", key, err)
+		return "", fmt.Errorf("route53 put record set %s: %w", key, err)
 	}
-	return p.appendToList(id, "rrset_keys", key)
+	return key, nil
+}
+
+// deleteRecordSetKeys removes the records stored under keys in zone id and drops them from index,
+// returning the index without them.
+func (p *Route53Plugin) deleteRecordSetKeys(id string, index, keys []string) ([]string, error) {
+	for _, k := range keys {
+		if err := p.state.Delete(context.Background(), route53Namespace, "rrset:"+id+":"+k); err != nil {
+			return nil, fmt.Errorf("route53 delete record set %s: %w", k, err)
+		}
+		index = slices.DeleteFunc(index, func(e string) bool { return e == k })
+	}
+	return index, nil
+}
+
+// saveList stores a whole index list.
+func (p *Route53Plugin) saveList(scope, listName string, ids []string) error {
+	key := listName + ":" + scope
+	data, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("route53 saveList %s marshal: %w", key, err)
+	}
+	if err := p.state.Put(context.Background(), route53Namespace, key, data); err != nil {
+		return fmt.Errorf("route53 saveList %s state.Put: %w", key, err)
+	}
+	return nil
 }
 
 // deleteZoneRecordSets removes every record set zone id still holds, and its record-set index. It runs
@@ -111,31 +224,32 @@ func (p *Route53Plugin) deleteZoneRecordSets(id string) error {
 	return nil
 }
 
-// storeRecordSetCount recounts zone id's record sets and stores the count on zone, so
-// ResourceRecordSetCount follows every change batch. It counts records rather than index entries:
-// an entry that outlived its record is skipped, as the listing skips it.
-func (p *Route53Plugin) storeRecordSetCount(id string, zone Route53HostedZone) error {
-	keys, err := p.loadList(id, "rrset_keys")
+// r53LoadZone reads the hosted zone a zone ID (bare or in the /hostedzone/ path form) names. found is
+// false for an absent zone; a read or decode failure is an error. It is the one loader the plugin and
+// the CloudFormation deployer share.
+func r53LoadZone(ctx context.Context, state StateManager, zoneID string) (Route53HostedZone, bool, error) {
+	data, err := state.Get(ctx, route53Namespace, "hostedzone:"+r53ZoneSuffix(zoneID))
 	if err != nil {
-		return fmt.Errorf("route53 count record sets: %w", err)
+		return Route53HostedZone{}, false, fmt.Errorf("route53 get hosted zone %s: %w", zoneID, err)
 	}
-	var n int64
-	for _, k := range keys {
-		_, found, err := p.loadRecordSet(id, k)
-		if err != nil {
-			return fmt.Errorf("route53 count record sets: %w", err)
-		}
-		if found {
-			n++
-		}
+	if data == nil {
+		return Route53HostedZone{}, false, nil
 	}
-	zone.ResourceRecordSetCount = n
+	var zone Route53HostedZone
+	if err := json.Unmarshal(data, &zone); err != nil {
+		return Route53HostedZone{}, false, fmt.Errorf("route53 decode hosted zone %s: %w", zoneID, err)
+	}
+	return zone, true, nil
+}
+
+// putZone stores a hosted zone record.
+func (p *Route53Plugin) putZone(id string, zone Route53HostedZone) error {
 	data, err := json.Marshal(zone)
 	if err != nil {
 		return fmt.Errorf("route53 marshal hosted zone %s: %w", id, err)
 	}
 	if err := p.state.Put(context.Background(), route53Namespace, "hostedzone:"+id, data); err != nil {
-		return fmt.Errorf("route53 store record-set count %s: %w", id, err)
+		return fmt.Errorf("route53 put hosted zone %s: %w", id, err)
 	}
 	return nil
 }

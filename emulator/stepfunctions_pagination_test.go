@@ -197,6 +197,36 @@ func TestStepFunctionsPaging_TheIssuedTokenWalksEveryListing(t *testing.T) {
 
 // The cursor is a value: deleting the item it names between two pages resumes after it rather than
 // restarting the listing or skipping the next item.
+// statusFilter is applied before the page is cut: each page is full of matching executions, and a
+// token is issued only when another matching one remains.
+func TestStepFunctionsPaging_StatusFilterIsAppliedBeforeThePage(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	smArn := sfnPageFixture(t, ts)
+	execPrefix := "arn:aws:states:us-east-1:123456789012:execution:sm-0:"
+	for _, name := range []string{"ex-0", "ex-2"} {
+		status, out := sfnPageCall(t, ts, "StopExecution", map[string]any{"executionArn": execPrefix + name})
+		require.Equal(t, http.StatusOK, status, "%v", out)
+	}
+	base := map[string]any{"stateMachineArn": smArn, "statusFilter": "ABORTED", "maxResults": 1}
+
+	status, out := sfnPageCall(t, ts, "ListExecutions", base)
+	require.Equal(t, http.StatusOK, status, "%v", out)
+	assert.Equal(t, []string{"ex-0"}, sfnPageNames(t, out, "executions"))
+	token := sfnPageToken(t, out)
+	require.NotEmpty(t, token, "another ABORTED execution remains")
+
+	status, out = sfnPageCall(t, ts, "ListExecutions", sfnPageWith(base, map[string]any{"nextToken": token}))
+	require.Equal(t, http.StatusOK, status, "%v", out)
+	assert.Equal(t, []string{"ex-2"}, sfnPageNames(t, out, "executions"), "the non-matching ex-1 does not use the page")
+	assert.Empty(t, sfnPageToken(t, out), "no matching execution remains")
+
+	status, out = sfnPageCall(t, ts, "ListExecutions", sfnPageWith(base, map[string]any{"statusFilter": "TIMED_OUT"}))
+	require.Equal(t, http.StatusOK, status, "%v", out)
+	assert.Empty(t, sfnPageNames(t, out, "executions"))
+	assert.Empty(t, sfnPageToken(t, out), "an empty filtered listing issues no token")
+}
+
 func TestStepFunctionsPaging_ADeleteMidWalkResumes(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)

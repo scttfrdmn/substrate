@@ -48,6 +48,18 @@ func TestBackupPlanARN_StoredRecordsReportThePublishedSegment(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, list["BackupPlansList"].([]any)[0].(map[string]any)["BackupPlanArn"], ":plan:")
 
+	// The stored stack record reports the published ARN on its plan resource and in the output that
+	// resolved Fn::GetAtt BackupPlanArn, without being redeployed.
+	stacks, err := d.ListStacks(ctx)
+	require.NoError(t, err)
+	require.Len(t, stacks, 1)
+	assert.Equal(t, want, stacks[0].Outputs["PlanArn"], "a recorded output is rewritten too")
+	for _, r := range stacks[0].Resources {
+		if r.Type == "AWS::Backup::BackupPlan" {
+			assert.Equal(t, want, r.ARN)
+		}
+	}
+
 	// An unchanged update carries the recorded resource forward, so its attribute comes from the stack
 	// record.
 	updated, err := d.Deploy(ctx, template, stack, nil)

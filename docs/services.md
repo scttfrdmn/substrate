@@ -13708,7 +13708,7 @@ Auto Scaling itself is free; the EC2 instances a group launches are costed as EC
 | GetHostedZone | |
 | DeleteHostedZone | `NoSuchHostedZone`/404 for an absent zone, and `HostedZoneNotEmpty`/400 for a zone holding any record set but its apex SOA and NS — see [Deleting a hosted zone](#deleting-a-hosted-zone) |
 | ListHostedZones | A zone record that cannot be read or decoded is an error, not a zone left out |
-| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A batch that deletes the zone's default SOA or NS is `InvalidChangeBatch`/400 and makes no change. A name with and without its trailing dot is one record set |
+| ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A batch that would leave the zone without exactly one apex SOA, or without an apex NS, is [`InvalidChangeBatch`/400](#the-default-soa-and-ns-record-sets) and makes no change. A name with and without its trailing dot is one record set; a `Type` outside the published upper-case values is `InvalidInput`/400 |
 | ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A record set that cannot be read or decoded is an error, not a record set left out |
 
 ### CloudFormation resource types
@@ -13772,19 +13772,39 @@ address is *"an amazon.com email address that is not monitored"*; `awsdns-hostma
 address real zones report. The NS TTL is the value *"Making Route 53 the DNS service for a domain
 that's in use"* calls *"the typical TTL setting for the NS record"*.
 
-`ResourceRecordSetCount` is recounted after every change batch, and `GetHostedZone`, `ListHostedZones`
-and `CreateHostedZone` report it.
+`ResourceRecordSetCount` follows every change batch: it is the size of the zone's record-set index
+after the batch, and `GetHostedZone`, `ListHostedZones` and `CreateHostedZone` report it.
 
 A change batch may `UPSERT` either default, and a name with or without its trailing dot is the same
-record set: `API_CreateHostedZone` says Route 53 treats the two spellings as identical. A batch that
-`DELETE`s either is refused with `InvalidChangeBatch`/400, the code `API_ChangeResourceRecordSets`
-publishes for a rejected batch; the Developer Guide's *"Deleting records"* says *"You can't delete the
-records that have a value of NS or SOA for Type"*. The page calls a batch transactional, so a refused
-batch makes none of its changes. The message is substrate's own.
+record set: `API_CreateHostedZone` says Route 53 treats the two spellings as identical. The page calls
+a batch transactional, so the check reads the batch's **end state**: a zone holding its defaults must
+end the batch with exactly one apex SOA and an apex NS. A batch that deletes the SOA and creates its
+replacement is accepted. One that would leave no SOA, a second SOA (a `CREATE` while one exists), no NS
+or a second NS is refused with `InvalidChangeBatch`/400, the code `API_ChangeResourceRecordSets`
+publishes for a rejected batch, and makes none of its changes. The Developer Guide's *"Deleting
+records"* says *"You can't delete the records that have a value of NS or SOA for Type"*. No page
+publishes the messages; substrate answers the two Route 53 itself answers, as Terraform's AWS provider
+reports quote them (hashicorp/terraform-provider-aws #37863 and #45241): *"A HostedZone must contain
+exactly one SOA record."* and *"A HostedZone must contain at least one NS record for the zone
+itself."*, joined with a comma when both apply. The message for a second apex NS record set is
+substrate's own.
+
+`Type` must be one of the values `API_ResourceRecordSet` publishes, which are upper case; anything
+else, a lower-case `a` included, is `InvalidInput`/400 ("The input is not valid.") before any change is
+made. The message is substrate's own.
 
 A CloudFormation `AWS::Route53::RecordSet` or `RecordSetGroup` element that writes the zone's apex SOA
 or NS modifies the default, so its delete restores the default with an `UPSERT` rather than sending a
-`DELETE` the zone would refuse, and the stack tears down.
+`DELETE` the zone would refuse, and the stack tears down. A zone that cannot be read fails that
+resource's delete.
+
+**State written before #1537.** A record set used to be keyed by its `Type` and `Name` exactly as the
+request spelled them. Such a record set is still found: a `DELETE` removes it, and a `CREATE` or
+`UPSERT` moves it to its canonical key (upper-case type, lower-case name without its trailing dot)
+rather than writing a second one. A zone stored before #1537 holds no defaults and is not given them:
+it is treated as having none, so no batch is refused for its apex SOA or NS, a CloudFormation delete of
+its apex record set sends a plain `DELETE`, and its count is what it holds. Backfilling them would
+rewrite a stored zone as a side effect of an unrelated request.
 
 ### The account a hosted zone carries reaches no response
 
@@ -19307,6 +19327,11 @@ item the previous page returned and the listing that issued it, checked before a
 token no call to that operation issued — a bare name, another listing's token, another state machine's
 execution token — is `InvalidToken`/400.
 
+`ListExecutions` applies `statusFilter` before it cuts the page, so a page holds up to `maxResults`
+matching executions and a `nextToken` means another matching one remains. The cursor is resumed by the
+named execution's place in the whole listing, so it stays valid when that execution's status changes
+between pages.
+
 State machines and activities resume at the first name after the cursor, so deleting one between two
 pages, including the one the cursor names, costs no other its place. Executions are listed in start
 order and are never removed from their state machine, so their cursor resumes after the named
@@ -24346,7 +24371,9 @@ for a plan (`API_CreateBackupPlan`'s and `AWS::Backup::BackupPlan`'s
 as a format string. Substrate spelled a plan's segment `backup-plan` until
 [#1181](https://github.com/scttfrdmn/substrate/issues/1181), so an IAM policy or an ARN parser written
 against it matched nothing on AWS. The ARN is derived from the plan's ID when it is read, so a plan
-stored before the fix, and a CloudFormation stack record holding one, report the published form.
+stored before the fix, and a CloudFormation stack record holding one, report the published form. A stack
+record's outputs are rewritten too, so an output that resolved `Fn::GetAtt BackupPlanArn`, an export
+built from one, and an importing stack's output that resolved it all report `plan`.
 
 The published example differs in one more way the table does not show: AWS's sample is
 `arn:aws:backup:us-east-1:123456789012:plan:8F81F553-3A74-4A3F-B93D-B3360DC80C50`, an **uppercase**

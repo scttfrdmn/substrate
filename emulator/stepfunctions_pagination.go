@@ -3,6 +3,8 @@ package emulator
 import (
 	"encoding/base64"
 	"net/http"
+	"slices"
+	"sort"
 	"strings"
 )
 
@@ -75,39 +77,48 @@ func sfnEncodeToken(tag, item string) string {
 
 // sfnPageSorted cuts one page of a name-sorted listing: the items sorting strictly after after, at
 // most size of them, and the token for the next page when more remain. The item the cursor names
-// need not still exist.
+// need not still exist. items must be sorted, which saveSMNames and saveActivityNames guarantee.
 func sfnPageSorted(tag string, items []string, after string, size int) ([]string, string) {
 	start := 0
 	if after != "" {
-		start = len(items)
-		for i, item := range items {
-			if item > after {
-				start = i
-				break
-			}
+		start = sort.SearchStrings(items, after)
+		if start < len(items) && items[start] == after {
+			start++
 		}
 	}
 	return sfnCut(tag, items[start:], size)
 }
 
-// sfnPageOrdered cuts one page of a listing in insertion order, resuming after the item after names.
-// ok is false when after names no item in the listing, which a caller answers with InvalidToken.
-func sfnPageOrdered(tag string, items []string, after string, size int) (page []string, next string, ok bool) {
+// sfnPageOrdered cuts one page of a listing in insertion order, resuming after the item after names,
+// and keeping only the items match accepts (every item when match is nil). The filter runs before the
+// page is cut, so a page holds up to size matching items and a token is issued only when another
+// matching item remains. The cursor is the last item returned, resumed by its position in the whole
+// listing, so it stays valid when that item stops matching between pages. ok is false when after
+// names no item in the listing, which a caller answers with InvalidToken; err is match's.
+func sfnPageOrdered(tag string, items []string, after string, size int, match func(string) (bool, error)) (page []string, next string, ok bool, err error) {
 	start := 0
 	if after != "" {
-		start = -1
-		for i, item := range items {
-			if item == after {
-				start = i + 1
-				break
-			}
-		}
-		if start < 0 {
-			return nil, "", false
+		start = slices.Index(items, after) + 1
+		if start == 0 {
+			return nil, "", false, nil
 		}
 	}
-	page, next = sfnCut(tag, items[start:], size)
-	return page, next, true
+	for _, item := range items[start:] {
+		if match != nil {
+			keep, err := match(item)
+			if err != nil {
+				return nil, "", true, err
+			}
+			if !keep {
+				continue
+			}
+		}
+		if len(page) == size {
+			return page, sfnEncodeToken(tag, page[size-1]), true, nil
+		}
+		page = append(page, item)
+	}
+	return page, "", true, nil
 }
 
 // sfnCut takes the first size items of rest, with the token resuming after the last of them when

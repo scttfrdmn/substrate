@@ -732,14 +732,15 @@ func backupPlanARN(region, acct, planID string) string {
 	return fmt.Sprintf("arn:aws:backup:%s:%s:plan:%s", region, acct, planID)
 }
 
-// backupLegacyPlanARN matches a plan ARN in the pre-#1181 shape, capturing everything before the
-// resource segment and the plan ID.
-var backupLegacyPlanARN = regexp.MustCompile(`^(arn:[^:]+:backup:[^:]*:[^:]*:)backup-plan:(.+)$`)
+// backupLegacyPlanARN matches the account-and-Region prefix and the resource segment of a plan ARN in
+// the pre-#1181 shape, wherever it appears in a string.
+var backupLegacyPlanARN = regexp.MustCompile(`(arn:[^:\s"]+:backup:[^:\s"]*:[^:\s"]*:)backup-plan:`)
 
-// backupPublishedPlanARN rewrites a pre-#1181 plan ARN into the published shape and leaves any other
-// string as it is. It is how a stack record written before #1181 reports the published ARN.
-func backupPublishedPlanARN(arn string) string {
-	return backupLegacyPlanARN.ReplaceAllString(arn, "${1}plan:${2}")
+// backupPublishedPlanARNs rewrites every pre-#1181 plan ARN in s into the published shape and leaves
+// the rest of s as it is. s may be an ARN or a value built from one, such as an Fn::Sub output. It is
+// how a stack record written before #1181 reports the published ARN.
+func backupPublishedPlanARNs(s string) string {
+	return backupLegacyPlanARN.ReplaceAllString(s, "${1}plan:")
 }
 
 // loadSelection loads a BackupSelection from state or returns a not-found error.

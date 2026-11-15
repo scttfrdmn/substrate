@@ -9,9 +9,13 @@ import (
 // cfnSequencedDeleters maps a resource type whose delete is several requests, each depending on
 // the response before it, to the function that dispatches them in order. It is consulted before
 // [cfnResourceDeleters], whose single pre-built request cannot carry a value only a response
-// supplies. A nil result is success, as from [StackDeployer.dispatchResourceDelete].
-var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, DeployedResource, string) *CFNResourceDeletion{
+// supplies. A nil result is success, as from [StackDeployer.dispatchResourceDelete]. It also serves a
+// delete whose request depends on state read with the sweep's context, which a deleter cannot take:
+// Route 53's record sets, whose delete depends on the zone (#1537).
+var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, DeployedResource, map[string]interface{}, *cfnContext, string) *CFNResourceDeletion{
 	"AWS::CloudFront::Distribution": cfnDeleteCloudFrontDistribution,
+	"AWS::Route53::RecordSet":       cfnDeleteRoute53RecordSet,
+	"AWS::Route53::RecordSetGroup":  cfnDeleteRoute53RecordSetGroup,
 }
 
 // cfnDeleteCloudFrontDistribution deletes a distribution the way CloudFormation does and
@@ -23,7 +27,7 @@ var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, Depl
 // same checks a caller's read-modify-write does. A distribution already gone at any step is a
 // completed delete, the same reading [cfnDeleteIsAbsent] gives every other type. The "wait for
 // Deployed" step is not needed: a distribution's Status is Deployed throughout.
-func cfnDeleteCloudFrontDistribution(ctx context.Context, d *StackDeployer, dr DeployedResource, streamID string) *CFNResourceDeletion {
+func cfnDeleteCloudFrontDistribution(ctx context.Context, d *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext, streamID string) *CFNResourceDeletion {
 	path := "/2020-05-31/distribution/" + dr.PhysicalID
 	failed := func(err error) *CFNResourceDeletion {
 		if cfnDeleteIsAbsent(err) {
