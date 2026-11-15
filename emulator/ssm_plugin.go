@@ -453,14 +453,15 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 		Path           string `json:"Path"`
 		Recursive      bool   `json:"Recursive"`
 		WithDecryption bool   `json:"WithDecryption"`
-		MaxResults     int    `json:"MaxResults"`
+		MaxResults     *int   `json:"MaxResults"`
 		NextToken      string `json:"NextToken"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, ssmInvalidBody()
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 10
+	maxResults, maxOK := ssmGetParametersByPathMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, ssmInvalidMaxResults(ssmGetParametersByPathMaxResults, *input.MaxResults)
 	}
 	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
 	if !tokenOK {
@@ -507,9 +508,9 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 	}
 	page := matched[offset:]
 	var nextToken string
-	if len(page) > input.MaxResults {
-		page = page[:input.MaxResults]
-		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
+	if len(page) > maxResults {
+		page = page[:maxResults]
+		nextToken = encodeOffsetPaginationToken(offset + maxResults)
 	}
 
 	type paramItem struct {
@@ -545,7 +546,7 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 
 func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		MaxResults int    `json:"MaxResults"`
+		MaxResults *int   `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -553,8 +554,9 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 			return nil, ssmInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 10
+	maxResults, maxOK := ssmDescribeParametersMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, ssmInvalidMaxResults(ssmDescribeParametersMaxResults, *input.MaxResults)
 	}
 	offset, tokenOK := decodeOffsetPaginationToken(input.NextToken)
 	if !tokenOK {
@@ -575,9 +577,9 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 	}
 	page := paths[offset:]
 	var nextToken string
-	if len(page) > input.MaxResults {
-		page = page[:input.MaxResults]
-		nextToken = encodeOffsetPaginationToken(offset + input.MaxResults)
+	if len(page) > maxResults {
+		page = page[:maxResults]
+		nextToken = encodeOffsetPaginationToken(offset + maxResults)
 	}
 
 	type paramMeta struct {

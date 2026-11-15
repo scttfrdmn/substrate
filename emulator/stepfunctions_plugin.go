@@ -618,8 +618,9 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 			return nil, sfnInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 100
+	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	if !maxOK {
+		return nil, sfnInvalidMaxResults(input.MaxResults)
 	}
 
 	goCtx := context.Background()
@@ -642,9 +643,9 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 	}
 	page := names[offset:]
 	var nextToken string
-	if len(page) > input.MaxResults {
-		nextToken = page[input.MaxResults]
-		page = page[:input.MaxResults]
+	if len(page) > maxResults {
+		nextToken = page[maxResults]
+		page = page[:maxResults]
 	}
 
 	type smEntry struct {
@@ -897,8 +898,9 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 			return nil, sfnInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 100
+	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	if !maxOK {
+		return nil, sfnListExecutionsInvalidMaxResults(input.MaxResults)
 	}
 
 	// API_ListExecutions is the one operation in this set whose stateMachineArn is "Required: No":
@@ -956,9 +958,9 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 	}
 	page := ids[offset:]
 	var nextToken string
-	if len(page) > input.MaxResults {
-		nextToken = page[input.MaxResults]
-		page = page[:input.MaxResults]
+	if len(page) > maxResults {
+		nextToken = page[maxResults]
+		page = page[:maxResults]
 	}
 
 	type execEntry struct {
@@ -1141,8 +1143,9 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 			return nil, sfnInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 100
+	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	if !maxOK {
+		return nil, sfnInvalidMaxResults(input.MaxResults)
 	}
 
 	goCtx := context.Background()
@@ -1165,9 +1168,9 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 	}
 	page := names[offset:]
 	var nextToken string
-	if len(page) > input.MaxResults {
-		nextToken = page[input.MaxResults]
-		page = page[:input.MaxResults]
+	if len(page) > maxResults {
+		nextToken = page[maxResults]
+		page = page[:maxResults]
 	}
 
 	type actEntry struct {

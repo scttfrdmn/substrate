@@ -672,9 +672,29 @@ func smInvalidNextToken() *AWSError {
 	}
 }
 
+// smListMaxResults is the `MaxResults` constraint API_ListSecrets and API_ListSecretVersionIds both
+// publish (#1131): "Valid Range: Minimum value of 1. Maximum value of 100." Neither page publishes a
+// default, so the 100 an absent member gets is substrate's reading, kept because every recorded
+// request that omits the member was answered with it.
+var smListMaxResults = pageSizeRange{member: "MaxResults", min: 1, max: 100, def: 100}
+
+// smInvalidMaxResults reports a `MaxResults` outside the published 1–100.
+//
+// InvalidParameterException/400, which API_ListSecrets and API_ListSecretVersionIds each publish on
+// their own pages, glossed "The parameter name or value is invalid." — a value out of range is an
+// invalid value. Both list operations answer through here, so the plugin has one refusal for one
+// constraint. The message is substrate's, and is the form ListSecretVersionIds already answered.
+func smInvalidMaxResults(value int) *AWSError {
+	return &AWSError{
+		Code:       "InvalidParameterException",
+		Message:    fmt.Sprintf("MaxResults must be from 1 to 100, not %d", value),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		MaxResults int    `json:"MaxResults"`
+		MaxResults *int   `json:"MaxResults"`
 		NextToken  string `json:"NextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -682,8 +702,9 @@ func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest)
 			return nil, smInvalidBody()
 		}
 	}
-	if input.MaxResults <= 0 {
-		input.MaxResults = 100
+	maxResults, maxOK := smListMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, smInvalidMaxResults(*input.MaxResults)
 	}
 
 	// A token substrate did not issue is refused rather than answered with page one, which
@@ -703,7 +724,7 @@ func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest)
 	// Sorted before the cut, so the offset a token names means the same thing on every call of
 	// one walk.
 	sort.Strings(names)
-	page, nextToken := pageByOffsetToken(names, offset, input.MaxResults)
+	page, nextToken := pageByOffsetToken(names, offset, maxResults)
 
 	type secretEntry struct {
 		ARN  string `json:"ARN"`
@@ -739,16 +760,9 @@ func (p *SecretsManagerPlugin) listSecretVersionIDs(ctx *RequestContext, req *AW
 	}
 	// MaxResults: "Valid Range: Minimum value of 1. Maximum value of 100." The page states no default;
 	// 100, the maximum, is substrate's reading, as ListSecrets' is.
-	pageSize := 100
-	if input.MaxResults != nil {
-		if *input.MaxResults < 1 || *input.MaxResults > 100 {
-			return nil, &AWSError{
-				Code:       "InvalidParameterException",
-				Message:    fmt.Sprintf("MaxResults must be from 1 to 100, not %d", *input.MaxResults),
-				HTTPStatus: http.StatusBadRequest,
-			}
-		}
-		pageSize = *input.MaxResults
+	pageSize, maxOK := smListMaxResults.resolve(input.MaxResults)
+	if !maxOK {
+		return nil, smInvalidMaxResults(*input.MaxResults)
 	}
 	offset, ok := decodeOffsetPaginationToken(input.NextToken)
 	if !ok {

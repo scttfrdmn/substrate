@@ -88,6 +88,34 @@ func ssmInvalidNextToken() *AWSError {
 	}
 }
 
+// ssmGetParametersByPathMaxResults and ssmDescribeParametersMaxResults are the two paginated
+// parameter operations' published `MaxResults` constraints (#1131).
+//
+// API_GetParametersByPath gives "Valid Range: Minimum value of 1. Maximum value of 10." and
+// API_DescribeParameters "Valid Range: Minimum value of 1. Maximum value of 50." Neither publishes a
+// default, so the 10 an absent member gets on both is substrate's own reading and is kept because
+// every recorded request that omits the member was answered with it. On GetParametersByPath the 10
+// is also the maximum, which is why it read like one; on DescribeParameters it is not, and a caller
+// may ask for up to 50.
+var (
+	ssmGetParametersByPathMaxResults = pageSizeRange{member: "MaxResults", min: 1, max: 10, def: 10}
+	ssmDescribeParametersMaxResults  = pageSizeRange{member: "MaxResults", min: 1, max: 50, def: 10}
+)
+
+// ssmInvalidMaxResults reports a `MaxResults` outside its operation's published range.
+//
+// ValidationError at 400, for the reasons this file's preamble gives: neither page lists a code for
+// a page size, and their Errors sections link the common list that publishes ValidationError —
+// "The input doesn't meet the required format or constraints." The message is substrate's. See
+// page_size_range.go for why the value is refused rather than clamped or honoured.
+func ssmInvalidMaxResults(r pageSizeRange, value int) *AWSError {
+	return &AWSError{
+		Code:       "ValidationError",
+		Message:    r.outOfRange(value),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
 // ssmInvalidResourceID reports that an identifier names no Systems Manager resource, naming the
 // reason so a caller can tell a wrong service from a wrong resource type from an absent resource.
 //
