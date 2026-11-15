@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.129.0] - 2026-11-15
+
 ### Added
 
 - **A worked pytest-substrate example, run in CI (#1518).** `python/examples/test_journey.py` tests a small release script against a per-test substrate through the `substrate_isolated` fixture. The script uploads to S3, health-checks a host through SSM Run Command and records the outcome in an SSM parameter, and its maintenance window is an EventBridge Scheduler schedule. The three tests take the nominal path, seed a failed command through `POST /v1/ssm/command-invocation` so the failure path runs, and move the simulated clock an hour so the schedule fires. Each asserts on the state the script wrote. `SubstrateServer` gains `now`, `set_time` and `advance_time` over `GET`/`POST /v1/control/time`; there is no advance endpoint, so `advance_time` reads the clock and sets it forward. pytest collects `python/examples`, and CI's and the Makefile's pytest and ruff steps cover it. `examples/README.md` replaces its "Planned" note, and the testing guide gains a Python section.
@@ -21620,7 +21622,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.128.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.129.0...HEAD
+[v0.129.0]: https://github.com/scttfrdmn/substrate/compare/v0.128.0...v0.129.0
 [v0.128.0]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...v0.128.0
 [v0.127.0]: https://github.com/scttfrdmn/substrate/compare/v0.126.0...v0.127.0
 [v0.126.0]: https://github.com/scttfrdmn/substrate/compare/v0.125.0...v0.126.0
