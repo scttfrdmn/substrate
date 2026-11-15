@@ -75,6 +75,20 @@ type cfnOutput struct {
 	// is local to its stack. Only an exported output is importable: an output
 	// without an Export is readable through DescribeStacks and nowhere else.
 	Export *cfnExport `json:"Export,omitempty" yaml:"Export,omitempty"`
+
+	// Condition names the template condition the output is created under, empty for an
+	// output that always is.
+	Condition string `json:"Condition,omitempty" yaml:"Condition,omitempty"`
+}
+
+// cfnOutputActive reports whether an output is created: it names no Condition, or one that is
+// true. A condition the context does not know is treated as true, as a resource's is.
+func cfnOutputActive(out cfnOutput, cctx *cfnContext) bool {
+	if out.Condition == "" {
+		return true
+	}
+	val, ok := cctx.conditions[out.Condition]
+	return !ok || val
 }
 
 // cfnExport is an output's Export block, which names the value for import by
@@ -611,6 +625,11 @@ type cfnContext struct {
 	// for what a removed property used to be — the TTL attribute an UpdateTimeToLive disabling it
 	// must name (#1545).
 	priorProps map[string]interface{}
+
+	// restoring is set while a rollback re-applies a resource it changed in place: priorProps is
+	// then the failed update's declaration, and the declaration being applied is the one the
+	// resource had before it.
+	restoring bool
 
 	// nameSuffixes holds, by logical ID, the suffix minted for a replacement's generated name;
 	// a resource absent from it gets the derived suffix. See [cfnContext.mintReplacementName].
@@ -1429,7 +1448,7 @@ type cfnDeployOutcome struct {
 // [StackDeployer.rollbackFailedUpdate].
 func (d *StackDeployer) deploy(
 	ctx context.Context, cfn, streamID string, params map[string]string, opts CFNDeployOptions,
-	base *CFNStackState, force map[string]bool,
+	base *CFNStackState, force map[string]map[string]interface{},
 ) (*DeployResult, *cfnDeployOutcome, error) {
 	if err := opts.validate(); err != nil {
 		return nil, nil, err
@@ -1518,9 +1537,11 @@ func (d *StackDeployer) deploy(
 			continue
 		}
 		outcome.dispatched[logicalID] = true
-		if plan.replacement {
+		if plan.replacement && cfnUsesGeneratedName(res.Type, res.Properties, cctx) {
 			// The replacement is a new resource and gets a new generated name, as AWS's does;
-			// the derived one belongs to the resource being replaced (#1545).
+			// the derived one belongs to the resource being replaced (#1545). Only a resource
+			// substrate names draws from the mint, so a replacement of a template-named or
+			// logical-ID-named resource leaves every later identifier where it was.
 			cctx.mintReplacementName(logicalID, d.mint)
 		}
 		dr, cost, deployErr := d.deployResource(ctx, logicalID, res, streamID, cctx, plan)
@@ -1572,6 +1593,12 @@ func (d *StackDeployer) deploy(
 	var outputFailures []string
 	for _, outKey := range outKeys {
 		outVal := tmpl.Outputs[outKey]
+		if !cfnOutputActive(outVal, cctx) {
+			// "To associate a condition with an output, define the condition in the Conditions
+			// section of the template": an Output whose condition is false is not created, so
+			// it is neither resolved nor published.
+			continue
+		}
 		outputs[outKey] = resolveValue(outVal.Value, cctx)
 		if outVal.Export != nil {
 			if name := resolveValue(outVal.Export.Name, cctx); name != "" {
@@ -2958,6 +2985,7 @@ func (d *StackDeployer) deployResource(
 		cctx.priorPhysicalID = plan.prior.PhysicalID
 	}
 	cctx.priorProps = plan.priorResolved
+	cctx.restoring = plan.resolvedSame
 
 	var (
 		dr   DeployedResource

@@ -533,6 +533,9 @@ func (d *StackDeployer) cfnValidateOutputAttributes(tmpl *cfnTemplate, cctx *cfn
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
+		if !cfnOutputActive(tmpl.Outputs[key], cctx) {
+			continue // An output under a false Condition is not created, so it reads nothing.
+		}
 		refs := cfnCollectReferences(tmpl.Outputs[key].Value, tmpl.Parameters, tmpl.Resources)
 		attrs := make([]string, 0, len(refs.attrs))
 		for a := range refs.attrs {

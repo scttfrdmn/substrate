@@ -441,15 +441,26 @@ func (d *StackDeployer) rollbackFailedUpdate(
 			previous[r.LogicalID] = r
 		}
 	}
-	force := map[string]bool{}
+	failedDecls := d.cfnFailedDeclarations(ctx, prev.StackName, outcome, failed.Resources)
+	force := map[string]map[string]interface{}{}
 	var created []DeployedResource
 	for _, r := range failed.Resources {
-		if r.Error != "" || outcome == nil || !outcome.dispatched[r.LogicalID] {
+		if outcome == nil || !outcome.dispatched[r.LogicalID] {
 			continue
 		}
 		old, had := previous[r.LogicalID]
-		if had && old.Type == r.Type && old.PhysicalID == r.PhysicalID {
-			force[r.LogicalID] = true
+		inPlace := had && old.Type == r.Type && old.PhysicalID == r.PhysicalID && r.PhysicalID != ""
+		if r.Error != "" {
+			// An in-place update that was refused part-way — a security group whose revoke went
+			// through and whose authorize did not — still changed the resource, so it is
+			// restored as well. A refused create made nothing, and is neither restored nor swept.
+			if _, updatable := cfnResourceUpdaters[r.Type]; inPlace && updatable {
+				force[r.LogicalID] = failedDecls[r.LogicalID]
+			}
+			continue
+		}
+		if inPlace {
+			force[r.LogicalID] = failedDecls[r.LogicalID]
 			continue
 		}
 		created = append(created, r)
@@ -501,6 +512,35 @@ func (d *StackDeployer) rollbackFailedUpdate(
 		return nil, err
 	}
 	return result, nil
+}
+
+// cfnFailedDeclarations resolves each resource of a failed update's template against what that
+// update deployed, in the structured form an updater reads, so a rollback can apply the difference
+// between it and the previous declaration (see [cfnBaseline.force]). A template that no longer
+// parses yields none, and the rollback then re-applies every declared property, as it did before.
+func (d *StackDeployer) cfnFailedDeclarations(
+	ctx context.Context, stackName string, outcome *cfnDeployOutcome, deployed []DeployedResource,
+) map[string]map[string]interface{} {
+	out := map[string]map[string]interface{}{}
+	if outcome == nil {
+		return out
+	}
+	tmpl, err := d.parseCFNTemplate(outcome.templateBody)
+	if err != nil {
+		return out
+	}
+	fctx := buildCFNContext(tmpl, outcome.params, d.identity.region, d.identity.accountID, stackName)
+	evaluateConditions(tmpl, fctx)
+	fctx.exports = d.loadExports(ctx, stackName)
+	for _, r := range deployed {
+		fctx.resources[r.LogicalID] = r
+	}
+	for id, res := range tmpl.Resources {
+		props, _ := cfnResolveStructured(res.Properties, fctx).(map[string]interface{})
+		out[id] = props
+	}
+	fctx.takeFailures()
+	return out
 }
 
 // setStackOutcome is [StackDeployer.setStackStatus] that also records the sweep's per-resource

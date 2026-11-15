@@ -3037,6 +3037,9 @@ against a value whose resource never deployed would resolve against nothing. A
 duplicate export name is still refused as an error rather than as a rolled-back
 stack, so that refusal reads the same whether or not a resource beside it failed.
 
+An Output under a `Condition` that is false is not created: it is neither resolved nor
+validated, and the stack publishes no value for it.
+
 An **Output that does not resolve fails the stack**, as a resource that does not
 resolve fails itself ([#1429](https://github.com/scttfrdmn/substrate/issues/1429)):
 an `Fn::ImportValue` naming no export, an `Fn::FindInMap` naming no entry, or an
@@ -3063,9 +3066,12 @@ Two divergences are substrate's own, both deliberate:
   changed in place has the previous declaration applied again; one it created — an
   addition, or the replacement for a resource whose change required one — is
   deleted, and the resource it replaced, which a successful update would only then
-  have deleted, is the stack's again under its original physical ID. What remains
-  approximate is a property the previous template never declared: applying the
-  previous declaration again leaves whatever the failed update set it to. A previous
+  have deleted, is the stack's again under its original physical ID. A resource changed
+  in place is restored by the difference between the failed update's declaration and
+  the previous one, in both directions, so a property the failed update newly declared
+  returns to the value an undeclared one has, by the type's rule for a removed
+  property. An in-place update refused part-way — a security group whose revoke went
+  through and whose authorize did not — is restored the same way. A previous
   record that cannot be read leaves the stack at `UPDATE_FAILED` with the reason
   logged rather than a rollback attempted against nothing.
 
@@ -3125,13 +3131,20 @@ a new ID, and the first stayed behind.
   `UpdateFunctionConfiguration` reads an empty one as not sent
   ([#1575](https://github.com/scttfrdmn/substrate/issues/1575)).
 
-  A security group's rules are reconciled against the group's **live** rules, one
-  source at a time, with CIDRs compared in canonical form: each rule the declaration
-  does not hold is revoked, then each declared rule the group lacks is authorized, the
+  A security group's rules are diffed **declaration against declaration**, one source at
+  a time, with CIDRs compared in canonical form: each rule the previous declaration held
+  and the new one does not is revoked, then each rule the new one adds is authorized, the
   order the page gives ("CloudFormation removes the existing rule and then adds a new
-  rule"). A removed `SecurityGroupEgress` leaves the group with no egress rule: "After
-  the security group is created, if you remove all egress rules that you added, we do
-  not add egress rules, so no outbound traffic is allowed." This is what an update of a
+  rule"). A rule the group holds for another reason — an
+  `AWS::EC2::SecurityGroupIngress`/`SecurityGroupEgress` resource, another stack, an
+  out-of-band call — is left alone. The live rules are read only to skip a revoke of a
+  rule already gone and an authorize of one already there. Declaring egress where none
+  was declared revokes the default all-traffic rule, as the create does; a removed
+  `SecurityGroupEgress` leaves the group with no egress rule: "After the security group
+  is created, if you remove all egress rules that you added, we do not add egress rules,
+  so no outbound traffic is allowed." A rollback restoring a declaration with no egress
+  restores the default rule. A rule list may hold `Fn::If` elements; one choosing
+  `AWS::NoValue` is no rule. This is what an update of a
   default-VPC group whose rules changed needed ([#1550](https://github.com/scttfrdmn/substrate/issues/1550)):
   re-creating it asked for its own name and was refused with `InvalidGroup.Duplicate`.
 - **Changed, and a changed property is *Update requires: Replacement*.** A new resource
@@ -3143,7 +3156,9 @@ a new ID, and the first stayed behind.
   replacement whose name substrate generates gets a **new** generated name, as AWS's
   does, with a suffix minted from the request's ID so a replay mints the same one; the
   derived name belongs to the resource being replaced, which still exists, so reusing
-  it would collide. The name a resource is first created under is unchanged.
+  it would collide. Only such a replacement draws from the request's mint, so a
+  template-named replacement leaves every later identifier where it was. The name a
+  resource is first created under is unchanged.
 - **Changed, and AWS updates the property in place through an operation substrate does
   not route.** `AWS::FSx::FileSystem` and `AWS::MSK::Cluster` fail the resource with a
   reason naming the property, and the update rolls back. So do `AWS::DynamoDB::Table`'s

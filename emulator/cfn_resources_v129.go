@@ -60,6 +60,79 @@ var cfnUpdateUnmodelledProperties = map[string]map[string]string{
 	},
 }
 
+// cfnChooseIf follows Fn::If to the branch its condition selects, as many levels as it nests, and
+// reports false when the value is, or selects, AWS::NoValue.
+func cfnChooseIf(v interface{}, cctx *cfnContext) (interface{}, bool) {
+	for {
+		if isCFNNoValue(v, cctx) {
+			return nil, false
+		}
+		m, ok := v.(map[string]interface{})
+		if !ok || len(m) != 1 {
+			return v, true
+		}
+		args, isIf := m["Fn::If"].([]interface{})
+		if !isIf || len(args) < 3 {
+			return v, true
+		}
+		name, _ := args[0].(string)
+		if cctx.condition(name) {
+			v = args[1]
+		} else {
+			v = args[2]
+		}
+	}
+}
+
+// cfnResolveStructured resolves a structured property value — an object, or a list of objects —
+// keeping its shape. It is [resolveNested] with one difference that matters for a list of rules or
+// a map of variables: an Fn::If choosing an object or a list is followed into that branch and
+// resolved in turn, and one choosing AWS::NoValue drops the member or element. resolveNested
+// resolves such an Fn::If as a scalar, which renders the chosen object as a string.
+//
+// Any other intrinsic is resolved by resolveNested, so scalars become strings and list-valued
+// intrinsics splice into the list they stand in. An absent value, or one that is AWS::NoValue,
+// resolves to nil.
+func cfnResolveStructured(v interface{}, cctx *cfnContext) interface{} {
+	v, ok := cfnChooseIf(v, cctx)
+	if !ok {
+		return nil
+	}
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if isCFNIntrinsic(val) {
+			return resolveNested(val, cctx)
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, item := range val {
+			if chosen, present := cfnChooseIf(item, cctx); present {
+				out[k] = cfnResolveStructured(chosen, cctx)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, 0, len(val))
+		for _, item := range val {
+			chosen, present := cfnChooseIf(item, cctx)
+			if !present {
+				continue
+			}
+			if m, isMap := chosen.(map[string]interface{}); isMap && isCFNIntrinsic(m) {
+				resolved := resolveNested(m, cctx)
+				if list, isList := resolved.([]interface{}); isList {
+					out = append(out, list...)
+				} else {
+					out = append(out, resolved)
+				}
+				continue
+			}
+			out = append(out, cfnResolveStructured(chosen, cctx))
+		}
+		return out
+	}
+	return v
+}
+
 // cfnChangedAny reports whether changed names any of props.
 func cfnChangedAny(changed []string, props ...string) bool {
 	for _, p := range props {
@@ -131,7 +204,7 @@ func cfnLambdaConfiguration(props map[string]interface{}, cctx *cfnContext) map[
 			body["MemorySize"] = n
 		}
 	}
-	if env, ok := props["Environment"].(map[string]interface{}); ok {
+	if env, ok := cfnResolveStructured(props["Environment"], cctx).(map[string]interface{}); ok {
 		vars := map[string]string{}
 		if declared, ok := env["Variables"].(map[string]interface{}); ok {
 			for k, v := range declared {
@@ -208,7 +281,9 @@ func (d *StackDeployer) updateLambdaFunction(
 // cfnUpdateUnmodelledProperties.
 //
 // A removed BillingMode resets to PROVISIONED — "If not specified, the default is PROVISIONED." A
-// removed TimeToLiveSpecification disables TTL on the attribute the previous declaration named.
+// removed TimeToLiveSpecification disables TTL on the attribute the previous declaration named, and
+// only when that declaration enabled it: a TTL already off, or one naming no attribute, needs no
+// call.
 func (d *StackDeployer) updateDynamoDBTable(
 	ctx context.Context, logicalID string, prior DeployedResource,
 	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
@@ -234,13 +309,15 @@ func (d *StackDeployer) updateDynamoDBTable(
 		}
 	}
 	if slices.Contains(changed, "TimeToLiveSpecification") {
-		spec, declared := props["TimeToLiveSpecification"]
 		var ttl interface{}
-		if declared {
-			ttl = resolveNested(spec, cctx)
+		if spec, declared := cfnResolveStructured(props["TimeToLiveSpecification"], cctx).(map[string]interface{}); declared {
+			ttl = spec
 		} else {
 			old, _ := cctx.priorProps["TimeToLiveSpecification"].(map[string]interface{})
 			attr, _ := old["AttributeName"].(string)
+			if on, _ := cfnBoolValue(old["Enabled"]); !on || attr == "" {
+				return dr, cost, nil
+			}
 			ttl = map[string]interface{}{"AttributeName": attr, "Enabled": false}
 		}
 		req, err := cfnJSONRequest("dynamodb", "UpdateTimeToLive",
@@ -361,7 +438,7 @@ type cfnS3SSEByDefaultX struct {
 // list of rules, each with ServerSideEncryptionByDefault and BucketKeyEnabled — as the XML
 // PutBucketEncryption takes, whose rule member is ApplyServerSideEncryptionByDefault.
 func cfnS3EncryptionXML(v interface{}, cctx *cfnContext) ([]byte, error) {
-	enc, _ := resolveNested(v, cctx).(map[string]interface{})
+	enc, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
 	rules, _ := enc["ServerSideEncryptionConfiguration"].([]interface{})
 	var cfg cfnS3SSEConfiguration
 	for _, raw := range rules {
@@ -388,7 +465,7 @@ func cfnS3EncryptionXML(v interface{}, cctx *cfnContext) ([]byte, error) {
 // AllowedHeaders, AllowedMethods, AllowedOrigins, ExposedHeaders, Id and MaxAge — as the
 // CORSConfiguration PutBucketCors takes, through the S3 plugin's own type.
 func cfnS3CORSXML(v interface{}, cctx *cfnContext) ([]byte, error) {
-	corsCfg, _ := resolveNested(v, cctx).(map[string]interface{})
+	corsCfg, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
 	rules, _ := corsCfg["CorsRules"].([]interface{})
 	var cfg s3CORSConfiguration
 	for _, raw := range rules {
@@ -454,7 +531,7 @@ func (d *StackDeployer) configureS3Bucket(
 		var err error
 		switch prop {
 		case "VersioningConfiguration":
-			vc, _ := resolveNested(raw, cctx).(map[string]interface{})
+			vc, _ := cfnResolveStructured(raw, cctx).(map[string]interface{})
 			status, _ := vc["Status"].(string)
 			if !declared || status == "" || (creating && status != "Enabled") {
 				continue
@@ -517,9 +594,12 @@ func (d *StackDeployer) updateS3Bucket(
 // Description for the properties in apply, and returns the first refusal.
 //
 // The create applies the declared ones its CreateKey does not take — rotation and Enabled — and the
-// update every changed one. The order keeps each call legal: a key being enabled is enabled first,
-// and a key being disabled is disabled last, because EnableKeyRotation and DisableKeyRotation
-// refuse a disabled key.
+// update every changed one. The order is the create's, and keeps each call legal whatever state
+// the key is in: EnableKeyRotation and DisableKeyRotation refuse a disabled key, so a key that ends
+// enabled is enabled first; one that ends disabled is disabled last; and a rotation change on a key
+// that is disabled and stays so enables it for the rotation call and disables it again after. A
+// rollback therefore re-applies a disabled key's rotation without being refused. Whether the key is
+// enabled now is read from the previous declaration (priorProps), the create's being enabled.
 //
 // A removed property resets to the page's default: Enabled "The default value is true",
 // EnableKeyRotation "By default, automatic key rotation is not enabled", RotationPeriodInDays "the
@@ -543,12 +623,19 @@ func (d *StackDeployer) configureKMSKey(
 	if v, ok := cfnBoolValue(resolveNested(props["Enabled"], cctx)); ok {
 		enabled = v
 	}
-	if enabled && !creating && slices.Contains(apply, "Enabled") {
+	wasEnabled := true
+	if !creating {
+		if v, ok := cfnBoolValue(cctx.priorProps["Enabled"]); ok {
+			wasEnabled = v
+		}
+	}
+	rotation := cfnChangedAny(apply, "EnableKeyRotation", "RotationPeriodInDays")
+	if !wasEnabled && (enabled || rotation) {
 		if err := call("EnableKey", map[string]interface{}{}); err != nil {
 			return cost, err
 		}
 	}
-	if cfnChangedAny(apply, "EnableKeyRotation", "RotationPeriodInDays") {
+	if rotation {
 		rotate, _ := cfnBoolValue(resolveNested(props["EnableKeyRotation"], cctx))
 		var err error
 		switch {
@@ -583,7 +670,7 @@ func (d *StackDeployer) configureKMSKey(
 			return cost, err
 		}
 	}
-	if !enabled && slices.Contains(apply, "Enabled") {
+	if !enabled && (wasEnabled || rotation) {
 		if err := call("DisableKey", map[string]interface{}{}); err != nil {
 			return cost, err
 		}
@@ -611,24 +698,38 @@ func (d *StackDeployer) updateKMSKey(
 
 // ----- AWS::EC2::SecurityGroup (#1550) --------------------------------------------------
 
+// cfnSGDefaultEgress is the egress rule CreateSecurityGroup adds to a group declared without any:
+// all traffic to 0.0.0.0/0, the IPv4 rule substrate's create adds and authorizeInlineSGRules revokes
+// when a template declares egress.
+var cfnSGDefaultEgress = []EC2IPPermission{{IPProtocol: "-1", IPRanges: []string{"0.0.0.0/0"}}}
+
 // updateEC2SecurityGroup applies a changed AWS::EC2::SecurityGroup's inline SecurityGroupIngress
 // and SecurityGroupEgress to the existing group, keeping its ID (#1550). Both are "Some
 // interruptions"; GroupName, GroupDescription and VpcId are Replacement and never reach here.
 //
-// The rules are reconciled against the group's live rules rather than against the previous
-// template, so a rollback re-applying the previous declaration restores what the failed update
-// changed. For each direction whose property changed: every live rule the declaration does not
-// hold is revoked, then every declared rule the group does not hold is authorized — the order the
-// page gives: "If you modify a rule, CloudFormation removes the existing rule and then adds a new
-// rule." A rule is one source under one protocol and port range, the granularity EC2 itself
-// compares at ([ec2AuthorizeDuplicates]), with protocols and ports in [ec2CanonicalPortRange]'s
-// form and CIDRs compared in canonical network form, so `10.0.0.1/16` and `10.0.0.0/16` are one
-// rule.
+// The rules are diffed **declaration against declaration**, as CloudFormation does: for each
+// direction whose property changed, the rules the previous declaration held and the new one does
+// not are revoked, then the rules the new one adds are authorized — the order the page gives: "If
+// you modify a rule, CloudFormation removes the existing rule and then adds a new rule." A rule the
+// group holds for another reason — an AWS::EC2::SecurityGroupIngress or SecurityGroupEgress
+// resource, another stack, an out-of-band call — is in neither declaration and is left alone. The
+// group's live rules are read only to keep each call legal: a rule to revoke that the group no
+// longer holds is skipped, which a revoke in a non-default VPC would refuse, and a rule to add that
+// it already holds is skipped, which an authorize would refuse as a duplicate.
 //
-// A removed SecurityGroupEgress revokes every egress rule and adds none back. The page: "After the
-// security group is created, if you remove all egress rules that you added, we do not add egress
-// rules, so no outbound traffic is allowed." A removed SecurityGroupIngress likewise leaves no
-// inbound rule. A rule whose description alone changed makes no call: substrate does not route
+// In a rollback the two declarations are the failed update's and the one being restored
+// ([cfnBaseline.force]), so the same diff undoes the failed update's changes.
+//
+// Egress has one asymmetry, from the page. An undeclared SecurityGroupEgress stands for the default
+// all-traffic rule when it is the previous declaration — "When you create a security group, if you
+// do not add egress rules, we add egress rules that allow all outbound IPv4 and IPv6 traffic" — so
+// declaring egress revokes the default, as the create does. As the new declaration it stands for no
+// rule: "After the security group is created, if you remove all egress rules that you added, we do
+// not add egress rules, so no outbound traffic is allowed." A rollback restoring a declaration with
+// no egress restores the default rule, which is what the group had unless an earlier update had
+// removed its declared egress; substrate keeps no record that tells the two apart.
+//
+// A rule whose description alone changed makes no call: substrate does not route
 // UpdateSecurityGroupRuleDescriptions*. Tags make no call, as the file comment says.
 func (d *StackDeployer) updateEC2SecurityGroup(
 	ctx context.Context, logicalID string, prior DeployedResource,
@@ -651,15 +752,23 @@ func (d *StackDeployer) updateEC2SecurityGroup(
 	for _, dir := range []struct {
 		prop, revoke, authorize string
 		live                    []EC2IPPermission
+		egress                  bool
 	}{
-		{"SecurityGroupIngress", "RevokeSecurityGroupIngress", "AuthorizeSecurityGroupIngress", group.IngressRules},
-		{"SecurityGroupEgress", "RevokeSecurityGroupEgress", "AuthorizeSecurityGroupEgress", group.EgressRules},
+		{"SecurityGroupIngress", "RevokeSecurityGroupIngress", "AuthorizeSecurityGroupIngress", group.IngressRules, false},
+		{"SecurityGroupEgress", "RevokeSecurityGroupEgress", "AuthorizeSecurityGroupEgress", group.EgressRules, true},
 	} {
 		if !slices.Contains(changed, dir.prop) {
 			continue
 		}
-		desired := cfnSGDeclaredPermissions(props[dir.prop], cctx)
-		revoke, authorize := cfnSGRuleDiff(dir.live, desired)
+		before, declaredBefore := cfnSGDeclaredPermissions(cctx.priorProps[dir.prop], cctx)
+		after, declaredAfter := cfnSGDeclaredPermissions(props[dir.prop], cctx)
+		if dir.egress && !declaredBefore {
+			before = cfnSGDefaultEgress
+		}
+		if dir.egress && !declaredAfter && cctx.restoring {
+			after = cfnSGDefaultEgress
+		}
+		revoke, authorize := cfnSGRuleDiff(before, after, dir.live)
 		for _, step := range []struct {
 			action string
 			perms  []EC2IPPermission
@@ -704,8 +813,13 @@ func (d *StackDeployer) loadCFNSecurityGroup(ctx context.Context, groupID string
 // cfnSGDeclaredPermissions parses a SecurityGroupIngress or SecurityGroupEgress list into the
 // permissions an Authorize request carrying it would store, through the same two halves the
 // create uses: [sgRuleParams] renders the request, and EC2's own parseSGPermissions reads it back.
-func cfnSGDeclaredPermissions(v interface{}, cctx *cfnContext) []EC2IPPermission {
-	rules, _ := v.([]interface{})
+// The list is resolved structurally first, so an element an Fn::If selects is a rule and one that
+// is AWS::NoValue is none. The second result reports whether the property is declared at all.
+func cfnSGDeclaredPermissions(v interface{}, cctx *cfnContext) ([]EC2IPPermission, bool) {
+	rules, declared := cfnResolveStructured(v, cctx).([]interface{})
+	if !declared {
+		return nil, false
+	}
 	params := map[string]string{}
 	n := 0
 	for _, raw := range rules {
@@ -719,43 +833,93 @@ func cfnSGDeclaredPermissions(v interface{}, cctx *cfnContext) []EC2IPPermission
 		}
 	}
 	if n == 0 {
-		return nil
+		return nil, true
 	}
-	return parseSGPermissions(params, cctx.accountID)
+	return parseSGPermissions(params, cctx.accountID), true
 }
 
-// cfnSGAtoms splits permissions into one permission per source, the unit EC2 stores a rule at.
-// A permission naming no source stays whole.
-func cfnSGAtoms(perms []EC2IPPermission) []EC2IPPermission {
-	var out []EC2IPPermission
+// cfnSGRuleKey identifies one rule as EC2 compares it — one source under one protocol and port
+// range ([ec2CanonicalPortRange]) — with a CIDR in canonical network form, so `10.0.0.1/16` and
+// `10.0.0.0/16` are one rule.
+type cfnSGRuleKey struct {
+	port   ec2RulePortRange
+	kind   string
+	source string
+}
+
+// cfnSGRule is one source's rule, kept with the spelling it was stored or declared with, which is
+// what a request names it by.
+type cfnSGRule struct {
+	perm EC2IPPermission
+	keys []cfnSGRuleKey
+}
+
+// cfnSGRules splits permissions into one rule per source, the unit EC2 stores a rule at, each with
+// the keys it is known by. A referenced group is known by its ID and by its name, since a
+// declaration may name it either way and a stored pair carries both once EC2 has resolved it. A
+// permission naming no source is one rule.
+func cfnSGRules(perms []EC2IPPermission) []cfnSGRule {
+	var out []cfnSGRule
 	for _, perm := range perms {
 		port := EC2IPPermission{IPProtocol: perm.IPProtocol, FromPort: perm.FromPort, ToPort: perm.ToPort}
+		pr := ec2CanonicalPortRange(perm)
+		one := func(p EC2IPPermission, keys ...cfnSGRuleKey) {
+			out = append(out, cfnSGRule{perm: p, keys: keys})
+		}
 		if !ec2PermHasSource(perm) {
-			out = append(out, port)
+			one(port, cfnSGRuleKey{port: pr, kind: "none"})
 			continue
 		}
 		for _, c := range perm.IPRanges {
-			one := port
-			one.IPRanges = []string{c}
-			out = append(out, one)
+			p := port
+			p.IPRanges = []string{c}
+			one(p, cfnSGRuleKey{port: pr, kind: "cidr", source: cfnCanonicalCIDR(c)})
 		}
 		for _, c := range perm.IPv6Ranges {
-			one := port
-			one.IPv6Ranges = []string{c}
-			out = append(out, one)
+			p := port
+			p.IPv6Ranges = []string{c}
+			one(p, cfnSGRuleKey{port: pr, kind: "cidr6", source: cfnCanonicalCIDR(c)})
 		}
 		for _, id := range perm.PrefixListIDs {
-			one := port
-			one.PrefixListIDs = []string{id}
-			out = append(out, one)
+			p := port
+			p.PrefixListIDs = []string{id}
+			one(p, cfnSGRuleKey{port: pr, kind: "pl", source: id})
 		}
 		for _, pair := range perm.UserIDGroupPairs {
-			one := port
-			one.UserIDGroupPairs = []EC2UserIDGroupPair{pair}
-			out = append(out, one)
+			p := port
+			p.UserIDGroupPairs = []EC2UserIDGroupPair{pair}
+			var keys []cfnSGRuleKey
+			if pair.GroupID != "" {
+				keys = append(keys, cfnSGRuleKey{port: pr, kind: "sg", source: pair.GroupID})
+			}
+			if pair.GroupName != "" {
+				keys = append(keys, cfnSGRuleKey{port: pr, kind: "sgname", source: pair.GroupName})
+			}
+			one(p, keys...)
 		}
 	}
 	return out
+}
+
+// cfnSGKeySet indexes rules by every key each is known by.
+func cfnSGKeySet(rules []cfnSGRule) map[cfnSGRuleKey]bool {
+	set := make(map[cfnSGRuleKey]bool, len(rules))
+	for _, r := range rules {
+		for _, k := range r.keys {
+			set[k] = true
+		}
+	}
+	return set
+}
+
+// cfnSGHeld reports whether set holds rule under any of its keys.
+func cfnSGHeld(set map[cfnSGRuleKey]bool, rule cfnSGRule) bool {
+	for _, k := range rule.keys {
+		if set[k] {
+			return true
+		}
+	}
+	return false
 }
 
 // cfnCanonicalCIDR returns a CIDR in canonical network form — host bits cleared, IPv6 compressed —
@@ -769,38 +933,20 @@ func cfnCanonicalCIDR(cidr string) string {
 	return p.Masked().String()
 }
 
-// cfnCanonicalAtoms returns a copy of atoms with every CIDR in [cfnCanonicalCIDR]'s form, for
-// comparison only: what is sent keeps the spelling it was stored or declared with.
-func cfnCanonicalAtoms(atoms []EC2IPPermission) []EC2IPPermission {
-	out := make([]EC2IPPermission, len(atoms))
-	for i, a := range atoms {
-		out[i] = a
-		out[i].IPRanges = make([]string, len(a.IPRanges))
-		for j, c := range a.IPRanges {
-			out[i].IPRanges[j] = cfnCanonicalCIDR(c)
-		}
-		out[i].IPv6Ranges = make([]string, len(a.IPv6Ranges))
-		for j, c := range a.IPv6Ranges {
-			out[i].IPv6Ranges[j] = cfnCanonicalCIDR(c)
+// cfnSGRuleDiff returns the rules to revoke — in before, not in after, and still held by the group
+// — and the rules to authorize — in after, not in before, and not already held — each as one
+// permission per source. Each side is indexed once, so the diff is linear in the rule counts.
+func cfnSGRuleDiff(before, after, live []EC2IPPermission) (revoke, authorize []EC2IPPermission) {
+	beforeRules, afterRules, liveRules := cfnSGRules(before), cfnSGRules(after), cfnSGRules(live)
+	beforeSet, afterSet, liveSet := cfnSGKeySet(beforeRules), cfnSGKeySet(afterRules), cfnSGKeySet(liveRules)
+	for _, r := range beforeRules {
+		if !cfnSGHeld(afterSet, r) && cfnSGHeld(liveSet, r) {
+			revoke = append(revoke, r.perm)
 		}
 	}
-	return out
-}
-
-// cfnSGRuleDiff returns the live rules the declaration does not hold, which are revoked, and the
-// declared rules the group does not hold, which are authorized — each as one permission per source.
-// "Holds" is EC2's own duplicate test, [ec2AuthorizeDuplicates], over canonical CIDRs.
-func cfnSGRuleDiff(live, desired []EC2IPPermission) (revoke, authorize []EC2IPPermission) {
-	liveAtoms, desiredAtoms := cfnSGAtoms(live), cfnSGAtoms(desired)
-	liveCanon, desiredCanon := cfnCanonicalAtoms(liveAtoms), cfnCanonicalAtoms(desiredAtoms)
-	for i, atom := range liveCanon {
-		if !ec2AuthorizeDuplicates(desiredCanon, []EC2IPPermission{atom}) {
-			revoke = append(revoke, liveAtoms[i])
-		}
-	}
-	for i, atom := range desiredCanon {
-		if !ec2AuthorizeDuplicates(liveCanon, []EC2IPPermission{atom}) {
-			authorize = append(authorize, desiredAtoms[i])
+	for _, r := range afterRules {
+		if !cfnSGHeld(beforeSet, r) && !cfnSGHeld(liveSet, r) {
+			authorize = append(authorize, r.perm)
 		}
 	}
 	return revoke, authorize

@@ -134,17 +134,21 @@ type cfnBaseline struct {
 	cctx      *cfnContext
 	resources map[string]DeployedResource
 
-	// force names resources to apply even though their resolved declaration is unchanged. A rollback
-	// sets it for the resources the failed update changed in place: the rollback's template is the
-	// baseline's own, so nothing compares as changed, and yet the live resource carries the failed
-	// update's values until it is applied again.
-	force map[string]bool
+	// force names resources to apply even though their resolved declaration is unchanged, each with
+	// the failed update's declaration of it, resolved. A rollback sets it for the resources the
+	// failed update changed in place: the rollback's template is the baseline's own, so nothing
+	// compares as changed against the baseline, and yet the live resource carries the failed
+	// update's values until it is applied again. What is applied is the difference between the two
+	// declarations, so a property the failed update newly declared is reset too.
+	force map[string]map[string]interface{}
 }
 
 // newCFNBaseline builds the baseline for record, or nil when there is nothing to compare against —
 // no record, no template, or a template that no longer parses. A nil baseline makes every resource
 // a create, which is what a first deployment is.
-func (d *StackDeployer) newCFNBaseline(record *CFNStackState, exports map[string]string, force map[string]bool) *cfnBaseline {
+func (d *StackDeployer) newCFNBaseline(
+	record *CFNStackState, exports map[string]string, force map[string]map[string]interface{},
+) *cfnBaseline {
 	if record == nil || record.TemplateBody == "" {
 		return nil
 	}
@@ -248,26 +252,37 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 		// replaced, which is how a change set reports it (Remove and Add).
 		return p
 	}
-	changed, old, resolved := b.changedProperties(priorDecl, res, cctx)
-	p.priorResolved = old
+	changed, resolved := b.changedProperties(priorDecl, res, cctx)
+	// The previous declaration in the structured form an updater reads, where an Fn::If choosing
+	// an object or AWS::NoValue has been taken — resolveNested would render such a branch as a
+	// string.
+	p.priorResolved, _ = cfnResolveStructured(priorDecl.Properties, b.cctx).(map[string]interface{})
+	b.cctx.takeFailures()
 	if !resolved {
 		// The new declaration does not resolve. Dispatching is what reports why.
 		return p
 	}
-	if len(changed) == 0 && !b.force[logicalID] {
+	failed, forced := b.force[logicalID]
+	if len(changed) == 0 && !forced {
 		p.keep = true
 		return p
 	}
 	if len(changed) == 0 {
+		// Forced: the declaration matches the baseline, and the live resource does not. What
+		// differs is the failed update's declaration from this one — in both directions, so a
+		// property the failed update added is in the set and, absent here, is reset by the
+		// updater's rule for a removed property. The failed declaration is the "previous" one
+		// the updater diffs against. None of it differs from the baseline, so a forced resource
+		// is never replaced; and when nothing differs, the failed update left it as it was.
 		p.resolvedSame = true
-		// Forced: the declaration matches the baseline, and the live resource does not, so
-		// every declared property is applied again. Replacement is still decided on them, but
-		// none of them differs from the baseline, so a forced resource is never replaced.
-		for k := range res.Properties {
-			changed = append(changed, k)
+		p.priorResolved = failed
+		updated, _ := cfnResolveStructured(res.Properties, cctx).(map[string]interface{})
+		cctx.takeFailures()
+		p.changed = cfnDiffProperties(failed, updated)
+		if len(p.changed) == 0 {
+			p.keep = true
+			return p
 		}
-		sort.Strings(changed)
-		p.changed = changed
 		if up, ok := cfnResourceUpdaters[res.Type]; ok {
 			p.update = up
 		}
@@ -307,19 +322,22 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 }
 
 // changedProperties resolves both declarations and returns the top-level properties whose values
-// differ, sorted, and the previous declaration's resolved properties. The third result is false
-// when the new declaration recorded a resolution failure; the failure is drained, since the deploy
-// that follows resolves it again and reports it.
-func (b *cfnBaseline) changedProperties(
-	before, after cfnResource, cctx *cfnContext,
-) ([]string, map[string]interface{}, bool) {
+// differ, sorted. The second result is false when the new declaration recorded a resolution
+// failure; the failure is drained, since the deploy that follows resolves it again and reports it.
+func (b *cfnBaseline) changedProperties(before, after cfnResource, cctx *cfnContext) ([]string, bool) {
 	old, _ := resolveNested(before.Properties, b.cctx).(map[string]interface{})
 	b.cctx.takeFailures()
 	cctx.takeFailures()
 	updated, _ := resolveNested(after.Properties, cctx).(map[string]interface{})
 	if len(cctx.takeFailures()) > 0 {
-		return nil, old, false
+		return nil, false
 	}
+	return cfnDiffProperties(old, updated), true
+}
+
+// cfnDiffProperties returns, sorted, the top-level properties whose values differ between two
+// resolved declarations, a property present in only one of them included.
+func cfnDiffProperties(old, updated map[string]interface{}) []string {
 	keys := map[string]bool{}
 	for k := range old {
 		keys[k] = true
@@ -334,7 +352,7 @@ func (b *cfnBaseline) changedProperties(
 		}
 	}
 	sort.Strings(changed)
-	return changed, old, true
+	return changed
 }
 
 // replacedBy reports whether dr, just deployed under this plan, replaced the previous resource:

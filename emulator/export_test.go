@@ -27,6 +27,16 @@ func AwaitTestServerForTest(baseURL string, deadline time.Duration) error {
 	return awaitTestServer(baseURL, deadline)
 }
 
+// CFNUsesGeneratedNameForTest wraps cfnUsesGeneratedName over a context holding no parameters,
+// for a declaration of literals. Exported because whether a replacement draws from the request's
+// mint is visible through the wire only as a shift in every later identifier (#1545).
+func CFNUsesGeneratedNameForTest(resType string, props map[string]interface{}) bool {
+	return cfnUsesGeneratedName(resType, props, &cfnContext{
+		params: map[string]string{}, conditions: map[string]bool{},
+		resources: map[string]DeployedResource{},
+	})
+}
+
 // GenerateIAMIDForTest wraps generateIAMID for external tests, minting from a fresh
 // [IDMint] over seed. An empty seed exercises the crypto/rand fallback, which is what
 // a mint site reached outside a request still does (#856).
