@@ -16861,12 +16861,21 @@ than silently taken:
   decoded, checked and reported: `DeadLetterConfig.Arn` (length 1–1600, the published SQS-ARN pattern),
   `EventBridgeParameters` (`DetailType` 1–128 and `Source` 1–256, both `Required: Yes`; `Source`'s
   pattern is not checked) and `SqsParameters.MessageGroupId` (1–128).
-- `RetryPolicy`'s published ranges (`MaximumRetryAttempts` 0–185, `MaximumEventAgeInSeconds`
-  60–86400) are not checked.
-- A `ScheduleExpression` substrate cannot evaluate — a malformed `at()`, `rate()` or `cron()`, or a
-  `ScheduleExpressionTimezone` that is not an IANA zone — is stored and reported as sent and **never
-  fires**. AWS refuses one with `ValidationException`, but publishes neither which inputs nor the
-  message, so substrate does not invent the refusal.
+
+Two checks were added in [#1514](https://github.com/scttfrdmn/substrate/issues/1514), on both
+`CreateSchedule` and `UpdateSchedule`:
+
+- `RetryPolicy`'s published Valid Ranges, `MaximumRetryAttempts` 0–185 and `MaximumEventAgeInSeconds`
+  60–86400, are checked when a member is sent, in the same *"1 validation error detected"* form as
+  `MaximumWindowInMinutes`.
+- A `ScheduleExpression` substrate cannot evaluate — a malformed `at()`, `rate()` or `cron()` — or a
+  `ScheduleExpressionTimezone` that is not an IANA zone is refused with `ValidationException`/400. It used
+  to be stored, reported as sent, and never fire. The expression is parsed by the same parser the clock
+  fires schedules with, which accepts the three forms and every wildcard the User Guide's
+  `schedule-types` page publishes (`, - * / ? L W #`), so a refusal is an expression the clock could never
+  fire. AWS refuses such input with `ValidationException` but publishes neither which inputs nor the
+  message, so which inputs are refused is substrate's reading and the messages are its own. Zones resolve
+  from the IANA database embedded in the binary, so the answer does not depend on the host.
 
 ### `UpdateSchedule` replaces the schedule, it does not merge into it
 
@@ -17122,8 +17131,7 @@ mapping's polls.
   ([#1511](https://github.com/scttfrdmn/substrate/issues/1511)), and the templated targets recorded as
   intent ([#1512](https://github.com/scttfrdmn/substrate/issues/1512)).
 - An observable `DELETING` window, `ClientToken` idempotency and the quotas
-  ([#1515](https://github.com/scttfrdmn/substrate/issues/1515)); refusing an unevaluable expression or an
-  out-of-range `RetryPolicy` ([#1514](https://github.com/scttfrdmn/substrate/issues/1514)).
+  ([#1515](https://github.com/scttfrdmn/substrate/issues/1515)).
 - The read-only-action restriction on universal targets, and the role's trust policy.
 
 ### `CreateSchedule` answers 200, not 201

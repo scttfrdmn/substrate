@@ -280,8 +280,9 @@ func (p *SchedulerPlugin) armTimer(ctx context.Context, rec *SchedulerRecord) er
 	}
 	t.arm(old, rec, now)
 	if t.Unevaluable {
-		// Stored and reported as sent, and never fired: substrate does not invent the refusal
-		// CreateSchedule would answer for an expression it cannot evaluate.
+		// CreateSchedule and UpdateSchedule refuse an expression or a time zone the parser cannot
+		// evaluate (#1514), so only a record written before that refusal existed can reach here. It
+		// is kept, reported as sent, and never fired.
 		p.logger.Warn("scheduler: schedule expression is not evaluated", "schedule", rec.ARN)
 	}
 	t.Due = t.due(now)

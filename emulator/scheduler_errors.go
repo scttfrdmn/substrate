@@ -216,7 +216,55 @@ func schedulerValidateTargetParameters(target *schedulerTargetInput) *AWSError {
 		}
 	}
 	if s := target.SqsParameters; s != nil {
-		return schedulerValidateLength("target.sqsParameters.messageGroupId", s.MessageGroupID, 128)
+		if err := schedulerValidateLength("target.sqsParameters.messageGroupId", s.MessageGroupID, 128); err != nil {
+			return err
+		}
+	}
+	return schedulerValidateRetryPolicy(target.RetryPolicy)
+}
+
+// schedulerValidateRetryPolicy checks RetryPolicy's two members against the Valid Ranges
+// `API_RetryPolicy` publishes (#1514): MaximumEventAgeInSeconds 60–86400 and MaximumRetryAttempts
+// 0–185. Both are `Required: No`, so an absent member is not checked. The message follows the form
+// MaximumWindowInMinutes' range check uses; the wording is substrate's own.
+func schedulerValidateRetryPolicy(rp *schedulerRetryPolicyInput) *AWSError {
+	if rp == nil {
+		return nil
+	}
+	for _, m := range []struct {
+		member string
+		value  *int32
+		lo, hi int32
+	}{
+		{"target.retryPolicy.maximumEventAgeInSeconds", rp.MaximumEventAgeInSeconds, 60, 86400},
+		{"target.retryPolicy.maximumRetryAttempts", rp.MaximumRetryAttempts, 0, 185},
+	} {
+		if m.value == nil {
+			continue
+		}
+		if n := *m.value; n < m.lo || n > m.hi {
+			return schedulerValidation(fmt.Sprintf("1 validation error detected: Value '%d' at '%s' failed "+
+				"to satisfy constraint: Member must be between %d and %d", n, m.member, m.lo, m.hi))
+		}
+	}
+	return nil
+}
+
+// schedulerValidateEvaluable refuses a ScheduleExpression substrate cannot evaluate, or a
+// ScheduleExpressionTimezone that is not an IANA zone, with ValidationException/400 (#1514).
+//
+// Until #1514 such a schedule was stored, reported as sent, and never fired. AWS refuses it with
+// ValidationException, the code `API_CreateSchedule` and `API_UpdateSchedule` publish for input that
+// "fails to satisfy the constraints", but no page publishes which inputs or the message. The parser is
+// the one the clock evaluates schedules with (scheduler_expression.go), which accepts the three forms
+// and the cron wildcards the API Reference and the User Guide publish, so what it refuses is what the
+// clock could never fire. The messages are substrate's own.
+func schedulerValidateEvaluable(expr, tz string) *AWSError {
+	if _, err := schedLocation(tz); err != nil {
+		return schedulerValidation(fmt.Sprintf("Invalid ScheduleExpressionTimezone %q: it is not an IANA time zone.", tz))
+	}
+	if _, err := parseSchedExpression(expr, tz); err != nil {
+		return schedulerValidation(fmt.Sprintf("Invalid ScheduleExpression %q.", expr))
 	}
 	return nil
 }
@@ -292,6 +340,9 @@ func schedulerValidateScheduleInput(name string, in *schedulerScheduleInput) *AW
 	}
 	if err := schedulerValidateLength("scheduleExpressionTimezone", in.ScheduleExpressionTimezone,
 		schedulerTimezoneMaxLength); err != nil {
+		return err
+	}
+	if err := schedulerValidateEvaluable(in.ScheduleExpression, in.ScheduleExpressionTimezone); err != nil {
 		return err
 	}
 	if err := schedulerValidateEnum("actionAfterCompletion", in.ActionAfterCompletion,

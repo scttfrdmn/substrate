@@ -106,8 +106,8 @@ func schedTargetRec(arn string) *emulator.SchedulerRecord {
 }
 
 // A recurring DELETE schedule that never fires (its StartDate is after its EndDate) is deleted once
-// the clock passes EndDate; one with no future occurrence and no EndDate, or an expression substrate
-// cannot evaluate, is never due.
+// the clock passes EndDate, and one with no future occurrence and no EndDate is never due. An
+// expression substrate cannot evaluate is refused at create (#1514), so it stores nothing to come due.
 func TestSchedulerClock_SchedulesThatNeverFire(t *testing.T) {
 	t.Parallel()
 	e := newSchedEnv(t)
@@ -124,8 +124,9 @@ func TestSchedulerClock_SchedulesThatNeverFire(t *testing.T) {
 		}
 	}
 	e.mustSched(http.MethodPost, "/schedules/past-cron", base("cron(0 0 1 1 ? 2020)"))
-	e.mustSched(http.MethodPost, "/schedules/unevaluable", base("rate(0 minutes)"))
-	assert.Empty(t, wake(), "neither has anything that will come due")
+	status, _ := e.sched(http.MethodPost, "/schedules/unevaluable", base("rate(0 minutes)"))
+	assert.Equal(t, http.StatusBadRequest, status, "an unevaluable expression is refused")
+	assert.Empty(t, wake(), "nothing will come due")
 
 	inverted := base("rate(1 hour)")
 	inverted["StartDate"] = float64(schedClockInstant.Add(3 * time.Hour).Unix())
@@ -136,12 +137,10 @@ func TestSchedulerClock_SchedulesThatNeverFire(t *testing.T) {
 	e.ts.AdvanceTime(time.Hour)
 	e.mustSched(http.MethodGet, "/schedules/inverted", nil)
 	e.ts.AdvanceTime(time.Hour)
-	status, _ := e.sched(http.MethodGet, "/schedules/inverted", nil)
+	status, _ = e.sched(http.MethodGet, "/schedules/inverted", nil)
 	assert.Equal(t, http.StatusNotFound, status, "finished without firing once EndDate passed")
-	for _, name := range []string{"past-cron", "unevaluable"} {
-		status, _ := e.sched(http.MethodGet, "/schedules/"+name, nil)
-		assert.Equal(t, http.StatusOK, status, "%s is kept: it never finishes", name)
-	}
+	status, _ = e.sched(http.MethodGet, "/schedules/past-cron", nil)
+	assert.Equal(t, http.StatusOK, status, "past-cron is kept: it never finishes")
 	assert.Empty(t, e.clockDispatches())
 }
 

@@ -55,8 +55,9 @@ type schedExpression struct {
 	loc   *time.Location
 }
 
-// errSchedExpression reports an expression substrate cannot evaluate. Such a schedule is stored
-// and reported as sent, and never fires.
+// errSchedExpression reports an expression substrate cannot evaluate. CreateSchedule and
+// UpdateSchedule refuse one (#1514); a record stored before that refusal is reported as sent and
+// never fires.
 var errSchedExpression = errors.New("unparseable schedule expression")
 
 // schedLocation resolves a ScheduleExpressionTimezone, UTC when the schedule names none.
