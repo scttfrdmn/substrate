@@ -76,6 +76,14 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	"AWS::SQS::Queue": {maxLen: 80},
 	"AWS::SNS::Topic": {maxLen: 256},
 
+	// A launch template name is unique within a Region and may be 3–128 characters of letters,
+	// digits and -_./() (API_CreateLaunchTemplate's LaunchTemplateName rule, which EC2 enforces
+	// as of #1507). The Template Reference says "If you do not specify a name, CloudFormation
+	// creates a name for you"; a generated name's letters, digits and hyphens are inside the rule,
+	// and the {stack}-{logical}-{suffix} shape is always longer than 3, so a short logical ID
+	// such as LT no longer becomes a name EC2 refuses.
+	"AWS::EC2::LaunchTemplate": {maxLen: 128},
+
 	// A log group name is unique within a Region and may be up to 512
 	// characters (CreateLogGroup).
 	"AWS::Logs::LogGroup": {maxLen: 512},

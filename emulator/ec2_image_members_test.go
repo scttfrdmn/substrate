@@ -176,7 +176,7 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 			want: ec2DescribedImage{
 				Name: "ubuntu-noble-24.04-amd64-server", Architecture: "x86_64",
 				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
-				RootDeviceName: "/dev/sda1",
+				RootDeviceName: "/dev/sda1", OwnerID: "099720109477",
 			},
 		},
 		{
@@ -184,7 +184,7 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 			want: ec2DescribedImage{
 				Name: "ubuntu-jammy-22.04-amd64-server", Architecture: "x86_64",
 				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
-				RootDeviceName: "/dev/sda1",
+				RootDeviceName: "/dev/sda1", OwnerID: "099720109477",
 			},
 		},
 		{
@@ -208,7 +208,7 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 			want: ec2DescribedImage{
 				Name: "ubuntu-noble-24.04-arm64-server", Architecture: "arm64",
 				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
-				RootDeviceName: "/dev/sda1",
+				RootDeviceName: "/dev/sda1", OwnerID: "099720109477",
 			},
 		},
 		{
@@ -216,7 +216,7 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 			want: ec2DescribedImage{
 				Name: "ubuntu-jammy-22.04-arm64-server", Architecture: "arm64",
 				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
-				RootDeviceName: "/dev/sda1",
+				RootDeviceName: "/dev/sda1", OwnerID: "099720109477",
 			},
 		},
 	}
@@ -250,10 +250,11 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 			assert.True(t, got.Public, "a bundled AMI resolved from a public parameter is public")
 			assert.Equal(t, tc.param, got.PublicSsmParameterName)
 
-			// No owner. A public AWS-owned AMI is not owned by the caller and substrate
-			// holds no account for the "amazon" alias, so claiming the requesting
-			// account would make an Owners=self describe match an image it does not own.
-			assert.Empty(t, got.OwnerID)
+			// No owner on an AWS-published entry. A public AWS-owned AMI is not owned by the
+			// caller and substrate holds no account for the "amazon" alias, so claiming the
+			// requesting account would make an Owners=self describe match an image it does
+			// not own. The Ubuntu entries report Canonical's documented account (#1494).
+			assert.Equal(t, tc.want.OwnerID, got.OwnerID)
 		})
 	}
 }
@@ -421,8 +422,9 @@ func TestEC2_CreateImage_InheritsFromItsSourceAMI(t *testing.T) {
 		} `xml:"instancesSet>item"`
 	}
 	ec2FleetXML(t, ts, map[string]string{
-		"Action":  "RunInstances",
-		"ImageId": ec2TestImageArm,
+		"Action":       "RunInstances",
+		"ImageId":      ec2TestImageArm,
+		"InstanceType": "t4g.micro", // an arm64 AMI needs an arm64 type (#1505)
 	}, &launched)
 	require.Len(t, launched.Instances, 1)
 

@@ -284,7 +284,7 @@ func writeFailureCases() []writeFailureCase {
 				`{"TableName":"t","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST","StreamSpecification":{"StreamEnabled":true,"StreamViewType":"NEW_AND_OLD_IMAGES"}}`),
 		}, call: jsonCall("dynamodb"+wfRegion, "DynamoDB_20120810.PutItem", `{"TableName":"t","Item":{"pk":{"S":"a"}}}`)},
 		{file: "ec2_plugin.go", call: queryCall("ec2"+wfRegion,
-			"Action=CreateLaunchTemplate&Version=2016-11-15&LaunchTemplateName=lt&LaunchTemplateData.ImageId=ami-12345678")},
+			"Action=CreateLaunchTemplate&Version=2016-11-15&LaunchTemplateName=wf-lt&LaunchTemplateData.ImageId=ami-12345678")},
 		{file: "ec2_plugin.go", op: "RunInstances (default VPC)", call: queryCall("ec2"+wfRegion,
 			"Action=RunInstances&Version=2016-11-15&ImageId="+ec2TestImage+"&InstanceType=t3.micro&MinCount=1&MaxCount=1")},
 		{file: "ec2_block_devices.go", setup: []wireCall{

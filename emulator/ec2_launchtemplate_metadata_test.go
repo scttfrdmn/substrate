@@ -230,7 +230,7 @@ func TestEC2_LaunchTemplate_MetadataOptionsReachTheInstance(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 	ltID := ltCreate(t, ts, "imds", map[string]string{
-		"LaunchTemplateData.ImageId":                                 ec2TestImageArm,
+		"LaunchTemplateData.ImageId":                                 ec2TestImageECS2,
 		"LaunchTemplateData.MetadataOptions.HttpTokens":              "required",
 		"LaunchTemplateData.MetadataOptions.HttpPutResponseHopLimit": "2",
 		"LaunchTemplateData.MetadataOptions.InstanceMetadataTags":    "enabled",

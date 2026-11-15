@@ -605,7 +605,7 @@ func TestEC2NetworkInterfaces_PreSliceTemplateStateStillWorks(t *testing.T) {
 
 	// The shape createLaunchTemplate wrote before #455: subnetId,
 	// associatePublicIpAddress and networkInterfaceGroups, no networkInterfaces key.
-	const acct, region, ltID = "123456789012", "us-east-1", "lt-0preslice00001"
+	const acct, region, ltID = "123456789012", "us-east-1", "lt-0b5e1ce000000001"
 	stored := map[string]any{
 		"launchTemplateId":     ltID,
 		"launchTemplateName":   "preslice",

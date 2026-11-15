@@ -63,6 +63,19 @@ func ec2AuthzRunInstancesResources(state StateManager, reqCtx *RequestContext, r
 	region := reqCtx.Region
 	var out []authzResource
 
+	// A resolve:ssm: ImageId is decided against the AMI it resolves to, the one the launch
+	// uses (#1506), through the resolver the handler calls. One that does not resolve names
+	// no image resource: the handler makes the same resolution and refuses it with
+	// InvalidParameterValue, or reports the store failure, and refusing here would turn either
+	// answer into AccessDenied. This decision runs before the handler and returns no error, so
+	// the handler is where a store failure surfaces.
+	if ec2IsSSMImageID(launch.imageID) {
+		resolved, resolveErr := ec2ResolveSSMImageID(context.Background(), state, reqCtx, launch.imageID)
+		if resolveErr != nil {
+			resolved = ""
+		}
+		launch.imageID = resolved
+	}
 	if launch.imageID != "" {
 		out = append(out, authzResource{
 			// No account field. The Service Authorization Reference gives the image

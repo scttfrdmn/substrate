@@ -233,9 +233,10 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	// create-template → create-fleet ordering error is observable. The refusal is the one
 	// every launch-template operation answers (#1469); the packer#7968 and karpenter#2101
 	// captures it is quoted from are both of a fleet naming a missing template.
+	// An identifier of the wrong shape is Malformed rather than NotFound (#1507).
 	for _, cfg := range configs {
-		if lt := p.resolveLaunchTemplate(goCtx, reqCtx, cfg.LaunchTemplateID, cfg.LaunchTemplateName); lt == nil {
-			return nil, ec2LaunchTemplateNotFound(cfg.LaunchTemplateID, cfg.LaunchTemplateName)
+		if _, awsErr := p.requireLaunchTemplate(goCtx, reqCtx, cfg.LaunchTemplateID, cfg.LaunchTemplateName); awsErr != nil {
+			return nil, awsErr
 		}
 	}
 

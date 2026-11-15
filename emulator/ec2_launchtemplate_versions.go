@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"net/http"
 	"sort"
@@ -104,7 +105,7 @@ func ec2LaunchTemplateVersionNotFound(ltID, version string) *AWSError {
 func ec2LaunchTemplateNotFound(ltID, ltName string) *AWSError {
 	if ltID != "" {
 		return &AWSError{
-			Code:       "InvalidLaunchTemplateId.NotFound",
+			Code:       ec2LaunchTemplateIDKind.NotFound,
 			Message:    fmt.Sprintf("The specified launch template, with template ID %s, does not exist.", ltID),
 			HTTPStatus: http.StatusBadRequest,
 		}
@@ -128,13 +129,107 @@ func ec2LaunchTemplateNotFound(ltID, ltName string) *AWSError {
 func ec2DescribeLaunchTemplatesNotFound(byID bool) *AWSError {
 	code := "InvalidLaunchTemplateName.NotFoundException"
 	if byID {
-		code = "InvalidLaunchTemplateId.NotFound"
+		code = ec2LaunchTemplateIDKind.NotFound
 	}
 	return &AWSError{
 		Code:       code,
 		Message:    "At least one of the launch templates specified in the request does not exist.",
 		HTTPStatus: http.StatusBadRequest,
 	}
+}
+
+// ec2LaunchTemplateNameMalformedCode is the error table's code for a launch template name
+// outside the published rule; see [ec2LaunchTemplateNameWellFormed].
+const ec2LaunchTemplateNameMalformedCode = "InvalidLaunchTemplateName.MalformedException"
+
+// ec2LaunchTemplateNameWellFormed reports whether a launch template name keeps the rule the
+// API reference publishes on every LaunchTemplateName member — "Length Constraints: Minimum
+// length of 3. Maximum length of 128. Pattern: [a-zA-Z0-9\(\)\.\-/_]+" — and the error table
+// restates for InvalidLaunchTemplateName.MalformedException (#1507).
+func ec2LaunchTemplateNameWellFormed(name string) bool {
+	if len(name) < 3 || len(name) > 128 {
+		return false
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case c == '(' || c == ')' || c == '.' || c == '-' || c == '/' || c == '_':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// ec2LaunchTemplateIDMalformed is the refusal for a launch template ID of the wrong shape.
+//
+// The code is the error table's; the message is observed — "The specified launch template ID
+// '{{ getLaunchTemplateData.LaunchtemplateID }}' is malformed." is quoted from a
+// CreateLaunchTemplateVersion refusal on AWS re:Post (QUEsP8p2mvSv2TAnNzqbynCg), which names an
+// unsubstituted template variable where an ID belonged.
+func ec2LaunchTemplateIDMalformed(ltID string) *AWSError {
+	return &AWSError{
+		Code:       ec2LaunchTemplateIDKind.Malformed,
+		Message:    fmt.Sprintf("The specified launch template ID '%s' is malformed.", ltID),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2LaunchTemplateNameMalformed is the refusal for a launch template name outside the
+// published rule. The message is the error table's own description of the code, verbatim; no
+// observed wording was found.
+func ec2LaunchTemplateNameMalformed() *AWSError {
+	return &AWSError{
+		Code: ec2LaunchTemplateNameMalformedCode,
+		Message: "The specified launch template name is invalid. A launch template name must be between 3 and " +
+			"128 characters, and may contain letters, numbers, and the following characters: '-', '_', '.', " +
+			"'/', '(', and ')'.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2LaunchTemplateIdentifierMalformed returns the Malformed refusal for the identifier a
+// request resolves its template by, or nil when that identifier is well formed or absent.
+//
+// It checks the identifier [ec2LookupLaunchTemplate] resolves by — the ID when there is one,
+// the name otherwise — so the syntax answer and the existence answer
+// ([ec2LaunchTemplateNotFound]) are always about the same identifier (#1507).
+//
+// It is asked only about an identifier that resolved to nothing. A template already in state is
+// acted on whatever its identifier looks like: one stored under a name the rule now refuses —
+// created before CreateLaunchTemplate enforced it, or written by a recorded event log that
+// replays — must stay reachable, or the rule would lock it out and make the older recording
+// fail on replay. A new name is held to the rule where it is introduced, at CreateLaunchTemplate.
+// For every identifier AWS itself could have issued, checking shape only after the lookup
+// misses gives the same answer as checking it first.
+func ec2LaunchTemplateIdentifierMalformed(ltID, ltName string) *AWSError {
+	switch {
+	case ltID != "":
+		if !ec2LaunchTemplateIDKind.wellFormed(ltID) {
+			return ec2LaunchTemplateIDMalformed(ltID)
+		}
+	case ltName != "":
+		if !ec2LaunchTemplateNameWellFormed(ltName) {
+			return ec2LaunchTemplateNameMalformed()
+		}
+	}
+	return nil
+}
+
+// requireLaunchTemplate resolves the template a request names by ID or name. An identifier
+// that names nothing is refused as Malformed when it has the wrong shape and as NotFound
+// otherwise — the two answers every operation naming one template gives (#1469, #1507). One
+// that names a stored template is acted on, whatever its shape; see
+// [ec2LaunchTemplateIdentifierMalformed].
+func (p *EC2Plugin) requireLaunchTemplate(goCtx context.Context, ctx *RequestContext, ltID, ltName string) (*EC2LaunchTemplate, *AWSError) {
+	if lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName); lt != nil {
+		return lt, nil
+	}
+	if awsErr := ec2LaunchTemplateIdentifierMalformed(ltID, ltName); awsErr != nil {
+		return nil, awsErr
+	}
+	return nil, ec2LaunchTemplateNotFound(ltID, ltName)
 }
 
 // ec2LTVersionItem is the launchTemplateVersion element shared by
@@ -481,9 +576,9 @@ func (p *EC2Plugin) putLaunchTemplate(goCtx context.Context, lt *EC2LaunchTempla
 func (p *EC2Plugin) createLaunchTemplateVersion(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 
-	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
-	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
+	lt, awsErr := p.requireLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	data, awsErr := parseLaunchTemplateData(req.Params)
@@ -623,9 +718,9 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 func (p *EC2Plugin) modifyLaunchTemplate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 
-	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
-	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
+	lt, awsErr := p.requireLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	// SetDefaultVersion is the only modifiable attribute, and it is Required: No —
@@ -703,11 +798,10 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 			return nil, awsErr
 		}
 	} else {
-		lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
-		if lt == nil {
-			return nil, ec2LaunchTemplateNotFound(ltID, ltName)
+		lt, awsErr := p.requireLaunchTemplate(goCtx, ctx, ltID, ltName)
+		if awsErr != nil {
+			return nil, awsErr
 		}
-		var awsErr *AWSError
 		items, awsErr = p.describeVersionsOfTemplate(lt, specs, req.Params)
 		if awsErr != nil {
 			return nil, awsErr
@@ -724,11 +818,39 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 		items = kept
 	}
 
+	// A version's ImageId reads back as stored — a resolve:ssm: reference stays one — unless
+	// the request sets ResolveAlias, which the reference documents as "If true, and if a
+	// Systems Manager parameter is specified for ImageId, the AMI ID is displayed in the
 	// Pagination is offset-based over a stable ordering, matching the other EC2
 	// describes: the token is the index to resume at. Since #917 the offset is read before the
 	// templates are resolved, so a token that is not one is refused whether or not the request
 	// also names a template that does not exist.
 	page, nextToken := ec2Page(items, offset, maxResults)
+
+	// A version's ImageId reads back as stored — a resolve:ssm: reference stays one — unless
+	// the request sets ResolveAlias, which the reference documents as "If true, and if a
+	// Systems Manager parameter is specified for ImageId, the AMI ID is displayed in the
+	// response for imageId", with "Default: false" (#1506). Only the page being answered is
+	// resolved, so a parameter read costs nothing for versions on other pages. The parameter is
+	// resolved the way a launch resolves it ([ec2ResolveSSMImageID]). One that does not resolve
+	// is left as the reference: the page documents no refusal for it, and the describe is not a
+	// launch. A store that cannot be read is an error, not a reference left as stored.
+	if strings.EqualFold(req.Params["ResolveAlias"], "true") {
+		for i := range page {
+			if !ec2IsSSMImageID(page[i].LaunchTemplateData.ImageID) {
+				continue
+			}
+			resolved, resolveErr := ec2ResolveSSMImageID(goCtx, p.state, ctx, page[i].LaunchTemplateData.ImageID)
+			var unresolved *AWSError
+			switch {
+			case errors.As(resolveErr, &unresolved):
+			case resolveErr != nil:
+				return nil, resolveErr
+			default:
+				page[i].LaunchTemplateData.ImageID = resolved
+			}
+		}
+	}
 
 	type response struct {
 		XMLName   xml.Name           `xml:"DescribeLaunchTemplateVersionsResponse"`
@@ -887,11 +1009,6 @@ func (p *EC2Plugin) deleteLaunchTemplateVersions(ctx *RequestContext, req *AWSRe
 		}
 	}
 
-	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
-	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
-	}
-
 	type responseErrorXML struct {
 		Code    string `xml:"code"`
 		Message string `xml:"message"`
@@ -907,9 +1024,55 @@ func (p *EC2Plugin) deleteLaunchTemplateVersions(ctx *RequestContext, req *AWSRe
 		ResponseError      responseErrorXML `xml:"responseError"`
 		VersionNumber      int64            `xml:"versionNumber"`
 	}
-
+	type response struct {
+		XMLName xml.Name      `xml:"DeleteLaunchTemplateVersionsResponse"`
+		XMLNS   string        `xml:"xmlns,attr"`
+		Deleted []deletedItem `xml:"successfullyDeletedLaunchTemplateVersionSet>item"`
+		Failed  []failedItem  `xml:"unsuccessfullyDeletedLaunchTemplateVersionSet>item"`
+	}
 	var deleted []deletedItem
 	var failed []failedItem
+	respond := func() (*AWSResponse, error) {
+		return ec2XMLResponse(http.StatusOK, response{
+			XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
+			Deleted: deleted,
+			Failed:  failed,
+		})
+	}
+
+	// An identifier of the wrong shape that names nothing is reported per version, through
+	// ResponseError.code's own launchTemplateIdMalformed and launchTemplateNameMalformed, rather
+	// than as the whole-request InvalidLaunchTemplateId.Malformed the other operations answer
+	// (#1507): this operation publishes a per-item code for exactly that condition. The message
+	// is the whole-request refusal's, so the two forms say the same thing. A stored template is
+	// acted on whatever its identifier looks like ([ec2LaunchTemplateIdentifierMalformed]). A
+	// template that does not exist is still the whole-request NotFound (#1469); the enum's
+	// launchTemplateIdDoesNotExist and launchTemplateNameDoesNotExist are not raised, because no
+	// capture shows which of the two forms real EC2 uses for absence (#1533).
+	ltID, ltName := req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"]
+	lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
+	if lt == nil {
+		malformed := ec2LaunchTemplateIdentifierMalformed(ltID, ltName)
+		if malformed == nil {
+			return nil, ec2LaunchTemplateNotFound(ltID, ltName)
+		}
+		code := "launchTemplateNameMalformed"
+		if ltID != "" {
+			code = "launchTemplateIdMalformed"
+		}
+		for _, spec := range specs {
+			item := failedItem{
+				LaunchTemplateID:   ltID,
+				LaunchTemplateName: ltName,
+				ResponseError:      responseErrorXML{Code: code, Message: malformed.Message},
+			}
+			if n, err := strconv.ParseInt(spec, 10, 64); err == nil {
+				item.VersionNumber = n
+			}
+			failed = append(failed, item)
+		}
+		return respond()
+	}
 	remaining := lt.TemplateVersions()
 
 	for _, spec := range specs {
@@ -983,17 +1146,7 @@ func (p *EC2Plugin) deleteLaunchTemplateVersions(ctx *RequestContext, req *AWSRe
 		}
 	}
 
-	type response struct {
-		XMLName xml.Name      `xml:"DeleteLaunchTemplateVersionsResponse"`
-		XMLNS   string        `xml:"xmlns,attr"`
-		Deleted []deletedItem `xml:"successfullyDeletedLaunchTemplateVersionSet>item"`
-		Failed  []failedItem  `xml:"unsuccessfullyDeletedLaunchTemplateVersionSet>item"`
-	}
-	return ec2XMLResponse(http.StatusOK, response{
-		XMLNS:   "http://ec2.amazonaws.com/doc/2016-11-15/",
-		Deleted: deleted,
-		Failed:  failed,
-	})
+	return respond()
 }
 
 // ec2LatestVersionData returns the highest-numbered version's data, falling back to

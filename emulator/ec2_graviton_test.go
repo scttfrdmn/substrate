@@ -25,9 +25,12 @@ type gravitonType struct {
 	Current      bool     `xml:"currentGeneration"`
 }
 
-// gravitonFamilies are the thirteen families #1497 added, as the guide pages name them.
+// gravitonFamilies are the thirteen families #1497 added and the sixteen #1509 added — the
+// gd and gn variants and g5g — as the guide pages name them.
 var gravitonFamilies = []string{
 	"t4g", "m6g", "m7g", "m8g", "m9g", "c6g", "c7g", "c8g", "c9g", "r6g", "r7g", "r8g", "r9g",
+	"m6gd", "m7gd", "m8gd", "m9gd", "c6gd", "c7gd", "c8gd", "c9gd", "r6gd", "r7gd", "r8gd", "r9gd",
+	"c6gn", "c7gn", "c8gn", "g5g",
 }
 
 func describeGravitonTypes(t *testing.T, params map[string]string) []gravitonType {
@@ -87,12 +90,15 @@ func TestEC2_Graviton_PublishedSpecs(t *testing.T) {
 }
 
 // TestEC2_Graviton_UnpublishedSizesAreRefused pins the edges of the transcription: bare metal
-// is excluded as it is for every family, Graviton2 and Graviton3 publish no 24xlarge, and the
-// gd variants are not carried.
+// is excluded as it is for every family, Graviton2 and Graviton3 publish no 24xlarge — their gd
+// and gn variants included — and g5g starts at xlarge.
 func TestEC2_Graviton_UnpublishedSizesAreRefused(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
-	for _, typ := range []string{"c7g.metal", "m8g.metal-24xl", "c7g.24xlarge", "m6g.nano", "c7gd.large"} {
+	for _, typ := range []string{
+		"c7g.metal", "m8g.metal-24xl", "c7g.24xlarge", "m6g.nano",
+		"c7gd.metal", "c6gn.24xlarge", "m6gd.24xlarge", "g5g.metal", "g5g.large",
+	} {
 		status, code, _ := ec2ErrorDetail(t, ts, map[string]string{"Action": "DescribeInstanceTypes", "InstanceType.1": typ})
 		assert.Equal(t, http.StatusBadRequest, status, typ)
 		assert.Equal(t, "InvalidInstanceType", code, typ)
@@ -101,13 +107,14 @@ func TestEC2_Graviton_UnpublishedSizesAreRefused(t *testing.T) {
 
 // TestEC2_Graviton_ArchitectureFilterSelectsExactlyTheGravitonFamilies is the issue's second
 // observation: processor-info.supported-architecture=arm64 matched nothing. It now matches the
-// 115 Graviton types and only them, and x86_64 still matches every other type.
+// 254 Graviton types and only them — 115 from #1497, 134 gd and gn sizes and five g5g sizes from
+// #1509 — and x86_64 still matches every other type.
 func TestEC2_Graviton_ArchitectureFilterSelectsExactlyTheGravitonFamilies(t *testing.T) {
 	t.Parallel()
 	arm := describeGravitonTypes(t, map[string]string{
 		"Filter.1.Name": "processor-info.supported-architecture", "Filter.1.Value.1": "arm64",
 	})
-	require.Len(t, arm, 115)
+	require.Len(t, arm, 254)
 	for _, it := range arm {
 		family, _, _ := strings.Cut(it.InstanceType, ".")
 		assert.Contains(t, gravitonFamilies, family)
@@ -115,7 +122,7 @@ func TestEC2_Graviton_ArchitectureFilterSelectsExactlyTheGravitonFamilies(t *tes
 	x86 := describeGravitonTypes(t, map[string]string{
 		"Filter.1.Name": "processor-info.supported-architecture", "Filter.1.Value.1": "x86_64",
 	})
-	assert.Len(t, x86, 210-115, "the x86 families and the accelerated ones")
+	assert.Len(t, x86, 349-254, "the x86 families and the x86 accelerated ones")
 }
 
 // TestEC2_Graviton_OfferingsAndSpotPrices pins that the Graviton types reach the other two
@@ -186,9 +193,14 @@ func TestAutoScaling_GravitonMatching(t *testing.T) {
 			VCpuCount: emulator.AutoScalingRange{Min: f(2), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(1024), Max: f(2048)},
 			BurstablePerformance: "required",
 		}, []string{"t4g.micro", "t4g.small"}},
+		// LocalStorage defaults to included, so the gd variants match beside their base family,
+		// and the gn ones by the same figures (#1509).
 		{"burstable excluded by default keeps t4g out", "arm64", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(2), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(4096), Max: f(4096)},
-		}, []string{"c6g.large", "c7g.large", "c8g.large", "c9g.large"}},
+		}, []string{
+			"c6g.large", "c6gd.large", "c6gn.large", "c7g.large", "c7gd.large", "c7gn.large",
+			"c8g.large", "c8gd.large", "c8gn.large", "c9g.large", "c9gd.large",
+		}},
 		{"amazon-web-services on an x86_64 AMI matches nothing", "x86_64", emulator.AutoScalingInstanceRequirements{
 			VCpuCount: emulator.AutoScalingRange{Min: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(1)},
 			CPUManufacturers: []string{"amazon-web-services"},
@@ -332,4 +344,94 @@ func TestAutoScaling_RegisteredImageWithoutArchitectureStaysX86(t *testing.T) {
 	g := e.group("no-arch")
 	require.Len(t, g.Instances, 1)
 	assert.Equal(t, "c5.large", g.Instances[0].InstanceType, "the x86 choice it made before the Graviton families")
+}
+
+// TestEC2_Graviton_VariantSpecs pins sizes from each #1509 family against the guide pages'
+// figures, and g5g's GPU count, which is reported through gpuInfo and steps from one to two at
+// the 16xlarge.
+func TestEC2_Graviton_VariantSpecs(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	tests := []struct {
+		instanceType string
+		vcpus        int
+		memoryMiB    int
+		gpus         int
+	}{
+		{"m6gd.medium", 1, 4096, 0},
+		{"m7gd.16xlarge", 64, 262144, 0},
+		{"m8gd.48xlarge", 192, 786432, 0},
+		{"m9gd.24xlarge", 96, 393216, 0},
+		{"c6gd.large", 2, 4096, 0},
+		{"c7gd.12xlarge", 48, 98304, 0},
+		{"c8gd.24xlarge", 96, 196608, 0},
+		{"c9gd.48xlarge", 192, 393216, 0},
+		{"r6gd.medium", 1, 8192, 0},
+		{"r7gd.8xlarge", 32, 262144, 0},
+		{"r8gd.48xlarge", 192, 1572864, 0},
+		{"r9gd.xlarge", 4, 32768, 0},
+		{"c6gn.16xlarge", 64, 131072, 0},
+		{"c7gn.medium", 1, 2048, 0},
+		{"c8gn.48xlarge", 192, 393216, 0},
+		{"g5g.xlarge", 4, 8192, 1},
+		{"g5g.8xlarge", 32, 65536, 1},
+		{"g5g.16xlarge", 64, 131072, 2},
+	}
+	for _, tc := range tests {
+		t.Run(tc.instanceType, func(t *testing.T) {
+			var doc struct {
+				Items []struct {
+					InstanceType string   `xml:"instanceType"`
+					VCpus        int      `xml:"vCpuInfo>defaultVCpus"`
+					MemoryMiB    int      `xml:"memoryInfo>sizeInMiB"`
+					Archs        []string `xml:"processorInfo>supportedArchitectures>item"`
+					GPUs         int      `xml:"gpuInfo>gpus>item>count"`
+					Current      bool     `xml:"currentGeneration"`
+				} `xml:"instanceTypeSet>item"`
+			}
+			ec2DescribeXML(t, ts, map[string]string{"Action": "DescribeInstanceTypes", "InstanceType.1": tc.instanceType}, &doc)
+			require.Len(t, doc.Items, 1)
+			it := doc.Items[0]
+			assert.Equal(t, tc.vcpus, it.VCpus)
+			assert.Equal(t, tc.memoryMiB, it.MemoryMiB)
+			assert.Equal(t, []string{"arm64"}, it.Archs)
+			assert.Equal(t, tc.gpus, it.GPUs)
+			assert.True(t, it.Current)
+		})
+	}
+}
+
+// TestAutoScaling_GravitonVariantAttributes pins how attribute-based selection reads the #1509
+// families: the gd variants carry instance store, so LocalStorage selects or drops them while the
+// gn variants follow their EBS-only base; all are amazon-web-services; g5g is a GPU type an arm64
+// AMI can select.
+func TestAutoScaling_GravitonVariantAttributes(t *testing.T) {
+	t.Parallel()
+	f := func(v float64) *float64 { return &v }
+	twoByFour := func(local string) emulator.AutoScalingInstanceRequirements {
+		return emulator.AutoScalingInstanceRequirements{
+			VCpuCount: emulator.AutoScalingRange{Min: f(2), Max: f(2)}, MemoryMiB: emulator.AutoScalingRange{Min: f(4096), Max: f(4096)},
+			CPUManufacturers: []string{"amazon-web-services"}, AllowedInstanceTypes: []string{"c6g*", "c7g*"},
+			LocalStorage: local,
+		}
+	}
+	tests := []struct {
+		name string
+		req  emulator.AutoScalingInstanceRequirements
+		want []string
+	}{
+		{"included by default", twoByFour(""), []string{"c6g.large", "c6gd.large", "c6gn.large", "c7g.large", "c7gd.large", "c7gn.large"}},
+		{"required keeps only gd", twoByFour("required"), []string{"c6gd.large", "c7gd.large"}},
+		{"excluded drops gd", twoByFour("excluded"), []string{"c6g.large", "c6gn.large", "c7g.large", "c7gn.large"}},
+		{"a GPU on an arm64 AMI is g5g", emulator.AutoScalingInstanceRequirements{
+			VCpuCount: emulator.AutoScalingRange{Min: f(4), Max: f(8)}, MemoryMiB: emulator.AutoScalingRange{Min: f(1)},
+			AcceleratorTypes: []string{"gpu"}, CPUManufacturers: []string{"amazon-web-services"},
+		}, []string{"g5g.xlarge", "g5g.2xlarge"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, tc.want, emulator.AutoScalingMatchInstanceTypesForTest(&tc.req, "arm64"))
+		})
+	}
 }

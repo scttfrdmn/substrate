@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"log/slog"
 	"testing"
 	"time"
@@ -116,6 +117,37 @@ func TestCFN_EC2LaunchTemplate(t *testing.T) {
 	body := routeQuery(t, registry, "ec2", map[string]string{"Action": "DescribeLaunchTemplates"})
 	assert.Contains(t, body, lt.PhysicalID)
 	assert.Contains(t, body, "compute-nodes")
+}
+
+// TestCFN_EC2LaunchTemplate_GeneratedName pins that a template naming no LaunchTemplateName gets
+// a generated name, as the Template Reference says CloudFormation creates one. The logical ID
+// "LT" is two characters, which EC2's name rule refuses (#1507), so using it verbatim would
+// fail the resource.
+func TestCFN_EC2LaunchTemplate_GeneratedName(t *testing.T) {
+	d, registry := newEC2IAMTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"LT": {
+				"Type": "AWS::EC2::LaunchTemplate",
+				"Properties": {"LaunchTemplateData": {"InstanceType": "t3.micro"}}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "gen-stack", nil)
+	require.NoError(t, err)
+
+	lt := findResource(t, result, "LT")
+	require.Empty(t, lt.Error)
+	assert.Regexp(t, `^lt-[0-9a-f]+$`, lt.PhysicalID)
+
+	var doc struct {
+		Names []string `xml:"launchTemplates>item>launchTemplateName"`
+	}
+	body := routeQuery(t, registry, "ec2", map[string]string{"Action": "DescribeLaunchTemplates", "LaunchTemplateId.1": lt.PhysicalID})
+	require.NoError(t, xml.Unmarshal([]byte(body), &doc))
+	require.Len(t, doc.Names, 1)
+	assert.Regexp(t, `^gen-stack-LT-[0-9a-z]{12}$`, doc.Names[0], "the {stack}-{logical}-{suffix} shape")
 }
 
 // TestCFN_IAMInstanceProfile verifies an instance profile is created and its

@@ -181,7 +181,9 @@ func (p *AutoScalingPlugin) asgPrepareLaunch(reqCtx *RequestContext, g *AutoScal
 			}
 		}
 	}
-	cands, awsErr := p.asgCandidates(reqCtx, g)
+	// Create and update are where an attribute-based policy on a resolve:ssm: template is
+	// refused (#1506); see [AutoScalingPlugin.asgCandidatesFor].
+	cands, awsErr := p.asgCandidatesFor(reqCtx, g, true)
 	if awsErr != nil {
 		return nil, nil, awsErr
 	}

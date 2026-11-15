@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -116,7 +118,9 @@ func runInstance(t *testing.T, ts *httptest.Server, params map[string]string) st
 	resp := ec2Request(t, ts, full)
 	defer resp.Body.Close() //nolint:errcheck
 	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("RunInstances: status = %d, want 200", resp.StatusCode)
+		body, readErr := io.ReadAll(resp.Body)
+		require.NoError(t, readErr)
+		t.Fatalf("RunInstances: status = %d, want 200; body = %s", resp.StatusCode, body)
 	}
 	var out struct {
 		Instances []struct {
@@ -159,7 +163,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.2.0.0/16", "lt-case-b")
 		ltID := createLaunchTemplate(t, ts, "case-b", map[string]string{
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
 
 		id := runInstance(t, ts, map[string]string{
@@ -200,7 +204,7 @@ func TestEC2_LaunchTemplate_SubnetSources(t *testing.T) {
 		ts := newEC2TestServer(t)
 		net := newLTNetwork(t, ts, "10.4.0.0/16", "lt-case-d")
 		ltID := createLaunchTemplate(t, ts, "case-d", map[string]string{
-			"LaunchTemplateData.ImageId":                        ec2TestImageMinimalArm,
+			"LaunchTemplateData.ImageId":                        ec2TestImageMinimal,
 			"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 			"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 		})
@@ -327,7 +331,7 @@ func TestEC2_LaunchTemplate_SecurityGroups(t *testing.T) {
 			// A group from a different VPC than the template's subnet must be
 			// rejected — which proves the list was read rather than ignored.
 			crossVPC := createLaunchTemplate(t, ts, "sg-cross-"+tt.param, map[string]string{
-				"LaunchTemplateData.ImageId":                        ec2TestImageArm,
+				"LaunchTemplateData.ImageId":                        ec2TestImageECS2,
 				"LaunchTemplateData.NetworkInterface.1.DeviceIndex": "0",
 				"LaunchTemplateData.NetworkInterface.1.SubnetId":    net.subnetID,
 				tt.param: other.sgID,
@@ -455,11 +459,11 @@ func TestEC2_LaunchTemplate_MergesWithRequestParams(t *testing.T) {
 		"LaunchTemplate.LaunchTemplateId": ltID,
 		// The only field the request names. Before #453 its presence alone was
 		// enough to discard everything else above.
-		"ImageId": ec2TestImageArm,
+		"ImageId": ec2TestImageECS2,
 	})
 	got := describeInstance(t, ts, id)
 
-	if got.ImageID != ec2TestImageArm {
+	if got.ImageID != ec2TestImageECS2 {
 		t.Errorf("imageId = %q, want the request's AMI", got.ImageID)
 	}
 	if got.InstanceType != "c5.xlarge" {
@@ -565,10 +569,10 @@ func TestEC2_LaunchTemplate_FieldPrecedence(t *testing.T) {
 		},
 		{
 			name:          "the template fills an absent ImageId",
-			templateData:  map[string]string{"LaunchTemplateData.ImageId": ec2TestImageArm},
+			templateData:  map[string]string{"LaunchTemplateData.ImageId": ec2TestImageECS2},
 			requestParams: map[string]string{},
 			check: func(t *testing.T, got launchedInstance) {
-				if got.ImageID != ec2TestImageArm {
+				if got.ImageID != ec2TestImageECS2 {
 					t.Errorf("imageId = %q, want the template's", got.ImageID)
 				}
 			},
@@ -620,7 +624,7 @@ func TestEC2_LaunchTemplate_NetworkingPrecedenceWithRequestImageID(t *testing.T)
 
 	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
 		"LaunchTemplate.LaunchTemplateId": ltID,
-		"ImageId":                         ec2TestImageArm,
+		"ImageId":                         ec2TestImageECS2,
 		"SubnetId":                        reqNet.subnetID,
 		"SecurityGroupId.1":               reqNet.sgID,
 	}))
@@ -657,7 +661,7 @@ func TestEC2_LaunchTemplate_RequestFalseBeatsTemplateTrue(t *testing.T) {
 
 	got := describeInstance(t, ts, runInstance(t, ts, map[string]string{
 		"LaunchTemplate.LaunchTemplateId": ltID,
-		"ImageId":                         ec2TestImageArm,
+		"ImageId":                         ec2TestImageECS2,
 		"NetworkInterface.1.AssociatePublicIpAddress": "false",
 		"NetworkInterface.1.SubnetId":                 net.subnetID,
 	}))
@@ -779,7 +783,8 @@ func TestEC2_LaunchTemplate_RoundTripsTagsAndProfile(t *testing.T) {
 			for k, v := range ltTagParams([2]string{"Env", "prod"}, [2]string{"Team", "core"}) {
 				data[k] = v
 			}
-			ltID := createLaunchTemplate(t, ts, "roundtrip-"+tt.name, data)
+			// A space is outside the name rule (#1507), so the case name is hyphenated.
+			ltID := createLaunchTemplate(t, ts, "roundtrip-"+strings.ReplaceAll(tt.name, " ", "-"), data)
 
 			versions, _ := describeLTVersions(t, ts, map[string]string{"LaunchTemplateId": ltID})
 			require.Len(t, versions, 1)
@@ -986,7 +991,7 @@ func TestEC2_LaunchTemplate_TagsAreSubjectToTheTagRules(t *testing.T) {
 
 		// Nothing is created, so the name is still free.
 		_ = createLaunchTemplate(t, ts, "reserved-tag", map[string]string{
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
 	})
 
@@ -1142,14 +1147,14 @@ func TestEC2_LaunchTemplate_StoredTagsAreCheckedAtLaunch(t *testing.T) {
 	}{
 		{
 			name:        "a reserved key",
-			ltID:        "lt-0stored000000001",
+			ltID:        "lt-0c0ffee000000001",
 			tags:        []map[string]string{{"key": "aws:foo", "value": "v"}},
 			wantCode:    "InvalidParameterValue",
 			wantMessage: ec2ReservedTagMessage,
 		},
 		{
 			name:        "more than the tag limit",
-			ltID:        "lt-0stored000000002",
+			ltID:        "lt-0c0ffee000000002",
 			tags:        storedNumberedTags(ec2TagLimit + 1),
 			wantCode:    "TagLimitExceeded",
 			wantMessage: ec2TagLimitMessage,

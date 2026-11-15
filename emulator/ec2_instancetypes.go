@@ -113,8 +113,8 @@ const (
 // other bare metal. They report arm64. Their stub rates carry no #234 anchor, so they are
 // substrate's, set below the x86 family of the same class and rising one step per
 // generation, by the rule [ec2AcceleratedFamilies] states. The `gd` (instance store) and `gn`
-// (network optimized) variants of these lines are not carried; a type from one of them is
-// refused like any other family the catalog lacks.
+// (network optimized) variants of these lines follow them (#1509): m6gd–m9gd, c6gd–c9gd,
+// r6gd–r9gd, c6gn, c7gn and c8gn, every one the guide pages publish.
 var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 	// Burstable, Intel. 0.0042 USD/GiB.
 	{Name: "t3", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
@@ -346,6 +346,194 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"24xlarge", 96, 786432, "1.7664"},
 		{"48xlarge", 192, 1572864, "3.5328"},
 	}},
+	// The Graviton gd (instance store) and gn (network optimized) variants (#1509), transcribed
+	// from the same three guide pages. Their vCPU and memory figures equal their base family's
+	// size for size — the pages publish them that way, the gn lines included — and the
+	// Graviton4 and Graviton5 lines add 24xlarge and 48xlarge as their base families do.
+	// Every gd size carries NVMe SSD instance store ("1 x 59 GB" on a medium upward, per the
+	// instance store tables) and every gn size is EBS-only ("Instance store not supported");
+	// the catalog reports neither, and [asgFamilyHasInstanceStore] is where the difference is
+	// read. Bare metal is excluded as everywhere. Stub rates are substrate's, a step above the
+	// base family's.
+	// General purpose, AWS Graviton2, NVMe instance store. 0.0047 USD/GiB.
+	{Name: "m6gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0188"},
+		{"large", 2, 8192, "0.0376"},
+		{"xlarge", 4, 16384, "0.0752"},
+		{"2xlarge", 8, 32768, "0.1504"},
+		{"4xlarge", 16, 65536, "0.3008"},
+		{"8xlarge", 32, 131072, "0.6016"},
+		{"12xlarge", 48, 196608, "0.9024"},
+		{"16xlarge", 64, 262144, "1.2032"},
+	}},
+	// General purpose, AWS Graviton3, NVMe instance store. 0.0049 USD/GiB.
+	{Name: "m7gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0196"},
+		{"large", 2, 8192, "0.0392"},
+		{"xlarge", 4, 16384, "0.0784"},
+		{"2xlarge", 8, 32768, "0.1568"},
+		{"4xlarge", 16, 65536, "0.3136"},
+		{"8xlarge", 32, 131072, "0.6272"},
+		{"12xlarge", 48, 196608, "0.9408"},
+		{"16xlarge", 64, 262144, "1.2544"},
+	}},
+	// General purpose, AWS Graviton4, NVMe instance store. 0.0051 USD/GiB.
+	{Name: "m8gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0204"},
+		{"large", 2, 8192, "0.0408"},
+		{"xlarge", 4, 16384, "0.0816"},
+		{"2xlarge", 8, 32768, "0.1632"},
+		{"4xlarge", 16, 65536, "0.3264"},
+		{"8xlarge", 32, 131072, "0.6528"},
+		{"12xlarge", 48, 196608, "0.9792"},
+		{"16xlarge", 64, 262144, "1.3056"},
+		{"24xlarge", 96, 393216, "1.9584"},
+		{"48xlarge", 192, 786432, "3.9168"},
+	}},
+	// General purpose, AWS Graviton5, NVMe instance store. 0.0053 USD/GiB.
+	{Name: "m9gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0212"},
+		{"large", 2, 8192, "0.0424"},
+		{"xlarge", 4, 16384, "0.0848"},
+		{"2xlarge", 8, 32768, "0.1696"},
+		{"4xlarge", 16, 65536, "0.3392"},
+		{"8xlarge", 32, 131072, "0.6784"},
+		{"12xlarge", 48, 196608, "1.0176"},
+		{"16xlarge", 64, 262144, "1.3568"},
+		{"24xlarge", 96, 393216, "2.0352"},
+		{"48xlarge", 192, 786432, "4.0704"},
+	}},
+	// Compute optimized, AWS Graviton2, NVMe instance store. 0.0082 USD/GiB.
+	{Name: "c6gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0164"},
+		{"large", 2, 4096, "0.0328"},
+		{"xlarge", 4, 8192, "0.0656"},
+		{"2xlarge", 8, 16384, "0.1312"},
+		{"4xlarge", 16, 32768, "0.2624"},
+		{"8xlarge", 32, 65536, "0.5248"},
+		{"12xlarge", 48, 98304, "0.7872"},
+		{"16xlarge", 64, 131072, "1.0496"},
+	}},
+	// Compute optimized, AWS Graviton3, NVMe instance store. 0.0086 USD/GiB.
+	{Name: "c7gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0172"},
+		{"large", 2, 4096, "0.0344"},
+		{"xlarge", 4, 8192, "0.0688"},
+		{"2xlarge", 8, 16384, "0.1376"},
+		{"4xlarge", 16, 32768, "0.2752"},
+		{"8xlarge", 32, 65536, "0.5504"},
+		{"12xlarge", 48, 98304, "0.8256"},
+		{"16xlarge", 64, 131072, "1.1008"},
+	}},
+	// Compute optimized, AWS Graviton4, NVMe instance store. 0.009 USD/GiB.
+	{Name: "c8gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.018"},
+		{"large", 2, 4096, "0.036"},
+		{"xlarge", 4, 8192, "0.072"},
+		{"2xlarge", 8, 16384, "0.144"},
+		{"4xlarge", 16, 32768, "0.288"},
+		{"8xlarge", 32, 65536, "0.576"},
+		{"12xlarge", 48, 98304, "0.864"},
+		{"16xlarge", 64, 131072, "1.152"},
+		{"24xlarge", 96, 196608, "1.728"},
+		{"48xlarge", 192, 393216, "3.456"},
+	}},
+	// Compute optimized, AWS Graviton5, NVMe instance store. 0.0094 USD/GiB.
+	{Name: "c9gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0188"},
+		{"large", 2, 4096, "0.0376"},
+		{"xlarge", 4, 8192, "0.0752"},
+		{"2xlarge", 8, 16384, "0.1504"},
+		{"4xlarge", 16, 32768, "0.3008"},
+		{"8xlarge", 32, 65536, "0.6016"},
+		{"12xlarge", 48, 98304, "0.9024"},
+		{"16xlarge", 64, 131072, "1.2032"},
+		{"24xlarge", 96, 196608, "1.8048"},
+		{"48xlarge", 192, 393216, "3.6096"},
+	}},
+	// Compute optimized, network optimized, AWS Graviton2. EBS only. 0.0088 USD/GiB.
+	{Name: "c6gn", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0176"},
+		{"large", 2, 4096, "0.0352"},
+		{"xlarge", 4, 8192, "0.0704"},
+		{"2xlarge", 8, 16384, "0.1408"},
+		{"4xlarge", 16, 32768, "0.2816"},
+		{"8xlarge", 32, 65536, "0.5632"},
+		{"12xlarge", 48, 98304, "0.8448"},
+		{"16xlarge", 64, 131072, "1.1264"},
+	}},
+	// Compute optimized, network optimized, AWS Graviton3E. EBS only. 0.0092 USD/GiB.
+	{Name: "c7gn", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0184"},
+		{"large", 2, 4096, "0.0368"},
+		{"xlarge", 4, 8192, "0.0736"},
+		{"2xlarge", 8, 16384, "0.1472"},
+		{"4xlarge", 16, 32768, "0.2944"},
+		{"8xlarge", 32, 65536, "0.5888"},
+		{"12xlarge", 48, 98304, "0.8832"},
+		{"16xlarge", 64, 131072, "1.1776"},
+	}},
+	// Compute optimized, network optimized, AWS Graviton4. EBS only. 0.0096 USD/GiB.
+	{Name: "c8gn", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0192"},
+		{"large", 2, 4096, "0.0384"},
+		{"xlarge", 4, 8192, "0.0768"},
+		{"2xlarge", 8, 16384, "0.1536"},
+		{"4xlarge", 16, 32768, "0.3072"},
+		{"8xlarge", 32, 65536, "0.6144"},
+		{"12xlarge", 48, 98304, "0.9216"},
+		{"16xlarge", 64, 131072, "1.2288"},
+		{"24xlarge", 96, 196608, "1.8432"},
+		{"48xlarge", 192, 393216, "3.6864"},
+	}},
+	// Memory optimized, AWS Graviton2, NVMe instance store. 0.0024 USD/GiB.
+	{Name: "r6gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0192"},
+		{"large", 2, 16384, "0.0384"},
+		{"xlarge", 4, 32768, "0.0768"},
+		{"2xlarge", 8, 65536, "0.1536"},
+		{"4xlarge", 16, 131072, "0.3072"},
+		{"8xlarge", 32, 262144, "0.6144"},
+		{"12xlarge", 48, 393216, "0.9216"},
+		{"16xlarge", 64, 524288, "1.2288"},
+	}},
+	// Memory optimized, AWS Graviton3, NVMe instance store. 0.0025 USD/GiB.
+	{Name: "r7gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.02"},
+		{"large", 2, 16384, "0.04"},
+		{"xlarge", 4, 32768, "0.08"},
+		{"2xlarge", 8, 65536, "0.16"},
+		{"4xlarge", 16, 131072, "0.32"},
+		{"8xlarge", 32, 262144, "0.64"},
+		{"12xlarge", 48, 393216, "0.96"},
+		{"16xlarge", 64, 524288, "1.28"},
+	}},
+	// Memory optimized, AWS Graviton4, NVMe instance store. 0.0026 USD/GiB.
+	{Name: "r8gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0208"},
+		{"large", 2, 16384, "0.0416"},
+		{"xlarge", 4, 32768, "0.0832"},
+		{"2xlarge", 8, 65536, "0.1664"},
+		{"4xlarge", 16, 131072, "0.3328"},
+		{"8xlarge", 32, 262144, "0.6656"},
+		{"12xlarge", 48, 393216, "0.9984"},
+		{"16xlarge", 64, 524288, "1.3312"},
+		{"24xlarge", 96, 786432, "1.9968"},
+		{"48xlarge", 192, 1572864, "3.9936"},
+	}},
+	// Memory optimized, AWS Graviton5, NVMe instance store. 0.0027 USD/GiB.
+	{Name: "r9gd", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0216"},
+		{"large", 2, 16384, "0.0432"},
+		{"xlarge", 4, 32768, "0.0864"},
+		{"2xlarge", 8, 65536, "0.1728"},
+		{"4xlarge", 16, 131072, "0.3456"},
+		{"8xlarge", 32, 262144, "0.6912"},
+		{"12xlarge", 48, 393216, "1.0368"},
+		{"16xlarge", 64, 524288, "1.3824"},
+		{"24xlarge", 96, 786432, "2.0736"},
+		{"48xlarge", 192, 1572864, "4.1472"},
+	}},
 }
 
 // ec2AcceleratedSize is one size within an [ec2AcceleratedFamily].
@@ -393,6 +581,12 @@ const (
 type ec2AcceleratedFamily struct {
 	// Name is the family prefix, e.g. "g5".
 	Name string
+	// Architecture is the one value the family's types report as
+	// processorInfo.supportedArchitectures, as [ec2InstanceTypeFamily.Architecture] is.
+	// Every accelerated family is x86_64 except g5g, the AWS Graviton2 family with NVIDIA
+	// T4g GPUs (#1509); until it was added the table had no Graviton row and
+	// [buildEC2InstanceTypeCatalog] applied x86_64 as a constant.
+	Architecture string
 	// Reports is the response member DescribeInstanceTypes reports this family's
 	// accelerator count through. See [ec2AcceleratedFamilies] for the five members AWS
 	// splits accelerators across and which of them are modeled.
@@ -461,27 +655,27 @@ type ec2AcceleratedFamily struct {
 var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 	// NVIDIA V100. Previous generation, and the only family in either table that is, so the
 	// only one whose types report currentGeneration false. 0.918/61 GiB.
-	{Name: "p3", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "p3", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"2xlarge", 8, 62464, 1, "0.918"},
 		{"8xlarge", 32, 249856, 4, "3.672"},
 		{"16xlarge", 64, 499712, 8, "7.344"},
 	}},
 	// NVIDIA A100 40 GiB. One size is the whole family. 0.0175 USD/GiB.
-	{Name: "p4d", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "p4d", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"24xlarge", 96, 1179648, 8, "20.16"},
 	}},
 	// NVIDIA A100 80 GiB — AWS's own family, not a p4d size. 0.0195 USD/GiB.
-	{Name: "p4de", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "p4de", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"24xlarge", 96, 1179648, 8, "22.464"},
 	}},
 	// NVIDIA H100. 0.0225 USD/GiB.
-	{Name: "p5", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "p5", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"4xlarge", 16, 262144, 1, "5.76"},
 		{"48xlarge", 192, 2097152, 8, "46.08"},
 	}},
 	// NVIDIA T4. 0.01175 USD/GiB. The accelerator count is not monotonic in size and AWS
 	// publishes it that way: the 12xlarge carries four and the 16xlarge one.
-	{Name: "g4dn", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "g4dn", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.188"},
 		{"2xlarge", 8, 32768, 1, "0.376"},
 		{"4xlarge", 16, 65536, 1, "0.752"},
@@ -491,7 +685,7 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 	}},
 	// NVIDIA A10G. 0.0125 USD/GiB. Same non-monotonic count as g4dn, plus a 24xlarge that
 	// carries four where the 48xlarge carries eight.
-	{Name: "g5", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "g5", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.2"},
 		{"2xlarge", 8, 32768, 1, "0.4"},
 		{"4xlarge", 16, 65536, 1, "0.8"},
@@ -502,7 +696,7 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 		{"48xlarge", 192, 786432, 8, "9.6"},
 	}},
 	// NVIDIA L4. 0.013 USD/GiB. g6.xlarge is the type #891, #892 and #894 probe.
-	{Name: "g6", Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+	{Name: "g6", Architecture: ec2ArchX86, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.208"},
 		{"2xlarge", 8, 32768, 1, "0.416"},
 		{"4xlarge", 16, 65536, 1, "0.832"},
@@ -513,28 +707,39 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 		{"48xlarge", 192, 786432, 8, "9.984"},
 	}},
 	// AWS Inferentia. 0.0095 USD/GiB. Not reported through gpuInfo; see above.
-	{Name: "inf1", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
+	{Name: "inf1", Architecture: ec2ArchX86, Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 8192, 1, "0.076"},
 		{"2xlarge", 8, 16384, 1, "0.152"},
 		{"6xlarge", 24, 49152, 4, "0.456"},
 		{"24xlarge", 96, 196608, 16, "1.824"},
 	}},
 	// AWS Inferentia2. 0.0105 USD/GiB. The count runs 1, 1, 6, 12 — not powers of two.
-	{Name: "inf2", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
+	{Name: "inf2", Architecture: ec2ArchX86, Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"xlarge", 4, 16384, 1, "0.168"},
 		{"8xlarge", 32, 131072, 1, "1.344"},
 		{"24xlarge", 96, 393216, 6, "4.032"},
 		{"48xlarge", 192, 786432, 12, "8.064"},
 	}},
 	// AWS Trainium. 0.0115 USD/GiB.
-	{Name: "trn1", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
+	{Name: "trn1", Architecture: ec2ArchX86, Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"2xlarge", 8, 32768, 1, "0.368"},
 		{"32xlarge", 128, 524288, 16, "5.888"},
 	}},
 	// AWS Trainium2. 0.0135 USD/GiB. The small size is a 3xlarge, not a 2xlarge.
-	{Name: "trn2", Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
+	{Name: "trn2", Architecture: ec2ArchX86, Reports: ec2AcceleratorNeuron, Sizes: []ec2AcceleratedSize{
 		{"3xlarge", 12, 131072, 1, "1.728"},
 		{"48xlarge", 192, 2097152, 16, "27.648"},
+	}},
+	// NVIDIA T4G on AWS Graviton2 — the catalog's one arm64 accelerated family (#1509), from
+	// the accelerated-computing guide: 1 GPU on every size up to 8xlarge and 2 on the 16xlarge,
+	// EBS only ("Instance store not supported"). g5g.metal is excluded with the other bare
+	// metal. 0.0105 USD/GiB, below g4dn's T4 rate.
+	{Name: "g5g", Architecture: ec2ArchARM64, Reports: ec2AcceleratorGPU, Sizes: []ec2AcceleratedSize{
+		{"xlarge", 4, 8192, 1, "0.084"},
+		{"2xlarge", 8, 16384, 1, "0.168"},
+		{"4xlarge", 16, 32768, 1, "0.336"},
+		{"8xlarge", 32, 65536, 1, "0.672"},
+		{"16xlarge", 64, 131072, 2, "1.344"},
 	}},
 }
 
@@ -558,9 +763,10 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 // neither. They are transcribed anyway, whole: the list is a copy of one AWS table rather than
 // the intersection with [ec2InstanceTypeFamilies], so a family added to the catalog later is
 // classified by AWS's answer instead of by whoever adds it remembering to look. Intersected
-// with the catalog's thirty-one families today it selects exactly p3 — three of 210 types report
-// false and 207 report true. (a1, the first Graviton family, is on the list and not in the
-// catalog; the thirteen Graviton families #1497 added are all current.)
+// with the catalog's forty-seven families today it selects exactly p3 — three of 349 types report
+// false and 346 report true. (a1, the first Graviton family, is on the list and not in the
+// catalog; the thirteen Graviton families #1497 added and the sixteen #1509 added are all
+// current.)
 var ec2PreviousGenerationFamilies = []string{ //nolint:gochecknoglobals // read-only reference data transcribed from one AWS page
 	"a1", "c1", "c3", "c4", "g3", "i2", "m1", "m2", "m3", "m4",
 	"p3", "p3dn", "r3", "r4", "t1",
@@ -600,9 +806,8 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 //
 // The architecture is the family's ([ec2InstanceTypeFamily.Architecture]) since #1497 added
 // the Graviton families; before that every entry was x86_64 and this function applied it as a
-// constant. The accelerated families are all x86_64 and are still given it here: the
-// Graviton-based accelerated families (g5g is the nearest) are not carried, so no
-// accelerated row needs the field.
+// constant. The accelerated families carry the field too since #1509 added g5g, the first
+// Graviton row in that table ([ec2AcceleratedFamily.Architecture]).
 //
 // CurrentGeneration is not applied that way, because it is the one property on which the
 // families disagree: it is derived per family through [ec2FamilyIsCurrentGeneration], which
@@ -647,7 +852,7 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 			case ec2AcceleratorNone:
 				// Reported nowhere; the count stays in the table as the record of it.
 			}
-			add(family.Name, ec2ArchX86, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
+			add(family.Name, family.Architecture, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
 		}
 	}
 	return catalog, index

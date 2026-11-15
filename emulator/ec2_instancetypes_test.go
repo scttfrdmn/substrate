@@ -459,7 +459,9 @@ func TestEC2_DescribeInstanceTypeOfferings_InstanceTypeFilter(t *testing.T) {
 			},
 		},
 		{
-			// Six of the eleven matches are accelerated families, which is what #896
+			// The Graviton4 and Graviton5 lines (#1497) and their gd and gn variants
+			// (#1509) carry a 24xlarge too, which is most of the answer now.
+			// Six of the matches are accelerated families, which is what #896
 			// widening the catalog added here: p4d and p4de are whole families of one
 			// 24xlarge, and g5, g6, inf1 and inf2 each carry one. The general-purpose
 			// five were the whole answer while the accelerated families held one size
@@ -467,12 +469,13 @@ func TestEC2_DescribeInstanceTypeOfferings_InstanceTypeFilter(t *testing.T) {
 			name:   "a mid-string wildcard",
 			values: map[string]string{"Filter.1.Name": "instance-type", "Filter.1.Value.1": "*.24xlarge"},
 			wantTypes: []string{
-				"c5.24xlarge", "c5a.24xlarge", "c8g.24xlarge", "c9g.24xlarge",
+				"c5.24xlarge", "c5a.24xlarge", "c8g.24xlarge", "c8gd.24xlarge", "c8gn.24xlarge",
+				"c9g.24xlarge", "c9gd.24xlarge",
 				"g5.24xlarge", "g6.24xlarge",
 				"inf1.24xlarge", "inf2.24xlarge", "m5.24xlarge", "m5a.24xlarge",
-				"m8g.24xlarge", "m9g.24xlarge",
+				"m8g.24xlarge", "m8gd.24xlarge", "m9g.24xlarge", "m9gd.24xlarge",
 				"p4d.24xlarge", "p4de.24xlarge", "r5.24xlarge",
-				"r8g.24xlarge", "r9g.24xlarge",
+				"r8g.24xlarge", "r8gd.24xlarge", "r9g.24xlarge", "r9gd.24xlarge",
 			},
 		},
 		{
