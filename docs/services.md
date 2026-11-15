@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1101 operations**. This
+Substrate ships **68 built-in service plugins** routing **1105 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -54,7 +54,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 33 | FSx | `fsx` | JSON | 3 |
 | 34 | Glue | `glue` | JSON | 33 |
 | 35 | Health | `health` | JSON | 4 |
-| 36 | IAM | `iam` | Query | 74 |
+| 36 | IAM | `iam` | Query | 78 |
 | 37 | Kinesis Data Streams | `kinesis` | JSON | 18 |
 | 38 | KMS | `kms` | JSON | 25 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
@@ -2818,7 +2818,10 @@ The types that get a generated name, with the limit each is fitted to:
 |---|---|---|
 | `AWS::IAM::Role` | `RoleName` | 64 |
 | `AWS::IAM::InstanceProfile` | `InstanceProfileName` | 128 |
-| `AWS::IAM::Policy` | `PolicyName` | 128 |
+| `AWS::IAM::ManagedPolicy` | `ManagedPolicyName` | 128 |
+| `AWS::IAM::User` | `UserName` | 64 |
+| `AWS::IAM::Group` | `GroupName` | 128 |
+| `AWS::IAM::Policy` | none — the generated value is the physical ID of the inline policy, whose `PolicyName` is required | 128 |
 | `AWS::S3::Bucket` | `BucketName` | 63, lowercase |
 | `AWS::DynamoDB::Table` | `TableName` | 255 |
 | `AWS::SQS::Queue` | `QueueName` | 80 |
@@ -3111,6 +3114,11 @@ a new ID, and the first stayed behind.
   | `AWS::KMS::Key` | `UpdateKeyDescription`, `PutKeyPolicy`, `EnableKeyRotation`/`DisableKeyRotation`, `EnableKey`/`DisableKey` | `Description`, `KeyPolicy`, `EnableKeyRotation`, `RotationPeriodInDays`, `Enabled` |
   | `AWS::EC2::SecurityGroup` | `RevokeSecurityGroupIngress`/`Egress`, then `AuthorizeSecurityGroupIngress`/`Egress` | `SecurityGroupIngress`, `SecurityGroupEgress` |
   | `AWS::ECS::Service` | `UpdateService` | `TaskDefinition`, `DesiredCount` |
+  | `AWS::IAM::Role` | `UpdateAssumeRolePolicy`, `UpdateRole`, `Attach`/`DetachRolePolicy`, `Put`/`DeleteRolePolicy`, `TagRole`/`UntagRole`, `Put`/`DeleteRolePermissionsBoundary` | `AssumeRolePolicyDocument`; `Description`, `MaxSessionDuration`; `ManagedPolicyArns`; `Policies`; `Tags`; `PermissionsBoundary` |
+  | `AWS::IAM::User` | `Add`/`RemoveUserFromGroup`, `Attach`/`DetachUserPolicy`, `Put`/`DeleteUserPolicy`, `TagUser`/`UntagUser`, `Put`/`DeleteUserPermissionsBoundary` | `Groups`, `ManagedPolicyArns`, `Policies`, `Tags`, `PermissionsBoundary` |
+  | `AWS::IAM::Group` | `Attach`/`DetachGroupPolicy`, `Put`/`DeleteGroupPolicy` | `ManagedPolicyArns`, `Policies` |
+  | `AWS::IAM::Policy` | `Put`/`Delete{Role,User,Group}Policy` | every property |
+  | `AWS::IAM::ManagedPolicy` | `CreatePolicyVersion` or `SetDefaultPolicyVersion`, `Attach`/`Detach{Role,User,Group}Policy` | `PolicyDocument`; `Roles`, `Users`, `Groups` |
 
   The properties applied are the ones the type's create forwards, so a create and an
   update of one declaration agree; a property the create does not forward either — most
@@ -3164,8 +3172,10 @@ a new ID, and the first stayed behind.
   reason naming the property, and the update rolls back. So do `AWS::DynamoDB::Table`'s
   `KeySchema`, `AttributeDefinitions`, `GlobalSecondaryIndexes`, `LocalSecondaryIndexes`
   and `StreamSpecification` ([#1574](https://github.com/scttfrdmn/substrate/issues/1574)),
-  and `AWS::ECS::Service`'s `LaunchType`. A new resource would be a new ID where AWS keeps
-  the old one.
+  and `AWS::ECS::Service`'s `LaunchType`, and a `Path` that differs from an `AWS::IAM::User`'s
+  or `AWS::IAM::Group`'s own, which needs `UpdateUser` or `UpdateGroup`
+  ([#1582](https://github.com/scttfrdmn/substrate/issues/1582)). A new resource would be a
+  new ID where AWS keeps the old one.
 - **Changed, any other type.** The resource is created again, which is what every
   update did before; when that yields a new physical ID, the old resource is deleted
   after the update succeeds, as a replacement is. Which types still re-create on
@@ -3725,15 +3735,16 @@ rather than quoted a second time. This covers:
 |---|---|
 | `AWS::IAM::Role` | `AssumeRolePolicyDocument` (and its drift comparison) |
 | `AWS::IAM::Policy` | `PolicyDocument` |
+| `AWS::IAM::ManagedPolicy` | `PolicyDocument` |
+| `AWS::IAM::Role`, `AWS::IAM::User`, `AWS::IAM::Group` | each `Policies` member's `PolicyDocument` |
 | `AWS::SNS::TopicPolicy` | `PolicyDocument` |
 | `AWS::Events::Rule` | `EventPattern` |
 | `AWS::ECR::Repository` lifecycle | `LifecyclePolicyText` |
 | `AWS::StepFunctions::StateMachine` | `Definition` (#1074) |
 
 A resource can only resolve an attribute of a resource deployed before it. Deploy
-order comes from a per-type priority, not from the template's references, and
-`AWS::IAM::Policy` deploys first of all. So an `Fn::GetAtt` inside an IAM policy
-finds nothing deployed yet, and answers the `LogicalId.Attribute` fallback.
+order follows the template's references (#1420), so an `Fn::GetAtt` inside an IAM
+policy document deploys the policy after the resource it names.
 
 Parameters use the Query protocol's list encoding, which is what every SDK and
 the CLI send:
@@ -4073,6 +4084,7 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | CreateRole | Supports trust policy document; the response carries it as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | GetRole | Reports `AssumeRolePolicyDocument` as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | UpdateAssumeRolePolicy | Replaces the trust policy in place, kept as submitted; takes effect on the next `AssumeRole` and does not revoke existing sessions. `PolicyDocument` is required |
+| UpdateRole | Changes `Description` and `MaxSessionDuration` (3600 to 43200) in place; only a member the request carries is changed. A service-linked role is `UnmodifiableEntity`/400 |
 | DeleteRole | Refuses with `DeleteConflict`/409 while a policy is attached **or** an instance profile holds the role; the message names the profiles. Refuses a service-linked role with `UnmodifiableEntity`/400 — note 400, not the 409 the conflicts use |
 | ListRoles | Each role's trust policy as submitted, URL-encoded per RFC 3986 — see [Policy documents are served as submitted](#policy-documents-are-served-as-submitted) |
 | CreateServiceLinkedRole | Mints the role under `/aws-service-role/<principal>/` with a trust policy naming the linked service. A duplicate name is `InvalidInput`/400, not `EntityAlreadyExists` (see below) |
@@ -4102,8 +4114,11 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | GetPolicy | Resolves a bundled AWS managed policy or a `CreatePolicy` one; metadata only, as on AWS |
 | DeletePolicy | `DeleteConflict`/409 while attached, naming the users, groups and roles; `InvalidInput` for a malformed ARN or a bundled AWS managed one — see below |
 | ListPolicies | Applies `Scope`, `PathPrefix` and `OnlyAttached`, and includes the bundled catalog. `PolicyUsageFilter` is validated and narrows nothing (see below) |
-| GetPolicyVersion | Returns the document as `CreatePolicy` received it, URL-encoded per RFC 3986. A `VersionId` other than the policy's default is `NoSuchEntity` |
-| ListPolicyVersions | Returns exactly one version — substrate stores one document per policy |
+| GetPolicyVersion | Returns any version's document as it was submitted, URL-encoded per RFC 3986. A bundled AWS managed policy has only its default version |
+| ListPolicyVersions | Newest first; pages with `MaxItems` and `Marker` |
+| CreatePolicyVersion | Up to five versions; a sixth is `LimitExceeded`/409. `SetAsDefault` makes it the evaluated document — see [Policy documents and versions](#policy-documents-and-versions) |
+| DeletePolicyVersion | The default version is `DeleteConflict`/409 |
+| SetDefaultPolicyVersion | The new default is what the next authorization decision reads |
 | SimulatePrincipalPolicy | Evaluates a user's, group's or role's identity policies plus its permissions boundary. See "What the policy simulator evaluates" |
 | SimulateCustomPolicy | Evaluates `PolicyInputList` only; resolves no entity, so it declares no `NoSuchEntity` |
 | CreateAccessKey | |
@@ -5485,21 +5500,35 @@ instead of refusing. A detach therefore requires the attachment, never the polic
 count and dates — which is what AWS returns. The document comes from `GetPolicyVersion`,
 URL-encoded per RFC 3986, for a bundled policy and a created one alike.
 
-**Substrate stores one document per policy**, so `ListPolicyVersions` returns exactly one
-version and `GetPolicyVersion` answers `NoSuchEntity` for any `VersionId` other than the
-policy's default. This is reachable immediately: the catalog reports real AWS defaults, so
-`AmazonSSMManagedInstanceCore` has `DefaultVersionId: v2` and `v1` does not exist here.
-Claiming `v1` resolves when the policy reports `v3` as its default would be a fabricated
-document. A `VersionId` that is not version-shaped at all is `InvalidInput` (400).
+**A customer managed policy holds up to five versions** (#1560). `CreatePolicyVersion` adds
+one, and makes it the default when `SetAsDefault` is true. The default is the document the policy
+evaluator reads. A sixth version is `LimitExceeded` (409), with the API reference's own sentence as
+its message. A version's number is one more than the highest the policy has had, so a number that
+`DeletePolicyVersion` freed is not reused. `UpdateDate` becomes the newest version's creation time.
+`DeletePolicyVersion` refuses the default version with `DeleteConflict` (409), quoting the API
+reference. `SetDefaultPolicyVersion` switches the default, and the change takes effect at the next
+authorization decision. `DeletePolicy` refuses a policy that still has versions other than its
+default, as `DeleteConflict` (409). `API_DeletePolicy` lists deleting them as a step, and the
+message is substrate's own. `ListPolicyVersions` lists newest first, as the page's sample does, and
+pages with `MaxItems` and `Marker`. `GetAccountAuthorizationDetails` lists every version.
+
+**A bundled AWS managed policy holds only its current default**, so `GetPolicyVersion` answers
+`NoSuchEntity` for any of its other `VersionId`s. This is reachable immediately: the catalog
+reports real AWS defaults, so `AmazonSSMManagedInstanceCore` has `DefaultVersionId: v2` and `v1`
+does not exist here. Claiming `v1` resolves when the policy reports `v3` as its default would be a
+fabricated document. The three version writes refuse an AWS managed ARN with `InvalidInput`, for the
+reason `DeletePolicy` does. A `VersionId` that is not version-shaped at all is `InvalidInput` (400).
 
 The seeded documents are also readable in process through `emulator.GetManagedPolicy`, and
 are what the IAM policy evaluator reads.
 
 ### The bookkeeping a record carries reaches no response
 
-Three IAM records declare bookkeeping members under wire-visible `json` tags:
+Four IAM records declare bookkeeping members under wire-visible `json` tags:
 
-- `IAMRole` and `IAMUser` each declare `EverTagged` as `ever_tagged,omitempty`.
+- `IAMRole`, `IAMUser` and `IAMInstanceProfile` each declare `EverTagged` as
+  `ever_tagged,omitempty`. The instance profile's has been read since GetResources began scanning
+  instance profiles (#1523).
 - `IAMAccessKey` declares its owning account as `AccountId,omitempty`. An access key's ID is what
   determines the account, so the account cannot be in its state key (#737).
 
@@ -5520,11 +5549,37 @@ every key.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::IAM::Role | RoleName | Supports AssumeRolePolicyDocument, ManagedPolicyArns |
-| AWS::IAM::Policy | PolicyName | |
-| AWS::IAM::User | UserName | |
+| AWS::IAM::Role | RoleName | `CreateRole` with the trust policy, `Description`, `MaxSessionDuration` and `Tags`; then `PermissionsBoundary`, `ManagedPolicyArns` (attached) and `Policies` (embedded inline). Updated in place; `RoleName` and `Path` replace it. `Fn::GetAtt` `Arn`, `RoleId` |
+| AWS::IAM::Policy | a generated ID | An **inline** policy: `Put{Role,User,Group}Policy` under `PolicyName` on every entry of `Roles`, `Users` and `Groups`. Naming none of the three fails the resource. Updated in place. `Ref` and `Fn::GetAtt Id` answer the generated physical ID |
+| AWS::IAM::ManagedPolicy | the policy ARN | `CreatePolicy`, then attached to every entry of `Roles`, `Users` and `Groups`. A changed `PolicyDocument` becomes a new default version. `ManagedPolicyName`, `Path` and `Description` replace it. `Fn::GetAtt` `PolicyArn`, `PolicyId`, `DefaultVersionId`, `AttachmentCount`, `IsAttachable`, `PermissionsBoundaryUsageCount`, `CreateDate`, `UpdateDate` |
+| AWS::IAM::User | UserName | `CreateUser` with `Path` and `Tags`; then `PermissionsBoundary`, `Groups` (joined), `ManagedPolicyArns` and `Policies`. Updated in place, except `Path`, which needs the unrouted `UpdateUser` and fails the update. `LoginProfile` is not applied. `UserName` replaces it. `Fn::GetAtt Arn` |
 | AWS::IAM::InstanceProfile | InstanceProfileName | Attaches each entry in `Roles`; resolvable by an `AWS::EC2::Instance`'s `IamInstanceProfile` |
-| AWS::IAM::Group | GroupName | |
+| AWS::IAM::Group | GroupName | `CreateGroup` with `Path`; then `ManagedPolicyArns` and `Policies`. Updated in place, except `Path` (`UpdateGroup` is not routed). `GroupName` replaces it. `Fn::GetAtt Arn` |
+
+A role, user, group or policy remembers what it has in place: what its deploy and its updates
+attached, embedded and joined, written as each call succeeds. An update changes only the
+difference between the declaration and what is in place, and a delete undoes exactly that before
+deleting the entity, in the order `DeleteUser`, `DeleteGroup` and `DeleteRole` require. A policy
+attached to a stack's role from outside the stack is not the stack's to detach, so `DeleteRole`
+then answers `DeleteConflict`, as it does on AWS.
+
+What is in place is read from the stack's latest deployment, so the rollback of a failed update
+detaches, deletes and untags what that update added. Four more rules apply to updates:
+
+- An inline policy is put again only when `Policies`, or an `AWS::IAM::Policy`'s `PolicyDocument`,
+  changed.
+- A user's or role's tag key whose case alone changed is kept. IAM's tag keys for those two types
+  are not case sensitive, so the new tag replaces the old one.
+- A `Path` equal to the user's or group's own is not refused.
+- An `AWS::IAM::ManagedPolicy` document that a version already holds reuses that version, through
+  `SetDefaultPolicyVersion` when it is not the default, rather than creating a duplicate.
+  This is substrate's reading.
+
+**An `AWS::IAM::Policy` is an inline policy** (#1562). Its page says it "adds or updates an inline
+policy document that is embedded in the specified IAM group, user or role". It used to be created
+as an unattached managed policy instead, so a role the template granted permissions to had none. A
+stack recorded by a release before the change still holds that managed policy. Deleting the stack,
+or updating the resource, deletes it.
 
 ### Cost
 
@@ -13605,12 +13660,32 @@ fix; that was a misreading of the Template Reference, and the DNS name is `Fn::G
 | `DNSName` | yes — the name the classic `DescribeLoadBalancers` reports for the same load balancer |
 | `CanonicalHostedZoneName` | empty — substrate mints no hosted zone for a classic load balancer |
 | `CanonicalHostedZoneNameID` | empty, for the same reason |
-| `SourceSecurityGroup.GroupName` | empty — no source security group is minted |
-| `SourceSecurityGroup.OwnerAlias` | empty, for the same reason |
+| `SourceSecurityGroup.GroupName` | yes — the name of the load balancer's first security group, as the classic `DescribeLoadBalancers` reports it; empty for a load balancer with no security group |
+| `SourceSecurityGroup.OwnerAlias` | yes — the owning account's ID; empty when the group name is |
 
-The four empty answers are deliberate ([#1013](https://github.com/scttfrdmn/substrate/issues/1013)):
-a plausible-looking hosted-zone ID in a stack `Output` is worse than a missing one, because a
-consumer asserts against it happily.
+The two hosted-zone answers are deliberately empty
+([#1013](https://github.com/scttfrdmn/substrate/issues/1013)): a plausible-looking hosted-zone ID
+in a stack `Output` is worse than a missing one, because a consumer asserts against it happily.
+
+#### Source security group and VPC
+
+A classic load balancer's create reads EC2 through the plugin registry (#1421), so
+`DescribeLoadBalancers` reports three members it used to omit:
+
+- **`VPCId`** is the VPC of the first subnet the create names.
+- **`SecurityGroups`**, for a load balancer in a VPC created without any, is the VPC's `default`
+  group. The Classic Load Balancer guide says a load balancer created that way in a nondefault VPC
+  "is automatically associated with the default security group for the VPC". In a default VPC, AWS
+  instead creates one `default_elb_<id>` group per account; substrate does not create that group, and
+  uses the VPC's `default` group there too.
+- **`SourceSecurityGroup`** is the first of those groups. `GroupName` is the name
+  `DescribeSecurityGroups` reports for it, and `OwnerAlias` is the account ID. The account-ID
+  owner alias is observed AWS behavior; the `SourceSecurityGroup` page describes the member only as
+  "The owner of the security group".
+
+A subnet or group EC2 does not know is still accepted, as before; the member derived from it is
+then omitted. A load balancer with neither subnets nor security groups records no source security
+group.
 
 ### Cost
 
@@ -13924,9 +13999,11 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans thirty-six resource types: S3 buckets, Lambda functions, SQS
-queues, DynamoDB tables, EC2 instances and Elastic IP addresses (`elastic-ip`, as of #1191), IAM
-users and roles, API Gateway REST
+`GetResources` scans forty resource types: S3 buckets, Lambda functions, SQS
+queues, DynamoDB tables, EC2 instances and Elastic IP addresses (`elastic-ip`, as of #1191), EC2
+security groups, launch templates and EBS volumes (`security-group`, `launch-template` and
+`volume`, as of #1523), IAM users, roles and instance profiles (`instance-profile`, as of #1523),
+API Gateway REST
 APIs, API Gateway v2 HTTP and WebSocket APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache

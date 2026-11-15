@@ -628,7 +628,7 @@ func iamRoleDetailXML(d *iamRoleDetail) string {
 // `ManagedPolicyDetail` lists the member and this operation's sample response carries it: the
 // carve-out AWS documents is on `Policy`, the listing shape, not on this one.
 //
-// `PolicyVersionList` holds the one version substrate stores, with its document
+// `PolicyVersionList` holds every version the policy has (#1560), each with its document
 // percent-encoded through [iamPolicyVersionXML] — the single place in this operation's response
 // where a document is not plain JSON, because `PolicyVersion.Document` is the single shape
 // whose own type page mandates RFC 3986.
@@ -636,12 +636,16 @@ func iamManagedPolicyDetailXML(d *iamManagedPolicyDetail) (string, error) {
 	if d == nil {
 		return "", nil
 	}
-	version, err := iamPolicyVersionXML(iamPolicyDefaultVersion(d.policy), true)
-	if err != nil {
-		return "", err
+	var versions strings.Builder
+	for _, v := range iamPolicyVersions(d.policy) {
+		version, err := iamPolicyVersionXML(v, true)
+		if err != nil {
+			return "", err
+		}
+		versions.WriteString("<member>" + version + "</member>")
 	}
 	return "<member>" + iamPolicyXMLFields(d.policy, d.boundaryUsage) +
 		iamPolicyDescriptionXML(d.policy.Description) +
-		"<PolicyVersionList><member>" + version + "</member></PolicyVersionList>" +
+		"<PolicyVersionList>" + versions.String() + "</PolicyVersionList>" +
 		"</member>", nil
 }

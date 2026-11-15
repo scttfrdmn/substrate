@@ -248,9 +248,14 @@ func TestCFN_ClassicELBRefIsTheNameAndDNSNameIsAnAttribute(t *testing.T) {
 	assert.True(t, strings.HasSuffix(result.Outputs["DNSName"], ".elb.amazonaws.com"),
 		"the DNS name must be the published form, got %q", result.Outputs["DNSName"])
 
-	for _, attr := range []string{"ZoneName", "ZoneID", "SGName", "SGOwner"} {
+	for _, attr := range []string{"ZoneName", "ZoneID"} {
 		assert.Empty(t, result.Outputs[attr],
 			"%s is recorded nowhere, so it must answer empty rather than a plausible value", attr)
+	}
+	// sg-33333333 is a group EC2 does not hold, so there is no name to report for it (#1421);
+	// TestCFN_ClassicELBSourceSecurityGroupResolves covers a group that exists.
+	for _, attr := range []string{"SGName", "SGOwner"} {
+		assert.Empty(t, result.Outputs[attr], "%s names a group EC2 does not know", attr)
 	}
 }
 

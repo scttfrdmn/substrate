@@ -1071,7 +1071,14 @@ type CFNDriftDetectionStatus struct {
 // with deploys exactly as it did, and one whose references they contradicted follows
 // the references.
 var typePriority = map[string]int{
-	"AWS::IAM::Policy":          0,
+	// The two policy types follow the principals they are embedded in or attached to, so a
+	// template naming a stack's role, user or group by a literal name rather than a Ref still
+	// finds it (#1562, #1560). AWS::IAM::Policy was 0 while it deployed as an unattached
+	// managed policy, when it named nothing.
+	"AWS::IAM::Group":           1,
+	"AWS::IAM::User":            2,
+	"AWS::IAM::Policy":          3,
+	"AWS::IAM::ManagedPolicy":   3,
 	"AWS::IAM::Role":            1,
 	"AWS::EC2::VPC":             1,
 	"AWS::Route53::HostedZone":  1,
@@ -3213,6 +3220,12 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployIAMPolicy(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::IAM::Role":
 		return d.deployIAMRole(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::IAM::ManagedPolicy":
+		return d.deployIAMManagedPolicy(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::IAM::User":
+		return d.deployIAMUser(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::IAM::Group":
+		return d.deployIAMGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::S3::Bucket":
 		return d.deployS3Bucket(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Lambda::Function":
@@ -3527,6 +3540,12 @@ func (d *StackDeployer) deployS3Bucket(
 }
 
 // deployIAMRole creates an IAM role for the given CFN resource.
+//
+// CreateRole carries the name, path, trust policy, description, MaxSessionDuration and Tags.
+// PermissionsBoundary, ManagedPolicyArns and Policies are applied after it, through
+// PutRolePermissionsBoundary, AttachRolePolicy and PutRolePolicy (see applyIAMRoleExtras) — until
+// v0.129.0 the last two were ignored, so a role a template granted a managed or inline policy was
+// created with neither (#1545). RoleId is CreateRole's own response member.
 func (d *StackDeployer) deployIAMRole(
 	ctx context.Context,
 	logicalID string,
@@ -3543,20 +3562,11 @@ func (d *StackDeployer) deployIAMRole(
 		"AssumeRolePolicyDocument": cfnJSONDocument(props["AssumeRolePolicyDocument"], cctx),
 		"Description":              resolveStringProp(props, "Description", "", cctx),
 	}
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("marshal role body: %w", err)
+	if msd := resolveStringProp(props, "MaxSessionDuration", "", cctx); msd != "" {
+		body["MaxSessionDuration"] = msd
 	}
-
-	req := &AWSRequest{
-		Service:   "iam",
-		Operation: "CreateRole",
-		Body:      bodyBytes,
-		Headers:   map[string]string{},
-		Params:    map[string]string{},
-	}
-
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	tags := cfnTagMap(props["Tags"], cctx)
+	resp, cost, routeErr := d.iamCall(ctx, "CreateRole", body, cfnIAMTagParams(tags), streamID)
 
 	dr := DeployedResource{
 		LogicalID:  logicalID,
@@ -3565,66 +3575,26 @@ func (d *StackDeployer) deployIAMRole(
 	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
-	} else if resp != nil {
+		return dr, cost, nil //nolint:nilerr // A refused create is reported on the resource.
+	}
+	if resp != nil {
 		var result struct {
-			ARN string `xml:"CreateRoleResult>Role>Arn"`
+			ARN    string `xml:"CreateRoleResult>Role>Arn"`
+			RoleID string `xml:"CreateRoleResult>Role>RoleId"`
 		}
 		if xmlErr := xmlUnmarshalIAM(resp.Body, &result); xmlErr == nil {
 			dr.ARN = result.ARN
+			cfnSetMetadata(&dr, "RoleId", result.RoleID)
 		}
 	}
 
-	return dr, cost, nil
-}
-
-// deployIAMPolicy creates an IAM managed policy for the given CFN resource.
-func (d *StackDeployer) deployIAMPolicy(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	streamID string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	policyName := resolveStringProp(props, "PolicyName",
-		cfnGeneratedName(cctx, "AWS::IAM::Policy", logicalID), cctx)
-
-	body := map[string]string{
-		"PolicyName":     policyName,
-		"Path":           resolveStringProp(props, "Path", "/", cctx),
-		"PolicyDocument": cfnJSONDocument(props["PolicyDocument"], cctx),
-		"Description":    resolveStringProp(props, "Description", "", cctx),
-	}
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("marshal policy body: %w", err)
-	}
-
-	req := &AWSRequest{
-		Service:   "iam",
-		Operation: "CreatePolicy",
-		Body:      bodyBytes,
-		Headers:   map[string]string{},
-		Params:    map[string]string{},
-	}
-
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
-
-	dr := DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::IAM::Policy",
-		PhysicalID: policyName,
-	}
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-	} else if resp != nil {
-		var result struct {
-			ARN string `xml:"CreatePolicyResult>Policy>Arn"`
-		}
-		if xmlErr := xmlUnmarshalIAM(resp.Body, &result); xmlErr == nil {
-			dr.ARN = result.ARN
+	rec := cfnIAMRecord{TagKeys: sortedStringKeys(tags)}
+	cost += d.applyIAMRoleExtras(ctx, &dr, props, &rec, streamID, cctx)
+	if dr.Error == "" {
+		if err := setCFNIAMRecord(&dr, rec); err != nil {
+			return DeployedResource{}, cost, err
 		}
 	}
-
 	return dr, cost, nil
 }
 
@@ -4230,11 +4200,12 @@ func (d *StackDeployer) deployELBLoadBalancer(
 // this operation's published Response Elements, and it is recorded in the resource's metadata where
 // step 2 of [cfnGetAttValue] finds it.
 //
-// The four other published attributes — `CanonicalHostedZoneName`, `CanonicalHostedZoneNameID`,
-// `SourceSecurityGroup.GroupName` and `SourceSecurityGroup.OwnerAlias` — are #1013 absences and get
-// no arm either: substrate mints no hosted zone and no source security group for a classic load
-// balancer, and [cfnGetAttNamesAnARN] already refuses an attribute containing a `.` or not ending
-// in `Arn`, so each answers empty. Inventing a hosted-zone ID would be #561 in another costume.
+// `SourceSecurityGroup.GroupName` and `SourceSecurityGroup.OwnerAlias` are read back from the
+// classic `DescribeLoadBalancers` after the create and recorded under those names, where step 2
+// of [cfnGetAttValue] finds them (#1421); the create derives them from EC2, as
+// elb_classic_source_sg.go describes. `CanonicalHostedZoneName` and `CanonicalHostedZoneNameID`
+// remain #1013 absences: substrate mints no hosted zone for a classic load balancer, so each
+// answers empty. Inventing a hosted-zone ID would be #561 in another costume.
 //
 // **The ARN is built rather than read.** No classic response carries one — the create's body is
 // `DNSName` alone — so it comes from [elbClassicLoadBalancerARN], the builder the create itself
@@ -4285,8 +4256,39 @@ func (d *StackDeployer) deployELBClassicLoadBalancer(
 	} else if resp != nil {
 		dr.ARN = elbClassicLoadBalancerARN(cctx.region, cctx.accountID, name)
 		cfnSetMetadata(&dr, "DNSName", extractXMLField(resp.Body, "DNSName"))
+		cost += d.recordClassicSourceSecurityGroup(ctx, &dr, streamID)
 	}
 	return dr, cost, nil
+}
+
+// recordClassicSourceSecurityGroup reads a classic load balancer's SourceSecurityGroup back through
+// the classic DescribeLoadBalancers and records its two members as the
+// `SourceSecurityGroup.GroupName` and `SourceSecurityGroup.OwnerAlias` attributes (#1421). A load
+// balancer with no source security group, or a read that fails, records neither, and both resolve
+// to empty.
+func (d *StackDeployer) recordClassicSourceSecurityGroup(ctx context.Context, dr *DeployedResource, streamID string) float64 {
+	resp, cost, err := d.dispatch(ctx, &AWSRequest{
+		Service: "elasticloadbalancing", Operation: "DescribeLoadBalancers", Headers: map[string]string{},
+		Params: map[string]string{
+			"Action": "DescribeLoadBalancers", "Version": elbClassicAPIVersion,
+			"LoadBalancerNames.member.1": dr.PhysicalID,
+		},
+	}, streamID)
+	if err != nil || resp == nil {
+		return cost
+	}
+	var out struct {
+		Source struct {
+			GroupName  string `xml:"GroupName"`
+			OwnerAlias string `xml:"OwnerAlias"`
+		} `xml:"DescribeLoadBalancersResult>LoadBalancerDescriptions>member>SourceSecurityGroup"`
+	}
+	if xml.Unmarshal(resp.Body, &out) != nil {
+		return cost
+	}
+	cfnSetMetadata(dr, "SourceSecurityGroup.GroupName", out.Source.GroupName)
+	cfnSetMetadata(dr, "SourceSecurityGroup.OwnerAlias", out.Source.OwnerAlias)
+	return cost
 }
 
 // cfnELBClassicListenerParams flattens a CloudFormation `Listeners` list into the

@@ -52,8 +52,10 @@ func requireNoIntrinsic(t *testing.T, doc string) {
 // order was the priority order, so the policy deployed before the queue its GetAtt named.
 func TestCFN_IAMPolicyDocumentResolvesIntrinsics(t *testing.T) {
 	const tmpl = `{"Resources":{
+		"Reader":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"doc-reader",
+			"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]}}},
 		"ReadData":{"Type":"AWS::IAM::Policy","Properties":{
-			"PolicyName":"read-the-data",
+			"PolicyName":"read-the-data","Roles":[{"Ref":"Reader"}],
 			"PolicyDocument":{"Version":"2012-10-17","Statement":[{
 				"Effect":"Allow","Action":"sqs:ReceiveMessage",
 				"Resource":{"Fn::Sub":"arn:${AWS::Partition}:sqs:${AWS::Region}:${AWS::AccountId}:cfn-doc-data"}}]}}}}}`
@@ -62,12 +64,14 @@ func TestCFN_IAMPolicyDocumentResolvesIntrinsics(t *testing.T) {
 	require.NoError(t, err)
 	requireNoResourceErrors(t, result)
 
+	// An AWS::IAM::Policy is an inline policy on its principals (#1562), so it is read back
+	// through GetRolePolicy.
 	body := cfnDocRoute(t, registry, &emulator.AWSRequest{
-		Service: "iam", Operation: "GetPolicyVersion",
-		Body: []byte(`{"PolicyArn":"arn:aws:iam::123456789012:policy/read-the-data","VersionId":"v1"}`),
+		Service: "iam", Operation: "GetRolePolicy",
+		Body: []byte(`{"RoleName":"doc-reader","PolicyName":"read-the-data"}`),
 	})
 	var out struct {
-		Document string `xml:"GetPolicyVersionResult>PolicyVersion>Document"`
+		Document string `xml:"GetRolePolicyResult>PolicyDocument"`
 	}
 	require.NoError(t, xml.Unmarshal(body, &out), string(body))
 	doc, err := url.QueryUnescape(out.Document)

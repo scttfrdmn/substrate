@@ -183,6 +183,19 @@ func ec2WireRequireScoped(t *testing.T, state emulator.StateManager, key, accoun
 		"%s must persist region before an absence assertion on it means anything", key)
 }
 
+// ec2WireStampEverTagged tags the resource and removes the tag again, then requires that its record
+// persists ever_tagged — the `,omitempty` member a tag write sets (#938) — so an absence assertion
+// on it means something. For the three records the tagging API scans since #1523.
+func ec2WireStampEverTagged(t *testing.T, p *emulator.EC2Plugin, ctx *emulator.RequestContext,
+	state emulator.StateManager, key, id string) {
+	t.Helper()
+	tag := map[string]string{"ResourceId.1": id, "Tag.1.Key": "wire", "Tag.1.Value": "yes"}
+	ec2Wire(t, p, ctx, "CreateTags", tag)
+	ec2Wire(t, p, ctx, "DeleteTags", tag)
+	require.JSONEqf(t, "true", string(ec2WireRecord(t, state, key)["ever_tagged"]),
+		"%s must persist ever_tagged before an absence assertion on it means anything", key)
+}
+
 // ec2WireKey builds the scoped state key the plugin stores a record under.
 func ec2WireKey(prefix, id string) string {
 	return prefix + ":" + ec2WireAccount + "/" + ec2WireRegion + "/" + id
@@ -293,6 +306,7 @@ func TestEC2Wire_SecurityGroupResponsesCarryNoBookkeepingMember(t *testing.T) {
 	})
 	sgID := ec2WireElement(t, "CreateSecurityGroup", created, "groupId")
 	ec2WireRequireScoped(t, state, ec2WireKey("sg", sgID), "account_id")
+	ec2WireStampEverTagged(t, p, ctx, state, ec2WireKey("sg", sgID), sgID)
 
 	rule := map[string]string{
 		"GroupId":                           sgID,
@@ -452,6 +466,7 @@ func TestEC2Wire_VolumeResponsesCarryNoBookkeepingMember(t *testing.T) {
 
 	created, volumeID := ec2WireVolume(t, p, ctx)
 	ec2WireRequireScoped(t, state, ec2WireKey("volume", volumeID), "account_id")
+	ec2WireStampEverTagged(t, p, ctx, state, ec2WireKey("volume", volumeID), volumeID)
 
 	ec2WireRun(t, p, ctx, []ec2WireCase{
 		{action: "CreateVolume", held: created, anchor: "<volumeId>" + volumeID + "</volumeId>"},
@@ -641,6 +656,7 @@ func TestEC2Wire_LaunchTemplateResponsesCarryNoBookkeepingMember(t *testing.T) {
 	created, ltID := ec2WireLaunchTemplate(t, p, ctx, "wire-template")
 	// The one record that spells the account `accountID`.
 	ec2WireRequireScoped(t, state, ec2WireKey("lt", ltID), "accountID")
+	ec2WireStampEverTagged(t, p, ctx, state, ec2WireKey("lt", ltID), ltID)
 
 	ec2WireRun(t, p, ctx, []ec2WireCase{
 		{action: "CreateLaunchTemplate", held: created, anchor: "<launchTemplateId>" + ltID + "</launchTemplateId>"},

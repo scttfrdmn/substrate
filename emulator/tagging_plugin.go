@@ -356,7 +356,11 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "dynamodb", scan: p.scanDynamoDBTables},
 		{typePrefix: "ec2", scan: p.scanEC2Instances},
 		{typePrefix: "ec2", scan: p.scanEC2ElasticIPs},
+		{typePrefix: "ec2", scan: p.scanEC2SecurityGroups},
+		{typePrefix: "ec2", scan: p.scanEC2LaunchTemplates},
+		{typePrefix: "ec2", scan: p.scanEC2Volumes},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
+		{typePrefix: "iam", scan: p.scanIAMInstanceProfiles},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayV2APIs},
 		{typePrefix: "states", scan: p.scanStepFunctionsStateMachines},
@@ -390,10 +394,12 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 
 	var all []resourceTagMapping
 	for _, d := range descriptors {
+		// A scan may return the records it could read alongside an error for the ones it could
+		// not (#1523), so the error is logged and the readable records are still reported: one
+		// unreadable record must not hide every other resource of its type.
 		resources, err := d.scan(goCtx, reqCtx)
 		if err != nil {
 			p.logger.Warn("tagging: scan error", "type", d.typePrefix, "err", err)
-			continue
 		}
 		// Scope is decided here rather than in each scanner, so a scanner that cannot narrow its
 		// state-key prefix — or forgets to — still cannot report another account's or Region's
@@ -565,29 +571,20 @@ func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestCon
 	return out, nil
 }
 
-func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
-	prefix := taggingScanPrefix("instance:", reqCtx)
-	keys, err := p.state.List(goCtx, ec2Namespace, prefix)
-	if err != nil {
-		return nil, fmt.Errorf("list ec2 instances: %w", err)
-	}
+// scanEC2Instances returns the caller's instances. A record that cannot be read or decoded is
+// reported as an error alongside the ones that could be, through [taggingScanRecords], rather than
+// skipped silently (#1523).
+func (p *TaggingPlugin) scanEC2Instances(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	var out []resourceTagMapping
-	for _, k := range keys {
-		raw, err := p.state.Get(goCtx, ec2Namespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var inst EC2Instance
-		if err := json.Unmarshal(raw, &inst); err != nil {
-			continue
-		}
-		arn := "arn:aws:ec2:" + inst.Region + ":" + inst.AccountID + ":instance/" + inst.InstanceID
+	err := taggingScanRecords(ctx, p.state, ec2Namespace, taggingScanPrefix("instance:", reqCtx), func(inst EC2Instance) {
 		out = append(out, resourceTagMapping{
-			ResourceARN: arn,
+			ResourceARN: taggingEC2ARN(inst.Region, inst.AccountID, "instance", inst.InstanceID),
 			Tags:        ec2TagsToTaggingTags(inst.Tags),
 			everTagged:  inst.EverTagged,
 		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 instances: %w", err)
 	}
 	return out, nil
 }
@@ -620,48 +617,27 @@ func (p *TaggingPlugin) scanEC2ElasticIPs(ctx context.Context, reqCtx *RequestCo
 // entities. Nothing filters index keys out of either sweep because nothing has to —
 // "user_policies:" and its siblings do not begin with "user:", so the prefix has
 // always excluded them, and the guard that claimed to do it never fired.
-func (p *TaggingPlugin) scanIAMEntities(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
+//
+// A record that cannot be read or decoded is reported as an error alongside the ones that could
+// be, through [taggingScanRecords], rather than skipped silently (#1523).
+func (p *TaggingPlugin) scanIAMEntities(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	var out []resourceTagMapping
-
-	userKeys, err := p.state.List(goCtx, iamNamespace, iamUserPrefix(reqCtx.AccountID))
-	if err != nil {
-		return nil, fmt.Errorf("list iam users: %w", err)
-	}
-	for _, k := range userKeys {
-		raw, err := p.state.Get(goCtx, iamNamespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var u IAMUser
-		if err := json.Unmarshal(raw, &u); err != nil {
-			continue
-		}
+	userErr := taggingScanRecords(ctx, p.state, iamNamespace, iamUserPrefix(reqCtx.AccountID), func(u IAMUser) {
 		out = append(out, resourceTagMapping{
 			ResourceARN: u.ARN,
 			Tags:        iamTagsToTaggingTags(u.Tags),
 			everTagged:  u.EverTagged,
 		})
-	}
-
-	roleKeys, err := p.state.List(goCtx, iamNamespace, iamRolePrefix(reqCtx.AccountID))
-	if err != nil {
-		return nil, fmt.Errorf("list iam roles: %w", err)
-	}
-	for _, k := range roleKeys {
-		raw, err := p.state.Get(goCtx, iamNamespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var r IAMRole
-		if err := json.Unmarshal(raw, &r); err != nil {
-			continue
-		}
+	})
+	roleErr := taggingScanRecords(ctx, p.state, iamNamespace, iamRolePrefix(reqCtx.AccountID), func(r IAMRole) {
 		out = append(out, resourceTagMapping{
 			ResourceARN: r.ARN,
 			Tags:        iamTagsToTaggingTags(r.Tags),
 			everTagged:  r.EverTagged,
 		})
+	})
+	if err := errors.Join(userErr, roleErr); err != nil {
+		return out, fmt.Errorf("scan iam users and roles: %w", err)
 	}
 	return out, nil
 }
@@ -1803,6 +1779,13 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		if id, ok := strings.CutPrefix(resource, "elastic-ip/"); ok && id != "" {
 			return ec2Namespace, "eip:" + parts[4] + "/" + parts[3] + "/" + id, nil
 		}
+		// The three types GetResources scans since #1523, each under the ARN the Service
+		// Authorization Reference publishes for it.
+		for _, t := range taggingEC2ScannedTypes {
+			if id, ok := strings.CutPrefix(resource, t.arnType+"/"); ok && id != "" && !strings.Contains(id, "/") {
+				return ec2Namespace, t.keyPrefix + parts[4] + "/" + parts[3] + "/" + id, nil
+			}
+		}
 		return "", "", unsupportedTagResource("EC2 %q is not a taggable resource type", resource)
 
 	case "iam":
@@ -1816,6 +1799,11 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		if strings.HasPrefix(resource, "role/") {
 			name := strings.TrimPrefix(resource, "role/")
 			return iamNamespace, iamRoleKey(acct, name), nil
+		}
+		// arn:aws:iam::{acct}:instance-profile/{path}{name} (#1523). IAM keys a profile by its name
+		// alone, so the path is dropped: the name is the last segment.
+		if rest, ok := strings.CutPrefix(resource, "instance-profile/"); ok && rest != "" {
+			return iamNamespace, iamInstanceProfileKey(acct, rest[strings.LastIndex(rest, "/")+1:]), nil
 		}
 		return "", "", unsupportedTagResource("IAM %q is not a taggable resource type", resource)
 
@@ -2267,6 +2255,12 @@ func mergeResourceTags(
 			}
 			return state.Put(goCtx, ns, key, updated)
 		}
+		// Security groups, launch templates and volumes (#1523) are merged on the raw record,
+		// through the writer EC2's own CreateTags and DeleteTags use, so every member those records
+		// carry survives — including the ones a decode into a struct here would not know about.
+		if taggingEC2RawMergedKey(key) {
+			return mergeRecordEC2Tags(goCtx, state, key, raw, addTags, removeKeys)
+		}
 		var inst EC2Instance
 		if err := json.Unmarshal(raw, &inst); err != nil {
 			return fmt.Errorf("unmarshal EC2Instance: %w", err)
@@ -2301,6 +2295,19 @@ func mergeResourceTags(
 			r.EverTagged = taggingEverTagged(r.EverTagged, len(r.Tags), len(addTags))
 			r.Tags = mergeIAMTags(r.Tags, addTags, removeKeys)
 			updated, err := json.Marshal(r)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
+			return state.Put(goCtx, ns, key, updated)
+		}
+		if strings.HasPrefix(key, "instance_profile:") {
+			var ip IAMInstanceProfile
+			if err := json.Unmarshal(raw, &ip); err != nil {
+				return fmt.Errorf("unmarshal IAMInstanceProfile: %w", err)
+			}
+			ip.EverTagged = taggingEverTagged(ip.EverTagged, len(ip.Tags), len(addTags))
+			ip.Tags = mergeIAMTags(ip.Tags, addTags, removeKeys)
+			updated, err := json.Marshal(ip)
 			if err != nil {
 				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
 			}

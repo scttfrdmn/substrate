@@ -215,6 +215,9 @@ func (p *IAMPlugin) loadTaggedInstanceProfile(ctx context.Context, accountID, na
 		return nil, fmt.Errorf("unmarshal instance profile: %w", err)
 	}
 	return &iamTagRecord{tags: profile.Tags, store: func(ctx context.Context, tags []IAMTag) error {
+		// Counted before the set is replaced, so an untag that empties it still stamps the flag
+		// the Resource Groups Tagging API reads (#1523).
+		profile.EverTagged = taggingEverTagged(profile.EverTagged, len(profile.Tags), len(tags))
 		profile.Tags = tags
 		out, marshalErr := json.Marshal(&profile)
 		if marshalErr != nil {
@@ -273,6 +276,9 @@ func (p *IAMPlugin) tagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespons
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.policyMu].
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
 	record, err := p.loadTaggedPolicy(goCtx, params.PolicyArn)
 	if err != nil {
 		return nil, err
@@ -316,6 +322,9 @@ func (p *IAMPlugin) untagPolicy(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 		return resp, nil
 	}
 
+	// Held across the load and the store; see [IAMPlugin.policyMu].
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
 	record, err := p.loadTaggedPolicy(goCtx, params.PolicyArn)
 	if err != nil {
 		return nil, err

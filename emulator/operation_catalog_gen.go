@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1101 routed operations.
+// 68 plugins, 1105 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -700,6 +700,7 @@ var routedOperations = map[string][]string{
 		"CreateGroup",
 		"CreateInstanceProfile",
 		"CreatePolicy",
+		"CreatePolicyVersion",
 		"CreateRole",
 		"CreateServiceLinkedRole",
 		"CreateUser",
@@ -708,6 +709,7 @@ var routedOperations = map[string][]string{
 		"DeleteGroupPolicy",
 		"DeleteInstanceProfile",
 		"DeletePolicy",
+		"DeletePolicyVersion",
 		"DeleteRole",
 		"DeleteRolePermissionsBoundary",
 		"DeleteRolePolicy",
@@ -754,6 +756,7 @@ var routedOperations = map[string][]string{
 		"PutUserPolicy",
 		"RemoveRoleFromInstanceProfile",
 		"RemoveUserFromGroup",
+		"SetDefaultPolicyVersion",
 		"SimulateCustomPolicy",
 		"SimulatePrincipalPolicy",
 		"TagInstanceProfile",
@@ -765,6 +768,7 @@ var routedOperations = map[string][]string{
 		"UntagRole",
 		"UntagUser",
 		"UpdateAssumeRolePolicy",
+		"UpdateRole",
 	},
 	"kinesis": {
 		"AddTagsToStream",

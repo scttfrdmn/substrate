@@ -227,8 +227,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 		"DeleteRule", "RuleArn"),
 
 	// --- Identity and secrets -----------------------------------------------
-	"AWS::IAM::Role":   iamDeleter("DeleteRole", "RoleName"),
-	"AWS::IAM::Policy": iamDeleter("DeletePolicy", "PolicyArn"),
+	// AWS::IAM::Role, Policy, ManagedPolicy, User and Group are several requests each — detach,
+	// delete inline policies, leave groups, then delete — and are in cfnSequencedDeleters.
 	"AWS::IAM::InstanceProfile": iamDeleter("DeleteInstanceProfile",
 		"InstanceProfileName"),
 	"AWS::KMS::Key": func(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {

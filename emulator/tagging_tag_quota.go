@@ -210,7 +210,8 @@ func taggingELBQuotaRefusal(key string, raw []byte, addTags map[string]string, r
 // count, because IAM's checker takes the post-merge slice and because that function is where the
 // entity type's case rule collapses two keys that differ only in case.
 func taggingIAMQuotaRefusal(key string, raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
-	if !strings.HasPrefix(key, "user:") && !strings.HasPrefix(key, "role:") {
+	if !strings.HasPrefix(key, "user:") && !strings.HasPrefix(key, "role:") &&
+		!strings.HasPrefix(key, "instance_profile:") {
 		return nil
 	}
 	var record struct {

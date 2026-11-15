@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -22,6 +23,14 @@ type IAMPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// policyMu serializes every operation that reads a customer managed policy's record, checks
+	// it and writes it back or deletes it: CreatePolicy, DeletePolicy, TagPolicy, UntagPolicy and
+	// the three version writes. Without it two concurrent creates could both pass the five-version
+	// check, a tag write could restore a policy DeletePolicy had just removed, and a version write
+	// and a tag write could each lose the other's change (#1560). One lock for the plugin rather
+	// than a stripe per policy, because these are rare control-plane writes.
+	policyMu sync.Mutex
 }
 
 // Name returns the service name "iam".
@@ -72,6 +81,8 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.getRole(ctx, req)
 	case "UpdateAssumeRolePolicy":
 		return p.updateAssumeRolePolicy(ctx, req)
+	case "UpdateRole":
+		return p.updateRole(ctx, req)
 	case "DeleteRole":
 		return p.deleteRole(ctx, req)
 	case "ListRoles":
@@ -141,6 +152,12 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.getPolicyVersion(ctx, req)
 	case "ListPolicyVersions":
 		return p.listPolicyVersions(ctx, req)
+	case "CreatePolicyVersion":
+		return p.createPolicyVersion(ctx, req)
+	case "DeletePolicyVersion":
+		return p.deletePolicyVersion(ctx, req)
+	case "SetDefaultPolicyVersion":
+		return p.setDefaultPolicyVersion(ctx, req)
 	case "GetAccountAuthorizationDetails":
 		return p.getAccountAuthorizationDetails(ctx, req)
 
@@ -1315,6 +1332,10 @@ func (p *IAMPlugin) createPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	arn := iamPolicyARN(ctx.AccountID, params.Path, params.PolicyName)
 
+	// Held from the existence check to the write, so two creates of one ARN cannot both succeed;
+	// see [IAMPlugin.policyMu].
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
 	existing, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
 	if err != nil {
 		return nil, fmt.Errorf("get policy: %w", err)
@@ -1494,6 +1515,10 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 			http.StatusBadRequest), nil
 	}
 
+	// Held from the read to the delete, so a version or tag write cannot put the record back;
+	// see [IAMPlugin.policyMu].
+	p.policyMu.Lock()
+	defer p.policyMu.Unlock()
 	raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(params.PolicyArn))
 	if err != nil {
 		return nil, fmt.Errorf("get policy: %w", err)
@@ -1515,10 +1540,6 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	// only when nothing is attached, so a policy re-created under the same ARN cannot inherit
 	// the previous one's attachments.
 	//
-	// AWS's other stated precondition — delete every non-default version first — needs no code.
-	// It publishes no error code (DeleteConflict's own text is about attached subordinate
-	// entities), and substrate models exactly one version per policy
-	// (iam_policy_versions.go), so there is never a non-default version to delete.
 	attached, err := p.iamPolicyAttachedEntities(goCtx, ctx.AccountID, params.PolicyArn)
 	if err != nil {
 		return nil, err
@@ -1527,6 +1548,24 @@ func (p *IAMPlugin) deletePolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return iamErrorResponse("DeleteConflict",
 			fmt.Sprintf("Cannot delete a policy attached to entities, must detach it from all "+
 				"users, groups and roles first. %s", attached.Describe()),
+			http.StatusConflict), nil
+	}
+
+	// AWS's other stated precondition: "Delete all versions of the policy using
+	// DeletePolicyVersion … You cannot use DeletePolicyVersion to delete the version that is
+	// marked as the default version. You delete the policy's default version in the next step of
+	// the process" (API_DeletePolicy). A policy can hold more than one version since #1560, so the
+	// precondition is enforced, as DeleteConflict — the code the page publishes for a delete
+	// refused while something subordinate remains. The message is substrate's own.
+	var policy IAMPolicy
+	if err := json.Unmarshal(raw, &policy); err != nil {
+		return nil, fmt.Errorf("unmarshal policy: %w", err)
+	}
+	if versions := iamPolicyVersionRecords(&policy); len(versions) > 1 {
+		return iamErrorResponse("DeleteConflict",
+			fmt.Sprintf("Cannot delete policy %s while it has versions other than its default; "+
+				"delete them with DeletePolicyVersion first. It has %d versions.",
+				params.PolicyArn, len(versions)),
 			http.StatusConflict), nil
 	}
 

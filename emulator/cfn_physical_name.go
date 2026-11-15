@@ -74,10 +74,12 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// profile (CreateRole, CreatePolicy, CreateInstanceProfile).
 	"AWS::IAM::Role":            {maxLen: 64, nameProp: "RoleName"},
 	"AWS::IAM::InstanceProfile": {maxLen: 128, nameProp: "InstanceProfileName"},
-	// AWS::IAM::Policy declares PolicyName as required, so a template that omits
-	// it is already invalid — but substrate deploys the type through CreatePolicy,
-	// which mints an account-unique managed policy, so the omitted case still has
-	// to generate rather than collide.
+	"AWS::IAM::ManagedPolicy":   {maxLen: 128, nameProp: "ManagedPolicyName"},
+	"AWS::IAM::User":            {maxLen: 64, nameProp: "UserName"},
+	"AWS::IAM::Group":           {maxLen: 128, nameProp: "GroupName"},
+	// AWS::IAM::Policy's PolicyName is required, so the generated value is not a name: it is the
+	// physical ID of the inline policy the type embeds, which has no identifier of its own for the
+	// stack to record (#1562). Every property is No interruption, so it is never replaced.
 	"AWS::IAM::Policy": {maxLen: 128, nameProp: "PolicyName"},
 
 	// A bucket name is globally unique, lowercase, and 3–63 characters

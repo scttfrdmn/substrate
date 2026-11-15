@@ -398,6 +398,12 @@ type EC2SecurityGroup struct {
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
+	// EverTagged records that this group has carried a tag; see [taggingEverTagged]. It is read
+	// since the Resource Groups Tagging API scans security groups (#1523), and declared here so a
+	// typed rewrite of the record — a rule authorize or revoke — keeps the flag the tag writer
+	// stamped on the raw record.
+	EverTagged bool `json:"ever_tagged,omitempty"`
+
 	// AccountID is the AWS account that owns the security group.
 	AccountID string `json:"account_id"`
 
@@ -1198,6 +1204,12 @@ type EC2LaunchTemplate struct {
 	// this field.
 	Versions []EC2LaunchTemplateVersion `json:"versions,omitempty"`
 
+	// EverTagged records that this template has carried a tag; see [taggingEverTagged]. It is read
+	// since the Resource Groups Tagging API scans launch templates (#1523), and declared here so a
+	// typed rewrite of the record — a new version, a default change — keeps the flag the tag
+	// writer stamped.
+	EverTagged bool `json:"ever_tagged,omitempty"`
+
 	// AccountID is the AWS account that owns the launch template.
 	AccountID string `json:"accountID"`
 
@@ -1315,6 +1327,11 @@ type EC2Volume struct {
 
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// EverTagged records that this volume has carried a tag; see [taggingEverTagged]. It is read
+	// since the Resource Groups Tagging API scans volumes (#1523), and declared here so a typed
+	// rewrite of the record — an attach or detach — keeps the flag the tag writer stamped.
+	EverTagged bool `json:"ever_tagged,omitempty"`
 
 	// CreateTime is the RFC3339 timestamp when the volume was created.
 	CreateTime string `json:"create_time"`

@@ -182,14 +182,14 @@ type ELBClassicListener struct {
 // and every member absent here is one no operation Tier 1a routes could set:
 // `BackendServerDescriptions` and `Instances` need `RegisterInstancesWithLoadBalancer`,
 // `HealthCheck` needs `ConfigureHealthCheck`, `Policies` and a listener's `PolicyNames` need the
-// policy operations, `SourceSecurityGroup` needs the security-group model ELB's own plugin does not
-// have, and `CanonicalHostedZoneName`/`CanonicalHostedZoneNameID` name a Route 53 zone substrate
-// does not mint. Inventing any of them would put a value on the wire that no request produced,
-// which is the #1013 failure.
+// policy operations, and `CanonicalHostedZoneName`/`CanonicalHostedZoneNameID` name a Route 53 zone
+// substrate does not mint. Inventing any of them would put a value on the wire that no request
+// produced, which is the #1013 failure.
 //
-// `VPCId` is stored and reported only when a create names subnets, because that is the only way a
-// classic load balancer is in a VPC — and substrate does not resolve a subnet to its VPC here, so
-// it stays empty and the member is omitted rather than guessed.
+// `VPCId`, the default security group of a VPC load balancer created without one, and
+// `SourceSecurityGroup` are read from EC2 at create time (#1421); elb_classic_source_sg.go says
+// how. `VPCId` is stored only when a create names subnets, because that is the only way a classic
+// load balancer is in a VPC.
 type ELBClassicLoadBalancer struct {
 	// Name is the load balancer name, which is also its identity: classic operations address a
 	// load balancer by name, never by ARN.
@@ -221,6 +221,10 @@ type ELBClassicLoadBalancer struct {
 	// VPCId is the VPC the load balancer is in, spelled as `LoadBalancerDescription` spells it —
 	// `VPCId`, where ELBv2's `LoadBalancer` spells the same thing `VpcId`.
 	VPCId string `json:"VPCId,omitempty"`
+
+	// SourceSecurityGroup is the group a back-end instance's inbound rules name to admit the load
+	// balancer's traffic (#1421), nil when the load balancer has no security group.
+	SourceSecurityGroup *ELBClassicSourceSecurityGroup `json:"SourceSecurityGroup,omitempty"`
 
 	// Tags holds key-value metadata.
 	Tags []ELBTag `json:"Tags,omitempty"`
@@ -514,19 +518,26 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 	}
 
 	subnets := extractIndexedParams(req.Params, "Subnets.member")
+	placement, err := p.resolveClassicPlacement(reqCtx, subnets,
+		extractIndexedParams(req.Params, "SecurityGroups.member"))
+	if err != nil {
+		return nil, err
+	}
 	lb := ELBClassicLoadBalancer{
-		Name:              name,
-		ARN:               elbClassicLoadBalancerARN(reqCtx.Region, reqCtx.AccountID, name),
-		DNSName:           elbClassicDNSName(name, generateELBSuffix(reqCtx.IDs), reqCtx.Region, scheme),
-		Scheme:            scheme,
-		Listeners:         listeners,
-		AvailabilityZones: extractIndexedParams(req.Params, "AvailabilityZones.member"),
-		Subnets:           subnets,
-		SecurityGroups:    extractIndexedParams(req.Params, "SecurityGroups.member"),
-		Tags:              tags,
-		AccountID:         reqCtx.AccountID,
-		Region:            reqCtx.Region,
-		CreatedTime:       p.tc.Now(),
+		Name:                name,
+		ARN:                 elbClassicLoadBalancerARN(reqCtx.Region, reqCtx.AccountID, name),
+		DNSName:             elbClassicDNSName(name, generateELBSuffix(reqCtx.IDs), reqCtx.Region, scheme),
+		Scheme:              scheme,
+		Listeners:           listeners,
+		AvailabilityZones:   extractIndexedParams(req.Params, "AvailabilityZones.member"),
+		Subnets:             subnets,
+		SecurityGroups:      placement.securityGroups,
+		VPCId:               placement.vpcID,
+		SourceSecurityGroup: placement.source,
+		Tags:                tags,
+		AccountID:           reqCtx.AccountID,
+		Region:              reqCtx.Region,
+		CreatedTime:         p.tc.Now(),
 	}
 	data, err := json.Marshal(lb)
 	if err != nil {
@@ -698,6 +709,13 @@ type elbClassicLBItem struct {
 	AvailabilityZones    []string                            `xml:"AvailabilityZones>member,omitempty"`
 	Subnets              []string                            `xml:"Subnets>member,omitempty"`
 	SecurityGroups       []string                            `xml:"SecurityGroups>member,omitempty"`
+	SourceSecurityGroup  *elbClassicSourceSecurityGroupItem  `xml:"SourceSecurityGroup,omitempty"`
+}
+
+// elbClassicSourceSecurityGroupItem is the XML representation of a `SourceSecurityGroup`.
+type elbClassicSourceSecurityGroupItem struct {
+	GroupName  string `xml:"GroupName"`
+	OwnerAlias string `xml:"OwnerAlias"`
 }
 
 // classicLBToItem renders one classic record as its published wire shape.
@@ -718,7 +736,14 @@ func classicLBToItem(lb ELBClassicLoadBalancer) elbClassicLBItem {
 			Listener: elbClassicListenerItem(l),
 		})
 	}
+	var source *elbClassicSourceSecurityGroupItem
+	if lb.SourceSecurityGroup != nil {
+		source = &elbClassicSourceSecurityGroupItem{
+			GroupName: lb.SourceSecurityGroup.GroupName, OwnerAlias: lb.SourceSecurityGroup.OwnerAlias,
+		}
+	}
 	return elbClassicLBItem{
+		SourceSecurityGroup:  source,
 		LoadBalancerName:     lb.Name,
 		DNSName:              lb.DNSName,
 		Scheme:               lb.Scheme,
