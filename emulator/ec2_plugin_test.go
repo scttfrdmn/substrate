@@ -4037,17 +4037,9 @@ func TestEC2_RunInstances_MissingImageId(t *testing.T) {
 			wantStatus: http.StatusBadRequest,
 			wantCode:   "MissingParameter",
 		},
-		{
-			name: "launch template name that does not exist",
-			params: func(*testing.T, *httptest.Server) map[string]string {
-				return map[string]string{
-					"MinCount": "1", "MaxCount": "1",
-					"LaunchTemplate.LaunchTemplateName": "no-such-template",
-				}
-			},
-			wantStatus: http.StatusBadRequest,
-			wantCode:   "MissingParameter",
-		},
+		// A launch template name that does not exist was a row here, answering
+		// MissingParameter because the template was skipped. It is refused for the template
+		// now (#1469); TestEC2_LaunchTemplateNotFound_ByTheIdentifierNamed covers it.
 		{
 			name: "explicit ImageId still launches",
 			params: func(*testing.T, *httptest.Server) map[string]string {

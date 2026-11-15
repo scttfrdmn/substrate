@@ -58,25 +58,33 @@ var asgProcessNames = []string{ //nolint:gochecknoglobals // read-only reference
 // The refusals are ValidationError, with real Auto Scaling's wording for a template that does
 // not exist (observed, not published).
 func (p *AutoScalingPlugin) asgResolveSpec(reqCtx *RequestContext, spec AutoScalingLaunchTemplateSpec) (AutoScalingLaunchTemplateSpec, *AWSError) {
+	resolved, _, awsErr := p.asgResolveSpecImage(reqCtx, spec)
+	return resolved, awsErr
+}
+
+// asgResolveSpecImage is [AutoScalingPlugin.asgResolveSpec], also returning the AMI the
+// resolved version names, so attribute-based selection reads it without resolving the
+// template a second time (#1497).
+func (p *AutoScalingPlugin) asgResolveSpecImage(reqCtx *RequestContext, spec AutoScalingLaunchTemplateSpec) (AutoScalingLaunchTemplateSpec, string, *AWSError) {
 	if spec.LaunchTemplateID == "" && spec.LaunchTemplateName == "" {
-		return spec, asgValidationError("You must specify either LaunchTemplateId or LaunchTemplateName in the launch template specification.")
+		return spec, "", asgValidationError("You must specify either LaunchTemplateId or LaunchTemplateName in the launch template specification.")
 	}
 	lt := ec2LookupLaunchTemplate(context.Background(), p.state, reqCtx, spec.LaunchTemplateID, spec.LaunchTemplateName)
 	if lt == nil {
 		if spec.LaunchTemplateID != "" {
-			return spec, asgValidationError("You must use a valid fully-formed launch template. The specified launch template, with template ID %s, does not exist.", spec.LaunchTemplateID)
+			return spec, "", asgValidationError("You must use a valid fully-formed launch template. The specified launch template, with template ID %s, does not exist.", spec.LaunchTemplateID)
 		}
-		return spec, asgValidationError("You must use a valid fully-formed launch template. The specified launch template, with template name %s, does not exist.", spec.LaunchTemplateName)
+		return spec, "", asgValidationError("You must use a valid fully-formed launch template. The specified launch template, with template name %s, does not exist.", spec.LaunchTemplateName)
 	}
 	version, awsErr := ec2ResolveTemplateVersion(lt, spec.Version)
 	if awsErr != nil {
-		return spec, asgValidationError("You must use a valid fully-formed launch template. The specified launch template version does not exist: %s", awsErr.Message)
+		return spec, "", asgValidationError("You must use a valid fully-formed launch template. The specified launch template version does not exist: %s", awsErr.Message)
 	}
 	return AutoScalingLaunchTemplateSpec{
 		LaunchTemplateID:   lt.LaunchTemplateID,
 		LaunchTemplateName: lt.LaunchTemplateName,
 		Version:            strconv.FormatInt(version.VersionNumber, 10),
-	}, nil
+	}, version.Data.ImageID, nil
 }
 
 // asgCandidates returns every launch candidate a group has, in priority order. A
@@ -93,7 +101,7 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 	if m == nil {
 		return nil, asgValidationError("The group has no launch template.")
 	}
-	base, awsErr := p.asgResolveSpec(reqCtx, m.LaunchTemplateSpecification)
+	base, baseImage, awsErr := p.asgResolveSpecImage(reqCtx, m.LaunchTemplateSpecification)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -101,10 +109,11 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 		return []asgCandidate{{spec: base}}, nil
 	}
 	var out []asgCandidate
+	archOf := map[string]string{} // AMI ID → architecture, resolved once per call.
 	for _, ov := range m.Overrides {
-		spec := base
+		spec, specImage := base, baseImage
 		if ov.LaunchTemplateSpecification != nil {
-			if spec, awsErr = p.asgResolveSpec(reqCtx, *ov.LaunchTemplateSpecification); awsErr != nil {
+			if spec, specImage, awsErr = p.asgResolveSpecImage(reqCtx, *ov.LaunchTemplateSpecification); awsErr != nil {
 				return nil, awsErr
 			}
 		}
@@ -112,11 +121,44 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 			out = append(out, asgCandidate{spec: spec, instanceType: ov.InstanceType, imageID: ov.ImageID})
 			continue
 		}
-		for _, info := range asgMatchInstanceTypes(ov.InstanceRequirements) {
+		image := ov.ImageID
+		if image == "" {
+			image = specImage
+		}
+		arch, seen := archOf[image]
+		if !seen {
+			arch = p.asgImageArchitecture(reqCtx, image)
+			archOf[image] = arch
+		}
+		for _, info := range asgMatchInstanceTypes(ov.InstanceRequirements, arch) {
 			out = append(out, asgCandidate{spec: spec, instanceType: info.InstanceType, imageID: ov.ImageID})
 		}
 	}
 	return out, nil
+}
+
+// asgImageArchitecture returns the architecture of the AMI a candidate would launch — the
+// override's ImageId when it names one, the resolved template version's otherwise — or ""
+// when there is no AMI or it does not resolve.
+//
+// It is what attribute-based selection narrows by (#1497); see [asgMatchInstanceTypes], which
+// narrows "" as x86_64. The AMI is resolved through [EC2Plugin.resolveImage], the lookup the
+// launch itself makes, so a type chosen here is chosen for the image the launch then uses. An
+// AMI that does not resolve is not refused here: the launch fails with EC2's own error, which
+// names the AMI.
+func (p *AutoScalingPlugin) asgImageArchitecture(reqCtx *RequestContext, imageID string) string {
+	if imageID == "" {
+		return ""
+	}
+	ec2, err := p.ec2()
+	if err != nil {
+		return ""
+	}
+	img, ok := ec2.resolveImage(reqCtx, imageID)
+	if !ok {
+		return ""
+	}
+	return img.Architecture
 }
 
 // asgPlacements resolves where a group can launch. Every subnet in VPCZoneIdentifier must

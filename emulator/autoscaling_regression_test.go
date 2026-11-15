@@ -123,8 +123,8 @@ func TestAutoScaling_BurstableIsTheTSeriesOnly(t *testing.T) {
 			BurstablePerformance: burst,
 		}
 	}
-	assert.Equal(t, []string{"t3.2xlarge", "t3a.2xlarge"}, emulator.AutoScalingMatchInstanceTypesForTest(size("required")))
-	assert.Contains(t, emulator.AutoScalingMatchInstanceTypesForTest(size("excluded")), "trn1.2xlarge",
+	assert.Equal(t, []string{"t3.2xlarge", "t3a.2xlarge"}, emulator.AutoScalingMatchInstanceTypesForTest(size("required"), "x86_64"))
+	assert.Contains(t, emulator.AutoScalingMatchInstanceTypesForTest(size("excluded"), "x86_64"), "trn1.2xlarge",
 		"excluding burstable types must not exclude Trainium")
 }
 

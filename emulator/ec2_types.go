@@ -102,6 +102,12 @@ type EC2Instance struct {
 	// [ec2TerminationProtectionBlocked].
 	DisableAPITermination bool `json:"disable_api_termination,omitempty"`
 
+	// MetadataOptions is the instance metadata options the launch and its template stated,
+	// merged per option, as later changed by ModifyInstanceMetadataOptions (#1471). Nil when
+	// none was stated, which is what an instance from an event log predating the field reads
+	// back as; see [ec2InstanceMetadataOptionsFor] for what is rendered either way.
+	MetadataOptions *EC2InstanceMetadataOptions `json:"metadata_options,omitempty"`
+
 	// AvailabilityZone is the zone the instance runs in, taken from
 	// Placement.AvailabilityZone or from the subnet's zone when the launch named
 	// neither. An instance unmarshalled from an event log predating this field
@@ -183,6 +189,14 @@ type EC2NetworkInterface struct {
 	// instance. AWS defaults a launch-created interface to true; an attached
 	// existing one to false.
 	DeleteOnTermination bool `json:"delete_on_termination"`
+
+	// DeleteOnTerminationDefaulted reports that DeleteOnTermination holds that default
+	// rather than a value the request stated (#1471). A launch reads the value either way;
+	// only a launch template's read-back distinguishes them, so a template that named an
+	// interface without the member does not read back with one. It records the default
+	// rather than the statement so that an interface from an event log predating it — false
+	// here — keeps reading back as it always has.
+	DeleteOnTerminationDefaulted bool `json:"delete_on_termination_defaulted,omitempty"`
 
 	// InterfaceType is "the type of network interface": interface, efa or efa-only.
 	// Absent reads back as "interface", the documented default.
@@ -980,6 +994,18 @@ type EC2LaunchTemplateData struct {
 	// fleet request, forwarding the launch template reference rather than the
 	// caller's own mappings.
 	BlockDeviceMappings []EC2BlockDeviceMapping `json:"blockDeviceMappings,omitempty"`
+
+	// MetadataOptions is LaunchTemplateData.MetadataOptions, the options the template states
+	// and only those (#1471). It was accepted and discarded before, so a template requiring
+	// IMDSv2 read back without the requirement and launched instances that did not carry it.
+	// Nil when the template states none.
+	MetadataOptions *EC2InstanceMetadataOptions `json:"metadataOptions,omitempty"`
+
+	// DisableAPITermination is LaunchTemplateData.DisableApiTermination, kept as the raw
+	// "true"/"false" parameter for the reason [EC2LaunchTemplateData.AssociatePublicIPAddress]
+	// is: absent is a third state, and a template that said nothing must neither read back as
+	// false nor override a launch that said true (#1471).
+	DisableAPITermination string `json:"disableApiTermination,omitempty"`
 }
 
 // EC2BlockDeviceMapping is one BlockDeviceMapping.N entry of a launch request or a

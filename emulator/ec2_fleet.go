@@ -230,21 +230,12 @@ func (p *EC2Plugin) createFleet(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	}
 
 	// Every referenced launch template must exist, mirroring AWS — so a
-	// create-template → create-fleet ordering error is observable.
+	// create-template → create-fleet ordering error is observable. The refusal is the one
+	// every launch-template operation answers (#1469); the packer#7968 and karpenter#2101
+	// captures it is quoted from are both of a fleet naming a missing template.
 	for _, cfg := range configs {
 		if lt := p.resolveLaunchTemplate(goCtx, reqCtx, cfg.LaunchTemplateID, cfg.LaunchTemplateName); lt == nil {
-			if cfg.LaunchTemplateID != "" {
-				return nil, &AWSError{
-					Code:       "InvalidLaunchTemplateId.NotFound",
-					Message:    "Launch template " + cfg.LaunchTemplateID + " does not exist",
-					HTTPStatus: http.StatusBadRequest,
-				}
-			}
-			return nil, &AWSError{
-				Code:       "InvalidLaunchTemplateName.NotFoundException",
-				Message:    "Launch template with name '" + cfg.LaunchTemplateName + "' does not exist",
-				HTTPStatus: http.StatusBadRequest,
-			}
+			return nil, ec2LaunchTemplateNotFound(cfg.LaunchTemplateID, cfg.LaunchTemplateName)
 		}
 	}
 

@@ -58,6 +58,7 @@ func TestEC2_DescribeImages_OwnerAmazonListsTheBundledCatalog(t *testing.T) {
 	assert.ElementsMatch(t, []string{
 		ec2TestImage, ec2TestImageArm, ec2TestImageMinimal, ec2TestImageMinimalArm,
 		ec2TestImageWindows, ec2TestImageECS, ec2TestImageECS2,
+		ec2TestImageECSArm, ec2TestImageECS2Arm,
 	}, ec2DiscoveredIDs(amazon), "every AWS-published bundled AMI, and not the Canonical ones")
 	for _, img := range amazon {
 		assert.Equal(t, "amazon", img.OwnerAlias)

@@ -175,6 +175,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.modifyInstanceAttribute(ctx, req)
 	case "DescribeInstanceAttribute":
 		return p.describeInstanceAttribute(ctx, req)
+	case "ModifyInstanceMetadataOptions":
+		return p.modifyInstanceMetadataOptions(ctx, req)
 	// Key pair operations
 	case "CreateKeyPair":
 		return p.createKeyPair(ctx, req)
@@ -413,6 +415,16 @@ func (p *EC2Plugin) launchInstances(
 	// TerminateInstances can refuse (#489). AWS documents the default as false, so
 	// an absent parameter and an explicit "false" agree.
 	disableAPITermination := strings.EqualFold(req.Params["DisableApiTermination"], "true")
+	// Whether the request stated it at all, so a template's value applies only when it did
+	// not (#1471).
+	disableAPITerminationStated := req.Params["DisableApiTermination"] != ""
+	// MetadataOptions.* is InstanceMetadataOptionsRequest. Each option the request states wins
+	// over the template's, and the rest come from the template; see
+	// [EC2InstanceMetadataOptions] for why per option (#1471).
+	metadataOptions, awsErr := ec2ParseMetadataOptions(req.Params, "MetadataOptions.")
+	if awsErr != nil {
+		return nil, "", nil, awsErr
+	}
 	// Placement.AvailabilityZone is optional; the reference says EC2 selects a zone
 	// when neither it nor AvailabilityZoneId is given. Substrate resolves an absent
 	// value from the subnet below, which is where a real launch's zone comes from
@@ -508,7 +520,16 @@ func (p *EC2Plugin) launchInstances(
 	// [ec2ResolveTemplateVersion] (#456).
 	ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
-	if lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName); lt != nil {
+	lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName)
+	if lt == nil && (ltID != "" || ltName != "") {
+		// A named template that does not exist is refused rather than skipped (#1469). It
+		// was skipped, so the launch went on without the template and failed — when it
+		// failed — on whatever the template would have supplied, usually the AMI, which
+		// named the wrong cause. The two codes are the ones the authorization decision
+		// defers to the handler for; see [ec2AuthzTemplateData].
+		return nil, "", nil, ec2LaunchTemplateNotFound(ltID, ltName)
+	}
+	if lt != nil {
 		version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
 		if awsErr != nil {
 			return nil, "", nil, awsErr
@@ -556,6 +577,12 @@ func (p *EC2Plugin) launchInstances(
 		}
 		if iamInstanceProfile == "" {
 			iamInstanceProfile = ltData.IamInstanceProfile
+		}
+		if !disableAPITerminationStated && ltData.DisableAPITermination != "" {
+			disableAPITermination = ltData.DisableAPITermination == "true"
+		}
+		if ltData.MetadataOptions != nil {
+			metadataOptions = ltData.MetadataOptions.overlay(metadataOptions)
 		}
 		// A template's tags fill the gap only when the caller named none, so they
 		// *replace* rather than merge: a request naming Env=req and a template naming
@@ -778,6 +805,10 @@ func (p *EC2Plugin) launchInstances(
 			DisableAPITermination: disableAPITermination,
 			AvailabilityZone:      placementAZ,
 		}
+		if !metadataOptions.empty() {
+			opts := metadataOptions
+			inst.MetadataOptions = &opts
+		}
 		if spot != nil {
 			inst.InstanceLifecycle = ec2InstanceLifecycleSpot
 			switch {
@@ -944,6 +975,11 @@ type ec2InstanceItem struct {
 	// spotInstanceRequestId, both omitted for an On-Demand instance (#1436).
 	InstanceLifecycle     string `xml:"instanceLifecycle,omitempty"`
 	SpotInstanceRequestID string `xml:"spotInstanceRequestId,omitempty"`
+
+	// MetadataOptions is Instance's metadataOptions, rendered for every instance since #1471,
+	// `pending` from RunInstances and `applied` from DescribeInstances; see
+	// [ec2InstanceMetadataOptionsFor] for which members and why.
+	MetadataOptions *ec2InstanceMetadataOptionsXML `xml:"metadataOptions"`
 }
 
 // ec2InstanceItemFor builds one instance's response item, shared by RunInstances and
@@ -952,10 +988,16 @@ type ec2InstanceItem struct {
 // mappings is the instance's block device set, resolved by the caller: both callers
 // read every volume in the account and region once and bucket by instance, because a
 // per-instance read would turn one List into an instances × volumes scan.
+//
+// metadataState is the metadataOptions state to report. It is the one member the two
+// responses deliberately differ on: every example output on the CLI's run-instances page
+// reports `"State": "pending"` for a launch, and DescribeInstances reports `applied` once
+// the options are in force — which here is by the next observation (#1471).
 func (p *EC2Plugin) ec2InstanceItemFor(
 	reqCtx *RequestContext,
 	inst EC2Instance,
 	mappings []ec2BlockDeviceMappingItem,
+	metadataState string,
 ) ec2InstanceItem {
 	item := ec2InstanceItem{
 		InstanceID:          inst.InstanceID,
@@ -977,6 +1019,7 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 
 		InstanceLifecycle:     inst.InstanceLifecycle,
 		SpotInstanceRequestID: inst.SpotInstanceRequestID,
+		MetadataOptions:       ec2InstanceMetadataOptionsFor(inst.MetadataOptions, metadataState),
 	}
 	// Echo the IAM instance profile set at launch (#331), resolved against IAM state so
 	// two describes of one instance report one id (#1291). The stored value is the name
@@ -1140,7 +1183,7 @@ func (p *EC2Plugin) runInstancesResponse(instances []EC2Instance, reservationID 
 		// variable is a copy, so nothing here reaches state.
 		inst.State = ec2ReportedTransition(inst.State)
 		resp.Instances = append(resp.Instances,
-			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID]))
+			p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsPending))
 	}
 
 	return ec2XMLResponse(http.StatusOK, resp)
@@ -1333,7 +1376,7 @@ func (p *EC2Plugin) describeInstances(reqCtx *RequestContext, req *AWSRequest) (
 			continue
 		}
 
-		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID])
+		item := p.ec2InstanceItemFor(reqCtx, inst, mappings[inst.InstanceID], ec2MetadataOptionsApplied)
 
 		if _, ok := resMap[inst.ReservationID]; !ok {
 			resMap[inst.ReservationID] = &ec2ReservationItem{
@@ -6648,8 +6691,37 @@ func ec2LookupLaunchTemplate(goCtx context.Context, state StateManager, ctx *Req
 // nowhere, so a template that tagged its instances produced untagged ones and a
 // template naming a role produced an instance with none — with nothing failing to
 // say so, and a tag: filter simply returning nothing (#471).
-func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
+//
+// #1471 swept the rest of RequestLaunchTemplateData for members dropped the same way, and
+// three more are read now. MetadataOptions, the issue's own, is validated as well as stored
+// ([ec2ParseMetadataOptions]), which is the one way this function refuses a request.
+// DisableApiTermination is stored and reaches the launch. And SecurityGroupId.N is read whole:
+// only SecurityGroupId.1 was, so a template naming two groups stored and launched with one.
+// The published members still not read — CapacityReservationSpecification, CpuOptions,
+// CreditSpecification, DisableApiStop, EbsOptimized, EnclaveOptions, HibernationOptions,
+// InstanceInitiatedShutdownBehavior, InstanceMarketOptions, InstanceRequirements, KernelId,
+// LicenseSpecifications, MaintenanceOptions, Monitoring, NetworkPerformanceOptions, Operator,
+// Placement, PrivateDnsNameOptions, RamDiskId, SecurityGroup.N (names) and the template's
+// network-interface and spot-instances-request tag scopes — are each a property no instance
+// record here carries, so storing one would be a value no launch honors.
+func parseLaunchTemplateData(params map[string]string) (EC2LaunchTemplateData, *AWSError) {
 	const ltPrefix = "LaunchTemplateData."
+
+	metadata, awsErr := ec2ParseMetadataOptions(params, ltPrefix+"MetadataOptions.")
+	if awsErr != nil {
+		return EC2LaunchTemplateData{}, awsErr
+	}
+	disableAPITermination := params[ltPrefix+"DisableApiTermination"]
+	switch {
+	case disableAPITermination == "":
+	case strings.EqualFold(disableAPITermination, "true"):
+		disableAPITermination = "true"
+	case strings.EqualFold(disableAPITermination, "false"):
+		disableAPITermination = "false"
+	default:
+		return EC2LaunchTemplateData{}, ec2InvalidParameterValue(ltPrefix+"DisableApiTermination",
+			disableAPITermination, "Valid values: true, false.")
+	}
 
 	interfaces := ec2ParseNetworkInterfaces(params, ltPrefix)
 	ec2SortInterfacesByDeviceIndex(interfaces)
@@ -6666,6 +6738,11 @@ func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 		VolumeTagSpecifications: ec2TagSpecificationTags(params, ltPrefix, "volume"),
 		NetworkInterfaces:       interfaces,
 		BlockDeviceMappings:     ec2ParseBlockDeviceMappings(params, ltPrefix),
+		SecurityGroupIDs:        indexedParams(params, ltPrefix+"SecurityGroupId.%d"),
+		DisableAPITermination:   disableAPITermination,
+	}
+	if !metadata.empty() {
+		data.MetadataOptions = &metadata
 	}
 	// The flat fields hold the primary interface's values; see
 	// [EC2LaunchTemplateData.NetworkInterfaces].
@@ -6680,10 +6757,7 @@ func parseLaunchTemplateData(params map[string]string) EC2LaunchTemplateData {
 	if data.IamInstanceProfile == "" {
 		data.IamInstanceProfile = params[ltPrefix+"IamInstanceProfile.Arn"]
 	}
-	if sg1 := params[ltPrefix+"SecurityGroupId.1"]; sg1 != "" {
-		data.SecurityGroupIDs = []string{sg1}
-	}
-	return data
+	return data, nil
 }
 
 func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -6707,7 +6781,10 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	ltID := generateLaunchTemplateID(ctx.IDs)
 	now := p.tc.Now().UTC().Format(time.RFC3339)
 
-	ltData := parseLaunchTemplateData(req.Params)
+	ltData, awsErr := parseLaunchTemplateData(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	if awsErr := ec2CheckTemplateTags(ltData); awsErr != nil {
 		return nil, awsErr
 	}
@@ -6887,9 +6964,14 @@ func ec2LaunchTemplateSummary(lt *EC2LaunchTemplate) ec2LaunchTemplateXML {
 // lookup CreateLaunchTemplateVersion and RunInstances use, and a describe that resolved names
 // differently from the operations that consume them would disagree with itself.
 //
-// An unknown ID or name still yields an empty set rather than
-// InvalidLaunchTemplateId.NotFound, which AWS publishes: that code has no [ec2IDKind] entry,
-// and #713 recorded inventing one as out of its scope. docs/services.md states the gap.
+// A named template that does not exist fails the whole call (#1469), as every other EC2
+// describe's explicit ID list does (#391): an unknown ID is InvalidLaunchTemplateId.NotFound and
+// an unknown name InvalidLaunchTemplateName.NotFoundException, the IDs checked before the names
+// and each list in request order. See [ec2DescribeLaunchTemplatesNotFound]. It used to answer
+// an empty set, so code treating the exception as "not created yet" could not run here. The
+// check runs before Filter.N is applied, so a template that exists and is filtered out is still
+// an empty answer and not a refusal — the [ec2IDFilter] rule. The codes are not an [ec2IDKind]:
+// the kind's message names one ID, and this operation's names none.
 //
 // It paginates as of #1024, the last of the sixteen routed describes that published MaxResults and
 // NextToken and implemented neither. Its range is the only one in the set whose floor is not five:
@@ -6949,7 +7031,10 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		seen := map[string]bool{}
 		for _, id := range filterIDs {
 			lt := p.resolveLaunchTemplate(goCtx, ctx, id, "")
-			if lt == nil || seen[lt.LaunchTemplateID] {
+			if lt == nil {
+				return nil, ec2DescribeLaunchTemplatesNotFound(true)
+			}
+			if seen[lt.LaunchTemplateID] {
 				continue
 			}
 			seen[lt.LaunchTemplateID] = true
@@ -6957,7 +7042,10 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 		}
 		for _, name := range filterNames {
 			lt := p.resolveLaunchTemplate(goCtx, ctx, "", name)
-			if lt == nil || seen[lt.LaunchTemplateID] {
+			if lt == nil {
+				return nil, ec2DescribeLaunchTemplatesNotFound(false)
+			}
+			if seen[lt.LaunchTemplateID] {
 				continue
 			}
 			seen[lt.LaunchTemplateID] = true
@@ -7004,11 +7092,9 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 	lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
 	if lt == nil {
-		return nil, &AWSError{
-			Code:       "InvalidLaunchTemplateId.NotFound",
-			Message:    "The launch template was not found",
-			HTTPStatus: http.StatusBadRequest,
-		}
+		// By the identifier the request used: a delete by name answered the ID code
+		// until #1469.
+		return nil, ec2LaunchTemplateNotFound(ltID, ltName)
 	}
 
 	ltKey := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, lt.LaunchTemplateID)

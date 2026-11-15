@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1090 operations**. This
+Substrate ships **68 built-in service plugins** routing **1091 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -41,7 +41,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 20 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 21 | Config | `config` | JSON | 25 |
 | 22 | DynamoDB | `dynamodb` | JSON | 26 |
-| 23 | EC2 / VPC | `ec2` | Query | 97 |
+| 23 | EC2 / VPC | `ec2` | Query | 98 |
 | 24 | ECR | `ecr` | JSON | 26 |
 | 25 | ECS | `ecs` | JSON | 21 |
 | 26 | EFS | `efs` | REST/JSON | 13 |
@@ -7744,8 +7744,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices) and [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time); thirteen filters, `instance-lifecycle` and `spot-instance-request-id` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time) and [`metadataOptions`](#instance-metadata-options); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#termination-protection-is-honored-one-availability-zone-at-a-time) and [`metadataOptions`](#instance-metadata-options); thirteen filters, `instance-lifecycle` and `spot-instance-request-id` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honored-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids); answers `pending` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
@@ -7753,6 +7753,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceStatus | [Explicit resource IDs](#explicit-resource-ids); three of eighteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `availabilityZone`, and a [seeded transient state](#seeding-an-instance-state-progression) both in `instanceState` and to its own `instance-state-name` filter. Paginates on `MaxResults`/`NextToken`, with no published range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
+| ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
 | CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
@@ -7825,12 +7826,12 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | CreatePlacementGroup | `GroupName` is required here, where AWS marks it `Required: No`; a name already held answers `InvalidPlacementGroup.Duplicate`/400. `Strategy` defaults to `cluster` and is stored unvalidated, so `partition` is accepted without a `PartitionCount` and `SpreadLevel` is not read. `TagSpecification.N` scoped to `placement-group` — which until [#708](https://github.com/scttfrdmn/substrate/issues/708) was the only way a placement group's tags were settable at all. Renders `groupName`, `groupId`, `groupArn`, `strategy`, `state` (`available` at once) and `tagSet`; `partitionCount` is not rendered |
 | DescribePlacementGroups | `GroupName.N` and `GroupId.N` [union](#twelve-describes-gained-filters) and narrow rather than assert, where AWS publishes `InvalidPlacementGroup.Unknown` — see [Which selectors assert existence](#which-selectors-assert-existence). Six of seven filters, `spread-level` inert, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); the page publishes **no `group-id` filter**, so `group-arn` is the ID-shaped one. Reports `tagSet`, [omitted rather than empty](#an-untagged-resource-omits-tagset) for an untagged group. No pagination, matching AWS |
 | DeletePlacementGroup | `GroupName` is required and **resolved**: a name naming nothing answers `InvalidPlacementGroup.Unknown`/400, so the delete is not idempotent. AWS's two preconditions — every instance in the group must be terminated first, and a parent of a cluster group cannot be deleted — are not enforced, so a group holding running instances is deleted and those instances keep reporting it in their `placement` |
-| CreateLaunchTemplate | Creates version 1. [Does not validate the AMI](#runinstances-requires-a-resolvable-ami), matching AWS, which reports mapping problems here through `warning`. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
-| DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters. **All four** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `LaunchTemplateId.N` and `LaunchTemplateName.N` are read at every index and [union](#twelve-describes-gained-filters). [Paginates](#one-offset-paginator-shared) on `MaxResults` (1–200) and `NextToken`; `LaunchTemplateId.N` with `MaxResults` is `InvalidParameterCombination`, `LaunchTemplateName.N` is not. `IncludeManagedResources` is inert |
-| DeleteLaunchTemplate | |
+| CreateLaunchTemplate | Creates version 1. [Does not validate the AMI](#runinstances-requires-a-resolvable-ami), matching AWS, which reports mapping problems here through `warning`. Networking is read from every `NetworkInterface.N.*` — see [Launch template networking](#launch-template-networking). `MetadataOptions` is stored and validated, and `DisableApiTermination` and every `SecurityGroupId.N` are read — see [Instance metadata options](#instance-metadata-options) and [What a launch template stores](#what-a-launch-template-stores). The top-level `TagSpecification.N` scoped to `launch-template` tags the template itself, separately from `LaunchTemplateData`'s, which tags what a launch creates |
+| DescribeLaunchTemplates | Summary only — no `launchTemplateData`, matching AWS. Use `DescribeLaunchTemplateVersions` to read a template's parameters. **All four** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); `LaunchTemplateId.N` and `LaunchTemplateName.N` are read at every index and [union](#twelve-describes-gained-filters), and a template either names that does not exist is [refused](#which-selectors-assert-existence) — `InvalidLaunchTemplateId.NotFound` or `InvalidLaunchTemplateName.NotFoundException`. [Paginates](#one-offset-paginator-shared) on `MaxResults` (1–200) and `NextToken`; `LaunchTemplateId.N` with `MaxResults` is `InvalidParameterCombination`, `LaunchTemplateName.N` is not. `IncludeManagedResources` is inert |
+| DeleteLaunchTemplate | A template that does not exist is refused [by the identifier the request named it with](#a-missing-launch-template-is-refused-by-the-identifier-named) |
 | CreateLaunchTemplateVersion | `SourceVersion` inheritance — see [Launch template versions](#launch-template-versions) |
 | ModifyLaunchTemplate | `SetDefaultVersion` only, which is AWS's only modifiable attribute |
-| DescribeLaunchTemplateVersions | Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken` (1–200, through the [shared paginator](#one-offset-paginator-shared)), and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved — as is the token, so a malformed one is refused whether or not the template exists |
+| DescribeLaunchTemplateVersions | Reports [only the members a version carries](#what-a-launch-template-stores) — no empty list elements. Numbers, `$Latest`, `$Default`, `MinVersion`/`MaxVersion`, `MaxResults`/`NextToken` (1–200, through the [shared paginator](#one-offset-paginator-shared)), and the account-wide form. Four of fourteen filters, applied **before** pagination, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) before the template is resolved — as is the token, so a malformed one is refused whether or not the template exists |
 | DeleteLaunchTemplateVersions | Reports per version at HTTP 200; the default version cannot be deleted |
 | CreateFleet | Instances launch through the `RunInstances` path, so they are visible to `DescribeInstances`, [need an AMI that resolves](#runinstances-requires-a-resolvable-ami), and carry the reserved `aws:ec2:fleet-id` tag. Partial fulfillment is seedable — see below |
 | DescribeFleets | An `instant` fleet is returned only when its ID is named explicitly, matching AWS; [filter names are checked](#one-rule-for-an-unrecognized-filter-name), and it documents **no tag filter**. Paginates on `MaxResults`/`NextToken`, with no published range — and an `instant` fleet therefore never lands on a paginated page, see [One offset paginator, shared](#one-offset-paginator-shared) |
@@ -8099,7 +8100,7 @@ Naming one resource in both lists still returns it once.
 would answer `MaxResults=1` with an empty page and a `nextToken`, which reads as "nothing
 matches" to a caller that does not follow the token. `DescribeLaunchTemplateVersions`' filter names
 are also checked **before** the template is resolved, so a typo answers `InvalidParameterValue`
-rather than `InvalidLaunchTemplateId.NotFound`; at `DescribeLaunchTemplates` the `MaxResults` and
+rather than a launch-template `NotFound`; at `DescribeLaunchTemplates` the `MaxResults` and
 `NextToken` refusals come first, ahead of the filter-name check, which is the order every operation
 on the shared paginator uses.
 
@@ -8265,7 +8266,7 @@ Three kinds of AMI resolve, and nothing else does.
 1. **One the caller made** — through `CreateImage` or `RegisterImage`, in the
    caller's own account and region.
 2. **A bundled public AMI**, keyed by the SSM public parameter a consumer
-   discovers it through. Substrate answers nine parameter names with a real image:
+   discovers it through. Substrate answers thirteen parameter names with a real image:
 
    | Parameter | Image |
    |---|---|
@@ -8278,11 +8279,25 @@ Three kinds of AMI resolve, and nothing else does.
    | `/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id` | ECS-optimized Amazon Linux 2 |
    | `/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id` | Ubuntu Server 24.04 LTS, amd64 |
    | `/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id` | Ubuntu Server 22.04 LTS, amd64 |
+   | `/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id` | ECS-optimized Amazon Linux 2023, arm64 |
+   | `/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id` | ECS-optimized Amazon Linux 2, arm64 |
+   | `/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id` | Ubuntu Server 24.04 LTS, arm64 |
+   | `/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id` | Ubuntu Server 22.04 LTS, arm64 |
+
+   The last four are the arm64 counterparts of the ECS and Ubuntu entries, added so a Graviton
+   launch that discovers its AMI the documented way has one
+   ([#1497](https://github.com/scttfrdmn/substrate/issues/1497)). Windows Server publishes no
+   arm64 parameter.
 
 3. **Any other `/aws/service/…` AMI parameter path**, which resolves to its
    family's entry above — a Windows path to the Windows image, an Ubuntu path to
-   Ubuntu 24.04, an ECS path to ECS-on-AL2023, anything else to Amazon Linux 2023
-   on x86_64. Substrate has answered every AMI-shaped `/aws/service/` path since
+   Ubuntu 24.04, an ECS path to ECS-on-AL2023, anything else to Amazon Linux 2023 —
+   **in the architecture the path names**: a path carrying `arm64` as a token anywhere —
+   delimited by `/`, `-` or `_`, as in `.../arm64/hvm/...`, `al2023-ami-kernel-6.1-arm64`,
+   `amzn2-ami-hvm-arm64-gp2` or EKS's `.../amazon-linux-2-arm64/recommended/image_id` —
+   resolves to the family's arm64 image, any other to its x86_64 one.
+   Before #1497 every unlisted path resolved to x86_64, so a Graviton launch that
+   discovered its AMI correctly was handed an image of the wrong architecture. Substrate has answered every AMI-shaped `/aws/service/` path since
    it gained `GetParameter`, and this is why: an unlisted path must still resolve
    to something launchable, or `GetParameter` would hand out an AMI that
    `RunInstances` then refuses. The cost is that two unlisted paths in one family
@@ -8299,7 +8314,7 @@ inventing a literal.
 Two things follow from bundled images living outside state.
 
 - **They are listed by owner, not unqualified.** `DescribeImages` with `Owner.N=amazon` lists
-  the seven AWS-published entries — every row above but the two Canonical Ubuntu images, which
+  the nine AWS-published entries — every row above but the four Canonical Ubuntu images, which
   carry no owner alias — and applies the request's filters to them, so the discovery AWS's own
   examples use (`Owners=amazon` and a `name` filter) finds an AMI on a fresh server
   ([#1432](https://github.com/scttfrdmn/substrate/issues/1432)). An *unqualified*
@@ -8351,6 +8366,9 @@ corresponding parameters included in the launch template."
 | `TagSpecification` (volume-scoped) | absent | `Env=tmpl` | `Env=tmpl` on every volume the launch makes |
 | `IamInstanceProfile` | `p-request` | `p-template` | `p-request` |
 | `IamInstanceProfile` | absent | `p-template` | `p-template` |
+| `DisableApiTermination` | `false` | `true` | `false` |
+| `DisableApiTermination` | absent | `true` | `true` |
+| `MetadataOptions` | `HttpPutResponseHopLimit=1` | `HttpTokens=required`, `HttpPutResponseHopLimit=2` | `HttpTokens=required`, `HttpPutResponseHopLimit=1` — per option, see [Instance metadata options](#instance-metadata-options) |
 | `SubnetId`, security groups, `AssociatePublicIpAddress` | see [Launch template networking](#launch-template-networking) | | |
 
 Which *version* of the template supplies those values is resolved from
@@ -8411,6 +8429,9 @@ resource type and no tags — so every stored template would silently start laun
 untagged instances. A change that breaks replay while compiling is exactly the shape
 this project's persisted structures are grown to avoid.
 
+Both scopes read back from `DescribeLaunchTemplateVersions`, as two `tagSpecificationSet`
+items; the volume scope did not until
+[#1471](https://github.com/scttfrdmn/substrate/issues/1471), though it was stored and applied.
 A template may also scope tags to `network-interface` or `spot-instances-request`.
 Those are still recorded nowhere rather than misapplied: they neither reach the launch
 nor read back from `DescribeLaunchTemplateVersions`, because a recorded tag no read
@@ -8539,6 +8560,92 @@ Every declared interface is parsed, on both `RunInstances` and launch templates 
 [Multiple network interfaces](#multiple-network-interfaces). The flat fields above
 describe the **primary** interface, which is what a launch from a multi-interface
 template resolves its subnet and groups from.
+
+### What a launch template stores
+
+`DescribeLaunchTemplateVersions` reports the members a version carries and **nothing else**
+([#1471](https://github.com/scttfrdmn/substrate/issues/1471)). Every list member —
+`blockDeviceMappingSet`, `securityGroupIdSet`, `networkInterfaceSet`, `tagSpecificationSet`, and
+an interface's `groupSet` — is left out when the template has none, where it used to be
+rendered as an empty element that an SDK decodes as a present, empty list: a template naming no
+network interface read back with a `NetworkInterfaces` key it was never sent. An interface's
+`deleteOnTermination` reads back only when the template stated it; the launch still applies the
+default (true for an interface the launch creates) either way.
+
+These `RequestLaunchTemplateData` members are stored, read back and applied at launch:
+`BlockDeviceMapping.N`, `DisableApiTermination`, `IamInstanceProfile`, `ImageId`,
+`InstanceType`, `KeyName`, `MetadataOptions`, `NetworkInterface.N`, `SecurityGroupId.N` (every
+index — only the first was read before #1471), `TagSpecification.N` scoped to `instance` or
+`volume`, and `UserData`. `DisableApiTermination` is three-valued like
+`AssociatePublicIpAddress`: absent leaves the launch's own value, so a template that says nothing
+does not read back as `false`.
+
+**Not read**, and therefore neither stored nor read back: `CapacityReservationSpecification`,
+`CpuOptions`, `CreditSpecification`, `DisableApiStop`, `EbsOptimized`, `EnclaveOptions`,
+`HibernationOptions`, `InstanceInitiatedShutdownBehavior`, `InstanceMarketOptions`,
+`InstanceRequirements`, `KernelId`, `LicenseSpecification.N`, `MaintenanceOptions`, `Monitoring`,
+`NetworkPerformanceOptions`, `Operator`, `Placement`, `PrivateDnsNameOptions`, `RamDiskId`,
+`SecurityGroup.N` (names), and the `network-interface` and `spot-instances-request` tag scopes.
+Each is a property no instance record here carries, so storing one would read back a value no
+launch honours.
+
+### A missing launch template is refused by the identifier named
+
+Every operation that names one launch template refuses a template that does not exist with the
+code for the identifier the request used ([#1469](https://github.com/scttfrdmn/substrate/issues/1469)):
+
+| Named by | Code | Message |
+|---|---|---|
+| `LaunchTemplateId` | `InvalidLaunchTemplateId.NotFound` | The specified launch template, with template ID `lt-…`, does not exist. |
+| `LaunchTemplateName` | `InvalidLaunchTemplateName.NotFoundException` | The specified launch template, with template name `…`, does not exist. |
+
+Both codes are in EC2's published error table; the messages are real EC2's, observed (the name
+form is quoted verbatim in hashicorp/packer#7968 and aws/karpenter-provider-aws#2101). That holds
+for `CreateLaunchTemplateVersion`, `ModifyLaunchTemplate`, `DescribeLaunchTemplateVersions`,
+`DeleteLaunchTemplateVersions`, `DeleteLaunchTemplate`, `RunInstances`' `LaunchTemplate.*` and
+`CreateFleet`'s launch template configs (whose codes were already these, with messages of their own).
+Before #1469 all of them answered the ID code, so a request naming its template by name — how
+most IaC names one — was refused with a code about an ID it never sent, and `RunInstances` did
+not refuse at all: it skipped the template and failed, if it failed, on whatever the template
+would have supplied. `DescribeLaunchTemplates`' list form answers the same two codes with its own
+message; see [Which selectors assert existence](#which-selectors-assert-existence).
+
+`InvalidLaunchTemplateId.Malformed` and `InvalidLaunchTemplateName.MalformedException` are not
+raised: an ID or name of the wrong shape is reported as not found.
+
+### Instance metadata options
+
+`MetadataOptions` — `HttpTokens`, `HttpPutResponseHopLimit`, `HttpEndpoint`, `HttpProtocolIpv6`
+and `InstanceMetadataTags` — is read on `CreateLaunchTemplate`, `CreateLaunchTemplateVersion`
+and `RunInstances`, and is what `ModifyInstanceMetadataOptions` changes
+([#1471](https://github.com/scttfrdmn/substrate/issues/1471)). It is how a template requires
+IMDSv2 and bounds the hop limit, which is what a security test asserts; until #1471 every one of
+those operations discarded it.
+
+- **Validated** against the published values: `optional | required` for `HttpTokens`,
+  `disabled | enabled` for the other three strings, and an integer from 1 to 64 for the hop limit.
+  Anything else is `InvalidParameterValue`.
+- **A template reads back exactly the options it was given**, with no defaults filled in and no
+  `state`.
+- **A launch merges per option.** The user guide's order of precedence says "Each metadata option
+  is evaluated separately", so an option the launch names wins and the rest come from the template.
+  A `SourceVersion`-derived template version is different: `MetadataOptions` is one parameter, so a
+  version naming any option replaces the source's whole.
+- **Every instance reports `metadataOptions`**, with `state` `pending` from `RunInstances` — what
+  every example output on the CLI's run-instances page shows — and `applied` from
+  `DescribeInstances`. `httpEndpoint`, `httpProtocolIpv6` and `instanceMetadataTags` are always
+  present, at the launch's value or at the published default (`enabled`, `disabled`, `disabled`).
+  `httpTokens` and `httpPutResponseHopLimit` are present **only when the launch or its template
+  stated them**: their defaults come from the AMI's `ImdsSupport` (`required` and a hop limit of 2
+  for a `v2.0` AMI), which substrate does not model, so either value would be a guess about the
+  image.
+- **`ModifyInstanceMetadataOptions`** replaces the options it names and keeps the rest, answering
+  `state` `pending`; every later `DescribeInstances` reports `applied`. The transition is settled by
+  the next observation rather than timed.
+
+Account-level IMDS defaults (`ModifyInstanceMetadataDefaults`) and IMDSv2 enforcement are not
+modelled. What the options *do* inside an instance — refusing a request without a token, how far
+a PUT response travels — is resource-internal and out of scope.
 
 ### The default VPC
 
@@ -9100,7 +9207,7 @@ include the resources specified in a launch template. To specify resource-level
 permissions for resources specified in a launch template, you must include the
 resources in the RunInstances action statement." A template that cannot be read
 contributes nothing to the resource list rather than failing the request, so a
-missing template still answers `InvalidLaunchTemplateId.NotFound` rather than a
+missing template still answers [its not-found code](#a-missing-launch-template-is-refused-by-the-identifier-named) rather than a
 denial.
 
 A resource the request does not name is skipped, not resolved to `*` — `*` for an
@@ -9686,7 +9793,7 @@ Five attributes are readable, being the ones that correspond to state substrate 
 |---|---|
 | `userData` | The value as stored, still base64-encoded |
 | `instanceType` | |
-| `disableApiTermination` | `true` or `false`; recorded at launch and by `ModifyInstanceAttribute` |
+| `disableApiTermination` | `true` or `false`; recorded at launch — from the request or its [launch template](#what-a-launch-template-stores) — and by `ModifyInstanceAttribute` |
 | `groupSet` | `groupSet>item` with `groupId`/`groupName`, the same shape [`DescribeInstances` reports](#security-groups-on-an-instance) |
 | `blockDeviceMapping` | `blockDeviceMapping>item`, the same set [an instance reports](#an-instance-reports-its-own-block-devices) |
 
@@ -9989,6 +10096,18 @@ exhaustive** — EC2 offers some 800 types — but it is **complete per family**
 | `inf2` | `xlarge`, `8xlarge`, `24xlarge`, `48xlarge` |
 | `trn1` | `2xlarge`, `32xlarge` |
 | `trn2` | `3xlarge`, `48xlarge` |
+| `t4g` | `nano`, `micro`, `small`, `medium`, `large`, `xlarge`, `2xlarge` — AWS Graviton2, burstable |
+| `m6g`, `c6g`, `r6g`, `m7g`, `c7g`, `r7g` | `medium`, `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge` — AWS Graviton2 and Graviton3 |
+| `m8g`, `c8g`, `r8g`, `m9g`, `c9g`, `r9g` | `medium`, `large`, `xlarge`, `2xlarge`, `4xlarge`, `8xlarge`, `12xlarge`, `16xlarge`, `24xlarge`, `48xlarge` — AWS Graviton4 and Graviton5 |
+
+That is 210 types in thirty-one families. **The thirteen Graviton families report `arm64`** in
+`processorInfo.supportedArchitectures`, and every other type `x86_64`, so the
+`processor-info.supported-architecture` filter selects one set or the other
+([#1497](https://github.com/scttfrdmn/substrate/issues/1497)). Auto Scaling attributes them to the
+`amazon-web-services` CPU manufacturer, and selects among them by the launch template's AMI
+architecture — see [EC2 Auto Scaling](#ec2-auto-scaling)'s mixed instances.
+Their `gd` (instance store) and `gn` (network optimized) variants, and their `.metal`,
+`.metal-24xl` and `.metal-48xl` sizes, are not carried.
 
 Whole families rather than a sample, because an absent type is *refused* (below) —
 a catalog stopping at `c5.xlarge` would answer `InvalidInstanceType` for
@@ -10007,8 +10126,8 @@ left out are worth naming: `p3dn`, `trn1n`, `p5e` and `p5en` are single-size
 families AWS publishes beside the ones here, and `trn2u.48xlarge` is published with
 **no** accelerator count at all — almost certainly a documentation gap rather than a
 zero-accelerator instance, and inferring `16` from `trn2.48xlarge` would be substrate
-inventing a spec. Graviton-based accelerated families (`g5g`) are out because every
-catalog entry reports `x86_64`. Widening later is additive (#896).
+inventing a spec. Graviton-based accelerated families (`g5g`) are not carried either.
+Widening later is additive (#896).
 
 #### Which member reports which family's accelerator count
 
@@ -10053,10 +10172,10 @@ count from `DescribeInstanceTypes`.
 #### `currentGeneration` is per family, and `p3` is the one that is `false`
 
 `DescribeInstanceTypes` reports `currentGeneration` from the family, not as a constant:
-**ninety-two of the ninety-five catalogued types report `true` and `p3`'s three report
+**207 of the 210 catalogued types report `true` and `p3`'s three report
 `false`**. The `current-generation` filter is evaluated to match, so
 `Name=current-generation,Values=false` selects exactly `p3.2xlarge`, `p3.8xlarge` and
-`p3.16xlarge`, and `Values=true` selects the other ninety-two.
+`p3.16xlarge`, and `Values=true` selects the other 207.
 
 The source is the EC2 Instance Types guide's
 [Specifications for Amazon EC2 previous generation instances](https://docs.aws.amazon.com/ec2/latest/instancetypes/pg.html),
@@ -10333,9 +10452,16 @@ answered with every AMI the account owned. A superset is the worse failure of th
 because an error is visible and a superset reads as a successful narrowing.
 
 `DescribeInstanceTypes`' `InstanceType.N` also asserts existence, answering
-`InvalidInstanceType`.
+`InvalidInstanceType`. So does `DescribeLaunchTemplates`, as of
+[#1469](https://github.com/scttfrdmn/substrate/issues/1469): an unknown `LaunchTemplateId.N`
+answers `InvalidLaunchTemplateId.NotFound` and an unknown `LaunchTemplateName.N`
+`InvalidLaunchTemplateName.NotFoundException`, both with real EC2's observed "At least one of
+the launch templates specified in the request does not exist." The IDs are checked before the
+names, each list in request order, and the check runs before `Filter.N`, so a named template
+that exists and is filtered out is still an empty answer. It answered an empty set before,
+which code treating the exception as "not created yet" could not tell from success.
 
-**Nine selector families deliberately do not**, and answer an empty set where AWS
+**Eight selector families deliberately do not**, and answer an empty set where AWS
 answers `NotFound`. Four have reasons that would not change if a kind were registered
 for them:
 
@@ -10346,13 +10472,11 @@ for them:
 | `DescribeRegions`' `RegionName.N` | The parameter explicitly permits naming any Region, enabled for the account or not, so "this Region is not in your answer" is not absence. |
 | `DescribeSecurityGroups`' `GroupName.N` | The kind **is** registered and its `GroupId.N` asserts, but the code is `InvalidGroup.NotFound` and both AWS's client-error table and substrate's message for it describe a missing security group *ID*. This operation's own Errors section is empty, so a name-shaped refusal would be invented wording. AWS also scopes the parameter to the default VPC where substrate matches account-wide, so absence here is not the absence AWS would be reporting. |
 
-Five more have a published code but no registered `ec2IDKind`, so the assertion is
+Four more have a published code but no registered `ec2IDKind`, so the assertion is
 unimplemented rather than declined: `DescribeKeyPairs`' `KeyName.N`/`KeyPairId.N`
 (`InvalidKeyPair.NotFound`), `DescribePlacementGroups`' `GroupName.N`/`GroupId.N`
 (`InvalidPlacementGroup.Unknown`), `DescribeAvailabilityZones`' `ZoneName.N`/`ZoneId.N`,
-`DescribeAddresses`' `PublicIp.N` (its `AllocationId.N` **does** assert), and
-`DescribeLaunchTemplates`, whose `InvalidLaunchTemplateId.NotFound` is one of the four
-hand-written codes above.
+and `DescribeAddresses`' `PublicIp.N` (its `AllocationId.N` **does** assert).
 
 `DescribeSecurityGroups`' `GroupName.N` selects as of
 [#749](https://github.com/scttfrdmn/substrate/issues/749) — it was read by nothing before, so a
@@ -10672,7 +10796,7 @@ now render ([#750](https://github.com/scttfrdmn/substrate/issues/750)):
 | `virtualizationType` | `hvm` | `RegisterImage`'s `VirtualizationType`, or inherited |
 | `hypervisor` | `xen` | `xen` |
 | `imageType` | `machine` | `machine` |
-| `imageOwnerAlias` | `amazon` on the seven AWS-published entries, **omitted** on the two Canonical ones | omitted |
+| `imageOwnerAlias` | `amazon` on the nine AWS-published entries, **omitted** on the four Canonical ones | omitted |
 | `isPublic` | `true` | `false` |
 | `publicSsmParameterName` | the parameter the AMI was discovered through | omitted |
 
@@ -12674,6 +12798,21 @@ On-Demand — and a Spot launch is a launch with `InstanceMarketOptions.MarketTy
 reports as `instanceLifecycle` `spot`. As for a CreateFleet Spot pool, no `sir-` Spot Instance
 request is written: the group is the record that tracks the capacity. `WeightedCapacity` is echoed
 and every instance counts as one unit.
+
+**Requirements select by the AMI's architecture.** API_InstanceRequirements' `CpuManufacturers` note
+says "Instances will be launched with a compatible CPU architecture based on the Amazon Machine Image
+(AMI) that you specify in your launch template", so an `InstanceRequirements` override first resolves
+its AMI — the override's `ImageId`, or the template version's — and considers only the catalog types
+that report its architecture: an `arm64` AMI selects only the AWS Graviton families, an `x86_64` AMI
+only the Intel and AMD ones ([#1497](https://github.com/scttfrdmn/substrate/issues/1497)). So
+`CpuManufacturers=["amazon-web-services"]` launches Graviton types from an arm64 AMI, `t4g` counting
+as burstable, and `intel` on an arm64 AMI matches nothing and records the Failed activity AWS would.
+Any other architecture narrows as `x86_64`: an AMI that does not resolve (the launch then fails on
+the AMI itself), and one reporting an architecture no catalog type does — `i386`, which an AMI
+registered without `Architecture` reports, or the `mac` values. So Graviton types are chosen only for
+an AMI that says `arm64`, and a group that chose an x86 type before the Graviton families existed
+chooses the same one now, rather than a 1-vCPU Graviton `.medium`. The manufacturer is the catalog
+family's processor as the guide pages publish it: `intel`, `amd`, or `amazon-web-services`.
 
 **A zone-only group uses the default VPC.** A group naming `AvailabilityZones` and no
 `VPCZoneIdentifier` launches "into the default VPC subnet in each Availability Zone", as

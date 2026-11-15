@@ -54,9 +54,23 @@ type ec2InstanceTypeSize struct {
 type ec2InstanceTypeFamily struct {
 	// Name is the family prefix, e.g. "c5".
 	Name string
+	// Architecture is the one value the family's types report as
+	// processorInfo.supportedArchitectures: [ec2ArchX86] or [ec2ArchARM64]. It is a
+	// family property because AWS publishes no family whose sizes differ in it (#1497).
+	Architecture string
 	// Sizes are the family's members, smallest first.
 	Sizes []ec2InstanceTypeSize
 }
+
+// The two architecture values the seeded catalog's types report, spelled as
+// API_ProcessorInfo's SupportedArchitectures publishes them ("Valid Values: i386 | x86_64 |
+// arm64 | x86_64_mac | arm64_mac"). No family in the catalog reports the other three.
+const (
+	// ec2ArchX86 is the Intel and AMD families' architecture.
+	ec2ArchX86 = "x86_64"
+	// ec2ArchARM64 is the AWS Graviton families' architecture.
+	ec2ArchARM64 = "arm64"
+)
 
 // ec2InstanceTypeFamilies is the seeded instance-type catalog, by family.
 //
@@ -89,9 +103,21 @@ type ec2InstanceTypeFamily struct {
 // is calibrated to them, so no existing fixture moves; the other three are pinned the same
 // way in [ec2AcceleratedFamilies]. Assert on the shape of a spot price response, never on
 // the amount.
+//
+// **The AWS Graviton families (#1497)** follow the seven x86 ones: t4g, then the general
+// purpose, compute optimized and memory optimized lines from Graviton2 to Graviton5 — m6g,
+// m7g, m8g, m9g; c6g, c7g, c8g, c9g; r6g, r7g, r8g, r9g. Every size is transcribed from the
+// same three guide pages, whose processor column reads "AWS Graviton2 Processor" through
+// "AWS Graviton5"; the Graviton4 and Graviton5 families add 24xlarge and 48xlarge sizes the
+// older ones do not have, and their `.metal-24xl`/`.metal-48xl` sizes are excluded with the
+// other bare metal. They report arm64. Their stub rates carry no #234 anchor, so they are
+// substrate's, set below the x86 family of the same class and rising one step per
+// generation, by the rule [ec2AcceleratedFamilies] states. The `gd` (instance store) and `gn`
+// (network optimized) variants of these lines are not carried; a type from one of them is
+// refused like any other family the catalog lacks.
 var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 	// Burstable, Intel. 0.0042 USD/GiB.
-	{Name: "t3", Sizes: []ec2InstanceTypeSize{
+	{Name: "t3", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"nano", 2, 512, "0.0021"},
 		{"micro", 2, 1024, "0.0042"},
 		{"small", 2, 2048, "0.0084"},
@@ -101,7 +127,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"2xlarge", 8, 32768, "0.1344"},
 	}},
 	// Burstable, AMD. 0.0038 USD/GiB.
-	{Name: "t3a", Sizes: []ec2InstanceTypeSize{
+	{Name: "t3a", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"nano", 2, 512, "0.0019"},
 		{"micro", 2, 1024, "0.0038"},
 		{"small", 2, 2048, "0.0076"},
@@ -111,7 +137,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"2xlarge", 8, 32768, "0.1216"},
 	}},
 	// General purpose, Intel. 0.00475 USD/GiB.
-	{Name: "m5", Sizes: []ec2InstanceTypeSize{
+	{Name: "m5", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"large", 2, 8192, "0.038"},
 		{"xlarge", 4, 16384, "0.076"},
 		{"2xlarge", 8, 32768, "0.152"},
@@ -122,7 +148,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"24xlarge", 96, 393216, "1.824"},
 	}},
 	// General purpose, AMD. 0.00425 USD/GiB.
-	{Name: "m5a", Sizes: []ec2InstanceTypeSize{
+	{Name: "m5a", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"large", 2, 8192, "0.034"},
 		{"xlarge", 4, 16384, "0.068"},
 		{"2xlarge", 8, 32768, "0.136"},
@@ -134,7 +160,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 	}},
 	// Compute optimized, Intel. 0.0085 USD/GiB. Note the size ladder is not shared with
 	// c5a: c5 has 9xlarge and 18xlarge where c5a has 8xlarge and 16xlarge.
-	{Name: "c5", Sizes: []ec2InstanceTypeSize{
+	{Name: "c5", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"large", 2, 4096, "0.034"},
 		{"xlarge", 4, 8192, "0.068"},
 		{"2xlarge", 8, 16384, "0.136"},
@@ -145,7 +171,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"24xlarge", 96, 196608, "1.632"},
 	}},
 	// Compute optimized, AMD. 0.00765 USD/GiB.
-	{Name: "c5a", Sizes: []ec2InstanceTypeSize{
+	{Name: "c5a", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"large", 2, 4096, "0.0306"},
 		{"xlarge", 4, 8192, "0.0612"},
 		{"2xlarge", 8, 16384, "0.1224"},
@@ -156,7 +182,7 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"24xlarge", 96, 196608, "1.4688"},
 	}},
 	// Memory optimized, Intel. 0.002375 USD/GiB.
-	{Name: "r5", Sizes: []ec2InstanceTypeSize{
+	{Name: "r5", Architecture: ec2ArchX86, Sizes: []ec2InstanceTypeSize{
 		{"large", 2, 16384, "0.038"},
 		{"xlarge", 4, 32768, "0.076"},
 		{"2xlarge", 8, 65536, "0.152"},
@@ -165,6 +191,160 @@ var ec2InstanceTypeFamilies = []ec2InstanceTypeFamily{
 		{"12xlarge", 48, 393216, "0.912"},
 		{"16xlarge", 64, 524288, "1.216"},
 		{"24xlarge", 96, 786432, "1.824"},
+	}},
+	// Burstable, AWS Graviton2. 0.0034 USD/GiB.
+	{Name: "t4g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"nano", 2, 512, "0.0017"},
+		{"micro", 2, 1024, "0.0034"},
+		{"small", 2, 2048, "0.0068"},
+		{"medium", 2, 4096, "0.0136"},
+		{"large", 2, 8192, "0.0272"},
+		{"xlarge", 4, 16384, "0.0544"},
+		{"2xlarge", 8, 32768, "0.1088"},
+	}},
+	// General purpose, AWS Graviton2. 0.004 USD/GiB.
+	{Name: "m6g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.016"},
+		{"large", 2, 8192, "0.032"},
+		{"xlarge", 4, 16384, "0.064"},
+		{"2xlarge", 8, 32768, "0.128"},
+		{"4xlarge", 16, 65536, "0.256"},
+		{"8xlarge", 32, 131072, "0.512"},
+		{"12xlarge", 48, 196608, "0.768"},
+		{"16xlarge", 64, 262144, "1.024"},
+	}},
+	// General purpose, AWS Graviton3. 0.0042 USD/GiB.
+	{Name: "m7g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0168"},
+		{"large", 2, 8192, "0.0336"},
+		{"xlarge", 4, 16384, "0.0672"},
+		{"2xlarge", 8, 32768, "0.1344"},
+		{"4xlarge", 16, 65536, "0.2688"},
+		{"8xlarge", 32, 131072, "0.5376"},
+		{"12xlarge", 48, 196608, "0.8064"},
+		{"16xlarge", 64, 262144, "1.0752"},
+	}},
+	// General purpose, AWS Graviton4. 0.0044 USD/GiB.
+	{Name: "m8g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0176"},
+		{"large", 2, 8192, "0.0352"},
+		{"xlarge", 4, 16384, "0.0704"},
+		{"2xlarge", 8, 32768, "0.1408"},
+		{"4xlarge", 16, 65536, "0.2816"},
+		{"8xlarge", 32, 131072, "0.5632"},
+		{"12xlarge", 48, 196608, "0.8448"},
+		{"16xlarge", 64, 262144, "1.1264"},
+		{"24xlarge", 96, 393216, "1.6896"},
+		{"48xlarge", 192, 786432, "3.3792"},
+	}},
+	// General purpose, AWS Graviton5. 0.0046 USD/GiB.
+	{Name: "m9g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 4096, "0.0184"},
+		{"large", 2, 8192, "0.0368"},
+		{"xlarge", 4, 16384, "0.0736"},
+		{"2xlarge", 8, 32768, "0.1472"},
+		{"4xlarge", 16, 65536, "0.2944"},
+		{"8xlarge", 32, 131072, "0.5888"},
+		{"12xlarge", 48, 196608, "0.8832"},
+		{"16xlarge", 64, 262144, "1.1776"},
+		{"24xlarge", 96, 393216, "1.7664"},
+		{"48xlarge", 192, 786432, "3.5328"},
+	}},
+	// Compute optimized, AWS Graviton2. 0.0072 USD/GiB.
+	{Name: "c6g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0144"},
+		{"large", 2, 4096, "0.0288"},
+		{"xlarge", 4, 8192, "0.0576"},
+		{"2xlarge", 8, 16384, "0.1152"},
+		{"4xlarge", 16, 32768, "0.2304"},
+		{"8xlarge", 32, 65536, "0.4608"},
+		{"12xlarge", 48, 98304, "0.6912"},
+		{"16xlarge", 64, 131072, "0.9216"},
+	}},
+	// Compute optimized, AWS Graviton3. 0.0076 USD/GiB.
+	{Name: "c7g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0152"},
+		{"large", 2, 4096, "0.0304"},
+		{"xlarge", 4, 8192, "0.0608"},
+		{"2xlarge", 8, 16384, "0.1216"},
+		{"4xlarge", 16, 32768, "0.2432"},
+		{"8xlarge", 32, 65536, "0.4864"},
+		{"12xlarge", 48, 98304, "0.7296"},
+		{"16xlarge", 64, 131072, "0.9728"},
+	}},
+	// Compute optimized, AWS Graviton4. 0.008 USD/GiB.
+	{Name: "c8g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.016"},
+		{"large", 2, 4096, "0.032"},
+		{"xlarge", 4, 8192, "0.064"},
+		{"2xlarge", 8, 16384, "0.128"},
+		{"4xlarge", 16, 32768, "0.256"},
+		{"8xlarge", 32, 65536, "0.512"},
+		{"12xlarge", 48, 98304, "0.768"},
+		{"16xlarge", 64, 131072, "1.024"},
+		{"24xlarge", 96, 196608, "1.536"},
+		{"48xlarge", 192, 393216, "3.072"},
+	}},
+	// Compute optimized, AWS Graviton5. 0.0084 USD/GiB.
+	{Name: "c9g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 2048, "0.0168"},
+		{"large", 2, 4096, "0.0336"},
+		{"xlarge", 4, 8192, "0.0672"},
+		{"2xlarge", 8, 16384, "0.1344"},
+		{"4xlarge", 16, 32768, "0.2688"},
+		{"8xlarge", 32, 65536, "0.5376"},
+		{"12xlarge", 48, 98304, "0.8064"},
+		{"16xlarge", 64, 131072, "1.0752"},
+		{"24xlarge", 96, 196608, "1.6128"},
+		{"48xlarge", 192, 393216, "3.2256"},
+	}},
+	// Memory optimized, AWS Graviton2. 0.002 USD/GiB.
+	{Name: "r6g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.016"},
+		{"large", 2, 16384, "0.032"},
+		{"xlarge", 4, 32768, "0.064"},
+		{"2xlarge", 8, 65536, "0.128"},
+		{"4xlarge", 16, 131072, "0.256"},
+		{"8xlarge", 32, 262144, "0.512"},
+		{"12xlarge", 48, 393216, "0.768"},
+		{"16xlarge", 64, 524288, "1.024"},
+	}},
+	// Memory optimized, AWS Graviton3. 0.0021 USD/GiB.
+	{Name: "r7g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0168"},
+		{"large", 2, 16384, "0.0336"},
+		{"xlarge", 4, 32768, "0.0672"},
+		{"2xlarge", 8, 65536, "0.1344"},
+		{"4xlarge", 16, 131072, "0.2688"},
+		{"8xlarge", 32, 262144, "0.5376"},
+		{"12xlarge", 48, 393216, "0.8064"},
+		{"16xlarge", 64, 524288, "1.0752"},
+	}},
+	// Memory optimized, AWS Graviton4. 0.0022 USD/GiB.
+	{Name: "r8g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0176"},
+		{"large", 2, 16384, "0.0352"},
+		{"xlarge", 4, 32768, "0.0704"},
+		{"2xlarge", 8, 65536, "0.1408"},
+		{"4xlarge", 16, 131072, "0.2816"},
+		{"8xlarge", 32, 262144, "0.5632"},
+		{"12xlarge", 48, 393216, "0.8448"},
+		{"16xlarge", 64, 524288, "1.1264"},
+		{"24xlarge", 96, 786432, "1.6896"},
+		{"48xlarge", 192, 1572864, "3.3792"},
+	}},
+	// Memory optimized, AWS Graviton5. 0.0023 USD/GiB.
+	{Name: "r9g", Architecture: ec2ArchARM64, Sizes: []ec2InstanceTypeSize{
+		{"medium", 1, 8192, "0.0184"},
+		{"large", 2, 16384, "0.0368"},
+		{"xlarge", 4, 32768, "0.0736"},
+		{"2xlarge", 8, 65536, "0.1472"},
+		{"4xlarge", 16, 131072, "0.2944"},
+		{"8xlarge", 32, 262144, "0.5888"},
+		{"12xlarge", 48, 393216, "0.8832"},
+		{"16xlarge", 64, 524288, "1.1776"},
+		{"24xlarge", 96, 786432, "1.7664"},
+		{"48xlarge", 192, 1572864, "3.5328"},
 	}},
 }
 
@@ -378,8 +558,9 @@ var ec2AcceleratedFamilies = []ec2AcceleratedFamily{
 // neither. They are transcribed anyway, whole: the list is a copy of one AWS table rather than
 // the intersection with [ec2InstanceTypeFamilies], so a family added to the catalog later is
 // classified by AWS's answer instead of by whoever adds it remembering to look. Intersected
-// with the catalog's eighteen families today it selects exactly p3 — three of ninety-five types
-// report false and ninety-two report true.
+// with the catalog's thirty-one families today it selects exactly p3 — three of 210 types report
+// false and 207 report true. (a1, the first Graviton family, is on the list and not in the
+// catalog; the thirteen Graviton families #1497 added are all current.)
 var ec2PreviousGenerationFamilies = []string{ //nolint:gochecknoglobals // read-only reference data transcribed from one AWS page
 	"a1", "c1", "c3", "c4", "g3", "i2", "m1", "m2", "m3", "m4",
 	"p3", "p3dn", "r3", "r4", "t1",
@@ -414,11 +595,14 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 // buildEC2InstanceTypeCatalog flattens both family tables into the catalog slice and its
 // by-name index.
 //
-// Every catalog entry is x86_64 and supports both on-demand and spot. That is true of
-// every family listed, so it is applied here rather than repeated per row; a family with
-// a different architecture or usage class would need this widening first. Graviton-based
-// accelerated families are the nearest real example — g5g is ARM — which is one reason the
-// catalog does not carry them.
+// Every catalog entry supports both on-demand and spot. That is true of every family listed,
+// so it is applied here rather than repeated per row.
+//
+// The architecture is the family's ([ec2InstanceTypeFamily.Architecture]) since #1497 added
+// the Graviton families; before that every entry was x86_64 and this function applied it as a
+// constant. The accelerated families are all x86_64 and are still given it here: the
+// Graviton-based accelerated families (g5g is the nearest) are not carried, so no
+// accelerated row needs the field.
 //
 // CurrentGeneration is not applied that way, because it is the one property on which the
 // families disagree: it is derived per family through [ec2FamilyIsCurrentGeneration], which
@@ -428,7 +612,7 @@ var ec2InstanceTypeCatalog, ec2InstanceTypeIndex = buildEC2InstanceTypeCatalog()
 func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2InstanceTypeInfo) {
 	var catalog []ec2InstanceTypeInfo
 	index := make(map[string]ec2InstanceTypeInfo)
-	add := func(family, name string, vcpus, memoryMiB, gpu, neuron int, spotPrice string) {
+	add := func(family, arch, name string, vcpus, memoryMiB, gpu, neuron int, spotPrice string) {
 		info := ec2InstanceTypeInfo{
 			InstanceType:          name,
 			VCpus:                 vcpus,
@@ -436,7 +620,7 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 			GPU:                   gpu,
 			NeuronDevices:         neuron,
 			SpotPrice:             spotPrice,
-			SupportedArchs:        []string{"x86_64"},
+			SupportedArchs:        []string{arch},
 			SupportedUsageClasses: []string{"on-demand", "spot"},
 			CurrentGeneration:     ec2FamilyIsCurrentGeneration(family),
 		}
@@ -445,7 +629,7 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 	}
 	for _, family := range ec2InstanceTypeFamilies {
 		for _, size := range family.Sizes {
-			add(family.Name, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, 0, size.SpotPrice)
+			add(family.Name, family.Architecture, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, 0, 0, size.SpotPrice)
 		}
 	}
 	for _, family := range ec2AcceleratedFamilies {
@@ -463,7 +647,7 @@ func buildEC2InstanceTypeCatalog() ([]ec2InstanceTypeInfo, map[string]ec2Instanc
 			case ec2AcceleratorNone:
 				// Reported nowhere; the count stays in the table as the record of it.
 			}
-			add(family.Name, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
+			add(family.Name, ec2ArchX86, family.Name+"."+size.Size, size.VCpus, size.MemoryMiB, gpu, neuron, size.SpotPrice)
 		}
 	}
 	return catalog, index

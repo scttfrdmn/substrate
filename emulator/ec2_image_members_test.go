@@ -187,6 +187,38 @@ func TestEC2_DescribeImages_BundledMembers(t *testing.T) {
 				RootDeviceName: "/dev/sda1",
 			},
 		},
+		{
+			param: "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
+			want: ec2DescribedImage{
+				Name: "amazon-linux-2023-ecs-optimized-arm64", Architecture: "arm64",
+				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
+				RootDeviceName: "/dev/xvda", OwnerAlias: "amazon",
+			},
+		},
+		{
+			param: "/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id",
+			want: ec2DescribedImage{
+				Name: "amazon-linux-2-ecs-optimized-arm64", Architecture: "arm64",
+				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
+				RootDeviceName: "/dev/xvda", OwnerAlias: "amazon",
+			},
+		},
+		{
+			param: "/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
+			want: ec2DescribedImage{
+				Name: "ubuntu-noble-24.04-arm64-server", Architecture: "arm64",
+				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
+				RootDeviceName: "/dev/sda1",
+			},
+		},
+		{
+			param: "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id",
+			want: ec2DescribedImage{
+				Name: "ubuntu-jammy-22.04-arm64-server", Architecture: "arm64",
+				PlatformDetails: "Linux/UNIX", UsageOperation: "RunInstances",
+				RootDeviceName: "/dev/sda1",
+			},
+		},
 	}
 	require.Len(t, tests, len(ec2BundledParameters),
 		"every bundled parameter needs a row here, or a new catalog entry ships unasserted")

@@ -3,6 +3,7 @@ package emulator
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"slices"
 	"strings"
 )
 
@@ -192,6 +193,50 @@ var bundledImages = []bundledImage{
 		UsageOperation:  "RunInstances",
 		RootDeviceName:  ec2RootDeviceSDA1,
 	},
+	// The arm64 counterparts of the ECS-optimized and Ubuntu entries above (#1497), so a
+	// Graviton launch that discovers its AMI the documented way has one. The ECS paths are
+	// the ECS guide's "(arm64)" parameters with its image_id sub-parameter, the form it
+	// documents for the x86_64 entries; the Ubuntu paths are Canonical's
+	// {product}/{release}/stable/{serial}/{arch}/hvm/{vol} format with ARCH arm64. Windows
+	// Server has no arm64 public parameter, so its entry has no counterpart.
+	{
+		Parameter:       "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
+		Name:            "amazon-linux-2023-ecs-optimized-arm64",
+		Description:     "Amazon ECS-optimized Amazon Linux 2023 AMI, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
+	},
+	{
+		Parameter:       "/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id",
+		Name:            "amazon-linux-2-ecs-optimized-arm64",
+		Description:     "Amazon ECS-optimized Amazon Linux 2 AMI, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceXVDA,
+		OwnerAlias:      "amazon",
+	},
+	{
+		Parameter:       "/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
+		Name:            "ubuntu-noble-24.04-arm64-server",
+		Description:     "Canonical Ubuntu Server 24.04 LTS, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceSDA1,
+	},
+	{
+		Parameter:       "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id",
+		Name:            "ubuntu-jammy-22.04-arm64-server",
+		Description:     "Canonical Ubuntu Server 22.04 LTS, arm64",
+		Architecture:    "arm64",
+		PlatformDetails: "Linux/UNIX",
+		UsageOperation:  "RunInstances",
+		RootDeviceName:  ec2RootDeviceSDA1,
+	},
 }
 
 // bundledImageDefaultParameter is the parameter substrate resolves when something needs an
@@ -207,14 +252,34 @@ const bundledImageDefaultParameter = "/aws/service/ami-amazon-linux-latest/al202
 // of names that resolve does not change — only what they resolve to. Order matters, and is
 // the order of this slice rather than a map's, because "/optimized-ami/" and "-latest" can
 // both appear in one path.
+//
+// ARMParameter is the family's arm64 entry, answered for an unlisted path that names arm64
+// (#1497). Before it existed an unlisted arm64 path — an Amazon Linux kernel variant, an ECS
+// GPU-less arm64 release — resolved to the family's x86_64 image, so a Graviton launch that
+// discovered its AMI correctly received one of the wrong architecture. Windows has none, so an
+// arm64-looking Windows path still gets the x86_64 image, as there is no other.
 var bundledImageFamilyDefaults = []struct {
-	Match     string
-	Parameter string
+	Match        string
+	Parameter    string
+	ARMParameter string
 }{
-	{"/ami-windows-latest/", "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base"},
-	{"/ubuntu/", "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id"},
-	{"/optimized-ami/", "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id"},
-	{"", bundledImageDefaultParameter},
+	{"/ami-windows-latest/", "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base", ""},
+	{"/ubuntu/", "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
+		"/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id"},
+	{"/optimized-ami/", "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id",
+		"/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"},
+	{"", bundledImageDefaultParameter, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64"},
+}
+
+// bundledImagePathIsARM reports whether an AMI parameter path names the arm64 architecture,
+// as a token anywhere in it — delimited by '/', '-' or '_'. The published paths put it in
+// every position: a segment (Canonical's ".../arm64/hvm/..."), a leaf suffix
+// ("al2023-ami-kernel-default-arm64"), mid-leaf ("amzn2-ami-hvm-arm64-gp2") and mid-segment
+// (EKS's ".../amazon-linux-2-arm64/recommended/image_id"). A token match rather than a
+// substring one keeps a hypothetical "notarm64x" from counting.
+func bundledImagePathIsARM(name string) bool {
+	tokens := strings.FieldsFunc(name, func(r rune) bool { return r == '/' || r == '-' || r == '_' })
+	return slices.Contains(tokens, "arm64")
 }
 
 // BundledImageID returns the AMI ID substrate resolves for an SSM public parameter in one
@@ -308,12 +373,17 @@ func bundledImageForParameter(name string) (bundledImage, bool) {
 	if !isAMI {
 		return bundledImage{}, false
 	}
+	arm := bundledImagePathIsARM(name)
 	for _, fam := range bundledImageFamilyDefaults {
 		if fam.Match != "" && !strings.Contains(name, fam.Match) {
 			continue
 		}
+		want := fam.Parameter
+		if arm && fam.ARMParameter != "" {
+			want = fam.ARMParameter
+		}
 		for _, img := range bundledImages {
-			if img.Parameter == fam.Parameter {
+			if img.Parameter == want {
 				return img, true
 			}
 		}
