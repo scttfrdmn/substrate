@@ -59,7 +59,7 @@ func (p *BackupPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*
 	case "DeleteBackupPlan":
 		return p.deleteBackupPlan(reqCtx, planID)
 	case "ListBackupPlans":
-		return p.listBackupPlans(reqCtx)
+		return p.listBackupPlans(reqCtx, req)
 	case "CreateBackupSelection":
 		return p.createBackupSelection(reqCtx, req, planID)
 	case "ListBackupSelections":
@@ -457,7 +457,51 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 	})
 }
 
-func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, error) {
+// listBackupPlans handles ListBackupPlans (#1184).
+//
+// API_ListBackupPlans publishes three query parameters, and none was read: the handler took no
+// request at all, so a page was never a page and an out-of-range value answered 200. It now follows
+// [BackupPlugin.listBackupVaults]' pattern, member for member.
+//
+//   - maxResults (Valid Range 1–1000) bounds the page; outside the range, or not an integer, is
+//     InvalidParameterValueException/400, which the page glosses "Indicates that something is wrong
+//     with a parameter's value. For example, the value is out of range." With none the page size is
+//     the published maximum, 1000, so a request with no pagination parameters answers what it did.
+//   - nextToken is [encodeOffsetPaginationToken]'s offset over the plan-ID index, which
+//     updateStringIndex keeps sorted, so a walk is stable. It is omitted on the last page, and one
+//     substrate did not issue is InvalidParameterValueException — the only validation code the page
+//     publishes — rather than read as page one (#915).
+//   - includeDeleted is "A Boolean value with a default value of FALSE that returns deleted backup
+//     plans when set to TRUE." It is read and must be a boolean (InvalidParameterValueException
+//     otherwise), but **true returns the same list as false**: DeleteBackupPlan removes the record, so
+//     substrate keeps no deleted plan to return. A consumer that lists deleted plans to confirm a
+//     deletion will find nothing, where AWS would answer the plan with a DeletionDate.
+//
+// A plan whose record cannot be read is an error rather than skipped (#1184), since a skipped plan
+// would shorten the list, shift every later offset and report success over a store failure. An index
+// entry outliving its record is not a fault and is passed over, as the vault listing does.
+func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	invalid := func(msg string) error {
+		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
+	}
+	pageSize := backupListPlansMax
+	if raw, ok := req.Params["maxResults"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 || n > backupListPlansMax {
+			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListPlansMax))
+		}
+		pageSize = n
+	}
+	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
+	if !ok {
+		return nil, invalid("The nextToken is not valid.")
+	}
+	if raw, ok := req.Params["includeDeleted"]; ok {
+		if _, err := strconv.ParseBool(raw); err != nil {
+			return nil, invalid("includeDeleted must be true or false.")
+		}
+	}
+
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, backupNamespace, backupPlanIDsKey(reqCtx.AccountID, reqCtx.Region))
 	if err != nil {
@@ -466,8 +510,12 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, er
 	summaries := make([]map[string]interface{}, 0, len(ids))
 	for _, id := range ids {
 		plan, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, id)
+		var awsErr *AWSError
+		if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+			continue // an index entry outliving its record, which is not a fault
+		}
 		if err != nil {
-			continue
+			return nil, err
 		}
 		summary := map[string]interface{}{
 			"BackupPlanId":   plan.BackupPlanID,
@@ -482,10 +530,17 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext) (*AWSResponse, er
 		}
 		summaries = append(summaries, summary)
 	}
-	return backupJSONResponse(http.StatusOK, map[string]interface{}{
-		"BackupPlansList": summaries,
-	})
+	page, next := pageByOffsetToken(summaries, offset, pageSize)
+	out := map[string]interface{}{"BackupPlansList": page}
+	if next != "" {
+		out["NextToken"] = next
+	}
+	return backupJSONResponse(http.StatusOK, out)
 }
+
+// backupListPlansMax is ListBackupPlans' published maxResults maximum, and its page size when the
+// caller names none.
+const backupListPlansMax = 1000
 
 func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSRequest, planID string) (*AWSResponse, error) {
 	if _, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID); err != nil {
