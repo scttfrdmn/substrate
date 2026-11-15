@@ -106,11 +106,11 @@ bench: ## Run benchmarks
 e2e: ## Run end-to-end tests
 	cd test/e2e && go test -v -race ./...
 
-python-test: ## Run pytest-substrate unit tests
-	cd python && .venv/bin/pytest tests/ -v
+python-test: ## Run pytest-substrate unit tests and the worked example in python/examples
+	cd python && .venv/bin/pytest tests/ examples/ -v
 
 python-lint: ## Lint pytest-substrate with ruff (if available)
-	cd python && .venv/bin/ruff check src/ tests/ 2>/dev/null || echo "ruff not installed; skipping"
+	cd python && .venv/bin/ruff check src/ tests/ examples/ 2>/dev/null || echo "ruff not installed; skipping"
 
 python-build: ## Build pytest-substrate wheel
 	cd python && .venv/bin/python -m build --wheel --outdir dist/ 2>/dev/null || \

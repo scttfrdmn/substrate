@@ -248,10 +248,12 @@ func (p *QuickSightPlugin) describeDataSource(ctx *RequestContext, _ *AWSRequest
 	ds.Status = status
 	out := quicksightDataSourceToWire(ds)
 	out.ErrorInfo = errorInfo
+	// No Status member: every QuickSight Response Syntax opens with HTTP/1.1 {Status}, binding Status to
+	// the status line, and no Response Elements list carries it in the body (#1179). An SDK fills it
+	// from the status it received; a member here was visible only to a raw-body reader.
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
 		"DataSource": out,
 		"RequestId":  generateQuickSightRequestID(ctx.IDs),
-		"Status":     http.StatusOK,
 	})
 }
 
@@ -360,10 +362,10 @@ func (p *QuickSightPlugin) describeIngestion(ctx *RequestContext, _ *AWSRequest,
 	if view.rowInfo != nil {
 		ingestion["RowInfo"] = view.rowInfo
 	}
+	// Status is bound to the status line, not the body; see describeDataSource (#1179).
 	return quicksightJSONResponse(http.StatusOK, map[string]interface{}{
 		"Ingestion": ingestion,
 		"RequestId": generateQuickSightRequestID(ctx.IDs),
-		"Status":    http.StatusOK,
 	})
 }
 

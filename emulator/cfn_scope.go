@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -70,10 +71,38 @@ func (d *StackDeployer) stackData(ctx context.Context, name string) ([]byte, err
 		return nil, fmt.Errorf("cfn read stack %q: %w", name, err)
 	}
 	if data != nil {
-		return data, nil
+		return cfnPublishedStackARNs(data), nil
 	}
 	legacy, _, err := d.legacyStack(ctx, name)
-	return legacy, err
+	return cfnPublishedStackARNs(legacy), err
+}
+
+// cfnPublishedStackARNs rewrites every pre-#1181 backup plan ARN a stack record holds into the
+// published plan segment, so a stack deployed before the fix reports what AWS publishes rather than
+// the backup-plan segment it recorded. That covers the plan resources' own ARNs and every output
+// value, so an Fn::GetAtt BackupPlanArn output, an export (which is an output's value), and an
+// importing stack's output that resolved one all report the new form. A record holding no such ARN,
+// or one that does not decode, is returned as it is; every reader decodes it and handles a corrupt
+// record its own way.
+func cfnPublishedStackARNs(data []byte) []byte {
+	if !bytes.Contains(data, []byte(":backup-plan:")) {
+		return data
+	}
+	var s CFNStackState
+	if json.Unmarshal(data, &s) != nil {
+		return data
+	}
+	for i, r := range s.Resources {
+		s.Resources[i].ARN = backupPublishedPlanARNs(r.ARN)
+	}
+	for k, v := range s.Outputs {
+		s.Outputs[k] = backupPublishedPlanARNs(v)
+	}
+	out, err := json.Marshal(s)
+	if err != nil {
+		return data
+	}
+	return out
 }
 
 // legacyStack returns the unscoped record for name when it belongs to the deployer's scope, and

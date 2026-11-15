@@ -37,6 +37,11 @@ type Route53HostedZone struct {
 
 	// AccountID is the AWS account that owns the hosted zone.
 	AccountID string `json:"AccountID"`
+
+	// DefaultRecordSets records that CreateHostedZone stored the zone's apex SOA and NS (#1537). A
+	// zone stored before #1537 has neither and no flag, and is treated as having no defaults; see
+	// route53_defaults.go.
+	DefaultRecordSets bool `json:"DefaultRecordSets,omitempty"`
 }
 
 // Route53ResourceRecord holds a single DNS resource record value.
@@ -151,7 +156,13 @@ func r53ZoneSuffix(id string) string {
 	return id
 }
 
-// r53RRSetKey returns the state key portion for a resource record set.
+// r53RRSetKey returns the state key portion for a resource record set. The name is canonical
+// ([r53CanonicalName]): API_CreateHostedZone says Route 53 treats a name with and without its
+// trailing dot as identical, so "example.com" and "example.com." name one record set, which is what
+// lets a caller's UPSERT of the apex NS replace the default one rather than sit beside it (#1537).
+//
+// The Type is upper-cased: the published values are upper case, and a lower-case Type is refused
+// before anything is keyed ([r53InvalidType]), so only a key written before #1537 can differ.
 func r53RRSetKey(rrType, name string) string {
-	return fmt.Sprintf("%s:%s", rrType, name)
+	return fmt.Sprintf("%s:%s", strings.ToUpper(rrType), r53CanonicalName(name))
 }

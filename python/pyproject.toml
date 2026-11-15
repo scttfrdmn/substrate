@@ -27,7 +27,7 @@ substrate = "pytest_substrate.plugin"
 where = ["src"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "examples"]
 
 [tool.ruff]
 target-version = "py311"

@@ -285,7 +285,7 @@ func TestCFN_BackupPlanRefAndAttributes(t *testing.T) {
 	assert.Regexp(t, uuid, first.Outputs["Ref"])
 	assert.NotEqual(t, "Plan", first.Outputs["Ref"])
 	assert.Equal(t, first.Outputs["Ref"], first.Outputs["Id"])
-	assert.Equal(t, "arn:aws:backup:us-east-1:123456789012:backup-plan:"+first.Outputs["Ref"], first.Outputs["Arn"])
+	assert.Equal(t, "arn:aws:backup:us-east-1:123456789012:plan:"+first.Outputs["Ref"], first.Outputs["Arn"])
 	assert.Regexp(t, uuid, first.Outputs["VersionId"])
 
 	same, err := d.Deploy(context.Background(), tmpl(``), "backup-stack", nil)

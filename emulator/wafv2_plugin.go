@@ -345,6 +345,17 @@ func (p *WAFv2Plugin) deleteWebACL(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 
+	// "Before deleting any web ACL, first disassociate it from all resources." (#1541). The page does
+	// not order its checks; the association is checked before the lock token, so a caller holding a
+	// current token still learns why the delete cannot go ahead.
+	associated, err := p.webACLAssociatedResource(reqCtx, acl.ARN)
+	if err != nil {
+		return nil, err
+	}
+	if associated != "" {
+		return nil, wafv2AssociatedItem("Web ACL " + acl.ARN + " is associated with resource " + associated + ".")
+	}
+
 	if acl.LockToken != input.LockToken {
 		return nil, &AWSError{Code: "WAFOptimisticLockException", Message: "The optimistic lock token you provided is out of date.", HTTPStatus: http.StatusBadRequest}
 	}
@@ -427,6 +438,15 @@ func (p *WAFv2Plugin) associateWebACL(reqCtx *RequestContext, req *AWSRequest) (
 	if input.ResourceArn == "" {
 		return nil, wafv2MissingMember("ResourceArn")
 	}
+	// WebACLArn is Required: Yes, and the ACL it names must exist: the page publishes
+	// WAFNonexistentItemException, "your resource doesn't exist" (#1541). Until then any string was
+	// stored, so GetWebACLForResource could reach an association naming nothing.
+	if input.WebACLArn == "" {
+		return nil, wafv2MissingMember("WebACLArn")
+	}
+	if _, err := p.loadWebACLByARN(reqCtx, input.WebACLArn); err != nil {
+		return nil, err
+	}
 
 	goCtx := context.Background()
 	key := wafv2AssocKey(reqCtx.AccountID, reqCtx.Region, input.ResourceArn)
@@ -483,7 +503,9 @@ func (p *WAFv2Plugin) getWebACLForResource(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("wafv2 getWebACLForResource get: %w", err)
 	}
 	if data == nil {
-		return nil, wafv2NonexistentItem("No WebACL is associated with resource " + input.ResourceArn)
+		// "If there is no associated resource, AWS WAF returns a null web ACL." (#1541): 200 with no
+		// WebACL member, which an SDK decodes as a nil WebACL.
+		return wafv2JSONResponse(http.StatusOK, map[string]interface{}{})
 	}
 
 	var webACLArn string

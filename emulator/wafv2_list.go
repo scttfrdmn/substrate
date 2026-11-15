@@ -48,14 +48,13 @@ import (
 // disagree about one ACL. The association keeps storing the bare ARN, the format every recorded run
 // already holds, rather than gaining a second copy of the scope and ID that could drift from it.
 //
-// An association whose web ACL no longer exists answers WAFNonexistentItemException/400 — published on
-// this page as "your resource doesn't exist" — as a resource with no association already does. The page
-// also says "If there is no associated resource, AWS WAF returns a null web ACL.", which substrate does
-// not adopt for either case: the sentence names no association rather than a dangling one, and
-// substrate's no-association answer predates this change and is pinned by tests. On AWS the dangling
-// case should not arise at all, because API_DeleteWebACL publishes WAFAssociatedItemException for an
-// ACL still associated with a resource; substrate's DeleteWebACL does not refuse that yet, which is
-// what makes the case reachable here.
+// A resource with no association answers 200 with no WebACL member: the page says "If there is no
+// associated resource, AWS WAF returns a null web ACL." (#1541). Before #1541 it answered
+// WAFNonexistentItemException/400. An association whose web ACL no longer exists still answers
+// WAFNonexistentItemException/400 — published on this page as "your resource doesn't exist" — but it is
+// no longer reachable through the API: DeleteWebACL refuses an ACL that is still associated with
+// WAFAssociatedItemException, as API_DeleteWebACL publishes, and AssociateWebACL refuses a WebACLArn
+// naming no ACL.
 
 // wafv2ListLimit is the `Limit` constraint ListWebACLs and ListIPSets both publish.
 var wafv2ListLimit = pageSizeRange{member: "Limit", min: 1, max: 100, def: 100}

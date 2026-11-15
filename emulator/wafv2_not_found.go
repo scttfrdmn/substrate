@@ -1,6 +1,12 @@
 package emulator
 
-import "net/http"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+)
 
 // WAFv2's three not-found refusals answer the status its pages publish (#1098).
 //
@@ -30,6 +36,47 @@ import "net/http"
 func wafv2NonexistentItem(message string) *AWSError {
 	return &AWSError{
 		Code:       "WAFNonexistentItemException",
+		Message:    message,
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// webACLAssociatedResource answers the first resource (in key order) associated with the web ACL
+// webACLArn in the caller's account and Region, or "" when none is. Associations are keyed by resource
+// ([wafv2AssocKey]) and carry no reverse index, so this scans the caller's associations; a store fault
+// or an association that does not decode is an error, never "not associated".
+func (p *WAFv2Plugin) webACLAssociatedResource(reqCtx *RequestContext, webACLArn string) (string, error) {
+	prefix := wafv2AssocKey(reqCtx.AccountID, reqCtx.Region, "")
+	keys, err := p.state.List(context.Background(), wafv2Namespace, prefix)
+	if err != nil {
+		return "", fmt.Errorf("wafv2 list associations: %w", err)
+	}
+	for _, key := range keys {
+		data, err := p.state.Get(context.Background(), wafv2Namespace, key)
+		if err != nil {
+			return "", fmt.Errorf("wafv2 get association %s: %w", key, err)
+		}
+		if data == nil {
+			continue
+		}
+		var arn string
+		if err := json.Unmarshal(data, &arn); err != nil {
+			return "", fmt.Errorf("wafv2 decode association %s: %w", key, err)
+		}
+		if arn == webACLArn {
+			return strings.TrimPrefix(key, prefix), nil
+		}
+	}
+	return "", nil
+}
+
+// wafv2AssociatedItem refuses deleting a web ACL that a resource is still associated with.
+// API_DeleteWebACL publishes WAFAssociatedItemException at 400, "AWS WAF couldn't perform the operation
+// because your resource is being used by another resource or it's associated with another resource."
+// The message names the ACL and the resource; that wording is substrate's own.
+func wafv2AssociatedItem(message string) *AWSError {
+	return &AWSError{
+		Code:       "WAFAssociatedItemException",
 		Message:    message,
 		HTTPStatus: http.StatusBadRequest,
 	}

@@ -78,14 +78,8 @@ func TestWAFv2_NonexistentItemAnswersTheStatusItsPagesPublish(t *testing.T) {
 		body map[string]any
 		want string
 	}{
-		{
-			name: "no web ACL is associated with the resource",
-			op:   "GetWebACLForResource",
-			body: map[string]any{
-				"ResourceArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/lb/1",
-			},
-			want: "No WebACL is associated with resource",
-		},
+		// A resource with no association is no longer one of these: it answers 200 with a null web ACL
+		// (#1541; wafv2_associations_test.go).
 		{
 			name: "no web ACL has that Id",
 			op:   "GetWebACL",

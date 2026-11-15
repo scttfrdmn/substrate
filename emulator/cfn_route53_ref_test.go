@@ -106,7 +106,7 @@ func TestCFNRoute53_ARecordSetGroupWritesIntoTheGroupsZone(t *testing.T) {
 // DeployedResource, never as a Go error, and the group discarded that resource, so a group whose
 // every record set was refused reported clean.
 func TestCFNRoute53_ARecordSetGroupReportsItsChildsRefusal(t *testing.T) {
-	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager(), failPut: "rrset:"}
+	fault := &cfFaultStateManager{inner: emulator.NewMemoryStateManager(), failPut: ":A:www.group.example.com"}
 	d := newCFNRoute53Deployer(t, fault)
 	result, err := d.Deploy(context.Background(), cfnRoute53GroupTemplate, "r53-group-refused", nil)
 	require.NoError(t, err)

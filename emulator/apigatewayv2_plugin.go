@@ -388,14 +388,16 @@ func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext, req *AWSRequest) (*AWS
 
 	items := make([]v2APIOut, 0, len(ids))
 	for _, id := range ids {
-		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2APIKey(ctx.AccountID, ctx.Region, id))
-		if getErr != nil || data == nil {
+		// A store fault or an undecodable record is an error, not an item left out of the page (#1538);
+		// only an index entry that outlived its record is skipped.
+		api, found, err := apigwv2LoadListed[V2ApiState](goCtx, p.state, apigwv2APIKey(ctx.AccountID, ctx.Region, id), "getApis")
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
-		var api V2ApiState
-		if json.Unmarshal(data, &api) == nil {
-			items = append(items, v2APIWire(api))
-		}
+		items = append(items, v2APIWire(api))
 	}
 
 	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
@@ -531,14 +533,16 @@ func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, req *AWSRequest, api
 
 	items := make([]v2RouteOut, 0, len(ids))
 	for _, id := range ids {
-		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2RouteKey(ctx.AccountID, ctx.Region, apiID, id))
-		if getErr != nil || data == nil {
+		// A store fault or an undecodable record is an error, not an item left out of the page (#1538);
+		// only an index entry that outlived its record is skipped.
+		route, found, err := apigwv2LoadListed[V2RouteState](goCtx, p.state, apigwv2RouteKey(ctx.AccountID, ctx.Region, apiID, id), "getRoutes")
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
-		var route V2RouteState
-		if json.Unmarshal(data, &route) == nil {
-			items = append(items, v2RouteWire(route))
-		}
+		items = append(items, v2RouteWire(route))
 	}
 
 	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
@@ -623,14 +627,16 @@ func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, req *AWSReques
 
 	items := make([]v2IntegrationOut, 0, len(ids))
 	for _, id := range ids {
-		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2IntegrationKey(ctx.AccountID, ctx.Region, apiID, id))
-		if getErr != nil || data == nil {
+		// A store fault or an undecodable record is an error, not an item left out of the page (#1538);
+		// only an index entry that outlived its record is skipped.
+		integ, found, err := apigwv2LoadListed[V2IntegrationState](goCtx, p.state, apigwv2IntegrationKey(ctx.AccountID, ctx.Region, apiID, id), "getIntegrations")
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
-		var integ V2IntegrationState
-		if json.Unmarshal(data, &integ) == nil {
-			items = append(items, v2IntegrationWire(integ))
-		}
+		items = append(items, v2IntegrationWire(integ))
 	}
 
 	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
@@ -720,14 +726,16 @@ func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, req *AWSRequest, a
 
 	items := make([]v2StageOut, 0, len(names))
 	for _, name := range names {
-		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, name))
-		if getErr != nil || data == nil {
+		// A store fault or an undecodable record is an error, not an item left out of the page (#1538);
+		// only an index entry that outlived its record is skipped.
+		stage, found, err := apigwv2LoadListed[V2StageState](goCtx, p.state, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, name), "getStages")
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
-		var stage V2StageState
-		if json.Unmarshal(data, &stage) == nil {
-			items = append(items, v2StageWire(stage))
-		}
+		items = append(items, v2StageWire(stage))
 	}
 
 	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
@@ -814,14 +822,16 @@ func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, req *AWSReque
 
 	items := make([]v2AuthorizerOut, 0, len(ids))
 	for _, id := range ids {
-		data, getErr := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2AuthorizerKey(ctx.AccountID, ctx.Region, apiID, id))
-		if getErr != nil || data == nil {
+		// A store fault or an undecodable record is an error, not an item left out of the page (#1538);
+		// only an index entry that outlived its record is skipped.
+		auth, found, err := apigwv2LoadListed[V2AuthorizerState](goCtx, p.state, apigwv2AuthorizerKey(ctx.AccountID, ctx.Region, apiID, id), "getAuthorizers")
+		if err != nil {
+			return nil, err
+		}
+		if !found {
 			continue
 		}
-		var auth V2AuthorizerState
-		if json.Unmarshal(data, &auth) == nil {
-			items = append(items, v2AuthorizerWire(auth))
-		}
+		items = append(items, v2AuthorizerWire(auth))
 	}
 
 	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))

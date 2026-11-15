@@ -61,6 +61,11 @@ type LambdaExecutor struct {
 	available bool
 	availOnce sync.Once
 	stopCh    chan struct{}
+
+	// probe reports whether the runtime interface listening on a host port is up. It is
+	// [rieReadyProbe] outside tests; a test replaces it to drive [LambdaExecutor.waitReady]
+	// without Docker (#1129).
+	probe func(port int) error
 }
 
 // NewLambdaExecutor creates a LambdaExecutor and starts the idle-container
@@ -77,6 +82,7 @@ func NewLambdaExecutor(cfg LambdaExecCfg, logger Logger) *LambdaExecutor {
 		cfg:    cfg,
 		logger: logger,
 		stopCh: make(chan struct{}),
+		probe:  rieReadyProbe,
 	}
 	go e.evictLoop()
 	return e
@@ -266,25 +272,57 @@ func (e *LambdaExecutor) startImageContainer(fn LambdaFunction) (*containerHandl
 	return h, nil
 }
 
-// waitReady polls the RIE endpoint until it responds or the deadline is exceeded.
+// waitReady polls the container's runtime interface until it answers or the deadline is exceeded.
 //
-// The endpoint it polls is the *invocation* endpoint with an empty payload, so becoming ready
-// means having been invoked once. On the ZIP path that costs nothing because nothing runs;
-// on [LambdaExecutor.startImageContainer]'s path it is an invocation the caller never asked
-// for. Recorded here rather than fixed with #1079, which is about the ZIP path: TODO(#1129):
-// probe readiness without invoking the handler.
+// The signal is [rieReadyProbe]: an HTTP round trip to a path the runtime interface does not route.
+// It is deliberately not the invocation endpoint. The runtime interface emulator publishes no
+// readiness endpoint — its README's only endpoint is /2015-03-31/functions/function/invocations, "that
+// you post data to it in order to invoke your function" — and that handler runs the function for any
+// method, so probing it, as this did until #1129, invoked the caller's handler once with an event of
+// {} before the caller's own invoke, on every cold start of the image path. Do not re-simplify the
+// probe into an invoke.
 func (e *LambdaExecutor) waitReady(h *containerHandle, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	url := fmt.Sprintf("http://localhost:%d/2015-03-31/functions/function/invocations", h.port)
-	for time.Now().Before(deadline) {
-		resp, err := http.Post(url, "application/json", strings.NewReader(`{}`)) //nolint:noctx
-		if err == nil {
-			_ = resp.Body.Close()
+	for {
+		if err := e.probe(h.port); err == nil {
 			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("container did not become ready within %s", timeout)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}
-	return fmt.Errorf("container did not become ready within %s", timeout)
+}
+
+// rieReadyProbePath is the path [rieReadyProbe] requests: the root, which the runtime interface does
+// not route. The emulator registers one handler on Go's default mux, for
+// /2015-03-31/functions/function/invocations (internal/lambda/rie/http.go), so any other path is
+// answered 404 by net/http itself and reaches no function.
+const rieReadyProbePath = "/"
+
+// rieReadyProbe reports whether the runtime interface on localhost:port answers HTTP. Any HTTP
+// response — the 404 it answers for [rieReadyProbePath] — means its server is up; a refused or reset
+// connection means it is not yet. An HTTP exchange rather than a bare TCP dial, because Docker's
+// port publishing can accept a connection on the host port before the container's listener exists.
+func rieReadyProbe(port int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("http://localhost:%d%s", port, rieReadyProbePath), nil)
+	if err != nil {
+		return fmt.Errorf("build readiness probe: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("readiness probe: %w", err)
+	}
+	if _, err := io.Copy(io.Discard, resp.Body); err != nil {
+		_ = resp.Body.Close()
+		return fmt.Errorf("readiness probe body: %w", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		return fmt.Errorf("readiness probe close: %w", err)
+	}
+	return nil
 }
 
 // invokePOST POSTs the payload to the container's RIE invocation endpoint.

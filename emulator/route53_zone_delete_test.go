@@ -171,15 +171,15 @@ func TestRoute53Lists_AnIndexEntryWithNoRecordIsSkipped(t *testing.T) {
 	route53DeleteChange(t, p, ctx, zoneID, "UPSERT", "www.example.com.", "A")
 	route53DeleteChange(t, p, ctx, zoneID, "UPSERT", "api.example.com.", "A")
 
-	keys, err := state.List(t.Context(), "route53", "rrset:"+zoneID+":")
+	keys, err := state.List(t.Context(), "route53", "rrset:"+zoneID+":A:")
 	require.NoError(t, err)
 	require.Len(t, keys, 2)
 	require.NoError(t, state.Delete(t.Context(), "route53", keys[0]))
 
 	resp, err := p.HandleRequest(ctx, route53AbsentZoneRequest(http.MethodGet, "/2013-04-01/hostedzone/"+zoneID+"/rrset", ""))
 	require.NoError(t, err)
-	assert.Equal(t, 1, strings.Count(string(resp.Body), "<ResourceRecordSet>"),
-		"the record set whose record is gone is left out, and the other is listed: %s", resp.Body)
+	assert.Equal(t, 3, strings.Count(string(resp.Body), "<ResourceRecordSet>"),
+		"the record set whose record is gone is left out, and the other is listed with the default NS and SOA: %s", resp.Body)
 
 	// The orphaned index entry does not block a delete once the surviving record set is removed.
 	surviving := "www.example.com."

@@ -343,19 +343,16 @@ func TestWAFv2Plugin_AssociateGetWebACLForResource(t *testing.T) {
 		t.Errorf("want ARN=%q, got %q", webACLArn, assocResult.WebACL["ARN"])
 	}
 
-	// GetWebACLForResource for unassociated resource should return 404.
-	_, err = p.HandleRequest(ctx, wafv2Request(t, "GetWebACLForResource", map[string]any{
+	// An unassociated resource answers 200 with a null web ACL: "If there is no associated resource,
+	// AWS WAF returns a null web ACL." (API_GetWebACLForResource; #1541).
+	resp, err = p.HandleRequest(ctx, wafv2Request(t, "GetWebACLForResource", map[string]any{
 		"ResourceArn": "arn:aws:elasticloadbalancing:us-east-1:123456789012:loadbalancer/app/other/xyz",
 	}))
-	if err == nil {
-		t.Fatal("want error for unassociated resource, got nil")
+	if err != nil {
+		t.Fatalf("GetWebACLForResource for an unassociated resource: %v", err)
 	}
-	awsErr, ok := err.(*emulator.AWSError)
-	if !ok {
-		t.Fatalf("want *AWSError, got %T", err)
-	}
-	if awsErr.Code != "WAFNonexistentItemException" {
-		t.Errorf("want WAFNonexistentItemException, got %q", awsErr.Code)
+	if resp.StatusCode != http.StatusOK || string(resp.Body) != "{}" {
+		t.Errorf("want 200 with no WebACL, got %d %s", resp.StatusCode, resp.Body)
 	}
 }
 
@@ -623,19 +620,15 @@ func TestWAFv2Plugin_DisassociateWebACL(t *testing.T) {
 		t.Fatalf("DisassociateWebACL: %v", err)
 	}
 
-	// GetWebACLForResource should now return not-found.
-	_, err = p.HandleRequest(ctx, wafv2Request(t, "GetWebACLForResource", map[string]any{
+	// GetWebACLForResource now answers a null web ACL (#1541).
+	resp, err = p.HandleRequest(ctx, wafv2Request(t, "GetWebACLForResource", map[string]any{
 		"ResourceArn": resourceArn,
 	}))
-	if err == nil {
-		t.Fatal("want error after disassociate, got nil")
+	if err != nil {
+		t.Fatalf("GetWebACLForResource after disassociate: %v", err)
 	}
-	awsErr, ok := err.(*emulator.AWSError)
-	if !ok {
-		t.Fatalf("want *AWSError, got %T", err)
-	}
-	if awsErr.Code != "WAFNonexistentItemException" {
-		t.Errorf("want WAFNonexistentItemException, got %q", awsErr.Code)
+	if string(resp.Body) != "{}" {
+		t.Errorf("want no WebACL after disassociate, got %s", resp.Body)
 	}
 }
 

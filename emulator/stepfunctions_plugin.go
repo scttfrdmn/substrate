@@ -622,6 +622,10 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 	if !maxOK {
 		return nil, sfnInvalidMaxResults(*input.MaxResults)
 	}
+	after, tokenErr := sfnParseToken(sfnTokenStateMachines, input.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
 
 	goCtx := context.Background()
 	names, err := p.loadSMNames(goCtx, ctx.AccountID, ctx.Region)
@@ -629,7 +633,7 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 		return nil, err
 	}
 
-	page, nextToken := sfnPageByName(names, input.NextToken, maxResults)
+	page, nextToken := sfnPageSorted(sfnTokenStateMachines, names, after, maxResults)
 
 	type smEntry struct {
 		StateMachineArn string  `json:"stateMachineArn"`
@@ -913,6 +917,13 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 		return nil, sfnResourceNotFoundError(input.MapRunArn)
 	}
 
+	// The token is checked before any state is read (#1540). It carries the state machine it was issued
+	// for, so it is matched against the ARN as the caller spelled it.
+	after, tokenErr := sfnParseToken(sfnTokenExecutions+"\x00"+input.StateMachineArn, input.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
+
 	goCtx := context.Background()
 	// The existence check is new. This was the one operation in the set with no check at all, so an ARN
 	// naming nothing — another account's state machine, a deleted one, an activity — answered 200 with
@@ -927,7 +938,28 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 
-	page, nextToken := sfnPageByName(ids, input.NextToken, maxResults)
+	// statusFilter is applied before the page is cut, so a page is up to maxResults matching
+	// executions and a nextToken means another matching one remains. The records the filter reads are
+	// kept for the page below.
+	loaded := map[string]*ExecutionState{}
+	var match func(string) (bool, error)
+	if input.StatusFilter != "" {
+		match = func(execName string) (bool, error) {
+			exec, err := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
+			if err != nil {
+				return false, err
+			}
+			loaded[execName] = exec
+			return exec != nil && exec.Status == input.StatusFilter, nil
+		}
+	}
+	page, nextToken, tokenOK, err := sfnPageOrdered(sfnTokenExecutions+"\x00"+input.StateMachineArn, ids, after, maxResults, match)
+	if err != nil {
+		return nil, err
+	}
+	if !tokenOK {
+		return nil, sfnInvalidToken()
+	}
 
 	type execEntry struct {
 		ExecutionArn    string  `json:"executionArn"`
@@ -939,11 +971,12 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 	}
 	entries := make([]execEntry, 0, len(page))
 	for _, execName := range page {
-		exec, loadErr := p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
-		if loadErr != nil || exec == nil {
-			continue
+		exec, cached := loaded[execName]
+		var loadErr error
+		if !cached {
+			exec, loadErr = p.loadExecution(goCtx, target.AccountID, target.Region, target.Name, execName)
 		}
-		if input.StatusFilter != "" && exec.Status != input.StatusFilter {
+		if loadErr != nil || exec == nil {
 			continue
 		}
 		e := execEntry{
@@ -1113,6 +1146,10 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 	if !maxOK {
 		return nil, sfnInvalidMaxResults(*input.MaxResults)
 	}
+	after, tokenErr := sfnParseToken(sfnTokenActivities, input.NextToken)
+	if tokenErr != nil {
+		return nil, tokenErr
+	}
 
 	goCtx := context.Background()
 	names, err := p.loadActivityNames(goCtx, ctx.AccountID, ctx.Region)
@@ -1120,7 +1157,7 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 		return nil, err
 	}
 
-	page, nextToken := sfnPageByName(names, input.NextToken, maxResults)
+	page, nextToken := sfnPageSorted(sfnTokenActivities, names, after, maxResults)
 
 	type actEntry struct {
 		ActivityArn  string  `json:"activityArn"`

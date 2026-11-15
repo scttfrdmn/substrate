@@ -1025,6 +1025,65 @@ CloudFront (always `us-east-1`), Route 53, IAM, STS, and Organizations.
 
 <!-- TODO(#178): add guidance on testing cross-region replication patterns -->
 
+## Testing from Python (pytest-substrate)
+
+The [`pytest-substrate`](https://github.com/scttfrdmn/substrate/tree/main/python) plugin runs the
+substrate binary for pytest. [First Python test](/getting-started#first-python-test-pytest) covers
+installing it; this section covers the three things a test of infrastructure code needs beyond a
+client that reaches the emulator.
+
+| Fixture | Server | State |
+|---------|--------|-------|
+| `substrate` | one per session | reset before each test |
+| `substrate_isolated` | a fresh process per test | its own |
+
+Both set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` and test credentials, so `boto3.client("s3")`
+reaches the emulator with no arguments, and both yield a `SubstrateServer` whose `url` is the
+server's address.
+
+**Seed an outcome** through the control plane before the call that observes it. Substrate runs no
+workload, so a failed command, a terminal job state or a capacity error is something a test sets
+rather than waits for:
+
+```python
+import json, urllib.request
+
+def test_failed_health_check(substrate_isolated):
+    body = {"documentName": "AWS-RunShellScript", "status": "Failed", "stderr": "connection refused", "exitCode": 7}
+    req = urllib.request.Request(f"{substrate_isolated.url}/v1/ssm/command-invocation",
+                                 data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    urllib.request.urlopen(req)
+    # ... SendCommand now reports Failed, and the code's failure path runs.
+```
+
+`seed_result`, `set_status` and `clear_seeds` wrap the query-result endpoints (Athena, Redshift
+Data); other seeds are posted as above.
+
+**Move the simulated clock** instead of sleeping. `set_time` sets it (`POST /v1/control/time`),
+`advance_time` moves it forward from where it is, and `now` reads it; all three answer an aware UTC
+`datetime`. Work that falls due as time passes — a Scheduler schedule, a lease — runs on the next
+request after the clock passes it:
+
+```python
+import datetime
+
+def test_window_opens(substrate_isolated):
+    substrate_isolated.set_time(datetime.datetime(2026, 11, 16, 9, tzinfo=datetime.UTC))
+    # ... create a one-time schedule for 10:00 ...
+    substrate_isolated.advance_time(hours=1, seconds=5)
+    # ... the schedule's target has run.
+```
+
+The clock keeps running from the instant set, so assert a window (`start <= t < start + 1 minute`)
+rather than an exact timestamp.
+
+**Assert on state** through the same APIs the code under test uses, rather than through
+substrate's internals, so the test means the same thing against AWS.
+
+[`python/examples/test_journey.py`](https://github.com/scttfrdmn/substrate/blob/main/python/examples/test_journey.py)
+puts the three together around a small release script, and runs in CI with the plugin's own tests.
+
 ## Full Example: Lambda + SQS end-to-end
 
 This example creates an SQS queue, registers a Lambda trigger, sends a message,

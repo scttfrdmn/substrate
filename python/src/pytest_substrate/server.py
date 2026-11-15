@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import shutil
@@ -65,6 +66,53 @@ class SubstrateServer:
             urllib.request.urlopen(req, timeout=5)  # nosemgrep
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"substrate state reset failed: {exc.code} {exc.reason}") from exc
+
+    def now(self) -> datetime.datetime:
+        """Return substrate's simulated clock (``GET /v1/control/time``) as an aware UTC datetime."""
+        with urllib.request.urlopen(f"{self.url}/v1/control/time", timeout=5) as resp:  # nosemgrep
+            body = json.loads(resp.read())
+        return _parse_rfc3339(body["simulated_time"])
+
+    def set_time(self, when: datetime.datetime | str) -> datetime.datetime:
+        """Set substrate's simulated clock (``POST /v1/control/time``) and return the clock it reports.
+
+        ``when`` is an aware :class:`~datetime.datetime` or an RFC 3339 string such as
+        ``"2026-11-16T12:00:00Z"``; a naive datetime is read as UTC. Setting the clock is how a
+        test reaches a future instant — a schedule's due time, a lease's expiry — without waiting
+        for it. The clock keeps running from the instant set.
+        """
+        if isinstance(when, datetime.datetime):
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=datetime.UTC)
+            when = when.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+        body = json.dumps({"time": when}).encode()
+        req = urllib.request.Request(
+            f"{self.url}/v1/control/time",
+            data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # nosemgrep
+                reported = json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"substrate set_time failed: {exc.code} {exc.read().decode(errors='replace')}") from exc
+        return _parse_rfc3339(reported["simulated_time"])
+
+    def advance_time(self, delta: datetime.timedelta | None = None, **kwargs: float) -> datetime.datetime:
+        """Move substrate's simulated clock forward and return the clock it reports.
+
+        Pass a :class:`~datetime.timedelta`, or its keyword arguments directly
+        (``advance_time(hours=1)``). Substrate has no advance endpoint, so this reads the clock and
+        sets it to that instant plus ``delta``.
+        """
+        if delta is None:
+            delta = datetime.timedelta(**kwargs)
+        elif kwargs:
+            raise TypeError("pass either a timedelta or its keyword arguments, not both")
+        if delta < datetime.timedelta(0):
+            raise ValueError("advance_time moves the clock forward; use set_time to move it back")
+        return self.set_time(self.now() + delta)
 
     def seed_result(self, service: str, result: dict, sql: str = "*") -> None:
         """Seed a query result for the given service and SQL pattern.
@@ -163,3 +211,19 @@ class SubstrateServer:
             f"substrate did not become healthy within {timeout}s. "
             f"Last error: {last_exc}"
         )
+
+
+def _parse_rfc3339(value: str) -> datetime.datetime:
+    """Parse the RFC 3339 instant substrate's clock endpoint reports into an aware UTC datetime.
+
+    Go renders nanoseconds, which :meth:`datetime.datetime.fromisoformat` does not accept, so the
+    fraction is cut to microseconds first.
+    """
+    value = value.replace("Z", "+00:00")
+    if "." in value:
+        head, rest = value.split(".", 1)
+        n = 0
+        while n < len(rest) and rest[n].isdigit():
+            n += 1
+        value = f"{head}.{rest[:n][:6].ljust(6, '0')}{rest[n:]}"
+    return datetime.datetime.fromisoformat(value).astimezone(datetime.UTC)

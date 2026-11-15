@@ -187,6 +187,17 @@ func RuntimeToImage(runtime string) string { return runtimeToImage(runtime) }
 // FindFreePort wraps findFreePort for external tests.
 func FindFreePort() (int, error) { return findFreePort() }
 
+// RIEReadyProbeForTest exposes rieReadyProbe, the Lambda container readiness probe (#1129).
+func RIEReadyProbeForTest(port int) error { return rieReadyProbe(port) }
+
+// WaitReadyForTest runs LambdaExecutor.waitReady for a container on port with probe in place of the
+// HTTP probe, so the readiness loop is exercised without Docker. No request can observe it: the
+// probe runs only while a container starts, which needs a Docker daemon.
+func (e *LambdaExecutor) WaitReadyForTest(port int, timeout time.Duration, probe func(port int) error) error {
+	e.probe = probe
+	return e.waitReady(&containerHandle{port: port}, timeout)
+}
+
 // NewLambdaExecutorForTest creates a LambdaExecutor with a forced Docker
 // availability value, allowing tests to run without a Docker daemon.
 func NewLambdaExecutorForTest(cfg LambdaExecCfg, logger Logger, dockerAvail bool) *LambdaExecutor {
