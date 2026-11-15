@@ -201,13 +201,18 @@ func (p *Route53Plugin) listHostedZones(reqCtx *RequestContext, _ *AWSRequest) (
 	}
 	resp := xmlResponse{XMLNS: r53XMLNS, MaxItems: "100"}
 	for _, zoneID := range ids {
+		// A store fault or an undecodable record is an error, not a zone left out of the listing
+		// (#1417); only an index entry that outlived its zone is skipped.
 		data, getErr := p.state.Get(context.Background(), route53Namespace, "hostedzone:"+zoneID)
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("route53 listHostedZones get %s: %w", zoneID, getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var zone Route53HostedZone
-		if json.Unmarshal(data, &zone) != nil {
-			continue
+		if err := json.Unmarshal(data, &zone); err != nil {
+			return nil, fmt.Errorf("route53 listHostedZones unmarshal %s: %w", zoneID, err)
 		}
 		item := xmlZone{
 			ID:                     zone.ID,
@@ -272,8 +277,33 @@ func (p *Route53Plugin) getHostedZone(_ *RequestContext, _ *AWSRequest, zoneID s
 	})
 }
 
+// deleteHostedZone handles DeleteHostedZone (#1416).
+//
+// API_DeleteHostedZone publishes NoSuchHostedZone (404), "No hosted zone exists with the ID that you
+// specified", and HostedZoneNotEmpty (400), "The hosted zone contains resource records that are not
+// SOA or NS records": "You can delete a hosted zone only if it contains only the default SOA and NS
+// records". Substrate creates no SOA or NS record with a zone, so every record set a zone holds was
+// written by ChangeResourceRecordSets and blocks the delete, except a SOA or NS at the zone's apex:
+// there is one record set per name and type, so a caller's write there is the default record
+// modified, which the page does not count against the delete. The HostedZoneNotEmpty message is
+// substrate's own; the page publishes none.
 func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, zoneID string) (*AWSResponse, error) {
 	id := r53ZoneSuffix(zoneID)
+	zone, err := p.loadHostedZone(zoneID)
+	if err != nil {
+		return nil, err
+	}
+	blocking, err := p.nonDefaultRecordSet(id, zone.Name)
+	if err != nil {
+		return nil, err
+	}
+	if blocking != "" {
+		return nil, &AWSError{
+			Code:       "HostedZoneNotEmpty",
+			Message:    fmt.Sprintf("The hosted zone %s contains the record set %s, which is not its SOA or NS record.", zoneID, blocking),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	if err := p.state.Delete(context.Background(), route53Namespace, "hostedzone:"+id); err != nil {
 		return nil, fmt.Errorf("route53 deleteHostedZone delete: %w", err)
 	}
@@ -312,14 +342,73 @@ func (p *Route53Plugin) deleteHostedZone(reqCtx *RequestContext, _ *AWSRequest, 
 // code API_ChangeResourceRecordSets and API_ListResourceRecordSets publish for "No hosted zone exists
 // with the ID that you specified" (#1410).
 func (p *Route53Plugin) requireHostedZone(zoneID string) error {
+	_, err := p.loadHostedZone(zoneID)
+	return err
+}
+
+// loadHostedZone reads the zone a zone ID names, refusing an absent one as [requireHostedZone] does.
+func (p *Route53Plugin) loadHostedZone(zoneID string) (Route53HostedZone, error) {
 	data, err := p.state.Get(context.Background(), route53Namespace, "hostedzone:"+r53ZoneSuffix(zoneID))
 	if err != nil {
-		return fmt.Errorf("route53 get hosted zone %s: %w", zoneID, err)
+		return Route53HostedZone{}, fmt.Errorf("route53 get hosted zone %s: %w", zoneID, err)
 	}
 	if data == nil {
-		return &AWSError{Code: "NoSuchHostedZone", Message: "No hosted zone found with ID: " + zoneID, HTTPStatus: http.StatusNotFound}
+		return Route53HostedZone{}, &AWSError{Code: "NoSuchHostedZone", Message: "No hosted zone found with ID: " + zoneID, HTTPStatus: http.StatusNotFound}
 	}
-	return nil
+	var zone Route53HostedZone
+	if err := json.Unmarshal(data, &zone); err != nil {
+		return Route53HostedZone{}, fmt.Errorf("route53 decode hosted zone %s: %w", zoneID, err)
+	}
+	return zone, nil
+}
+
+// nonDefaultRecordSet returns the index key of the first record set in zone id that is not the zone's
+// own apex SOA or NS, or "" when there is none. A read or decode failure is an error, and an index
+// entry whose record is gone is skipped, as the listings skip it (#1417).
+func (p *Route53Plugin) nonDefaultRecordSet(id, zoneName string) (string, error) {
+	keys, err := p.loadList(id, "rrset_keys")
+	if err != nil {
+		return "", fmt.Errorf("route53 deleteHostedZone list: %w", err)
+	}
+	apex := r53CanonicalName(zoneName)
+	for _, k := range keys {
+		rrset, found, err := p.loadRecordSet(id, k)
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			continue
+		}
+		if (rrset.Type == "SOA" || rrset.Type == "NS") && r53CanonicalName(rrset.Name) == apex {
+			continue
+		}
+		return k, nil
+	}
+	return "", nil
+}
+
+// loadRecordSet reads one record set by its index key. found is false when the index entry outlived
+// its record, which a caller skips; a read or decode failure is an error (#1417).
+func (p *Route53Plugin) loadRecordSet(id, key string) (Route53ResourceRecordSet, bool, error) {
+	fullKey := "rrset:" + id + ":" + key
+	data, err := p.state.Get(context.Background(), route53Namespace, fullKey)
+	if err != nil {
+		return Route53ResourceRecordSet{}, false, fmt.Errorf("route53 get record set %s: %w", fullKey, err)
+	}
+	if data == nil {
+		return Route53ResourceRecordSet{}, false, nil
+	}
+	var rrset Route53ResourceRecordSet
+	if err := json.Unmarshal(data, &rrset); err != nil {
+		return Route53ResourceRecordSet{}, false, fmt.Errorf("route53 decode record set %s: %w", fullKey, err)
+	}
+	return rrset, true, nil
+}
+
+// r53CanonicalName lower-cases a DNS name and drops its trailing dot, so "Example.com." and
+// "example.com" compare equal.
+func r53CanonicalName(name string) string {
+	return strings.TrimSuffix(strings.ToLower(name), ".")
 }
 
 func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AWSRequest, zoneID string) (*AWSResponse, error) {
@@ -462,13 +551,13 @@ func (p *Route53Plugin) listResourceRecordSets(_ *RequestContext, _ *AWSRequest,
 	}
 	resp := xmlResponse{XMLNS: r53XMLNS, MaxItems: "300"}
 	for _, k := range keys {
-		fullKey := "rrset:" + id + ":" + k
-		data, getErr := p.state.Get(context.Background(), route53Namespace, fullKey)
-		if getErr != nil || data == nil {
-			continue
+		// A store fault or an undecodable record is an error, not a record set left out of the
+		// listing (#1417); only an index entry that outlived its record is skipped.
+		rrset, found, loadErr := p.loadRecordSet(id, k)
+		if loadErr != nil {
+			return nil, fmt.Errorf("route53 listResourceRecordSets: %w", loadErr)
 		}
-		var rrset Route53ResourceRecordSet
-		if json.Unmarshal(data, &rrset) != nil {
+		if !found {
 			continue
 		}
 		item := xmlRRSet{

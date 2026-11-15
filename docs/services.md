@@ -13068,10 +13068,10 @@ Auto Scaling itself is free; the EC2 instances a group launches are costed as EC
 |-----------|-------|
 | CreateHostedZone | Returns HTTP 201; zone IDs prefixed `/hostedzone/Z` |
 | GetHostedZone | |
-| DeleteHostedZone | |
-| ListHostedZones | |
+| DeleteHostedZone | `NoSuchHostedZone`/404 for an absent zone, and `HostedZoneNotEmpty`/400 for a zone holding any record set but its apex SOA and NS — see [Deleting a hosted zone](#deleting-a-hosted-zone) |
+| ListHostedZones | A zone record that cannot be read or decoded is an error, not a zone left out |
 | ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
-| ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
+| ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A record set that cannot be read or decoded is an error, not a record set left out |
 
 ### CloudFormation resource types
 
@@ -13089,6 +13089,24 @@ written, so nothing is stored ([#1410](https://github.com/scttfrdmn/substrate/is
 missing zone used to be written and answered with a `ChangeInfo`, so `ListResourceRecordSets` found
 records under a zone that `GetHostedZone` said did not exist. A CloudFormation `AWS::Route53::RecordSet`
 naming a missing zone now fails its resource, where it used to report success over an orphan record set.
+
+### Deleting a hosted zone
+
+`DeleteHostedZone` used to answer 200 with a `ChangeInfo` for any ID, and to delete a zone whatever it
+held ([#1416](https://github.com/scttfrdmn/substrate/issues/1416)). `API_DeleteHostedZone` publishes
+`NoSuchHostedZone` (404) for *"No hosted zone exists with the ID that you specified"* and
+`HostedZoneNotEmpty` (400) for *"The hosted zone contains resource records that are not SOA or NS
+records"*: *"You can delete a hosted zone only if it contains only the default SOA and NS records."*
+
+Substrate creates no SOA or NS record with a zone, so every record set a zone holds was written by
+`ChangeResourceRecordSets`, and each one blocks the delete except an SOA or NS at the zone's apex. A
+zone has one record set per name and type, so a write there modifies the default record rather than
+adding one. The `HostedZoneNotEmpty` message is substrate's own; the page publishes none.
+
+The two listings, and the delete's own check, skip an index entry whose record is gone, since the index
+outlived it. A record that is there but cannot be read or decoded is an error, answered as a 500, where
+it used to be left out of the listing silently
+([#1417](https://github.com/scttfrdmn/substrate/issues/1417)).
 
 ### The account a hosted zone carries reaches no response
 
