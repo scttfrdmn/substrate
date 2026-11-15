@@ -742,10 +742,11 @@ func (p *ElastiCachePlugin) addTagsToResource(reqCtx *RequestContext, req *AWSRe
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	newTags := elasticacheTagsFromParams(req.Params)
-	if err := p.updateTagsByARN(resourceARN, newTags, nil); err != nil {
+	tags, err := p.updateTagsByARN(resourceARN, newTags, nil)
+	if err != nil {
 		return nil, err
 	}
-	return p.tagListAfterChange(reqCtx, "AddTagsToResource", resourceARN)
+	return elasticacheOKResponse(reqCtx, "AddTagsToResource", elasticacheTagListResult(tags))
 }
 
 // removeTagsFromResource removes the named keys and answers the resource's remaining tags, which is
@@ -756,19 +757,11 @@ func (p *ElastiCachePlugin) removeTagsFromResource(reqCtx *RequestContext, req *
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	keys := extractIndexedParams(req.Params, "TagKeys.member")
-	if err := p.updateTagsByARN(resourceARN, nil, keys); err != nil {
-		return nil, err
-	}
-	return p.tagListAfterChange(reqCtx, "RemoveTagsFromResource", resourceARN)
-}
-
-// tagListAfterChange answers a tag mutation with the resource's tags as they now stand.
-func (p *ElastiCachePlugin) tagListAfterChange(reqCtx *RequestContext, operation, resourceARN string) (*AWSResponse, error) {
-	tags, err := p.loadTagsByARN(resourceARN)
+	tags, err := p.updateTagsByARN(resourceARN, nil, keys)
 	if err != nil {
 		return nil, err
 	}
-	return elasticacheOKResponse(reqCtx, operation, elasticacheTagListResult(tags))
+	return elasticacheOKResponse(reqCtx, "RemoveTagsFromResource", elasticacheTagListResult(tags))
 }
 
 // loadTagsByARN resolves an ElastiCache ARN and returns the resource's tags.
@@ -778,32 +771,44 @@ func (p *ElastiCachePlugin) loadTagsByARN(arn string) (map[string]string, error)
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	data, err := p.state.Get(context.Background(), elasticacheNamespace, key)
-	if err != nil || data == nil {
+	if err != nil {
+		return nil, fmt.Errorf("elasticache loadTagsByARN get %s: %w", key, err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
 	}
 	var res struct {
 		Tags map[string]string `json:"Tags"`
 	}
-	if json.Unmarshal(data, &res) != nil {
-		return nil, nil //nolint:nilerr
+	// Reported rather than swallowed, as RDS's twin does: a store fault answered 404 and a record that
+	// would not decode answered an empty TagList, each indistinguishable from a real answer.
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("elasticache loadTagsByARN unmarshal %s: %w", key, err)
 	}
 	return res.Tags, nil
 }
 
-// updateTagsByARN merges or removes tags on the resource identified by arn.
-func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, removeKeys []string) error {
+// updateTagsByARN merges or removes tags on the resource identified by arn and returns the tag set
+// it wrote.
+//
+// The set is returned rather than re-read so a tag mutation's TagList is the one this request wrote:
+// a read after the Put could report tags another request wrote in between (#1242).
+func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, removeKeys []string) (map[string]string, error) {
 	_, key, err := elasticacheResolveARN(arn)
 	if err != nil {
-		return &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	data, err := p.state.Get(context.Background(), elasticacheNamespace, key)
-	if err != nil || data == nil {
-		return &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
+	if err != nil {
+		return nil, fmt.Errorf("elasticache updateTagsByARN get %s: %w", key, err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
 	}
 
 	var m map[string]interface{}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN unmarshal: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN unmarshal: %w", err)
 	}
 	existingTags := map[string]string{}
 	if t, ok := m["Tags"]; ok && t != nil {
@@ -816,15 +821,18 @@ func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, r
 		}
 	}
 	if err := taggingStampRecordAnyEverTagged(m, len(existingTags), len(add)); err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN: %w", err)
 	}
 	merged := mergeStringMap(existingTags, add, removeKeys)
 	m["Tags"] = merged
 	updated, err := json.Marshal(m)
 	if err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN marshal: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN marshal: %w", err)
 	}
-	return p.state.Put(context.Background(), elasticacheNamespace, key, updated)
+	if err := p.state.Put(context.Background(), elasticacheNamespace, key, updated); err != nil {
+		return nil, fmt.Errorf("elasticache updateTagsByARN put %s: %w", key, err)
+	}
+	return merged, nil
 }
 
 // --- State helpers ---

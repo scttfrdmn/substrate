@@ -1,7 +1,6 @@
 package emulator
 
 import (
-	"encoding/base64"
 	"net/http"
 	"slices"
 	"strconv"
@@ -29,37 +28,40 @@ import (
 // # The token, and refusing one substrate did not issue
 //
 // A truncated page carries a `nextToken`; the last page carries none, as the pages require ("You
-// should repeat this until the NextToken response element comes back as null"). A token substrate
-// could not have issued is InvalidNextTokenException/400, refused before any state is read, so a
-// caller looping on a bad token is told so rather than handed page one again. The message is the
-// pages' own.
+// should repeat this until the NextToken response element comes back as null"). Every token is
+// [encodeQueryMarker] of `{Operation}:{position}`, so it names the operation that issued it: the page
+// says a token must be one "you received in the NextToken response of a previous call to this
+// operation", and a ListPrincipals token handed to ListResources is not. A token that does not decode,
+// names another operation, or carries a position this operation never emits is
+// InvalidNextTokenException/400, refused before any state is read, so a caller looping on a bad token
+// is told so rather than handed page one again. The message is the pages' own.
 //
 // # GetResourceShares pages on a value cursor
 //
 // Its listing is rendered in resource-share ARN order — the share index is kept sorted
 // ([updateStringIndex]) and the handler sorts again so the order does not rest on that — so the
-// cursor `query_marker_pagination.go` uses for RDS and ElastiCache fits it at no cost: the token is
-// the base64 ARN of the page's last share, and the next page is the shares whose ARN sorts strictly
-// after it. That matters here because this listing is the one that shrinks on its own. A DELETED share
-// is listed for its two-hour window (#1171) and the first listing after the window removes it from
-// the index; an offset would then skip the share that moved into its position, where the value cursor
-// resumes after the expired ARN as if it were still there.
+// [queryMarkerCursor] RDS and ElastiCache use fits it at no cost: the position is the ARN of the
+// page's last share, and the next page is the shares whose ARN sorts strictly after it. That matters
+// here because this listing is the one that shrinks on its own. A DELETED share is listed for its
+// two-hour window (#1171) and the first listing after the window removes it from the index; an offset
+// would then skip the share that moved into its position, where the value cursor resumes after the
+// expired ARN as if it were still there.
 //
-// The token is refused unless it decodes to a resource-share ARN in the caller's own account and
-// Region, which every token this operation issues is. That is a check on the text, not on state, so a
-// token naming a share that has since expired is accepted and resumes after it.
+// The position must be a resource-share ARN in the caller's own account and Region, which every token
+// this operation issues carries. That is a check on the text, not on state, so a token naming a share
+// that has since expired is accepted and resumes after it.
 //
 // # ListPrincipals and ListResources page on an offset
 //
 // Their items are not records with an identifier of their own in a sortable order: each listing is
 // the principals or resources of every live share, in share-ARN order and then association order,
-// deduplicated across shares. So they use the shared base64 offset ([pageByOffsetToken],
-// [decodeOffsetPaginationToken]). An offset counts positions, so a delete, associate or disassociate
-// between two pages shifts later pages and a walk spanning it skips or repeats one item; a token past
-// a listing that has since shrunk clamps to an empty final page rather than erroring. An expiry does
-// not shift them, because a DELETED share contributes nothing to either. A value cursor here would
-// need the items rendered in an order they compare in, which reorders both responses; that is a
-// follow-up (#1566), not part of this change.
+// deduplicated across shares. So the position is an offset, cut by [pageByOffsetToken]. The offset
+// is never 0 — the first page is the absent token — so a token naming offset 0 is refused. An offset
+// counts positions, so a delete, associate or disassociate between two pages shifts later pages and a
+// walk spanning it skips or repeats one item; a token past a listing that has since shrunk clamps to
+// an empty final page rather than erroring. An expiry does not shift them, because a DELETED share
+// contributes nothing to either. A value cursor here would need the items rendered in an order they
+// compare in, which reorders both responses; that is a follow-up (#1566), not part of this change.
 
 const (
 	// ramMaxResultsMin and ramMaxResultsMax are the Valid Range all three pages publish for maxResults.
@@ -79,6 +81,28 @@ func ramInvalidNextToken() *AWSError {
 	}
 }
 
+// ramEncodeToken renders the nextToken that resumes operation's listing at position.
+func ramEncodeToken(operation, position string) string {
+	return encodeQueryMarker(operation + ":" + position)
+}
+
+// ramDecodeToken returns the position a nextToken carries, refusing one that does not decode or that
+// operation did not issue. An empty token is the first page and decodes to "".
+func ramDecodeToken(operation, raw string) (string, error) {
+	cursor, perr := parseQueryMarker(raw)
+	if perr != nil {
+		return "", ramInvalidNextToken()
+	}
+	if cursor.after == "" {
+		return "", nil
+	}
+	position, ok := strings.CutPrefix(cursor.after, operation+":")
+	if !ok || position == "" {
+		return "", ramInvalidNextToken()
+	}
+	return position, nil
+}
+
 // ramReadMaxResults validates maxResults, returning 0 — the whole listing — for an absent one.
 func ramReadMaxResults(maxResults *int) (int, error) {
 	if maxResults == nil {
@@ -93,6 +117,9 @@ func ramReadMaxResults(maxResults *int) (int, error) {
 
 // ramPage is the decoded paging request of ListPrincipals or ListResources.
 type ramPage struct {
+	// operation is the listing's operation name, which its tokens carry.
+	operation string
+
 	// offset is where the page starts.
 	offset int
 
@@ -101,16 +128,25 @@ type ramPage struct {
 }
 
 // ramReadPage validates an offset-paged listing's maxResults and nextToken, before any state is read.
-func ramReadPage(maxResults *int, nextToken string) (ramPage, error) {
+//
+// The offset must be the canonical decimal of a positive integer: substrate emits no other, and the
+// first page is the absent token rather than offset 0.
+func ramReadPage(operation string, maxResults *int, nextToken string) (ramPage, error) {
 	size, err := ramReadMaxResults(maxResults)
 	if err != nil {
 		return ramPage{}, err
 	}
-	offset, ok := decodeOffsetPaginationToken(nextToken)
-	if !ok {
+	page := ramPage{operation: operation, size: size}
+	position, err := ramDecodeToken(operation, nextToken)
+	if err != nil || position == "" {
+		return page, err
+	}
+	offset, convErr := strconv.Atoi(position)
+	if convErr != nil || offset < 1 || strconv.Itoa(offset) != position {
 		return ramPage{}, ramInvalidNextToken()
 	}
-	return ramPage{offset: offset, size: size}, nil
+	page.offset = offset
+	return page, nil
 }
 
 // ramPaged cuts one page out of items and answers it under member, with `nextToken` when a further
@@ -119,15 +155,20 @@ func ramPaged[T any](member string, items []T, page ramPage) (*AWSResponse, erro
 	cut, next := pageByOffsetToken(items, page.offset, page.size)
 	out := map[string]interface{}{member: cut}
 	if next != "" {
-		out["nextToken"] = next
+		// pageByOffsetToken emits a token only when a further item exists; the token this listing
+		// issues is its own, bound to the operation, at the same next offset.
+		out["nextToken"] = ramEncodeToken(page.operation, strconv.Itoa(page.offset+len(cut)))
 	}
 	return ramJSONResponse(http.StatusOK, out)
 }
 
+// ramGetResourceSharesOp is the operation name GetResourceShares' tokens carry.
+const ramGetResourceSharesOp = "GetResourceShares"
+
 // ramShareCursor is GetResourceShares' decoded paging request.
 type ramShareCursor struct {
-	// after is the ARN the page starts after, "" for the first page.
-	after string
+	// marker is the ARN the page starts after; its zero value is the first page.
+	marker queryMarkerCursor
 
 	// size is the page size, or 0 for the whole remainder.
 	size int
@@ -135,46 +176,37 @@ type ramShareCursor struct {
 
 // ramReadShareCursor validates GetResourceShares' maxResults and nextToken, before any state is read.
 //
-// A token must be base64 of a resource-share ARN in the caller's account and Region; anything else is
-// one substrate did not issue.
+// A token's position must be a resource-share ARN in the caller's account and Region; anything else
+// is one substrate did not issue.
 func ramReadShareCursor(maxResults *int, nextToken, acct, region string) (ramShareCursor, error) {
 	size, err := ramReadMaxResults(maxResults)
 	if err != nil {
 		return ramShareCursor{}, err
 	}
-	if nextToken == "" {
-		return ramShareCursor{size: size}, nil
-	}
-	decoded, err := base64.StdEncoding.DecodeString(nextToken)
+	after, err := ramDecodeToken(ramGetResourceSharesOp, nextToken)
 	if err != nil {
-		return ramShareCursor{}, ramInvalidNextToken()
+		return ramShareCursor{}, err
 	}
-	after := string(decoded)
-	prefix := "arn:aws:ram:" + region + ":" + acct + ":resource-share/"
-	if !strings.HasPrefix(after, prefix) || len(after) == len(prefix) {
-		return ramShareCursor{}, ramInvalidNextToken()
+	if after != "" {
+		prefix := "arn:aws:ram:" + region + ":" + acct + ":resource-share/"
+		if !strings.HasPrefix(after, prefix) || len(after) == len(prefix) {
+			return ramShareCursor{}, ramInvalidNextToken()
+		}
 	}
-	return ramShareCursor{after: after, size: size}, nil
+	return ramShareCursor{marker: queryMarkerCursor{after: after}, size: size}, nil
 }
 
 // ramPageShares cuts GetResourceShares' page out of shares, which must be in ARN order, returning the
 // token that resumes after it when a further share exists.
 func ramPageShares(shares []ramResourceShareOut, c ramShareCursor) ([]ramResourceShareOut, string) {
 	start := 0
-	if c.after != "" {
-		start, _ = slices.BinarySearchFunc(shares, c.after, func(s ramResourceShareOut, after string) int {
-			// Every share at or before the cursor compares "before" it, so the search lands on the
-			// first share strictly after it whether or not the cursor's own share still exists.
-			if s.ResourceShareArn <= after {
-				return -1
-			}
-			return 1
-		})
+	for start < len(shares) && c.marker.skip(shares[start].ResourceShareArn) {
+		start++
 	}
 	page := shares[start:]
 	if c.size > 0 && len(page) > c.size {
 		page = page[:c.size]
-		return page, base64.StdEncoding.EncodeToString([]byte(page[len(page)-1].ResourceShareArn))
+		return page, ramEncodeToken(ramGetResourceSharesOp, page[len(page)-1].ResourceShareArn)
 	}
 	return page, ""
 }

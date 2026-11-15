@@ -163,7 +163,7 @@ func (p *RAMPlugin) loadShares(goCtx context.Context, acct, region string) ([]RA
 			return nil, fmt.Errorf("ram loadShares unmarshal %s: %w", arn, err)
 		}
 		if !ramShareVisible(&share, now) {
-			if err := p.pruneShare(goCtx, acct, region, arn); err != nil {
+			if err := p.pruneShare(goCtx, acct, region, &share); err != nil {
 				return nil, err
 			}
 			continue
@@ -182,7 +182,14 @@ func (p *RAMPlugin) loadShares(goCtx context.Context, acct, region string) ([]RA
 // that reaches the same request at the same simulated time prunes the same share. A share pruned or not
 // yet pruned answers identically: either way it is not listed and its lookup is
 // UnknownResourceException, so when the prune happens is not observable through the API.
-func (p *RAMPlugin) pruneShare(goCtx context.Context, acct, region, arn string) error {
+//
+// The share's clientToken index entries go with it (ram_idempotency.go), so they do not accumulate
+// either.
+func (p *RAMPlugin) pruneShare(goCtx context.Context, acct, region string, share *RAMResourceShare) error {
+	arn := share.ResourceShareArn
+	if err := p.dropTokenEntries(goCtx, acct, region, share); err != nil {
+		return err
+	}
 	if err := p.state.Delete(goCtx, ramNamespace, ramShareKey(acct, region, arn)); err != nil {
 		return fmt.Errorf("ram pruneShare delete %s: %w", arn, err)
 	}

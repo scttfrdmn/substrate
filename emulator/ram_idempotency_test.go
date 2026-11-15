@@ -5,6 +5,7 @@ package emulator_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -235,4 +237,76 @@ func TestRAMIdempotency_AReplayReproducesTheMintedToken(t *testing.T) {
 		assert.False(t, strings.Contains(diff.Field, "clientToken"),
 			"%s replayed a different clientToken: recorded %v, replayed %v", diff.Operation, diff.Expected, diff.Actual)
 	}
+}
+
+// TestRAMIdempotency_AWriterCannotUndoAConcurrentDelete pins the scope lock on every share writer.
+// Associate, Disassociate and UpdateResourceShare each load the share, change it and write it back;
+// without the lock one that loaded the share before a concurrent delete wrote it back ACTIVE afterwards,
+// erasing the DELETED status and the delete's token.
+func TestRAMIdempotency_AWriterCannotUndoAConcurrentDelete(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	for round := range 20 {
+		arn := ramCreate(t, ts, map[string]any{"name": fmt.Sprintf("race-%d", round)}).ResourceShare.ResourceShareArn
+		token := fmt.Sprintf("del-%d", round)
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			status, raw := ramDeleteQuery(t, ts, arn, token)
+			assert.Equal(t, http.StatusOK, status, "%s", raw)
+		})
+		for i := range 6 {
+			wg.Go(func() {
+				// Each either lands before the delete or is refused after it; neither outcome may
+				// leave the share ACTIVE.
+				switch i % 3 {
+				case 0:
+					ramOwnershipCall(t, ts, "/associateresourceshare", map[string]any{"resourceShareArn": arn, "principals": []string{"333333333333"}})
+				case 1:
+					ramOwnershipCall(t, ts, "/disassociateresourceshare", map[string]any{"resourceShareArn": arn, "principals": []string{"333333333333"}})
+				default:
+					ramOwnershipCall(t, ts, "/updateresourceshare", map[string]any{"resourceShareArn": arn, "name": "renamed"})
+				}
+			})
+		}
+		wg.Wait()
+
+		got := ramOwnershipGet(t, ts, map[string]any{"resourceOwner": "SELF", "resourceShareArns": []string{arn}})
+		require.Len(t, got.ResourceShares, 1)
+		assert.Equal(t, "DELETED", got.ResourceShares[0].Status, "round %d: a concurrent writer undid the delete", round)
+		status, raw := ramDeleteQuery(t, ts, arn, token)
+		assert.Equal(t, http.StatusOK, status, "round %d: the delete's token survived: %s", round, raw)
+	}
+}
+
+// TestRAMIdempotency_TokenEntriesGoWithAnExpiredShare pins that the token index entries are pruned
+// with the share they name, and that a create token reused after its share was deleted names the new
+// share and survives the old one's pruning.
+func TestRAMIdempotency_TokenEntriesGoWithAnExpiredShare(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	old := ramCreate(t, ts, map[string]any{"name": "reused", "clientToken": "reused"}).ResourceShare.ResourceShareArn
+	status, raw := ramDeleteQuery(t, ts, old, "gone")
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+	reborn := ramCreate(t, ts, map[string]any{"name": "reused", "clientToken": "reused"}).ResourceShare.ResourceShareArn
+	require.NotEqual(t, old, reborn)
+
+	ts.AdvanceTime(2*time.Hour + time.Second)
+	require.Equal(t, 1, ramShareCount(t, ts), "the listing prunes the expired share")
+
+	for _, prefix := range []string{"share_delete_token:", "share_client_token:"} {
+		keys, err := ts.StateManager().List(t.Context(), "ram", prefix)
+		require.NoError(t, err)
+		for _, key := range keys {
+			value, err := ts.StateManager().Get(t.Context(), "ram", key)
+			require.NoError(t, err)
+			assert.NotEqual(t, old, string(value), "%s still names the pruned share", key)
+		}
+		if prefix == "share_delete_token:" {
+			assert.Empty(t, keys, "the delete token went with its share")
+		} else {
+			assert.Len(t, keys, 1, "the reused create token names the new share")
+		}
+	}
+	again := ramCreate(t, ts, map[string]any{"name": "reused", "clientToken": "reused"})
+	assert.Equal(t, reborn, again.ResourceShare.ResourceShareArn, "the reused token still finds the new share")
 }

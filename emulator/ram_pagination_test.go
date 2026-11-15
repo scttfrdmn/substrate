@@ -93,7 +93,10 @@ func TestRAMPagination_RefusesWhatItCannotPage(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	const ownShare = "arn:aws:ram:us-east-1:123456789012:resource-share/0000"
-	for _, path := range []string{"/getresourceshares", "/listprincipals", "/listresources"} {
+	ops := map[string]string{
+		"/getresourceshares": "GetResourceShares", "/listprincipals": "ListPrincipals", "/listresources": "ListResources",
+	}
+	for path, op := range ops {
 		for _, tc := range []struct {
 			name string
 			body map[string]any
@@ -102,10 +105,14 @@ func TestRAMPagination_RefusesWhatItCannotPage(t *testing.T) {
 			{"maxResults 501", map[string]any{"maxResults": 501}},
 			{"maxResults -1", map[string]any{"maxResults": -1}},
 			{"a token that is not base64", map[string]any{"nextToken": "not a token!"}},
-			{"a token that is neither form", map[string]any{"nextToken": b64("abc")}},
-			{"an offset in a form never emitted", map[string]any{"nextToken": b64("05")}},
-			{"a share ARN in another account", map[string]any{"nextToken": b64("arn:aws:ram:us-east-1:210987654321:resource-share/0000")}},
-			{"a share ARN in another Region", map[string]any{"nextToken": b64("arn:aws:ram:eu-west-1:123456789012:resource-share/0000")}},
+			{"a token naming no operation", map[string]any{"nextToken": b64("abc")}},
+			{"a bare offset, the shared helper's form", map[string]any{"nextToken": b64("1")}},
+			{"a bare share ARN", map[string]any{"nextToken": b64(ownShare)}},
+			{"the operation with no position", map[string]any{"nextToken": b64(op + ":")}},
+			{"offset 0, which is never emitted", map[string]any{"nextToken": b64(op + ":0")}},
+			{"an offset in a form never emitted", map[string]any{"nextToken": b64(op + ":05")}},
+			{"a share ARN in another account", map[string]any{"nextToken": b64(op + ":arn:aws:ram:us-east-1:210987654321:resource-share/0000")}},
+			{"a share ARN in another Region", map[string]any{"nextToken": b64(op + ":arn:aws:ram:eu-west-1:123456789012:resource-share/0000")}},
 		} {
 			tc.body["resourceOwner"] = "SELF"
 			want := "InvalidNextTokenException"
@@ -118,16 +125,30 @@ func TestRAMPagination_RefusesWhatItCannotPage(t *testing.T) {
 		}
 	}
 
-	// Each listing's token is its own: GetResourceShares issues an ARN cursor and the two list
-	// operations an offset, and neither accepts the other's.
-	for _, tc := range []struct{ path, token string }{
-		{"/getresourceshares", b64("1")},
-		{"/listprincipals", b64(ownShare)},
-		{"/listresources", b64(ownShare)},
-	} {
-		status, code := ramOwnershipErrorCode(t, ts, tc.path, map[string]any{"resourceOwner": "SELF", "nextToken": tc.token})
-		assert.Equal(t, http.StatusBadRequest, status, tc.path)
-		assert.Equal(t, "InvalidNextTokenException", code, tc.path)
+	// Each listing's token is its own: a token one operation really issued is refused by the other two.
+	for i := range 2 {
+		ramOwnershipShare(t, ts, fmt.Sprintf("tok-%d", i),
+			[]string{fmt.Sprintf("11111111111%d", i)},
+			[]string{fmt.Sprintf("arn:aws:ec2:us-east-1:123456789012:subnet/subnet-%d", i)})
+	}
+	issued := map[string]string{}
+	members := map[string]string{"/getresourceshares": "resourceShares", "/listprincipals": "principals", "/listresources": "resources"}
+	for path, member := range members {
+		page := ramPageCall(t, ts, path, member, map[string]any{"resourceOwner": "SELF", "maxResults": 1})
+		require.NotEmpty(t, page.NextToken, path)
+		issued[path] = page.NextToken
+		again := ramPageCall(t, ts, path, member, map[string]any{"resourceOwner": "SELF", "maxResults": 1, "nextToken": page.NextToken})
+		assert.Len(t, again.Items, 1, "%s accepts its own token", path)
+	}
+	for from, token := range issued {
+		for to := range members {
+			if to == from {
+				continue
+			}
+			status, code := ramOwnershipErrorCode(t, ts, to, map[string]any{"resourceOwner": "SELF", "nextToken": token})
+			assert.Equal(t, http.StatusBadRequest, status, "%s token on %s", from, to)
+			assert.Equal(t, "InvalidNextTokenException", code, "%s token on %s", from, to)
+		}
 	}
 }
 

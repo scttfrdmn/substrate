@@ -24544,10 +24544,13 @@ share. Now:
   request's ID — so a replay reproduces it — and stored like a caller's, so retrying with it is
   idempotent too.
 
-The token lives on the share record and is found by scanning the caller's shares; the scan, the check
-and the write run under one lock per account and Region, so concurrent creates under one token make
-one share. `InvalidClientTokenException` is published and has no site, because neither page publishes
-a length or a pattern for the token.
+The token lives on the share record. One index entry per token names the share's ARN, so finding it
+is one read rather than a scan of every share. The share an entry names must still carry the token,
+and pruning an expired share removes the entries that still name it. Every share writer — create,
+delete, update, associate, disassociate — holds one lock per account and Region across its load,
+check and write. So concurrent creates under one token make one share, and an associate racing a
+delete cannot write the share back `ACTIVE`. `InvalidClientTokenException` is published and has no
+site, because neither page publishes a length or a pattern for the token.
 
 ### The three listings page
 
@@ -24564,17 +24567,20 @@ last page carries none.
   ("Multiple tag filters are evaluated as an OR condition"), and a filter with no `tagValues` matches
   any value of its key. A filter with no `tagKey` is `InvalidParameterException`/400.
 
-The two kinds of listing use two kinds of token, and neither accepts the other's:
+Every token names the operation that issued it, so a token from one listing is refused by the other
+two ("a value you received in the NextToken response of a previous call to this operation"). The
+position inside it takes one of two forms:
 
-- **`GetResourceShares`** lists shares in ARN order, so its token is a value cursor, as the RDS and
+- **`GetResourceShares`** lists shares in ARN order, so its position is a value cursor, as the RDS and
   ElastiCache describes use: the ARN of the page's last share, and the next page starts strictly after
   it. That matters because this listing shrinks on its own. A `DELETED` share is listed for its
   two-hour window and then removed, and a walk that spans the removal resumes after the expired ARN
-  rather than skipping the share that moved into its position. A token is refused unless it names a
+  rather than skipping the share that moved into its position. A position is refused unless it names a
   resource share in the caller's own account and Region; a share that has since expired still resumes.
 - **`ListPrincipals` and `ListResources`** list the principals or resources of every live share, in
   share-ARN order and then association order, with duplicates across shares removed. Those items have
-  no identifier of their own in that order, so the token is an offset. An offset counts positions:
+  no identifier of their own in that order, so the position is an offset, never 0 (a token naming 0
+  is refused, since the first page is the absent token). An offset counts positions:
   a delete, associate or disassociate between two pages shifts later pages, and a walk spanning it
   skips or repeats one item. A token past a listing that has since shrunk answers an empty final page
   rather than an error. An expiry does not shift them, because a `DELETED` share contributes nothing

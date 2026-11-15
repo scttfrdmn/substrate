@@ -20,8 +20,10 @@ type RAMPlugin struct {
 	// indexMu serializes read-modify-writes of the share-ARN index: a create adds to it while a read
 	// may prune an expired share from it, and StateManager has no compare-and-swap (#1171).
 	indexMu sync.Mutex
-	// scopeMu serializes CreateResourceShare's and DeleteResourceShare's clientToken scan, check and
-	// write per account and Region (#1170). It is always taken before indexMu, never while holding it.
+	// scopeMu serializes every share writer per account and Region — the clientToken lookup, check
+	// and write of CreateResourceShare and DeleteResourceShare, and the load-modify-Put of Update,
+	// Associate and DisassociateResourceShare (#1170). It is always taken before indexMu, never while
+	// holding it.
 	scopeMu ramScopeMutex
 }
 
@@ -150,6 +152,9 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, shareArn), d); err != nil {
 		return nil, fmt.Errorf("ram createResourceShare put: %w", err)
 	}
+	if err := p.putTokenEntry(goCtx, ramClientTokenKey(reqCtx.AccountID, reqCtx.Region, token), shareArn); err != nil {
+		return nil, err
+	}
 	p.indexMu.Lock()
 	defer p.indexMu.Unlock()
 	if err := updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn); err != nil {
@@ -241,6 +246,11 @@ func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest)
 			return nil, ramInvalidBody()
 		}
 	}
+
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
@@ -336,6 +346,9 @@ func (p *RAMPlugin) deleteResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, share.ResourceShareArn), d); err != nil {
 		return nil, fmt.Errorf("ram deleteResourceShare put: %w", err)
 	}
+	if err := p.putTokenEntry(goCtx, ramDeleteTokenKey(reqCtx.AccountID, reqCtx.Region, token), share.ResourceShareArn); err != nil {
+		return nil, err
+	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
 		"clientToken": token,
@@ -354,6 +367,11 @@ func (p *RAMPlugin) associateResourceShare(reqCtx *RequestContext, req *AWSReque
 			return nil, ramInvalidBody()
 		}
 	}
+
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
@@ -393,6 +411,11 @@ func (p *RAMPlugin) disassociateResourceShare(reqCtx *RequestContext, req *AWSRe
 			return nil, ramInvalidBody()
 		}
 	}
+
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
@@ -442,7 +465,7 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err != nil {
 		return nil, err
 	}
-	page, err := ramReadPage(input.MaxResults, input.NextToken)
+	page, err := ramReadPage("ListPrincipals", input.MaxResults, input.NextToken)
 	if err != nil {
 		return nil, err
 	}
@@ -508,7 +531,7 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, ramInvalidParameter("resourceRegionScope must be one of " +
 			strings.Join(ramRegionScopes, ", ") + ", was " + input.ResourceRegionScope)
 	}
-	page, err := ramReadPage(input.MaxResults, input.NextToken)
+	page, err := ramReadPage("ListResources", input.MaxResults, input.NextToken)
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +589,7 @@ func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare,
 	if err != nil {
 		return nil, fmt.Errorf("ram loadShare get: %w", err)
 	}
-	notFound := &AWSError{Code: "UnknownResourceException", Message: "ResourceShare " + shareArn + " not found.", HTTPStatus: http.StatusBadRequest}
+	notFound := &AWSError{Code: ramUnknownResourceCode, Message: "ResourceShare " + shareArn + " not found.", HTTPStatus: http.StatusBadRequest}
 	if data == nil {
 		return nil, notFound
 	}
@@ -575,7 +598,7 @@ func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare,
 		return nil, fmt.Errorf("ram loadShare unmarshal: %w", err)
 	}
 	if !ramShareVisible(&share, p.tc.Now()) {
-		if err := p.pruneShare(goCtx, acct, region, shareArn); err != nil {
+		if err := p.pruneShare(goCtx, acct, region, &share); err != nil {
 			return nil, err
 		}
 		return nil, notFound
