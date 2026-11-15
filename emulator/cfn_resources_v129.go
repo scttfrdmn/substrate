@@ -32,7 +32,6 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
-	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -839,8 +838,8 @@ func cfnSGDeclaredPermissions(v interface{}, cctx *cfnContext) ([]EC2IPPermissio
 }
 
 // cfnSGRuleKey identifies one rule as EC2 compares it — one source under one protocol and port
-// range ([ec2CanonicalPortRange]) — with a CIDR in canonical network form, so `10.0.0.1/16` and
-// `10.0.0.0/16` are one rule.
+// range ([ec2CanonicalPortRange]) — with a CIDR in EC2's canonical form ([ec2CanonicalRuleCIDR]),
+// so `10.0.0.1/16` and `10.0.0.0/16` are one rule.
 type cfnSGRuleKey struct {
 	port   ec2RulePortRange
 	kind   string
@@ -873,12 +872,12 @@ func cfnSGRules(perms []EC2IPPermission) []cfnSGRule {
 		for _, c := range perm.IPRanges {
 			p := port
 			p.IPRanges = []string{c}
-			one(p, cfnSGRuleKey{port: pr, kind: "cidr", source: cfnCanonicalCIDR(c)})
+			one(p, cfnSGRuleKey{port: pr, kind: "cidr", source: cfnSGCanonicalCIDR(c, false)})
 		}
 		for _, c := range perm.IPv6Ranges {
 			p := port
 			p.IPv6Ranges = []string{c}
-			one(p, cfnSGRuleKey{port: pr, kind: "cidr6", source: cfnCanonicalCIDR(c)})
+			one(p, cfnSGRuleKey{port: pr, kind: "cidr6", source: cfnSGCanonicalCIDR(c, true)})
 		}
 		for _, id := range perm.PrefixListIDs {
 			p := port
@@ -922,30 +921,48 @@ func cfnSGHeld(set map[cfnSGRuleKey]bool, rule cfnSGRule) bool {
 	return false
 }
 
-// cfnCanonicalCIDR returns a CIDR in canonical network form — host bits cleared, IPv6 compressed —
-// or the input unchanged when it does not parse, so an unparseable value still compares against
-// itself.
-func cfnCanonicalCIDR(cidr string) string {
-	p, err := netip.ParsePrefix(strings.TrimSpace(cidr))
+// cfnSGCanonicalCIDR is a rule CIDR in EC2's canonical form ([ec2CanonicalRuleCIDR]), or the text
+// unchanged when EC2 would refuse it, so an unparseable value still compares against itself and
+// the refusal comes from the request that carries it.
+func cfnSGCanonicalCIDR(cidr string, v6 bool) string {
+	canonical, err := ec2CanonicalRuleCIDR(cidr, v6)
 	if err != nil {
 		return cidr
 	}
-	return p.Masked().String()
+	return canonical
 }
 
 // cfnSGRuleDiff returns the rules to revoke — in before, not in after, and still held by the group
 // — and the rules to authorize — in after, not in before, and not already held — each as one
-// permission per source. Each side is indexed once, so the diff is linear in the rule counts.
+// permission per source.
+//
+// The two declarations are each indexed once, so their diff is linear in the rule counts. Whether
+// the group holds a rule is EC2's own test, [ec2AuthorizeDuplicates] — the check an authorize is
+// refused on — so the updater and the plugin cannot disagree about what one rule is; it is asked
+// only for the rules the declaration diff moves, with the candidate's CIDRs canonical as an
+// authorize stores them.
 func cfnSGRuleDiff(before, after, live []EC2IPPermission) (revoke, authorize []EC2IPPermission) {
-	beforeRules, afterRules, liveRules := cfnSGRules(before), cfnSGRules(after), cfnSGRules(live)
-	beforeSet, afterSet, liveSet := cfnSGKeySet(beforeRules), cfnSGKeySet(afterRules), cfnSGKeySet(liveRules)
+	beforeRules, afterRules := cfnSGRules(before), cfnSGRules(after)
+	beforeSet, afterSet := cfnSGKeySet(beforeRules), cfnSGKeySet(afterRules)
+	held := func(perm EC2IPPermission) bool {
+		probe := perm
+		probe.IPRanges = slices.Clone(perm.IPRanges)
+		probe.IPv6Ranges = slices.Clone(perm.IPv6Ranges)
+		for i, c := range probe.IPRanges {
+			probe.IPRanges[i] = cfnSGCanonicalCIDR(c, false)
+		}
+		for i, c := range probe.IPv6Ranges {
+			probe.IPv6Ranges[i] = cfnSGCanonicalCIDR(c, true)
+		}
+		return ec2AuthorizeDuplicates(live, []EC2IPPermission{probe})
+	}
 	for _, r := range beforeRules {
-		if !cfnSGHeld(afterSet, r) && cfnSGHeld(liveSet, r) {
+		if !cfnSGHeld(afterSet, r) && held(r.perm) {
 			revoke = append(revoke, r.perm)
 		}
 	}
 	for _, r := range afterRules {
-		if !cfnSGHeld(beforeSet, r) && !cfnSGHeld(liveSet, r) {
+		if !cfnSGHeld(beforeSet, r) && !held(r.perm) {
 			authorize = append(authorize, r.perm)
 		}
 	}
