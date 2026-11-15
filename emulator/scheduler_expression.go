@@ -6,12 +6,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-
-	// The IANA database is embedded so a ScheduleExpressionTimezone resolves the same way on
-	// every host, including a container image with no /usr/share/zoneinfo. A schedule's
-	// occurrences are part of what a replay must reproduce, and a zone that loads on one machine
-	// and not another would make them depend on where the replay runs (#1501).
-	_ "time/tzdata"
 )
 
 // The three schedule expressions EventBridge Scheduler publishes, evaluated on the simulated
@@ -55,21 +49,10 @@ type schedExpression struct {
 	loc   *time.Location
 }
 
-// errSchedExpression reports an expression substrate cannot evaluate. Such a schedule is stored
-// and reported as sent, and never fires.
+// errSchedExpression reports an expression substrate cannot evaluate. CreateSchedule and
+// UpdateSchedule refuse one (#1514); a record stored before that refusal is reported as sent and
+// never fires.
 var errSchedExpression = errors.New("unparseable schedule expression")
-
-// schedLocation resolves a ScheduleExpressionTimezone, UTC when the schedule names none.
-func schedLocation(tz string) (*time.Location, error) {
-	if tz == "" {
-		return time.UTC, nil
-	}
-	loc, err := time.LoadLocation(tz)
-	if err != nil {
-		return nil, fmt.Errorf("%w: timezone %q: %w", errSchedExpression, tz, err)
-	}
-	return loc, nil
-}
 
 // parseSchedExpression parses expr, evaluated in tz.
 func parseSchedExpression(expr, tz string) (*schedExpression, error) {

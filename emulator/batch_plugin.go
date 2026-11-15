@@ -26,6 +26,9 @@ type BatchPlugin struct {
 	// seedMu serializes a job progression's read-modify-write of its observation counter; see
 	// [progression.observe].
 	seedMu sync.Mutex
+	// queueMu serializes SubmitJob's queue check and job write against DeleteJobQueue, per
+	// queue (#1422); see batch_submit.go.
+	queueMu batchQueueMutex
 }
 
 // Name returns the service name "batch".
@@ -604,8 +607,23 @@ func (p *BatchPlugin) submitJob(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, batchClientError("the request body is not valid JSON")
 	}
-	if body.JobName == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "jobName is required", HTTPStatus: http.StatusBadRequest}
+	// All three are Required: Yes, and the queue and definition must be usable; see batch_submit.go
+	// (#1422). The shape is checked before any state is read.
+	for _, required := range []struct{ member, value string }{
+		{"jobName", body.JobName}, {"jobQueue", body.JobQueue}, {"jobDefinition", body.JobDefinition},
+	} {
+		if required.value == "" {
+			return nil, batchClientError(required.member + " is required")
+		}
+	}
+	// Held from the queue check to the job's write; see batch_submit.go.
+	unlock := p.queueMu.lock(ctx, batchNameFromIdentifier(body.JobQueue))
+	defer unlock()
+	if err := p.batchRequireSubmittableQueue(ctx, body.JobQueue); err != nil {
+		return nil, err
+	}
+	if err := p.batchRequireActiveDefinition(ctx, body.JobDefinition); err != nil {
+		return nil, err
 	}
 
 	jobID := generateBatchJobID(ctx.IDs)
@@ -936,6 +954,10 @@ func (p *BatchPlugin) registerJobDefinition(ctx *RequestContext, req *AWSRequest
 	}
 
 	if err := p.putBatchRecord(ctx, "job-definition", name, def); err != nil {
+		return nil, err
+	}
+	// SubmitJob resolves a bare name to its latest ACTIVE revision through this index (#1422).
+	if err := p.setRevisionActive(ctx, body.JobDefinitionName, revision, true); err != nil {
 		return nil, err
 	}
 	return batchJSONResponse(http.StatusOK, map[string]interface{}{

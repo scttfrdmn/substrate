@@ -95,6 +95,8 @@ emulator/backup_types.go	BackupVault	AccountID	AccountID
 emulator/backup_types.go	BackupVault	Region	Region
 emulator/batch_plugin.go	BatchJob	AccountID	accountID
 emulator/batch_plugin.go	BatchJob	Region	region
+emulator/bedrock_guardrail.go	bedrockGuardrailBlocklistSeed	AccountID	accountId,omitempty
+emulator/bedrock_guardrail.go	bedrockGuardrailBlocklistSeed	Region	region,omitempty
 emulator/bedrock_runtime_plugin.go	BedrockModelInvocationJob	AccountID	accountID
 emulator/bedrock_runtime_plugin.go	BedrockModelInvocationJob	Region	region
 emulator/budgets_types.go	Budget	AccountID	AccountId

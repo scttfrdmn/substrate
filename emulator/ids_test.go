@@ -926,6 +926,13 @@ func idsRecordBatchAndEMRServerless(t *testing.T, ts *emulator.TestServer) {
 	var job struct {
 		JobID string `json:"jobId"`
 	}
+	idsRESTCall(t, ts, idsBatchHost, http.MethodPost, "/v1/createjobqueue", map[string]any{
+		"jobQueueName": "ids-queue", "priority": 1, "state": "ENABLED",
+		"computeEnvironmentOrder": []map[string]any{{"order": 1, "computeEnvironment": "ce"}},
+	})
+	idsRESTCall(t, ts, idsBatchHost, http.MethodPost, "/v1/registerjobdefinition", map[string]any{
+		"jobDefinitionName": "ids-def", "type": "container",
+	})
 	require.NoError(t, json.Unmarshal(idsRESTCall(t, ts, idsBatchHost, http.MethodPost,
 		"/v1/submitjob", map[string]any{
 			"jobName": "ids-tier3", "jobQueue": "ids-queue", "jobDefinition": "ids-def",

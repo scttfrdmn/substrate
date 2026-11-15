@@ -17,10 +17,11 @@ package emulator
 // publish, written out in each rather than factored into a third helper, because the whole point
 // is that the shapes are separate and a shared map is what let them drift together.
 //
-// Neither builder renders EncryptionType, KeyId or StreamModeDetails, and the summary renders
-// none of ChannelCount, ConsumerCount, MaxRecordSizeInKiB, StreamId or WarmThroughput. All are
-// Required: No on their pages and substrate holds no state for any of them; capacity mode is
-// #1118.
+// Both builders render StreamModeDetails from the record (#1118), and the summary renders
+// MaxRecordSizeInKiB (#1418). Both are Required: No, and a record holding neither reads back as
+// PROVISIONED and 1024. Neither builder renders EncryptionType or KeyId, and the summary renders
+// none of ChannelCount, ConsumerCount, RecordDistributionStrategy, StreamId or WarmThroughput. All
+// are Required: No on their pages and substrate holds no state for any of them.
 
 // kinesisRenderEnhancedMonitoring renders a stream's stored metric names as the published shape.
 //
@@ -56,6 +57,7 @@ func buildStreamDescription(stream KinesisStream) map[string]interface{} {
 		"StreamName":              stream.StreamName,
 		"StreamARN":               stream.StreamArn,
 		"StreamStatus":            stream.StreamStatus,
+		"StreamModeDetails":       kinesisRenderStreamModeDetails(stream),
 		"RetentionPeriodHours":    stream.RetentionPeriodHours,
 		"StreamCreationTimestamp": stream.CreatedAt.Unix(),
 		"EnhancedMonitoring":      kinesisRenderEnhancedMonitoring(stream.EnhancedMonitoring),
@@ -78,5 +80,7 @@ func buildStreamDescriptionSummary(stream KinesisStream) map[string]interface{} 
 		"StreamCreationTimestamp": stream.CreatedAt.Unix(),
 		"EnhancedMonitoring":      kinesisRenderEnhancedMonitoring(stream.EnhancedMonitoring),
 		"OpenShardCount":          stream.ShardCount,
+		"StreamModeDetails":       kinesisRenderStreamModeDetails(stream),
+		"MaxRecordSizeInKiB":      kinesisMaxRecordSizeBytes(stream) >> 10,
 	}
 }

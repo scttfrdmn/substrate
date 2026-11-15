@@ -126,6 +126,9 @@ func (p *BatchPlugin) deregisterJobDefinition(ctx *RequestContext, req *AWSReque
 	if err := p.saveBatchRecord(ctx, "job-definition", name, def); err != nil {
 		return nil, err
 	}
+	if err := p.setRevisionActive(ctx, def.JobDefinitionName, def.Revision, false); err != nil {
+		return nil, err
+	}
 	// "If the action is successful, the service sends back an HTTP 200 response with an empty
 	// HTTP body"; the page's own sample response is {}.
 	return batchJSONResponse(http.StatusOK, map[string]string{})
@@ -243,7 +246,9 @@ func (p *BatchPlugin) updateComputeEnvironment(ctx *RequestContext, req *AWSRequ
 // deleteJobQueue deletes a job queue, which must already be DISABLED: "You must first disable
 // submissions for a queue with the UpdateJobQueue operation." Its compute environments need
 // not be disassociated first — "It's not necessary to disassociate compute environments from a
-// queue before submitting a DeleteJobQueue request." The queue's jobs are left as they are.
+// queue before submitting a DeleteJobQueue request." "All jobs in the queue are eventually
+// terminated when you delete a job queue": substrate ends them at delete time (#1422); see
+// batch_submit.go.
 func (p *BatchPlugin) deleteJobQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		JobQueue string `json:"jobQueue"`
@@ -256,6 +261,10 @@ func (p *BatchPlugin) deleteJobQueue(ctx *RequestContext, req *AWSRequest) (*AWS
 	}
 
 	name := batchNameFromIdentifier(body.JobQueue)
+	// Held from the check to the delete, so no SubmitJob lands a job between the job sweep and the
+	// queue's removal; see batch_submit.go.
+	unlock := p.queueMu.lock(ctx, name)
+	defer unlock()
 	var queue BatchJobQueue
 	found, err := p.loadBatchRecord(ctx, "job-queue", name, &queue)
 	if err != nil {
@@ -267,6 +276,10 @@ func (p *BatchPlugin) deleteJobQueue(ctx *RequestContext, req *AWSRequest) (*AWS
 	if queue.State != batchStateDisabled {
 		return nil, batchClientError(fmt.Sprintf(
 			"job queue %s must be DISABLED before it can be deleted; its state is %s", name, queue.State))
+	}
+	// The jobs first, so a delete that fails partway leaves the queue for a retry to finish.
+	if err := p.failQueueJobs(ctx, name); err != nil {
+		return nil, err
 	}
 	if err := p.deleteBatchRecord(ctx, "job-queue", name); err != nil {
 		return nil, err

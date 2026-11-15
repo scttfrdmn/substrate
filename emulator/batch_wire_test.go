@@ -27,6 +27,7 @@ func TestBatchWire_JobResponsesCarryNoBookkeepingMember(t *testing.T) {
 		return wireREST(t, p, ctx, "batch", http.MethodPost, path, body)
 	}
 
+	batchEnsureSubmittable(t, batchPluginPoster(t, p, ctx), "wire-queue", "wire-def")
 	submitted := call("/v1/submitjob", map[string]any{"jobName": "wire-job", "jobQueue": "wire-queue", "jobDefinition": "wire-def"})
 	var job struct {
 		JobID string `json:"jobId"`

@@ -147,3 +147,22 @@ func TestCFNRoute53_AStackDeleteDeletesTheHostedZone(t *testing.T) {
 	assert.Equal(t, "DELETE_COMPLETE", byLogical["MyZone"].Status, "%+v", byLogical["MyZone"])
 	assert.Equal(t, "DELETE_COMPLETE", byLogical["Rec"].Status, "%+v", byLogical["Rec"])
 }
+
+// A stack holding a zone and a record set group tears down. DeleteHostedZone refuses a zone that
+// still holds record sets (#1416), and the sweep used to skip the group, so the zone could never be
+// deleted. The group now deletes its record sets, and the zone follows.
+func TestCFNRoute53_AStackDeleteRemovesARecordSetGroupsRecordSetsAndItsZone(t *testing.T) {
+	d := newV016FullDeployer(t)
+	ctx := context.Background()
+	result, err := d.Deploy(ctx, cfnRoute53GroupTemplate, "r53-group-delete", nil)
+	require.NoError(t, err)
+	require.Equal(t, "CREATE_COMPLETE", result.Status)
+
+	deletions := d.DeleteStackResourcesForTest(ctx, "r53-group-delete")
+	byLogical := map[string]emulator.CFNResourceDeletion{}
+	for _, del := range deletions {
+		byLogical[del.LogicalID] = del
+	}
+	assert.Equal(t, "DELETE_COMPLETE", byLogical["Group"].Status, "%+v", byLogical["Group"])
+	assert.Equal(t, "DELETE_COMPLETE", byLogical["MyZone"].Status, "%+v", byLogical["MyZone"])
+}

@@ -266,6 +266,7 @@ func TestAPIGatewayV2Wire_Deployment(t *testing.T) {
 func TestAPIGatewayV2Wire_DomainNameAndApiMapping(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
 	apiID := agwv2API(t, p, ctx, "mapping-wire")
+	agwv2DefaultStage(t, p, ctx, apiID)
 
 	dn, rawDN := agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{
 		"DomainName": "v2.example.com",

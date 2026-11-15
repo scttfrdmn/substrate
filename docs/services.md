@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1098 operations**. This
+Substrate ships **68 built-in service plugins** routing **1099 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -55,7 +55,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 34 | Glue | `glue` | JSON | 33 |
 | 35 | Health | `health` | JSON | 4 |
 | 36 | IAM | `iam` | Query | 74 |
-| 37 | Kinesis Data Streams | `kinesis` | JSON | 17 |
+| 37 | Kinesis Data Streams | `kinesis` | JSON | 18 |
 | 38 | KMS | `kms` | JSON | 24 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
 | 40 | CloudWatch Logs | `logs` | JSON | 14 |
@@ -2959,8 +2959,8 @@ would be refused anyway, and reporting the detach's own error names what went wr
 A profile declaring no roles dispatches only its own delete.
 
 Coverage is stated rather than implied. Of the 109 resource types the deployer
-dispatches, 89 have a delete request and 11 are state-only types whose stub record
-is removed. The remaining 9 sweep to a no-op and are reported as `DELETE_SKIPPED`
+dispatches, 90 have a delete request and 11 are state-only types whose stub record
+is removed. The remaining 8 sweep to a no-op and are reported as `DELETE_SKIPPED`
 naming the reason:
 
 | Type | Why the sweep is a no-op |
@@ -2969,7 +2969,6 @@ naming the reason:
 | `AWS::ECS::CapacityProvider` | the deploy records no state to remove |
 | `AWS::SSM::Association` | the deploy records no state to remove |
 | `AWS::SecretsManager::SecretTargetAttachment` | the deploy records no state to remove |
-| `AWS::Route53::RecordSetGroup` | its record sets are dispatches the stack does not record individually |
 | `AWS::ECR::LifecyclePolicy` | `DeleteLifecyclePolicy` is not routed; deleting the repository removes the policy |
 | `AWS::ApiGateway::UsagePlanKey` | `DeleteUsagePlanKey` is not routed; the key goes with its usage plan |
 | `AWS::Cognito::IdentityPoolRoleAttachment` | Cognito models no `DeleteIdentityPoolRoles` |
@@ -12909,7 +12908,7 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 | UpdateAutoScalingGroup | Any subset of Create's members; a member not sent is unchanged, inside `MixedInstancesPolicy` too (overrides are replaced as a list when any is sent, distribution members one by one, an empty `SpotMaxPrice` clears it, a `LaunchTemplateSpecification` carrying only `Version` re-points the existing template). A new `MinSize` above, or `MaxSize` below, the current desired capacity moves it there when no `DesiredCapacity` is named, as the reference states. Reconciles before answering |
 | DeleteAutoScalingGroup | `ResourceInUse`/400 while instances remain unless `ForceDelete`, which terminates them through EC2. A `ForceDelete` whose termination fails fails the request and leaves the group, still owning its instances |
 | SetDesiredCapacity | Outside `MinSize`–`MaxSize` is `ValidationError`/400. `HonorCooldown=true` inside `DefaultCooldown` of the group's last activity is `ScalingActivityInProgress`/400. Scales out or in before answering |
-| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` lowers desired by the instance's weight, and below `MinSize` is `ValidationError`/400. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
+| TerminateInstanceInAutoScalingGroup | `InstanceId`, or `InstanceIds.member.N` with `AutoScalingGroupName` (answering `Activities`). An `InstanceId` belongs to whichever group owns it; an `AutoScalingGroupName` naming a different group is `ValidationError`/400, as is a repeated ID. Every instance is validated before any is terminated, and the batch terminates whole. `ShouldDecrementDesiredCapacity=false` launches the replacement before answering; `true` lowers desired by the instance's weight, held at `MinSize` and never below (#1526). When every instance terminated weighs one, desired less the full decrement below `MinSize` is `ValidationError`/400, as before; a weighted decrement is refused only when desired already equals `MinSize` (both observed wording). AWS was observed clamping a weighted decrement at a `MinSize` of 0 and terminating rather than refusing; that it clamps the same way above 0 is substrate's reading. The answered activity is `InProgress`, as the published sample shows; the recorded one is `Successful` |
 | SuspendProcesses | The nine published processes, all of them when `ScalingProcesses` is omitted. `Launch`, `Terminate`, `HealthCheck` and `ReplaceUnhealthy` change what a reconciliation does; the others are recorded and echoed |
 | ResumeProcesses | |
 | DescribeScalingActivities | Most recent first; `AutoScalingGroupName`, `ActivityIds`, `IncludeDeletedGroups` (which adds `AutoScalingGroupState`), `Filters` `Status`/`StartTimeLowerBound`/`StartTimeUpperBound`. Pages on `NextToken`/`MaxRecords` (default and max 100). An observation |
@@ -12970,8 +12969,10 @@ at desired, which is at most `MaxSize`, so capacity stays below `MaxSize` plus o
 The On-Demand/Spot split and zone balance are computed in units, for the size the launch or
 termination leaves the group at. A scale-in terminates only an instance whose weight fits in the
 excess over desired, so the group never drops below it (AWS publishes no finer rule). A decrementing
-`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight, held at zero. It is
-refused, as before, when desired less the full decrement would fall below `MinSize`.
+`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight. When every instance it
+terminates weighs one, it is refused, as before, when desired less the full decrement would fall below
+`MinSize`. A weighted decrement is held at `MinSize` instead, and refused only when desired already
+equals `MinSize` (#1526).
 Changing an override's weight reconciles to desired, and an instance whose type no override names any
 more keeps its last weight, as the instance-weighting guide states. A weighted group's members report
 `WeightedCapacity` (a string) in `DescribeAutoScalingGroups` and `DescribeAutoScalingInstances`; the
@@ -13068,10 +13069,10 @@ Auto Scaling itself is free; the EC2 instances a group launches are costed as EC
 |-----------|-------|
 | CreateHostedZone | Returns HTTP 201; zone IDs prefixed `/hostedzone/Z` |
 | GetHostedZone | |
-| DeleteHostedZone | |
-| ListHostedZones | |
+| DeleteHostedZone | `NoSuchHostedZone`/404 for an absent zone, and `HostedZoneNotEmpty`/400 for a zone holding any record set but its apex SOA and NS — see [Deleting a hosted zone](#deleting-a-hosted-zone) |
+| ListHostedZones | A zone record that cannot be read or decoded is an error, not a zone left out |
 | ChangeResourceRecordSets | CREATE/DELETE/UPSERT actions; [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
-| ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone |
+| ListResourceRecordSets | [`NoSuchHostedZone`](#a-record-set-needs-its-hosted-zone) for an absent zone. A record set that cannot be read or decoded is an error, not a record set left out |
 
 ### CloudFormation resource types
 
@@ -13089,6 +13090,28 @@ written, so nothing is stored ([#1410](https://github.com/scttfrdmn/substrate/is
 missing zone used to be written and answered with a `ChangeInfo`, so `ListResourceRecordSets` found
 records under a zone that `GetHostedZone` said did not exist. A CloudFormation `AWS::Route53::RecordSet`
 naming a missing zone now fails its resource, where it used to report success over an orphan record set.
+
+### Deleting a hosted zone
+
+`DeleteHostedZone` used to answer 200 with a `ChangeInfo` for any ID, and to delete a zone whatever it
+held ([#1416](https://github.com/scttfrdmn/substrate/issues/1416)). `API_DeleteHostedZone` publishes
+`NoSuchHostedZone` (404) for *"No hosted zone exists with the ID that you specified"* and
+`HostedZoneNotEmpty` (400) for *"The hosted zone contains resource records that are not SOA or NS
+records"*: *"You can delete a hosted zone only if it contains only the default SOA and NS records."*
+
+Substrate creates no SOA or NS record with a zone, so every record set a zone holds was written by
+`ChangeResourceRecordSets`, and each one blocks the delete except an SOA or NS at the zone's apex. A
+zone has one record set per name and type, so a write there modifies the default record rather than
+adding one. The `HostedZoneNotEmpty` message is substrate's own; the page publishes none.
+
+The two listings, and the delete's own check, skip an index entry whose record is gone, since the index
+outlived it. A record that is there but cannot be read or decoded is an error, answered as a 500, where
+it used to be left out of the listing silently
+([#1417](https://github.com/scttfrdmn/substrate/issues/1417)).
+
+A CloudFormation stack delete still converges: an `AWS::Route53::RecordSetGroup`'s delete removes its
+record sets with a `ChangeResourceRecordSets` `DELETE` batch per zone, where the sweep used to skip the
+group, so the zone it lives in can then be deleted.
 
 ### The account a hosted zone carries reaches no response
 
@@ -16843,12 +16866,23 @@ than silently taken:
   decoded, checked and reported: `DeadLetterConfig.Arn` (length 1–1600, the published SQS-ARN pattern),
   `EventBridgeParameters` (`DetailType` 1–128 and `Source` 1–256, both `Required: Yes`; `Source`'s
   pattern is not checked) and `SqsParameters.MessageGroupId` (1–128).
-- `RetryPolicy`'s published ranges (`MaximumRetryAttempts` 0–185, `MaximumEventAgeInSeconds`
-  60–86400) are not checked.
-- A `ScheduleExpression` substrate cannot evaluate — a malformed `at()`, `rate()` or `cron()`, or a
-  `ScheduleExpressionTimezone` that is not an IANA zone — is stored and reported as sent and **never
-  fires**. AWS refuses one with `ValidationException`, but publishes neither which inputs nor the
-  message, so substrate does not invent the refusal.
+
+Two checks were added in [#1514](https://github.com/scttfrdmn/substrate/issues/1514), on both
+`CreateSchedule` and `UpdateSchedule`:
+
+- `RetryPolicy`'s published Valid Ranges, `MaximumRetryAttempts` 0–185 and `MaximumEventAgeInSeconds`
+  60–86400, are checked when a member is sent, in the same *"1 validation error detected"* form as
+  `MaximumWindowInMinutes`.
+- A `ScheduleExpression` substrate cannot evaluate — a malformed `at()`, `rate()` or `cron()` — or a
+  `ScheduleExpressionTimezone` that is not an IANA zone is refused with `ValidationException`/400. It used
+  to be stored, reported as sent, and never fire. The expression is parsed by the same parser the clock
+  fires schedules with, which accepts the three forms and every wildcard the User Guide's
+  `schedule-types` page publishes (`, - * / ? L W #`), so a refusal is an expression the clock could never
+  fire. AWS refuses such input with `ValidationException` but publishes neither which inputs nor the
+  message, so which inputs are refused is substrate's reading and the messages are its own. A zone must
+  be named exactly, case included, in the copy of the IANA database (release 2026c) embedded in the
+  binary, which the clock also evaluates it with. The host's zoneinfo is never consulted and `Local` is
+  refused, so acceptance and firing times do not depend on the host.
 
 ### `UpdateSchedule` replaces the schedule, it does not merge into it
 
@@ -17104,8 +17138,7 @@ mapping's polls.
   ([#1511](https://github.com/scttfrdmn/substrate/issues/1511)), and the templated targets recorded as
   intent ([#1512](https://github.com/scttfrdmn/substrate/issues/1512)).
 - An observable `DELETING` window, `ClientToken` idempotency and the quotas
-  ([#1515](https://github.com/scttfrdmn/substrate/issues/1515)); refusing an unevaluable expression or an
-  out-of-range `RetryPolicy` ([#1514](https://github.com/scttfrdmn/substrate/issues/1514)).
+  ([#1515](https://github.com/scttfrdmn/substrate/issues/1515)).
 - The read-only-action restriction on universal targets, and the role's trust policy.
 
 ### `CreateSchedule` answers 200, not 201
@@ -17573,33 +17606,33 @@ no error (#529).
 | GetApi | |
 | UpdateApi | Applies `Name` and `Description` when non-empty and ignores every other member, including `RouteSelectionExpression` and the CORS configuration; `404 NotFoundException` for an unknown API |
 | DeleteApi | |
-| GetApis | |
+| GetApis | Pages by `maxResults`/`nextToken`, in ascending API ID — see [The v2 collections page](#the-v2-collections-page) |
 | CreateRoute | |
 | GetRoute | |
-| GetRoutes | One page, in ascending route ID |
+| GetRoutes | Pages by `maxResults`/`nextToken`, in ascending route ID |
 | UpdateRoute | Patches `routeKey`, `target`, `authorizationType` and `authorizerId`; a member absent from the body is left as it was (see *An update changes only what it names*). `404 NotFoundException` for an unknown API or route, `400 BadRequestException` for a body that does not decode |
 | DeleteRoute | |
 | CreateIntegration | |
 | GetIntegration | |
-| GetIntegrations | One page, in ascending integration ID |
+| GetIntegrations | Pages by `maxResults`/`nextToken`, in ascending integration ID |
 | DeleteIntegration | `204`, and idempotent: an integration ID with nothing behind it is not refused |
 | CreateStage | |
 | GetStage | |
-| GetStages | One page, in ascending stage name |
+| GetStages | Pages by `maxResults`/`nextToken`, in ascending stage name |
 | UpdateStage | Patches `autoDeploy`, `accessLogSettings`, `defaultRouteSettings`, `description`, `stageVariables` and `deploymentId`; a member absent from the body is left as it was, and `lastUpdatedDate` is set from the simulated clock. `404 NotFoundException` for an unknown API or stage, `400 BadRequestException` for a body that does not decode |
 | DeleteStage | `204`, and idempotent: a stage name with nothing behind it is not refused |
 | CreateAuthorizer | |
 | GetAuthorizer | `404 NotFoundException` for an unknown authorizer |
-| GetAuthorizers | One page, in ascending authorizer ID |
+| GetAuthorizers | Pages by `maxResults`/`nextToken`, in ascending authorizer ID |
 | DeleteAuthorizer | `204`, and idempotent: an authorizer ID with nothing behind it is not refused |
 | CreateDeployment | Reports `DeploymentStatus` `DEPLOYED` at once and dates the deployment from the simulated clock; the API id is taken from the path and not checked, so a deployment can be recorded against an API that does not exist |
 | GetDeployment | `404 NotFoundException` for an unknown deployment |
 | CreateDomainName | Reads `DomainName` only, and reports one `domainNameConfigurations` entry — `apiGatewayDomainName` derived from the name and the caller's Region, `endpointType` `REGIONAL`, `domainNameStatus` `AVAILABLE`. `DomainNameConfigurations` and `MutualTlsAuthentication` in the request are not read |
 | GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
-| CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`. A domain name the account and Region hold no record of is `404 NotFoundException` (#566) |
-| GetApiMappings | The domain's mappings in creation order, in the `items` envelope; one complete page, with no `nextToken`, like the other v2 lists here. `404 NotFoundException` for a domain that does not exist |
+| CreateApiMapping | Mints an `apiMappingId`. `apiId` and `stage` are required (`400 BadRequestException`); the domain, the API and the stage must exist (`404 NotFoundException`); and an `apiMappingKey` another mapping of the domain already uses, the empty key included, is `409 ConflictException` (#566, #1423) |
+| GetApiMappings | The domain's mappings in ascending mapping ID, in the `items` envelope; pages by `maxResults`/`nextToken`. `404 NotFoundException` for a domain that does not exist |
 | GetApiMapping | `404 NotFoundException` for a mapping, or a domain, that does not exist |
-| UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping` |
+| UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping`, and the mapping it leaves is held to `CreateApiMapping`'s checks: an empty `apiId` or `stage` is `400 BadRequestException`, an absent API or stage `404 NotFoundException`, and another mapping's key `409 ConflictException` |
 | DeleteApiMapping | `204`, and the mapping leaves `GetApiMappings`. Same refusals as `GetApiMapping`, so deleting twice is refused the second time |
 | TagResource | `POST /v2/tags/{resource-arn}` with `{"tags": {…}}`; **201** with no body. Merges onto an API's tags (see *An API's tags*). `404 NotFoundException` for an API that does not exist, `400 BadRequestException` for a body that does not decode or an ARN that names no API |
 | GetTags | `GET /v2/tags/{resource-arn}`; answers `{"tags": {…}}`, an empty map for an untagged API. Same refusals as `TagResource` |
@@ -17613,6 +17646,21 @@ no error (#529).
 | AWS::ApiGatewayV2::Route | RouteId | |
 | AWS::ApiGatewayV2::Integration | IntegrationId | |
 | AWS::ApiGatewayV2::Stage | StageName | |
+
+### The v2 collections page
+
+`GetApis`, `GetRoutes`, `GetIntegrations`, `GetStages`, `GetAuthorizers` and `GetApiMappings` each
+publish `maxResults` and `nextToken`, and until [#1423](https://github.com/scttfrdmn/substrate/issues/1423)
+none read either, so each answered its whole collection in one page. They now page. The pages publish
+no default, maximum or minimum for `maxResults` and no order, so these readings are substrate's:
+
+- A request with no `maxResults` gets the whole collection in one page with no `nextToken`, which is what
+  every list answered before, so an existing fixture is unchanged.
+- `maxResults` must be a positive integer, and a `nextToken` substrate could not have issued is refused
+  rather than answered with page one. Both are `400 BadRequestException`, which every page publishes for
+  *"One of the parameters in the request is invalid"*, and both are checked before any state is read.
+- `nextToken` is the base64 offset the v1 collections use, and the last page carries none. Elements are in
+  ascending ID (or stage name), so the offset is stable between pages.
 
 ### An update changes only what it names
 
@@ -19110,8 +19158,11 @@ resolver per type, so the refusals are uniform: an empty `UserPoolId`, `ClientId
 service's gloss on that code says *invalid* and not *missing* — an absent pool, client or group is
 `ResourceNotFoundException`, and an absent user is `UserNotFoundException`, the code that operation's
 own page publishes rather than the generic one. An unparseable body is `InvalidParameterException`.
-Substrate answers the two not-found codes at **404**; a record keyed by the caller's account and Region
-means an identifier from another account reaches nothing rather than the caller's same-named record.
+Both not-found codes answer HTTP **400**, which is what `API_DescribeUserPool`, `API_AdminGetUser` and
+every other user pools page publish for them; until
+[#1425](https://github.com/scttfrdmn/substrate/issues/1425) substrate answered **404**, a status the
+service publishes for neither. A record keyed by the caller's account and Region means an identifier from
+another account reaches nothing rather than the caller's same-named record.
 
 ### `UpdateUserPool` and `UpdateUserPoolClient` replace, they do not merge
 
@@ -19171,7 +19222,7 @@ So the merge there is what the page describes, and substrate keeps it.
   and no page names an app client, whose `UserPoolClientType` publishes no ARN member. So the accepted
   form is `arn:aws:cognito-idp:{region}:{account}:userpool/{id}`, in the caller's own account and
   Region. Anything else, or a pool that does not exist, is `ResourceNotFoundException` at the
-  published **400**. That is unlike the loaders above, which answer the same code at 404.
+  published **400**, as the loaders above answer it.
 - **`ResourceArn`, `Tags` and `TagKeys` are `Required: Yes`**; an absent one is
   `InvalidParameterException`/400.
 - **The two writes answer an empty body**, which is their pages' Response Elements, rather than the
@@ -19312,21 +19363,22 @@ Cognito Identity operations are free.
 
 ### Supported operations
 
-All seventeen operations accept `StreamARN`, `StreamName` or both, except the three noted below — see
+All eighteen operations accept `StreamARN`, `StreamName` or both, except the four noted below — see
 [Naming a stream: by name or by ARN](#naming-a-stream-by-name-or-by-arn).
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written |
-| DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard) |
-| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
+| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written. Records `StreamModeDetails` (an `ON_DEMAND` stream starts with four shards) and `MaxRecordSizeInKiB` (1024–10 240) — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
+| DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard). Carries `StreamModeDetails` |
+| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards`. Carries `StreamModeDetails` and `MaxRecordSizeInKiB` |
 | DeleteStream | A store fault deleting a shard's records is an error, not a stream reported deleted (#1399) |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region. Pages by `Limit` (1–10 000, default 100, at most 100 returned) and `ExclusiveStartStreamName`, reporting `HasMoreStreams`; names are listed lexicographically; `NextToken` is not read — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) |
-| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
-| MergeShards | Merges the two named adjacent shards: both close, and one child covering their union reports them as `ParentShardId`/`AdjacentParentShardId`. Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) and [A stream's status progresses](#a-streams-status-progresses) |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses). Refuses an on-demand stream with `ValidationException`/400 |
+| UpdateStreamMode | Names the stream by `StreamARN` only, which is `Required: Yes`, as is `StreamModeDetails`. Switches the capacity mode and reports `UPDATING` under a seed like a reshard; switching to the mode the stream already has changes nothing. `WarmThroughputMiBps` is not read — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
+| MergeShards | Merges the two named adjacent shards: both close, and one child covering their union reports them as `ParentShardId`/`AdjacentParentShardId`. Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 and an on-demand stream with `ValidationException`/400 — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) and [A stream's status progresses](#a-streams-status-progresses) |
 | SplitShard | Splits the named shard at `NewStartingHashKey`: it closes, and two children report it as `ParentShardId`. Otherwise as `MergeShards` |
-| PutRecord | |
-| PutRecords | Batch put |
+| PutRecord | `PartitionKey` is 1–256 characters, and the record is at most the stream's maximum record size — see [What a put may carry](#what-a-put-may-carry) |
+| PutRecords | 1–500 entries, each checked as `PutRecord`'s, and at most 10 MiB in all |
 | GetShardIterator | Returns base64-encoded cursor |
 | GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName`. `ApproximateArrivalTimestamp` is epoch seconds to the millisecond, as the page publishes (#1338) |
 | EnableEnhancedMonitoring | `ShardLevelMetrics` is checked against its published 1–7 range and enum; `ALL` is expanded — see [Shard-level metrics, and the ALL wildcard](#shard-level-metrics-and-the-all-wildcard) |
@@ -19337,7 +19389,7 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 
 ### Naming a stream: by name or by ARN
 
-Fifteen of the seventeen operations publish `StreamARN` beside `StreamName`, both `Required: No`, under
+Fifteen of the eighteen operations publish `StreamARN` beside `StreamName`, both `Required: No`, under
 a Note that is byte-identical on every one of their pages: *"you must use either the `StreamARN` or the
 `StreamName` parameter, or both. It is recommended that you use the `StreamARN` input parameter when you
 invoke this API."* Until [#966](https://github.com/scttfrdmn/substrate/issues/966) substrate decoded
@@ -19400,7 +19452,9 @@ at all — not on an operation page, not on the common-errors page, not even in 
 `InvalidArgumentException`/400, which **all sixteen** guarded operation pages publish: *"A specified
 parameter exceeds its restrictions, is not supported, or can't be used. For more information, see the
 returned message."* `ValidationException`, which four of those pages also carry, is not the answer:
-its gloss is specific to capacity mode. So nothing in the plugin answers the old code any longer.
+the SDK model glosses it as specific to capacity mode, and since
+[#1118](https://github.com/scttfrdmn/substrate/issues/1118) it is answered only for a reshard of an
+on-demand stream. So nothing in the plugin answers the old code any longer.
 
 **`GetRecords`' page contradicts itself, and the contradiction is recorded rather than resolved.** It
 publishes `StreamARN` and no `StreamName`, because its stream is implied by the required
@@ -19734,6 +19788,48 @@ caller named were never the ones that changed. Each now follows its page:
   listed lexicographically, which is what makes "start after this name" well defined. A `Limit` outside
   1–10 000 is `InvalidArgumentException`. `NextToken` is not read.
 
+### Capacity mode, and the reshards it refuses
+
+Until [#1118](https://github.com/scttfrdmn/substrate/issues/1118) every stream was implicitly
+provisioned: `CreateStream` discarded `StreamModeDetails` and `UpdateStreamMode` was not routed. A stream
+now records its mode, and `API_StreamModeDetails` publishes the one member, `StreamMode`, as
+`PROVISIONED | ON_DEMAND`.
+
+| Request | Answer |
+|---------|--------|
+| `CreateStream` with no `StreamModeDetails` | `PROVISIONED`, with the shards `ShardCount` asks for (one if it asks for none). The record stores no mode, so it is byte-identical to one written before #1118 |
+| `CreateStream` with `ON_DEMAND` | Four shards, the count the quotas page's *"new data streams created with the on-demand capacity mode have 4 MB/s of write … throughput"* implies at 1 MB/s a shard. On-demand scaling is not modelled |
+| `CreateStream` with `ON_DEMAND` and a `ShardCount` | `InvalidArgumentException`/400. **Substrate's reading:** the page once called the parameter *"no longer supported"* for on-demand streams and now says nothing |
+| A `StreamMode` outside the enum, or missing | `InvalidArgumentException`/400, the code [#950](https://github.com/scttfrdmn/substrate/issues/950) settled on for an unusable parameter |
+| `UpdateShardCount`, `MergeShards` or `SplitShard` on an on-demand stream | `ValidationException`/400 |
+| `UpdateStreamMode` to the mode the stream has | 200, nothing changes. **Substrate's reading**; no page states it |
+| `UpdateStreamMode` to the other mode | The mode changes, the shards stay, and the stream reports `UPDATING` under a seed — see [A stream's status progresses](#a-streams-status-progresses) |
+
+The three reshard pages each say *"This API is only supported for the data streams with the provisioned
+capacity mode"*, and the SDK model glosses their `ValidationException` as *"Specifies that you tried to
+invoke this API for a data stream with the on-demand capacity mode."* The API Reference pages now gloss
+the same code more generally, as data validation *"for this data stream"*, which the refusal still fits.
+The quota of two mode switches in 24 hours, and `WarmThroughputMiBps`, are not modelled. The messages are
+substrate's own.
+
+### What a put may carry
+
+[#1418](https://github.com/scttfrdmn/substrate/issues/1418) added the limits `API_PutRecord` and
+`API_PutRecords` publish. Every refusal is `InvalidArgumentException`/400, the only validation code
+either page's Errors section carries, and the messages are substrate's own.
+
+| Limit | Source |
+|-------|--------|
+| `PartitionKey` is 1–256 characters | The length constraint on both pages. The member is `Required: No` only for a stream using the `AUTO` distribution strategy; substrate models only the default `USER_PARTITION_KEY`, under which the pages say *"a partition key is required"* |
+| `Records` holds 1–500 entries | *"Array Members: Minimum number of 1 item. Maximum number of 500 items."* |
+| A record is at most the stream's maximum record size, partition key included | 1 MiB unless `CreateStream` set `MaxRecordSizeInKiB`. The large-records guide: *"The default maximum record size for existing, and newly created streams is set to 1 MiB."* The blob is counted before base64 encoding |
+| A `PutRecords` request is at most 10 MiB, partition keys included | *"up to a limit of 10 MiB for the entire request, including partition keys"*, on `API_PutRecords` and the quotas page. The older 5 MiB figure is no longer published |
+
+What the request alone decides — the key lengths, the entry count and the 10 MiB total — is checked
+before the stream is read, so it is refused even for a stream that does not exist. The per-record check
+needs the stream's own maximum, so it runs after the stream is loaded, the same order `UpdateShardCount`
+uses for its bounds against the current shard count. `UpdateMaxRecordSize` is not routed.
+
 ### The account and Region a record carries reach no response
 
 `KinesisStream` declares `AccountID`, `Region` and `CreatedAt` under wire-visible `json` tags, plus
@@ -19746,7 +19842,7 @@ reads back. None of them reaches a body:
 - Every other operation answers a map or a list of names.
 - `CreatedAt` reaches the wire only as the published `StreamCreationTimestamp`.
 
-All seventeen routed operations are driven by
+All eighteen routed operations are driven by
 `TestKinesisWire_StreamResponsesCarryNoBookkeepingMember` and its shard-topology sibling in
 `emulator/kinesis_wire_test.go`. Each walks the decoded document and fails on a bookkeeping member at
 any depth. `ever_tagged` carries `,omitempty` and is set only by a tag write (#938). So the test
@@ -19763,7 +19859,7 @@ millisecond. The stored record keeps its `time.Time`, so a recorded run replays 
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::Kinesis::Stream | StreamName | |
+| AWS::Kinesis::Stream | StreamName | Forwards `ShardCount`, `StreamModeDetails` and `MaxRecordSizeInKiB` as declared. A provisioned stream declaring no `ShardCount` gets one shard, and an `ON_DEMAND` one sends none |
 
 ### A shard iterator carries its account and Region only inside the token
 
@@ -21879,7 +21975,7 @@ Firehose data ingestion: $0.029 per GB.
 | DescribeJobQueues | `jobQueues` filter takes names or full ARNs; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | RegisterJobDefinition | `jobDefinitionName` and `type` required; each registration is [the next revision](#a-job-definition-is-versioned) |
 | DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
-| SubmitJob | Returns `jobId`. The job is recorded `SUBMITTED`; what a describe reports is its [progression](#a-jobs-status-progresses-through-the-seven-published-values) (#1248) |
+| SubmitJob | Returns `jobId`. `jobName`, `jobQueue` and `jobDefinition` are required, and the queue and definition must be usable — see [What a submitted job needs](#what-a-submitted-job-needs). The job is recorded `SUBMITTED`; what a describe reports is its [progression](#a-jobs-status-progresses-through-the-seven-published-values) (#1248) |
 | DescribeJobs | Each job reported is one [observation](#a-jobs-status-progresses-through-the-seven-published-values) of its progression |
 | ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
 | TerminateJob | A job not yet settled is reported `FAILED` with the supplied `reason`, as the page publishes for `STARTING`/`RUNNING` (terminated) and earlier states (cancelled). A settled job is left as it is. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
@@ -21887,7 +21983,7 @@ Firehose data ingestion: $0.029 per GB.
 | DeregisterJobDefinition | `jobDefinition` is `name:revision` or a full ARN; a bare name, which addresses no single revision, and a revision that does not exist are `ClientException`. The revision is [kept and reported `INACTIVE`](#a-resource-leaves-service-through-five-lifecycle-operations), so `status: INACTIVE` selects it. Answers `{}` (#555) |
 | UpdateJobQueue | Changes `state`, `priority`, `schedulingPolicyArn` and `computeEnvironmentOrder`; an absent member is left as it was. `state` outside `ENABLED \| DISABLED`, or a queue that does not exist, is `ClientException`. `jobStateTimeLimitActions` and `serviceEnvironmentOrder` are not read |
 | UpdateComputeEnvironment | Changes `state`, `serviceRole` and `unmanagedvCpus`, and merges `computeResources` member by member; an absent member is left as it was. Same refusals as `UpdateJobQueue`. `updatePolicy`, `ecsSettings`, `eksConfiguration` and `context` are not read |
-| DeleteJobQueue | Refused with `ClientException` unless the queue is `DISABLED`, as the page requires; its compute environments need not be disassociated first. The queue [is gone at once](#a-resource-leaves-service-through-five-lifecycle-operations). Answers `{}` |
+| DeleteJobQueue | Refused with `ClientException` unless the queue is `DISABLED`, as the page requires; its compute environments need not be disassociated first. The queue [is gone at once](#a-resource-leaves-service-through-five-lifecycle-operations), and its unfinished jobs [are failed](#what-a-submitted-job-needs). Answers `{}` |
 | DeleteComputeEnvironment | Refused with `ClientException` unless the environment is `DISABLED` and no job queue's `computeEnvironmentOrder` names it, by name or ARN. Answers `{}` |
 
 ### A resource leaves service through five lifecycle operations
@@ -21909,6 +22005,39 @@ Every operation reports a bad request as **`ClientException`** at HTTP 400. The 
 reference declares exactly two errors for each Batch operation, `ClientException` and
 `ServerException`, so substrate does not use the `MissingParameter` or
 `InvalidParameterValue` codes other services return for the same shape of complaint.
+
+### What a submitted job needs
+
+Until [#1422](https://github.com/scttfrdmn/substrate/issues/1422) `SubmitJob` answered a missing
+`jobName` with `MissingParameter`, which Batch publishes nowhere, and checked neither the queue nor the
+definition, so a job could be submitted to a queue that was disabled, deleted or never created.
+`API_SubmitJob` publishes `jobName`, `jobQueue` and `jobDefinition` as `Required: Yes` and one client
+error, `ClientException`/400 (*"Another cause is specifying an identifier that's not valid"*). Each of
+these is now that refusal:
+
+| Request | Why |
+|---------|-----|
+| `jobName`, `jobQueue` or `jobDefinition` missing | `Required: Yes`; checked before any state is read |
+| A queue that does not exist, by name or ARN | *"You can specify either the name or the Amazon Resource Name (ARN) of the queue"* |
+| A queue that is not `ENABLED` and `VALID` | `UpdateJobQueue`: a `DISABLED` queue *"can't accept new jobs"* |
+| A `name:revision`, or an ARN with one, naming no revision or an `INACTIVE` one | The definition must be usable |
+| A bare name, or an ARN without a revision, with no `ACTIVE` revision | *"If the revision is not specified, then the latest active revision is used"* |
+
+The job keeps the queue and definition identifiers as they were sent. The messages are substrate's own.
+
+`API_DeleteJobQueue` says *"All jobs in the queue are eventually terminated when you delete a job
+queue."* Substrate ends them **at delete time**, since the page publishes no interval. Every job of the
+queue, submitted by name or by ARN, is ended by the rule `TerminateJob` uses, so the two agree: a job
+that would report `SUBMITTED`, `PENDING`, `RUNNABLE`, `STARTING` or `RUNNING` is recorded `FAILED`, and
+one `TerminateJob` or `CancelJob` already ended keeps its status and reason. As with `TerminateJob`, an
+unseeded job's record is still `SUBMITTED`, so it is ended too. The state is peeked rather than
+observed, so the delete spends no observation. No page publishes a `statusReason` for such a job, so the
+one it reports, *"Job terminated because its job queue was deleted."*, is substrate's.
+
+The jobs are failed before the queue is deleted, so a delete that fails partway leaves the queue for a
+retry to finish. `SubmitJob` and `DeleteJobQueue` serialize on the queue, so no job is accepted between
+the delete's job sweep and the queue's removal. A bare definition name resolves through an index of the
+name's `ACTIVE` revisions, which `RegisterJobDefinition` and `DeregisterJobDefinition` maintain.
 
 ### A describe filter takes a name or an ARN
 
@@ -23432,8 +23561,8 @@ running.
 
 | Operation | Notes |
 |-----------|-------|
-| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
-| ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
+| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model, or `{"amazon-bedrock-guardrailAction": "INTERVENED"}` when the guardrail [its headers name](#invokemodel-reads-the-guardrail-headers) intervenes. `accept` is not read |
+| ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a seeded blocklist](#how-a-guardrail-decides) for that guardrail and version |
 | CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. All five members marked `Required: Yes` (`jobName`, `modelId`, `roleArn`, `inputDataConfig`, `outputDataConfig`) are checked, and an absent one is `ValidationException`/400 ([#1174](https://github.com/scttfrdmn/substrate/issues/1174)). The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports the job's [observed status](#a-batch-jobs-lifecycle): one read is one observation of its countdown |
 | ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; each summary is one observation of that job's countdown, so a poll on either operation agrees, and one List over N jobs spends one observation of each. Every published query filter is ignored and no `nextToken` is emitted |
@@ -23444,39 +23573,63 @@ Converse-shaped call is served. Nor is the rest of the `bedrock` control plane �
 `ListFoundationModels`, `GetFoundationModel`, `CreateGuardrail`, `GetGuardrail`,
 `CreateModelCustomizationJob` and the provisioned-throughput operations among them.
 
-### InvokeModel reads nothing but the model ID
+### InvokeModel reads the guardrail headers
 
-The handler takes its request as `_ *AWSRequest`, so every part of the call except the path's model ID
-is discarded. Three consequences are worth knowing before writing a test.
+Until [#1183](https://github.com/scttfrdmn/substrate/issues/1183) `InvokeModel` read nothing but the
+model ID, so an invocation that attached a guardrail was never filtered. It now reads
+`X-Amzn-Bedrock-GuardrailIdentifier` (an ID or a guardrail ARN) and `X-Amzn-Bedrock-GuardrailVersion`
+(a number or `DRAFT`). When both name a guardrail and its [blocklist](#how-a-guardrail-decides) matches
+any string in the request body, the answer is `{"amazon-bedrock-guardrailAction": "INTERVENED"}` in place
+of the inference: the member and its value are the page's own example response. The example's
+`amazon-bedrock-trace` member, whose contents the page does not publish, is not rendered, and
+`X-Amzn-Bedrock-Trace` is not read.
 
-`X-Amzn-Bedrock-GuardrailIdentifier` and `X-Amzn-Bedrock-GuardrailVersion` are published request
-headers and are unread, so an invocation that attaches a guardrail is never filtered. The published
-`"amazon-bedrock-guardrailAction": "INTERVENED | NONE"` member therefore never appears in a canned
-body — the only way to observe an intervention is to call `ApplyGuardrail` directly, which is a
-different operation most consumers do not make. The decision itself already exists next door
-([see above](#how-a-guardrail-decides)); what is missing is the header read that would reach it.
+A non-intervening invocation answers exactly what it answered before, byte for byte, so a recorded run
+replays identically. A [seeded response](#seeding-a-model-response) wins outright: a response seed is
+the caller stating what the wire carries, and a guardrail decision does not rewrite it.
 
-The page publishes three conditions under which the *request* is an error, and none is checked: a body
-naming `amazon-bedrock-guardrailConfig` with no guardrail identifier, a guardrail enabled with a
-`contentType` other than `application/json`, and a guardrail identifier with no `guardrailVersion`.
+The page lists three request errors, and each is `ValidationException`/400, which the page publishes:
 
-And because the body is never parsed, a malformed or entirely absent one is accepted — the canned
-Claude Messages body comes back regardless.
-[#1183](https://github.com/scttfrdmn/substrate/issues/1183).
+| Request | Answer |
+|---------|--------|
+| A body with `amazon-bedrock-guardrailConfig` and no guardrail identifier | `ValidationException`/400 |
+| A guardrail identifier and no `guardrailVersion` | `ValidationException`/400 |
+| A guardrail with a `Content-Type` other than `application/json` | `ValidationException`/400 |
+| An identifier or version outside its published pattern | `ValidationException`/400 |
+| A version and no identifier | Accepted, and no guardrail is applied: *"If you don't provide a value, no guardrail is applied to the invocation"*, and the page lists no error for it |
+
+These are checked before anything else, so a seeded response does not mask them. The messages are
+substrate's own.
 
 ### How a guardrail decides
 
-A guardrail's blocklist is a list of substrings held in state. If any of them occurs in the request's
-first text content item, the response is `action: GUARDRAIL_INTERVENED` with a fixed output
-(*"Sorry, I can't help with that."*) and a single fabricated `topicPolicy` assessment naming
-`blocked-topic`; otherwise it is `action: NONE` with the input echoed back and an empty assessment
-list. `usage` is a fixed set of counters in both cases.
+Substrate evaluates no guardrail policy, since content filtering is resource-internal. Whether a
+guardrail intervenes is **seeded**: a blocklist names the substrings it blocks, and `ApplyGuardrail` and
+`InvokeModel` share the one decision.
 
-Two consequences worth knowing before writing a test. There is no control-plane endpoint for the
-blocklist, so `GUARDRAIL_INTERVENED` is reachable only by writing the blocklist key into state
-directly — every ordinary call gets `NONE`. And the blocklist key is auto-created empty on first use
-and omits both the Region and the guardrail version, so `ApplyGuardrail` can never answer
-`ResourceNotFoundException`: any guardrail identifier, for any version, is valid.
+```
+POST   /v1/bedrock/guardrail-blocklist   {"guardrailIdentifier": "gr1", "guardrailVersion": "1",
+                                          "accountId": "…", "region": "…", "terms": ["forbidden"]}
+DELETE /v1/bedrock/guardrail-blocklist   (all, or ?guardrailIdentifier=…&guardrailVersion=…&accountId=…&region=… for one)
+```
+
+`terms` is required. Each of the other four members defaults to `"*"`, which matches anything, and a
+guardrail named by ARN is keyed by the ID the ARN ends in. A request is matched against the most specific
+seed only, trying the guardrail's own ID before `"*"`, then its version, then the account, then the
+Region. An unseeded guardrail intervenes on nothing.
+
+`ApplyGuardrail` matches every text content item. If a term occurs in one, the response is
+`action: GUARDRAIL_INTERVENED` with a fixed output (*"Sorry, I can't help with that."*) and a single
+fabricated `topicPolicy` assessment naming `blocked-topic`; otherwise it is `action: NONE` with the first
+input echoed back and an empty assessment list. `usage` is a fixed set of counters in both cases.
+`InvokeModel` matches every string value in its JSON body, at any depth, so a term matches wherever the
+model's request format puts the prompt.
+
+Until #1183 the blocklist was a state key with no Region and no version, writable only by a test that
+wrote the state store directly, and `ApplyGuardrail` created it empty on first use. That was a state
+write on a read and then a discarded decode error. Both reads now write nothing, and a seed that does not
+decode is an error. `ApplyGuardrail` still never answers `ResourceNotFoundException`, since substrate
+holds no guardrail resources: any identifier, for any version, is valid.
 
 ### Seeding a model response
 
@@ -23541,17 +23694,18 @@ status it observed.
 | a batch job that does not exist | `ResourceNotFoundException` | 404 |
 | `StopModelInvocationJob` on a job in a terminal status | `ConflictException` | 400 |
 
-All four match what the pages publish. Those two are the only operations that parse a body at all:
-`InvokeModel` [reads nothing but the model ID](#invokemodel-reads-nothing-but-the-model-id), so it has
-no body-parse refusal to answer.
+All four match what the pages publish. `InvokeModel` also answers `ValidationException`/400 for the
+[guardrail request errors](#invokemodel-reads-the-guardrail-headers) its page lists. It reads its body
+only to match a guardrail's blocklist, so a body that will not parse is not refused.
 
 The rest of what the pages publish has no site, because none of the conditions is modelled.
 `InvokeModel` alone publishes ten errors — `AccessDeniedException`/403, `InternalServerException`/500,
 `ModelErrorException`/424, `ModelNotReadyException`/429, `ModelTimeoutException`/408,
 `ResourceNotFoundException`/404, `ServiceQuotaExceededException`/400,
 `ServiceUnavailableException`/503, `ThrottlingException`/429 and `ValidationException`/400 — of which
-Substrate answers none: there is no quota, no model readiness, no timeout and no unknown model, so
-every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop.
+substrate answers only `ValidationException`, for the guardrail request errors: there is no quota, no
+model readiness, no timeout and no unknown model, so every other invocation succeeds.
+`ConflictException`/400 is published on the batch create and the batch stop.
 The stop answers it for a terminal job (#1174); the create does not, so a duplicate `jobName` is accepted.
 `ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
 

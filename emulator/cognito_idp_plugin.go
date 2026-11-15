@@ -1058,7 +1058,7 @@ func (p *CognitoIDPPlugin) signUp(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		}
 	}
 	if poolID == "" {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + body.ClientID, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + body.ClientID, HTTPStatus: http.StatusBadRequest}
 	}
 
 	userSub := generateCognitoID(ctx.IDs)
@@ -1117,7 +1117,7 @@ func (p *CognitoIDPPlugin) confirmSignUp(ctx *RequestContext, req *AWSRequest) (
 		}
 	}
 	if poolID == "" {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + body.ClientID, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + body.ClientID, HTTPStatus: http.StatusBadRequest}
 	}
 
 	user, err := p.loadUser(ctx, poolID, body.Username)
@@ -1187,6 +1187,14 @@ func (p *CognitoIDPPlugin) setUserPoolMfaConfig(ctx *RequestContext, req *AWSReq
 
 // --- Helpers -----------------------------------------------------------------
 
+// loadUserPool reads a user pool, refusing an absent one.
+//
+// Every not-found refusal in this file answers HTTP 400 (#1425): API_DescribeUserPool and
+// API_AdminGetUser, like every Cognito user pools page, publish ResourceNotFoundException ("This
+// exception is thrown when the Amazon Cognito service can't find the requested resource") and
+// UserNotFoundException ("This exception is thrown when a user isn't found") at HTTP Status Code 400.
+// The loaders answered 404, which the service publishes for neither, and the tag operations (#1135)
+// already answered 400.
 func (p *CognitoIDPPlugin) loadUserPool(ctx *RequestContext, poolID string) (*CognitoUserPool, error) {
 	if poolID == "" {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "UserPoolId is required", HTTPStatus: http.StatusBadRequest}
@@ -1197,7 +1205,7 @@ func (p *CognitoIDPPlugin) loadUserPool(ctx *RequestContext, poolID string) (*Co
 		return nil, fmt.Errorf("cognito-idp loadUserPool state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "User pool not found: " + poolID, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "User pool not found: " + poolID, HTTPStatus: http.StatusBadRequest}
 	}
 	var pool CognitoUserPool
 	if err := json.Unmarshal(data, &pool); err != nil {
@@ -1216,7 +1224,7 @@ func (p *CognitoIDPPlugin) loadUserPoolClient(ctx *RequestContext, poolID, clien
 		return nil, fmt.Errorf("cognito-idp loadUserPoolClient state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + clientID, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Client not found: " + clientID, HTTPStatus: http.StatusBadRequest}
 	}
 	var client CognitoUserPoolClient
 	if err := json.Unmarshal(data, &client); err != nil {
@@ -1235,7 +1243,7 @@ func (p *CognitoIDPPlugin) loadGroup(ctx *RequestContext, poolID, groupName stri
 		return nil, fmt.Errorf("cognito-idp loadGroup state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Group not found: " + groupName, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Group not found: " + groupName, HTTPStatus: http.StatusBadRequest}
 	}
 	var group CognitoGroup
 	if err := json.Unmarshal(data, &group); err != nil {
@@ -1254,7 +1262,7 @@ func (p *CognitoIDPPlugin) loadUser(ctx *RequestContext, poolID, username string
 		return nil, fmt.Errorf("cognito-idp loadUser state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "UserNotFoundException", Message: "User not found: " + username, HTTPStatus: http.StatusNotFound}
+		return nil, &AWSError{Code: "UserNotFoundException", Message: "User not found: " + username, HTTPStatus: http.StatusBadRequest}
 	}
 	var user CognitoUser
 	if err := json.Unmarshal(data, &user); err != nil {

@@ -18,9 +18,13 @@ import "net/http"
 // status audit could not have found it.
 //
 // ValidationException is on four of the sixteen pages (CreateStream, UpdateShardCount, MergeShards,
-// SplitShard) and must not be used: its gloss is capacity-mode-specific — "Specifies that you tried
-// to invoke this API for a data stream with the on-demand capacity mode" — so it is not a generic
-// validation code despite the name.
+// SplitShard), and on UpdateStreamMode's. The SDK model's gloss is capacity-mode-specific — "Specifies that you tried to invoke this API for a data
+// stream with the on-demand capacity mode" — so it is not a generic validation code despite the
+// name. Since #1118 it has its sites: [kinesisRequireProvisioned] answers it when UpdateShardCount,
+// MergeShards or SplitShard addresses an on-demand stream. The API Reference pages have since
+// reworded the gloss to "The request failed data validation for this data stream", which the
+// reshard refusal still fits; it does not make the code available elsewhere, because it is still on
+// neither PutRecord's nor PutRecords' page, whose limits (#1418) answer InvalidArgumentException.
 //
 // [kinesisResolveStream] and [kinesisValidateTagMap] already answered InvalidArgumentException, and
 // the comment at the ListTagsForStream limit check predicted this change by name. So after #950 every

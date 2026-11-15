@@ -539,6 +539,10 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Bedrock Runtime control-plane endpoints.
 		cp.Post("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeSeedResponse)
 		cp.Delete("/v1/bedrock-runtime/responses", s.handleBedrockRuntimeClearResponses)
+		// The substrings a guardrail blocks, read by ApplyGuardrail and InvokeModel (#1183); see
+		// bedrock_guardrail.go.
+		cp.Post("/v1/bedrock/guardrail-blocklist", s.handleBedrockSeedGuardrailBlocklist)
+		cp.Delete("/v1/bedrock/guardrail-blocklist", s.handleBedrockClearGuardrailBlocklist)
 		// A Bedrock batch-inference job's status and stop countdowns (#1174), on the shared
 		// progression helper; see bedrock_job_progression.go.
 		cp.Post("/v1/bedrock/model-invocation-job-status", func(w http.ResponseWriter, r *http.Request) {

@@ -241,3 +241,124 @@ func TestSchedulerValidation_TheTargetIsDecodedAsAWSPublishesIt(t *testing.T) {
 	assert.Equal(t, int32(15), got.FlexibleTimeWindow.MaximumWindowInMinutes,
 		"MaximumWindowInMinutes used to be dropped by the decode")
 }
+
+// schedulerBodyWith is a valid create body with one expression, time zone and RetryPolicy.
+func schedulerBodyWith(expr, tz, retryPolicy string) string {
+	zone := ""
+	if tz != "" {
+		zone = `"ScheduleExpressionTimezone":` + strconvQuote(tz) + `,`
+	}
+	rp := ""
+	if retryPolicy != "" {
+		rp = `,"RetryPolicy":` + retryPolicy
+	}
+	return `{"ScheduleExpression":` + strconvQuote(expr) + `,` + zone +
+		`"Target":{"Arn":"arn:aws:sqs:us-east-1:123456789012:q","RoleArn":"arn:aws:iam::123456789012:role/r"` + rp + `},` +
+		`"FlexibleTimeWindow":{"Mode":"OFF"}}`
+}
+
+// strconvQuote renders s as a JSON string.
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s) //nolint:errchkjson // a string always marshals
+	return string(b)
+}
+
+// TestSchedulerValidation_AnUnevaluableExpressionOrZoneIsRefused is #1514's first item: an expression
+// or time zone the clock could never evaluate is ValidationException/400 on both writes, where it used
+// to be stored and never fire.
+func TestSchedulerValidation_AnUnevaluableExpressionOrZoneIsRefused(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	cases := []struct {
+		name, expr, tz string
+		ok             bool
+	}{
+		{"a rate", "rate(5 minutes)", "", true},
+		{"a cron with the published wildcards", "cron(0/15 8-17 ? * MON-FRI *)", "America/New_York", true},
+		{"the guide's last-Friday cron", "cron(15 10 ? * 6L 2022-2023)", "America/Los_Angeles", true},
+		{"a cron on the nearest weekday", "cron(0 12 3W * ? *)", "", true},
+		{"a cron on the second Tuesday", "cron(0 12 ? * 3#2 *)", "", true},
+		{"a cron with month and day names", "cron(0 9 ? JAN-MAR MON,WED,FRI *)", "", true},
+		{"a cron with a year range and step", "cron(0 0 1 */3 ? 2026-2030)", "", true},
+		{"an at", "at(2027-01-01T09:00:00)", "Europe/London", true},
+		{"a rate of zero", "rate(0 minutes)", "", false},
+		{"a rate in seconds", "rate(30 seconds)", "", false},
+		{"a cron with five fields", "cron(0 12 * * ?)", "", false},
+		{"a cron naming both days", "cron(0 12 1 * MON *)", "", false},
+		{"an at that is not a timestamp", "at(tomorrow)", "", false},
+		{"no form at all", "every five minutes", "", false},
+		{"a zone that is not IANA", "rate(5 minutes)", "Mars/Olympus_Mons", false},
+		{"the host's own zone", "cron(0 9 * * ? *)", "Local", false},
+		{"a zone in the wrong case", "cron(0 9 * * ? *)", "america/new_york", false},
+		{"UTC by name", "cron(0 9 * * ? *)", "UTC", true},
+		{"an Etc zone", "cron(0 9 * * ? *)", "Etc/GMT+5", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := schedulerBodyWith(tc.expr, tc.tz, "")
+			if tc.ok {
+				resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/ok-"+schedulerCaseName(tc.name), body)
+				assert.Equal(t, http.StatusOK, resp.StatusCode, "%s", readSchedulerBody(t, resp))
+				return
+			}
+			schedulerRefusal(t, ts, http.MethodPost, "/schedules/create-"+schedulerCaseName(tc.name), body)
+		})
+	}
+
+	// UpdateSchedule runs the same validator, so an update cannot introduce what a create refuses.
+	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/to-update", schedulerBodyWith("rate(5 minutes)", "", ""))
+	require.Equal(t, http.StatusOK, resp.StatusCode, "%s", readSchedulerBody(t, resp))
+	schedulerRefusal(t, ts, http.MethodPut, "/schedules/to-update", schedulerBodyWith("rate(0 minutes)", "", ""))
+}
+
+// TestSchedulerValidation_RetryPolicyRangesAreRefused is #1514's second item: API_RetryPolicy publishes
+// MaximumEventAgeInSeconds 60–86400 and MaximumRetryAttempts 0–185.
+func TestSchedulerValidation_RetryPolicyRangesAreRefused(t *testing.T) {
+	srv := newSchedulerTestServer(t)
+	ts := httptest.NewServer(srv)
+	t.Cleanup(ts.Close)
+
+	cases := []struct {
+		name, policy, wantMessage string
+	}{
+		{"age 59", `{"MaximumEventAgeInSeconds":59}`, "must be between 60 and 86400"},
+		{"age 86401", `{"MaximumEventAgeInSeconds":86401}`, "must be between 60 and 86400"},
+		{"attempts -1", `{"MaximumRetryAttempts":-1}`, "must be between 0 and 185"},
+		{"attempts 186", `{"MaximumRetryAttempts":186}`, "must be between 0 and 185"},
+		{"age 60", `{"MaximumEventAgeInSeconds":60}`, ""},
+		{"age 86400 and attempts 185", `{"MaximumEventAgeInSeconds":86400,"MaximumRetryAttempts":185}`, ""},
+		{"attempts 0", `{"MaximumRetryAttempts":0}`, ""},
+		{"an empty policy", `{}`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "/schedules/rp-" + schedulerCaseName(tc.name)
+			body := schedulerBodyWith("rate(5 minutes)", "", tc.policy)
+			if tc.wantMessage == "" {
+				resp := schedulerRequest(t, ts, http.MethodPost, path, body)
+				assert.Equal(t, http.StatusOK, resp.StatusCode, "%s", readSchedulerBody(t, resp))
+				return
+			}
+			err := schedulerRefusal(t, ts, http.MethodPost, path, body)
+			assert.Contains(t, err.Message, tc.wantMessage, "the message names the published Valid Range")
+			assert.Contains(t, err.Message, "1 validation error detected")
+		})
+	}
+}
+
+// schedulerCaseName turns a case name into a schedule name the published pattern accepts.
+func schedulerCaseName(name string) string {
+	out := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+			out = append(out, c)
+		default:
+			out = append(out, '-')
+		}
+	}
+	return string(out)
+}
