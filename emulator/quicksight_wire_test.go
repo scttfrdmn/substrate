@@ -112,7 +112,7 @@ func TestQuickSightWire_DataSourceResponsesCarryNoBookkeepingMember(t *testing.T
 	const id = "wire-source"
 	base := "/accounts/" + quicksightWireAccount + "/data-sources"
 	created := quicksightWire(t, p, ctx, "POST", base, map[string]any{"DataSourceId": id, "Name": "wire", "Type": "S3"})
-	quicksightWireRequireScoped(t, state, "datasource:"+quicksightWireAccount+"/"+id)
+	quicksightWireRequireScoped(t, state, "datasource:"+quicksightWireAccount+"/"+quicksightWireRegion+"/"+id)
 	described := quicksightWire(t, p, ctx, "GET", base+"/"+id, nil)
 
 	quicksightWireRun(t, []struct {
@@ -131,7 +131,7 @@ func TestQuickSightWire_DataSetResponsesCarryNoBookkeepingMember(t *testing.T) {
 	const id = "wire-set"
 	created := quicksightWire(t, p, ctx, "POST", "/accounts/"+quicksightWireAccount+"/data-sets",
 		map[string]any{"DataSetId": id, "Name": "wire"})
-	quicksightWireRequireScoped(t, state, "dataset:"+quicksightWireAccount+"/"+id)
+	quicksightWireRequireScoped(t, state, "dataset:"+quicksightWireAccount+"/"+quicksightWireRegion+"/"+id)
 	var out struct {
 		IngestionID string `json:"IngestionId"`
 	}
