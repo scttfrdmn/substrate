@@ -634,20 +634,6 @@ func isOrgOUID(id string) bool { return len(id) > 3 && id[:3] == "ou-" }
 // isOrgRootID reports whether id has the "r-" prefix of a root.
 func isOrgRootID(id string) bool { return len(id) > 2 && id[:2] == "r-" }
 
-// isOrgAccountID reports whether id has the exactly-12-digits shape the model's
-// AccountId pattern requires.
-func isOrgAccountID(id string) bool {
-	if len(id) != 12 {
-		return false
-	}
-	for i := 0; i < len(id); i++ {
-		if id[i] < '0' || id[i] > '9' {
-			return false
-		}
-	}
-	return true
-}
-
 // isOrgParentID reports whether id has the shape of a ParentId — a root or an OU
 // — which is the pattern the model puts on both of MoveAccount's parent members.
 func isOrgParentID(id string) bool { return isOrgRootID(id) || isOrgOUID(id) }

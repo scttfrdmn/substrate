@@ -102,3 +102,30 @@ func TestCodePipelineVersions_GetPipelineExecutionRequiresBothMembers(t *testing
 	status, body = call("GetPipelineExecution", map[string]any{"pipelineName": "owner", "pipelineExecutionId": started.ID})
 	assert.Equal(t, http.StatusOK, status, "%s", body)
 }
+
+// DeletePipeline removes exactly the deleted pipeline's stored versions — not those of a pipeline whose
+// name it prefixes — and leaves no snapshot behind.
+func TestCodePipelineVersions_DeleteRemovesOnlyItsOwnHistory(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	call := func(op string, body any) (int, []byte) {
+		return cicdCall(t, ts, cicdPipelineHost, cicdPipelineTgt, op, body)
+	}
+	for _, name := range []string{"a", "ab"} {
+		status, body := call("CreatePipeline", cpVersionsPipeline(name, "arn:aws:iam::123456789012:role/v1"))
+		require.Equal(t, http.StatusOK, status, "%s", body)
+		status, body = call("UpdatePipeline", cpVersionsPipeline(name, "arn:aws:iam::123456789012:role/v2"))
+		require.Equal(t, http.StatusOK, status, "%s", body)
+	}
+	status, body := call("DeletePipeline", map[string]any{"name": "a"})
+	require.Equal(t, http.StatusOK, status, "%s", body)
+
+	keys, err := ts.StateManager().List(t.Context(), "codepipeline", "pipeline_version:")
+	require.NoError(t, err)
+	assert.Len(t, keys, 2, "ab's two versions remain: %v", keys)
+	for _, k := range keys {
+		assert.Contains(t, k, "/ab/", "only ab's history remains")
+	}
+	status, body = call("GetPipeline", map[string]any{"name": "ab", "version": 1})
+	assert.Equal(t, http.StatusOK, status, "%s", body)
+}

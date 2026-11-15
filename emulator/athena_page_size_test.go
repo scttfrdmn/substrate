@@ -47,17 +47,17 @@ func TestAthenaPageSize_EachListingHasItsOwnRange(t *testing.T) {
 	}
 }
 
-// TestAthenaPageSize_ZeroIsAnEmptyPageThatResumes asserts what a legal MaxResults of 0 answers on
-// ListQueryExecutions: no IDs, and a token that resumes at the same position, rather than the widest
-// page substrate used to rewrite it to.
-func TestAthenaPageSize_ZeroIsAnEmptyPageThatResumes(t *testing.T) {
+// TestAthenaPageSize_ZeroIsAFinalEmptyPage asserts what a legal MaxResults of 0 answers on
+// ListQueryExecutions: no IDs and no token, so a paginator stops rather than following a cursor that
+// never advances, and not the widest page substrate used to rewrite it to.
+func TestAthenaPageSize_ZeroIsAFinalEmptyPage(t *testing.T) {
 	srv := tokenRefusalServer(t, emulator.NewMemoryStateManager(), &emulator.AthenaPlugin{})
-	first := tokenRefusalAthenaStartQuery(t, srv, "SELECT 1")
+	tokenRefusalAthenaStartQuery(t, srv, "SELECT 1")
 	second := tokenRefusalAthenaStartQuery(t, srv, "SELECT 2")
 
 	type page struct {
 		QueryExecutionIds []string `json:"QueryExecutionIds"`
-		NextToken         string   `json:"NextToken"`
+		NextToken         *string  `json:"NextToken"`
 	}
 	list := func(body string) page {
 		status, raw, _ := tokenRefusalAthenaCall(t, srv, "ListQueryExecutions", body)
@@ -69,19 +69,15 @@ func TestAthenaPageSize_ZeroIsAnEmptyPageThatResumes(t *testing.T) {
 
 	zero := list(`{"MaxResults":0}`)
 	assert.Empty(t, zero.QueryExecutionIds, "MaxResults=0 asks for at most zero items")
-	require.NotEmpty(t, zero.NextToken, "records remain, so the walk can resume")
+	assert.Nil(t, zero.NextToken, "a zero page ends the walk even though records remain")
 
-	resumed := list(fmt.Sprintf(`{"NextToken":%q}`, zero.NextToken))
-	assert.Equal(t, []string{first, second}, resumed.QueryExecutionIds, "the token resumes where the zero page stood")
-	assert.Empty(t, resumed.NextToken)
-
-	// At the end of the listing, a zero page is the final page: no token, and not a wrap to page one.
+	// Mid-walk, a zero page is also final, and a non-zero walk still resumes and ends normally.
 	one := list(`{"MaxResults":1}`)
-	require.NotEmpty(t, one.NextToken)
-	tail := list(fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, one.NextToken))
+	require.NotNil(t, one.NextToken)
+	mid := list(fmt.Sprintf(`{"MaxResults":0,"NextToken":%q}`, *one.NextToken))
+	assert.Empty(t, mid.QueryExecutionIds)
+	assert.Nil(t, mid.NextToken)
+	tail := list(fmt.Sprintf(`{"MaxResults":1,"NextToken":%q}`, *one.NextToken))
 	assert.Equal(t, []string{second}, tail.QueryExecutionIds)
-	assert.Empty(t, tail.NextToken)
-	end := list(fmt.Sprintf(`{"MaxResults":0,"NextToken":%q}`, "Mg==")) // offset 2, the end
-	assert.Empty(t, end.QueryExecutionIds)
-	assert.Empty(t, end.NextToken, "nothing remains, so a zero page carries no token")
+	assert.Nil(t, tail.NextToken)
 }

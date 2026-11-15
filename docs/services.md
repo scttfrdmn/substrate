@@ -1598,8 +1598,9 @@ whose three describes share one paginator.
 rewrote anything at or below zero to 50 and honoured anything above. Now a value outside the operation's
 own range is `InvalidRequestException`/400, which both pages gloss as "a required parameter may be
 missing or out of range". An absent `MaxResults` is still 50. A `MaxResults` of **0** on
-`ListQueryExecutions` is legal and is honoured as written: an empty `QueryExecutionIds` with a
-`NextToken` that resumes at the same position when records remain there. The response publishes
+`ListQueryExecutions` is legal and is honoured as written: an empty `QueryExecutionIds` and **no**
+`NextToken`, so the walk ends. A token resuming at the same position would never advance, and a
+paginator following it would ask for zero items forever. The response publishes
 `QueryExecutionIds` with "Array Members: Minimum number of 1 item", which a zero page cannot meet;
 substrate reads that minimum as describing a non-empty page rather than forbidding the empty list it
 already answers for a workgroup with no queries. An explicit empty `NextToken` (`""`) is refused for
@@ -22121,7 +22122,7 @@ is `2017-05-18` and appears in no wire field.
 | GetQueryExecution | Reports `QueryExecutionId`, `Query`, `WorkGroup`, `Status` and `ResultConfiguration.OutputLocation`, and nothing else; each call is [one observation of a seeded progression](#a-query-progresses-under-a-seed) |
 | GetQueryResults | Returns [the result set seeded for the execution's SQL](#the-result-set-is-seeded-by-sql-text) once the query has `SUCCEEDED`, and refuses it with `InvalidRequestException`/400 before; `MaxResults` and `NextToken` are not read |
 | StopQueryExecution | Writes `CANCELLED` ([#1154](https://github.com/scttfrdmn/substrate/issues/1154)); accepted for any stored execution, including one already `SUCCEEDED` |
-| ListQueryExecutions | `MaxResults` defaults to 50; 0–50 is honoured, 0 as an empty page, and anything else is `InvalidRequestException` (#1185) |
+| ListQueryExecutions | `MaxResults` defaults to 50; 0–50 is honoured, 0 as a final empty page with no `NextToken`, and anything else is `InvalidRequestException` (#1185) |
 | CreateWorkGroup | `Name` and `Description` are read; `Configuration` and `Tags` are discarded |
 | GetWorkGroup | Reports `Name`, `State` and `Description`, and nothing else; [synthesises the `primary` workgroup](#the-primary-workgroup-and-what-is-synthesised-about-it) when no record was written for it |
 | DeleteWorkGroup | Refuses `primary` with `InvalidRequestException`/400 and *"The primary workgroup cannot be deleted"*, which `API_DeleteWorkGroup` itself states; `RecursiveDeleteOption` is not read |
@@ -23275,12 +23276,13 @@ was one page with no `NextToken`, and both filters matched every vault.
   issue is `InvalidParameterValueException`, rather than read as page one (#915).
 - **`vaultType`** must be one of its published Valid Values. Every vault is a `BACKUP_VAULT`, so that
   value matches every vault and the other two match none.
-- **`shared`** must be a boolean. The page glosses it as sorting "the list of vaults by shared
+- **`shared`** must be `true` or `false` (in any case; `1`, `t` and the like are refused). The page glosses it as sorting "the list of vaults by shared
   vaults"; the CLI and SDKs use it to list the vaults shared with the caller. Substrate shares no vault
   across accounts, so `true` answers an empty list and `false` the full one.
 
 A vault whose record cannot be read is an error rather than skipped, since a skipped vault would
-shorten the list and shift every later offset.
+shorten the list and shift every later offset. The page is cut from the sorted name index before any
+record is loaded, so a listing loads only the vaults it returns.
 
 ### ListBackupPlans pages
 
@@ -23294,11 +23296,13 @@ all three, with the vault listing's rules:
 - **`nextToken`** is an offset over the plan-ID index, which is kept sorted. It is omitted on the last
   page, and one substrate did not issue is `InvalidParameterValueException` — the only validation code
   the page publishes — rather than page one.
-- **`includeDeleted`** must be a boolean, but **`true` lists the same plans as `false`**:
+- **`includeDeleted`** must be `true` or `false` (in any case), but **`true` lists the same plans as `false`**:
   `DeleteBackupPlan` removes the record, so substrate keeps no deleted plan to return, where AWS would
   answer one with its `DeletionDate`.
 
-A plan whose record cannot be read or decoded fails the listing; it used to be skipped.
+A plan whose record cannot be read or decoded fails the listing; it used to be skipped. All three Backup
+listings — vaults, plans and selections — share one validation rule (`emulator/backup_list_params.go`)
+and cut the page from the sorted index before loading any record.
 
 ### The account and Region a record carries reach no response
 
@@ -23921,9 +23925,10 @@ It was decoded and discarded (the two list operations read no request at all), s
 **empty list**, because nothing in substrate is shared across accounts: a share's principals are
 recorded, but no other account's view is derived from them.
 
-The published filters apply. A resource's `resourceType` is derived from its ARN as
-`service:resource-type` (`ec2:subnet`) and compared case-insensitively; this is substrate's reading of
-an ARN rather than RAM's catalog, so a type RAM would reject matches nothing rather than being refused.
+The published filters apply. A resource's type is the name RAM publishes on its "Shareable AWS
+resources" page, looked up from the ARN's service and resource segment (`transit-gateway/tgw-…` is
+`ec2:TransitGateway`), compared case-insensitively and reported as the resource's `type` by
+`ListResources`. An ARN the table does not name has no type and matches no `resourceType` filter.
 A resource's `resourceRegionScope` is `GLOBAL` when its ARN has no Region and `REGIONAL` otherwise.
 
 A share whose record cannot be read or decoded fails the request; it used to be skipped.
@@ -23952,6 +23957,9 @@ status", and substrate applies that window on the simulated clock:
   `OperationNotPermittedException`/400, which it does.
 - After two hours the share is neither listed nor addressable: `UnknownResourceException`, as for a
   share that never existed.
+- The first list or lookup that finds an expired share removes its record and index entry, so deleted
+  shares do not accumulate. When that happens is not observable: an expired share answers the same
+  whether or not it has been removed yet.
 
 ### What a refusal reports
 

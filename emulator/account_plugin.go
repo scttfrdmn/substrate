@@ -612,7 +612,7 @@ func (p *AccountPlugin) targetAccount(reqCtx *RequestContext, accountID string) 
 	if accountID == "" {
 		return caller, nil
 	}
-	if !isAccountIDPattern(accountID) {
+	if !isAccountID(accountID) {
 		return "", accountValidation("fieldValidationFailed",
 			fmt.Sprintf("AccountId %q must be 12 digits", accountID))
 	}
@@ -654,20 +654,6 @@ func (p *AccountPlugin) organizationOwner(ctx context.Context, acct string) (str
 		return "", fmt.Errorf("account organizationOwner %s unmarshal: %w", acct, err)
 	}
 	return owner, nil
-}
-
-// isAccountIDPattern reports whether s matches the model's AccountId pattern,
-// ^\d{12}$.
-func isAccountIDPattern(s string) bool {
-	if len(s) != 12 {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 // --- helpers -----------------------------------------------------------------

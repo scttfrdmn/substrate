@@ -236,13 +236,15 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 		return nil, err
 	}
 
+	// The version history goes first, so a failure partway leaves the pipeline addressable and the
+	// delete retryable rather than orphaning snapshots behind a deleted record (#1160).
 	goCtx := context.Background()
+	if err := p.deletePipelineVersions(goCtx, pipeline); err != nil {
+		return nil, err
+	}
 	key := codepipelineKey(reqCtx.AccountID, reqCtx.Region, input.Name)
 	if err := p.state.Delete(goCtx, codepipelineNamespace, key); err != nil {
 		return nil, fmt.Errorf("codepipeline deletePipeline delete: %w", err)
-	}
-	if err := p.deletePipelineVersions(goCtx, pipeline); err != nil {
-		return nil, err
 	}
 	if err := removeFromStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
 		return nil, fmt.Errorf("codepipeline deletePipeline index: %w", err)

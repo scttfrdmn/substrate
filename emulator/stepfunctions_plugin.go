@@ -610,7 +610,7 @@ func (p *StepFunctionsPlugin) deleteStateMachine(_ *RequestContext, req *AWSRequ
 
 func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		MaxResults int    `json:"maxResults"`
+		MaxResults *int   `json:"maxResults"`
 		NextToken  string `json:"nextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -618,9 +618,9 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 			return nil, sfnInvalidBody()
 		}
 	}
-	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	maxResults, maxOK := sfnListMaxResults.resolve(input.MaxResults)
 	if !maxOK {
-		return nil, sfnInvalidMaxResults(input.MaxResults)
+		return nil, sfnInvalidMaxResults(*input.MaxResults)
 	}
 
 	goCtx := context.Background()
@@ -629,24 +629,7 @@ func (p *StepFunctionsPlugin) listStateMachines(ctx *RequestContext, req *AWSReq
 		return nil, err
 	}
 
-	offset := 0
-	if input.NextToken != "" {
-		for i, n := range names {
-			if n == input.NextToken {
-				offset = i
-				break
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		nextToken = page[maxResults]
-		page = page[:maxResults]
-	}
+	page, nextToken := sfnPageByName(names, input.NextToken, maxResults)
 
 	type smEntry struct {
 		StateMachineArn string  `json:"stateMachineArn"`
@@ -890,7 +873,7 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 		StateMachineArn string `json:"stateMachineArn"`
 		MapRunArn       string `json:"mapRunArn"`
 		StatusFilter    string `json:"statusFilter"`
-		MaxResults      int    `json:"maxResults"`
+		MaxResults      *int   `json:"maxResults"`
 		NextToken       string `json:"nextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -898,9 +881,9 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 			return nil, sfnInvalidBody()
 		}
 	}
-	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	maxResults, maxOK := sfnListMaxResults.resolve(input.MaxResults)
 	if !maxOK {
-		return nil, sfnListExecutionsInvalidMaxResults(input.MaxResults)
+		return nil, sfnListExecutionsInvalidMaxResults(*input.MaxResults)
 	}
 
 	// API_ListExecutions is the one operation in this set whose stateMachineArn is "Required: No":
@@ -944,24 +927,7 @@ func (p *StepFunctionsPlugin) listExecutions(_ *RequestContext, req *AWSRequest)
 		return nil, err
 	}
 
-	offset := 0
-	if input.NextToken != "" {
-		for i, id := range ids {
-			if id == input.NextToken {
-				offset = i
-				break
-			}
-		}
-	}
-	if offset > len(ids) {
-		offset = len(ids)
-	}
-	page := ids[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		nextToken = page[maxResults]
-		page = page[:maxResults]
-	}
+	page, nextToken := sfnPageByName(ids, input.NextToken, maxResults)
 
 	type execEntry struct {
 		ExecutionArn    string  `json:"executionArn"`
@@ -1135,7 +1101,7 @@ func (p *StepFunctionsPlugin) describeActivity(_ *RequestContext, req *AWSReques
 
 func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
-		MaxResults int    `json:"maxResults"`
+		MaxResults *int   `json:"maxResults"`
 		NextToken  string `json:"nextToken"`
 	}
 	if len(req.Body) > 0 {
@@ -1143,9 +1109,9 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 			return nil, sfnInvalidBody()
 		}
 	}
-	maxResults, maxOK := sfnListMaxResults.resolve(&input.MaxResults)
+	maxResults, maxOK := sfnListMaxResults.resolve(input.MaxResults)
 	if !maxOK {
-		return nil, sfnInvalidMaxResults(input.MaxResults)
+		return nil, sfnInvalidMaxResults(*input.MaxResults)
 	}
 
 	goCtx := context.Background()
@@ -1154,24 +1120,7 @@ func (p *StepFunctionsPlugin) listActivities(ctx *RequestContext, req *AWSReques
 		return nil, err
 	}
 
-	offset := 0
-	if input.NextToken != "" {
-		for i, n := range names {
-			if n == input.NextToken {
-				offset = i
-				break
-			}
-		}
-	}
-	if offset > len(names) {
-		offset = len(names)
-	}
-	page := names[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		nextToken = page[maxResults]
-		page = page[:maxResults]
-	}
+	page, nextToken := sfnPageByName(names, input.NextToken, maxResults)
 
 	type actEntry struct {
 		ActivityArn  string  `json:"activityArn"`

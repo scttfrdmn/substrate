@@ -207,4 +207,53 @@ func TestRAMOwnership_DeleteIsSoftForTheDocumentedWindow(t *testing.T) {
 	status, code := ramOwnershipErrorCode(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": arn})
 	assert.Equal(t, http.StatusBadRequest, status)
 	assert.Equal(t, "UnknownResourceException", code)
+
+	// The observation that found it expired pruned it: no record and no index entry remain, so deleted
+	// shares do not accumulate.
+	keys, err := ts.StateManager().List(t.Context(), "ram", "share:")
+	require.NoError(t, err)
+	assert.Empty(t, keys, "the expired share's record is removed")
+	index, err := ts.StateManager().Get(t.Context(), "ram", "share_arns:123456789012/us-east-1")
+	require.NoError(t, err)
+	assert.NotContains(t, string(index), arn, "and so is its index entry")
+}
+
+// A resource's type is RAM's published type name, looked up from the ARN rather than built from it: a
+// transit gateway is ec2:TransitGateway, which no spelling of its ARN segment produces.
+func TestRAMOwnership_ResourceTypeIsThePublishedName(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	tgw := "arn:aws:ec2:us-east-1:123456789012:transit-gateway/tgw-0123456789abcdef0"
+	unlisted := "arn:aws:example:us-east-1:123456789012:widget/w-1"
+	ramOwnershipShare(t, ts, "tgw", []string{"111111111111"}, []string{tgw, unlisted})
+
+	list := func(body map[string]any) []map[string]any {
+		body["resourceOwner"] = "SELF"
+		status, raw := ramOwnershipCall(t, ts, "/listresources", body)
+		require.Equal(t, http.StatusOK, status, "%s", raw)
+		var doc struct {
+			Resources []map[string]any `json:"resources"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &doc))
+		return doc.Resources
+	}
+
+	all := list(map[string]any{})
+	require.Len(t, all, 2)
+	byArn := map[string]map[string]any{}
+	for _, r := range all {
+		byArn[r["arn"].(string)] = r
+	}
+	assert.Equal(t, "ec2:TransitGateway", byArn[tgw]["type"])
+	assert.NotContains(t, byArn[unlisted], "type", "an ARN the table does not name reports no type")
+
+	for _, want := range []string{"ec2:TransitGateway", "EC2:transitgateway"} {
+		got := list(map[string]any{"resourceType": want})
+		require.Len(t, got, 1, want)
+		assert.Equal(t, tgw, got[0]["arn"], want)
+	}
+	assert.Empty(t, list(map[string]any{"resourceType": "ec2:transit-gateway"}), "the ARN segment is not a type name")
+
+	status, raw := ramOwnershipCall(t, ts, "/listprincipals", map[string]any{"resourceOwner": "SELF", "resourceType": "ec2:TransitGateway"})
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+	assert.Contains(t, string(raw), "111111111111")
 }

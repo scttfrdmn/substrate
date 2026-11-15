@@ -501,17 +501,9 @@ func (p *SSMPlugin) getParametersByPath(ctx *RequestContext, req *AWSRequest) (*
 
 	// Pagination. The token was validated before the parameter paths were read, so a token
 	// substrate could not have issued is refused rather than answered with page one (#915).
-	// An offset past the end is a token substrate did issue over a listing that has since
-	// shrunk, and clamps to a final empty page.
-	if offset > len(matched) {
-		offset = len(matched)
-	}
-	page := matched[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		nextToken = encodeOffsetPaginationToken(offset + maxResults)
-	}
+	// pageByOffsetToken clamps an offset past the end to a final empty page: that is a token
+	// substrate did issue over a listing that has since shrunk.
+	page, nextToken := pageByOffsetToken(matched, offset, maxResults)
 
 	type paramItem struct {
 		Name    string `json:"Name"`
@@ -572,15 +564,7 @@ func (p *SSMPlugin) describeParameters(ctx *RequestContext, req *AWSRequest) (*A
 
 	// See getParametersByPath: the token is validated before any state is read, and an
 	// offset past the end clamps to a final empty page rather than being refused (#915).
-	if offset > len(paths) {
-		offset = len(paths)
-	}
-	page := paths[offset:]
-	var nextToken string
-	if len(page) > maxResults {
-		page = page[:maxResults]
-		nextToken = encodeOffsetPaginationToken(offset + maxResults)
-	}
+	page, nextToken := pageByOffsetToken(paths, offset, maxResults)
 
 	type paramMeta struct {
 		Name        string `json:"Name"`

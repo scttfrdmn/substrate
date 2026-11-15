@@ -88,6 +88,8 @@ func TestBackupPlan_ListBackupPlansPages(t *testing.T) {
 		{"nextToken": "not-a-token"},
 		{"nextToken": base64.StdEncoding.EncodeToString([]byte("05"))},
 		{"includeDeleted": "maybe"},
+		{"includeDeleted": "1"},
+		{"includeDeleted": "t"},
 	} {
 		status, code, _, err := h.call(http.MethodGet, "/backup/plans/", params, nil)
 		require.NoError(t, err)

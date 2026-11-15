@@ -34,9 +34,6 @@ var ecrPrefixPattern = regexp.MustCompile(`^([a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*(\
 // `ecr-pullthroughcache/`, which the user guide states as a requirement in its own right.
 var ecrCredentialArnPattern = regexp.MustCompile(`^arn:aws(-\w+)*:secretsmanager:[a-zA-Z0-9-:]+:secret:ecr\-pullthroughcache\/[a-zA-Z0-9\/_+=.@-]+$`)
 
-// ecrRegistryIDPattern is registryId's published pattern on every ECR operation that carries it.
-var ecrRegistryIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
-
 // ecrUpstreamECRPattern is the Amazon ECR upstream URL form, `<accountId>.dkr.ecr.<region>.amazonaws.com`.
 var ecrUpstreamECRPattern = regexp.MustCompile(`^([0-9]{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com$`)
 
@@ -131,7 +128,7 @@ func ecrValidatePrefix(member, value string, minLen, maxLen int) *AWSError {
 // caller's own registry, as the rest of the plugin does, because nothing here models registry
 // permissions that would let one account act on another's.
 func ecrValidateRegistryID(registryID string) *AWSError {
-	if registryID != "" && !ecrRegistryIDPattern.MatchString(registryID) {
+	if registryID != "" && !isAccountID(registryID) {
 		return ecrInvalidParameter("Invalid parameter at 'registryId' failed to satisfy constraint: 'Member must satisfy regular expression pattern: [0-9]{12}'")
 	}
 	return nil

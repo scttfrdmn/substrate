@@ -34,7 +34,7 @@ import (
 
 // codepipelineVersionKey is the state key one stored version of a pipeline lives at.
 func codepipelineVersionKey(acct, region, name string, version int) string {
-	return "pipeline_version:" + acct + "/" + region + "/" + name + "/" + strconv.Itoa(version)
+	return codepipelineVersionPrefix(acct, region, name) + strconv.Itoa(version)
 }
 
 // putPipelineVersion stores pl as the snapshot of its own version.
@@ -71,11 +71,27 @@ func (p *CodePipelinePlugin) loadPipelineVersion(goCtx context.Context, current 
 	return &pl, nil
 }
 
-// deletePipelineVersions removes every stored version of a pipeline up to its current one.
+// codepipelineVersionPrefix is the key prefix every stored version of one pipeline shares. The trailing
+// slash keeps pipeline `a`'s prefix from matching pipeline `ab`'s keys.
+func codepipelineVersionPrefix(acct, region, name string) string {
+	return "pipeline_version:" + acct + "/" + region + "/" + name + "/"
+}
+
+// deletePipelineVersions removes the stored versions of a pipeline that exist.
+//
+// The keys are listed by prefix rather than counted from 1 to the current version, so a pipeline with
+// no history (one created before #1160) or a long one costs a delete per snapshot actually held, not
+// per version number. DeletePipeline calls this before it deletes the current record, so a failure
+// partway leaves the pipeline addressable and the delete retryable rather than leaving snapshots behind
+// with no record to find them through.
 func (p *CodePipelinePlugin) deletePipelineVersions(goCtx context.Context, pl *CodePipelineState) error {
-	for v := 1; v <= pl.Version; v++ {
-		if err := p.state.Delete(goCtx, codepipelineNamespace, codepipelineVersionKey(pl.AccountID, pl.Region, pl.Name, v)); err != nil {
-			return fmt.Errorf("codepipeline deletePipelineVersions: %w", err)
+	keys, err := p.state.List(goCtx, codepipelineNamespace, codepipelineVersionPrefix(pl.AccountID, pl.Region, pl.Name))
+	if err != nil {
+		return fmt.Errorf("codepipeline deletePipelineVersions list: %w", err)
+	}
+	for _, key := range keys {
+		if err := p.state.Delete(goCtx, codepipelineNamespace, key); err != nil {
+			return fmt.Errorf("codepipeline deletePipelineVersions delete: %w", err)
 		}
 	}
 	return nil

@@ -34,14 +34,19 @@ import (
 //   - A record that cannot be read fails the listing instead of being skipped, since a skipped record
 //     shortens the page and reports success over a store failure. An index entry outliving its record
 //     is not a fault and is passed over.
+//   - The page is cut from the sorted ID index before any record is loaded, so a listing loads only
+//     the records it returns. A passed-over entry can leave a page short while a marker is still
+//     emitted; the offset counts index entries, so the walk stays coherent.
 //
 // # GetWebACLForResource
 //
 // The handler answered `{"WebACL": {"ARN": …}}` — the association's stored ARN and nothing else —
 // where API_GetWebACLForResource publishes "WebACL / The web ACL that is associated with the resource."
 // of type WebACL, whose DefaultAction and VisibilityConfig are Required: Yes. It now resolves the ARN to
-// the stored record and answers it through [wafv2WebACLToWire], the projection GetWebACL uses, so the
-// two cannot disagree about one ACL.
+// the stored record through [WAFv2Plugin.loadWebACLByARN] — the path GetWebACL takes for its own `ARN`
+// member — and answers it through [wafv2WebACLToWire], GetWebACL's projection, so the two cannot
+// disagree about one ACL. The association keeps storing the bare ARN, the format every recorded run
+// already holds, rather than gaining a second copy of the scope and ID that could drift from it.
 //
 // An association whose web ACL no longer exists answers WAFNonexistentItemException/400 — published on
 // this page as "your resource doesn't exist" — as a resource with no association already does. The page
@@ -72,6 +77,30 @@ func wafv2ListParams(limit *int, marker string) (int, int, error) {
 func wafv2IsNonexistent(err error) bool {
 	var awsErr *AWSError
 	return errors.As(err, &awsErr) && awsErr.Code == "WAFNonexistentItemException"
+}
+
+// loadWebACLByARN loads the web ACL an ARN names, for the caller's account and Region.
+//
+// It is the one ARN-to-record path in the plugin: GetWebACL takes it when the request names `ARN`, and
+// GetWebACLForResource takes it for the ARN an association stores, so the two cannot resolve one ARN
+// differently. The parse is checked against the record it finds — the loaded ACL's own ARN, minted by
+// [wafv2ARN], must equal the one asked for — so if the parse and the builder ever disagreed the answer
+// would be a refusal rather than a different ACL. An ARN naming another account or Region, one that is
+// not a web ACL ARN, and one naming no stored ACL are all WAFNonexistentItemException/400.
+func (p *WAFv2Plugin) loadWebACLByARN(reqCtx *RequestContext, arn string) (*WAFv2WebACL, error) {
+	notFound := wafv2NonexistentItem("Web ACL " + arn + " does not exist.")
+	acct, region, scope, id, ok := wafv2ParseWebACLArn(arn)
+	if !ok || acct != reqCtx.AccountID || region != reqCtx.Region {
+		return nil, notFound
+	}
+	acl, err := p.loadWebACLByID(acct, region, scope, id)
+	if err != nil {
+		return nil, err
+	}
+	if acl.ARN != arn {
+		return nil, notFound
+	}
+	return acl, nil
 }
 
 // wafv2ParseWebACLArn splits a web ACL ARN built by [wafv2ARN] into the parts its state key is built

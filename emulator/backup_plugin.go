@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
-	"strconv"
 	"time"
 )
 
@@ -204,68 +203,59 @@ func (p *BackupPlugin) deleteBackupVault(reqCtx *RequestContext, name string) (*
 // A vault whose record cannot be read is an error rather than skipped, since a skipped vault would
 // shorten the list and shift every later offset.
 func (p *BackupPlugin) listBackupVaults(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	invalid := func(msg string) error {
-		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
-	}
-	pageSize := backupListVaultsMax
-	if raw, ok := req.Params["maxResults"]; ok {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > backupListVaultsMax {
-			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListVaultsMax))
-		}
-		pageSize = n
-	}
-	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
-	if !ok {
-		return nil, invalid("The nextToken is not valid.")
+	// maxResults and nextToken go through the rule all three listings share; see backup_list_params.go.
+	pageSize, offset, err := backupListParams(req.Params)
+	if err != nil {
+		return nil, err
 	}
 	matchesType := true
 	if vt, ok := req.Params["vaultType"]; ok {
 		if !backupVaultTypes[vt] {
-			return nil, invalid("vaultType must be one of BACKUP_VAULT, LOGICALLY_AIR_GAPPED_BACKUP_VAULT or RESTORE_ACCESS_BACKUP_VAULT.")
+			return nil, backupInvalidParameterValue("vaultType must be one of BACKUP_VAULT, LOGICALLY_AIR_GAPPED_BACKUP_VAULT or RESTORE_ACCESS_BACKUP_VAULT.")
 		}
 		matchesType = vt == backupVaultTypeStandard
 	}
-	if shared, ok := req.Params["shared"]; ok {
-		b, err := strconv.ParseBool(shared)
-		if err != nil {
-			return nil, invalid("shared must be true or false.")
-		}
-		if b {
-			matchesType = false
-		}
+	shared, _, err := backupQueryBool(req.Params, "shared")
+	if err != nil {
+		return nil, err
+	}
+	if shared {
+		matchesType = false
 	}
 
 	goCtx := context.Background()
-	names, err := loadStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region))
-	if err != nil {
-		return nil, fmt.Errorf("backup listBackupVaults load index: %w", err)
-	}
-	vaults := make([]BackupVault, 0, len(names))
+	var names []string
 	if matchesType {
-		for _, name := range names {
-			v, err := p.loadVault(reqCtx.AccountID, reqCtx.Region, name)
-			var awsErr *AWSError
-			if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
-				continue // an index entry outliving its record, which is not a fault
-			}
-			if err != nil {
-				return nil, err
-			}
-			vaults = append(vaults, *v)
+		names, err = loadStringIndex(goCtx, p.state, backupNamespace, backupVaultNamesKey(reqCtx.AccountID, reqCtx.Region))
+		if err != nil {
+			return nil, fmt.Errorf("backup listBackupVaults load index: %w", err)
 		}
 	}
-	page, next := pageByOffsetToken(vaults, offset, pageSize)
-	out := map[string]interface{}{"BackupVaultList": backupVaultsToWire(page)}
+	// The page is cut from the sorted index first, so only its records are loaded.
+	pageNames, next := pageByOffsetToken(names, offset, pageSize)
+	vaults := make([]BackupVault, 0, len(pageNames))
+	for _, name := range pageNames {
+		v, err := p.loadVault(reqCtx.AccountID, reqCtx.Region, name)
+		if backupIsNotFound(err) {
+			continue // an index entry outliving its record, which is not a fault
+		}
+		if err != nil {
+			return nil, err
+		}
+		vaults = append(vaults, *v)
+	}
+	out := map[string]interface{}{"BackupVaultList": backupVaultsToWire(vaults)}
 	if next != "" {
 		out["NextToken"] = next
 	}
 	return backupJSONResponse(http.StatusOK, out)
 }
 
-// backupListVaultsMax is ListBackupVaults' published maxResults maximum, and its page size when the
-// caller names none.
-const backupListVaultsMax = 1000
+// backupIsNotFound reports whether err is the not-found refusal a load answers for an absent record.
+func backupIsNotFound(err error) bool {
+	var awsErr *AWSError
+	return errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException"
+}
 
 // backupVaultTypeStandard is the one VaultType substrate creates: CreateBackupVault makes a
 // BACKUP_VAULT, and the operations that make the other two types are unrouted.
@@ -472,8 +462,8 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 //     substrate did not issue is InvalidParameterValueException — the only validation code the page
 //     publishes — rather than read as page one (#915).
 //   - includeDeleted is "A Boolean value with a default value of FALSE that returns deleted backup
-//     plans when set to TRUE." It is read and must be a boolean (InvalidParameterValueException
-//     otherwise), but **true returns the same list as false**: DeleteBackupPlan removes the record, so
+//     plans when set to TRUE." It is read and must be `true` or `false` (InvalidParameterValueException
+//     otherwise; see backup_list_params.go), but **true returns the same list as false**: DeleteBackupPlan removes the record, so
 //     substrate keeps no deleted plan to return. A consumer that lists deleted plans to confirm a
 //     deletion will find nothing, where AWS would answer the plan with a DeletionDate.
 //
@@ -481,25 +471,12 @@ func (p *BackupPlugin) deleteBackupPlan(reqCtx *RequestContext, planID string) (
 // would shorten the list, shift every later offset and report success over a store failure. An index
 // entry outliving its record is not a fault and is passed over, as the vault listing does.
 func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	invalid := func(msg string) error {
-		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
+	pageSize, offset, err := backupListParams(req.Params)
+	if err != nil {
+		return nil, err
 	}
-	pageSize := backupListPlansMax
-	if raw, ok := req.Params["maxResults"]; ok {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > backupListPlansMax {
-			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListPlansMax))
-		}
-		pageSize = n
-	}
-	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
-	if !ok {
-		return nil, invalid("The nextToken is not valid.")
-	}
-	if raw, ok := req.Params["includeDeleted"]; ok {
-		if _, err := strconv.ParseBool(raw); err != nil {
-			return nil, invalid("includeDeleted must be true or false.")
-		}
+	if _, _, err := backupQueryBool(req.Params, "includeDeleted"); err != nil {
+		return nil, err
 	}
 
 	goCtx := context.Background()
@@ -507,11 +484,12 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext, req *AWSRequest) 
 	if err != nil {
 		return nil, fmt.Errorf("backup listBackupPlans load index: %w", err)
 	}
-	summaries := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
+	// The page is cut from the sorted index first, so only its records are loaded.
+	pageIDs, next := pageByOffsetToken(ids, offset, pageSize)
+	summaries := make([]map[string]interface{}, 0, len(pageIDs))
+	for _, id := range pageIDs {
 		plan, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, id)
-		var awsErr *AWSError
-		if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+		if backupIsNotFound(err) {
 			continue // an index entry outliving its record, which is not a fault
 		}
 		if err != nil {
@@ -530,17 +508,12 @@ func (p *BackupPlugin) listBackupPlans(reqCtx *RequestContext, req *AWSRequest) 
 		}
 		summaries = append(summaries, summary)
 	}
-	page, next := pageByOffsetToken(summaries, offset, pageSize)
-	out := map[string]interface{}{"BackupPlansList": page}
+	out := map[string]interface{}{"BackupPlansList": summaries}
 	if next != "" {
 		out["NextToken"] = next
 	}
 	return backupJSONResponse(http.StatusOK, out)
 }
-
-// backupListPlansMax is ListBackupPlans' published maxResults maximum, and its page size when the
-// caller names none.
-const backupListPlansMax = 1000
 
 func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSRequest, planID string) (*AWSResponse, error) {
 	if _, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID); err != nil {
@@ -619,20 +592,9 @@ func (p *BackupPlugin) createBackupSelection(reqCtx *RequestContext, req *AWSReq
 // listBackupSelections handles ListBackupSelections (#1408): the plan's selections as published
 // BackupSelectionsListMember entries, paged by maxResults (1 to 1000) and nextToken.
 func (p *BackupPlugin) listBackupSelections(reqCtx *RequestContext, req *AWSRequest, planID string) (*AWSResponse, error) {
-	invalid := func(msg string) error {
-		return &AWSError{Code: "InvalidParameterValueException", Message: msg, HTTPStatus: http.StatusBadRequest}
-	}
-	pageSize := backupListSelectionsMax
-	if raw, ok := req.Params["maxResults"]; ok {
-		n, err := strconv.Atoi(raw)
-		if err != nil || n < 1 || n > backupListSelectionsMax {
-			return nil, invalid(fmt.Sprintf("maxResults must be an integer from 1 to %d.", backupListSelectionsMax))
-		}
-		pageSize = n
-	}
-	offset, ok := decodeOffsetPaginationToken(req.Params["nextToken"])
-	if !ok {
-		return nil, invalid("The nextToken is not valid.")
+	pageSize, offset, err := backupListParams(req.Params)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := p.loadPlan(reqCtx.AccountID, reqCtx.Region, planID); err != nil {
 		return nil, err
@@ -643,11 +605,12 @@ func (p *BackupPlugin) listBackupSelections(reqCtx *RequestContext, req *AWSRequ
 	if err != nil {
 		return nil, fmt.Errorf("backup listBackupSelections load index: %w", err)
 	}
-	members := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
+	// The page is cut from the sorted index first, so only its records are loaded.
+	pageIDs, next := pageByOffsetToken(ids, offset, pageSize)
+	members := make([]map[string]interface{}, 0, len(pageIDs))
+	for _, id := range pageIDs {
 		sel, err := p.loadSelection(reqCtx.AccountID, reqCtx.Region, planID, id)
-		var awsErr *AWSError
-		if errors.As(err, &awsErr) && awsErr.Code == "ResourceNotFoundException" {
+		if backupIsNotFound(err) {
 			continue // an index entry outliving its record, which is not a fault
 		}
 		if err != nil {
@@ -667,17 +630,12 @@ func (p *BackupPlugin) listBackupSelections(reqCtx *RequestContext, req *AWSRequ
 		}
 		members = append(members, member)
 	}
-	page, next := pageByOffsetToken(members, offset, pageSize)
-	out := map[string]interface{}{"BackupSelectionsList": page}
+	out := map[string]interface{}{"BackupSelectionsList": members}
 	if next != "" {
 		out["NextToken"] = next
 	}
 	return backupJSONResponse(http.StatusOK, out)
 }
-
-// backupListSelectionsMax is ListBackupSelections' published maxResults maximum, and its page size
-// when the caller names none.
-const backupListSelectionsMax = 1000
 
 func (p *BackupPlugin) getBackupSelection(reqCtx *RequestContext, planID, selectionID string) (*AWSResponse, error) {
 	selection, err := p.loadSelection(reqCtx.AccountID, reqCtx.Region, planID, selectionID)

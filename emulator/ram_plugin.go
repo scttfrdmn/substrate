@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -16,6 +17,9 @@ type RAMPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// indexMu serializes read-modify-writes of the share-ARN index: a create adds to it while a read
+	// may prune an expired share from it, and StateManager has no compare-and-swap (#1171).
+	indexMu sync.Mutex
 }
 
 // Name returns the service name "ram".
@@ -112,6 +116,8 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, shareArn), d); err != nil {
 		return nil, fmt.Errorf("ram createResourceShare put: %w", err)
 	}
+	p.indexMu.Lock()
+	defer p.indexMu.Unlock()
 	if err := updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn); err != nil {
 		return nil, fmt.Errorf("ram createResourceShare index: %w", err)
 	}
@@ -432,11 +438,16 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 					continue
 				}
 				seen[resourceArn] = true
-				resources = append(resources, map[string]interface{}{
+				resource := map[string]interface{}{
 					"arn":              resourceArn,
 					"resourceShareArn": share.ResourceShareArn,
 					"status":           "AVAILABLE",
-				})
+				}
+				// API_Resource publishes `type`; it is answered when the ARN maps to a published type.
+				if t := ramResourceType(resourceArn); t != "" {
+					resource["type"] = t
+				}
+				resources = append(resources, resource)
 			}
 		}
 	}
@@ -468,6 +479,9 @@ func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare,
 		return nil, fmt.Errorf("ram loadShare unmarshal: %w", err)
 	}
 	if !ramShareVisible(&share, p.tc.Now()) {
+		if err := p.pruneShare(goCtx, acct, region, shareArn); err != nil {
+			return nil, err
+		}
 		return nil, notFound
 	}
 	return &share, nil

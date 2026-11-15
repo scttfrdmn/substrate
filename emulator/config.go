@@ -946,7 +946,7 @@ func Validate(cfg *Config) error {
 		// An empty account_id adopts account.default, so only a non-empty one can
 		// be wrong. A malformed one lands in every ARN the caller signing with this
 		// key gets back.
-		if entry.AccountID != "" && !isAccountIDPattern(entry.AccountID) {
+		if entry.AccountID != "" && !isAccountID(entry.AccountID) {
 			return fmt.Errorf("credentials.entries[%d].account_id %q is not valid; an AWS account ID is 12 digits",
 				i, entry.AccountID)
 		}
@@ -979,7 +979,7 @@ func Validate(cfg *Config) error {
 	// An empty value keeps the built-in default; anything else must be a real
 	// account ID, because it lands in every ARN the server hands back and a
 	// malformed one is a fixture that cannot be compared against AWS.
-	if cfg.Account.Default != "" && !isAccountIDPattern(cfg.Account.Default) {
+	if cfg.Account.Default != "" && !isAccountID(cfg.Account.Default) {
 		return fmt.Errorf("account.default %q is not valid; an AWS account ID is 12 digits", cfg.Account.Default)
 	}
 

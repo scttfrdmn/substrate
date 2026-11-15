@@ -37,11 +37,13 @@ import (
 // `resourceType`. ListResources applies `principal`, `resourceArns`, `resourceShareArns`, `resourceType`
 // and `resourceRegionScope` (validated against `ALL | REGIONAL | GLOBAL`, default ALL).
 //
-// A resource's type is derived from its ARN as `service:resource-type` — `arn:aws:ec2:…:subnet/subnet-1`
-// is `ec2:subnet` — and compared case-insensitively, since API_Resource glosses the type as "of the form
-// service-code:resource-code, and is case-insensitive". Substrate records ARNs, not types, so this is
-// its reading of an ARN rather than RAM's own catalog, and a `resourceType` that RAM's ListResourceTypes
-// would reject is not refused but simply matches nothing. A resource's scope is GLOBAL when its ARN has
+// A resource's type is RAM's published type name, looked up from its ARN in [ramResourceTypes] —
+// `arn:aws:ec2:…:transit-gateway/tgw-1` is `ec2:TransitGateway`, not a name built from the ARN's
+// kebab-case segment — and compared case-insensitively, since API_Resource glosses the type as "of the
+// form service-code:resource-code, and is case-insensitive". ListResources reports it as the Resource's
+// `type`. An ARN whose service and resource segment the table does not name has no type: it matches no
+// `resourceType` filter and is reported without one. A `resourceType` that RAM's ListResourceTypes would
+// reject is not refused but simply matches nothing. A resource's scope is GLOBAL when its ARN has
 // an empty Region field and REGIONAL otherwise.
 //
 // Not read, and recorded so they are not mistaken for applied: `maxResults` and `nextToken` on all three
@@ -159,14 +161,107 @@ func (p *RAMPlugin) loadShares(goCtx context.Context, acct, region string) ([]RA
 		if err := json.Unmarshal(data, &share); err != nil {
 			return nil, fmt.Errorf("ram loadShares unmarshal %s: %w", arn, err)
 		}
-		if ramShareVisible(&share, now) {
-			shares = append(shares, share)
+		if !ramShareVisible(&share, now) {
+			if err := p.pruneShare(goCtx, acct, region, arn); err != nil {
+				return nil, err
+			}
+			continue
 		}
+		shares = append(shares, share)
 	}
 	return shares, nil
 }
 
-// ramResourceType derives `service:resource-type` from a resource ARN, lowercased.
+// pruneShare removes a DELETED share whose retention window has passed: its record and its index
+// entry.
+//
+// Nothing else ever removes a deleted share, so without this the record and the index would grow with
+// every delete for the life of the state. It runs on the observation that finds the share expired — a
+// list or a lookup — rather than on a timer, and expiry is read from the simulated clock, so a replay
+// that reaches the same request at the same simulated time prunes the same share. A share pruned or not
+// yet pruned answers identically: either way it is not listed and its lookup is
+// UnknownResourceException, so when the prune happens is not observable through the API.
+func (p *RAMPlugin) pruneShare(goCtx context.Context, acct, region, arn string) error {
+	if err := p.state.Delete(goCtx, ramNamespace, ramShareKey(acct, region, arn)); err != nil {
+		return fmt.Errorf("ram pruneShare delete %s: %w", arn, err)
+	}
+	p.indexMu.Lock()
+	defer p.indexMu.Unlock()
+	if err := removeFromStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(acct, region), arn); err != nil {
+		return fmt.Errorf("ram pruneShare index %s: %w", arn, err)
+	}
+	return nil
+}
+
+// ramResourceTypes maps an ARN's `service:resource-segment` to the resource type RAM publishes for it.
+//
+// The values are the type codes the RAM User Guide's "Shareable AWS resources" page lists, verbatim
+// (`ec2:TransitGateway`, `license-manager:LicenseConfiguration`, `route53resolver:ResolverRule`, …).
+// The keys are the resource segment each service's ARN carries — kebab-case for most
+// (`transit-gateway/tgw-…`, `prefix-list/pl-…`), but not all (`network-firewall`'s
+// `stateful-rulegroup`, `vpc-lattice`'s `servicenetwork`, ELB's `truststore`) — which is why the type is
+// looked up rather than built: no one spelling rule turns the segment into the published name. The
+// table covers the shareable types whose ARN form is a `service:segment/…` or `service:segment:…`;
+// types not listed here (API Gateway domain names, Marketplace entities and the rest) have no type.
+var ramResourceTypes = map[string]string{
+	"ec2:capacity-reservation":                  "ec2:CapacityReservation",
+	"ec2:coip-pool":                             "ec2:CoipPool",
+	"ec2:dedicated-host":                        "ec2:DedicatedHost",
+	"ec2:ipam-pool":                             "ec2:IpamPool",
+	"ec2:ipam-resource-discovery":               "ec2:IpamResourceDiscovery",
+	"ec2:local-gateway-route-table":             "ec2:LocalGatewayRouteTable",
+	"ec2:placement-group":                       "ec2:PlacementGroup",
+	"ec2:prefix-list":                           "ec2:PrefixList",
+	"ec2:security-group":                        "ec2:SecurityGroup",
+	"ec2:subnet":                                "ec2:Subnet",
+	"ec2:traffic-mirror-target":                 "ec2:TrafficMirrorTarget",
+	"ec2:transit-gateway":                       "ec2:TransitGateway",
+	"ec2:transit-gateway-multicast-domain":      "ec2:TransitGatewayMulticastDomain",
+	"ec2:verified-access-group":                 "ec2:VerifiedAccessGroup",
+	"ec2:volume":                                "ec2:Volume",
+	"acm-pca:certificate-authority":             "acm-pca:CertificateAuthority",
+	"appmesh:mesh":                              "appmesh:Mesh",
+	"backup:backup-vault":                       "backup:BackupVault",
+	"codebuild:project":                         "codebuild:Project",
+	"codebuild:report-group":                    "codebuild:ReportGroup",
+	"codeconnections:connection":                "codeconnections:Connection",
+	"elasticloadbalancing:truststore":           "elasticloadbalancing:TrustStore",
+	"fsx:volume":                                "fsx:Volume",
+	"glue:catalog":                              "glue:Catalog",
+	"glue:database":                             "glue:Database",
+	"glue:table":                                "glue:Table",
+	"imagebuilder:component":                    "imagebuilder:Component",
+	"imagebuilder:container-recipe":             "imagebuilder:ContainerRecipe",
+	"imagebuilder:image":                        "imagebuilder:Image",
+	"imagebuilder:image-recipe":                 "imagebuilder:ImageRecipe",
+	"license-manager:license-configuration":     "license-manager:LicenseConfiguration",
+	"network-firewall:firewall":                 "network-firewall:Firewall",
+	"network-firewall:firewall-policy":          "network-firewall:FirewallPolicy",
+	"network-firewall:stateful-rulegroup":       "network-firewall:StatefulRuleGroup",
+	"network-firewall:stateless-rulegroup":      "network-firewall:StatelessRuleGroup",
+	"networkmanager:core-network":               "networkmanager:CoreNetwork",
+	"outposts:outpost":                          "outposts:Outpost",
+	"outposts:site":                             "outposts:Site",
+	"rds:cluster":                               "rds:Cluster",
+	"resource-groups:group":                     "resource-groups:Group",
+	"route53profiles:profile":                   "route53profiles:Profile",
+	"route53resolver:firewall-rule-group":       "route53resolver:FirewallRuleGroup",
+	"route53resolver:resolver-query-log-config": "route53resolver:ResolverQueryLogConfig",
+	"route53resolver:resolver-rule":             "route53resolver:ResolverRule",
+	"sagemaker:feature-group":                   "sagemaker:FeatureGroup",
+	"sagemaker:hub":                             "sagemaker:Hub",
+	"sagemaker:model-card":                      "sagemaker:ModelCard",
+	"sagemaker:pipeline":                        "sagemaker:Pipeline",
+	"servicediscovery:namespace":                "servicediscovery:Namespace",
+	"ssm:document":                              "ssm:Document",
+	"ssm:parameter":                             "ssm:Parameter",
+	"vpc-lattice:resourceconfiguration":         "vpc-lattice:ResourceConfiguration",
+	"vpc-lattice:service":                       "vpc-lattice:Service",
+	"vpc-lattice:servicenetwork":                "vpc-lattice:ServiceNetwork",
+}
+
+// ramResourceType returns the published RAM resource type of a resource ARN, or "" when
+// [ramResourceTypes] does not name its service and resource segment.
 func ramResourceType(arn string) string {
 	parts := strings.SplitN(arn, ":", 6)
 	if len(parts) != 6 {
@@ -176,7 +271,7 @@ func ramResourceType(arn string) string {
 	if i := strings.IndexAny(resource, "/:"); i >= 0 {
 		resource = resource[:i]
 	}
-	return strings.ToLower(parts[2] + ":" + resource)
+	return ramResourceTypes[parts[2]+":"+resource]
 }
 
 // ramResourceRegionScope is GLOBAL for an ARN with no Region and REGIONAL otherwise.

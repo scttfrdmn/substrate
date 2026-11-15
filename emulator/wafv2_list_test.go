@@ -147,3 +147,36 @@ func TestWAFv2List_GetWebACLForResourceAnswersTheWholeWebACL(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, status, "%s", raw)
 	assert.Equal(t, "WAFNonexistentItemException", cicdCode(t, raw), "%s", raw)
 }
+
+// GetWebACL resolves its ARN member through the path GetWebACLForResource uses, for both scopes, so
+// the ARN the builder mints is the ARN the resolver accepts.
+func TestWAFv2List_GetWebACLByARN(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	for _, scope := range []string{"REGIONAL", "CLOUDFRONT"} {
+		var created struct {
+			Summary struct {
+				ARN string `json:"ARN"`
+				ID  string `json:"Id"`
+			} `json:"Summary"`
+		}
+		wafv2ListCall(t, ts, "CreateWebACL", map[string]any{
+			"Name": "by-arn-" + scope, "Scope": scope, "DefaultAction": map[string]any{"Allow": map[string]any{}},
+			"VisibilityConfig": map[string]any{"SampledRequestsEnabled": false, "CloudWatchMetricsEnabled": false, "MetricName": "m"},
+		}, &created)
+		var got struct {
+			WebACL map[string]any `json:"WebACL"`
+		}
+		wafv2ListCall(t, ts, "GetWebACL", map[string]any{"ARN": created.Summary.ARN}, &got)
+		assert.Equal(t, created.Summary.ID, got.WebACL["Id"], scope)
+		assert.Equal(t, created.Summary.ARN, got.WebACL["ARN"], scope)
+	}
+	for name, arn := range map[string]string{
+		"another account": "arn:aws:wafv2:us-east-1:999999999999:regional/webacl/x/00000000-0000-0000-0000-000000000000",
+		"not a web ACL":   "arn:aws:wafv2:us-east-1:123456789012:regional/ipset/x/00000000-0000-0000-0000-000000000000",
+		"no such ACL":     "arn:aws:wafv2:us-east-1:123456789012:regional/webacl/x/00000000-0000-0000-0000-000000000000",
+	} {
+		status, raw := cicdCall(t, ts, wafv2ListHost, wafv2ListTarget, "GetWebACL", map[string]any{"ARN": arn})
+		assert.Equal(t, http.StatusBadRequest, status, "%s: %s", name, raw)
+		assert.Equal(t, "WAFNonexistentItemException", cicdCode(t, raw), "%s: %s", name, raw)
+	}
+}

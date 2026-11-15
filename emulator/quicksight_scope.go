@@ -1,9 +1,6 @@
 package emulator
 
-import (
-	"net/http"
-	"regexp"
-)
+import "net/http"
 
 // QuickSight resources are identified by account, Region and ID, and the account in the path is the
 // one the request addresses (#1167).
@@ -39,12 +36,9 @@ import (
 // Nothing migrates the old keys, since a key that omits the Region cannot say which Region it belonged
 // to.
 
-// quicksightAccountIDPattern is the published Pattern of the URI's AwsAccountId.
-var quicksightAccountIDPattern = regexp.MustCompile(`^[0-9]{12}$`)
-
 // quicksightCheckPathAccount refuses a path AwsAccountId that is malformed or is not the caller's.
 func quicksightCheckPathAccount(ctx *RequestContext, pathAccount string) error {
-	if !quicksightAccountIDPattern.MatchString(pathAccount) {
+	if !isAccountID(pathAccount) {
 		return quicksightInvalidParameterValue("AwsAccountId must be a 12-digit account ID")
 	}
 	if pathAccount != ctx.AccountID {

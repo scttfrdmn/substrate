@@ -69,9 +69,12 @@ import "net/http"
 // An absent MaxResults keeps [athenaListDefaultPageSize], so every recorded request that omitted it
 // replays byte-identically.
 //
-// **A MaxResults of 0 on ListQueryExecutions is honored as written**: the page carries no query
-// execution IDs, and carries a NextToken that resumes at the same position when records remain there
-// (none when they do not). Neither page says what 0 means — unlike Step Functions', no sentence maps
+// **A MaxResults of 0 on ListQueryExecutions is honored as written, and ends the walk**: the page
+// carries no query execution IDs and **no NextToken**. A token resuming at the same position would be the
+// only other honest cursor, and it never advances: a paginator that follows it asks for zero items
+// forever, and the SDK paginators that refuse a repeated token fail instead. So the zero page is a
+// complete answer to a request for zero items, and a caller wanting the records asks again without the
+// 0 (or with a token from a non-zero page). Neither page says what 0 means — unlike Step Functions', no sentence maps
 // it to a default — so substrate answers what the caller asked for: at most zero items. The response
 // element publishes `QueryExecutionIds` with "Array Members: Minimum number of 1 item", which a zero
 // page cannot meet. Substrate reads that minimum as describing a page with something on it rather than
@@ -125,20 +128,17 @@ func athenaListParams(operation string, r pageSizeRange, maxResults *int, nextTo
 	return size, offset, nil
 }
 
-// athenaPageIDs cuts one ListQueryExecutions page, honoring a MaxResults of 0 as a page with no items.
+// athenaPageIDs cuts one ListQueryExecutions page, honoring a MaxResults of 0 as a final page with no
+// items.
 //
 // [pageByOffsetToken] reads a page size of 0 as "no limit", which is the opposite of what a caller who
-// sent 0 asked for, so that case is answered here: an empty page, and a token that resumes at the same
-// offset when records remain from it. A past-the-end offset still clamps to an empty final page with no
-// token, as it does for every other size.
+// sent 0 asked for, so that case is answered here: an empty page and no token, so the walk ends rather
+// than being handed a cursor that never advances. See this file's comment.
 func athenaPageIDs(ids []string, offset, maxResults int) ([]string, string) {
 	if maxResults > 0 {
 		return pageByOffsetToken(ids, offset, maxResults)
 	}
-	if offset >= len(ids) {
-		return []string{}, ""
-	}
-	return []string{}, encodeOffsetPaginationToken(offset)
+	return []string{}, ""
 }
 
 // athenaInvalidPaginationToken refuses a NextToken that no previous call to operation returned.
