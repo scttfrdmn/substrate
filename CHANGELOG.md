@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`CLAUDE.md` records how error message text is matched (#487).** Codes and statuses must match AWS. Message text is matched as each error is touched: AWS's published wording where a source exists, noted at the literal. Otherwise substrate's own wording, stated as such or cited under Provenance. This replaces a one-time sweep of about 650 literals.
+
 ## [v0.127.0] - 2026-11-14
 
 ### Added

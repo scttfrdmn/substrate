@@ -176,6 +176,14 @@ knowledge or assumptions. Verify request/response shapes, error codes, paginatio
 behaviour, and IAM condition keys against the AWS API reference for the relevant
 service before writing code or tests.
 
+**Error message text.** Codes and HTTP statuses must match AWS; message *text* is matched as
+you go, not in a sweep (#487). Any change that adds or touches an `AWSError` uses AWS's wording
+when a source publishes it: the API reference, a user-guide page, or a documented CLI/SDK example.
+Note that source in a comment next to the literal. Where nothing publishes the wording, keep
+substrate's own message and say so in the CHANGELOG ("the messages are substrate's own"), or
+cite observed behaviour (an SDK or Terraform report) under the release's `## Provenance`.
+Never invent text that imitates AWS without a source.
+
 ## Key files
 
 | File | Purpose |
