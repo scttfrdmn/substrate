@@ -37,3 +37,8 @@ func ServiceListForTest() map[string]string {
 // The Organizations ceilings this package's tests compare the seeded values
 // against are already exported by organizations_export_test.go.
 func ServiceListLenForTest() int { return len(defaultServiceList) }
+
+// EC2VCPUQuotaClassOfForTest exposes the instance-type-to-quota-class rule, so every prefix
+// it special-cases can be asserted, including families substrate's catalog does not carry
+// and so no launch can reach.
+func EC2VCPUQuotaClassOfForTest(instanceType string) string { return ec2VCPUQuotaClassOf(instanceType) }

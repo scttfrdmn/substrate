@@ -9,8 +9,8 @@ import (
 )
 
 // ServiceQuotasPlugin emulates the AWS Service Quotas API.
-// It handles ListServices, ListServiceQuotas, GetServiceQuota,
-// GetAWSDefaultServiceQuota, RequestServiceQuotaIncrease,
+// It handles ListServices, ListServiceQuotas, ListAWSDefaultServiceQuotas,
+// GetServiceQuota, GetAWSDefaultServiceQuota, RequestServiceQuotaIncrease,
 // ListRequestedServiceQuotaChangeHistory, and GetRequestedServiceQuotaChange.
 // The built-in quota table provides representative default values; increases
 // are stored in state as PENDING requests. The Service Quotas API is free.
@@ -41,20 +41,22 @@ func (p *ServiceQuotasPlugin) Shutdown(_ context.Context) error { return nil }
 // HandleRequest dispatches a Service Quotas JSON-protocol request.
 //
 // The three quota-increase operations take the caller's account, because a quota
-// increase belongs to the account that filed it. The four read-only ones do not:
-// the quota table is per-service and identical for every caller, so threading an
-// account into them would imply a per-account value that substrate does not model
-// and nothing can set.
+// increase belongs to the account that filed it. The quota reads take the caller's
+// context only to mint each quota's QuotaArn, which names the caller's region and, for
+// an applied value, account: the quota table itself is per-service and identical for
+// every caller, since substrate models no per-account value and nothing can set one.
 func (p *ServiceQuotasPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	switch req.Operation {
 	case "ListServices":
 		return p.listServices(req)
 	case "ListServiceQuotas":
-		return p.listServiceQuotas(req)
+		return p.listServiceQuotas(reqCtx, req)
+	case "ListAWSDefaultServiceQuotas":
+		return p.listAWSDefaultServiceQuotas(reqCtx, req)
 	case "GetServiceQuota":
-		return p.getServiceQuota(req)
+		return p.getServiceQuota(reqCtx, req)
 	case "GetAWSDefaultServiceQuota":
-		return p.getAWSDefaultServiceQuota(req)
+		return p.getAWSDefaultServiceQuota(reqCtx, req)
 	case "RequestServiceQuotaIncrease":
 		return p.requestServiceQuotaIncrease(reqCtx.IDs, sqAccountID(reqCtx), req)
 	// The second name is not one AWS has; it is the name this handler shipped
@@ -141,21 +143,65 @@ func (p *ServiceQuotasPlugin) saveIncrease(ctx context.Context, accountID string
 
 // --- Operations --------------------------------------------------------------
 
-func (p *ServiceQuotasPlugin) listServices(_ *AWSRequest) (*AWSResponse, error) {
-	return sqJSONResponse(http.StatusOK, map[string]interface{}{
-		"Services": defaultServiceList,
-	})
+// listServices answers ListServices, one page at a time.
+func (p *ServiceQuotasPlugin) listServices(req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		MaxResults *int   `json:"MaxResults"`
+		NextToken  string `json:"NextToken"`
+	}
+	if err := sqUnmarshal(req.Body, &input); err != nil {
+		return nil, err
+	}
+	pageSize, offset, awsErr := sqPageInput(input.MaxResults, input.NextToken)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	// defaultServiceList is a fixed slice, so its order is stable across pages.
+	page, next := pageByOffsetToken(defaultServiceList, offset, pageSize)
+	return sqJSONResponse(http.StatusOK, sqWithNextToken(map[string]interface{}{"Services": page}, next))
 }
 
-func (p *ServiceQuotasPlugin) listServiceQuotas(req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		ServiceCode string `json:"ServiceCode"`
-	}
+// sqListInput is the request shape ListServiceQuotas and ListAWSDefaultServiceQuotas share.
+// QuotaCode and QuotaAppliedAtLevel are ListServiceQuotas members only; the default listing
+// does not model them, so it never reads them.
+type sqListInput struct {
+	ServiceCode         string `json:"ServiceCode"`
+	QuotaCode           string `json:"QuotaCode"`
+	QuotaAppliedAtLevel string `json:"QuotaAppliedAtLevel"`
+	MaxResults          *int   `json:"MaxResults"`
+	NextToken           string `json:"NextToken"`
+}
+
+// listServiceQuotas answers ListServiceQuotas: the applied values of a service's quotas.
+//
+// QuotaCode narrows the listing to one quota, and a code the service does not publish
+// narrows it to none, which is a filter answering with nothing rather than a refusal.
+// QuotaAppliedAtLevel is validated against its three values. Every quota substrate
+// publishes is applied at the account level, so ACCOUNT (the default) and ALL list them all
+// and RESOURCE lists none.
+func (p *ServiceQuotasPlugin) listServiceQuotas(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.listQuotas(reqCtx, req, false)
+}
+
+// listAWSDefaultServiceQuotas answers ListAWSDefaultServiceQuotas: "the default values for
+// the quotas for the specified AWS service. A default value does not reflect any quota
+// increases." Its pagination is ListServiceQuotas'.
+func (p *ServiceQuotasPlugin) listAWSDefaultServiceQuotas(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.listQuotas(reqCtx, req, true)
+}
+
+// listQuotas is the body of both quota listings; awsDefault selects which value is read.
+func (p *ServiceQuotasPlugin) listQuotas(reqCtx *RequestContext, req *AWSRequest, awsDefault bool) (*AWSResponse, error) {
+	var input sqListInput
 	if err := sqUnmarshal(req.Body, &input); err != nil {
 		return nil, err
 	}
 	if input.ServiceCode == "" {
 		return nil, sqIllegalArgument("ServiceCode is required")
+	}
+	pageSize, offset, awsErr := sqPageInput(input.MaxResults, input.NextToken)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	// An unrecognized service is NoSuchResourceException, which the model declares
@@ -166,12 +212,55 @@ func (p *ServiceQuotasPlugin) listServiceQuotas(req *AWSRequest) (*AWSResponse, 
 		return nil, sqNoSuchService(input.ServiceCode)
 	}
 
-	return sqJSONResponse(http.StatusOK, map[string]interface{}{
-		"Quotas": quotas,
-	})
+	selected := quotas
+	if !awsDefault {
+		switch input.QuotaAppliedAtLevel {
+		case "", "ACCOUNT", "ALL":
+		case "RESOURCE":
+			selected = nil
+		default:
+			return nil, sqIllegalArgument(fmt.Sprintf(
+				"QuotaAppliedAtLevel %q is not one of ACCOUNT, RESOURCE or ALL", input.QuotaAppliedAtLevel))
+		}
+		if input.QuotaCode != "" {
+			var one []ServiceQuota
+			for _, q := range selected {
+				if q.QuotaCode == input.QuotaCode {
+					one = append(one, q)
+				}
+			}
+			selected = one
+		}
+	}
+
+	// The table rows are a fixed slice, so the offset a token carries names the same row on
+	// every call.
+	page, next := pageByOffsetToken(selected, offset, pageSize)
+	accountID, region := sqCaller(reqCtx)
+	rendered := make([]ServiceQuota, 0, len(page))
+	for _, q := range page {
+		rendered = append(rendered, sqRenderQuota(q, accountID, region, awsDefault))
+	}
+	return sqJSONResponse(http.StatusOK, sqWithNextToken(map[string]interface{}{"Quotas": rendered}, next))
 }
 
-func (p *ServiceQuotasPlugin) getServiceQuota(req *AWSRequest) (*AWSResponse, error) {
+// getServiceQuota answers GetServiceQuota: one quota's applied value.
+func (p *ServiceQuotasPlugin) getServiceQuota(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.getQuota(reqCtx, req, false)
+}
+
+// getAWSDefaultServiceQuota answers GetAWSDefaultServiceQuota: "the default value for the
+// specified quota. The default value does not reflect any quota increases."
+//
+// For nearly every quota the two are the same number, because nothing in substrate raises a
+// quota. The exception is L-1216C47A, whose applied value substrate has long published as 32
+// while AWS's new-account default is 5; see [ec2StandardOnDemandAppliedValue].
+func (p *ServiceQuotasPlugin) getAWSDefaultServiceQuota(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	return p.getQuota(reqCtx, req, true)
+}
+
+// getQuota is the body of both single-quota reads; awsDefault selects which value is read.
+func (p *ServiceQuotasPlugin) getQuota(reqCtx *RequestContext, req *AWSRequest, awsDefault bool) (*AWSResponse, error) {
 	var input struct {
 		ServiceCode string `json:"ServiceCode"`
 		QuotaCode   string `json:"QuotaCode"`
@@ -187,13 +276,84 @@ func (p *ServiceQuotasPlugin) getServiceQuota(req *AWSRequest) (*AWSResponse, er
 	if awsErr != nil {
 		return nil, awsErr
 	}
+	accountID, region := sqCaller(reqCtx)
 	return sqJSONResponse(http.StatusOK, map[string]interface{}{
-		"Quota": quota,
+		"Quota": sqRenderQuota(*quota, accountID, region, awsDefault),
 	})
 }
 
-func (p *ServiceQuotasPlugin) getAWSDefaultServiceQuota(req *AWSRequest) (*AWSResponse, error) {
-	return p.getServiceQuota(req)
+// sqRenderQuota returns q as the wire carries it to the caller.
+//
+// The applied value's ARN names the caller's account and the default value's names none —
+// "arn:aws:servicequotas:us-east-2::ec2/L-1216C47A" is what the Service Quotas CLI
+// reference's get-aws-default-service-quota example shows, against
+// "arn:aws:servicequotas:us-east-2:123456789012:ec2/L-1216C47A" for get-service-quota. A
+// default belongs to no account; that is what makes it a default. The format is the quota
+// resource type's, arn:${Partition}:servicequotas:${Region}:${Account}:${ServiceCode}/${QuotaCode}.
+func sqRenderQuota(q ServiceQuota, accountID, region string, awsDefault bool) ServiceQuota {
+	out := q
+	if awsDefault {
+		if q.defaultValue != nil {
+			out.Value = *q.defaultValue
+		}
+		accountID = ""
+	}
+	out.QuotaArn = "arn:" + cfnPartition(region) + ":servicequotas:" + region + ":" + accountID + ":" +
+		q.ServiceCode + "/" + q.QuotaCode
+	return out
+}
+
+// sqCaller returns the account and region a quota's ARN is minted under. A nil or empty
+// context falls back to the account and region an unconfigured request resolves to, as
+// [sqAccountID] does.
+func sqCaller(reqCtx *RequestContext) (accountID, region string) {
+	accountID, region = sqAccountID(reqCtx), defaultRegion
+	if reqCtx != nil && reqCtx.Region != "" {
+		region = reqCtx.Region
+	}
+	return accountID, region
+}
+
+// sqMaxResultsLimit is the upper bound the reference gives every paginated Service Quotas
+// listing: "Valid Range: Minimum value of 1. Maximum value of 100."
+const sqMaxResultsLimit = 100
+
+// sqPageInput validates a listing's MaxResults and NextToken and returns the page size and
+// starting offset.
+//
+// MaxResults "defaults to a value appropriate to the operation"; substrate's is the upper
+// bound, so an unpaginated caller sees every quota a service publishes in one page. A value
+// outside 1–100 is IllegalArgumentException, the code the reference declares for invalid
+// input. A token substrate did not issue is InvalidPaginationTokenException, which the
+// reference declares for both quota listings and for ListServices — never page one.
+func sqPageInput(maxResults *int, nextToken string) (pageSize, offset int, refusal *AWSError) {
+	pageSize = sqMaxResultsLimit
+	if maxResults != nil {
+		if *maxResults < 1 || *maxResults > sqMaxResultsLimit {
+			return 0, 0, sqIllegalArgument(fmt.Sprintf(
+				"MaxResults %d is outside the valid range of 1 to %d", *maxResults, sqMaxResultsLimit))
+		}
+		pageSize = *maxResults
+	}
+	offset, ok := decodeOffsetPaginationToken(nextToken)
+	if !ok {
+		return 0, 0, &AWSError{
+			Code:       "InvalidPaginationTokenException",
+			Message:    "The NextToken is not one this listing issued.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return pageSize, offset, nil
+}
+
+// sqWithNextToken adds NextToken to a listing's body when another page exists. On the last
+// page it is absent, which a client reads as null: "repeat this until the NextToken response
+// element comes back as null".
+func sqWithNextToken(body map[string]interface{}, next string) map[string]interface{} {
+	if next != "" {
+		body["NextToken"] = next
+	}
+	return body
 }
 
 func (p *ServiceQuotasPlugin) requestServiceQuotaIncrease(mint *IDMint, accountID string, req *AWSRequest) (*AWSResponse, error) {

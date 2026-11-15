@@ -13,7 +13,7 @@ import (
 // CloudWatchPlugin emulates the Amazon CloudWatch Alarms and Metrics API. It
 // handles PutMetricAlarm, DeleteAlarms, DescribeAlarms, DescribeAlarmsForMetric,
 // SetAlarmState, EnableAlarmActions, DisableAlarmActions, PutMetricData,
-// ListMetrics and GetMetricData.
+// ListMetrics, GetMetricData and GetMetricStatistics.
 //
 // All three wire protocols CloudWatch's service shape declares are served —
 // aws.protocols#awsQuery, aws.protocols#awsJson1_0 and
@@ -71,6 +71,8 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.disableAlarmActions(ctx, req)
 	case "GetMetricData":
 		return p.getMetricData(ctx, req)
+	case "GetMetricStatistics":
+		return p.getMetricStatistics(ctx, req)
 	case "PutMetricData":
 		return p.putMetricData(ctx, req)
 	case "ListMetrics":
@@ -416,29 +418,6 @@ func parseMemberList(params map[string]string, prefix string) []string {
 	return result
 }
 
-// --- GetMetricData -----------------------------------------------------------
-
-// getMetricData handles the GetMetricData operation.
-//
-// Substrate records a metric's name and namespace but not its time series — running the
-// workload that produces data points is outside what an API observation can be — so the
-// answer is a present-but-empty MetricDataResults list and an empty Messages list. A
-// caller that degrades gracefully on zero values (displaying "0 bytes", say) works
-// against this; one that needs data points needs a seeded time series, which is not
-// modeled.
-//
-// Before #785 this was where substrate's only CBOR lived: a hardcoded one-byte 0xa0 for
-// any caller whose Content-Type mentioned CBOR, with the request body never parsed. The
-// empty map is *tolerated* by the protocol's NoOutputClientAllowsEmptyCbor test but says
-// nothing about the members, so a client could not distinguish "no data" from "not
-// implemented"; the two empty lists do.
-func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	result := cwDoc{}.
-		with("MetricDataResults", cwList{}).
-		with("Messages", cwList{})
-	return cwRespond(req, "GetMetricData", ctx.RequestID, result)
-}
-
 // --- PutMetricData -----------------------------------------------------------
 
 // cwMetricNamesKey returns the state key for the metric name index.
@@ -472,12 +451,19 @@ func (p *CloudWatchPlugin) putMetricData(ctx *RequestContext, req *AWSRequest) (
 // --- ListMetrics -------------------------------------------------------------
 
 // listMetrics handles the ListMetrics operation. It returns the metric names
-// that were previously published via PutMetricData for the given namespace.
-// Closes #221.
+// that were previously published via PutMetricData for the given namespace
+// (#221), followed by the EC2 vCPU usage metrics in AWS/Usage that the caller's
+// instances have counted against (#1498; see cloudwatch_usage.go).
+//
+// A Dimensions filter is honored for both: a metric is listed only when it has
+// every named dimension, with the named value when one is given. A metric
+// published through PutMetricData is recorded without dimensions, so any
+// dimension filter excludes it.
 func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	goCtx := context.Background()
 	namespace := req.Params["Namespace"]
 	filterName := req.Params["MetricName"]
+	dimensionFilters := cwParseDimensions(req.Params, "Dimensions")
 
 	metrics := cwList{}
 
@@ -507,6 +493,9 @@ func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*A
 			if filterName != "" && name != filterName {
 				continue
 			}
+			if !cwDimensionFiltersMatch(dimensionFilters, nil) {
+				continue
+			}
 			// Dimensions is present and empty rather than absent: substrate records a
 			// metric by name and namespace only, and an empty dimension list is what
 			// CloudWatch reports for a metric published without any.
@@ -516,6 +505,12 @@ func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*A
 				with("Dimensions", cwList{}))
 		}
 	}
+
+	usageMetrics, err := p.usageMetrics(ctx, namespace, filterName, dimensionFilters)
+	if err != nil {
+		return nil, err
+	}
+	metrics = append(metrics, usageMetrics...)
 
 	result := cwDoc{}.with("Metrics", metrics)
 	return cwRespond(req, "ListMetrics", ctx.RequestID, result)

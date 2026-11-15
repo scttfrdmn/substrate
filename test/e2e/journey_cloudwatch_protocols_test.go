@@ -282,10 +282,11 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 	// --- GetMetricData: no data points, and that is a modeled answer ---
 	//
 	// Substrate records a metric's identity, not its time series — running the workload
-	// behind the API is out of scope — so the honest answer is an empty result list, and
-	// a caller must be able to tell that from "the operation returned nothing". Both
-	// lists are present and empty; before #785 this was a hardcoded one-byte CBOR map
-	// that said nothing about either member.
+	// behind the API is out of scope — so the query gets a result with no data points, and
+	// a caller must be able to tell that from "the operation returned nothing". The result
+	// is present, one per query as CloudWatch answers, with present-and-empty Timestamps and
+	// Values (#1498); before #785 this was a hardcoded one-byte CBOR map that said nothing
+	// about either member.
 	data, err := cw.GetMetricData(ctx, &cloudwatch.GetMetricDataInput{
 		StartTime: aws.Time(time.Unix(1_700_000_000, 0)),
 		EndTime:   aws.Time(time.Unix(1_700_003_600, 0)),
@@ -304,12 +305,12 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetMetricData: %v", err)
 	}
-	if data.MetricDataResults == nil {
-		t.Error("GetMetricData omitted MetricDataResults; it is present and empty")
+	if len(data.MetricDataResults) != 1 {
+		t.Fatalf("GetMetricData returned %d results, want one per query", len(data.MetricDataResults))
 	}
-	if len(data.MetricDataResults) != 0 {
-		t.Errorf("GetMetricData returned %d results; substrate does not model a time series",
-			len(data.MetricDataResults))
+	if r := data.MetricDataResults[0]; aws.ToString(r.Id) != "journey0" || len(r.Values) != 0 ||
+		len(r.Timestamps) != 0 || r.StatusCode != cwtypes.StatusCodeComplete {
+		t.Errorf("GetMetricData result = %+v; want journey0, Complete, no data points", r)
 	}
 	if data.Messages == nil {
 		t.Error("GetMetricData omitted Messages; it is present and empty")

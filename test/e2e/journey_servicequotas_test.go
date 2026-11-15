@@ -80,7 +80,8 @@ func TestJourney_ServiceQuotasOrganizations(t *testing.T) {
 	}
 
 	// GetAWSDefaultServiceQuota agrees, because nothing here mutates a quota: the
-	// applied value and the AWS default cannot diverge.
+	// applied value is the AWS default. (EC2's L-1216C47A is the one quota substrate
+	// publishes with an applied value above its default; see #1498.)
 	def, err := quotas.GetAWSDefaultServiceQuota(ctx, &servicequotas.GetAWSDefaultServiceQuotaInput{
 		ServiceCode: aws.String("organizations"),
 		QuotaCode:   aws.String("L-E619E033"),

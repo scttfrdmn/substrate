@@ -51,7 +51,7 @@ import (
 //
 // # Unit outputs
 //
-// Six of CloudWatch's ten operations are modeled with a smithy.api#Unit output, and the
+// Six of CloudWatch's eleven operations are modeled with a smithy.api#Unit output, and the
 // RPC v2 CBOR protocol tests are explicit that such a response carries no body and
 // MUST NOT set Content-Type (`no_output` in
 // smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy lists Content-Type in

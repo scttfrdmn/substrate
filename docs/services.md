@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1088 operations**. This
+Substrate ships **68 built-in service plugins** routing **1090 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -59,7 +59,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 38 | KMS | `kms` | JSON | 24 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
 | 40 | CloudWatch Logs | `logs` | JSON | 14 |
-| 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 10 |
+| 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 11 |
 | 42 | MSK | `msk` | REST/JSON | 9 |
 | 43 | HealthOmics | `omics` | REST/JSON | 5 |
 | 44 | OpenSearch | `opensearch` | REST/JSON | 0 |
@@ -75,7 +75,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 54 | SageMaker | `sagemaker` | JSON | 10 |
 | 55 | EventBridge Scheduler | `scheduler` | REST/JSON | 5 |
 | 56 | Secrets Manager | `secretsmanager` | JSON | 12 |
-| 57 | Service Quotas | `servicequotas` | JSON | 8 |
+| 57 | Service Quotas | `servicequotas` | JSON | 9 |
 | 58 | SES v2 | `sesv2` | REST/JSON | 5 |
 | 59 | SNS | `sns` | Query | 18 |
 | 60 | SQS | `sqs` | JSON | 17 |
@@ -16668,7 +16668,7 @@ closing tag was the operation's — not well-formed XML at all. `MetricAlarms` a
 omitted.
 
 **An operation with a `smithy.api#Unit` output answers with no body and no
-`Content-Type`.** Six of the ten do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
+`Content-Type`.** Six of the eleven do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
 `EnableAlarmActions`, `DisableAlarmActions` and `PutMetricData`. On the CBOR path they
 return HTTP 200 carrying only `Smithy-Protocol: rpc-v2-cbor` — the rule comes from the
 `no_output` protocol test in `smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy`,
@@ -16686,9 +16686,59 @@ carries no timestamps, `Unit`, `ExtendedStatistic`, `DatapointsToAlarm` or
 `TreatMissingData`, and an alarm created without OK actions omits `OKActions` rather than
 returning an empty list. A member substrate models as empty is present: `DescribeAlarms`
 always returns `MetricAlarms`, a metric published without dimensions returns an empty
-`Dimensions`, and `GetMetricData` returns empty `MetricDataResults` and `Messages` because
-substrate records a metric's identity but not its time series (running the workload behind
-the API is outside what substrate models).
+`Dimensions`, and a `GetMetricData` result for a published metric has empty `Timestamps`
+and `Values` because substrate records a metric's identity but not its time series (running
+the workload behind the API is outside what substrate models). The one exception is the
+EC2 vCPU usage metrics below, whose value is API-observable state rather than workload
+output.
+
+### EC2 vCPU usage in `AWS/Usage`
+
+`ResourceCount` in the `AWS/Usage` namespace, with dimensions `Service=EC2`,
+`Type=Resource`, `Resource=vCPU` and a `Class`, reports the vCPUs of the account's running
+instances in that quota class (#1498). It is what a quota preflight compares against the
+quota's value: each EC2 vCPU quota in [Service Quotas](#service-quotas) names this metric
+as its `UsageMetric`. `GetMetricData`, `GetMetricStatistics` and `ListMetrics` all answer
+it, derived at request time from EC2's stored instances. Nothing is stored on the
+CloudWatch side, and a replay that rebuilds the same instances and clock reads back the
+same values.
+
+| Class | Counts |
+|---|---|
+| `Standard/OnDemand`, `Standard/Spot` | Types starting A, C, D, H, I, M, R, T or Z, except `inf` |
+| `F/OnDemand`, `F/Spot` | F |
+| `G/OnDemand`, `G/Spot` | G and VT |
+| `Inf/OnDemand`, `Inf/Spot` | Inf |
+| `P/OnDemand`, `P/Spot` | P |
+| `X/OnDemand`, `X/Spot` | X |
+
+- **Which instances count.** An instance counts while its stored state is `running`, and
+  under `…/Spot` when its `InstanceLifecycle` is `spot`. Pending, stopping, stopped,
+  shutting-down and terminated instances do not count, following the On-Demand quota
+  page ("Instances that are in the pending, stopping, stopped, and hibernated states do
+  not count"). AWS also counts an open Spot request's vCPUs against the Spot quota;
+  substrate fulfills a Spot request at once or refuses it, so it never holds one to count.
+  An instance's vCPUs are its type's default vCPU count from the
+  [instance-type catalog](#ec2); a type outside the catalog counts nowhere, and so do
+  Trn, DL, HPC and High Memory types, which have no `Class` value.
+- **Which classes have a metric.** A class has a metric once any instance in the account
+  and region has counted against it, and keeps it after that instance stops or
+  terminates, so its usage then reads 0. A class nothing has launched into has no metric:
+  `ListMetrics` omits it and a query for it gets no datapoint.
+- **Which datapoint is reported.** Substrate keeps no usage history, so each query gets
+  exactly one datapoint, carrying the usage at request time. The window's `StartTime` is
+  rounded down the way CloudWatch rounds it (to the minute, or to 5 minutes or an hour for
+  a start 15 or 63 days back); periods are laid end to end from there; and the datapoint
+  is stamped with the latest period start that is no later than the simulated clock and
+  earlier than `EndTime`, which is exclusive. A window that opens after the clock has no
+  datapoint. A window wholly in the past still gets the usage as of the request, at its
+  last period, because there is no older value to report.
+- **Which statistic.** The usage is treated as sampled every minute of the period at its
+  current value. `Maximum`, `Minimum`, `Average`, `IQM` and percentile, trimmed-mean and
+  winsorized-mean statistics are the value itself; `SampleCount` is the period's minute
+  count (`Period`/60, at least 1); `Sum` is the value times that count. Any other
+  statistic gets no datapoint. The unit is `None`, so a query naming another `Unit` gets
+  none either.
 
 **Errors name the modeled shape, not the query code.** A CBOR or JSON refusal sets `__type`
 to the absolute shape ID — `com.amazonaws.cloudwatch#InvalidParameterValueException`, not
@@ -16715,8 +16765,9 @@ is a documented divergence from the reference writer's output and conformant eit
 | Operation | Notes |
 |-----------|-------|
 | PutMetricData | Records each datum's name and namespace for ListMetrics; values are discarded |
-| ListMetrics | Filters on `Namespace` and `MetricName`; `Dimensions` is always empty |
-| GetMetricData | Always empty `MetricDataResults` — no time series is modeled |
+| ListMetrics | Filters on `Namespace`, `MetricName` and `Dimensions`; a published metric's `Dimensions` is empty; also lists the [EC2 vCPU usage metrics](#ec2-vcpu-usage-in-aws-usage) the account has used |
+| GetMetricData | One result per query; `ReturnData=false` gets only `Id` and `StatusCode`; no data points except for an [EC2 vCPU usage metric](#ec2-vcpu-usage-in-aws-usage); expressions are not evaluated; any `NextToken` is `InvalidNextToken` |
+| GetMetricStatistics | Validates required members, `Statistics` against `ExtendedStatistics`, `Period` and the 1,440-datapoint ceiling; empty `Datapoints` except for an [EC2 vCPU usage metric](#ec2-vcpu-usage-in-aws-usage); `ExtendedStatistics` values are not reported |
 | PutMetricAlarm | Preserves an existing alarm's state on re-put |
 | DescribeAlarms | Filters on `AlarmNames` and `StateValue`; paginates on `MaxRecords`/`NextToken`; refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
 | DescribeAlarmsForMetric | Filters on `MetricName` and `Namespace`; does not paginate |
@@ -21024,10 +21075,11 @@ than an empty result — see below.
 
 | Operation | Notes |
 |-----------|-------|
-| ListServices | The service codes substrate publishes quotas for |
-| ListServiceQuotas | `ServiceCode` required; `NoSuchResourceException` for a service not in the table |
+| ListServices | The service codes substrate publishes quotas for; paginates on `MaxResults`/`NextToken` |
+| ListServiceQuotas | `ServiceCode` required; `NoSuchResourceException` for a service not in the table; filters on `QuotaCode` and `QuotaAppliedAtLevel`; paginates — see [Listings paginate](#listings-paginate) |
+| ListAWSDefaultServiceQuotas | Each quota's AWS default rather than its applied value; otherwise as `ListServiceQuotas`, without its two filters |
 | GetServiceQuota | `ServiceCode` **and** `QuotaCode` required |
-| GetAWSDefaultServiceQuota | The same answer as `GetServiceQuota` — nothing here mutates a quota, so the applied value and the AWS default never diverge |
+| GetAWSDefaultServiceQuota | The AWS default. Nothing here mutates a quota, so it is the applied value for every quota but EC2's `L-1216C47A` — see [EC2 vCPU quotas](#ec2-vcpu-quotas) |
 | RequestServiceQuotaIncrease | Records a `PENDING` request; the published value does not move |
 | ListRequestedServiceQuotaChangeHistory | The caller's own requests; filterable by `ServiceCode` and `Status` |
 | ListRequestedServiceQuotaChangesByService | The same handler, and **not an operation the Service Quotas API has**: the 2019-06-24 model declares `…ChangeHistory` and `…ChangeHistoryByQuota` and nothing resembling this name, so every SDK and CLI call got `InvalidAction` and the plugin's own tests could not reach it (#636). Both names route because a fixture may already drive the invented one directly |
@@ -21041,6 +21093,69 @@ for one release the handler was reachable only by a hand-built `X-Amz-Target`, a
 every SDK or CLI call answered `InvalidAction`. The invented name is kept as an
 alias so a fixture that already drives it keeps working; new code should use the
 real one. `…ChangeHistoryByQuota` is not modelled.
+
+Every quota carries its `QuotaArn`,
+`arn:aws:servicequotas:{region}:{account}:{serviceCode}/{quotaCode}`. A default value's
+ARN names no account — `arn:aws:servicequotas:us-east-2::ec2/L-1216C47A`, as the CLI
+reference's `get-aws-default-service-quota` example shows — because a default belongs to
+no account.
+
+### Listings paginate
+
+`ListServices`, `ListServiceQuotas` and `ListAWSDefaultServiceQuotas` take `MaxResults`
+(1 to 100, `IllegalArgumentException` outside that) and `NextToken`. With no
+`MaxResults` a page holds 100, so every service's quotas fit in one. The last page
+carries no `NextToken`, and a token substrate did not issue is
+`InvalidPaginationTokenException`, never page one.
+
+`ListServiceQuotas`' `QuotaCode` narrows the listing to that one quota, or to none for a
+code the service does not publish. `QuotaAppliedAtLevel` must be `ACCOUNT`, `RESOURCE` or
+`ALL`; every quota substrate publishes is account-level, so `RESOURCE` lists none.
+
+### EC2 vCPU quotas
+
+EC2 meters instances in vCPUs per quota class, separately for On-Demand and Spot (#1498).
+Substrate publishes both tables from AWS's
+[instance-type quotas page](https://docs.aws.amazon.com/ec2/latest/instancetypes/ec2-instance-quotas.html),
+under the service name `Amazon Elastic Compute Cloud (Amazon EC2)`:
+
+| Quota code | Name | Applied | Default |
+|---|---|---|---|
+| `L-1216C47A` | Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances | 32 | 5 |
+| `L-74FC7D96` | Running On-Demand F instances | 0 | 0 |
+| `L-DB2E81BA` | Running On-Demand G and VT instances | 0 | 0 |
+| `L-1945791B` | Running On-Demand Inf instances | 0 | 0 |
+| `L-417A185B` | Running On-Demand P instances | 0 | 0 |
+| `L-7295265B` | Running On-Demand X instances | 0 | 0 |
+| `L-34B43A08` | All Standard (A, C, D, H, I, M, R, T, Z) Spot Instance Requests | 5 | 5 |
+| `L-88CF9481` | All F Spot Instance Requests | 0 | 0 |
+| `L-3819A6DF` | All G and VT Spot Instance Requests | 0 | 0 |
+| `L-B5D1601B` | All Inf Spot Instance Requests | 0 | 0 |
+| `L-7212CCBC` | All P Spot Instance Requests | 0 | 0 |
+| `L-E3A00192` | All X Spot Instance Requests | 0 | 0 |
+
+All twelve are adjustable, regional and in unit `None`, which is what the CLI reference's
+`get-service-quota` example shows for `L-1216C47A`. Each names its usage metric:
+`AWS/Usage` `ResourceCount` with `Service=EC2`, `Type=Resource`, `Resource=vCPU` and the
+class's `Class` (`Standard/OnDemand`, `Standard/Spot`, `G/OnDemand`, …), with
+`MetricStatisticRecommendation` `Maximum`. CloudWatch answers that metric — see
+[EC2 vCPU usage in `AWS/Usage`](#ec2-vcpu-usage-in-aws-usage) — so `Value` minus the
+metric's latest value is the headroom a launch has.
+
+`L-1216C47A`'s applied value stays at the 32 substrate has always published, while
+`GetAWSDefaultServiceQuota` reports AWS's new-account default of 5. An applied value above
+the default is what a real account usually shows, since EC2 raises its On-Demand quotas
+automatically with use. Every other EC2 quota's applied value is its default, so
+`L-34B43A08` reads 5 — the Spot quota a new account has.
+
+The DL, HPC, High Memory and Trn quotas are not published: none has a usage-metric
+`Class` value to name, and substrate's catalog has no DL, HPC or High Memory type to
+count.
+
+**The quotas are published, not enforced.** A launch beyond a quota succeeds, as it
+always has. Opt-in enforcement — `RunInstances`, `RequestSpotInstances` and Auto Scaling
+refusing with `VcpuLimitExceeded` or `MaxSpotInstanceCountExceeded` — is tracked in
+#1499.
 
 ### An unknown service is a refusal, not an empty list
 

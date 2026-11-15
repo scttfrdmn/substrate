@@ -28,6 +28,38 @@ type ServiceQuota struct {
 
 	// Unit is the unit of measurement for the quota (e.g., "None", "Requests").
 	Unit string `json:"Unit"`
+
+	// UsageMetric names the CloudWatch metric that reports usage against the quota, or is
+	// nil for a quota substrate publishes no usage metric for. It is omitted from the wire
+	// when nil, which is how AWS answers for a quota without one.
+	UsageMetric *ServiceQuotaMetric `json:"UsageMetric,omitempty"`
+
+	// QuotaArn is the quota's ARN. The table leaves it empty; it is filled in per request,
+	// because it names the caller's region and, for an applied value, the caller's account.
+	QuotaArn string `json:"QuotaArn,omitempty"`
+
+	// defaultValue is AWS's published default when it differs from Value, the applied value;
+	// nil means the two are the same. It never reaches the wire as a member of its own:
+	// GetAWSDefaultServiceQuota and ListAWSDefaultServiceQuotas report it as Value.
+	defaultValue *float64
+}
+
+// ServiceQuotaMetric is Service Quotas' MetricInfo: the CloudWatch metric that reflects a
+// quota's usage.
+type ServiceQuotaMetric struct {
+	// MetricNamespace is the metric's namespace, e.g. "AWS/Usage".
+	MetricNamespace string `json:"MetricNamespace"`
+
+	// MetricName is the metric's name, e.g. "ResourceCount".
+	MetricName string `json:"MetricName"`
+
+	// MetricDimensions is the metric's dimensions, by name. encoding/json writes a map's
+	// keys in sorted order, so the rendering is the same on every run.
+	MetricDimensions map[string]string `json:"MetricDimensions"`
+
+	// MetricStatisticRecommendation is the statistic AWS recommends comparing against the
+	// quota: "Sum" or "Maximum".
+	MetricStatisticRecommendation string `json:"MetricStatisticRecommendation"`
 }
 
 // QuotaIncrease represents a requested service quota increase.
@@ -135,17 +167,8 @@ var defaultServiceQuotas = map[string][]ServiceQuota{
 			Unit:        "None",
 		},
 	},
-	"ec2": {
-		{
-			ServiceCode: "ec2",
-			ServiceName: "Amazon Elastic Compute Cloud",
-			QuotaCode:   "L-1216C47A",
-			QuotaName:   "Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances",
-			Value:       32,
-			Adjustable:  true,
-			Unit:        "vCPU",
-		},
-	},
+	// EC2's vCPU quotas, On-Demand and Spot, by quota class; see servicequotas_ec2_vcpu.go.
+	"ec2": ec2VCPUServiceQuotas(),
 	"iam": {
 		{
 			ServiceCode: "iam",
@@ -257,7 +280,7 @@ var defaultServiceList = []map[string]string{
 	{"ServiceCode": "s3", "ServiceName": "Amazon S3"},
 	{"ServiceCode": "dynamodb", "ServiceName": "Amazon DynamoDB"},
 	{"ServiceCode": "sqs", "ServiceName": "Amazon Simple Queue Service"},
-	{"ServiceCode": "ec2", "ServiceName": "Amazon Elastic Compute Cloud"},
+	{"ServiceCode": "ec2", "ServiceName": ec2ServiceQuotasServiceName},
 	{"ServiceCode": "iam", "ServiceName": "AWS Identity and Access Management"},
 	{"ServiceCode": "kinesis", "ServiceName": "Amazon Kinesis Data Streams"},
 	{"ServiceCode": "cloudwatch", "ServiceName": "Amazon CloudWatch"},

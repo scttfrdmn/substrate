@@ -137,11 +137,12 @@ def test_alarm_round_trip_keeps_modeled_types(cloudwatch) -> None:  # type: igno
 
 
 def test_get_metric_data_reports_no_results_rather_than_nothing(cloudwatch) -> None:  # type: ignore[no-untyped-def]
-    """GetMetricData answers modeled empty lists.
+    """GetMetricData answers one result per query, with modeled empty data points.
 
     Substrate records a metric's identity, not its time series, so "no data points" is the
     honest answer — but a caller has to be able to tell it from "the operation returned
-    nothing", which a bare HTTP 200 with an unparseable body could not.
+    nothing", which a bare HTTP 200 with an unparseable body could not. The result itself is
+    present, as CloudWatch answers for a metric with no data in the window (#1498).
     """
     out = cloudwatch.get_metric_data(
         MetricDataQueries=[
@@ -157,7 +158,11 @@ def test_get_metric_data_reports_no_results_rather_than_nothing(cloudwatch) -> N
         StartTime="2024-01-01T00:00:00Z",
         EndTime="2024-01-02T00:00:00Z",
     )
-    assert out["MetricDataResults"] == []
+    (result,) = out["MetricDataResults"]
+    assert result["Id"] == "q0"
+    assert result["StatusCode"] == "Complete"
+    assert result["Timestamps"] == []
+    assert result["Values"] == []
     assert out["Messages"] == []
 
 
