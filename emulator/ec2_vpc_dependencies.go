@@ -122,17 +122,19 @@ func ec2PermissionsReference(rules []EC2IPPermission, sgID string) bool {
 // Each half is what substrate stores. An association is a non-terminated instance carrying the
 // group on any of its interfaces — substrate stores no standalone network interface, so an
 // interface's groups are read off the instance it was launched with. A reference is an ingress
-// or egress rule of any **other** group naming it; a group's rules about itself (the default
-// group's own inbound rule is one) go with it. A terminated instance holds nothing, as it holds
+// or egress rule of another group **in the same VPC** naming it, as the page limits it; a group's
+// rules about itself (the default group's own inbound rule is one) go with it, and a reference
+// from another VPC — a peered VPC's group — does not hold it. A terminated instance holds nothing, as it holds
 // nothing for [EC2Plugin.vpcDependents]. VPC associations (AssociateSecurityGroupVpc) are not
 // modeled, and resources other plugins hold (load balancers, Lambda functions, RDS instances)
 // are not consulted.
-func (p *EC2Plugin) securityGroupInUse(reqCtx *RequestContext, sgID string) (bool, error) {
+func (p *EC2Plugin) securityGroupInUse(reqCtx *RequestContext, target EC2SecurityGroup) (bool, error) {
 	ctx := context.Background()
 	scope := reqCtx.AccountID + "/" + reqCtx.Region + "/"
+	sgID := target.GroupID
 	used := false
 	if err := ec2ScanRecords(ctx, p.state, "sg:"+scope, func(_ string, sg EC2SecurityGroup) {
-		if sg.GroupID == sgID {
+		if sg.GroupID == sgID || sg.VPCID != target.VPCID {
 			return
 		}
 		used = used || ec2PermissionsReference(sg.IngressRules, sgID) ||
@@ -141,7 +143,7 @@ func (p *EC2Plugin) securityGroupInUse(reqCtx *RequestContext, sgID string) (boo
 		return false, fmt.Errorf("ec2 deleteSecurityGroup groups: %w", err)
 	}
 	if err := ec2ScanRecords(ctx, p.state, "instance:"+scope, func(_ string, inst EC2Instance) {
-		used = used || (inst.State.Name != "terminated" && ec2InstanceUsesGroup(inst, sgID))
+		used = used || (inst.State.Name != ec2StateTerminated && ec2InstanceUsesGroup(inst, sgID))
 	}); err != nil {
 		return false, fmt.Errorf("ec2 deleteSecurityGroup instances: %w", err)
 	}
@@ -161,7 +163,7 @@ func (p *EC2Plugin) subnetInUse(reqCtx *RequestContext, subnetID string) (bool, 
 	scope := reqCtx.AccountID + "/" + reqCtx.Region + "/"
 	used := false
 	if err := ec2ScanRecords(ctx, p.state, "instance:"+scope, func(_ string, inst EC2Instance) {
-		if inst.State.Name == "terminated" {
+		if inst.State.Name == ec2StateTerminated {
 			return
 		}
 		used = used || inst.SubnetID == subnetID
@@ -303,7 +305,7 @@ func (p *EC2Plugin) vpcDependents(reqCtx *RequestContext, vpcID string) (bool, [
 		return false, owned, fmt.Errorf("ec2 deleteVpc NAT gateways: %w", err)
 	}
 	if err := ec2ScanRecords(ctx, p.state, "instance:"+scope, func(_ string, inst EC2Instance) {
-		held = held || (inst.VPCID == vpcID && inst.State.Name != "terminated")
+		held = held || (inst.VPCID == vpcID && inst.State.Name != ec2StateTerminated)
 	}); err != nil {
 		return false, owned, fmt.Errorf("ec2 deleteVpc instances: %w", err)
 	}

@@ -248,11 +248,12 @@ func TestEC2_PlacementGroup_StoreFailureIsNotUnknown(t *testing.T) {
 	t.Parallel()
 	state := &ec2PlacementFaultState{StateManager: emulator.NewMemoryStateManager()}
 	ts := newEC2TestServerWithState(t, state)
-	ec2CreatePlacementGroup(t, ts, "workers")
+	pgID := ec2CreatePlacementGroup(t, ts, "workers")
 	state.armed.Store(true)
 
 	for _, params := range []map[string]string{
 		{"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1", "Placement.GroupName": "workers"},
+		{"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1", "Placement.GroupId": pgID},
 		{"Action": "DeletePlacementGroup", "GroupName": "workers"},
 	} {
 		status, code, _ := ec2ErrorDetail(t, ts, params)

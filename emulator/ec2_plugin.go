@@ -51,11 +51,14 @@ type EC2Plugin struct {
 
 	// sgMu serializes the read-check-write of a security group's name and rules, so two
 	// concurrent creates cannot both pass the per-VPC name check and two concurrent authorizes
-	// cannot both pass the duplicate-rule check (#1491).
+	// cannot both pass the duplicate-rule check (#1491). Since #1551 it also serializes an
+	// instance launch, from its subnet and group checks through its writes, with DeleteSubnet's
+	// and DeleteSecurityGroup's dependency checks and deletes.
 	sgMu sync.Mutex
 
-	// igwMu serializes AttachInternetGateway's check that neither the gateway nor the VPC is
-	// already attached with the write that attaches them (#1554).
+	// igwMu serializes every read-check-write of an internet gateway's attachments (#1554):
+	// AttachInternetGateway, DetachInternetGateway, DeleteInternetGateway, and DeleteVpc's
+	// dependency check. Where both locks are held, igwMu is taken first.
 	igwMu sync.Mutex
 }
 
@@ -403,6 +406,12 @@ func (p *EC2Plugin) launchInstances(
 	tags []EC2Tag,
 	spot *ec2SpotLaunch,
 ) ([]EC2Instance, string, []EC2SpotInstanceRequest, error) {
+	// Held from the subnet and security-group checks through the instance writes, so a
+	// concurrent DeleteSubnet or DeleteSecurityGroup — which hold it across their dependency
+	// checks and deletes — cannot remove a subnet or group a launch has validated but not yet
+	// recorded an instance in (#1551). No caller holds it, and nothing below takes igwMu.
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	imageID := req.Params["ImageId"]
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
@@ -790,10 +799,19 @@ func (p *EC2Plugin) launchInstances(
 		securityGroupIDs = []string{sgID}
 	}
 
-	// Resolve VPCID from subnet for SG validation.
+	// Resolve VPCID from subnet for SG validation. The subnet must exist (#1551): a launch naming
+	// one that does not — including one a DeleteSubnet removed while this launch waited for
+	// sgMu — is InvalidSubnetID.NotFound, rather than an instance recorded in a subnet nothing
+	// holds. Through v0.128.0 an unknown subnet was accepted and stored on the instance.
 	var targetVPCID string
 	if subnetID != "" {
-		subData, _ := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
+		subData, subErr := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
+		if subErr != nil {
+			return nil, "", nil, fmt.Errorf("ec2 runInstances get subnet: %w", subErr)
+		}
+		if reqErr := ec2RequireResource(ec2SubnetIDKind, subnetID, subData != nil); reqErr != nil {
+			return nil, "", nil, reqErr
+		}
 		if subData != nil {
 			var sub EC2Subnet
 			if json.Unmarshal(subData, &sub) == nil {
@@ -1294,7 +1312,7 @@ func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bo
 
 // ec2InstanceMatchesFilter evaluates a single filter against an instance.
 //
-// A name it does not handle is one of the 125 DescribeInstances documents over instance
+// A name it does not handle is one of the 122 DescribeInstances documents over instance
 // members substrate does not model, and it is **inert** — the instance matches. Until
 // #687 it matched nothing, which was defensible while an unknown name landed here too
 // ("never return resources the caller meant to exclude"), but a refused typo is the
@@ -1340,6 +1358,14 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		// "placement.availability-zone" — the placement family's filters are
 		// spelled out individually in DescribeInstances' filter list.
 		return ec2FilterAccepts(values, inst.AvailabilityZone)
+	case "architecture":
+		// Evaluated against the value the instance renders (#1525), so a filter and a read agree,
+		// as #750's rule for a newly rendered member requires.
+		return ec2FilterAccepts(values, ec2InstanceArchitecture(inst))
+	case "placement-group-name":
+		// An instance in no placement group carries no name and matches no value (#1193). The page
+		// publishes no placement-group-id filter.
+		return inst.PlacementGroupName != "" && ec2FilterAccepts(values, inst.PlacementGroupName)
 	case "tag-key":
 		// Instance has a tag with any of the requested keys (any value).
 		for _, t := range inst.Tags {
@@ -2042,8 +2068,12 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	// none takes its default security group and main route table with it (#1492); see
 	// [EC2Plugin.vpcDependents]. The check and the deletes hold sgMu, the lock every security-group
 	// write holds, so a group cannot be created in the VPC between the check and the delete, and the
-	// default group cannot be written back by a concurrent authorize. DeleteVpc takes no other lock,
-	// and nothing holding sgMu takes one, so the order cannot invert.
+	// default group cannot be written back by a concurrent authorize. It also takes igwMu, first,
+	// so a concurrent AttachInternetGateway cannot attach to the VPC after the check found no
+	// gateway (#1554). The order is igwMu then sgMu everywhere both are held, and nothing holding
+	// sgMu takes igwMu, so the order cannot invert.
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	p.sgMu.Lock()
 	defer p.sgMu.Unlock()
 	held, owned, err := p.vpcDependents(reqCtx, vpcID)
@@ -2198,6 +2228,10 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if subnetID == "" {
 		return nil, ec2MissingParameter("SubnetId")
 	}
+	// Held across the dependency check and the delete, as a launch holds it from its subnet check
+	// through its writes, so a launch cannot land in a subnet this delete has just removed (#1551).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
 	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
@@ -2520,7 +2554,7 @@ func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 	if ec2IsDefaultSecurityGroup(sg) {
 		return nil, ec2CannotDeleteDefaultGroupError()
 	}
-	inUse, err := p.securityGroupInUse(reqCtx, sgID)
+	inUse, err := p.securityGroupInUse(reqCtx, sg)
 	if err != nil {
 		return nil, err
 	}
@@ -2617,7 +2651,17 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
-	if err := ec2CanonicalizePermissions(perms); err != nil {
+	rules := &sg.IngressRules
+	if direction == "egress" {
+		rules = &sg.EgressRules
+	}
+	// A revoke may name a malformed range an earlier substrate stored verbatim; see
+	// [ec2CanonicalizePermissions].
+	var held []EC2IPPermission
+	if !add {
+		held = *rules
+	}
+	if err := ec2CanonicalizePermissions(perms, held); err != nil {
 		return nil, err
 	}
 	// A group named rather than identified is resolved to its ID within the group's VPC, on
@@ -2626,10 +2670,6 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 		return nil, err
 	}
 
-	rules := &sg.IngressRules
-	if direction == "egress" {
-		rules = &sg.EgressRules
-	}
 	var unknown []EC2IPPermission
 	if add {
 		if ec2AuthorizeDuplicates(*rules, perms) {
@@ -3031,6 +3071,10 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 // [ec2DependencyViolationError]. Through v0.127.0 it was deleted attached, taking its
 // attachment with it.
 func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Held across the attachment check and the delete, so a concurrent attach cannot attach the
+	// gateway after the check and leave a VPC attached to a gateway that no longer exists (#1554).
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	igwID := req.Params["InternetGatewayId"]
 	if igwID == "" {
 		return nil, ec2MissingParameter("InternetGatewayId")

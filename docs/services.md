@@ -8006,8 +8006,8 @@ generated — so a new `case` in the switch has to be given a row by hand.
 
 | Operation | Notes |
 |-----------|-------|
-| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve), and [resolves an `ImageId` of `resolve:ssm:<parameter>`](#an-imageid-may-name-a-systems-manager-parameter); [refuses an AMI whose architecture the instance type cannot run](#an-ami-the-instance-type-cannot-run-is-refused); refuses a launch template identifier [of the wrong shape](#a-missing-launch-template-is-refused-by-the-identifier-named); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#an-instances-architecture-and-placement-group) (with the placement group named by `Placement.GroupName` or `Placement.GroupId`, which must exist — naming both is `InvalidParameterCombination`), [`architecture`](#an-instances-architecture-and-placement-group) and [`metadataOptions`](#instance-metadata-options); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
-| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#an-instances-architecture-and-placement-group), [`architecture`](#an-instances-architecture-and-placement-group) and [`metadataOptions`](#instance-metadata-options); thirteen filters, `instance-lifecycle` and `spot-instance-request-id` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| RunInstances | A launch naming no subnet lands in the [default VPC](#the-default-vpc)'s default subnet for its `Placement.AvailabilityZone` (zone a when it names none), and is refused with `VPCIdNotSpecified` when the account has none or `InvalidInput` when the zone has no default subnet; a `SubnetId` naming no subnet is `InvalidSubnetID.NotFound` ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)); `InstanceMarketOptions.MarketType=spot` [launches a Spot Instance with its own request](#spot-instance-requests); [requires an AMI that resolves](#runinstances-requires-a-resolvable-ami), from the caller's own images or the [bundled catalog](#which-amis-resolve), and [resolves an `ImageId` of `resolve:ssm:<parameter>`](#an-imageid-may-name-a-systems-manager-parameter); [refuses an AMI whose architecture the instance type cannot run](#an-ami-the-instance-type-cannot-run-is-refused); refuses a launch template identifier [of the wrong shape](#a-missing-launch-template-is-refused-by-the-identifier-named); [merges a named launch template field by field](#a-launch-template-merges-with-the-request-field-by-field); [validates MinCount/MaxCount](#mincount-and-maxcount); [refuses an invalid block device mapping](#a-mapping-aws-refuses-is-refused-with-invalidblockdevicemapping); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#an-instances-architecture-and-placement-group) (with the placement group named by `Placement.GroupName` or `Placement.GroupId`, which must exist — naming both is `InvalidParameterCombination`), [`architecture`](#an-instances-architecture-and-placement-group) and [`metadataOptions`](#instance-metadata-options); the launched instance is born `pending` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
+| DescribeInstances | [Explicit resource IDs](#explicit-resource-ids); reports [`groupSet`](#security-groups-on-an-instance), [`blockDeviceMapping`](#an-instance-reports-its-own-block-devices), [`placement`](#an-instances-architecture-and-placement-group), [`architecture`](#an-instances-architecture-and-placement-group) and [`metadataOptions`](#instance-metadata-options); fifteen filters, `instance-lifecycle`, `spot-instance-request-id`, `architecture` and `placement-group-name` among them, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, counting instances rather than reservations — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | TerminateInstances | [Explicit resource IDs](#explicit-resource-ids); [honours termination protection, per Availability Zone](#termination-protection-is-honored-one-availability-zone-at-a-time); answers `shutting-down` as its own `currentState` — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StopInstances | [Explicit resource IDs](#explicit-resource-ids); answers `stopping` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
 | StartInstances | [Explicit resource IDs](#explicit-resource-ids); answers `pending` as its own `currentState`, and refuses a `terminated` instance — see [Seeding an instance-state progression](#seeding-an-instance-state-progression) |
@@ -8083,7 +8083,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeNatGateways | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared). `state` is what the [seeded progression](#seeding-a-nat-gateway-progression) reports, taken before the filters run, and a `failed` gateway carries `failureCode` and `failureMessage` |
 | DeleteNatGateway | `NatGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). The answer is `natGatewayId` alone, as published; the `state` element substrate used to add is on no page. The record settles `deleted` and is kept, so `DescribeNatGateways` keeps reporting it — as AWS does, though AWS stops after about an hour and substrate reports it for the life of the store. A seed's count reports `deleting` first ([Seeding a NAT gateway progression](#seeding-a-nat-gateway-progression)). A second delete answers again rather than refusing |
 | CreateKeyPair | `KeyName` is required (`MissingParameter`), and a name already held answers `InvalidKeyPair.Duplicate`/400. `TagSpecification.N` scoped to `key-pair`; `tagSet` is [omitted rather than empty](#an-untagged-resource-omits-tagset) for an untagged key. `KeyType` is `rsa` (the default) or `ed25519`, anything else `InvalidParameterValue`, and the key is that type (#1296): a 2048-bit RSA key as the PKCS#1 `RSA PRIVATE KEY` PEM the page publishes, fingerprinted as the colon-separated SHA-1 digest of its DER (PKCS#8) private key; or an ed25519 key in OpenSSH format, fingerprinted as the base64 SHA-256 digest of its public key. The material is [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded), so a replay answers the same key. `KeyName` is up to 255 ASCII characters, as published, and anything longer or non-ASCII is `InvalidParameterValue`. `KeyFormat` is read: `pem` (the default) is answered, and `ppk` is `InvalidParameterValue` — substrate does not generate PuTTY keys — as is any other value. The response does not render `keyType`, which this operation's Response Elements do not publish ([#1190](https://github.com/scttfrdmn/substrate/issues/1190)); `DescribeKeyPairs` reports it. The published 5,000-per-Region quota is not enforced |
-| ImportKeyPair | `KeyName` and `PublicKeyMaterial` are both required, a duplicate name answers `InvalidKeyPair.Duplicate`, and `KeyName` is held to CreateKeyPair's 255-ASCII-character bound. The material is base64-decoded, falling back to the raw text when it is not base64, and **parsed** ([#1190](https://github.com/scttfrdmn/substrate/issues/1190)): an RSA or ED25519 key in the OpenSSH public key format, or an RSA key as base64 DER or an RFC 4716 file — the User Guide's supported formats. Anything else, ECDSA and DSA keys included, is `InvalidKeyPair.Format`. An ED25519 key's fingerprint is the base64 SHA-256 digest of its public key, CreateKeyPair's rule; an RSA key's is the colon-separated MD5 of its DER public key — see [Key pair fingerprints](#key-pair-fingerprints). `TagSpecification.N` scoped to `key-pair`; no `keyMaterial` and no `keyType` are returned, matching the published Response Elements |
+| ImportKeyPair | `KeyName` and `PublicKeyMaterial` are both required, a duplicate name answers `InvalidKeyPair.Duplicate`, and `KeyName` is held to CreateKeyPair's 255-ASCII-character bound. The material is base64-decoded, falling back to the raw text when it is not base64, and **parsed** ([#1190](https://github.com/scttfrdmn/substrate/issues/1190)): an RSA or ED25519 key in the OpenSSH public key format, or an RSA key as base64 DER or an RFC 4716 file — the User Guide's supported formats. Anything else, ECDSA and DSA keys included, is `InvalidKeyPair.Format`, as is an RSA key that is not one of the "Supported lengths: 1024, 2048, and 4096". An ED25519 key's fingerprint is the base64 SHA-256 digest of its public key, CreateKeyPair's rule; an RSA key's is the colon-separated MD5 of its DER public key — see [Key pair fingerprints](#key-pair-fingerprints). `TagSpecification.N` scoped to `key-pair`; no `keyMaterial` and no `keyType` are returned, matching the published Response Elements |
 | DescribeKeyPairs | `KeyName.N` and `KeyPairId.N` [union](#twelve-describes-gained-filters) and **narrow rather than assert**: an unknown name or ID is an empty answer where AWS publishes `InvalidKeyPair.NotFound` — one of the five selector families whose assertion is [unimplemented rather than declined](#which-selectors-assert-existence). **All five** filters are evaluated, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Reports `keyPairId`, `keyName`, `keyFingerprint`, `keyType`, `createTime` and `tagSet`. No pagination, matching AWS, which publishes none |
 | DeleteKeyPair | Either `KeyName` or `KeyPairId`; both absent answers `MissingParameter`, which is substrate's reading — AWS marks both `Required: No` and publishes no error for the empty request. A `key-`-prefixed value is resolved by scanning the region's key pairs, and anything else is taken as a name. Silently idempotent: a key pair naming nothing answers `return=true`, matching AWS, whose page publishes no error for a nonexistent key pair. The published `keyPairId` response element is not rendered — the answer is `return` alone |
 | CreatePlacementGroup | `GroupName` is required here, where AWS marks it `Required: No`; a name already held answers `InvalidPlacementGroup.Duplicate`/400. `Strategy` defaults to `cluster` and is stored unvalidated, so `partition` is accepted without a `PartitionCount` and `SpreadLevel` is not read. `TagSpecification.N` scoped to `placement-group` — which until [#708](https://github.com/scttfrdmn/substrate/issues/708) was the only way a placement group's tags were settable at all. Renders `groupName`, `groupId`, `groupArn`, `strategy`, `state` (`available` at once) and `tagSet`; `partitionCount` is not rendered |
@@ -8167,7 +8167,7 @@ one is refused on its neighbour — `tag:<key>` most conspicuously (see below).
 
 | Operation | Evaluated | Documented but inert |
 |---|---|---|
-| DescribeInstances | `availability-zone`, `image-id`, `instance-id`, `instance-lifecycle`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `spot-instance-request-id`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 123 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `architecture`, `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
+| DescribeInstances | `architecture`, `availability-zone`, `image-id`, `instance-id`, `instance-lifecycle`, `instance-state-code`, `instance-state-name`, `instance-type`, `key-name`, `placement-group-name`, `spot-instance-request-id`, `subnet-id`, `tag-key`, `tag:<key>`, `vpc-id` | the other 121 — the `network-interface.*`, `block-device-mapping.*`, `metadata-options.*`, `capacity-reservation*`, `private-dns-name-options.*`, `iam-instance-profile.*` and `operator.*` families, plus `platform`, `tenancy`, `root-device-type`, `owner-id` and the rest |
 | DescribeImages | `architecture`, `block-device-mapping.snapshot-id`, `description`, `hypervisor`, `image-id`, `image-type`, `is-public`, `name`, `owner-alias`, `owner-id`, `platform`, `public-ssm-parameter-name`, `root-device-name`, `root-device-type`, `state`, `tag-key`, `tag:<key>`, `virtualization-type` | the other 25 — the `block-device-mapping.*` (bar `snapshot-id`), `image-watermark.*`, `product-code*`, `source-image*` and `state-reason-*` families, plus `creation-date`, the ENA/sriov and kernel/ramdisk names, the Allowed-AMIs and Free-Tier markers and the rest |
 | DescribeVolumes | `attachment.delete-on-termination`, `attachment.device`, `attachment.instance-id`, `availability-zone`, `size`, `snapshot-id`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-type` | `attachment.attach-time`, `attachment.status`, `availability-zone-id`, `create-time`, `encrypted`, `fast-restored`, `multi-attach-enabled`, `operator.managed`, `operator.principal` |
 | DescribeSnapshots | `description`, `encrypted`, `owner-id`, `progress`, `snapshot-id`, `start-time`, `status`, `tag-key`, `tag:<key>`, `volume-id`, `volume-size` | `owner-alias`, `storage-tier`, `transfer-type` |
@@ -9167,7 +9167,7 @@ answered before anything is written.
 | Delete | Refused while | Answer |
 |---|---|---|
 | `DeleteSecurityGroup` | the group is a VPC's default group | `CannotDelete` / "You cannot delete the 'default' security group in your VPC, but you can change its rules." |
-| `DeleteSecurityGroup` | another group's ingress or egress rule references it | `DependencyViolation` / "resource sg-… has a dependent object" |
+| `DeleteSecurityGroup` | another group in the same VPC references it in an ingress or egress rule | `DependencyViolation` / "resource sg-… has a dependent object" |
 | `DeleteSecurityGroup` | an instance that is not terminated carries it, on any of its interfaces | the same |
 | `DeleteSubnet` | an instance that is not terminated has an interface in it | `DependencyViolation` / "The subnet '…' has dependencies and cannot be deleted." |
 | `DeleteSubnet` | a NAT gateway in it is not yet `deleted` | the same |
@@ -9182,11 +9182,17 @@ answered before anything is written.
   associated with an instance or network interface, is referenced by another security group in the
   same VPC, or has a VPC association, the operation fails with `DependencyViolation`." The page names
   that one code for a reference too, so the client-error table's `InvalidGroup.InUse` is not used. A
-  group's rules about itself do not hold it. An instance's groups are read from every interface it
+  group's rules about itself do not hold it, and nor does a reference from another VPC's group — a
+  peered VPC's — since the page limits a reference to "the same VPC". An instance's groups are read from every interface it
   was launched with, since substrate stores no standalone network interface. VPC associations and
   resources other services hold (load balancers, Lambda functions, RDS instances) are not consulted.
 - **A subnet in use.** `API_DeleteSubnet`: "You must terminate all running instances in the subnet
   before you can delete the subnet." A NAT gateway holds its subnet as it holds its VPC.
+
+**A launch is serialized with both deletes.** `RunInstances` holds the lock the two deletes hold,
+from its subnet and group checks through its writes, so a launch cannot land in a subnet or carry a
+group a concurrent delete has just removed. A launch naming a subnet that does not exist is now
+`InvalidSubnetID.NotFound`; before, the ID was stored on the instance unchecked.
 
 Neither code's message is published; both are EC2's observed wording
 (hashicorp/terraform-provider-aws#32745 for the group, terraform-aws-modules/terraform-aws-vpc#1081
@@ -9194,8 +9200,8 @@ for the subnet).
 
 **Compatibility.** A teardown that deletes a group before the instances using it or the rules
 referencing it, a subnet before its instances or NAT gateway, or a default group at all, is now
-refused, as on AWS. CloudFormation's delete sweep reverses dependency order, so a stack whose
-template orders them validly still tears down.
+refused, as on AWS, and so is a launch naming a subnet that does not exist. CloudFormation's delete
+sweep reverses dependency order, so a stack whose template orders them validly still tears down.
 
 ### VPC attributes and internet gateways
 
@@ -9218,7 +9224,10 @@ reading. Turning support off while hostnames are on is not refused, since no pag
 `InvalidParameterValue` / "Network vpc-… already has an internet gateway attached", EC2's observed
 answer (terraform-aws-modules/terraform-aws-vpc#282). The [default VPC](#the-default-vpc) is seeded
 with a gateway, so a new gateway attaches to it only after that one is detached. A gateway already
-attached elsewhere is still `Resource.AlreadyAssociated`.
+attached elsewhere is still `Resource.AlreadyAssociated`. Every read-check-write of a gateway's
+attachments — attach, detach, `DeleteInternetGateway`, and `DeleteVpc`'s dependency check — holds
+one lock, so a concurrent attach cannot attach a gateway being deleted or attach to a VPC being
+deleted.
 
 **Compatibility.** A modify naming two attributes, a hostnames enable on a VPC without DNS support,
 and a second gateway attached to one VPC all succeeded before.
@@ -9473,9 +9482,15 @@ rendered in Go's canonical text form, which for IPv6 is the compressed lower-cas
 (`2001:0DB8::1/32` is stored as `2001:db8::/32`). It is the step `CreateRoute` takes for a route's
 destination ([#1187](https://github.com/scttfrdmn/substrate/issues/1187)). A value that does not parse as a CIDR of the parameter's
 family is `InvalidParameterValue` / "CIDR block … is malformed", EC2's observed answer
-(aws/aws-cli#2846, hashicorp/terraform#9481). A rule stored before this change keeps the spelling it
-was sent in, and is compared canonically, so a revoke or duplicate authorize names it in either
-spelling.
+(aws/aws-cli#2846, hashicorp/terraform#9481). The family is decided by the text: `CidrIp` must be an
+IPv4 dotted quad, and `CidrIpv6` an IPv6 address that is not IPv4-mapped, so `::ffff:0:0/96` is
+malformed in both — as `CidrIp` it would otherwise unmap to `0.0.0.0/0` and open the rule to every
+IPv4 address. Refusing the mapped form rather than unmapping it is substrate's reading. A rule stored
+before this change keeps the spelling it was sent in, and is compared canonically, so a revoke or
+duplicate authorize names it in either spelling. One stored malformed — which an earlier substrate
+accepted — is revoked by a request naming its exact text, which is the request CloudFormation's
+sweep rebuilds from the template; that text is still refused on authorize, and on a revoke of a group
+that does not hold it.
 
 A rule's protocol and ports are compared, on authorize and revoke alike, for what they mean rather
 than how they were spelled. `API_IpPermission`'s `IpProtocol` is "The IP protocol name (`tcp`,
@@ -12192,8 +12207,8 @@ page publishes, and ED25519 in OpenSSH format. `KeyFormat=ppk` is refused rather
 PuTTY's format carries a MAC substrate has no reference output to check against.
 
 **Compatibility.** `ImportKeyPair` parses the key, so material that is not an RSA or ED25519 public
-key in a supported format, placeholder strings included, is now
-`InvalidKeyPair.Format`. Neither `CreateKeyPair` nor `ImportKeyPair` renders `keyType` any longer;
+key in a supported format, placeholder strings included, is now `InvalidKeyPair.Format`, as AWS
+answers it; so is an RSA key of a length other than 1024, 2048 or 4096 bits. Neither `CreateKeyPair` nor `ImportKeyPair` renders `keyType` any longer;
 read it from `DescribeKeyPairs`.
 
 ### Every response carries its requestId

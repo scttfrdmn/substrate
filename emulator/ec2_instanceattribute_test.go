@@ -950,18 +950,21 @@ func TestEC2_DescribeInstances_AvailabilityZoneFilter(t *testing.T) {
 // zone would group with every other zoneless instance, so a whole-request refusal
 // would masquerade as the zone-scoped rule.
 //
-// The path that reaches the region-default fallback is a launch naming a SubnetId that
-// resolves to nothing — RunInstances does not validate the ID, which is a pre-existing
-// looseness this test relies on rather than endorses. An absent SubnetId cannot reach
-// it, because the auto-created default subnet already supplies a zone.
+// The path that reached the region-default fallback was a launch naming a SubnetId that
+// resolves to nothing, which RunInstances accepted until #1551 made it InvalidSubnetID.NotFound.
+// That launch is now refused, so the invariant is pinned on the two launches that remain: one
+// naming no subnet, which the default subnet supplies a zone for, and one naming a created
+// subnet, which supplies its own.
 func TestEC2_Instance_AlwaysCarriesAZone(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	id := runInstance(t, ts, map[string]string{
-		"ImageId": ec2TestImage, "InstanceType": "t3.micro",
-		"SubnetId": "subnet-0000000000000dead",
-	})
+	ec2RequireRefusal(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": ec2TestImage, "InstanceType": "t3.micro",
+		"MinCount": "1", "MaxCount": "1", "SubnetId": "subnet-0000000000000dead",
+	}, "InvalidSubnetID.NotFound")
+
+	id := runInstance(t, ts, map[string]string{"ImageId": ec2TestImage, "InstanceType": "t3.micro"})
 
 	resp := ec2Request(t, ts, map[string]string{
 		"Action": "DescribeInstances", "InstanceId.1": id,

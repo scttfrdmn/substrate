@@ -45,12 +45,24 @@ func (p *EC2Plugin) resolveLaunchPlacementGroup(reqCtx *RequestContext, params m
 			HTTPStatus: http.StatusBadRequest,
 		}
 	case name == "":
-		resolved, found := ec2NameKeyedResource(p.state,
-			ec2StatePrefix("placement_group", reqCtx.AccountID, reqCtx.Region), "group_id", id)
-		if !found {
+		// The records are keyed by name, so an ID is found by scanning them. A store failure is
+		// an error rather than a missing group, which [ec2NameKeyedResource] would report it as,
+		// and the decoded record is returned directly rather than read a second time.
+		var found *EC2PlacementGroup
+		err := ec2ScanRecords(context.Background(), p.state,
+			ec2StatePrefix("placement_group", reqCtx.AccountID, reqCtx.Region),
+			func(_ string, pg EC2PlacementGroup) {
+				if found == nil && pg.GroupID == id {
+					found = &pg
+				}
+			})
+		if err != nil {
+			return nil, fmt.Errorf("ec2 runInstances scan placement groups: %w", err)
+		}
+		if found == nil {
 			return nil, ec2UnknownPlacementGroupError(id)
 		}
-		name = resolved
+		return found, nil
 	}
 	data, err := p.state.Get(context.Background(), ec2Namespace,
 		ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name))
@@ -77,7 +89,7 @@ func (p *EC2Plugin) placementGroupInUse(reqCtx *RequestContext, pg EC2PlacementG
 	used := false
 	err := ec2ScanRecords(context.Background(), p.state, "instance:"+reqCtx.AccountID+"/"+reqCtx.Region+"/",
 		func(_ string, inst EC2Instance) {
-			if inst.State.Name == "terminated" || inst.PlacementGroupName == "" {
+			if inst.State.Name == ec2StateTerminated || inst.PlacementGroupName == "" {
 				return
 			}
 			if inst.PlacementGroupID != "" && pg.GroupID != "" {

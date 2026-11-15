@@ -4,8 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -17,63 +17,102 @@ import (
 // example, if you specify 100.68.0.18/18 for the CIDR block, AWS canonicalizes the CIDR block to
 // 100.68.0.0/18. Any subsequent DescribeSecurityGroups and DescribeSecurityGroupRules calls will
 // return the canonicalized form of the CIDR block." The canonical form is the network address the
-// prefix length leaves, rendered as [net.IPNet.String] renders it — dotted quad for IPv4, the
-// compressed RFC 5952 text for IPv6 — the same step [ec2ParseRouteDestination] takes for a
-// route's destination (#1187).
+// prefix length leaves, rendered as [netip.Prefix.String] renders it — dotted quad for IPv4, the
+// compressed RFC 5952 text for IPv6 — the step [ec2ParseRouteDestination] takes for a route's
+// destination (#1187).
 //
-// v6 says which family the parameter carries: CidrIp is IPv4 and CidrIpv6 is IPv6, and a value of
-// the other family is refused like any other unparseable one. The refusal is InvalidParameterValue
-// with "CIDR block <value> is malformed", EC2's observed answer to an unparseable rule CIDR on
-// both families (aws/aws-cli#2846 for an IPv6 range, hashicorp/terraform#9481 for an IPv4 address
-// with no prefix length, NixOS/nixops-aws#63 for an IPv6 range sent as CidrIp); the operation's
-// Errors section is the Common Error Types boilerplate.
+// v6 says which family the parameter carries, and the family is decided by the text: CidrIp must
+// be an IPv4 dotted quad and CidrIpv6 an IPv6 address that is not IPv4-mapped. So `::ffff:0:0/96`
+// is refused in both: as CidrIp it would otherwise unmap to 0.0.0.0/0 and open the rule to every
+// IPv4 address, and as CidrIpv6 it names IPv4 space through the other family's parameter. A value
+// of the wrong family is refused like any other unparseable one. The refusal is
+// InvalidParameterValue with "CIDR block <value> is malformed", EC2's observed answer to an
+// unparseable rule CIDR on both families (aws/aws-cli#2846 for an IPv6 range,
+// hashicorp/terraform#9481 for an IPv4 address with no prefix length, NixOS/nixops-aws#63 for an
+// IPv6 range sent as CidrIp); the operation's Errors section is the Common Error Types
+// boilerplate. That the IPv4-mapped form is refused rather than unmapped is substrate's reading.
 func ec2CanonicalRuleCIDR(cidr string, v6 bool) (string, error) {
-	ip, block, err := net.ParseCIDR(cidr)
-	if err != nil || (ip.To4() == nil) != v6 {
-		return "", &AWSError{
-			Code:       "InvalidParameterValue",
-			Message:    "CIDR block " + cidr + " is malformed",
-			HTTPStatus: http.StatusBadRequest,
-		}
+	prefix, err := netip.ParsePrefix(cidr)
+	family := err == nil && prefix.Addr().Is4()
+	if v6 {
+		family = err == nil && prefix.Addr().Is6() && !prefix.Addr().Is4In6()
 	}
-	return block.String(), nil
+	if !family {
+		return "", ec2MalformedCIDRError(cidr)
+	}
+	return prefix.Masked().String(), nil
+}
+
+// ec2MalformedCIDRError is the refusal [ec2CanonicalRuleCIDR] answers.
+func ec2MalformedCIDRError(cidr string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidParameterValue",
+		Message:    "CIDR block " + cidr + " is malformed",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // ec2CanonicalizePermissions rewrites every IPv4 and IPv6 range in perms to its canonical form,
 // in place, so that the duplicate check, the revoke match and the stored record all see the form
 // AWS stores (#1553). It runs on authorize and revoke alike, so a revoke naming the
 // non-canonical spelling of a stored rule removes it.
-func ec2CanonicalizePermissions(perms []EC2IPPermission) error {
-	for i := range perms {
-		for j, cidr := range perms[i].IPRanges {
-			canonical, err := ec2CanonicalRuleCIDR(cidr, false)
-			if err != nil {
-				return err
+//
+// held, when non-nil, is the group's stored rules in the request's direction, and is passed by a
+// revoke. A value that does not canonicalise but is held verbatim is kept as sent rather than
+// refused: an earlier substrate stored each range as it was sent, malformed or not, and without
+// this a rule it stored could never be revoked — the revoke would be refused before it was
+// matched. [ec2SameRuleCIDR] then matches it by its exact text. An authorize passes nil, so a
+// malformed range is never written.
+func ec2CanonicalizePermissions(perms []EC2IPPermission, held []EC2IPPermission) error {
+	heldVerbatim := func(cidr string, v6 bool) bool {
+		for _, r := range held {
+			ranges := r.IPRanges
+			if v6 {
+				ranges = r.IPv6Ranges
 			}
-			perms[i].IPRanges[j] = canonical
+			if slices.Contains(ranges, cidr) {
+				return true
+			}
 		}
-		for j, cidr := range perms[i].IPv6Ranges {
-			canonical, err := ec2CanonicalRuleCIDR(cidr, true)
+		return false
+	}
+	canonicalize := func(ranges []string, v6 bool) error {
+		for j, cidr := range ranges {
+			canonical, err := ec2CanonicalRuleCIDR(cidr, v6)
 			if err != nil {
+				if heldVerbatim(cidr, v6) {
+					continue
+				}
 				return err
 			}
-			perms[i].IPv6Ranges[j] = canonical
+			ranges[j] = canonical
+		}
+		return nil
+	}
+	for i := range perms {
+		if err := canonicalize(perms[i].IPRanges, false); err != nil {
+			return err
+		}
+		if err := canonicalize(perms[i].IPv6Ranges, true); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
 // ec2SameRuleCIDR reports whether a stored rule CIDR names the range target does. target is
-// canonical by the time it is compared; the stored side is canonicalised here, because a group
-// written before #1553 holds each range as it was sent, and its rule must still match a revoke
-// or a duplicate authorize naming it in either spelling. A stored value that does not parse —
-// which only an earlier substrate could have accepted — matches only itself.
+// canonical by the time it is compared, or a held malformed value kept verbatim; the stored side
+// is canonicalised here, because a group written before #1553 holds each range as it was sent, and
+// its rule must still match a revoke or a duplicate authorize naming it in either spelling. A
+// stored value that does not parse — which only an earlier substrate could have accepted —
+// matches only its own exact text. A stored IPv4-mapped value canonicalises to IPv6 text, so it
+// never matches an IPv4 target.
 func ec2SameRuleCIDR(stored, target string) bool {
 	if stored == target {
 		return true
 	}
-	if _, block, err := net.ParseCIDR(stored); err == nil {
-		return block.String() == target
+	if prefix, err := netip.ParsePrefix(stored); err == nil {
+		return prefix.Masked().String() == target
 	}
 	return false
 }

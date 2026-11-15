@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -186,11 +187,23 @@ func ec2KeyFromSSHBlob(blob []byte) (keyType, fingerprint string, awsErr *AWSErr
 	}
 }
 
+// ec2ImportRSALengths are the RSA key lengths ImportKeyPair accepts: "Supported lengths: 1024,
+// 2048, and 4096" (EC2 User Guide, "Create a key pair using a third-party tool and import the
+// public key to Amazon EC2").
+var ec2ImportRSALengths = []int{1024, 2048, 4096}
+
 // ec2ImportedRSAFingerprint is an imported RSA key's fingerprint: the colon-separated MD5 of its
 // DER-encoded SubjectPublicKeyInfo, which is what `openssl rsa -pubout -outform DER` writes.
+//
+// The key must be one of the User Guide's "Supported lengths: 1024, 2048, and 4096", measured as
+// the modulus's bit length; any other is refused with InvalidKeyPair.Format by the caller, as an
+// unsupported type is.
 func ec2ImportedRSAFingerprint(pub *rsa.PublicKey) (string, error) {
 	if pub.N.Sign() <= 0 {
 		return "", fmt.Errorf("ec2 import key: empty RSA modulus")
+	}
+	if bits := pub.N.BitLen(); !slices.Contains(ec2ImportRSALengths, bits) {
+		return "", fmt.Errorf("ec2 import key: %d-bit RSA key is not a supported length", bits)
 	}
 	der, err := x509.MarshalPKIXPublicKey(pub)
 	if err != nil {

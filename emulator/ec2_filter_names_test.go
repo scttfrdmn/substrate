@@ -175,7 +175,9 @@ func TestEC2_FilterNames_InertMeansEveryResource(t *testing.T) {
 	ts := newEC2TestServer(t)
 	want := ec2TagTestInstance(t, ts)
 
-	for _, filter := range []string{"platform", "architecture", "root-device-type"} {
+	// architecture was in this list until #1525 made it evaluated; tenancy, also unmodeled,
+	// takes its place.
+	for _, filter := range []string{"platform", "tenancy", "root-device-type"} {
 		t.Run(filter, func(t *testing.T) {
 			resp := ec2Request(t, ts, map[string]string{
 				"Action":           "DescribeInstances",
