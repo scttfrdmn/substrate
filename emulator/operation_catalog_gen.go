@@ -480,6 +480,7 @@ var routedOperations = map[string][]string{
 		"GetSpotPlacementScores",
 		"ImportKeyPair",
 		"ModifyInstanceAttribute",
+		"ModifyInstanceMetadataOptions",
 		"ModifyLaunchTemplate",
 		"ModifySnapshotAttribute",
 		"ModifySubnetAttribute",

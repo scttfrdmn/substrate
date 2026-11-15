@@ -1843,10 +1843,10 @@ func AutoScalingTargetOnDemandForTest(total, base, pct int) int {
 }
 
 // AutoScalingMatchInstanceTypesForTest returns the catalog types asgMatchInstanceTypes
-// selects for req, in launch-priority order.
-func AutoScalingMatchInstanceTypesForTest(req *AutoScalingInstanceRequirements) []string {
+// selects for req and an AMI of architecture arch ("" for none), in launch-priority order.
+func AutoScalingMatchInstanceTypesForTest(req *AutoScalingInstanceRequirements, arch string) []string {
 	var out []string
-	for _, info := range asgMatchInstanceTypes(req) {
+	for _, info := range asgMatchInstanceTypes(req, arch) {
 		out = append(out, info.InstanceType)
 	}
 	return out

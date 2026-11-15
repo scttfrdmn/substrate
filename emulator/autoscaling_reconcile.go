@@ -112,11 +112,44 @@ func (p *AutoScalingPlugin) asgCandidates(reqCtx *RequestContext, g *AutoScaling
 			out = append(out, asgCandidate{spec: spec, instanceType: ov.InstanceType, imageID: ov.ImageID})
 			continue
 		}
-		for _, info := range asgMatchInstanceTypes(ov.InstanceRequirements) {
+		arch := p.asgImageArchitecture(reqCtx, spec, ov.ImageID)
+		for _, info := range asgMatchInstanceTypes(ov.InstanceRequirements, arch) {
 			out = append(out, asgCandidate{spec: spec, instanceType: info.InstanceType, imageID: ov.ImageID})
 		}
 	}
 	return out, nil
+}
+
+// asgImageArchitecture returns the architecture of the AMI a candidate would launch — the
+// override's ImageId when it names one, the resolved template version's otherwise — or ""
+// when there is no AMI or it does not resolve.
+//
+// It is what attribute-based selection narrows by (#1497); see [asgMatchInstanceTypes]. The
+// AMI is resolved through [EC2Plugin.resolveImage], the lookup the launch itself makes, so a
+// type chosen here is chosen for the image the launch then uses. "" never refuses anything
+// here: an AMI that does not resolve fails the launch with EC2's own error, which names the
+// AMI, where narrowing to nothing would report a mismatch the caller cannot see the cause of.
+func (p *AutoScalingPlugin) asgImageArchitecture(reqCtx *RequestContext, spec AutoScalingLaunchTemplateSpec, imageID string) string {
+	if imageID == "" {
+		lt := ec2LookupLaunchTemplate(context.Background(), p.state, reqCtx, spec.LaunchTemplateID, spec.LaunchTemplateName)
+		if lt == nil {
+			return ""
+		}
+		version, awsErr := ec2ResolveTemplateVersion(lt, spec.Version)
+		if awsErr != nil {
+			return ""
+		}
+		imageID = version.Data.ImageID
+	}
+	ec2, err := p.ec2()
+	if err != nil {
+		return ""
+	}
+	img, ok := ec2.resolveImage(reqCtx, imageID)
+	if !ok {
+		return ""
+	}
+	return img.Architecture
 }
 
 // asgPlacements resolves where a group can launch. Every subnet in VPCZoneIdentifier must

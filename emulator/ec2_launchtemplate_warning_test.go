@@ -439,10 +439,9 @@ func TestEC2_LaunchTemplateVersion_NoSourceVersionInheritsNothing(t *testing.T) 
 	mappings, body := ltDescribeMappings(t, ts, "no-inherit", "2")
 	assert.Empty(t, mappings,
 		"a version naming no SourceVersion holds only what its own request said: %s", body)
-	// The container element itself is still emitted, empty — encoding/xml writes the
-	// parent of an `a>b` path unconditionally, so omitempty on the slice cannot suppress
-	// it. That is what securityGroupIdSet, networkInterfaceSet and tagSpecificationSet
-	// have always done in this same struct, so the new member matches its siblings rather
-	// than being the one that disappears.
-	assert.Contains(t, body, "<blockDeviceMappingSet></blockDeviceMappingSet>")
+	// The container element is omitted, not emitted empty (#1471). encoding/xml writes the
+	// parent of an `a>b` path unconditionally, which is how every list member of this struct
+	// once rendered an empty element an SDK decodes as a present, empty list; they are
+	// pointer-wrapped now, so a version that names no mappings reads back without the key.
+	assert.NotContains(t, body, "blockDeviceMappingSet")
 }

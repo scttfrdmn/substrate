@@ -33,15 +33,19 @@ const ec2TestRegion = "us-east-1"
 // IDs, ami-0abcdef1234567890 and ami-1234567890abcdef0. Substrate refuses those, real AWS
 // refuses those, and TestEC2_BundledImages_DocumentationExamplesAreNotBundled pins it.
 var (
-	ec2TestImage           = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")
-	ec2TestImageArm        = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64")
-	ec2TestImageMinimal    = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64")
-	ec2TestImageMinimalArm = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64")
-	ec2TestImageWindows    = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base")
-	ec2TestImageECS        = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id")
-	ec2TestImageECS2       = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id")
-	ec2TestImageUbuntu     = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id")
-	ec2TestImageUbuntu22   = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id")
+	ec2TestImage            = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64")
+	ec2TestImageArm         = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64")
+	ec2TestImageMinimal     = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-x86_64")
+	ec2TestImageMinimalArm  = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-default-arm64")
+	ec2TestImageWindows     = emulator.BundledImageID(ec2TestRegion, "/aws/service/ami-windows-latest/Windows_Server-2022-English-Full-Base")
+	ec2TestImageECS         = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2023/recommended/image_id")
+	ec2TestImageECS2        = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id")
+	ec2TestImageUbuntu      = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id")
+	ec2TestImageUbuntu22    = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id")
+	ec2TestImageECSArm      = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id")
+	ec2TestImageECS2Arm     = emulator.BundledImageID(ec2TestRegion, "/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id")
+	ec2TestImageUbuntuArm   = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id")
+	ec2TestImageUbuntu22Arm = emulator.BundledImageID(ec2TestRegion, "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id")
 )
 
 // ec2BundledParameters is every parameter the vars above name, in the same order, so a test
@@ -56,6 +60,10 @@ var ec2BundledParameters = []string{
 	"/aws/service/ecs/optimized-ami/amazon-linux-2/recommended/image_id",
 	"/aws/service/canonical/ubuntu/server/24.04/stable/current/amd64/hvm/ebs-gp3/ami-id",
 	"/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
+	"/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id",
+	"/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id",
+	"/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id",
+	"/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id",
 }
 
 // TestEC2_BundledImages_IDsAreWellFormedAndDistinct pins the two properties every other
@@ -119,6 +127,15 @@ func TestEC2_BundledImages_UnlistedPathResolvesToItsFamily(t *testing.T) {
 		{"an unlisted Amazon Linux kernel", "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64", ec2TestImage},
 		{"a listed path is itself, not its family's default", "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-arm64", ec2TestImageArm},
 		{"a listed release is itself, not its family's newest", "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id", ec2TestImageUbuntu22},
+		// #1497: an unlisted path that names arm64 resolves to its family's arm64 image, not
+		// the x86_64 one, so a Graviton launch that discovered its AMI is not handed an image
+		// of the wrong architecture.
+		{"an unlisted arm64 Amazon Linux kernel", "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-arm64", ec2TestImageArm},
+		{"an unlisted arm64 Ubuntu release", "/aws/service/canonical/ubuntu/server/20.04/stable/current/arm64/hvm/ebs-gp2/ami-id", ec2TestImageUbuntuArm},
+		{"an unlisted arm64 ECS path", "/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended", ec2TestImageECSArm},
+		{"a listed arm64 ECS path is itself", "/aws/service/ecs/optimized-ami/amazon-linux-2/arm64/recommended/image_id", ec2TestImageECS2Arm},
+		{"a listed arm64 Ubuntu release is itself", "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id", ec2TestImageUbuntu22Arm},
+		{"an arm64-looking Windows path has no arm64 image to take", "/aws/service/ami-windows-latest/Windows_Server-2025-arm64", ec2TestImageWindows},
 		{"not an AMI path", "/aws/service/datasync/agent", ""},
 		{"not a managed path at all", "/my/own/parameter", ""},
 	}

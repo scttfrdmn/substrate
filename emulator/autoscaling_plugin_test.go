@@ -707,7 +707,7 @@ func TestAutoScaling_InstanceRequirementsMatching(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			assert.Equal(t, tc.want, emulator.AutoScalingMatchInstanceTypesForTest(&tc.req))
+			assert.Equal(t, tc.want, emulator.AutoScalingMatchInstanceTypesForTest(&tc.req, "x86_64"))
 		})
 	}
 }

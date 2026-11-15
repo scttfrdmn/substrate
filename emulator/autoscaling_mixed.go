@@ -27,7 +27,18 @@ import (
 //     the general-purpose, compute-optimized, memory-optimized and accelerated-computing
 //     specification pages, and the previous-generation page for p3.
 //   - **Burstable** is the T series: the naming-conventions page lists "T – Burstable
-//     performance", and every T3/T3a size carries the burstable footnote.
+//     performance", and every T3/T3a/T4g size carries the burstable footnote.
+//   - **Architecture** is not an InstanceRequirements member at all, and it still narrows:
+//     the reference's CpuManufacturers note says "Instances will be launched with a
+//     compatible CPU architecture based on the Amazon Machine Image (AMI) that you specify
+//     in your launch template". So the override's AMI — or its template's — is resolved and
+//     a type is a candidate only when its supportedArchitectures carries the AMI's
+//     architecture (#1497). An arm64 AMI selects only Graviton types and an x86_64 AMI only
+//     Intel and AMD ones, which is also why adding the Graviton families moved no x86
+//     group's choice. An AMI that does not resolve, or whose architecture no catalog type
+//     reports (i386, the mac values), does not narrow: the first launch then fails on the
+//     AMI itself, or the catalog lacks the families that would answer, and neither is a
+//     question this filter can settle.
 //   - **Local storage** is [asgFamilyHasInstanceStore], transcribed from the accelerated
 //     page's instance store table rather than read off the `d` naming option, which several
 //     of those families carry storage without.
@@ -54,14 +65,20 @@ import (
 
 // asgFamilyCPUManufacturer is the CPU manufacturer of each family in the seeded catalog, as
 // the specification pages' processor column states it ("Intel Xeon Platinum 8175", "AMD
-// EPYC 7571", "2nd Gen AMD EPYC 7R32", …). A family missing here matches no CpuManufacturers
-// filter, which is the conservative reading for a family substrate cannot attribute.
+// EPYC 7571", "2nd Gen AMD EPYC 7R32", "AWS Graviton4 Processor", …), spelled as
+// API_InstanceRequirements' CpuManufacturers values ("intel | amd | amazon-web-services |
+// apple"; "For instance types with AWS CPUs, specify amazon-web-services"). A family missing
+// here matches no CpuManufacturers filter, which is the conservative reading for a family
+// substrate cannot attribute.
 func asgFamilyCPUManufacturer(family string) string {
 	switch family {
 	case "t3", "m5", "c5", "r5", "p3", "p4d", "p4de", "g4dn", "inf1", "trn1", "trn2":
 		return "intel"
 	case "t3a", "m5a", "c5a", "p5", "g5", "g6", "inf2":
 		return "amd"
+	case "t4g", "m6g", "m7g", "m8g", "m9g", "c6g", "c7g", "c8g", "c9g",
+		"r6g", "r7g", "r8g", "r9g":
+		return "amazon-web-services"
 	}
 	return ""
 }
@@ -82,8 +99,8 @@ func asgFamilyBurstable(family string) bool {
 // asgFamilyHasInstanceStore reports whether a family carries instance store volumes, as the
 // accelerated-computing page's "Instance store specifications" table lists them. The naming
 // convention's `d` option is not used: g5, g6, p5, trn1 and trn2 carry NVMe instance store
-// without it. None of the seven non-accelerated families in the catalog has any, and p3,
-// inf1 and inf2 are EBS-only.
+// without it. None of the twenty non-accelerated families in the catalog has any — the
+// Graviton `gd` variants that would are not carried — and p3, inf1 and inf2 are EBS-only.
 func asgFamilyHasInstanceStore(family string) bool {
 	switch family {
 	case "g4dn", "g5", "g6", "p4d", "p4de", "p5", "trn1", "trn2":
@@ -117,10 +134,18 @@ func asgMatchesAny(patterns []string, value string) bool {
 	return false
 }
 
-// asgMatchInstanceTypes returns the catalog types satisfying req, in launch-priority order.
-func asgMatchInstanceTypes(req *AutoScalingInstanceRequirements) []ec2InstanceTypeInfo {
+// asgMatchInstanceTypes returns the catalog types satisfying req and able to run an AMI of
+// architecture arch, in launch-priority order. An empty arch, or one no catalog type
+// reports, does not narrow; see the file comment's Architecture entry.
+func asgMatchInstanceTypes(req *AutoScalingInstanceRequirements, arch string) []ec2InstanceTypeInfo {
+	if arch != ec2ArchX86 && arch != ec2ArchARM64 {
+		arch = ""
+	}
 	var out []ec2InstanceTypeInfo
 	for _, info := range ec2InstanceTypeCatalog {
+		if arch != "" && !containsStr(info.SupportedArchs, arch) {
+			continue
+		}
 		if asgTypeSatisfies(req, info) {
 			out = append(out, info)
 		}

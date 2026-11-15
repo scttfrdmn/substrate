@@ -85,11 +85,54 @@ func ec2LaunchTemplateVersionNotFound(ltID, version string) *AWSError {
 	}
 }
 
-// ec2LaunchTemplateNotFound reports a launch template that does not exist.
-func ec2LaunchTemplateNotFound() *AWSError {
+// ec2LaunchTemplateNotFound reports a launch template that does not exist, by the identifier
+// the request named it with: an ID gets InvalidLaunchTemplateId.NotFound and a name gets
+// InvalidLaunchTemplateName.NotFoundException.
+//
+// Both codes are EC2's published ones — the error table describes the first as "The specified
+// launch template ID does not exist" and the second as "The specified launch template name does
+// not exist". Until #1469 every caller answered the ID code, so a request that named its template
+// by name, which is how most IaC names one, was refused with a code about an ID it never sent.
+// When a request names both, the ID is what [ec2LookupLaunchTemplate] resolves by, so the ID
+// is what is reported.
+//
+// The messages are observed, not published: "The specified launch template, with template name
+// packer-fleet-launch-template, does not exist." is quoted verbatim from real EC2 in
+// hashicorp/packer#7968 and aws/karpenter-provider-aws#2101, and the ID form is the same
+// sentence, as Auto Scaling's own refusal here ([AutoScalingPlugin.asgResolveSpec]) already
+// renders it.
+func ec2LaunchTemplateNotFound(ltID, ltName string) *AWSError {
+	if ltID != "" {
+		return &AWSError{
+			Code:       "InvalidLaunchTemplateId.NotFound",
+			Message:    fmt.Sprintf("The specified launch template, with template ID %s, does not exist.", ltID),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	return &AWSError{
-		Code:       "InvalidLaunchTemplateId.NotFound",
-		Message:    "The launch template was not found",
+		Code:       "InvalidLaunchTemplateName.NotFoundException",
+		Message:    fmt.Sprintf("The specified launch template, with template name %s, does not exist.", ltName),
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2DescribeLaunchTemplatesNotFound is DescribeLaunchTemplates' refusal for a named template
+// that does not exist: the same two codes as [ec2LaunchTemplateNotFound], by which list named
+// it, with the list operation's own message.
+//
+// "At least one of the launch templates specified in the request does not exist." is real
+// EC2's, observed: #1469 quotes it for an unknown name, and terraform-provider-aws#5967 records
+// it under InvalidLaunchTemplateId.NotFound for an unknown ID (spelled "Atleast" in that 2018
+// capture; the spelling here is #1469's). It names no template, so the code is what tells a
+// caller which list held the miss.
+func ec2DescribeLaunchTemplatesNotFound(byID bool) *AWSError {
+	code := "InvalidLaunchTemplateName.NotFoundException"
+	if byID {
+		code = "InvalidLaunchTemplateId.NotFound"
+	}
+	return &AWSError{
+		Code:       code,
+		Message:    "At least one of the launch templates specified in the request does not exist.",
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
@@ -165,16 +208,42 @@ func ec2ValidationWarningFor(problems []*AWSError) *ec2ValidationWarningXML {
 // TagSpecification.N on the way in: ResponseLaunchTemplateData and
 // RequestLaunchTemplateData spell it differently, so a round-trip test has to use
 // both names.
+//
+// Every list member is an [ec2ItemSet] pointer rather than a slice behind an
+// `xml:"…Set>item,omitempty"` path (#1471). encoding/xml writes the parent of an `a>b`
+// path before it consults omitempty on the child, so an empty slice still rendered
+// `<networkInterfaceSet></networkInterfaceSet>` — and an SDK decodes that as a present,
+// empty NetworkInterfaces list. Every template naming no interface read back with a
+// NetworkInterfaces key the request never carried, and the same was true of each list a
+// template left empty. A nil pointer omits the element whole.
 type ec2LTVersionDataXML struct {
-	BlockDeviceMappings []ec2LTVersionBDMXML     `xml:"blockDeviceMappingSet>item,omitempty"`
-	IamInstanceProfile  *ec2LTVersionProfileXML  `xml:"iamInstanceProfile,omitempty"`
-	ImageID             string                   `xml:"imageId,omitempty"`
-	InstanceType        string                   `xml:"instanceType,omitempty"`
-	KeyName             string                   `xml:"keyName,omitempty"`
-	UserData            string                   `xml:"userData,omitempty"`
-	SecurityGroupIDs    []string                 `xml:"securityGroupIdSet>item,omitempty"`
-	NetworkInterfaces   []ec2LTVersionNetIfcXML  `xml:"networkInterfaceSet>item,omitempty"`
-	TagSpecifications   []ec2LTVersionTagSpecXML `xml:"tagSpecificationSet>item,omitempty"`
+	BlockDeviceMappings   *ec2ItemSet[ec2LTVersionBDMXML]     `xml:"blockDeviceMappingSet,omitempty"`
+	DisableAPITermination *bool                               `xml:"disableApiTermination,omitempty"`
+	IamInstanceProfile    *ec2LTVersionProfileXML             `xml:"iamInstanceProfile,omitempty"`
+	ImageID               string                              `xml:"imageId,omitempty"`
+	InstanceType          string                              `xml:"instanceType,omitempty"`
+	KeyName               string                              `xml:"keyName,omitempty"`
+	MetadataOptions       *ec2LTMetadataOptionsXML            `xml:"metadataOptions,omitempty"`
+	UserData              string                              `xml:"userData,omitempty"`
+	SecurityGroupIDs      *ec2ItemSet[string]                 `xml:"securityGroupIdSet,omitempty"`
+	NetworkInterfaces     *ec2ItemSet[ec2LTVersionNetIfcXML]  `xml:"networkInterfaceSet,omitempty"`
+	TagSpecifications     *ec2ItemSet[ec2LTVersionTagSpecXML] `xml:"tagSpecificationSet,omitempty"`
+}
+
+// ec2ItemSet is an EC2 list element — `<xSet><item>…</item></xSet>` — that a nil pointer
+// omits entirely. See [ec2LTVersionDataXML] for why a slice behind a `>` path cannot.
+type ec2ItemSet[T any] struct {
+	// Items are the list's members, in order.
+	Items []T `xml:"item"`
+}
+
+// ec2Items wraps items as an [ec2ItemSet], or returns nil for an empty list so that the
+// element is left out.
+func ec2Items[T any](items []T) *ec2ItemSet[T] {
+	if len(items) == 0 {
+		return nil
+	}
+	return &ec2ItemSet[T]{Items: items}
 }
 
 // ec2LTVersionBDMXML is one LaunchTemplateBlockDeviceMapping within a version's data.
@@ -214,17 +283,21 @@ type ec2LTVersionEbsBDMXML struct {
 }
 
 // ec2LTVersionNetIfcXML is one network interface within a version's data.
+//
+// groupSet is an [ec2ItemSet] and deleteOnTermination a pointer for #1471's reason: an
+// interface naming no groups read back with an empty groupSet, and one that did not state
+// deleteOnTermination read back with the launch default as though it had.
 type ec2LTVersionNetIfcXML struct {
-	DeviceIndex              int      `xml:"deviceIndex"`
-	SubnetID                 string   `xml:"subnetId,omitempty"`
-	AssociatePublicIPAddress string   `xml:"associatePublicIpAddress,omitempty"`
-	Groups                   []string `xml:"groupSet>item,omitempty"`
-	NetworkInterfaceID       string   `xml:"networkInterfaceId,omitempty"`
-	PrivateIPAddress         string   `xml:"privateIpAddress,omitempty"`
-	Description              string   `xml:"description,omitempty"`
-	InterfaceType            string   `xml:"interfaceType,omitempty"`
-	NetworkCardIndex         int      `xml:"networkCardIndex,omitempty"`
-	DeleteOnTermination      bool     `xml:"deleteOnTermination"`
+	DeviceIndex              int                 `xml:"deviceIndex"`
+	SubnetID                 string              `xml:"subnetId,omitempty"`
+	AssociatePublicIPAddress string              `xml:"associatePublicIpAddress,omitempty"`
+	Groups                   *ec2ItemSet[string] `xml:"groupSet,omitempty"`
+	NetworkInterfaceID       string              `xml:"networkInterfaceId,omitempty"`
+	PrivateIPAddress         string              `xml:"privateIpAddress,omitempty"`
+	Description              string              `xml:"description,omitempty"`
+	InterfaceType            string              `xml:"interfaceType,omitempty"`
+	NetworkCardIndex         int                 `xml:"networkCardIndex,omitempty"`
+	DeleteOnTermination      *bool               `xml:"deleteOnTermination,omitempty"`
 }
 
 // ec2LTVersionProfileXML is a version's LaunchTemplateIamInstanceProfileSpecification,
@@ -248,7 +321,12 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 		InstanceType:     d.InstanceType,
 		KeyName:          d.KeyName,
 		UserData:         d.UserData,
-		SecurityGroupIDs: d.SecurityGroupIDs,
+		SecurityGroupIDs: ec2Items(d.SecurityGroupIDs),
+		MetadataOptions:  ec2LTMetadataOptions(d.MetadataOptions),
+	}
+	if d.DisableAPITermination != "" {
+		v := d.DisableAPITermination == "true"
+		out.DisableAPITermination = &v
 	}
 	// The profile is stored as one string, so it is echoed back in whichever member
 	// it arrived in: an "arn:"-prefixed value is an arn and anything else is a name.
@@ -262,16 +340,27 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 			out.IamInstanceProfile = &ec2LTVersionProfileXML{Name: d.IamInstanceProfile}
 		}
 	}
-	out.BlockDeviceMappings = ec2LTVersionBDMs(d.BlockDeviceMappings)
-	// Only the instance scope is stored, so only the instance scope reads back; see
-	// [EC2LaunchTemplateData.TagSpecifications].
-	if len(d.TagSpecifications) > 0 {
-		spec := ec2LTVersionTagSpecXML{ResourceType: "instance"}
-		for _, t := range d.TagSpecifications {
+	out.BlockDeviceMappings = ec2Items(ec2LTVersionBDMs(d.BlockDeviceMappings))
+	// The two stored scopes read back, instance then volume; see
+	// [EC2LaunchTemplateData.TagSpecifications]. The volume scope has been stored since #670
+	// and was not rendered until #1471, so a template tagging its volumes read back as though
+	// it did not. The other scopes the request shape allows are not stored, so they cannot
+	// read back.
+	var specs []ec2LTVersionTagSpecXML
+	for _, scope := range []struct {
+		resourceType string
+		tags         []EC2Tag
+	}{{"instance", d.TagSpecifications}, {"volume", d.VolumeTagSpecifications}} {
+		if len(scope.tags) == 0 {
+			continue
+		}
+		spec := ec2LTVersionTagSpecXML{ResourceType: scope.resourceType}
+		for _, t := range scope.tags {
 			spec.Tags = append(spec.Tags, ec2TagItem(t))
 		}
-		out.TagSpecifications = []ec2LTVersionTagSpecXML{spec}
+		specs = append(specs, spec)
 	}
+	out.TagSpecifications = ec2Items(specs)
 	// Every interface the template declared reads back, not just the primary (#455).
 	//
 	// The flat-field fallback below is what a template stored before the slice existed
@@ -279,30 +368,39 @@ func ec2LTVersionData(d EC2LaunchTemplateData) ec2LTVersionDataXML {
 	// nothing. Either way an interface is emitted only when the template actually
 	// named one, so a template carrying no networking does not read back with a
 	// phantom eth0.
+	var interfaces []ec2LTVersionNetIfcXML
 	for _, ifc := range d.NetworkInterfaces {
-		out.NetworkInterfaces = append(out.NetworkInterfaces, ec2LTVersionNetIfcXML{
+		item := ec2LTVersionNetIfcXML{
 			DeviceIndex:              ifc.DeviceIndex,
 			SubnetID:                 ifc.SubnetID,
 			AssociatePublicIPAddress: ifc.AssociatePublicIPAddress,
-			Groups:                   ifc.SecurityGroupIDs,
+			Groups:                   ec2Items(ifc.SecurityGroupIDs),
 			NetworkInterfaceID:       ifc.NetworkInterfaceID,
 			PrivateIPAddress:         ifc.PrivateIPAddress,
 			Description:              ifc.Description,
 			InterfaceType:            ifc.InterfaceType,
 			NetworkCardIndex:         ifc.NetworkCardIndex,
-			DeleteOnTermination:      ifc.DeleteOnTermination,
-		})
+		}
+		if !ifc.DeleteOnTerminationDefaulted {
+			dot := ifc.DeleteOnTermination
+			item.DeleteOnTermination = &dot
+		}
+		interfaces = append(interfaces, item)
 	}
-	if len(out.NetworkInterfaces) == 0 &&
+	if len(interfaces) == 0 &&
 		(d.SubnetID != "" || d.AssociatePublicIPAddress != "" || len(d.NetworkInterfaceGroups) > 0) {
-		out.NetworkInterfaces = []ec2LTVersionNetIfcXML{{
+		// A template stored before the slice existed, which recorded no statement of the
+		// member: it reads back as it always has.
+		dot := true
+		interfaces = []ec2LTVersionNetIfcXML{{
 			DeviceIndex:              0,
 			SubnetID:                 d.SubnetID,
 			AssociatePublicIPAddress: d.AssociatePublicIPAddress,
-			Groups:                   d.NetworkInterfaceGroups,
-			DeleteOnTermination:      true,
+			Groups:                   ec2Items(d.NetworkInterfaceGroups),
+			DeleteOnTermination:      &dot,
 		}}
 	}
+	out.NetworkInterfaces = ec2Items(interfaces)
 	return out
 }
 
@@ -385,10 +483,13 @@ func (p *EC2Plugin) createLaunchTemplateVersion(ctx *RequestContext, req *AWSReq
 
 	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound()
+		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	}
 
-	data := parseLaunchTemplateData(req.Params)
+	data, awsErr := parseLaunchTemplateData(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 
 	// SourceVersion inheritance, per the API reference: "the new version inherits
 	// the launch parameters from the source version, except for parameters that you
@@ -501,6 +602,26 @@ func ec2OverlayTemplateData(src, overlay EC2LaunchTemplateData) EC2LaunchTemplat
 	if overlay.IamInstanceProfile != "" {
 		out.IamInstanceProfile = overlay.IamInstanceProfile
 	}
+	// MetadataOptions is one RequestLaunchTemplateData parameter, so a version naming it
+	// replaces the source's whole rather than per option: the reference's rule is about
+	// "parameters that you specify in LaunchTemplateData", and the options are members of
+	// one (#1471).
+	if overlay.MetadataOptions != nil {
+		out.MetadataOptions = overlay.MetadataOptions
+	}
+	if overlay.DisableAPITermination != "" {
+		out.DisableAPITermination = overlay.DisableAPITermination
+	}
+	// The interface list was not overlaid before #1471, so a version naming its own
+	// interfaces inherited the source's list — the one every read and launch prefers — and
+	// only the flat primary fields above changed. The list and the primary's flat fields
+	// are one parameter and are replaced together.
+	if len(overlay.NetworkInterfaces) > 0 {
+		out.NetworkInterfaces = overlay.NetworkInterfaces
+		out.SubnetID = overlay.SubnetID
+		out.AssociatePublicIPAddress = overlay.AssociatePublicIPAddress
+		out.NetworkInterfaceGroups = overlay.NetworkInterfaceGroups
+	}
 	return out
 }
 
@@ -510,7 +631,7 @@ func (p *EC2Plugin) modifyLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 
 	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound()
+		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	}
 
 	// SetDefaultVersion is the only modifiable attribute, and it is Required: No —
@@ -590,7 +711,7 @@ func (p *EC2Plugin) describeLaunchTemplateVersions(ctx *RequestContext, req *AWS
 	} else {
 		lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
 		if lt == nil {
-			return nil, ec2LaunchTemplateNotFound()
+			return nil, ec2LaunchTemplateNotFound(ltID, ltName)
 		}
 		var awsErr *AWSError
 		items, awsErr = p.describeVersionsOfTemplate(lt, specs, req.Params)
@@ -774,7 +895,7 @@ func (p *EC2Plugin) deleteLaunchTemplateVersions(ctx *RequestContext, req *AWSRe
 
 	lt := p.resolveLaunchTemplate(goCtx, ctx, req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	if lt == nil {
-		return nil, ec2LaunchTemplateNotFound()
+		return nil, ec2LaunchTemplateNotFound(req.Params["LaunchTemplateId"], req.Params["LaunchTemplateName"])
 	}
 
 	type responseErrorXML struct {

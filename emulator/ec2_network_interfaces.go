@@ -68,8 +68,10 @@ func ec2ParseNetworkInterface(params map[string]string, p string) (EC2NetworkInt
 	// caller brought would destroy something the launch did not make. An explicit
 	// value wins over both.
 	ifc.DeleteOnTermination = ifc.NetworkInterfaceID == ""
+	ifc.DeleteOnTerminationDefaulted = true
 	if v, ok := params[p+"DeleteOnTermination"]; ok && v != "" {
 		ifc.DeleteOnTermination = strings.EqualFold(v, "true")
+		ifc.DeleteOnTerminationDefaulted = false
 	}
 
 	present := hasDeviceIndex || ifc.NetworkInterfaceID != "" || ifc.SubnetID != "" ||

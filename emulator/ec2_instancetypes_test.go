@@ -467,9 +467,12 @@ func TestEC2_DescribeInstanceTypeOfferings_InstanceTypeFilter(t *testing.T) {
 			name:   "a mid-string wildcard",
 			values: map[string]string{"Filter.1.Name": "instance-type", "Filter.1.Value.1": "*.24xlarge"},
 			wantTypes: []string{
-				"c5.24xlarge", "c5a.24xlarge", "g5.24xlarge", "g6.24xlarge",
+				"c5.24xlarge", "c5a.24xlarge", "c8g.24xlarge", "c9g.24xlarge",
+				"g5.24xlarge", "g6.24xlarge",
 				"inf1.24xlarge", "inf2.24xlarge", "m5.24xlarge", "m5a.24xlarge",
+				"m8g.24xlarge", "m9g.24xlarge",
 				"p4d.24xlarge", "p4de.24xlarge", "r5.24xlarge",
+				"r8g.24xlarge", "r9g.24xlarge",
 			},
 		},
 		{
