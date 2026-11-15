@@ -1951,3 +1951,8 @@ func SchedQueryParamsForTest(input, sdkID, op string) (map[string]string, error)
 
 // PolicyDocumentsEqualForTest wraps policyDocumentsEqual for external tests.
 func PolicyDocumentsEqualForTest(a, b PolicyDocument) bool { return policyDocumentsEqual(a, b) }
+
+// ParseRoute53OperationForTest wraps parseRoute53Operation for external tests.
+func ParseRoute53OperationForTest(method, path string) (op, zoneID string) {
+	return parseRoute53Operation(method, path)
+}
