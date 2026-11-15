@@ -1241,9 +1241,8 @@ every other caller exposed.
   RDS's and ElastiCache's describes are the other: their pages state no order either, but they
   do state what the `Marker` means — "the response includes only records beyond the marker" — and
   a record cannot be *beyond* another without an order to be beyond it in. AWS also publishes a
-  `Marker` and `PageSize` on the four ELBv2 describes, though substrate implements neither
-  parameter there yet ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)), so ELBv2's
-  order rests on the replay promise alone for now. A cursor over
+  `Marker` and `PageSize` on the four ELBv2 describes, and substrate pages them over this key order
+  ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). A cursor over
   an unstable order is the worst form of this defect, because it loses and duplicates resources
   rather than merely reordering them.
 - **AWS documents no order at all, and lexicographic is substrate's reading.** `ListBuckets` says
@@ -1361,7 +1360,7 @@ code serves both families, as it does for the `Marker`, so the two parameters of
 be refused under different codes. Both parameters are validated before any state is read.
 
 **Elastic Load Balancing joined this rule later, and from the other side.** Its two paginated
-operations published one range — `PageSize` 1–400, on both generations' pages — and answered it two
+operations at the time published one range — `PageSize` 1–400, on both generations' pages — and answered it two
 ways: the classic `DescribeLoadBalancers` refused an out-of-range value while ELBv2
 `DescribeAccountLimits` substituted its default and answered 200. The fallback rested on the
 operation publishing no error of its own, which
@@ -12051,29 +12050,51 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | Operation | Notes |
 |-----------|-------|
 | CreateLoadBalancer | ALB and NLB supported; accepts `Tags.member.N`. Answers the `LoadBalancer` of `API_LoadBalancer`, including the `AvailabilityZones.member.N` derived from `Subnets.member.N` and the `SecurityGroups.member.N` the create named — both persisted and reported nowhere before [#756](https://github.com/scttfrdmn/substrate/issues/756). Carries no account or Region member |
-| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N`. Same load-balancer shape as CreateLoadBalancer |
+| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N`. Same load-balancer shape as CreateLoadBalancer. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244); see [Paging](#paging-the-six-paginated-operations)) |
 | DeleteLoadBalancer | |
 | DescribeLoadBalancerAttributes | |
 | ModifyLoadBalancerAttributes | |
 | CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
-| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. An ARN in `TargetGroupArns` or a name in `Names` naming nothing is refused `TargetGroupNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `TargetGroupArns` or a name in `Names` naming nothing is refused `TargetGroupNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteTargetGroup | |
 | ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | RegisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DeregisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DescribeTargetHealth | An ARN naming nothing is refused `TargetGroupNotFound`/400 rather than answered an empty list ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
-| DescribeListeners | Same listener shape as CreateListener. An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeListeners | Same listener shape as CreateListener. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteListener | An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | ModifyListener | Answers the modified listener. An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
-| DescribeRules | Same rule shape as CreateRule. An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400, and a `ListenerArn` naming nothing `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeRules | Same rule shape as CreateRule. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400, and a `ListenerArn` naming nothing `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteRule | An ARN naming nothing is refused `RuleNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is refused `RuleNotFound`/400, and every pair is resolved before any is written, so a refused call reprices nothing ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
 | DescribeAccountLimits | Reports 23 limits, seedable; `Marker`/`PageSize` paginated |
+
+### Paging the six paginated operations
+
+All six paginated operations — ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`,
+`DescribeListeners`, `DescribeRules` and `DescribeAccountLimits`, and classic
+`DescribeLoadBalancers` — read `Marker` and `PageSize` through one rule
+([#1244](https://github.com/scttfrdmn/substrate/issues/1244),
+[#1245](https://github.com/scttfrdmn/substrate/issues/1245)):
+
+- `PageSize` absent is the published default of 400; a value outside the published 1–400, or one
+  that is not a number, is refused `ValidationError`/400.
+- `Marker` is an opaque cursor substrate issues as `NextMarker`. A marker substrate could not have
+  issued is refused `ValidationError`/400, never answered with page one, because a paging loop
+  cannot see a cursor that resets ([#915](https://github.com/scttfrdmn/substrate/issues/915)). No
+  operation publishes a code for a bad marker; `ValidationError` is the Query Common Errors page's
+  code, which each operation links as its own, and the message is substrate's own. A marker past the
+  end answers an empty last page, because a listing can shrink during a walk.
+- `NextMarker` is present when a further page exists and **absent**, not empty, when the walk is
+  exhausted, as the v2 pages publish ("Otherwise, this is null").
+- The four describes page over the key order the state store guarantees
+  ([#865](https://github.com/scttfrdmn/substrate/issues/865)), after every named ARN or name has
+  been resolved, so a name naming nothing is refused whichever page it would have fallen on.
 
 Every operation whose output shape carries no members answers
 `<OperationResponse><OperationResult/><ResponseMetadata>…</ResponseMetadata></OperationResponse>`.
@@ -12252,8 +12273,8 @@ Details a consumer can observe:
   `ValidationError`. The operation publishes no token code of its own, so the code comes from the
   Common Errors page that covers it; the refusal itself is substrate's reading, for the reason
   [#915](https://github.com/scttfrdmn/substrate/issues/915) records — a paging loop cannot see a
-  cursor that resets. ELBv2 `DescribeAccountLimits` still restarts the walk for the same cursor,
-  which is [#1245](https://github.com/scttfrdmn/substrate/issues/1245).
+  cursor that resets. Every paginated ELBv2 operation now answers the same cursor the same way
+  ([#1245](https://github.com/scttfrdmn/substrate/issues/1245); see [Paging](#paging-the-six-paginated-operations)).
 - **`PageSize` is refused outside its published 1–400**, through the rule both generations now
   share — see [Account limits](#account-limits) for why refusing replaced the fallback the other
   operation had ([#1150](https://github.com/scttfrdmn/substrate/issues/1150)).
@@ -12400,26 +12421,22 @@ what ELB's Common Errors page publishes — but the rule no longer does.
 **The sweep behind that decision, and its count.** The plugin has six paginated operations:
 ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`
 and `DescribeAccountLimits`, plus classic `DescribeLoadBalancers`, each publishing `PageSize`
-1–400 and `Marker`. Two read the member and now answer through one rule. The other **four read
-neither `Marker` nor `PageSize` at all**, which was a third answer rather than a second, and is
-[#1244](https://github.com/scttfrdmn/substrate/issues/1244) — closing it means implementing the
-cursor, not validating a member, and when they gain it they take the same rule. ELBv2
-`DescribeTags` publishes no pagination member and is correctly unpaginated.
+1–400 and `Marker`. Two read the member and answered through one rule after #1150. The other
+**four read neither `Marker` nor `PageSize` at all**, which was a third answer rather than a
+second; [#1244](https://github.com/scttfrdmn/substrate/issues/1244) gave them the cursor and the
+same rule. ELBv2 `DescribeTags` publishes no pagination member and is correctly unpaginated.
 
-`Marker` is a decimal offset into a fixed, name-ordered set, so a paged walk returns each
-limit exactly once. An unparseable `Marker` restarts the walk and an offset past the end
-answers an empty last page — neither being an error the operation publishes a code for.
-
-**The `Marker` half of this cursor is still answered two ways**, and that is now a recorded
-defect rather than a recorded decision: the classic `DescribeLoadBalancers` refuses a marker it
-never issued, for the reason
-[#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a
-cursor that resets — while the restart above stands on the same "no published code" step #1064
-answered for `PageSize`. It is
-[#1245](https://github.com/scttfrdmn/substrate/issues/1245), kept out of #1150 so that one
-change's diff is one member of the cursor. An offset past the end stays an empty last page
-either way: that is a walk that has ended, not a malformed cursor, and both operations already
-agree on it.
+`Marker` is an offset into a fixed, name-ordered set, so a paged walk returns each limit exactly
+once. **Until [#1245](https://github.com/scttfrdmn/substrate/issues/1245) it was a bare decimal,
+and an unparseable or negative `Marker` restarted the walk at page one** — recorded here as a
+decision, on the ground that the operation publishes no code for a bad marker. That is the same
+"no published code" step #1064 answered for `PageSize`, while the classic `DescribeLoadBalancers`
+already refused a marker it never issued, for the reason
+[#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a cursor
+that resets. The operation now takes the plugin's one cursor rule (see [Paging](#paging-the-six-paginated-operations)): the
+marker is the same opaque cursor the other five operations issue, an unissued one is refused
+`ValidationError`/400, and an offset past the end stays an empty last page, which is a walk that has
+ended rather than a malformed cursor.
 
 Authorization needed nothing: `elasticloadbalancing:DescribeAccountLimits` was **already** in
 substrate's generated authorization reference with an empty resource list, which is exactly

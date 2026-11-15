@@ -200,6 +200,11 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 }
 
 func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
+	offset, pageSize, awsErr := elbPageCursor(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "LoadBalancerArns.member")
@@ -209,10 +214,7 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		return nil, fmt.Errorf("elb describeLoadBalancers list: %w", err)
 	}
 
-	type lbResult struct {
-		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
-	}
-	var result lbResult
+	var matched []elbLBItem
 	held := map[string]bool{}
 	heldNames := map[string]bool{}
 	for _, k := range allKeys {
@@ -235,7 +237,7 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		if len(arns) > 0 && !containsStr(arns, lb.ARN) {
 			continue
 		}
-		result.LoadBalancers = append(result.LoadBalancers, lbToItem(lb))
+		matched = append(matched, lbToItem(lb))
 	}
 	// API_DescribeLoadBalancers publishes LoadBalancerNotFound at 400. Until #1413 a
 	// LoadBalancerArns or Names entry naming nothing matched nothing and the call answered
@@ -246,7 +248,15 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 	if err := elbRequireEveryARN(names, heldNames, elbKindLoadBalancer); err != nil {
 		return nil, err
 	}
-	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS, result)
+	// Paged after every named record is found, so a missing name is refused whichever page it
+	// would have fallen on. The order is the key order [StateManager.List] guarantees (#865).
+	page, next := pageByOffsetToken(matched, offset, pageSize)
+	type lbResult struct {
+		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
+		NextMarker    string      `xml:"NextMarker,omitempty"`
+	}
+	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS,
+		lbResult{LoadBalancers: page, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteLoadBalancer(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -351,6 +361,11 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 }
 
 func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
+	offset, pageSize, awsErr := elbPageCursor(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "TargetGroupArns.member")
@@ -362,10 +377,7 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 	if err != nil {
 		return nil, fmt.Errorf("elb describeTargetGroups list: %w", err)
 	}
-	type tgResult struct {
-		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
-	}
-	var result tgResult
+	var matched []elbTGItem
 	held := make(map[string]bool, len(allKeys))
 	heldNames := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
@@ -388,7 +400,7 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 		if len(arns) > 0 && !containsStr(arns, tg.ARN) {
 			continue
 		}
-		result.TargetGroups = append(result.TargetGroups, tgToItem(tg))
+		matched = append(matched, tgToItem(tg))
 	}
 	if err := elbRequireEveryARN(arns, held, elbKindTargetGroup); err != nil {
 		return nil, err
@@ -398,7 +410,13 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 	if err := elbRequireEveryARN(names, heldNames, elbKindTargetGroup); err != nil {
 		return nil, err
 	}
-	return elbOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS, result)
+	page, next := pageByOffsetToken(matched, offset, pageSize)
+	type tgResult struct {
+		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
+		NextMarker   string      `xml:"NextMarker,omitempty"`
+	}
+	return elbOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS,
+		tgResult{TargetGroups: page, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteTargetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -679,6 +697,11 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 }
 
 func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
+	offset, pageSize, awsErr := elbPageCursor(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	listenerARNs := extractIndexedParams(req.Params, "ListenerArns.member")
 	lbARN := req.Params["LoadBalancerArn"]
@@ -690,10 +713,7 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("elb describeListeners list: %w", err)
 	}
-	type listenerResult struct {
-		Listeners []elbListenerItem `xml:"Listeners>member"`
-	}
-	var result listenerResult
+	var matched []elbListenerItem
 	held := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
@@ -714,12 +734,18 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 		if lbARN != "" && l.LoadBalancerARN != lbARN {
 			continue
 		}
-		result.Listeners = append(result.Listeners, listenerToItem(l))
+		matched = append(matched, listenerToItem(l))
 	}
 	if err := elbRequireEveryARN(listenerARNs, held, elbKindListener); err != nil {
 		return nil, err
 	}
-	return elbOKResponse(reqCtx, "DescribeListeners", elbXMLNS, result)
+	page, next := pageByOffsetToken(matched, offset, pageSize)
+	type listenerResult struct {
+		Listeners  []elbListenerItem `xml:"Listeners>member"`
+		NextMarker string            `xml:"NextMarker,omitempty"`
+	}
+	return elbOKResponse(reqCtx, "DescribeListeners", elbXMLNS,
+		listenerResult{Listeners: page, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteListener(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -871,6 +897,11 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 }
 
 func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// The cursor is resolved before any state is read (#1244); see [elbPageCursor].
+	offset, pageSize, awsErr := elbPageCursor(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	ruleARNs := extractIndexedParams(req.Params, "RuleArns.member")
 	listenerARN := req.Params["ListenerArn"]
@@ -882,10 +913,7 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if err != nil {
 		return nil, fmt.Errorf("elb describeRules list: %w", err)
 	}
-	type ruleResult struct {
-		Rules []elbRuleItem `xml:"Rules>member"`
-	}
-	var result ruleResult
+	var matched []elbRuleItem
 	held := make(map[string]bool, len(allKeys))
 	for _, k := range allKeys {
 		data, getErr := p.state.Get(context.Background(), elbNamespace, k)
@@ -906,12 +934,18 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if listenerARN != "" && r.ListenerARN != listenerARN {
 			continue
 		}
-		result.Rules = append(result.Rules, ruleToItem(r))
+		matched = append(matched, ruleToItem(r))
 	}
 	if err := elbRequireEveryARN(ruleARNs, held, elbKindRule); err != nil {
 		return nil, err
 	}
-	return elbOKResponse(reqCtx, "DescribeRules", elbXMLNS, result)
+	page, next := pageByOffsetToken(matched, offset, pageSize)
+	type ruleResult struct {
+		Rules      []elbRuleItem `xml:"Rules>member"`
+		NextMarker string        `xml:"NextMarker,omitempty"`
+	}
+	return elbOKResponse(reqCtx, "DescribeRules", elbXMLNS,
+		ruleResult{Rules: page, NextMarker: next})
 }
 
 func (p *ELBPlugin) deleteRule(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

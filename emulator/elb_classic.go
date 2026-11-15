@@ -552,20 +552,13 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 // result member is `LoadBalancerDescriptions`, not ELBv2's `LoadBalancers`, and each member is a
 // `LoadBalancerDescription` rather than a `LoadBalancer`.
 func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	pageSize, awsErr := elbPageSize(req.Params["PageSize"])
+	// No token code is published on this operation — its Errors section publishes
+	// `DependencyThrottle` and `LoadBalancerNotFound` and nothing else — so a refused cursor answers
+	// the Common Errors page's code. Refusing an unissued marker rather than restarting at page one
+	// began here, and #1245 made it the plugin's one rule, [elbPageCursor].
+	offset, pageSize, awsErr := elbPageCursor(req)
 	if awsErr != nil {
 		return nil, awsErr
-	}
-	offset, ok := decodeOffsetPaginationToken(req.Params["Marker"])
-	if !ok {
-		// No token code is published on this operation — its Errors section publishes
-		// `DependencyThrottle` and `LoadBalancerNotFound` and nothing else — so the code comes from
-		// the Common Errors page that covers it. **Refusing rather than clamping is substrate's
-		// reading**: an unissued marker silently restarting the listing at page one is a wrong
-		// answer a consumer's paging loop cannot see, which is the defect #915 records for the three
-		// operations this decoder was hoisted out of.
-		return nil, elbValidationError("Marker '%s' is not a marker this service issued",
-			req.Params["Marker"])
 	}
 
 	names := extractIndexedParams(req.Params, "LoadBalancerNames.member")

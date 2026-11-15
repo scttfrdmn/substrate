@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strconv"
 )
 
 // elbAccountLimitsCtrlNamespace is the state namespace for the ELB account-limit
@@ -165,7 +164,7 @@ type elbLimitItem struct {
 func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Before any state is read, as `DescribeLoadBalancers` validates its own cursor: a refused
 	// request must not be distinguishable from one that was refused earlier.
-	pageSize, awsErr := elbPageSize(req.Params["PageSize"])
+	offset, pageSize, awsErr := elbPageCursor(req)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -183,24 +182,15 @@ func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSReques
 		limits = append(limits, elbLimitItem{Max: reported, Name: limit.Name})
 	}
 
-	// The cursor is a decimal offset into the fixed order above, matching the Marker RDS
-	// and ElastiCache already answer with. An unparseable Marker restarts from the
-	// beginning and an offset past the end yields an empty last page, both as they do:
-	// neither is an error the operation publishes a code for.
-	offset := 0
-	if n, err := strconv.Atoi(req.Params["Marker"]); err == nil && n > 0 {
-		offset = n
-	}
-	if offset > len(limits) {
-		offset = len(limits)
-	}
-	page := limits[offset:]
-
-	var nextMarker string
-	if len(page) > pageSize {
-		page = page[:pageSize]
-		nextMarker = strconv.Itoa(offset + pageSize)
-	}
+	// The cursor is an offset into the fixed order above. Until #1245 it was a bare decimal, and
+	// an unparseable or negative Marker restarted the walk at page one. That was a decision,
+	// argued here on the ground that the operation publishes no code for a bad marker. #1064
+	// removed the ground: the Query Common Errors page this operation links as its own publishes
+	// `ValidationError`/400, which classic `DescribeLoadBalancers` was already answering for the
+	// same cursor. The restart was replaced by the plugin's one rule, [elbPageCursor]: the marker
+	// is the base64 offset classic issues, an unissued one is refused, and an offset past the end
+	// is still an empty last page.
+	page, nextMarker := pageByOffsetToken(limits, offset, pageSize)
 
 	type limitsResult struct {
 		Limits     []elbLimitItem `xml:"Limits>member"`

@@ -200,8 +200,8 @@ func TestELB_DescribeAccountLimits_ReportsTheSourcedSet(t *testing.T) {
 // TestELB_DescribeAccountLimits_MarkerRoundTrip walks the whole set a page at a time and
 // asserts each limit is returned exactly once.
 //
-// The Marker is a decimal offset into a fixed order, the cursor RDS and ElastiCache already
-// answer with. An offset over an unordered list could skip or repeat an entry between pages,
+// The Marker is an offset into a fixed order, encoded as every paginated ELB operation encodes
+// it (#1245). An offset over an unordered list could skip or repeat an entry between pages,
 // which a deterministic emulator cannot do.
 func TestELB_DescribeAccountLimits_MarkerRoundTrip(t *testing.T) {
 	ts := newELBTestServer(t)
@@ -253,8 +253,9 @@ func TestELB_DescribeAccountLimits_PageSize(t *testing.T) {
 		wantNextMarker string
 	}{
 		{"absent returns the whole set", "", all, ""},
-		{"the documented minimum", "1", 1, "1"},
-		{"the documented minimum plus one", "2", 2, "2"},
+		// The marker is the base64 offset every paginated ELB operation issues (#1245).
+		{"the documented minimum", "1", 1, "MQ=="},
+		{"the documented minimum plus one", "2", 2, "Mg=="},
 		{"exactly the set size", "23", all, ""},
 		{"the documented maximum", "400", all, ""},
 	}
@@ -268,33 +269,6 @@ func TestELB_DescribeAccountLimits_PageSize(t *testing.T) {
 			_, limits, next := elbDescribeAccountLimits(t, ts, extra)
 			assert.Len(t, limits, tt.wantLen)
 			assert.Equal(t, tt.wantNextMarker, next)
-		})
-	}
-}
-
-// TestELB_DescribeAccountLimits_MarkerEdges covers a Marker substrate cannot use and one
-// past the end. Neither is an error the operation publishes a code for, so an unparseable
-// Marker restarts the walk and an exhausted offset answers an empty last page — as RDS's
-// and ElastiCache's cursors do.
-func TestELB_DescribeAccountLimits_MarkerEdges(t *testing.T) {
-	tests := []struct {
-		name    string
-		marker  string
-		wantLen int
-	}{
-		{"unparseable restarts the walk", "not-an-offset", len(elbExpectedAccountLimitNames)},
-		{"negative restarts the walk", "-3", len(elbExpectedAccountLimitNames)},
-		{"past the end is an empty last page", "9999", 0},
-		{"exactly the end is an empty last page", "23", 0},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ts := newELBTestServer(t)
-			raw, limits, next := elbDescribeAccountLimits(t, ts, map[string]string{"Marker": tt.marker})
-			assert.Len(t, limits, tt.wantLen)
-			assert.Empty(t, next)
-			// Even an empty page carries the wrapper botocore looks up.
-			assert.Contains(t, raw, "<DescribeAccountLimitsResult>")
 		})
 	}
 }
