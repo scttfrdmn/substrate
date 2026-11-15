@@ -208,7 +208,7 @@ func TestCFN_AConfigSideCarIsReadBeforeItIsReconciled(t *testing.T) {
 	updated, err := f.deployer.UpdateStack(context.Background(), tmpl,
 		stackName, nil, emulator.CFNDeployOptions{Tags: map[string]string{"team": "infra"}})
 	require.NoError(t, err)
-	require.Empty(t, cfnFailedLogicalIDs(updated), "the update redeployed both resources")
+	require.Empty(t, cfnFailedLogicalIDs(updated), "the update kept both resources")
 	updatedARNs := arnsByLogicalID(t, updated)
 	require.Equal(t, arns["Recorder"], updatedARNs["Recorder"],
 		"the recorder's ARN is minted from its name, so the reconciliation revisits the "+

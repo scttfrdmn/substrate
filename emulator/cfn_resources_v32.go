@@ -1,15 +1,14 @@
 package emulator
 
 // cfn_resources_v32.go holds the StackDeployer.deployResource helpers for
-// Athena, Backup, CloudTrail, the CodeSuite, OpenSearch, Transfer and WAFv2.
-// The name records the substrate release that added them (v0.32.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// Athena, CloudTrail, the CodeSuite, OpenSearch, Transfer and WAFv2. Backup's two
+// types moved to cfn_resources_v128.go when they began dispatching the Backup API
+// (#1428). The name records the substrate release that added them (v0.32.0) rather
+// than the services, because several releases touched overlapping services; the
+// helpers here follow the same pattern as those in cfn_deployer.go.
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -127,69 +126,6 @@ func (d *StackDeployer) deployWAFv2WebACL(
 			"Scope": scope,
 		},
 	}, 0, nil
-}
-
-// deployBackupBackupPlan deploys an AWS::Backup::BackupPlan as a stub in cfnStubNamespace.
-//
-// AWS publishes "Ref returns BackupPlanId" and three Fn::GetAtt attributes, BackupPlanArn,
-// BackupPlanId and VersionId (#1182). This deploy used to answer the logical ID for Ref and record
-// no attribute, under a comment claiming the Ref was the plan ID. Now:
-//   - The plan ID is a UUID derived from the account, Region, stack and logical ID, so an
-//     UpdateStack keeps the ID a sibling AWS::Backup::BackupSelection already holds. It is the
-//     physical ID, so Ref answers it.
-//   - VersionId is derived from the same scope plus the declared properties, so it changes when
-//     the plan's declaration changes and stays the same on an unchanged redeploy.
-//   - BackupPlanArn is the ARN, resolved by the ARN-suffix rule. Its resource segment is
-//     backup-plan, the one the Backup plugin also mints; #1181 tracks AWS publishing plan.
-//
-// BackupPlan is Required: Yes, so a template without it fails the resource rather than deploying
-// a plan with no rules.
-//
-// It stays a stub, so GetBackupPlan and ListBackupPlans do not see a deployed plan. That is a
-// decision, recorded here because #1182 asked for one: CreateBackupPlan's route is being moved
-// from POST to PUT in the same release (#1172), and AWS::Backup::BackupSelection, the one consumer
-// of this Ref, is not deployed either. Dispatching CreateBackupPlan belongs with deploying the
-// selection type, after the route settles.
-func (d *StackDeployer) deployBackupBackupPlan(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	_ string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::Backup::BackupPlan"}
-	if props["BackupPlan"] == nil {
-		dr.Error = "BackupPlan is a required property of AWS::Backup::BackupPlan"
-		return dr, 0, nil
-	}
-	declared, err := json.Marshal(props)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("cfn deployBackupBackupPlan marshal: %w", err)
-	}
-	scope := cctx.accountID + "/" + cctx.region + "/" + cctx.stackName + "/" + logicalID
-	planID := cfnDerivedUUID(scope)
-	versionID := cfnDerivedUUID(scope + "/" + string(declared))
-	if err := d.stubStore(ctx, cctx.accountID, cctx.region, logicalID, props); err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("cfn deployBackupBackupPlan stubStore: %w", err)
-	}
-	dr.PhysicalID = planID
-	dr.ARN = fmt.Sprintf("arn:aws:backup:%s:%s:backup-plan:%s", cctx.region, cctx.accountID, planID)
-	dr.Metadata = map[string]interface{}{
-		"BackupPlanId": planID,
-		"VersionId":    versionID,
-	}
-	return dr, 0, nil
-}
-
-// cfnDerivedUUID renders a UUID-shaped identifier (8-4-4-4-12 lowercase hex, the shape
-// [IDMint.HexUUID] renders) derived from seed by SHA-256.
-//
-// For an identifier a stub deploy invents and must keep across an UpdateStack, which re-deploys
-// every resource: a minted one would change on each update.
-func cfnDerivedUUID(seed string) string {
-	sum := sha256.Sum256([]byte(seed))
-	h := hex.EncodeToString(sum[:16])
-	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
 }
 
 // deployCodeBuildProject creates a CodeBuild project stub.

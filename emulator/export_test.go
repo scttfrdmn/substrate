@@ -841,6 +841,20 @@ func (d *StackDeployer) DeleteStackResourcesForTest(
 	return d.deleteStackResources(ctx, stack, stackName, cfnDeleteStackOp)
 }
 
+// PersistStackForTest overwrites a stack's persisted record.
+//
+// It exists to reproduce a record written by an earlier release — a template the current
+// request-level validation would refuse (#1420) — which no request can now produce.
+func (d *StackDeployer) PersistStackForTest(ctx context.Context, s CFNStackState) error {
+	return d.persistStack(ctx, s)
+}
+
+// CFNResourceStatusForTest wraps cfnResourceStatus, the status DescribeStackResources and
+// DescribeStackEvents both report for one resource.
+func CFNResourceStatusForTest(s CFNStackState, r DeployedResource) (string, string) {
+	return cfnResourceStatus(s, r)
+}
+
 // CFNStackEventForTest is the derived stack event, aliased so an external test can
 // read its members. The type stays unexported in the package proper: it is a wire
 // shape, and the only supported way to reach one is DescribeStackEvents.

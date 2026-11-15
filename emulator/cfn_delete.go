@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -62,6 +61,12 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::EFS::AccessPoint": pathDeleter("efs", "/2015-02-01/access-points/"),
 	"AWS::EFS::MountTarget": pathDeleter("efs", "/2015-02-01/mount-targets/"),
 	"AWS::FSx::FileSystem":  jsonBodyDeleter("fsx", "DeleteFileSystem", "FileSystemId"),
+
+	// --- Backup (#1428) ------------------------------------------------------------
+	// DeleteBackupPlan refuses a plan that still has selections (#1178), so the sweep's order
+	// matters: a selection names its plan by Ref, which makes it delete first (#1420).
+	"AWS::Backup::BackupPlan":      pathDeleter("backup", "/backup/plans/"),
+	"AWS::Backup::BackupSelection": backupSelectionDeleter,
 
 	// --- Transfer and CodeDeploy (#1203) ---------------------------------------
 	// These three were stubs until #1203. CodeDeploy's two deletes succeed for an absent
@@ -596,7 +601,6 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // cfnResourceDeleters.
 var cfnStubDeleteTypes = map[string]bool{
 	"AWS::Athena::WorkGroup":         true,
-	"AWS::Backup::BackupPlan":        true,
 	"AWS::CloudTrail::Trail":         true,
 	"AWS::CodeBuild::Project":        true,
 	"AWS::CodePipeline::Pipeline":    true,
@@ -784,6 +788,16 @@ type CFNResourceDeletion struct {
 	// Type is the CloudFormation resource type.
 	Type string `json:"Type"`
 
+	// PhysicalID is the physical ID of the resource the sweep acted on, empty in a record
+	// written before #1427.
+	//
+	// It is what tells two resources under one logical ID apart. An update that replaces a
+	// resource deletes the old one while the new one keeps the logical ID, and a rollback
+	// deletes the replacement a failed update created while the restored resource takes the
+	// logical ID back — so a deletion matched on the logical ID alone would report the live
+	// resource as deleted, and an update would treat it as gone.
+	PhysicalID string `json:"PhysicalID,omitempty"`
+
 	// Status is "DELETE_COMPLETE", "DELETE_SKIPPED" or "DELETE_FAILED".
 	Status string `json:"Status"`
 
@@ -802,11 +816,11 @@ const (
 // deleteStackResources deletes a stack's resources in the reverse of the order
 // Deploy created them, and reports what happened to each.
 //
-// Ordering is the exact inverse of Deploy's: descending typePriority, ties broken by
-// descending logical ID. That matters because the priorities encode real
-// dependencies — a subnet cannot go before the instances in it — and reversing the
-// same map is what guarantees the teardown order is consistent with the build order
-// rather than merely plausible.
+// Ordering is the reverse of the dependency order Deploy uses (#1420): "Resource A is
+// deleted before resource B" when A references B through Ref, Fn::GetAtt or Fn::Sub,
+// or names it in DependsOn. The order is computed from the stack's template rather than
+// read off the record — see [cfnDeleteOrder] — so a resource goes before whatever it
+// was created after, whichever way the two are declared.
 //
 // A resource that is already absent counts as deleted. A sweep's goal is that the
 // resource not exist, and a resource deleted out of band has met it; treating
@@ -814,6 +828,19 @@ const (
 // cannot fix.
 func (d *StackDeployer) deleteStackResources(
 	ctx context.Context, stack *CFNStackState, streamID string, op cfnDeletionOp,
+) []CFNResourceDeletion {
+	return d.sweepResources(ctx, stack, stack.Resources, streamID, op)
+}
+
+// sweepResources deletes stack.Resources, resolving the properties their deletes need
+// against seed as well as against the resources being deleted.
+//
+// The two differ when only some of a stack's resources are being removed — the ones an
+// update replaced, or the ones a failed update created — and a delete still has to
+// resolve a Ref to a sibling that stays.
+func (d *StackDeployer) sweepResources(
+	ctx context.Context, stack *CFNStackState, seed []DeployedResource, streamID string,
+	op cfnDeletionOp,
 ) []CFNResourceDeletion {
 	// The template supplies the deletion policies and the properties a nested
 	// resource's delete needs. A template that no longer parses is not a reason to
@@ -823,13 +850,15 @@ func (d *StackDeployer) deleteStackResources(
 		policies = map[string]string{}
 		props    = map[string]map[string]interface{}{}
 		cctx     *cfnContext
+		parsed   *cfnTemplate
 	)
 	if tmpl, err := d.parseCFNTemplate(stack.TemplateBody); err == nil {
+		parsed = tmpl
 		cctx = buildCFNContext(tmpl, stack.Parameters, d.identity.region, d.identity.accountID,
 			stack.StackName)
 		evaluateConditions(tmpl, cctx)
 		for logicalID, res := range tmpl.Resources {
-			policies[logicalID] = cfnDeletionPolicyFor(res)
+			policies[logicalID] = cfnPolicyForOp(res, op)
 			props[logicalID] = res.Properties
 		}
 	} else {
@@ -846,24 +875,20 @@ func (d *StackDeployer) deleteStackResources(
 	// Ref and GetAtt in a surviving resource's properties must resolve to what the
 	// deploy produced, so the context is seeded with the deployed resources rather
 	// than left empty.
+	for _, dr := range seed {
+		cctx.resources[dr.LogicalID] = dr
+	}
 	for _, dr := range stack.Resources {
 		cctx.resources[dr.LogicalID] = dr
 	}
 
-	ordered := make([]DeployedResource, len(stack.Resources))
-	copy(ordered, stack.Resources)
-	sort.SliceStable(ordered, func(i, j int) bool {
-		pi, pj := cfnTypePriority(ordered[i].Type), cfnTypePriority(ordered[j].Type)
-		if pi != pj {
-			return pi > pj
-		}
-		return ordered[i].LogicalID > ordered[j].LogicalID
-	})
-
+	ordered := cfnDeleteOrder(parsed, stack.Resources)
 	results := make([]CFNResourceDeletion, 0, len(ordered))
 	for _, dr := range ordered {
-		results = append(results, d.deleteOneResource(ctx, dr, policies[dr.LogicalID],
-			props[dr.LogicalID], cctx, streamID, op))
+		result := d.deleteOneResource(ctx, dr, policies[dr.LogicalID], props[dr.LogicalID], cctx,
+			streamID, op)
+		result.PhysicalID = dr.PhysicalID
+		results = append(results, result)
 	}
 	return results
 }
@@ -888,14 +913,18 @@ func (d *StackDeployer) deleteOneResource(
 	if policy == "" {
 		policy = cfnPolicyDelete
 	}
-	if !cfnValidDeletionPolicies[policy] {
+	attribute := "DeletionPolicy"
+	if op == cfnUpdateReplaceOp {
+		attribute = "UpdateReplacePolicy"
+	}
+	if !cfnValidPolicyForOp(policy, op) {
 		result.Status = cfnDeleteFailed
-		result.Reason = fmt.Sprintf("invalid DeletionPolicy %q", policy)
+		result.Reason = fmt.Sprintf("invalid %s %q", attribute, policy)
 		return result
 	}
 	if cfnPolicyRetainsResource(policy, op) {
 		result.Status = cfnDeleteSkipped
-		result.Reason = "DeletionPolicy " + policy
+		result.Reason = attribute + " " + policy
 		return result
 	}
 	if policy == cfnPolicySnapshot {

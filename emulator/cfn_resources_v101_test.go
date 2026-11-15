@@ -358,10 +358,10 @@ func TestCFN_ConfigRecordingGroupIsTranslated(t *testing.T) {
 // own page states: "AWS CloudFormation starts the recorder as soon as the delivery
 // channel is available."
 //
-// It also asserts the ordering comes from typePriority alone. The template declares
-// the channel before the recorder and uses no DependsOn — which substrate parses and
-// does not act on — so if the priorities were wrong the channel's Put would meet
-// NoAvailableConfigurationRecorderException.
+// It also asserts the ordering needs no DependsOn. The template declares the channel
+// before the recorder and names no dependency, so the order has to come from the
+// implied recorder-before-channel edge (cfnImpliedDependencies); without it the
+// channel's Put would meet NoAvailableConfigurationRecorderException.
 func TestCFN_ConfigDeliveryChannelStartsTheRecorder(t *testing.T) {
 	d, registry := newConfigTestDeployer(t)
 	cfnConfigDeliveryBucket(t, registry, "cfg-logs")

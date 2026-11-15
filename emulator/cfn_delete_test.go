@@ -181,11 +181,11 @@ func TestCFN_DeletionPolicyRetainKeepsTheResource(t *testing.T) {
 // TestCFN_SweepOrderIsTheInverseOfDeploy is the ordering gate, and it asserts the
 // recorded operation *sequence* rather than set membership.
 //
-// The priorities encode real dependencies — a subnet cannot go before the instances
-// in it — so a sweep in any other order is a sweep that happens to work on templates
-// whose resources are independent. Reversing the same map Deploy sorts by is what
-// makes the teardown order consistent with the build order rather than merely
-// plausible, and the recorded events are the only place that is observable.
+// These four resources are independent, so the deploy order is the tie-break order —
+// ascending priority, then logical ID — and the sweep is its exact reverse. That the
+// sweep reverses the *dependency* order, not the priorities, when the two disagree is
+// TestCFN_DeleteOrderIsTheReverseOfTheDependencyOrder (#1420). The recorded events are
+// the only place either is observable.
 func TestCFN_SweepOrderIsTheInverseOfDeploy(t *testing.T) {
 	d, _, _, store := newSweepDeployer(t)
 	ctx := context.Background()
@@ -202,7 +202,7 @@ func TestCFN_SweepOrderIsTheInverseOfDeploy(t *testing.T) {
 	all := sweepOperations(t, store, "ordered")
 	deleted := all[len(created):]
 	assert.Equal(t, []string{"DeleteTopic", "DeleteQueue", "DeleteBucket", "DeleteRole"},
-		deleted, "the sweep is the exact inverse: descending priority, ties descending")
+		deleted, "the sweep is the exact inverse of the deploy order")
 }
 
 // TestCFN_SweepToleratesAResourceDeletedOutOfBand pins that a not-found is a

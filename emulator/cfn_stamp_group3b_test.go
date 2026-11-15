@@ -218,15 +218,14 @@ func TestCFN_AStackTagReachesGroup3B(t *testing.T) {
 // deployments, and both directions are asserted in one pass. Against a reader that cannot see a tag
 // *list* the first assertion fails on the clobber and the second on the tag that will not leave.
 //
-// A topic and a parameter rather than a KMS key, which is the record whose shape actually broke.
-// Three of the twelve cannot carry this assertion at all, for a reason worth stating because it is
-// not about tags: an `UpdateStack` re-creates every resource in the template, so a type whose create
-// mints a fresh identity (a KMS key, a certificate, a distribution) is never revisited at the record
-// a caller could have tagged, and a type whose create *rebuilds* its record (an ECS service, whose
-// ARN does survive) has the caller's tag wiped before the reconciliation runs. A topic and a
-// parameter are the two list-shaped records among the twelve whose create is idempotent, so they are
-// the whole set this can be asserted through. KMS's own `TagKey`/`TagValue` spelling — the one shape
-// no wire path reaches — is covered by [TestCFNDecodeRecordTags_ReadsEveryShapeARecordKeepsTagsIn].
+// A topic, a parameter and a KMS key — the key being the record whose shape actually broke, and
+// the one KMS spells `TagKey`/`TagValue`. Until #1427 the key could not carry this assertion: an
+// `UpdateStack` re-created every resource in the template, so a type whose create mints a fresh
+// identity (a KMS key, a certificate, a distribution) was never revisited at the record a caller
+// could have tagged, and a type whose create rebuilds its record (an ECS service) had the caller's
+// tag wiped before the reconciliation ran. An unchanged resource is now kept, so the update below
+// revisits the very key the caller tagged, and the reconciliation has to read its list to leave the
+// caller's value alone.
 func TestCFN_AListShapedRecordIsReadBeforeItIsReconciled(t *testing.T) {
 	f := newCFNStampFixture(t, nil)
 	const stackName = "group3b-reconciled-stack"
@@ -235,7 +234,8 @@ func TestCFN_AListShapedRecordIsReadBeforeItIsReconciled(t *testing.T) {
 			"Topic": {"Type": "AWS::SNS::Topic", "Properties": {
 				"TopicName": "reconciled-topic"}},
 			"Param": {"Type": "AWS::SSM::Parameter", "Properties": {
-				"Name": "reconciled-param", "Type": "String", "Value": "v"}}
+				"Name": "reconciled-param", "Type": "String", "Value": "v"}},
+			"Key": {"Type": "AWS::KMS::Key", "Properties": {"Description": "reconciled key"}}
 		},
 		"Outputs": {"StackId": {"Value": {"Ref": "AWS::StackId"}}}
 	}`
@@ -253,18 +253,23 @@ func TestCFN_AListShapedRecordIsReadBeforeItIsReconciled(t *testing.T) {
 		f.topicTagsFor(t, ids["Topic"]))
 	require.Equal(t, cfnExpectedTags(stackName, stackID, "Param", both),
 		f.parameterTagsFor(t, ids["Param"]))
+	require.Equal(t, cfnExpectedTags(stackName, stackID, "Key", both),
+		f.kmsKeyTagsFor(t, ids["Key"]))
 
-	// From here `team` is the caller's on both, at a value the stack does not carry.
+	// From here `team` is the caller's on all three, at a value the stack does not carry.
 	f.tagTopicDirectly(t, ids["Topic"], "team", "mine")
 	f.tagParameterDirectly(t, ids["Param"], "team", "mine")
+	f.tagKMSKeyDirectly(t, ids["Key"], "team", "mine")
 
 	// `team` changes on the stack and `env` leaves it.
 	updated, err := f.deployer.UpdateStack(context.Background(), tmpl,
 		stackName, nil, emulator.CFNDeployOptions{Tags: map[string]string{"team": "infra"}})
 	require.NoError(t, err)
-	require.Empty(t, cfnFailedLogicalIDs(updated), "the update redeployed both resources")
-	require.Equal(t, ids["Topic"], physicalIDs(t, updated)["Topic"],
-		"the topic kept its ARN, so the reconciliation revisits the record just tagged")
+	require.Empty(t, cfnFailedLogicalIDs(updated), "the update kept all three resources")
+	for _, logicalID := range []string{"Topic", "Param", "Key"} {
+		require.Equal(t, ids[logicalID], physicalIDs(t, updated)[logicalID],
+			"%s kept its identity, so the reconciliation revisits the record just tagged", logicalID)
+	}
 
 	mine := map[string]string{"team": "mine"}
 	assert.Equal(t, cfnExpectedTags(stackName, stackID, "Topic", mine),
@@ -272,17 +277,41 @@ func TestCFN_AListShapedRecordIsReadBeforeItIsReconciled(t *testing.T) {
 		"the caller's value survives and env is gone — both need the stored list to be readable")
 	assert.Equal(t, cfnExpectedTags(stackName, stackID, "Param", mine),
 		f.parameterTagsFor(t, ids["Param"]))
+	assert.Equal(t, cfnExpectedTags(stackName, stackID, "Key", mine),
+		f.kmsKeyTagsFor(t, ids["Key"]),
+		"KMS's TagKey/TagValue list is read, so the caller's value survives here too")
+}
+
+// tagKMSKeyDirectly puts one tag on a key through KMS's own TagResource, whose tag members are
+// spelled TagKey and TagValue.
+func (f *cfnStampFixture) tagKMSKeyDirectly(t *testing.T, keyID, key, value string) {
+	t.Helper()
+	body, err := json.Marshal(map[string]interface{}{
+		"KeyId": keyID,
+		"Tags":  []map[string]string{{"TagKey": key, "TagValue": value}},
+	})
+	require.NoError(t, err)
+
+	_, err = f.kms.HandleRequest(cfnStampReqCtx(), &emulator.AWSRequest{
+		Service:   "kms",
+		Operation: "TagResource",
+		Body:      body,
+		Params:    map[string]string{},
+		Headers:   map[string]string{},
+	})
+	require.NoError(t, err)
 }
 
 // TestCFNDecodeRecordTags_ReadsEveryShapeARecordKeepsTagsIn covers the four shapes substrate's
-// records keep tags in, one of which no wire path reaches.
+// records keep tags in, directly rather than through a deployment.
 //
-// KMS is the reason this test is here rather than folded into a deployment: it is the only service
-// in the tree spelling its tag members `TagKey`/`TagValue` — AWS's own naming for the KMS `Tag`
-// shape, not substrate's invention — and its record is unreachable from the reconciliation for the
-// reason [TestCFN_AListShapedRecordIsReadBeforeItIsReconciled] gives. A missed spelling here is not
-// a missing read but a wrong decision: `nil` is indistinguishable from an untagged resource, so a
-// caller's tag is clobbered and a removed stack tag is never removed.
+// KMS is the reason this test exists: it is the only service in the tree spelling its tag members
+// `TagKey`/`TagValue` — AWS's own naming for the KMS `Tag` shape, not substrate's invention — and
+// until #1427 its record was unreachable from the reconciliation, because every update re-minted
+// the key. [TestCFN_AListShapedRecordIsReadBeforeItIsReconciled] now reaches it through a stack
+// update as well. A missed spelling here is not a missing read but a wrong decision: `nil` is
+// indistinguishable from an untagged resource, so a caller's tag is clobbered and a removed stack
+// tag is never removed.
 //
 // The unreadable case is asserted too, because it is a decision rather than an oversight: a shape
 // none of the decodes reaches reads as untagged, so a record substrate cannot parse cannot fail a
