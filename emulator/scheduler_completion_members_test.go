@@ -86,25 +86,26 @@ func TestScheduler_CompletionMembersAbsentWhenUnset(t *testing.T) {
 
 // TestScheduler_UpdateReplacesCompletionMembers asserts UpdateSchedule's documented replace rule holds
 // for the four members: an update naming new values replaces them, and one omitting them clears them
-// rather than keeping what the create set.
+// rather than keeping what the create set. The dates are in 2100: since #1475 a DELETE schedule whose
+// EndDate has passed deletes itself on the next request, which a 1970 EndDate would.
 func TestScheduler_UpdateReplacesCompletionMembers(t *testing.T) {
 	ts := httptest.NewServer(newSchedulerTestServer(t))
 	t.Cleanup(ts.Close)
 
 	resp := schedulerRequest(t, ts, http.MethodPost, "/schedules/replaced", schedulerCompletionBody(
-		`"ActionAfterCompletion":"DELETE","StartDate":100,"EndDate":200,`+
+		`"ActionAfterCompletion":"DELETE","StartDate":4102444800,"EndDate":4102448400,`+
 			`"KmsKeyArn":"arn:aws:kms:us-east-1:123456789012:alias/one"`))
 	require.NoError(t, resp.Body.Close())
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	resp = schedulerRequest(t, ts, http.MethodPut, "/schedules/replaced", schedulerCompletionBody(
-		`"ActionAfterCompletion":"NONE","EndDate":300`))
+		`"ActionAfterCompletion":"NONE","EndDate":4102452000`))
 	require.NoError(t, resp.Body.Close())
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
 	got := getScheduleRaw(t, ts, "replaced")
 	assert.JSONEq(t, `"NONE"`, string(got["ActionAfterCompletion"]))
-	assert.JSONEq(t, `300`, string(got["EndDate"]))
+	assert.JSONEq(t, `4102452000`, string(got["EndDate"]))
 	assert.NotContains(t, got, "StartDate", "an omitted StartDate is cleared, not kept")
 	assert.NotContains(t, got, "KmsKeyArn", "an omitted KmsKeyArn is cleared, not kept")
 

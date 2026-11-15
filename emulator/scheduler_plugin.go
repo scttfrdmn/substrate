@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -67,15 +68,42 @@ type SchedulerTarget struct {
 	Input string `json:"input,omitempty"`
 	// RetryPolicy configures retries on invocation failure.
 	RetryPolicy *SchedulerRetryPolicy `json:"retry_policy,omitempty"`
+	// DeadLetterConfig names the SQS queue a failed invocation's dead-letter event is sent to (#1501).
+	DeadLetterConfig *SchedulerDeadLetterConfig `json:"dead_letter_config,omitempty"`
+	// SqsParameters carries the message group of an SQS FIFO target (#1501).
+	SqsParameters *SchedulerSqsParameters `json:"sqs_parameters,omitempty"`
+	// EventBridgeParameters carries the detail type and source of an EventBridge target (#1501).
+	EventBridgeParameters *SchedulerEventBridgeParameters `json:"eventbridge_parameters,omitempty"`
+}
+
+// SchedulerDeadLetterConfig is a target's dead-letter queue.
+type SchedulerDeadLetterConfig struct {
+	// ARN is the SQS queue's ARN.
+	ARN string `json:"arn,omitempty"`
+}
+
+// SchedulerSqsParameters is the templated SQS target's parameter set.
+type SchedulerSqsParameters struct {
+	// MessageGroupID is the FIFO message group ID.
+	MessageGroupID string `json:"message_group_id,omitempty"`
+}
+
+// SchedulerEventBridgeParameters is the templated EventBridge target's parameter set.
+type SchedulerEventBridgeParameters struct {
+	// DetailType is the event's detail type.
+	DetailType string `json:"detail_type"`
+	// Source is the event's source.
+	Source string `json:"source"`
 }
 
 // SchedulerRetryPolicy configures retry behavior for a schedule target.
 type SchedulerRetryPolicy struct {
-	// MaximumEventAgeInSeconds is the maximum age in seconds of an event
-	// before it is discarded.
-	MaximumEventAgeInSeconds int32 `json:"maximum_event_age_in_seconds"`
-	// MaximumRetryAttempts is the maximum number of retry attempts.
-	MaximumRetryAttempts int32 `json:"maximum_retry_attempts"`
+	// MaximumEventAgeInSeconds is the maximum age in seconds of an event before it is discarded;
+	// nil when the request named none, so the default applies (an explicit value is kept as sent).
+	MaximumEventAgeInSeconds *int32 `json:"maximum_event_age_in_seconds,omitempty"`
+	// MaximumRetryAttempts is the maximum number of retry attempts; nil when the request named
+	// none, so the default applies, where an explicit 0 means no retries.
+	MaximumRetryAttempts *int32 `json:"maximum_retry_attempts,omitempty"`
 }
 
 // SchedulerFlexibleTimeWindow configures the flexible time window for a schedule.
@@ -114,20 +142,43 @@ type schedulerScheduleInput struct {
 
 // schedulerTargetInput is the `Target` object as AWS publishes it.
 //
-// The templated-target objects (EcsParameters, EventBridgeParameters, KinesisParameters,
-// SageMakerPipelineParameters, SqsParameters, DeadLetterConfig) are published and unmodelled, so they
+// DeadLetterConfig, SqsParameters and EventBridgeParameters are decoded and reported since #1501,
+// because a due schedule acts on them. The other templated-target objects (EcsParameters,
+// EventBridgePutEventsV2Parameters, EventBridgePutRawEventsParameters, KinesisParameters,
+// SageMakerPipelineParameters) belong to targets substrate records rather than dispatches, so they
 // are not decoded and not reported — #1013's honest-empty rule rather than a silent round trip.
 type schedulerTargetInput struct {
-	Arn         string                     `json:"Arn"`
-	RoleArn     string                     `json:"RoleArn"`
-	Input       string                     `json:"Input"`
-	RetryPolicy *schedulerRetryPolicyInput `json:"RetryPolicy"`
+	Arn                   string                       `json:"Arn"`
+	RoleArn               string                       `json:"RoleArn"`
+	Input                 string                       `json:"Input"`
+	RetryPolicy           *schedulerRetryPolicyInput   `json:"RetryPolicy"`
+	DeadLetterConfig      *schedulerDeadLetterInput    `json:"DeadLetterConfig"`
+	SqsParameters         *schedulerSqsParametersInput `json:"SqsParameters"`
+	EventBridgeParameters *schedulerEventBridgeInput   `json:"EventBridgeParameters"`
 }
 
-// schedulerRetryPolicyInput is the `RetryPolicy` object as AWS publishes it.
+// schedulerDeadLetterInput is the `DeadLetterConfig` object as AWS publishes it.
+type schedulerDeadLetterInput struct {
+	Arn string `json:"Arn"`
+}
+
+// schedulerSqsParametersInput is the `SqsParameters` object as AWS publishes it.
+type schedulerSqsParametersInput struct {
+	MessageGroupID string `json:"MessageGroupId,omitempty"`
+}
+
+// schedulerEventBridgeInput is the `EventBridgeParameters` object as AWS publishes it.
+type schedulerEventBridgeInput struct {
+	DetailType string `json:"DetailType"`
+	Source     string `json:"Source"`
+}
+
+// schedulerRetryPolicyInput is the `RetryPolicy` object as AWS publishes it. Both members are
+// `Required: No`, so they are pointers: an absent member takes the default (see
+// scheduler_clock.go), and an explicit 0 retry attempts means none.
 type schedulerRetryPolicyInput struct {
-	MaximumEventAgeInSeconds int32 `json:"MaximumEventAgeInSeconds"`
-	MaximumRetryAttempts     int32 `json:"MaximumRetryAttempts"`
+	MaximumEventAgeInSeconds *int32 `json:"MaximumEventAgeInSeconds"`
+	MaximumRetryAttempts     *int32 `json:"MaximumRetryAttempts"`
 }
 
 // schedulerFlexibleTimeWindowInput is the `FlexibleTimeWindow` object as AWS publishes it.
@@ -221,6 +272,18 @@ func (t *schedulerTargetInput) record() SchedulerTarget {
 			MaximumRetryAttempts:     t.RetryPolicy.MaximumRetryAttempts,
 		}
 	}
+	if t.DeadLetterConfig != nil {
+		out.DeadLetterConfig = &SchedulerDeadLetterConfig{ARN: t.DeadLetterConfig.Arn}
+	}
+	if t.SqsParameters != nil {
+		out.SqsParameters = &SchedulerSqsParameters{MessageGroupID: t.SqsParameters.MessageGroupID}
+	}
+	if t.EventBridgeParameters != nil {
+		out.EventBridgeParameters = &SchedulerEventBridgeParameters{
+			DetailType: t.EventBridgeParameters.DetailType,
+			Source:     t.EventBridgeParameters.Source,
+		}
+	}
 	return out
 }
 
@@ -237,13 +300,19 @@ func (w *schedulerFlexibleTimeWindowInput) record() SchedulerFlexibleTimeWindow 
 	return out
 }
 
-// SchedulerPlugin emulates the Amazon EventBridge Scheduler REST/JSON API.
-// It handles CreateSchedule, GetSchedule, UpdateSchedule, DeleteSchedule, and
-// ListSchedules using path-based HTTP method routing.
+// SchedulerPlugin emulates the Amazon EventBridge Scheduler REST/JSON API: schedules, schedule
+// groups and their tags, using path-based HTTP method routing. It is a [ClockDrivenPlugin]: a due
+// schedule invokes its target on the simulated clock (see scheduler_clock.go).
 type SchedulerPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// auth authorizes the requests a due schedule makes as its target's RoleArn; nil authorizes
+	// nothing, as for the CloudFormation deployer.
+	auth *AuthController
+	// mu serializes the clock-driven work with the operations that arm, re-arm or remove a timer,
+	// so an occurrence is never fired twice or fired against a configuration being replaced.
+	mu sync.Mutex
 }
 
 // Name returns the service name "scheduler".
@@ -258,6 +327,7 @@ func (p *SchedulerPlugin) Initialize(_ context.Context, cfg PluginConfig) error 
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	p.auth, _ = cfg.Options["auth_controller"].(*AuthController)
 	return nil
 }
 
@@ -269,6 +339,20 @@ func (p *SchedulerPlugin) Shutdown(_ context.Context) error { return nil }
 func (p *SchedulerPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	op := parseSchedulerOperation(requestMethod(req), req.Path)
 	switch op {
+	case "CreateScheduleGroup":
+		return p.createScheduleGroup(ctx, req)
+	case "GetScheduleGroup":
+		return p.getScheduleGroup(ctx, req)
+	case "ListScheduleGroups":
+		return p.listScheduleGroups(ctx, req)
+	case "DeleteScheduleGroup":
+		return p.deleteScheduleGroup(ctx, req)
+	case "TagResource":
+		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(ctx, req)
 	case "CreateSchedule":
 		return p.createSchedule(ctx, req)
 	case "GetSchedule":
@@ -301,6 +385,39 @@ func (p *SchedulerPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*
 func parseSchedulerOperation(method, path string) string {
 	const schedulesPrefix = "/schedules/"
 	const schedulesPath = "/schedules"
+
+	// Schedule groups and tags (#1501). A group name is one segment, as a schedule's is; a tag
+	// route's ResourceArn carries "/" once decoded, so everything after /tags/ is the ARN.
+	switch {
+	case path == "/schedule-groups":
+		if method == http.MethodGet {
+			return "ListScheduleGroups"
+		}
+		return ""
+	case strings.HasPrefix(path, "/schedule-groups/"):
+		if strings.Contains(strings.TrimPrefix(path, "/schedule-groups/"), "/") {
+			return ""
+		}
+		switch method {
+		case http.MethodPost:
+			return "CreateScheduleGroup"
+		case http.MethodGet:
+			return "GetScheduleGroup"
+		case http.MethodDelete:
+			return "DeleteScheduleGroup"
+		}
+		return ""
+	case strings.HasPrefix(path, "/tags/"):
+		switch method {
+		case http.MethodPost:
+			return "TagResource"
+		case http.MethodGet:
+			return "ListTagsForResource"
+		case http.MethodDelete:
+			return "UntagResource"
+		}
+		return ""
+	}
 
 	if path == schedulesPath {
 		if method == http.MethodGet {
@@ -363,6 +480,20 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	}
 
 	goCtx := context.Background()
+	if err := p.ensureDefaultGroup(goCtx, ctx.AccountID, ctx.Region); err != nil {
+		return nil, err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// `API_CreateSchedule` publishes ResourceNotFoundException, and the group is the one resource
+	// the request references that it does not create (#1501).
+	group, err := p.loadGroup(goCtx, ctx.AccountID, ctx.Region, groupName)
+	if err != nil {
+		return nil, err
+	}
+	if group == nil {
+		return nil, schedulerGroupNotFound(groupName)
+	}
 	recKey := schedKey(ctx.AccountID, ctx.Region, groupName, name)
 	existing, err := p.state.Get(goCtx, schedulerNamespace, recKey)
 	if err != nil {
@@ -397,6 +528,9 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	}
 	if err := updateStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name); err != nil {
 		return nil, fmt.Errorf("scheduler createSchedule index: %w", err)
+	}
+	if err := p.armTimer(goCtx, &rec); err != nil {
+		return nil, fmt.Errorf("scheduler createSchedule timer: %w", err)
 	}
 
 	type response struct {
@@ -462,6 +596,8 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 		groupName = "default"
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	goCtx := context.Background()
 	recKey := schedKey(ctx.AccountID, ctx.Region, groupName, name)
 	data, err := p.state.Get(goCtx, schedulerNamespace, recKey)
@@ -487,6 +623,9 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 	if err := p.state.Put(goCtx, schedulerNamespace, recKey, updated); err != nil {
 		return nil, fmt.Errorf("scheduler updateSchedule state.Put: %w", err)
 	}
+	if err := p.armTimer(goCtx, &rec); err != nil {
+		return nil, fmt.Errorf("scheduler updateSchedule timer: %w", err)
+	}
 
 	type response struct {
 		ScheduleArn string `json:"ScheduleArn"`
@@ -509,13 +648,20 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 		groupName = "default"
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	goCtx := context.Background()
-	recKey := schedKey(ctx.AccountID, ctx.Region, groupName, name)
-	if err := p.state.Delete(goCtx, schedulerNamespace, recKey); err != nil {
-		return nil, fmt.Errorf("scheduler deleteSchedule state.Delete: %w", err)
+	// `API_DeleteSchedule` publishes ResourceNotFoundException/404; a delete of a schedule that
+	// does not exist answered 200 until #1501.
+	existing, err := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, name))
+	if err != nil {
+		return nil, fmt.Errorf("scheduler deleteSchedule state.Get: %w", err)
 	}
-	if err := removeFromStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName), name); err != nil {
-		return nil, fmt.Errorf("scheduler deleteSchedule index: %w", err)
+	if existing == nil {
+		return nil, schedulerNotFound(name, groupName)
+	}
+	if err := p.removeSchedule(goCtx, ctx.AccountID, ctx.Region, groupName, name); err != nil {
+		return nil, fmt.Errorf("scheduler deleteSchedule: %w", err)
 	}
 
 	return &AWSResponse{StatusCode: http.StatusOK, Headers: map[string]string{"Content-Type": "application/json"}, Body: []byte("{}")}, nil
@@ -524,10 +670,12 @@ func (p *SchedulerPlugin) deleteSchedule(ctx *RequestContext, req *AWSRequest) (
 func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// PascalCase, and ScheduleGroup rather than groupName, because this page publishes its query
 	// string that way where the single-schedule pages do not — see scheduler_query_keys.go (#1226).
+	//
+	// GroupName is a filter: "If specified, only lists the schedules whose associated schedule group
+	// matches the given filter." Absent, every group's schedules are listed, ordered by group and
+	// then by name; until #1501 an absent group read the default group alone. A group that does not
+	// exist matches nothing, so it lists nothing.
 	groupName := req.Params[schedListGroupKey]
-	if groupName == "" {
-		groupName = "default"
-	}
 	namePrefix := req.Params[schedListNamePrefixKey]
 	stateFilter := req.Params[schedListStateKey]
 
@@ -549,21 +697,30 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	}
 
 	goCtx := context.Background()
-	allNames, err := loadStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, groupName))
-	if err != nil {
-		return nil, fmt.Errorf("scheduler listSchedules loadIndex: %w", err)
+	groups := []string{groupName}
+	if groupName == "" {
+		// The default group is materialized first, so a default-group schedule stored before
+		// groups were indexed (#1501) still lists: the group index is what this listing walks.
+		if err := p.ensureDefaultGroup(goCtx, ctx.AccountID, ctx.Region); err != nil {
+			return nil, err
+		}
+		var err error
+		if groups, err = p.groupNames(goCtx, ctx.AccountID, ctx.Region); err != nil {
+			return nil, fmt.Errorf("scheduler listSchedules groups: %w", err)
+		}
 	}
-
-	// Apply namePrefix filter.
-	names := allNames
-	if namePrefix != "" {
-		filtered := make([]string, 0, len(allNames))
-		for _, n := range allNames {
-			if strings.HasPrefix(n, namePrefix) {
-				filtered = append(filtered, n)
+	type groupedName struct{ group, name string }
+	var names []groupedName
+	for _, g := range groups {
+		groupNames, err := loadStringIndex(goCtx, p.state, schedulerNamespace, schedNamesKey(ctx.AccountID, ctx.Region, g))
+		if err != nil {
+			return nil, fmt.Errorf("scheduler listSchedules loadIndex: %w", err)
+		}
+		for _, n := range groupNames {
+			if namePrefix == "" || strings.HasPrefix(n, namePrefix) {
+				names = append(names, groupedName{group: g, name: n})
 			}
 		}
-		names = filtered
 	}
 
 	type targetSummary struct {
@@ -586,7 +743,7 @@ func (p *SchedulerPlugin) listSchedules(ctx *RequestContext, req *AWSRequest) (*
 	// (#1229).
 	matching := make([]schedSummary, 0, len(names))
 	for _, n := range names {
-		data, getErr := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, groupName, n))
+		data, getErr := p.state.Get(goCtx, schedulerNamespace, schedKey(ctx.AccountID, ctx.Region, n.group, n.name))
 		if getErr != nil || data == nil {
 			// A name the index holds with no record behind it, and a record that will not decode, are
 			// both store inconsistencies rather than filters. They still shorten the *listing*, but no
@@ -660,16 +817,19 @@ type schedWireRecord struct {
 
 // schedWireTarget is the wire-format representation of a schedule target.
 type schedWireTarget struct {
-	Arn         string                `json:"Arn"`
-	RoleArn     string                `json:"RoleArn"`
-	Input       string                `json:"Input,omitempty"`
-	RetryPolicy *schedWireRetryPolicy `json:"RetryPolicy,omitempty"`
+	Arn                   string                       `json:"Arn"`
+	RoleArn               string                       `json:"RoleArn"`
+	Input                 string                       `json:"Input,omitempty"`
+	RetryPolicy           *schedWireRetryPolicy        `json:"RetryPolicy,omitempty"`
+	DeadLetterConfig      *schedulerDeadLetterInput    `json:"DeadLetterConfig,omitempty"`
+	SqsParameters         *schedulerSqsParametersInput `json:"SqsParameters,omitempty"`
+	EventBridgeParameters *schedulerEventBridgeInput   `json:"EventBridgeParameters,omitempty"`
 }
 
 // schedWireRetryPolicy is the wire-format representation of a retry policy.
 type schedWireRetryPolicy struct {
-	MaximumEventAgeInSeconds int32 `json:"MaximumEventAgeInSeconds"`
-	MaximumRetryAttempts     int32 `json:"MaximumRetryAttempts"`
+	MaximumEventAgeInSeconds *int32 `json:"MaximumEventAgeInSeconds,omitempty"`
+	MaximumRetryAttempts     *int32 `json:"MaximumRetryAttempts,omitempty"`
 }
 
 // schedWireFlexibleTimeWindow is the wire-format flexible time window.
@@ -712,6 +872,15 @@ func schedRecordToWire(rec SchedulerRecord) schedWireRecord {
 			MaximumEventAgeInSeconds: rec.Target.RetryPolicy.MaximumEventAgeInSeconds,
 			MaximumRetryAttempts:     rec.Target.RetryPolicy.MaximumRetryAttempts,
 		}
+	}
+	if d := rec.Target.DeadLetterConfig; d != nil {
+		w.Target.DeadLetterConfig = &schedulerDeadLetterInput{Arn: d.ARN}
+	}
+	if s := rec.Target.SqsParameters; s != nil {
+		w.Target.SqsParameters = &schedulerSqsParametersInput{MessageGroupID: s.MessageGroupID}
+	}
+	if e := rec.Target.EventBridgeParameters; e != nil {
+		w.Target.EventBridgeParameters = &schedulerEventBridgeInput{DetailType: e.DetailType, Source: e.Source}
 	}
 	return w
 }

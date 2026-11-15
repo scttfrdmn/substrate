@@ -1851,3 +1851,86 @@ func AutoScalingMatchInstanceTypesForTest(req *AutoScalingInstanceRequirements, 
 	}
 	return out
 }
+
+// SchedOccurrencesForTest returns up to n occurrences of a schedule expression evaluated in tz,
+// for a configuration armed at armed with the given StartDate and EndDate (#1501). An expression
+// substrate cannot evaluate is an error.
+func SchedOccurrencesForTest(expr, tz string, armed time.Time, start, end *time.Time, n int) ([]time.Time, error) {
+	e, err := parseSchedExpression(expr, tz)
+	if err != nil {
+		return nil, err
+	}
+	var out []time.Time
+	next := e.first(armed, start, end)
+	for next != nil && len(out) < n {
+		out = append(out, *next)
+		if e.kind == schedExprAt {
+			break
+		}
+		next = e.next(*next, end)
+	}
+	return out, nil
+}
+
+// SchedTargetRequestForTest builds the request a schedule in us-east-1/123456789012 with the given
+// target ARN and Input would make (#1501). failureCode is set when the Input is refused before any
+// dispatch, and intent when the target is recorded rather than dispatched.
+func SchedTargetRequestForTest(targetARN, input string) (req *AWSRequest, failureCode, intent string) {
+	return SchedTargetRequestForRecordForTest(&SchedulerRecord{Target: SchedulerTarget{ARN: targetARN}}, input)
+}
+
+// SchedTargetRequestForRecordForTest is [SchedTargetRequestForTest] for a whole schedule record, so a
+// test can set the target's parameter objects. An empty account or Region defaults as above.
+func SchedTargetRequestForRecordForTest(rec *SchedulerRecord, input string) (req *AWSRequest, failureCode, intent string) {
+	if rec.AccountID == "" {
+		rec.AccountID = "123456789012"
+	}
+	if rec.Region == "" {
+		rec.Region = "us-east-1"
+	}
+	call := buildTargetCall(rec, input)
+	if call.invalid != nil {
+		failureCode = call.invalid.Code
+	}
+	return call.req, failureCode, call.intent
+}
+
+// SchedTargetFailureForTest reads a dispatched target's answer as the Scheduler plugin does: ok is
+// false when the answer is a success, and otherwise code, message and retryable describe the
+// failure (#1501).
+func SchedTargetFailureForTest(resp *AWSResponse, err error) (code, message string, retryable, ok bool) {
+	f := schedTargetFailure(resp, err)
+	if f == nil {
+		return "", "", false, false
+	}
+	return f.Code, f.Message, f.retryable(), true
+}
+
+// SchedQueryHintForTest is the Query serialization hint the generated model table holds, exported so
+// a test can drive the flattener with shapes today's routed operations do not have (#1501).
+type SchedQueryHintForTest = schedQueryHint
+
+// SchedQueryFlattenForTest flattens a JSON Input into awsQuery (or ec2) form parameters under the
+// given hints instead of the generated table's.
+func SchedQueryFlattenForTest(input string, ec2 bool, hints map[string]SchedQueryHintForTest) (map[string]string, error) {
+	var v map[string]any
+	dec := json.NewDecoder(strings.NewReader(input))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
+		return nil, fmt.Errorf("decode input: %w", err)
+	}
+	f := schedQueryFlattener{out: map[string]string{}, hints: hints, ec2: ec2}
+	f.value("", "", v)
+	return f.out, nil
+}
+
+// SchedQueryParamsForTest flattens a universal target's JSON Input into the Query form parameters
+// of sdkID's operation op, as the Scheduler plugin does for an awsQuery (or, for "ec2", an
+// EC2-protocol) target (#1501).
+func SchedQueryParamsForTest(input, sdkID, op string) (map[string]string, error) {
+	params, failure := schedQueryParams(input, sdkID, op, sdkID == "ec2")
+	if failure != nil {
+		return nil, fmt.Errorf("%s: %s", failure.Code, failure.Message)
+	}
+	return params, nil
+}

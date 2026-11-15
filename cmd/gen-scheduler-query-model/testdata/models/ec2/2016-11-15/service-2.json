@@ -1,0 +1,38 @@
+{
+  "metadata": {"apiVersion": "2016-11-15", "protocol": "ec2"},
+  "operations": {
+    "DescribeInstances": {"input": {"shape": "DescribeInstancesRequest"}},
+    "CreateTags": {"input": {"shape": "CreateTagsRequest"}}
+  },
+  "shapes": {
+    "DescribeInstancesRequest": {
+      "type": "structure",
+      "members": {
+        "Filters": {"shape": "FilterList", "locationName": "Filter"},
+        "InstanceIds": {"shape": "InstanceIdStringList", "locationName": "InstanceId"},
+        "DryRun": {"shape": "Boolean", "locationName": "dryRun"},
+        "MaxResults": {"shape": "Integer"}
+      }
+    },
+    "CreateTagsRequest": {
+      "type": "structure",
+      "members": {
+        "Resources": {"shape": "ResourceIdList", "queryName": "ResourceId"},
+        "Tags": {"shape": "TagList", "locationName": "Tag"}
+      }
+    },
+    "FilterList": {"type": "list", "member": {"shape": "Filter", "locationName": "Filter"}},
+    "Filter": {
+      "type": "structure",
+      "members": {"Name": {"shape": "String"}, "Values": {"shape": "ValueStringList", "locationName": "Value"}}
+    },
+    "ValueStringList": {"type": "list", "member": {"shape": "String", "locationName": "item"}},
+    "InstanceIdStringList": {"type": "list", "member": {"shape": "String", "locationName": "InstanceId"}},
+    "ResourceIdList": {"type": "list", "member": {"shape": "String"}},
+    "TagList": {"type": "list", "member": {"shape": "Tag", "locationName": "item"}},
+    "Tag": {"type": "structure", "members": {"Key": {"shape": "String"}, "Value": {"shape": "String"}}},
+    "Boolean": {"type": "boolean"},
+    "Integer": {"type": "integer"},
+    "String": {"type": "string"}
+  }
+}
