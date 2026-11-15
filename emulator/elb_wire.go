@@ -14,7 +14,7 @@ import "time"
 // ELBClassicLoadBalancer (elb_classic.go) — carry AccountID, Region and EverTagged, and none carries
 // a CreatedAt: fifteen baseline lines, three apiece, the most uniform block AC3 has met. But
 // `grep 'ELB[A-Za-z]* .*`xml:'` matches nothing in the tree. Not one record is XML-encoded directly;
-// every one of the twelve sites that answers a resource hands a *…Item struct to elbOKResponse, so no
+// every one of the twelve sites that answers a resource hands a *…Item struct to queryOKResponse, so no
 // bookkeeping member could reach a body even before this change.
 //
 // What was missing was therefore not a projection but the assertion that one exists: the fifteen

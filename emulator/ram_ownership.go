@@ -46,9 +46,10 @@ import (
 // reject is not refused but simply matches nothing. A resource's scope is GLOBAL when its ARN has
 // an empty Region field and REGIONAL otherwise.
 //
-// Not read, and recorded so they are not mistaken for applied: `maxResults` and `nextToken` on all three
-// (every share, principal and resource is one page), and `tagFilters`, `permissionArn` and
-// `permissionVersion` on GetResourceShares.
+// Since #1542 all three read `maxResults` and `nextToken` (ram_pagination.go) and GetResourceShares
+// applies `tagFilters`. Accepted and not applied, recorded so they are not mistaken for applied:
+// `permissionArn` and `permissionVersion` on GetResourceShares, since substrate attaches no managed
+// permission to a share and so has none to filter on.
 //
 // # Statuses
 //

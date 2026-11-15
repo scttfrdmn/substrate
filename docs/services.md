@@ -24493,14 +24493,14 @@ RAM reports as `ASSOCIATED` gains no permission on the resource anywhere else in
 
 | Operation | Notes |
 |-----------|-------|
-| CreateResourceShare | Answers HTTP 200 with `{"resourceShare"}`; `name` is the one `Required: Yes` member and is checked. [Two members AWS does not publish are included, and `clientToken` is never echoed](#the-resource-share-record-diverges-from-the-published-shape) |
-| GetResourceShares | [`resourceOwner` is required and read](#resourceowner-is-required-and-read); filters by `name`, `resourceShareArns` and `resourceShareStatus`. `maxResults`, `nextToken`, `tagFilters` and `permissionArn` are ignored and no `nextToken` is emitted |
+| CreateResourceShare | Answers HTTP 200 with `{"clientToken", "resourceShare"}`; `name` is the one `Required: Yes` member and is checked. [`clientToken` is honored and echoed](#clienttoken-is-honored-on-create-and-delete), and minted when the request omits it |
+| GetResourceShares | [`resourceOwner` is required and read](#resourceowner-is-required-and-read); filters by `name`, `resourceShareArns`, `resourceShareStatus` and `tagFilters`. [Pages on `maxResults`/`nextToken`](#the-three-listings-page). `permissionArn` and `permissionVersion` are accepted and ignored: substrate attaches no managed permission to a share |
 | UpdateResourceShare | Replaces `name` and `allowExternalPrincipals` and refreshes `lastUpdatedTime`; `clientToken` is not read. A `DELETED` share is `OperationNotPermittedException` |
-| DeleteResourceShare | [A soft delete](#a-delete-marks-the-share-deleted), answering `{"returnValue": true}` |
+| DeleteResourceShare | [A soft delete](#a-delete-marks-the-share-deleted), answering `{"clientToken", "returnValue": true}`; a retry under the same `clientToken` [succeeds again](#clienttoken-is-honored-on-create-and-delete) |
 | AssociateResourceShare | Records each principal and resource ARN and answers `resourceShareAssociations` of five members, each `ASSOCIATED`. `clientToken` and `sources` are not read. A `DELETED` share is `InvalidStateTransitionException` |
 | DisassociateResourceShare | [Reports `DISASSOCIATED`](#a-disassociation-reports-disassociated) |
-| ListPrincipals | `principals` of `id` and `resourceShareArn`, where `Principal` publishes five members and no `status`. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principals`, `resourceArn`, `resourceShareArns` and `resourceType` filter. `maxResults` and `nextToken` are not read |
-| ListResources | `resources` of `arn`, `resourceShareArn` and `status`, all `AVAILABLE`, where `Resource` publishes eight members. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principal`, `resourceArns`, `resourceShareArns`, `resourceType` and `resourceRegionScope` filter. `maxResults` and `nextToken` are not read |
+| ListPrincipals | `principals` of `id` and `resourceShareArn`, where `Principal` publishes five members and no `status`. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principals`, `resourceArn`, `resourceShareArns` and `resourceType` filter. [Pages on `maxResults`/`nextToken`](#the-three-listings-page) |
+| ListResources | `resources` of `arn`, `resourceShareArn` and `status`, all `AVAILABLE`, where `Resource` publishes eight members. [`resourceOwner` is required and read](#resourceowner-is-required-and-read), and `principal`, `resourceArns`, `resourceShareArns`, `resourceType` and `resourceRegionScope` filter. [Pages on `maxResults`/`nextToken`](#the-three-listings-page) |
 
 The invitation surface is unrouted — `GetResourceShareInvitations`,
 `AcceptResourceShareInvitation`, `RejectResourceShareInvitation` — as is the permission surface
@@ -24510,21 +24510,68 @@ The invitation surface is unrouted — `GetResourceShareInvitations`,
 `tags` are stored but RAM is not scanned by the Resource Groups Tagging API, so they cannot be
 searched for or read back except inside a share.
 
-### The resource share record diverges from the published shape
+### The resource share's published shape
 
-`API_ResourceShare` publishes exactly eleven members. Substrate's record carries eight of them —
+`API_ResourceShare` publishes exactly eleven members. Substrate answers eight of them —
 `allowExternalPrincipals`, `creationTime`, `lastUpdatedTime`, `name`, `owningAccountId`,
 `resourceShareArn`, `status`, `tags` — and omits `featureSet`, `resourceShareConfiguration` and
-`statusMessage`. It adds `principals` and `resourceArns`, which are on no RAM page: they are the
-create request's own inputs kept on the share for convenience, and a consumer that reads them is
-writing code that reads nothing against AWS. The record also carries `accountID` and `region`,
-Substrate's own bookkeeping ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
+`statusMessage`. The share's associations, which the record keeps because `ListPrincipals` and
+`ListResources` answer from them, are not on the wire: RAM reports them through those operations,
+not on the share ([#1170](https://github.com/scttfrdmn/substrate/issues/1170)). Nor are the record's
+`accountID` and `region` ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
-`CreateResourceShare` publishes `clientToken` alongside `resourceShare` and Substrate emits only the
-latter. `clientToken` is not read either, so the published idempotency contract — a retry with the
-same token returning the same share, and the same token with different parameters failing with
-`IdempotentParameterMismatch` — does not hold: the same request twice creates two shares with
-different ARNs. [#1170](https://github.com/scttfrdmn/substrate/issues/1170).
+### clientToken is honored on create and delete
+
+[#1170](https://github.com/scttfrdmn/substrate/issues/1170). Both pages publish `clientToken` as the
+idempotency key — "If you retry the operation with the same `ClientToken`, but with different
+parameters, the retry fails with an `IdempotentParameterMismatch` error" — and both responses
+publish it. Substrate read it on neither and echoed it on neither, so a retried create made a second
+share. Now:
+
+- A create under a token that already made a share, with the same parameters, answers that share and
+  the token and creates nothing. The parameters are compared as the decoded request body less
+  `clientToken`, so key order and whitespace do not matter but every member does, including
+  `permissionArns`, `sources` and `resourceShareConfiguration`, which substrate does not otherwise
+  model. Spelling out a default the first request omitted is a different request.
+- The same token with different parameters is `IdempotentParameterMismatchException`/400.
+- A create token does not match a `DELETED` share: the retry creates a new share rather than
+  answering a deleted one as the outcome of a create.
+- A delete retried under the token it was made with answers `returnValue: true` again, rather than
+  the `InvalidStateTransitionException` a second delete answers without it; the same delete token on
+  a different share is `IdempotentParameterMismatchException`. Once the deleted share's two-hour
+  window passes, the retry finds nothing and answers `UnknownResourceException`.
+- A request without a token is answered with one substrate generates, in UUID form, from the
+  request's ID — so a replay reproduces it — and stored like a caller's, so retrying with it is
+  idempotent too.
+
+The token lives on the share record and is found by scanning the caller's shares; the scan, the check
+and the write run under one lock per account and Region, so concurrent creates under one token make
+one share. `InvalidClientTokenException` is published and has no site, because neither page publishes
+a length or a pattern for the token.
+
+### The three listings page
+
+[#1542](https://github.com/scttfrdmn/substrate/issues/1542). `GetResourceShares`, `ListPrincipals` and
+`ListResources` read `maxResults` and `nextToken`, and a truncated page carries a `nextToken`; the
+last page carries none.
+
+- `maxResults` outside the published 1–500 is `InvalidParameterException`/400. An absent one answers
+  the whole listing on one page: the pages give the default only as "a value that is specific to the
+  operation", so any number would be invented.
+- A `nextToken` substrate did not issue is `InvalidNextTokenException`/400, refused before any state
+  is read.
+- `tagFilters` filters `GetResourceShares`: a share matches when any filter matches one of its tags
+  ("Multiple tag filters are evaluated as an OR condition"), and a filter with no `tagValues` matches
+  any value of its key. A filter with no `tagKey` is `InvalidParameterException`/400.
+
+The token is an offset into the listing, which is in creation order. An offset counts positions, so a
+listing that changes between two pages shifts every later page. A create lands on the last page and
+shifts nothing. A deleted share expiring out of `GetResourceShares` after its two-hour window, or a
+delete, associate or disassociate changing what `ListPrincipals` and `ListResources` report, skips one
+item for a walk that spans it; a token past a listing that has since shrunk answers an empty final page
+rather than an error. A value cursor, as the RDS and ElastiCache describes use, would not skip, but it
+needs the listing rendered in the order it compares in, which would reorder all three responses; that
+is tracked separately.
 
 ### resourceOwner is required and read
 
@@ -24582,6 +24629,9 @@ status", and substrate applies that window on the simulated clock:
 | a resource share that does not exist, or was deleted more than two hours ago | `UnknownResourceException` | 400 |
 | delete, associate or disassociate on a `DELETED` share | `InvalidStateTransitionException` | 400 |
 | update on a `DELETED` share | `OperationNotPermittedException` | 400 |
+| a `clientToken` reused with different parameters | `IdempotentParameterMismatchException` | 400 |
+| `maxResults` outside 1–500, or a `tagFilters` entry with no `tagKey` | `InvalidParameterException` | 400 |
+| a `nextToken` substrate did not issue | `InvalidNextTokenException` | 400 |
 
 `ValidationError`/400 is the spelling RAM's consolidated common-errors list publishes, and
 `UnknownResourceException`/400 matches its own page.
@@ -24593,10 +24643,9 @@ required parameters are included"* ([#1169](https://github.com/scttfrdmn/substra
 parameter that was sent with an invalid value, and an absent member was not sent at all. The one code
 covers every share operation, because they all look the share up the same way.
 
-`IdempotentParameterMismatch`, `InvalidClientTokenException`, `MalformedArnException`,
-`OperationNotPermittedException`, `ResourceShareLimitExceededException` and
-`ServerInternalException`/500 are published and have no site: no ARN is validated for shape, no
-token is tracked, and no share quota is enforced.
+`InvalidClientTokenException`, `MalformedArnException`, `ResourceShareLimitExceededException` and
+`ServerInternalException`/500 are published and have no site: no token or ARN is validated for shape,
+and no share quota is enforced.
 
 ### The account and Region a resource share carries reach no response
 
