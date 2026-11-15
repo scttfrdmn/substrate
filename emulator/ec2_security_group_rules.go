@@ -4,11 +4,85 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// ec2CanonicalRuleCIDR returns a rule CIDR in the canonical form AWS stores it in (#1553).
+//
+// API_AuthorizeSecurityGroupIngress, on CidrIp: "AWS canonicalizes IPv4 and IPv6 CIDRs. For
+// example, if you specify 100.68.0.18/18 for the CIDR block, AWS canonicalizes the CIDR block to
+// 100.68.0.0/18. Any subsequent DescribeSecurityGroups and DescribeSecurityGroupRules calls will
+// return the canonicalized form of the CIDR block." The canonical form is the network address the
+// prefix length leaves, rendered as [net.IPNet.String] renders it — dotted quad for IPv4, the
+// compressed RFC 5952 text for IPv6 — the same step [ec2ParseRouteDestination] takes for a
+// route's destination (#1187).
+//
+// v6 says which family the parameter carries: CidrIp is IPv4 and CidrIpv6 is IPv6, and a value of
+// the other family is refused like any other unparseable one. The refusal is InvalidParameterValue
+// with "CIDR block <value> is malformed", EC2's observed answer to an unparseable rule CIDR on
+// both families (aws/aws-cli#2846 for an IPv6 range, hashicorp/terraform#9481 for an IPv4 address
+// with no prefix length, NixOS/nixops-aws#63 for an IPv6 range sent as CidrIp); the operation's
+// Errors section is the Common Error Types boilerplate.
+func ec2CanonicalRuleCIDR(cidr string, v6 bool) (string, error) {
+	ip, block, err := net.ParseCIDR(cidr)
+	if err != nil || (ip.To4() == nil) != v6 {
+		return "", &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "CIDR block " + cidr + " is malformed",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return block.String(), nil
+}
+
+// ec2CanonicalizePermissions rewrites every IPv4 and IPv6 range in perms to its canonical form,
+// in place, so that the duplicate check, the revoke match and the stored record all see the form
+// AWS stores (#1553). It runs on authorize and revoke alike, so a revoke naming the
+// non-canonical spelling of a stored rule removes it.
+func ec2CanonicalizePermissions(perms []EC2IPPermission) error {
+	for i := range perms {
+		for j, cidr := range perms[i].IPRanges {
+			canonical, err := ec2CanonicalRuleCIDR(cidr, false)
+			if err != nil {
+				return err
+			}
+			perms[i].IPRanges[j] = canonical
+		}
+		for j, cidr := range perms[i].IPv6Ranges {
+			canonical, err := ec2CanonicalRuleCIDR(cidr, true)
+			if err != nil {
+				return err
+			}
+			perms[i].IPv6Ranges[j] = canonical
+		}
+	}
+	return nil
+}
+
+// ec2SameRuleCIDR reports whether a stored rule CIDR names the range target does. target is
+// canonical by the time it is compared; the stored side is canonicalised here, because a group
+// written before #1553 holds each range as it was sent, and its rule must still match a revoke
+// or a duplicate authorize naming it in either spelling. A stored value that does not parse —
+// which only an earlier substrate could have accepted — matches only itself.
+func ec2SameRuleCIDR(stored, target string) bool {
+	if stored == target {
+		return true
+	}
+	if _, block, err := net.ParseCIDR(stored); err == nil {
+		return block.String() == target
+	}
+	return false
+}
+
+// ec2HoldsRuleCIDR reports whether a stored range list holds cidr, compared as
+// [ec2SameRuleCIDR] compares.
+func ec2HoldsRuleCIDR(stored []string, cidr string) bool {
+	return slices.ContainsFunc(stored, func(s string) bool { return ec2SameRuleCIDR(s, cidr) })
+}
 
 // ec2PermHasSource reports whether a permission names any source at all: an IPv4 or IPv6
 // range, a prefix list, or a referenced security group.
@@ -217,7 +291,7 @@ func ec2AuthorizeDuplicates(stored, perms []EC2IPPermission) bool {
 			continue
 		}
 		for _, cidr := range perm.IPRanges {
-			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPRanges, cidr) }) {
+			if holds(perm, func(r EC2IPPermission) bool { return ec2HoldsRuleCIDR(r.IPRanges, cidr) }) {
 				return true
 			}
 			one := port
@@ -225,7 +299,7 @@ func ec2AuthorizeDuplicates(stored, perms []EC2IPPermission) bool {
 			held = append(held, one)
 		}
 		for _, cidr := range perm.IPv6Ranges {
-			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPv6Ranges, cidr) }) {
+			if holds(perm, func(r EC2IPPermission) bool { return ec2HoldsRuleCIDR(r.IPv6Ranges, cidr) }) {
 				return true
 			}
 			one := port
@@ -316,7 +390,9 @@ func ec2RevokePermissions(stored, targets []EC2IPPermission) (remaining, unknown
 		}
 
 		missed := EC2IPPermission{IPProtocol: target.IPProtocol, FromPort: target.FromPort, ToPort: target.ToPort}
-		removeString := func(get func(*EC2IPPermission) *[]string, value string) bool {
+		// same compares a stored value with the request's: CIDRs canonically (#1553), so a
+		// rule stored before canonicalisation still matches; prefix-list IDs exactly.
+		removeString := func(get func(*EC2IPPermission) *[]string, value string, same func(stored, target string) bool) bool {
 			removed := false
 			for i := range rules {
 				if dropped[i] || !ec2SamePortRange(rules[i], target) {
@@ -324,24 +400,25 @@ func ec2RevokePermissions(stored, targets []EC2IPPermission) (remaining, unknown
 				}
 				list := get(&rules[i])
 				if before := len(*list); before > 0 {
-					*list = slices.DeleteFunc(*list, func(v string) bool { return v == value })
+					*list = slices.DeleteFunc(*list, func(v string) bool { return same(v, value) })
 					removed = removed || len(*list) < before
 				}
 			}
 			return removed
 		}
+		exact := func(stored, target string) bool { return stored == target }
 		for _, cidr := range target.IPRanges {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPRanges }, cidr) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPRanges }, cidr, ec2SameRuleCIDR) {
 				missed.IPRanges = append(missed.IPRanges, cidr)
 			}
 		}
 		for _, cidr := range target.IPv6Ranges {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPv6Ranges }, cidr) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPv6Ranges }, cidr, ec2SameRuleCIDR) {
 				missed.IPv6Ranges = append(missed.IPv6Ranges, cidr)
 			}
 		}
 		for _, id := range target.PrefixListIDs {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.PrefixListIDs }, id) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.PrefixListIDs }, id, exact) {
 				missed.PrefixListIDs = append(missed.PrefixListIDs, id)
 			}
 		}

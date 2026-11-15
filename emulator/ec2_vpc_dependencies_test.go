@@ -115,11 +115,12 @@ func TestEC2_InternetGateway_AttachDetachContract(t *testing.T) {
 	ec2RequireRefusal(t, ts, attach("vpc-0000000000000dead"), "InvalidVpcID.NotFound")
 	ec2RequireRefusal(t, ts, detach(vpcA), "Gateway.NotAttached")
 
-	// A well-formed attach answers exactly what it always has.
+	// A well-formed attach answers exactly what it always has, apart from the requestId every EC2
+	// success document leads with since #1189.
 	resp := ec2Request(t, ts, attach(vpcA))
 	body := readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, body, `<AttachInternetGatewayResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><return>true</return></AttachInternetGatewayResponse>`)
+	assert.Contains(t, ec2StripRequestID(body), `<AttachInternetGatewayResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><return>true</return></AttachInternetGatewayResponse>`)
 
 	ec2RequireRefusal(t, ts, attach(vpcA), "Resource.AlreadyAssociated")
 	ec2RequireRefusal(t, ts, attach(vpcB), "Resource.AlreadyAssociated")
@@ -137,7 +138,7 @@ func TestEC2_InternetGateway_AttachDetachContract(t *testing.T) {
 	resp = ec2Request(t, ts, detach(vpcA))
 	body = readBody(t, resp)
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.Contains(t, body, `<DetachInternetGatewayResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><return>true</return></DetachInternetGatewayResponse>`)
+	assert.Contains(t, ec2StripRequestID(body), `<DetachInternetGatewayResponse xmlns="http://ec2.amazonaws.com/doc/2016-11-15/"><return>true</return></DetachInternetGatewayResponse>`)
 	ec2RequireRefusal(t, ts, detach(vpcA), "Gateway.NotAttached")
 	ec2OK(t, ts, map[string]string{"Action": "DeleteInternetGateway", "InternetGatewayId": igw})
 }
@@ -215,9 +216,11 @@ func TestEC2_DeleteVpc_RefusesWhileDependentsRemain(t *testing.T) {
 			ec2FleetXML(t, ts, map[string]string{
 				"Action": "CreateNatGateway", "SubnetId": subnet, "AllocationId": alloc,
 			}, &nat)
-			// The subnet goes first, so only the gateway holds the VPC.
-			ec2OK(t, ts, map[string]string{"Action": "DeleteSubnet", "SubnetId": subnet})
-			return []map[string]string{{"Action": "DeleteNatGateway", "NatGatewayId": nat.ID}}
+			// The gateway holds its subnet too (#1551), so the subnet can only go after it.
+			return []map[string]string{
+				{"Action": "DeleteNatGateway", "NatGatewayId": nat.ID},
+				{"Action": "DeleteSubnet", "SubnetId": subnet},
+			}
 		}},
 		{"an instance not yet terminated", func(t *testing.T, ts *httptest.Server, vpcID string) []map[string]string {
 			subnet := ec2CreateSubnetIn(t, ts, vpcID, "10.30.3.0/24")
@@ -225,8 +228,11 @@ func TestEC2_DeleteVpc_RefusesWhileDependentsRemain(t *testing.T) {
 				"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1", "SubnetId": subnet,
 			})
 			require.Len(t, ids, 1)
-			ec2OK(t, ts, map[string]string{"Action": "DeleteSubnet", "SubnetId": subnet})
-			return []map[string]string{{"Action": "TerminateInstances", "InstanceId.1": ids[0]}}
+			// The instance holds its subnet too (#1551), so the subnet can only go after it.
+			return []map[string]string{
+				{"Action": "TerminateInstances", "InstanceId.1": ids[0]},
+				{"Action": "DeleteSubnet", "SubnetId": subnet},
+			}
 		}},
 	}
 	for _, tc := range tests {

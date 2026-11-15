@@ -319,7 +319,7 @@ func ec2LookupDefaultSecurityGroup(ctx context.Context, state StateManager, reqC
 			continue
 		}
 		var sg EC2SecurityGroup
-		if json.Unmarshal(data, &sg) == nil && sg.VPCID == vpcID && sg.GroupName == "default" {
+		if json.Unmarshal(data, &sg) == nil && sg.VPCID == vpcID && ec2IsDefaultSecurityGroup(sg) {
 			return sg.GroupID
 		}
 	}

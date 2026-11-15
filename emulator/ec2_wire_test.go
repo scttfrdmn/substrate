@@ -616,11 +616,11 @@ func TestEC2Wire_KeyPairResponsesCarryNoBookkeepingMember(t *testing.T) {
 	require.NotEmptyf(t, string(ec2WireRecord(t, state, key)["createdAt"]),
 		"%s must persist createdAt before an absence assertion on it means anything", key)
 
-	// The handler does not parse the material, so the short value TestEC2_KeyPair_Import uses will
-	// do: this asserts on the response, not on import validation.
+	// The handler parses the material since #1190, so a real key is sent; this asserts on the
+	// response, not on import validation.
 	imported := ec2Wire(t, p, ctx, "ImportKeyPair", map[string]string{
 		"KeyName":           "wire-imported",
-		"PublicKeyMaterial": "c3NoLWVkMjU1MTkgQUFBQUM=",
+		"PublicKeyMaterial": ec2TestEd25519AuthorizedKey(),
 	})
 	importedID := ec2WireElement(t, "ImportKeyPair", imported, "keyPairId")
 	ec2WireRequireScoped(t, state, ec2WireKey("keypair", "wire-imported"), "accountId")

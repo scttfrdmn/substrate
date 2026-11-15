@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/xml"
 	"io"
@@ -958,8 +959,9 @@ func TestEC2_KeyPair_Import(t *testing.T) {
 	t.Parallel()
 	ts := newEC2TestServer(t)
 
-	// ImportKeyPair with a base64-encoded public key.
-	pubKeyB64 := "c3NoLWVkMjU1MTkgQUFBQUM=" // base64 of "ssh-ed25519 AAAAC" (fake but valid base64)
+	// ImportKeyPair with a base64-encoded public key, as the SDKs send it. The key must be real
+	// since #1190, which parses it to compute the published fingerprint.
+	pubKeyB64 := base64.StdEncoding.EncodeToString([]byte(ec2TestEd25519AuthorizedKey()))
 	importResp := ec2Request(t, ts, map[string]string{
 		"Action":            "ImportKeyPair",
 		"KeyName":           "imported-key",
@@ -1331,15 +1333,17 @@ func TestEC2_KeyPair_KeyType_Default(t *testing.T) {
 	if createResp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateKeyPair: expected 200, got %d", createResp.StatusCode)
 	}
+	// The CreateKeyPair response carries no keyType, which API_CreateKeyPair does not publish
+	// among its Response Elements (#1190); DescribeKeyPairs reports it below.
 	var createResult struct {
-		KeyType string `xml:"keyType"`
+		KeyType *string `xml:"keyType"`
 	}
 	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
 		t.Fatalf("decode CreateKeyPair response: %v", err)
 	}
 	createResp.Body.Close() //nolint:errcheck
-	if createResult.KeyType != "rsa" {
-		t.Errorf("keyType = %q; want %q", createResult.KeyType, "rsa")
+	if createResult.KeyType != nil {
+		t.Errorf("CreateKeyPair rendered keyType %q, which its page does not publish", *createResult.KeyType)
 	}
 
 	descResp := ec2Request(t, ts, map[string]string{
@@ -1380,15 +1384,16 @@ func TestEC2_KeyPair_KeyType_Ed25519(t *testing.T) {
 	if createResp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateKeyPair ed25519: expected 200, got %d", createResp.StatusCode)
 	}
-	var createResult struct {
-		KeyType string `xml:"keyType"`
-	}
-	if err := xml.NewDecoder(createResp.Body).Decode(&createResult); err != nil {
-		t.Fatalf("decode CreateKeyPair response: %v", err)
-	}
 	createResp.Body.Close() //nolint:errcheck
-	if createResult.KeyType != "ed25519" {
-		t.Errorf("keyType = %q; want %q", createResult.KeyType, "ed25519")
+
+	// keyType is read back where API_KeyPairInfo publishes it, DescribeKeyPairs; the
+	// CreateKeyPair response does not carry it (#1190).
+	var described struct {
+		KeyType string `xml:"keySet>item>keyType"`
+	}
+	ec2FleetXML(t, ts, map[string]string{"Action": "DescribeKeyPairs", "KeyName.1": "key-ed25519"}, &described)
+	if described.KeyType != "ed25519" {
+		t.Errorf("keyType = %q; want %q", described.KeyType, "ed25519")
 	}
 }
 
@@ -3880,7 +3885,12 @@ func TestEC2_PlacementGroups(t *testing.T) {
 		"MinCount": "1", "MaxCount": "1", "Placement.GroupName": "mpi-pg",
 	})
 	assert.Equal(t, http.StatusOK, ok.StatusCode)
+	var launched struct {
+		IDs []string `xml:"instancesSet>item>instanceId"`
+	}
+	require.NoError(t, xml.NewDecoder(ok.Body).Decode(&launched))
 	ok.Body.Close() //nolint:errcheck
+	require.Len(t, launched.IDs, 1)
 
 	// RunInstances into an unknown group → InvalidPlacementGroup.Unknown (400).
 	bad := ec2Request(t, ts, map[string]string{
@@ -3889,6 +3899,12 @@ func TestEC2_PlacementGroups(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, bad.StatusCode)
 	bad.Body.Close() //nolint:errcheck
+
+	// The group holds a running instance, so it cannot be deleted until that is terminated
+	// (#1193).
+	ec2RequireRefusal(t, ts, map[string]string{"Action": "DeletePlacementGroup", "GroupName": "mpi-pg"},
+		"InvalidPlacementGroup.InUse")
+	ec2OK(t, ts, map[string]string{"Action": "TerminateInstances", "InstanceId.1": launched.IDs[0]})
 
 	// Delete, then describe → gone; delete again → Unknown.
 	del := ec2Request(t, ts, map[string]string{"Action": "DeletePlacementGroup", "GroupName": "mpi-pg"})
@@ -4446,6 +4462,13 @@ func TestEC2_Instances_GroupSet(t *testing.T) {
 			t.Fatalf("RunInstances launched %d instances, want 1", len(launched))
 		}
 
+		// A group an instance carries cannot be deleted (#1551), so the instance is terminated
+		// first; a terminated instance is still described, with the groups it ran with.
+		term := ec2Request(t, ts, map[string]string{"Action": "TerminateInstances", "InstanceId.1": launched[0].InstanceID})
+		defer term.Body.Close() //nolint:errcheck
+		if term.StatusCode != http.StatusOK {
+			t.Fatalf("TerminateInstances: status = %d, want 200", term.StatusCode)
+		}
 		del := ec2Request(t, ts, map[string]string{"Action": "DeleteSecurityGroup", "GroupId": net.sgID})
 		defer del.Body.Close() //nolint:errcheck
 		if del.StatusCode != http.StatusOK {

@@ -340,8 +340,10 @@ func TestEC2DescribeInstancesReservationSetIsOrdered(t *testing.T) {
 	require.Len(t, ids, 6, "six RunInstances calls make six reservations")
 	require.IsIncreasing(t, ids, "reservationSet must be ordered by reservation ID, not by map order")
 
+	// Each body leads with its own request's requestId (#1189), so the bodies are compared with
+	// that element removed: everything the state determines must not move.
 	_, secondBody := describe()
-	require.True(t, bytes.Equal(firstBody, secondBody),
+	require.True(t, bytes.Equal([]byte(ec2StripRequestID(string(firstBody))), []byte(ec2StripRequestID(string(secondBody)))),
 		"two DescribeInstances calls over unchanged state must return byte-identical bodies")
 }
 

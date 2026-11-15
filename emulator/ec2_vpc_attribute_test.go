@@ -68,8 +68,10 @@ func TestEC2_VPCAttributes_PublishedSpellingsRoundTrip(t *testing.T) {
 		assert.Equal(t, tc.value, ec2VPCAttribute(t, ts, vpcID, tc.attribute), tc.param)
 	}
 
-	// The Go-initialism spellings are not AWS's, and change nothing.
-	ec2OK(t, ts, map[string]string{"Action": "ModifyVpcAttribute", "VpcId": vpcID, "EnableDNSHostnames.Value": "false"})
+	// The Go-initialism spellings are not AWS's, and change nothing: a request carrying only one
+	// names no attribute, which is refused (#1554).
+	ec2RequireRefusal(t, ts, map[string]string{"Action": "ModifyVpcAttribute", "VpcId": vpcID, "EnableDNSHostnames.Value": "false"},
+		"InvalidParameterCombination")
 	assert.True(t, ec2VPCAttribute(t, ts, vpcID, "enableDnsHostnames"))
 
 	subnetID := ec2CreateSubnetIn(t, ts, vpcID, "10.40.1.0/24")

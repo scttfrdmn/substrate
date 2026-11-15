@@ -27,8 +27,22 @@ import (
 type keyPairOut struct {
 	KeyPairID   string `xml:"keyPairId"`
 	Fingerprint string `xml:"keyFingerprint"`
-	KeyType     string `xml:"keyType"`
-	Material    string `xml:"keyMaterial"`
+	// KeyType is nil when the response omits it, which it must: keyType is not among
+	// API_CreateKeyPair's Response Elements (#1190).
+	KeyType  *string `xml:"keyType"`
+	Material string  `xml:"keyMaterial"`
+}
+
+// keyPairDescribedType returns the keyType DescribeKeyPairs reports for name, which is where
+// API_KeyPairInfo publishes it.
+func keyPairDescribedType(t *testing.T, p *emulator.EC2Plugin, ctx *emulator.RequestContext, name string) string {
+	t.Helper()
+	var out struct {
+		Types []string `xml:"keySet>item>keyType"`
+	}
+	natDecode(t, ec2Wire(t, p, ctx, "DescribeKeyPairs", map[string]string{"Action": "DescribeKeyPairs", "KeyName.1": name}), &out)
+	require.Len(t, out.Types, 1)
+	return out.Types[0]
 }
 
 // keyPairCreate issues CreateKeyPair through ctx and decodes the response.
@@ -99,7 +113,8 @@ func TestEC2KeyMaterial_AnRSAKeyIsWhatThePagePublishes(t *testing.T) {
 	t.Parallel()
 	p, ctx, _ := setupEC2WirePlugin(t)
 	got := keyPairCreate(t, p, ctx, map[string]string{"KeyName": "rsa-default"})
-	assert.Equal(t, "rsa", got.KeyType, "rsa is the published default")
+	assert.Nil(t, got.KeyType, "keyType is not a CreateKeyPair response element")
+	assert.Equal(t, "rsa", keyPairDescribedType(t, p, ctx, "rsa-default"), "rsa is the published default")
 
 	block, _ := pem.Decode([]byte(got.Material))
 	require.NotNil(t, block, "keyMaterial is PEM")
@@ -123,7 +138,8 @@ func TestEC2KeyMaterial_AnEd25519KeyIsWhatThePagePublishes(t *testing.T) {
 	t.Parallel()
 	p, ctx, _ := setupEC2WirePlugin(t)
 	got := keyPairCreate(t, p, ctx, map[string]string{"KeyName": "ed", "KeyType": "ed25519"})
-	assert.Equal(t, "ed25519", got.KeyType)
+	assert.Nil(t, got.KeyType, "keyType is not a CreateKeyPair response element")
+	assert.Equal(t, "ed25519", keyPairDescribedType(t, p, ctx, "ed"))
 
 	block, _ := pem.Decode([]byte(got.Material))
 	require.NotNil(t, block)
