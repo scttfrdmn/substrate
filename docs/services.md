@@ -19143,8 +19143,11 @@ resolver per type, so the refusals are uniform: an empty `UserPoolId`, `ClientId
 service's gloss on that code says *invalid* and not *missing* — an absent pool, client or group is
 `ResourceNotFoundException`, and an absent user is `UserNotFoundException`, the code that operation's
 own page publishes rather than the generic one. An unparseable body is `InvalidParameterException`.
-Substrate answers the two not-found codes at **404**; a record keyed by the caller's account and Region
-means an identifier from another account reaches nothing rather than the caller's same-named record.
+Both not-found codes answer HTTP **400**, which is what `API_DescribeUserPool`, `API_AdminGetUser` and
+every other user pools page publish for them; until
+[#1425](https://github.com/scttfrdmn/substrate/issues/1425) substrate answered **404**, a status the
+service publishes for neither. A record keyed by the caller's account and Region means an identifier from
+another account reaches nothing rather than the caller's same-named record.
 
 ### `UpdateUserPool` and `UpdateUserPoolClient` replace, they do not merge
 
@@ -19204,7 +19207,7 @@ So the merge there is what the page describes, and substrate keeps it.
   and no page names an app client, whose `UserPoolClientType` publishes no ARN member. So the accepted
   form is `arn:aws:cognito-idp:{region}:{account}:userpool/{id}`, in the caller's own account and
   Region. Anything else, or a pool that does not exist, is `ResourceNotFoundException` at the
-  published **400**. That is unlike the loaders above, which answer the same code at 404.
+  published **400**, as the loaders above answer it.
 - **`ResourceArn`, `Tags` and `TagKeys` are `Required: Yes`**; an absent one is
   `InvalidParameterException`/400.
 - **The two writes answer an empty body**, which is their pages' Response Elements, rather than the
