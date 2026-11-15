@@ -21957,7 +21957,7 @@ Firehose data ingestion: $0.029 per GB.
 | DescribeJobQueues | `jobQueues` filter takes names or full ARNs; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
 | RegisterJobDefinition | `jobDefinitionName` and `type` required; each registration is [the next revision](#a-job-definition-is-versioned) |
 | DescribeJobDefinitions | `jobDefinitions` (`${name}:${revision}` or full ARN), `jobDefinitionName` (every revision), and `status`; a `nextToken` no previous call returned answers [`ClientException` / 400](#batchs-three-describes-shared-one-paginator-so-the-decode-had-to-leave-it) rather than page one |
-| SubmitJob | Returns `jobId`. The job is recorded `SUBMITTED`; what a describe reports is its [progression](#a-jobs-status-progresses-through-the-seven-published-values) (#1248) |
+| SubmitJob | Returns `jobId`. `jobName`, `jobQueue` and `jobDefinition` are required, and the queue and definition must be usable — see [What a submitted job needs](#what-a-submitted-job-needs). The job is recorded `SUBMITTED`; what a describe reports is its [progression](#a-jobs-status-progresses-through-the-seven-published-values) (#1248) |
 | DescribeJobs | Each job reported is one [observation](#a-jobs-status-progresses-through-the-seven-published-values) of its progression |
 | ListJobs | `POST /v1/listjobs`; [`RUNNING` by default](#listjobs-reads-its-request), `jobQueue` scopes, all five `filters` match by their published rules, `maxResults`/`nextToken` paginate, and `arrayJobId`/`multiNodeJobId` are empty listings |
 | TerminateJob | A job not yet settled is reported `FAILED` with the supplied `reason`, as the page publishes for `STARTING`/`RUNNING` (terminated) and earlier states (cancelled). A settled job is left as it is. Answers `{}`: the page publishes an empty body, and its own sample response is `{}` (#1206) |
@@ -21965,7 +21965,7 @@ Firehose data ingestion: $0.029 per GB.
 | DeregisterJobDefinition | `jobDefinition` is `name:revision` or a full ARN; a bare name, which addresses no single revision, and a revision that does not exist are `ClientException`. The revision is [kept and reported `INACTIVE`](#a-resource-leaves-service-through-five-lifecycle-operations), so `status: INACTIVE` selects it. Answers `{}` (#555) |
 | UpdateJobQueue | Changes `state`, `priority`, `schedulingPolicyArn` and `computeEnvironmentOrder`; an absent member is left as it was. `state` outside `ENABLED \| DISABLED`, or a queue that does not exist, is `ClientException`. `jobStateTimeLimitActions` and `serviceEnvironmentOrder` are not read |
 | UpdateComputeEnvironment | Changes `state`, `serviceRole` and `unmanagedvCpus`, and merges `computeResources` member by member; an absent member is left as it was. Same refusals as `UpdateJobQueue`. `updatePolicy`, `ecsSettings`, `eksConfiguration` and `context` are not read |
-| DeleteJobQueue | Refused with `ClientException` unless the queue is `DISABLED`, as the page requires; its compute environments need not be disassociated first. The queue [is gone at once](#a-resource-leaves-service-through-five-lifecycle-operations). Answers `{}` |
+| DeleteJobQueue | Refused with `ClientException` unless the queue is `DISABLED`, as the page requires; its compute environments need not be disassociated first. The queue [is gone at once](#a-resource-leaves-service-through-five-lifecycle-operations), and its unfinished jobs [are failed](#what-a-submitted-job-needs). Answers `{}` |
 | DeleteComputeEnvironment | Refused with `ClientException` unless the environment is `DISABLED` and no job queue's `computeEnvironmentOrder` names it, by name or ARN. Answers `{}` |
 
 ### A resource leaves service through five lifecycle operations
@@ -21987,6 +21987,34 @@ Every operation reports a bad request as **`ClientException`** at HTTP 400. The 
 reference declares exactly two errors for each Batch operation, `ClientException` and
 `ServerException`, so substrate does not use the `MissingParameter` or
 `InvalidParameterValue` codes other services return for the same shape of complaint.
+
+### What a submitted job needs
+
+Until [#1422](https://github.com/scttfrdmn/substrate/issues/1422) `SubmitJob` answered a missing
+`jobName` with `MissingParameter`, which Batch publishes nowhere, and checked neither the queue nor the
+definition, so a job could be submitted to a queue that was disabled, deleted or never created.
+`API_SubmitJob` publishes `jobName`, `jobQueue` and `jobDefinition` as `Required: Yes` and one client
+error, `ClientException`/400 (*"Another cause is specifying an identifier that's not valid"*). Each of
+these is now that refusal:
+
+| Request | Why |
+|---------|-----|
+| `jobName`, `jobQueue` or `jobDefinition` missing | `Required: Yes`; checked before any state is read |
+| A queue that does not exist, by name or ARN | *"You can specify either the name or the Amazon Resource Name (ARN) of the queue"* |
+| A queue that is not `ENABLED` and `VALID` | `UpdateJobQueue`: a `DISABLED` queue *"can't accept new jobs"* |
+| A `name:revision`, or an ARN with one, naming no revision or an `INACTIVE` one | The definition must be usable |
+| A bare name, or an ARN without a revision, with no `ACTIVE` revision | *"If the revision is not specified, then the latest active revision is used"* |
+
+The job keeps the queue and definition identifiers as they were sent. The messages are substrate's own.
+
+`API_DeleteJobQueue` says *"All jobs in the queue are eventually terminated when you delete a job
+queue."* Substrate ends them **at delete time**, since the page publishes no interval: every job of the
+queue, submitted by name or by ARN, that an observation would still report `SUBMITTED`, `PENDING`,
+`RUNNABLE`, `STARTING` or `RUNNING` is recorded `FAILED`, which is what `API_TerminateJob` says
+terminating a job does. The job is peeked rather than observed, so the delete spends no observation,
+and a job that already reports `SUCCEEDED` or `FAILED` — including an unseeded job, whose first
+observation reports `SUCCEEDED` — is left as it is. No page publishes a `statusReason` for such a job, so
+the one it reports, *"Job terminated because its job queue was deleted."*, is substrate's.
 
 ### A describe filter takes a name or an ARN
 

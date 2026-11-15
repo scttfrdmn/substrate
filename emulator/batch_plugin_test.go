@@ -85,6 +85,7 @@ func TestBatchPlugin_SubmitDescribeTerminateJob(t *testing.T) {
 	ts := newBatchTestServer(t)
 
 	// SubmitJob
+	batchEnsureSubmittable(t, batchHTTPPoster(t, ts), "q1", "jd1:1")
 	resp := batchRequest(t, ts, http.MethodPost, "/v1/submitjob", map[string]string{
 		"jobName":       "test-job",
 		"jobQueue":      "arn:aws:batch:us-east-1:123456789012:job-queue/q1",
@@ -158,6 +159,7 @@ func TestBatchPlugin_SubmitDescribeTerminateJob(t *testing.T) {
 // jobs are actually in. The default listing's emptiness is asserted in batch_list_jobs_test.go.
 func TestBatchPlugin_ListJobs(t *testing.T) {
 	ts := newBatchTestServer(t)
+	batchEnsureSubmittable(t, batchHTTPPoster(t, ts), "q1", "jd1")
 
 	for i := 0; i < 3; i++ {
 		resp := batchRequest(t, ts, http.MethodPost, "/v1/submitjob", map[string]string{

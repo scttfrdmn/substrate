@@ -258,7 +258,11 @@ func writeFailureCases() []writeFailureCase {
 			`{"DocumentName":"AWS-RunShellScript","InstanceIds":["i-0123456789abcdef0"],"Parameters":{"commands":["true"]}}`)},
 		{file: "timestream_plugin.go", call: jsonCall("ingest-cell1.timestream"+wfRegion, "Timestream_20181101.CreateDatabase", `{"DatabaseName":"db"}`)},
 		{file: "transfer_plugin.go", call: jsonCall("transfer"+wfRegion, "TransferService.CreateServer", `{}`)},
-		{file: "batch_plugin.go", call: restCall("POST", "batch"+wfRegion, "/v1/submitjob",
+		{file: "batch_plugin.go", setup: []wireCall{
+			restCall("POST", "batch"+wfRegion, "/v1/createjobqueue",
+				`{"jobQueueName":"q","priority":1,"state":"ENABLED","computeEnvironmentOrder":[{"order":1,"computeEnvironment":"ce"}]}`),
+			restCall("POST", "batch"+wfRegion, "/v1/registerjobdefinition", `{"jobDefinitionName":"d","type":"container"}`),
+		}, call: restCall("POST", "batch"+wfRegion, "/v1/submitjob",
 			`{"jobName":"j","jobQueue":"q","jobDefinition":"d"}`)},
 		{file: "cfn_resources_v32.go", op: "CreateStack (stubStore, deployGenericStub)", call: queryCall("cloudformation"+wfRegion,
 			"Action=CreateStack&Version=2010-05-15&StackName=s&TemplateBody="+url.QueryEscape(`{"Resources":{`+

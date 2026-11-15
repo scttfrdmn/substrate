@@ -243,7 +243,9 @@ func (p *BatchPlugin) updateComputeEnvironment(ctx *RequestContext, req *AWSRequ
 // deleteJobQueue deletes a job queue, which must already be DISABLED: "You must first disable
 // submissions for a queue with the UpdateJobQueue operation." Its compute environments need
 // not be disassociated first — "It's not necessary to disassociate compute environments from a
-// queue before submitting a DeleteJobQueue request." The queue's jobs are left as they are.
+// queue before submitting a DeleteJobQueue request." "All jobs in the queue are eventually
+// terminated when you delete a job queue": substrate ends them at delete time (#1422); see
+// batch_submit.go.
 func (p *BatchPlugin) deleteJobQueue(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		JobQueue string `json:"jobQueue"`
@@ -269,6 +271,9 @@ func (p *BatchPlugin) deleteJobQueue(ctx *RequestContext, req *AWSRequest) (*AWS
 			"job queue %s must be DISABLED before it can be deleted; its state is %s", name, queue.State))
 	}
 	if err := p.deleteBatchRecord(ctx, "job-queue", name); err != nil {
+		return nil, err
+	}
+	if err := p.failQueueJobs(ctx, name); err != nil {
 		return nil, err
 	}
 	return batchJSONResponse(http.StatusOK, map[string]string{})

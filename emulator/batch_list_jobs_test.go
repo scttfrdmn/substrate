@@ -134,6 +134,7 @@ func listJobsRefused(t *testing.T, ts *httptest.Server, body interface{}) string
 // submitBatchJob submits one job and returns its ID.
 func submitBatchJob(t *testing.T, ts *httptest.Server, name, queue, definition string) string {
 	t.Helper()
+	batchEnsureSubmittable(t, batchHTTPPoster(t, ts), queue, definition)
 	resp := batchRequest(t, ts, http.MethodPost, "/v1/submitjob", map[string]string{
 		"jobName":       name,
 		"jobQueue":      queue,
@@ -501,6 +502,7 @@ func TestBatchListJobs_SummaryCarriesEveryMemberSubstrateHasARecordFor(t *testin
 
 	// Submitted inline, so the ARN asserted below is the one SubmitJob itself returned rather than
 	// one the test rebuilt from a hardcoded account.
+	batchEnsureSubmittable(t, batchHTTPPoster(t, ts), "q1", "jd1:2")
 	submitted := batchRequest(t, ts, http.MethodPost, "/v1/submitjob", map[string]string{
 		"jobName": "job-a", "jobQueue": "q1", "jobDefinition": "jd1:2",
 	})

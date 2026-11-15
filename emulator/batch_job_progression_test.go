@@ -44,6 +44,7 @@ func batchCall(t *testing.T, ts *emulator.TestServer, path string, body any) (in
 // batchSubmit submits a job and returns its ID.
 func batchSubmit(t *testing.T, ts *emulator.TestServer, name string) string {
 	t.Helper()
+	batchEnsureSubmittable(t, batchTestServerPoster(t, ts), "progress-queue", "progress-def")
 	status, body := batchCall(t, ts, "/v1/submitjob", map[string]any{
 		"jobName": name, "jobQueue": "progress-queue", "jobDefinition": "progress-def",
 	})
@@ -330,6 +331,7 @@ func TestBatchJobProgression_AStoreFaultIsAnError(t *testing.T) {
 					Headers: map[string]string{"Content-Type": "application/json"}, Params: map[string]string{},
 				})
 			}
+			batchEnsureSubmittable(t, batchPluginPoster(t, p, ctx), "q", "d")
 			resp, err := call("/v1/submitjob", map[string]any{"jobName": "f", "jobQueue": "q", "jobDefinition": "d"})
 			require.NoError(t, err)
 			var sub struct {
