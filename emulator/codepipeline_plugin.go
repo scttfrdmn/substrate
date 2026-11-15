@@ -108,6 +108,9 @@ func (p *CodePipelinePlugin) createPipeline(reqCtx *RequestContext, req *AWSRequ
 	if err := p.state.Put(goCtx, codepipelineNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codepipeline createPipeline put: %w", err)
 	}
+	if err := p.putPipelineVersion(goCtx, pipeline); err != nil {
+		return nil, err
+	}
 	if err := updateStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Pipeline.Name); err != nil {
 		return nil, fmt.Errorf("codepipeline createPipeline index: %w", err)
 	}
@@ -130,7 +133,7 @@ func (p *CodePipelinePlugin) createPipeline(reqCtx *RequestContext, req *AWSRequ
 func (p *CodePipelinePlugin) getPipeline(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		Name    string `json:"name"`
-		Version int    `json:"version"`
+		Version *int   `json:"version"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -141,6 +144,14 @@ func (p *CodePipelinePlugin) getPipeline(reqCtx *RequestContext, req *AWSRequest
 	pipeline, err := p.loadPipeline(reqCtx.AccountID, reqCtx.Region, input.Name)
 	if err != nil {
 		return nil, err
+	}
+	// An absent version is the current one; any other is read from the version history (#1160). See
+	// codepipeline_versions.go.
+	if input.Version != nil {
+		pipeline, err = p.loadPipelineVersion(context.Background(), pipeline, *input.Version)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
@@ -196,6 +207,9 @@ func (p *CodePipelinePlugin) updatePipeline(reqCtx *RequestContext, req *AWSRequ
 	if err := p.state.Put(goCtx, codepipelineNamespace, key, data); err != nil {
 		return nil, fmt.Errorf("codepipeline updatePipeline put: %w", err)
 	}
+	if err := p.putPipelineVersion(goCtx, *pipeline); err != nil {
+		return nil, err
+	}
 
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{
 		"pipeline": map[string]interface{}{
@@ -217,7 +231,8 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 		}
 	}
 
-	if _, err := p.loadPipeline(reqCtx.AccountID, reqCtx.Region, input.Name); err != nil {
+	pipeline, err := p.loadPipeline(reqCtx.AccountID, reqCtx.Region, input.Name)
+	if err != nil {
 		return nil, err
 	}
 
@@ -225,6 +240,9 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 	key := codepipelineKey(reqCtx.AccountID, reqCtx.Region, input.Name)
 	if err := p.state.Delete(goCtx, codepipelineNamespace, key); err != nil {
 		return nil, fmt.Errorf("codepipeline deletePipeline delete: %w", err)
+	}
+	if err := p.deletePipelineVersions(goCtx, pipeline); err != nil {
+		return nil, err
 	}
 	if err := removeFromStringIndex(goCtx, p.state, codepipelineNamespace, codepipelineNamesKey(reqCtx.AccountID, reqCtx.Region), input.Name); err != nil {
 		return nil, fmt.Errorf("codepipeline deletePipeline index: %w", err)
@@ -352,6 +370,17 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 		}
 	}
 
+	// Both members are Required: Yes on API_GetPipelineExecution, and an absent one is refused before
+	// any lookup (#1160) with the ValidationException that page publishes. Before, an absent
+	// pipelineName skipped the ownership check below, so any execution answered 200 to a request that
+	// named no pipeline; an absent pipelineExecutionId was looked up as the empty ID.
+	if input.PipelineName == "" {
+		return nil, codepipelineMissingMember("pipelineName")
+	}
+	if input.PipelineExecutionID == "" {
+		return nil, codepipelineMissingMember("pipelineExecutionId")
+	}
+
 	goCtx := context.Background()
 	key := codepipelineExecKey(reqCtx.AccountID, reqCtx.Region, input.PipelineExecutionID)
 	data, err := p.state.Get(goCtx, codepipelineNamespace, key)
@@ -368,7 +397,7 @@ func (p *CodePipelinePlugin) getPipelineExecution(reqCtx *RequestContext, req *A
 	}
 	// API_GetPipelineExecution glosses the code as covering "an execution ID does not belong to the
 	// specified pipeline", and executions are keyed by ID alone, so the pipeline is checked here.
-	if input.PipelineName != "" && exec.PipelineName != input.PipelineName {
+	if exec.PipelineName != input.PipelineName {
 		return nil, codepipelineExecutionNotFound(input.PipelineExecutionID)
 	}
 
