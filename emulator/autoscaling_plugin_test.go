@@ -153,6 +153,7 @@ type asgInstanceOut struct {
 	Protected      bool   `xml:"ProtectedFromScaleIn"`
 	LTID           string `xml:"LaunchTemplate>LaunchTemplateId"`
 	LTVersion      string `xml:"LaunchTemplate>Version"`
+	Weighted       string `xml:"WeightedCapacity"`
 }
 
 type asgGroupOut struct {
@@ -179,7 +180,8 @@ type asgGroupOut struct {
 		OnDemandPct                int    `xml:"OnDemandPercentageAboveBaseCapacity"`
 		SpotAllocationStrategy     string `xml:"SpotAllocationStrategy"`
 	} `xml:"MixedInstancesPolicy>InstancesDistribution"`
-	VCpuMin string `xml:"MixedInstancesPolicy>LaunchTemplate>Overrides>member>InstanceRequirements>VCpuCount>Min"`
+	VCpuMin      string `xml:"MixedInstancesPolicy>LaunchTemplate>Overrides>member>InstanceRequirements>VCpuCount>Min"`
+	CapacityType string `xml:"DesiredCapacityType"`
 }
 
 type asgDescribeGroupsOut struct {

@@ -221,6 +221,7 @@ func (p *AutoScalingPlugin) describeAutoScalingInstances(reqCtx *RequestContext,
 				LaunchTemplate:       asgSpecXML(&lt),
 				ImageID:              inst.ImageID,
 				ProtectedFromScaleIn: inst.ProtectedFromScaleIn,
+				WeightedCapacity:     asgWeightedCapacityXML(g, &inst),
 			})
 		}
 	}
@@ -393,6 +394,7 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 	} else if g, err = p.requireGroup(reqCtx, req); err != nil {
 		return nil, err
 	}
+	g.refreshWeights()
 	members := make([]AutoScalingInstance, 0, len(ids))
 	for _, id := range ids {
 		idx := g.instanceIndex(id)
@@ -401,7 +403,13 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 		}
 		members = append(members, g.Instances[idx])
 	}
-	if decrement && g.DesiredCapacity-len(ids) < g.MinSize {
+	// A decrement lowers desired by each instance's weight — its capacity units — never below
+	// zero; for an unweighted group that is one per instance.
+	decremented := g.DesiredCapacity
+	for i := range members {
+		decremented = max(decremented-members[i].weightOf(), 0)
+	}
+	if decrement && decremented < g.MinSize {
 		// Observed wording.
 		return nil, asgValidationError("Currently, desiredSize equals minSize (%d). Terminating instance without replacement will violate group's min size constraint. Either set shouldDecrementDesiredCapacity flag to false or lower group's min size.", g.MinSize)
 	}
@@ -417,15 +425,15 @@ func (p *AutoScalingPlugin) terminateInstanceInAutoScalingGroup(reqCtx *RequestC
 	for _, inst := range members {
 		id := inst.InstanceID
 		idx := g.instanceIndex(id)
-		from := len(g.Instances)
+		from := g.capacity()
 		g.Instances = append(g.Instances[:idx:idx], g.Instances[idx+1:]...)
 		now := asgCauseTime(p.tc.Now())
 		cause := "At " + now + " instance " + id + " was taken out of service in response to a user request."
 		if decrement {
-			g.DesiredCapacity--
+			g.DesiredCapacity = max(g.DesiredCapacity-inst.weightOf(), 0)
 			// The published sample: "…in response to a user request, shrinking the capacity
-			// from 4 to 3."
-			cause = fmt.Sprintf("At %s instance %s was taken out of service in response to a user request, shrinking the capacity from %d to %d.", now, id, from, from-1)
+			// from 4 to 3." The capacity is in the group's units.
+			cause = fmt.Sprintf("At %s instance %s was taken out of service in response to a user request, shrinking the capacity from %d to %d.", now, id, from, g.capacity())
 		}
 		a, err := p.record(reqCtx, g, "Successful", "Terminating EC2 instance: "+id, cause,
 			asgDetails(inst.AvailabilityZone, inst.SubnetID), "")

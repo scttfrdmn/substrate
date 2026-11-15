@@ -208,6 +208,9 @@ func asgApplyMixedInstancesPolicy(params map[string]string, base *AutoScalingMix
 			}
 			m.Overrides = append(m.Overrides, ov)
 		}
+		if awsErr := asgCheckWeights(m.Overrides); awsErr != nil {
+			return nil, awsErr
+		}
 	}
 
 	const dist = root + "InstancesDistribution."
