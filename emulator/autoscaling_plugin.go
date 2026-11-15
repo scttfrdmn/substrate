@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -155,44 +154,18 @@ func (p *AutoScalingPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 
 // --- Response envelope -------------------------------------------------------
 
-// asgResponseEnvelope is the document every Auto Scaling response is: the result, when the
-// operation has one, then the published ResponseMetadata.
-//
-// The result is a pointer so an operation whose botocore output shape is absent —
-// CreateAutoScalingGroup, UpdateAutoScalingGroup, DeleteAutoScalingGroup,
-// SetDesiredCapacity, Suspend/ResumeProcesses, CreateOrUpdateTags and DeleteTags — answers
-// with no `{Operation}Result` element at all, while SetInstanceProtection, whose output
-// shape is the memberless SetInstanceProtectionAnswer under a resultWrapper, answers with
-// an empty one. The two are not interchangeable: botocore looks the wrapper up by name for
-// the second class only. [elbResultElement] carries the element name for the same reason
-// it does in ELB.
-type asgResponseEnvelope struct {
-	XMLName          xml.Name
-	XMLNS            string `xml:"xmlns,attr"`
-	Result           *elbResultElement
-	ResponseMetadata responseMetadata `xml:"ResponseMetadata"`
-}
-
 // asgOKResponse answers an operation with result under `<{operation}Result>` and the
 // metadata carrying the context's request ID, so a replay renders identical bytes.
+//
+// The document is the shared awsQuery one, [queryOKResponse]. A nil result omits the result
+// element, which is the class for an operation whose botocore output shape is absent —
+// CreateAutoScalingGroup, UpdateAutoScalingGroup, DeleteAutoScalingGroup,
+// SetDesiredCapacity, Suspend/ResumeProcesses, CreateOrUpdateTags and DeleteTags — while
+// SetInstanceProtection, whose output shape is the memberless SetInstanceProtectionAnswer
+// under a resultWrapper, answers with an empty one. The two are not interchangeable:
+// botocore looks the wrapper up by name for the second class only.
 func asgOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
-	env := asgResponseEnvelope{
-		XMLName:          xml.Name{Local: operation + "Response"},
-		XMLNS:            autoscalingXMLNS,
-		ResponseMetadata: responseMetadata{RequestID: reqCtx.RequestID},
-	}
-	if result != nil {
-		env.Result = &elbResultElement{name: operation + "Result", value: result}
-	}
-	body, err := xml.Marshal(env)
-	if err != nil {
-		return nil, fmt.Errorf("autoscaling xml marshal %s: %w", operation, err)
-	}
-	return &AWSResponse{
-		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
+	return queryOKResponse(reqCtx, operation, autoscalingXMLNS, result)
 }
 
 // asgNoResultResponse answers an operation whose botocore model declares no output shape.

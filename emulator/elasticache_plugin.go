@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -145,15 +144,7 @@ func (p *ElastiCachePlugin) createCacheCluster(reqCtx *RequestContext, req *AWSR
 	type result struct {
 		CacheCluster xmlCacheClusterItem `xml:"CacheCluster"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateCacheClusterResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateCacheClusterResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheCluster: cacheClusterToXML(cluster)},
-	})
+	return elasticacheOKResponse(reqCtx, "CreateCacheCluster", result{CacheCluster: cacheClusterToXML(cluster)})
 }
 
 func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -205,17 +196,9 @@ func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *A
 		CacheClusters []xmlCacheClusterItem `xml:"CacheClusters>CacheCluster"`
 		Marker        string                `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeCacheClustersResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeCacheClustersResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS: elasticacheXMLNS,
-		Result: result{
-			CacheClusters: page,
-			Marker:        nextMarker,
-		},
+	return elasticacheOKResponse(reqCtx, "DescribeCacheClusters", result{
+		CacheClusters: page,
+		Marker:        nextMarker,
 	})
 }
 
@@ -259,15 +242,7 @@ func (p *ElastiCachePlugin) modifyCacheCluster(reqCtx *RequestContext, req *AWSR
 	type result struct {
 		CacheCluster xmlCacheClusterItem `xml:"CacheCluster"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"ModifyCacheClusterResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ModifyCacheClusterResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheCluster: cacheClusterToXML(cluster)},
-	})
+	return elasticacheOKResponse(reqCtx, "ModifyCacheCluster", result{CacheCluster: cacheClusterToXML(cluster)})
 }
 
 func (p *ElastiCachePlugin) deleteCacheCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -298,15 +273,7 @@ func (p *ElastiCachePlugin) deleteCacheCluster(reqCtx *RequestContext, req *AWSR
 	type result struct {
 		CacheCluster xmlCacheClusterItem `xml:"CacheCluster"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteCacheClusterResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DeleteCacheClusterResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheCluster: cacheClusterToXML(cluster)},
-	})
+	return elasticacheOKResponse(reqCtx, "DeleteCacheCluster", result{CacheCluster: cacheClusterToXML(cluster)})
 }
 
 // --- Replication Group operations ---
@@ -358,15 +325,7 @@ func (p *ElastiCachePlugin) createReplicationGroup(reqCtx *RequestContext, req *
 	type result struct {
 		ReplicationGroup xmlReplicationGroupItem `xml:"ReplicationGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateReplicationGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateReplicationGroupResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{ReplicationGroup: replicationGroupToXML(rg)},
-	})
+	return elasticacheOKResponse(reqCtx, "CreateReplicationGroup", result{ReplicationGroup: replicationGroupToXML(rg)})
 }
 
 func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -423,17 +382,9 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 		ReplicationGroups []xmlReplicationGroupItem `xml:"ReplicationGroups>ReplicationGroup"`
 		Marker            string                    `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeReplicationGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeReplicationGroupsResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS: elasticacheXMLNS,
-		Result: result{
-			ReplicationGroups: page,
-			Marker:            nextMarker,
-		},
+	return elasticacheOKResponse(reqCtx, "DescribeReplicationGroups", result{
+		ReplicationGroups: page,
+		Marker:            nextMarker,
 	})
 }
 
@@ -483,15 +434,7 @@ func (p *ElastiCachePlugin) modifyReplicationGroup(reqCtx *RequestContext, req *
 	type result struct {
 		ReplicationGroup xmlReplicationGroupItem `xml:"ReplicationGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"ModifyReplicationGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ModifyReplicationGroupResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{ReplicationGroup: replicationGroupToXML(rg)},
-	})
+	return elasticacheOKResponse(reqCtx, "ModifyReplicationGroup", result{ReplicationGroup: replicationGroupToXML(rg)})
 }
 
 func (p *ElastiCachePlugin) deleteReplicationGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -522,15 +465,7 @@ func (p *ElastiCachePlugin) deleteReplicationGroup(reqCtx *RequestContext, req *
 	type result struct {
 		ReplicationGroup xmlReplicationGroupItem `xml:"ReplicationGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteReplicationGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DeleteReplicationGroupResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{ReplicationGroup: replicationGroupToXML(rg)},
-	})
+	return elasticacheOKResponse(reqCtx, "DeleteReplicationGroup", result{ReplicationGroup: replicationGroupToXML(rg)})
 }
 
 // --- Cache Subnet Group operations ---
@@ -564,15 +499,7 @@ func (p *ElastiCachePlugin) createCacheSubnetGroup(reqCtx *RequestContext, req *
 	type result struct {
 		CacheSubnetGroup xmlCacheSubnetGroupItem `xml:"CacheSubnetGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateCacheSubnetGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateCacheSubnetGroupResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheSubnetGroup: cacheSubnetGroupToXML(sg)},
-	})
+	return elasticacheOKResponse(reqCtx, "CreateCacheSubnetGroup", result{CacheSubnetGroup: cacheSubnetGroupToXML(sg)})
 }
 
 func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -627,17 +554,9 @@ func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, re
 		CacheSubnetGroups []xmlCacheSubnetGroupItem `xml:"CacheSubnetGroups>CacheSubnetGroup"`
 		Marker            string                    `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeCacheSubnetGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeCacheSubnetGroupsResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS: elasticacheXMLNS,
-		Result: result{
-			CacheSubnetGroups: page,
-			Marker:            nextMarker,
-		},
+	return elasticacheOKResponse(reqCtx, "DescribeCacheSubnetGroups", result{
+		CacheSubnetGroups: page,
+		Marker:            nextMarker,
 	})
 }
 
@@ -654,11 +573,7 @@ func (p *ElastiCachePlugin) deleteCacheSubnetGroup(reqCtx *RequestContext, req *
 		return nil, fmt.Errorf("elasticache deleteCacheSubnetGroup removeFromIndex: %w", err)
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"DeleteCacheSubnetGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{XMLNS: elasticacheXMLNS})
+	return elasticacheOKResponse(reqCtx, "DeleteCacheSubnetGroup", nil)
 }
 
 // --- Cache Parameter Group operations ---
@@ -692,15 +607,7 @@ func (p *ElastiCachePlugin) createCacheParameterGroup(reqCtx *RequestContext, re
 	type result struct {
 		CacheParameterGroup xmlCacheParameterGroupItem `xml:"CacheParameterGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateCacheParameterGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateCacheParameterGroupResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{CacheParameterGroup: cacheParameterGroupToXML(pg)},
-	})
+	return elasticacheOKResponse(reqCtx, "CreateCacheParameterGroup", result{CacheParameterGroup: cacheParameterGroupToXML(pg)})
 }
 
 func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -755,17 +662,9 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 		CacheParameterGroups []xmlCacheParameterGroupItem `xml:"CacheParameterGroups>CacheParameterGroup"`
 		Marker               string                       `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeCacheParameterGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeCacheParameterGroupsResult"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS: elasticacheXMLNS,
-		Result: result{
-			CacheParameterGroups: page,
-			Marker:               nextMarker,
-		},
+	return elasticacheOKResponse(reqCtx, "DescribeCacheParameterGroups", result{
+		CacheParameterGroups: page,
+		Marker:               nextMarker,
 	})
 }
 
@@ -782,16 +681,12 @@ func (p *ElastiCachePlugin) deleteCacheParameterGroup(reqCtx *RequestContext, re
 		return nil, fmt.Errorf("elasticache deleteCacheParameterGroup removeFromIndex: %w", err)
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"DeleteCacheParameterGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{XMLNS: elasticacheXMLNS})
+	return elasticacheOKResponse(reqCtx, "DeleteCacheParameterGroup", nil)
 }
 
 // --- Tagging operations ---
 
-func (p *ElastiCachePlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *ElastiCachePlugin) listTagsForResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
@@ -800,69 +695,73 @@ func (p *ElastiCachePlugin) listTagsForResource(_ *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, err
 	}
-
-	type xmlTag struct {
-		Key   string `xml:"Key"`
-		Value string `xml:"Value"`
-	}
-	type result struct {
-		TagList []xmlTag `xml:"TagList>Tag"`
-	}
-	type response struct {
-		XMLName xml.Name `xml:"ListTagsForResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ListTagsForResourceResult"`
-	}
-	xmlTags := make([]xmlTag, 0, len(tags))
-	for k, v := range tags {
-		xmlTags = append(xmlTags, xmlTag{Key: k, Value: v})
-	}
-	// Ranging the map put Go's map order into TagList, so two identical calls could report one
-	// cluster's tags in a different order (#1011). This is the site #946 missed when it swept the
-	// per-service tag listings: ElastiCache stores its tags as a map[string]string like Kinesis and
-	// S3 do, but it renders them through XML rather than JSON, so it fell outside that sweep's shape.
-	//
-	// API_ListTagsForResource describes TagList.Tag.N only as "A list of tags as key-value pairs" and
-	// publishes no cursor, so unlike Kinesis's ExclusiveStartTagKey there is nothing here implying an
-	// order. Lexicographic by key is substrate's reading, resting on the replay promise — see
-	// docs/services.md.
-	sortTagsByKey(xmlTags, func(t xmlTag) string { return t.Key })
-	return elasticacheXMLResponse(http.StatusOK, response{
-		XMLNS:  elasticacheXMLNS,
-		Result: result{TagList: xmlTags},
-	})
+	return elasticacheOKResponse(reqCtx, "ListTagsForResource", elasticacheTagListResult(tags))
 }
 
-func (p *ElastiCachePlugin) addTagsToResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// elasticacheTagListXML is one member of a `TagListMessage`'s `TagList`.
+type elasticacheTagListXML struct {
+	Key   string `xml:"Key"`
+	Value string `xml:"Value"`
+}
+
+// elasticacheTagListMessage is the published `TagListMessage`: the output of ListTagsForResource,
+// AddTagsToResource and RemoveTagsFromResource alike.
+type elasticacheTagListMessage struct {
+	TagList []elasticacheTagListXML `xml:"TagList>Tag"`
+}
+
+// elasticacheTagListResult renders a resource's tags as a `TagListMessage`.
+//
+// Ranging the map put Go's map order into TagList, so two identical calls could report one
+// cluster's tags in a different order (#1011). This is the site #946 missed when it swept the
+// per-service tag listings: ElastiCache stores its tags as a map[string]string like Kinesis and
+// S3 do, but it renders them through XML rather than JSON, so it fell outside that sweep's shape.
+//
+// API_ListTagsForResource describes TagList.Tag.N only as "A list of tags as key-value pairs" and
+// publishes no cursor, so unlike Kinesis's ExclusiveStartTagKey there is nothing here implying an
+// order. Lexicographic by key is substrate's reading, resting on the replay promise — see
+// docs/services.md.
+func elasticacheTagListResult(tags map[string]string) elasticacheTagListMessage {
+	xmlTags := make([]elasticacheTagListXML, 0, len(tags))
+	for k, v := range tags {
+		xmlTags = append(xmlTags, elasticacheTagListXML{Key: k, Value: v})
+	}
+	sortTagsByKey(xmlTags, func(t elasticacheTagListXML) string { return t.Key })
+	return elasticacheTagListMessage{TagList: xmlTags}
+}
+
+// addTagsToResource merges the request's tags into the resource's and answers the resulting list.
+//
+// API_AddTagsToResource publishes one response element, `TagList.Tag.N` — the output shape is
+// `TagListMessage`, the same as ListTagsForResource's — so unlike RDS's operation of the same name,
+// whose sample response carries no result element, ElastiCache's answers the resource's tags after
+// the change. Until #1242 it answered an empty document.
+func (p *ElastiCachePlugin) addTagsToResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	newTags := elasticacheTagsFromParams(req.Params)
-	if err := p.updateTagsByARN(resourceARN, newTags, nil); err != nil {
+	tags, err := p.updateTagsByARN(resourceARN, newTags, nil)
+	if err != nil {
 		return nil, err
 	}
-	type response struct {
-		XMLName xml.Name `xml:"AddTagsToResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{XMLNS: elasticacheXMLNS})
+	return elasticacheOKResponse(reqCtx, "AddTagsToResource", elasticacheTagListResult(tags))
 }
 
-func (p *ElastiCachePlugin) removeTagsFromResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// removeTagsFromResource removes the named keys and answers the resource's remaining tags, which is
+// what API_RemoveTagsFromResource's one response element, `TagList.Tag.N`, publishes.
+func (p *ElastiCachePlugin) removeTagsFromResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	keys := extractIndexedParams(req.Params, "TagKeys.member")
-	if err := p.updateTagsByARN(resourceARN, nil, keys); err != nil {
+	tags, err := p.updateTagsByARN(resourceARN, nil, keys)
+	if err != nil {
 		return nil, err
 	}
-	type response struct {
-		XMLName xml.Name `xml:"RemoveTagsFromResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return elasticacheXMLResponse(http.StatusOK, response{XMLNS: elasticacheXMLNS})
+	return elasticacheOKResponse(reqCtx, "RemoveTagsFromResource", elasticacheTagListResult(tags))
 }
 
 // loadTagsByARN resolves an ElastiCache ARN and returns the resource's tags.
@@ -872,32 +771,44 @@ func (p *ElastiCachePlugin) loadTagsByARN(arn string) (map[string]string, error)
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	data, err := p.state.Get(context.Background(), elasticacheNamespace, key)
-	if err != nil || data == nil {
+	if err != nil {
+		return nil, fmt.Errorf("elasticache loadTagsByARN get %s: %w", key, err)
+	}
+	if data == nil {
 		return nil, &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
 	}
 	var res struct {
 		Tags map[string]string `json:"Tags"`
 	}
-	if json.Unmarshal(data, &res) != nil {
-		return nil, nil //nolint:nilerr
+	// Reported rather than swallowed, as RDS's twin does: a store fault answered 404 and a record that
+	// would not decode answered an empty TagList, each indistinguishable from a real answer.
+	if err := json.Unmarshal(data, &res); err != nil {
+		return nil, fmt.Errorf("elasticache loadTagsByARN unmarshal %s: %w", key, err)
 	}
 	return res.Tags, nil
 }
 
-// updateTagsByARN merges or removes tags on the resource identified by arn.
-func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, removeKeys []string) error {
+// updateTagsByARN merges or removes tags on the resource identified by arn and returns the tag set
+// it wrote.
+//
+// The set is returned rather than re-read so a tag mutation's TagList is the one this request wrote:
+// a read after the Put could report tags another request wrote in between (#1242).
+func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, removeKeys []string) (map[string]string, error) {
 	_, key, err := elasticacheResolveARN(arn)
 	if err != nil {
-		return &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
+		return nil, &AWSError{Code: "InvalidParameterValue", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	data, err := p.state.Get(context.Background(), elasticacheNamespace, key)
-	if err != nil || data == nil {
-		return &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
+	if err != nil {
+		return nil, fmt.Errorf("elasticache updateTagsByARN get %s: %w", key, err)
+	}
+	if data == nil {
+		return nil, &AWSError{Code: "CacheClusterNotFound", Message: "Resource not found: " + arn, HTTPStatus: http.StatusNotFound}
 	}
 
 	var m map[string]interface{}
 	if err := json.Unmarshal(data, &m); err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN unmarshal: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN unmarshal: %w", err)
 	}
 	existingTags := map[string]string{}
 	if t, ok := m["Tags"]; ok && t != nil {
@@ -910,15 +821,18 @@ func (p *ElastiCachePlugin) updateTagsByARN(arn string, add map[string]string, r
 		}
 	}
 	if err := taggingStampRecordAnyEverTagged(m, len(existingTags), len(add)); err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN: %w", err)
 	}
 	merged := mergeStringMap(existingTags, add, removeKeys)
 	m["Tags"] = merged
 	updated, err := json.Marshal(m)
 	if err != nil {
-		return fmt.Errorf("elasticache updateTagsByARN marshal: %w", err)
+		return nil, fmt.Errorf("elasticache updateTagsByARN marshal: %w", err)
 	}
-	return p.state.Put(context.Background(), elasticacheNamespace, key, updated)
+	if err := p.state.Put(context.Background(), elasticacheNamespace, key, updated); err != nil {
+		return nil, fmt.Errorf("elasticache updateTagsByARN put %s: %w", key, err)
+	}
+	return merged, nil
 }
 
 // --- State helpers ---
@@ -1065,15 +979,12 @@ func elasticacheTagsFromParams(params map[string]string) map[string]string {
 	return tags
 }
 
-// elasticacheXMLResponse serializes v to XML and wraps it in an AWSResponse.
-func elasticacheXMLResponse(status int, v interface{}) (*AWSResponse, error) {
-	body, err := xml.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("elasticache xml marshal: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
+// elasticacheOKResponse answers an ElastiCache operation in the awsQuery success document, under
+// [elasticacheXMLNS] with the published `ResponseMetadata` carrying the request's own ID (#1242).
+//
+// result is the operation's result struct. Pass nil for an operation whose page publishes no result
+// element — `DeleteCacheSubnetGroup` and `DeleteCacheParameterGroup`, whose sample responses are the
+// root and the metadata alone; see `query_envelope.go` for why that is not the same as an empty one.
+func elasticacheOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
+	return queryOKResponse(reqCtx, operation, elasticacheXMLNS, result)
 }

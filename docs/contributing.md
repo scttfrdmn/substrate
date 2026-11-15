@@ -204,9 +204,10 @@ Each plugin owns its wire encoding, so start from the closest existing one rathe
 from scratch.
 
 - **awsQuery (XML) services** — copy ELB. `elb_plugin.go` dispatches on
-  `req.Operation` with `unknownActionError` as the default; `elb_response_envelope.go`
-  (`elbOKResponse`, `elbEmptyOKResponse`) writes the `<{Op}Response>` envelope with
-  `ResponseMetadata` carrying `reqCtx.RequestID`. Read `member.N` lists with
+  `req.Operation` with `unknownActionError` as the default; `query_envelope.go`
+  (`queryOKResponse`) writes the `<{Op}Response>` envelope with `ResponseMetadata` carrying
+  `reqCtx.RequestID` for every awsQuery plugin. Pass `nil` as the result for an operation whose
+  page shows no result element, and an empty struct for one whose page shows it empty. Read `member.N` lists with
   `extractIndexedParams` (`ec2_plugin.go`) and structs with `iamMemberList`,
   `iamMemberStructs` and `iamMemberTags` (`iam_query.go`). Errors are plain `*AWSError`
   values; the shared Query writer (`marshalAWSError` in `error_protocol.go`) emits the

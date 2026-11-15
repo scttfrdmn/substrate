@@ -938,7 +938,7 @@ func (p *ELBPlugin) describeTags(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 			Tags:        elbTagItems(res.tags),
 		})
 	}
-	return elbOKResponse(reqCtx, "DescribeTags", elbXMLNS, result)
+	return queryOKResponse(reqCtx, "DescribeTags", elbXMLNS, result)
 }
 
 // elbTagItem is the XML representation of one ELB tag.

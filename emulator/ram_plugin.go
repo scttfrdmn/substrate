@@ -20,6 +20,11 @@ type RAMPlugin struct {
 	// indexMu serializes read-modify-writes of the share-ARN index: a create adds to it while a read
 	// may prune an expired share from it, and StateManager has no compare-and-swap (#1171).
 	indexMu sync.Mutex
+	// scopeMu serializes every share writer per account and Region — the clientToken lookup, check
+	// and write of CreateResourceShare and DeleteResourceShare, and the load-modify-Put of Update,
+	// Associate and DisassociateResourceShare (#1170). It is always taken before indexMu, never while
+	// holding it.
+	scopeMu ramScopeMutex
 }
 
 // Name returns the service name "ram".
@@ -72,6 +77,7 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	var input struct {
 		Name                    string   `json:"name"`
 		AllowExternalPrincipals bool     `json:"allowExternalPrincipals"`
+		ClientToken             string   `json:"clientToken"`
 		Principals              []string `json:"principals"`
 		ResourceArns            []string `json:"resourceArns"`
 		Tags                    []RAMTag `json:"tags"`
@@ -84,10 +90,38 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if input.Name == "" {
 		return nil, ramMissingParameter("name is required")
 	}
+	params, err := ramCanonicalCreateParams(req.Body)
+	if err != nil {
+		return nil, err
+	}
 
 	goCtx := context.Background()
+	// The token scan, the check and the write are one step; see ram_idempotency.go (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
+	token := input.ClientToken
+	if token != "" {
+		prior, err := p.findShareByClientToken(goCtx, reqCtx.AccountID, reqCtx.Region, token)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			if prior.CreateParams != params {
+				return nil, ramIdempotentParameterMismatch()
+			}
+			return ramJSONResponse(http.StatusOK, map[string]interface{}{
+				"clientToken":   token,
+				"resourceShare": ramResourceShareToWire(*prior),
+			})
+		}
+	}
+
 	now := p.tc.Now()
 	shareArn := fmt.Sprintf("arn:aws:ram:%s:%s:resource-share/%s", reqCtx.Region, reqCtx.AccountID, generateRAMShareID(reqCtx.IDs))
+	if token == "" {
+		// Minted after the share ID, so a recording made before #1170 replays to the same ARN.
+		token = reqCtx.IDs.UUID()
+	}
 	share := RAMResourceShare{
 		ResourceShareArn:        shareArn,
 		Name:                    input.Name,
@@ -101,6 +135,8 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 		LastUpdatedTime:         now,
 		AccountID:               reqCtx.AccountID,
 		Region:                  reqCtx.Region,
+		ClientToken:             token,
+		CreateParams:            params,
 	}
 	if share.Principals == nil {
 		share.Principals = []string{}
@@ -116,6 +152,9 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, shareArn), d); err != nil {
 		return nil, fmt.Errorf("ram createResourceShare put: %w", err)
 	}
+	if err := p.putTokenEntry(goCtx, ramClientTokenKey(reqCtx.AccountID, reqCtx.Region, token), shareArn); err != nil {
+		return nil, err
+	}
 	p.indexMu.Lock()
 	defer p.indexMu.Unlock()
 	if err := updateStringIndex(goCtx, p.state, ramNamespace, ramShareArnsKey(reqCtx.AccountID, reqCtx.Region), shareArn); err != nil {
@@ -123,16 +162,22 @@ func (p *RAMPlugin) createResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
+		"clientToken":   token,
 		"resourceShare": ramResourceShareToWire(share),
 	})
 }
 
 func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// permissionArn and permissionVersion are accepted and ignored: substrate attaches no managed
+	// permission to a share, so there is nothing to filter on (#1542).
 	var input struct {
-		Name                string   `json:"name"`
-		ResourceOwner       string   `json:"resourceOwner"`
-		ResourceShareArns   []string `json:"resourceShareArns"`
-		ResourceShareStatus string   `json:"resourceShareStatus"`
+		MaxResults          *int           `json:"maxResults"`
+		Name                string         `json:"name"`
+		NextToken           string         `json:"nextToken"`
+		ResourceOwner       string         `json:"resourceOwner"`
+		ResourceShareArns   []string       `json:"resourceShareArns"`
+		ResourceShareStatus string         `json:"resourceShareStatus"`
+		TagFilters          []ramTagFilter `json:"tagFilters"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
@@ -148,6 +193,13 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 	if input.ResourceShareStatus != "" && !slices.Contains(ramShareStatuses, input.ResourceShareStatus) {
 		return nil, ramInvalidParameter("resourceShareStatus must be one of " +
 			strings.Join(ramShareStatuses, ", ") + ", was " + input.ResourceShareStatus)
+	}
+	if err := ramValidateTagFilters(input.TagFilters); err != nil {
+		return nil, err
+	}
+	cursor, err := ramReadShareCursor(input.MaxResults, input.NextToken, reqCtx.AccountID, reqCtx.Region)
+	if err != nil {
+		return nil, err
 	}
 
 	shares := make([]ramResourceShareOut, 0)
@@ -166,13 +218,21 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 			if input.ResourceShareStatus != "" && share.Status != input.ResourceShareStatus {
 				continue
 			}
+			if !ramMatchesTagFilters(input.TagFilters, share.Tags) {
+				continue
+			}
 			shares = append(shares, ramResourceShareToWire(share))
 		}
 	}
-
-	return ramJSONResponse(http.StatusOK, map[string]interface{}{
-		"resourceShares": shares,
-	})
+	// The cursor is a value in ARN order, so the listing is put in that order here rather than relying
+	// on the index's; see ram_pagination.go (#1542).
+	slices.SortFunc(shares, func(a, b ramResourceShareOut) int { return strings.Compare(a.ResourceShareArn, b.ResourceShareArn) })
+	page, next := ramPageShares(shares, cursor)
+	out := map[string]interface{}{"resourceShares": page}
+	if next != "" {
+		out["nextToken"] = next
+	}
+	return ramJSONResponse(http.StatusOK, out)
 }
 
 func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -186,6 +246,11 @@ func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest)
 			return nil, ramInvalidBody()
 		}
 	}
+
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
@@ -219,15 +284,43 @@ func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest)
 func (p *RAMPlugin) deleteResourceShare(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ResourceShareArn string `json:"resourceShareArn"`
+		ClientToken      string `json:"clientToken"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, ramInvalidBody()
 		}
 	}
-	// Also check query params (DELETE requests may pass ARN as query param).
+	// API_DeleteResourceShare publishes both members as URI query parameters; a POST body is read too.
 	if input.ResourceShareArn == "" {
 		input.ResourceShareArn = req.Params["resourceShareArn"]
+	}
+	if input.ClientToken == "" {
+		input.ClientToken = req.Params["clientToken"]
+	}
+	if input.ResourceShareArn == "" {
+		return nil, ramMissingParameter("resourceShareArn is required")
+	}
+
+	goCtx := context.Background()
+	// The token scan, the check and the write are one step; see ram_idempotency.go (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
+	token := input.ClientToken
+	if token != "" {
+		prior, err := p.findShareByDeleteClientToken(goCtx, reqCtx.AccountID, reqCtx.Region, token)
+		if err != nil {
+			return nil, err
+		}
+		if prior != nil {
+			if prior.ResourceShareArn != input.ResourceShareArn {
+				return nil, ramIdempotentParameterMismatch()
+			}
+			return ramJSONResponse(http.StatusOK, map[string]interface{}{
+				"clientToken": token,
+				"returnValue": true,
+			})
+		}
 	}
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
@@ -237,20 +330,28 @@ func (p *RAMPlugin) deleteResourceShare(reqCtx *RequestContext, req *AWSRequest)
 	if share.Status == ramShareStatusDeleted {
 		return nil, ramInvalidStateTransition(share)
 	}
+	if token == "" {
+		token = reqCtx.IDs.UUID()
+	}
 
 	// A soft delete: the share stays, DELETED, for the retention window ram_ownership.go records
 	// (#1171). The index entry stays with it so the share is listed until the window passes.
 	share.Status = ramShareStatusDeleted
 	share.LastUpdatedTime = p.tc.Now()
+	share.DeleteClientToken = token
 	d, err := json.Marshal(share)
 	if err != nil {
 		return nil, fmt.Errorf("ram deleteResourceShare marshal: %w", err)
 	}
-	if err := p.state.Put(context.Background(), ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, share.ResourceShareArn), d); err != nil {
+	if err := p.state.Put(goCtx, ramNamespace, ramShareKey(reqCtx.AccountID, reqCtx.Region, share.ResourceShareArn), d); err != nil {
 		return nil, fmt.Errorf("ram deleteResourceShare put: %w", err)
+	}
+	if err := p.putTokenEntry(goCtx, ramDeleteTokenKey(reqCtx.AccountID, reqCtx.Region, token), share.ResourceShareArn); err != nil {
+		return nil, err
 	}
 
 	return ramJSONResponse(http.StatusOK, map[string]interface{}{
+		"clientToken": token,
 		"returnValue": true,
 	})
 }
@@ -266,6 +367,11 @@ func (p *RAMPlugin) associateResourceShare(reqCtx *RequestContext, req *AWSReque
 			return nil, ramInvalidBody()
 		}
 	}
+
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
 
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
@@ -306,6 +412,11 @@ func (p *RAMPlugin) disassociateResourceShare(reqCtx *RequestContext, req *AWSRe
 		}
 	}
 
+	// Every share writer holds the scope lock across its load, check and Put, so none can overwrite
+	// a concurrent delete's DELETED status or token with the record it loaded before it (#1170).
+	unlock := p.scopeMu.lock(reqCtx.AccountID, reqCtx.Region)
+	defer unlock()
+
 	share, err := p.loadShare(reqCtx.AccountID, reqCtx.Region, input.ResourceShareArn)
 	if err != nil {
 		return nil, err
@@ -337,6 +448,8 @@ func (p *RAMPlugin) disassociateResourceShare(reqCtx *RequestContext, req *AWSRe
 // API_ListPrincipals publishes. See ram_ownership.go (#1171).
 func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
+		MaxResults        *int     `json:"maxResults"`
+		NextToken         string   `json:"nextToken"`
 		ResourceOwner     string   `json:"resourceOwner"`
 		Principals        []string `json:"principals"`
 		ResourceArn       string   `json:"resourceArn"`
@@ -349,6 +462,10 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 	self, err := ramCheckResourceOwner(input.ResourceOwner)
+	if err != nil {
+		return nil, err
+	}
+	page, err := ramReadPage("ListPrincipals", input.MaxResults, input.NextToken)
 	if err != nil {
 		return nil, err
 	}
@@ -385,15 +502,15 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
-	return ramJSONResponse(http.StatusOK, map[string]interface{}{
-		"principals": principals,
-	})
+	return ramPaged("principals", principals, page)
 }
 
 // listResources handles ListResources: the resources in the caller's active shares, filtered as
 // API_ListResources publishes. See ram_ownership.go (#1171).
 func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
+		MaxResults          *int     `json:"maxResults"`
+		NextToken           string   `json:"nextToken"`
 		ResourceOwner       string   `json:"resourceOwner"`
 		Principal           string   `json:"principal"`
 		ResourceArns        []string `json:"resourceArns"`
@@ -413,6 +530,10 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if input.ResourceRegionScope != "" && !slices.Contains(ramRegionScopes, input.ResourceRegionScope) {
 		return nil, ramInvalidParameter("resourceRegionScope must be one of " +
 			strings.Join(ramRegionScopes, ", ") + ", was " + input.ResourceRegionScope)
+	}
+	page, err := ramReadPage("ListResources", input.MaxResults, input.NextToken)
+	if err != nil {
+		return nil, err
 	}
 
 	resources := make([]map[string]interface{}, 0)
@@ -452,9 +573,7 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
-	return ramJSONResponse(http.StatusOK, map[string]interface{}{
-		"resources": resources,
-	})
+	return ramPaged("resources", resources, page)
 }
 
 // loadShare loads a RAMResourceShare from state or returns a not-found error.
@@ -470,7 +589,7 @@ func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare,
 	if err != nil {
 		return nil, fmt.Errorf("ram loadShare get: %w", err)
 	}
-	notFound := &AWSError{Code: "UnknownResourceException", Message: "ResourceShare " + shareArn + " not found.", HTTPStatus: http.StatusBadRequest}
+	notFound := &AWSError{Code: ramUnknownResourceCode, Message: "ResourceShare " + shareArn + " not found.", HTTPStatus: http.StatusBadRequest}
 	if data == nil {
 		return nil, notFound
 	}
@@ -479,7 +598,7 @@ func (p *RAMPlugin) loadShare(acct, region, shareArn string) (*RAMResourceShare,
 		return nil, fmt.Errorf("ram loadShare unmarshal: %w", err)
 	}
 	if !ramShareVisible(&share, p.tc.Now()) {
-		if err := p.pruneShare(goCtx, acct, region, shareArn); err != nil {
+		if err := p.pruneShare(goCtx, acct, region, &share); err != nil {
 			return nil, err
 		}
 		return nil, notFound

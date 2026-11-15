@@ -15,7 +15,8 @@ import "time"
 // and EverTagged: sixteen baseline lines, the largest single block on #756 after ECS and Glue. But
 // `grep 'RDSDB[A-Za-z]* .*`xml:'` matches nothing in the tree. Not one record is XML-encoded
 // directly; every one of the seventeen sites that answers a resource hands a *…ToXML item struct to
-// rdsXMLResponse, so no bookkeeping member could reach a body even before this change.
+// rdsXMLResponse (now [rdsOKResponse], #1242), so no bookkeeping member could reach a body even before
+// this change.
 //
 // What was missing was therefore not a projection but the assertion that one exists: the sixteen
 // lines were reachable-by-declaration with nothing pinning them shut, exactly the position ECS's
@@ -85,7 +86,8 @@ import "time"
 // RebootDBInstance therefore answered <Result> where API_StartDBInstance publishes
 // StartDBInstanceResult, and an SDK decoding any of the three found no result element. Fixed at the
 // site in rds_plugin.go; it is a response element name rather than a projection, so nothing in this
-// file changes for it.
+// file changes for it. Since #1242 the substitution is gone: setDBInstanceStatus answers through
+// [rdsOKResponse] like every other handler, which derives both names from the operation.
 //
 // # What stays on the records
 //

@@ -3,11 +3,9 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -217,15 +215,7 @@ func (p *RDSPlugin) createDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateDBInstanceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateDBInstanceResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBInstance: dbInstanceToXML(inst)},
-	})
+	return rdsOKResponse(reqCtx, "CreateDBInstance", result{DBInstance: dbInstanceToXML(inst)})
 }
 
 func (p *RDSPlugin) describeDBInstances(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -277,17 +267,9 @@ func (p *RDSPlugin) describeDBInstances(reqCtx *RequestContext, req *AWSRequest)
 		DBInstances []xmlDBInstanceItem `xml:"DBInstances>DBInstance"`
 		Marker      string              `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeDBInstancesResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeDBInstancesResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{
-			DBInstances: page,
-			Marker:      nextMarker,
-		},
+	return rdsOKResponse(reqCtx, "DescribeDBInstances", result{
+		DBInstances: page,
+		Marker:      nextMarker,
 	})
 }
 
@@ -334,15 +316,7 @@ func (p *RDSPlugin) modifyDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"ModifyDBInstanceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ModifyDBInstanceResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBInstance: dbInstanceToXML(inst)},
-	})
+	return rdsOKResponse(reqCtx, "ModifyDBInstance", result{DBInstance: dbInstanceToXML(inst)})
 }
 
 func (p *RDSPlugin) deleteDBInstance(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -388,30 +362,29 @@ func (p *RDSPlugin) deleteDBInstance(reqCtx *RequestContext, req *AWSRequest) (*
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteDBInstanceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DeleteDBInstanceResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBInstance: dbInstanceToXML(inst)},
-	})
+	return rdsOKResponse(reqCtx, "DeleteDBInstance", result{DBInstance: dbInstanceToXML(inst)})
 }
 
 func (p *RDSPlugin) startDBInstance(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	return p.setDBInstanceStatus(reqCtx, req, "available", "StartDBInstanceResponse", "StartDBInstanceResult")
+	return p.setDBInstanceStatus(reqCtx, req, "available", "StartDBInstance")
 }
 
 func (p *RDSPlugin) stopDBInstance(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	return p.setDBInstanceStatus(reqCtx, req, "stopped", "StopDBInstanceResponse", "StopDBInstanceResult")
+	return p.setDBInstanceStatus(reqCtx, req, "stopped", "StopDBInstance")
 }
 
 func (p *RDSPlugin) rebootDBInstance(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	return p.setDBInstanceStatus(reqCtx, req, "available", "RebootDBInstanceResponse", "RebootDBInstanceResult")
+	return p.setDBInstanceStatus(reqCtx, req, "available", "RebootDBInstance")
 }
 
-func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest, status, responseName, resultName string) (*AWSResponse, error) {
+// setDBInstanceStatus sets an instance's status and answers operation's document with the instance.
+//
+// Start, Stop and RebootDBInstance share it and differ only in the status written and the operation
+// name, from which [rdsOKResponse] derives both element names. Until #1242 the names were spliced in
+// by substituting placeholder strings in the marshaled bytes — after #756 found the result element
+// had been missed entirely — which also rewrote any instance attribute that happened to contain the
+// placeholder text.
+func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest, status, operation string) (*AWSResponse, error) {
 	id := req.Params["DBInstanceIdentifier"]
 	if id == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "DBInstanceIdentifier is required", HTTPStatus: http.StatusBadRequest}
@@ -440,31 +413,7 @@ func (p *RDSPlugin) setDBInstanceStatus(reqCtx *RequestContext, req *AWSRequest,
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
-	// The two element names this operation's response differs in are substituted after marshaling,
-	// so each is declared here as a literal the substitution below rewrites. Result carries the tag
-	// `XMLResult` rather than being left untagged: without it encoding/xml names the element from the
-	// field, writing <Result> — which the substitution never matched, so Start, Stop and
-	// RebootDBInstance answered <Result> where API_StartDBInstance publishes StartDBInstanceResult and
-	// an SDK found no result element at all (#756).
-	type xmlResp struct {
-		XMLName xml.Name `xml:"placeholder"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"XMLResult"`
-	}
-	resp := xmlResp{XMLNS: rdsXMLNS, Result: result{DBInstance: dbInstanceToXML(inst)}}
-	// Build raw XML with dynamic element names.
-	body, err := xml.Marshal(resp)
-	if err != nil {
-		return nil, fmt.Errorf("rds setDBInstanceStatus xml marshal: %w", err)
-	}
-	// Replace placeholder element names with dynamic names.
-	body = []byte(strings.ReplaceAll(string(body), "placeholder", responseName))
-	body = []byte(strings.ReplaceAll(string(body), "XMLResult", resultName))
-	return &AWSResponse{
-		StatusCode: http.StatusOK,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
+	return rdsOKResponse(reqCtx, operation, result{DBInstance: dbInstanceToXML(inst)})
 }
 
 // --- DB Cluster operations ---
@@ -523,15 +472,7 @@ func (p *RDSPlugin) createDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 	type result struct {
 		DBCluster xmlDBClusterItem `xml:"DBCluster"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateDBClusterResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateDBClusterResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBCluster: dbClusterToXML(cluster)},
-	})
+	return rdsOKResponse(reqCtx, "CreateDBCluster", result{DBCluster: dbClusterToXML(cluster)})
 }
 
 func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -583,17 +524,9 @@ func (p *RDSPlugin) describeDBClusters(reqCtx *RequestContext, req *AWSRequest) 
 		DBClusters []xmlDBClusterItem `xml:"DBClusters>DBCluster"`
 		Marker     string             `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeDBClustersResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeDBClustersResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{
-			DBClusters: page,
-			Marker:     nextMarker,
-		},
+	return rdsOKResponse(reqCtx, "DescribeDBClusters", result{
+		DBClusters: page,
+		Marker:     nextMarker,
 	})
 }
 
@@ -629,15 +562,7 @@ func (p *RDSPlugin) deleteDBCluster(reqCtx *RequestContext, req *AWSRequest) (*A
 	type result struct {
 		DBCluster xmlDBClusterItem `xml:"DBCluster"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteDBClusterResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DeleteDBClusterResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBCluster: dbClusterToXML(cluster)},
-	})
+	return rdsOKResponse(reqCtx, "DeleteDBCluster", result{DBCluster: dbClusterToXML(cluster)})
 }
 
 // --- Restore operations ---
@@ -698,15 +623,7 @@ func (p *RDSPlugin) restoreDBInstanceFromSnapshot(reqCtx *RequestContext, req *A
 	type result struct {
 		DBInstance xmlDBInstanceItem `xml:"DBInstance"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"RestoreDBInstanceFromDBSnapshotResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"RestoreDBInstanceFromDBSnapshotResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBInstance: dbInstanceToXML(inst)},
-	})
+	return rdsOKResponse(reqCtx, "RestoreDBInstanceFromDBSnapshot", result{DBInstance: dbInstanceToXML(inst)})
 }
 
 // --- DB Snapshot operations ---
@@ -756,15 +673,7 @@ func (p *RDSPlugin) createDBSnapshot(reqCtx *RequestContext, req *AWSRequest) (*
 	type result struct {
 		DBSnapshot xmlDBSnapshotItem `xml:"DBSnapshot"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateDBSnapshotResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateDBSnapshotResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBSnapshot: dbSnapshotToXML(snap)},
-	})
+	return rdsOKResponse(reqCtx, "CreateDBSnapshot", result{DBSnapshot: dbSnapshotToXML(snap)})
 }
 
 func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -829,17 +738,9 @@ func (p *RDSPlugin) describeDBSnapshots(reqCtx *RequestContext, req *AWSRequest)
 		DBSnapshots []xmlDBSnapshotItem `xml:"DBSnapshots>DBSnapshot"`
 		Marker      string              `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeDBSnapshotsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeDBSnapshotsResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{
-			DBSnapshots: page,
-			Marker:      nextMarker,
-		},
+	return rdsOKResponse(reqCtx, "DescribeDBSnapshots", result{
+		DBSnapshots: page,
+		Marker:      nextMarker,
 	})
 }
 
@@ -870,15 +771,7 @@ func (p *RDSPlugin) deleteDBSnapshot(reqCtx *RequestContext, req *AWSRequest) (*
 	type result struct {
 		DBSnapshot xmlDBSnapshotItem `xml:"DBSnapshot"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DeleteDBSnapshotResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DeleteDBSnapshotResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBSnapshot: dbSnapshotToXML(snap)},
-	})
+	return rdsOKResponse(reqCtx, "DeleteDBSnapshot", result{DBSnapshot: dbSnapshotToXML(snap)})
 }
 
 // --- DB Subnet Group operations ---
@@ -913,15 +806,7 @@ func (p *RDSPlugin) createDBSubnetGroup(reqCtx *RequestContext, req *AWSRequest)
 	type result struct {
 		DBSubnetGroup xmlDBSubnetGroupItem `xml:"DBSubnetGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateDBSubnetGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateDBSubnetGroupResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBSubnetGroup: dbSubnetGroupToXML(sg)},
-	})
+	return rdsOKResponse(reqCtx, "CreateDBSubnetGroup", result{DBSubnetGroup: dbSubnetGroupToXML(sg)})
 }
 
 func (p *RDSPlugin) describeDBSubnetGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -973,17 +858,9 @@ func (p *RDSPlugin) describeDBSubnetGroups(reqCtx *RequestContext, req *AWSReque
 		DBSubnetGroups []xmlDBSubnetGroupItem `xml:"DBSubnetGroups>DBSubnetGroup"`
 		Marker         string                 `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeDBSubnetGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeDBSubnetGroupsResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{
-			DBSubnetGroups: page,
-			Marker:         nextMarker,
-		},
+	return rdsOKResponse(reqCtx, "DescribeDBSubnetGroups", result{
+		DBSubnetGroups: page,
+		Marker:         nextMarker,
 	})
 }
 
@@ -1000,11 +877,7 @@ func (p *RDSPlugin) deleteDBSubnetGroup(reqCtx *RequestContext, req *AWSRequest)
 		return nil, fmt.Errorf("rds deleteDBSubnetGroup removeFromIndex: %w", err)
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"DeleteDBSubnetGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
+	return rdsOKResponse(reqCtx, "DeleteDBSubnetGroup", nil)
 }
 
 // --- DB Parameter Group operations ---
@@ -1038,15 +911,7 @@ func (p *RDSPlugin) createDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 	type result struct {
 		DBParameterGroup xmlDBParameterGroupItem `xml:"DBParameterGroup"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"CreateDBParameterGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"CreateDBParameterGroupResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{DBParameterGroup: dbParamGroupToXML(pg)},
-	})
+	return rdsOKResponse(reqCtx, "CreateDBParameterGroup", result{DBParameterGroup: dbParamGroupToXML(pg)})
 }
 
 func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -1102,17 +967,9 @@ func (p *RDSPlugin) describeDBParameterGroups(reqCtx *RequestContext, req *AWSRe
 		DBParameterGroups []xmlDBParameterGroupItem `xml:"DBParameterGroups>DBParameterGroup"`
 		Marker            string                    `xml:"Marker,omitempty"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"DescribeDBParameterGroupsResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"DescribeDBParameterGroupsResult"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS: rdsXMLNS,
-		Result: result{
-			DBParameterGroups: page,
-			Marker:            nextMarker,
-		},
+	return rdsOKResponse(reqCtx, "DescribeDBParameterGroups", result{
+		DBParameterGroups: page,
+		Marker:            nextMarker,
 	})
 }
 
@@ -1129,11 +986,7 @@ func (p *RDSPlugin) deleteDBParameterGroup(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("rds deleteDBParameterGroup removeFromIndex: %w", err)
 	}
 
-	type response struct {
-		XMLName xml.Name `xml:"DeleteDBParameterGroupResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
+	return rdsOKResponse(reqCtx, "DeleteDBParameterGroup", nil)
 }
 
 // --- Tagging operations ---
@@ -1237,15 +1090,13 @@ func rdsTagsFromParams(params map[string]string) map[string]string {
 	return tags
 }
 
-// rdsXMLResponse serializes v to XML and wraps it in an AWSResponse.
-func rdsXMLResponse(status int, v interface{}) (*AWSResponse, error) {
-	body, err := xml.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("rds xml marshal: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
+// rdsOKResponse answers an RDS operation in the awsQuery success document, under [rdsXMLNS] with the
+// published `ResponseMetadata` carrying the request's own ID (#1242).
+//
+// result is the operation's result struct. Pass nil for an operation whose page publishes no result
+// element — `DeleteDBSubnetGroup`, `DeleteDBParameterGroup`, `AddTagsToResource` and
+// `RemoveTagsFromResource`, whose sample responses are the root and the metadata alone; see
+// `query_envelope.go` for why that is not the same as an empty one.
+func rdsOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
+	return queryOKResponse(reqCtx, operation, rdsXMLNS, result)
 }

@@ -5,8 +5,15 @@ import "time"
 // rdsNamespace is the state namespace used by the RDS plugin.
 const rdsNamespace = "rds"
 
-// rdsXMLNS is the XML namespace used in RDS API responses.
-const rdsXMLNS = "https://rds.amazonaws.com/doc/2014-10-31/"
+// rdsXMLNS is the document namespace every RDS success response carries, read off the sample
+// response on `API_CreateDBInstance` (and every other RDS page with one):
+// `<CreateDBInstanceResponse xmlns="http://rds.amazonaws.com/doc/2014-10-31/">`.
+//
+// It was spelled `https://` until #1238. A sibling's `https://` is not evidence either way: IAM, SNS,
+// STS and Route 53 genuinely publish `https://` and ELB, ElastiCache and Redshift publish `http://`,
+// so each constant is read off its own service's page. The shared Query error document carries no
+// namespace, so this governs success documents only ([queryOKResponse]).
+const rdsXMLNS = "http://rds.amazonaws.com/doc/2014-10-31/"
 
 // RDSDBInstance represents an Amazon RDS DB instance.
 type RDSDBInstance struct {

@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -188,6 +189,10 @@ func TestElastiCache_ATagSetIsReportedInOneOrder(t *testing.T) {
 
 // ecTagKeyOrder reads one ElastiCache resource's TagList and returns the keys in the order reported,
 // alongside the raw body so a second call can be compared to it byte for byte.
+//
+// The body returned stops before `<ResponseMetadata>`: since #1242 every ElastiCache response carries
+// its own request's ID there, which differs per call by design, and the comparison is about the
+// TagList, which comes before it.
 func ecTagKeyOrder(t *testing.T, ts *httptest.Server, arn string) ([]string, string) {
 	t.Helper()
 	resp := ecRequest(t, ts, map[string]string{
@@ -208,5 +213,7 @@ func ecTagKeyOrder(t *testing.T, ts *httptest.Server, arn string) ([]string, str
 	for _, tag := range out.Tags {
 		keys = append(keys, tag.Key)
 	}
-	return keys, body
+	result, _, found := strings.Cut(body, "<ResponseMetadata>")
+	require.Truef(t, found, "ListTagsForResource carries ResponseMetadata: %s", body)
+	return keys, result
 }

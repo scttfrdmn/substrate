@@ -34,6 +34,15 @@ type RAMResourceShare struct {
 	AccountID string `json:"accountID"`
 	// Region is the AWS region where the resource share exists.
 	Region string `json:"region"`
+	// ClientToken is the idempotency token the share was created under — the caller's, or the one
+	// substrate minted when the request carried none — which CreateResourceShare echoes (#1170).
+	ClientToken string `json:"clientToken,omitempty"`
+	// CreateParams is the canonical form of the create request's parameters other than clientToken,
+	// against which a retry under the same token is compared (#1170).
+	CreateParams string `json:"createParams,omitempty"`
+	// DeleteClientToken is the idempotency token the share was deleted under, which a retried
+	// DeleteResourceShare is matched against (#1170).
+	DeleteClientToken string `json:"deleteClientToken,omitempty"`
 }
 
 // RAMTag is a key-value tag for an AWS RAM resource.

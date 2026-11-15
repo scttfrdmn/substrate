@@ -26,7 +26,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"slices"
@@ -159,7 +158,7 @@ func rdsNotFoundError(key, arn string) *AWSError {
 
 // --- Tagging operations ---
 
-func (p *RDSPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *RDSPlugin) listTagsForResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
@@ -176,11 +175,6 @@ func (p *RDSPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AW
 	type result struct {
 		TagList []xmlTag `xml:"TagList>Tag"`
 	}
-	type response struct {
-		XMLName xml.Name `xml:"ListTagsForResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-		Result  result   `xml:"ListTagsForResourceResult"`
-	}
 	// Sorted by key. AWS documents no order for TagList — its own sample response renders
 	// "owner" before "environment" — so this is substrate's reading, taken for the reason
 	// sortTagsByKey records: the slice was built by ranging a Go map, so two identical calls
@@ -194,13 +188,10 @@ func (p *RDSPlugin) listTagsForResource(_ *RequestContext, req *AWSRequest) (*AW
 	for _, k := range keys {
 		xmlTags = append(xmlTags, xmlTag{Key: k, Value: tags[k]})
 	}
-	return rdsXMLResponse(http.StatusOK, response{
-		XMLNS:  rdsXMLNS,
-		Result: result{TagList: xmlTags},
-	})
+	return rdsOKResponse(reqCtx, "ListTagsForResource", result{TagList: xmlTags})
 }
 
-func (p *RDSPlugin) addTagsToResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *RDSPlugin) addTagsToResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
@@ -209,14 +200,10 @@ func (p *RDSPlugin) addTagsToResource(_ *RequestContext, req *AWSRequest) (*AWSR
 	if err := p.updateTagsByARN(resourceARN, newTags, nil); err != nil {
 		return nil, err
 	}
-	type response struct {
-		XMLName xml.Name `xml:"AddTagsToResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
+	return rdsOKResponse(reqCtx, "AddTagsToResource", nil)
 }
 
-func (p *RDSPlugin) removeTagsFromResource(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *RDSPlugin) removeTagsFromResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "ResourceName is required", HTTPStatus: http.StatusBadRequest}
@@ -225,11 +212,7 @@ func (p *RDSPlugin) removeTagsFromResource(_ *RequestContext, req *AWSRequest) (
 	if err := p.updateTagsByARN(resourceARN, nil, keys); err != nil {
 		return nil, err
 	}
-	type response struct {
-		XMLName xml.Name `xml:"RemoveTagsFromResourceResponse"`
-		XMLNS   string   `xml:"xmlns,attr"`
-	}
-	return rdsXMLResponse(http.StatusOK, response{XMLNS: rdsXMLNS})
+	return rdsOKResponse(reqCtx, "RemoveTagsFromResource", nil)
 }
 
 // loadTagsByARN resolves an RDS ARN and returns the resource's tags.

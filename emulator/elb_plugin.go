@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -195,7 +194,7 @@ func (p *ELBPlugin) createLoadBalancer(reqCtx *RequestContext, req *AWSRequest) 
 	type lbResult struct {
 		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
 	}
-	return elbOKResponse(reqCtx, "CreateLoadBalancer", elbXMLNS,
+	return queryOKResponse(reqCtx, "CreateLoadBalancer", elbXMLNS,
 		lbResult{LoadBalancers: []elbLBItem{lbToItem(lb)}})
 }
 
@@ -255,7 +254,7 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 		LoadBalancers []elbLBItem `xml:"LoadBalancers>member"`
 		NextMarker    string      `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS,
+	return queryOKResponse(reqCtx, "DescribeLoadBalancers", elbXMLNS,
 		lbResult{LoadBalancers: page, NextMarker: next})
 }
 
@@ -294,11 +293,11 @@ func (p *ELBPlugin) describeLoadBalancerAttributes(reqCtx *RequestContext, _ *AW
 	type attrResult struct {
 		Attributes []attr `xml:"Attributes>member"`
 	}
-	return elbOKResponse(reqCtx, "DescribeLoadBalancerAttributes", elbXMLNS, attrResult{})
+	return queryOKResponse(reqCtx, "DescribeLoadBalancerAttributes", elbXMLNS, attrResult{})
 }
 
 func (p *ELBPlugin) modifyLoadBalancerAttributes(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	return elbOKResponse(reqCtx, "ModifyLoadBalancerAttributes", elbXMLNS, elbEmptyResult{})
+	return queryOKResponse(reqCtx, "ModifyLoadBalancerAttributes", elbXMLNS, elbEmptyResult{})
 }
 
 // --- Target Group operations ---
@@ -356,7 +355,7 @@ func (p *ELBPlugin) createTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 	type tgResult struct {
 		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
 	}
-	return elbOKResponse(reqCtx, "CreateTargetGroup", elbXMLNS,
+	return queryOKResponse(reqCtx, "CreateTargetGroup", elbXMLNS,
 		tgResult{TargetGroups: []elbTGItem{tgToItem(tg)}})
 }
 
@@ -415,7 +414,7 @@ func (p *ELBPlugin) describeTargetGroups(reqCtx *RequestContext, req *AWSRequest
 		TargetGroups []elbTGItem `xml:"TargetGroups>member"`
 		NextMarker   string      `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS,
+	return queryOKResponse(reqCtx, "DescribeTargetGroups", elbXMLNS,
 		tgResult{TargetGroups: page, NextMarker: next})
 }
 
@@ -485,7 +484,7 @@ func (p *ELBPlugin) modifyTargetGroup(reqCtx *RequestContext, req *AWSRequest) (
 		if putErr := p.state.Put(context.Background(), elbNamespace, k, newData); putErr != nil {
 			return nil, fmt.Errorf("elb modifyTargetGroup state.Put: %w", putErr)
 		}
-		return elbOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS,
+		return queryOKResponse(reqCtx, "ModifyTargetGroup", elbXMLNS,
 			tgResult{TargetGroups: []elbTGItem{tgToItem(tg)}})
 	}
 	return nil, elbPublishedNotFound(elbKindTargetGroup)
@@ -619,7 +618,7 @@ func (p *ELBPlugin) describeTargetHealth(reqCtx *RequestContext, req *AWSRequest
 			desc.TargetHealth.State = "healthy"
 			result.Descriptions = append(result.Descriptions, desc)
 		}
-		return elbOKResponse(reqCtx, "DescribeTargetHealth", elbXMLNS, result)
+		return queryOKResponse(reqCtx, "DescribeTargetHealth", elbXMLNS, result)
 	}
 	return nil, elbPublishedNotFound(elbKindTargetGroup)
 }
@@ -692,7 +691,7 @@ func (p *ELBPlugin) createListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 	type listenerResult struct {
 		Listeners []elbListenerItem `xml:"Listeners>member"`
 	}
-	return elbOKResponse(reqCtx, "CreateListener", elbXMLNS,
+	return queryOKResponse(reqCtx, "CreateListener", elbXMLNS,
 		listenerResult{Listeners: []elbListenerItem{listenerToItem(listener)}})
 }
 
@@ -744,7 +743,7 @@ func (p *ELBPlugin) describeListeners(reqCtx *RequestContext, req *AWSRequest) (
 		Listeners  []elbListenerItem `xml:"Listeners>member"`
 		NextMarker string            `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeListeners", elbXMLNS,
+	return queryOKResponse(reqCtx, "DescribeListeners", elbXMLNS,
 		listenerResult{Listeners: page, NextMarker: next})
 }
 
@@ -802,7 +801,7 @@ func (p *ELBPlugin) modifyListener(reqCtx *RequestContext, req *AWSRequest) (*AW
 		type listenerResult struct {
 			Listeners []elbListenerItem `xml:"Listeners>member"`
 		}
-		return elbOKResponse(reqCtx, "ModifyListener", elbXMLNS,
+		return queryOKResponse(reqCtx, "ModifyListener", elbXMLNS,
 			listenerResult{Listeners: []elbListenerItem{listenerToItem(l)}})
 	}
 	// API_ModifyListener publishes ListenerNotFound; until #1313 this fell through to an empty list.
@@ -892,7 +891,7 @@ func (p *ELBPlugin) createRule(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	type ruleResult struct {
 		Rules []elbRuleItem `xml:"Rules>member"`
 	}
-	return elbOKResponse(reqCtx, "CreateRule", elbXMLNS,
+	return queryOKResponse(reqCtx, "CreateRule", elbXMLNS,
 		ruleResult{Rules: []elbRuleItem{ruleToItem(rule)}})
 }
 
@@ -944,7 +943,7 @@ func (p *ELBPlugin) describeRules(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		Rules      []elbRuleItem `xml:"Rules>member"`
 		NextMarker string        `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeRules", elbXMLNS,
+	return queryOKResponse(reqCtx, "DescribeRules", elbXMLNS,
 		ruleResult{Rules: page, NextMarker: next})
 }
 
@@ -1034,7 +1033,7 @@ func (p *ELBPlugin) setRulePriorities(reqCtx *RequestContext, req *AWSRequest) (
 		}
 		result.Rules = append(result.Rules, ruleToItem(rp.rule))
 	}
-	return elbOKResponse(reqCtx, "SetRulePriorities", elbXMLNS, result)
+	return queryOKResponse(reqCtx, "SetRulePriorities", elbXMLNS, result)
 }
 
 // --- Helpers ---
@@ -1185,23 +1184,6 @@ func (p *ELBPlugin) removeFromList(scope, listName, id string) error {
 		return fmt.Errorf("elb removeFromList %s state.Put: %w", key, err)
 	}
 	return nil
-}
-
-// elbXMLResponse serializes v to XML and returns an AWSResponse.
-//
-// Every caller reaches it through [elbOKResponse], which is where the document's shape — root
-// element, namespace, result element and `ResponseMetadata` — is decided; this function adds the XML
-// declaration and the content type and nothing else.
-func elbXMLResponse(status int, v interface{}) (*AWSResponse, error) {
-	body, err := xml.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("elb xml marshal: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
 }
 
 // extractELBNameFromARN extracts the load balancer name from an ELBv2 ARN.
