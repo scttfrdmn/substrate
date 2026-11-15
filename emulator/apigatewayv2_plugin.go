@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -15,6 +16,8 @@ type APIGatewayV2Plugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+	// mappingMu serializes CreateApiMapping's duplicate-key check with its write (#1423).
+	mappingMu sync.Mutex
 }
 
 // Name returns the service name "apigatewayv2".
@@ -51,7 +54,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "GetApi":
 		return p.getAPI(ctx, params["apiId"])
 	case "GetApis":
-		return p.getAPIs(ctx)
+		return p.getAPIs(ctx, req)
 	case "DeleteApi":
 		return p.deleteAPI(ctx, params["apiId"])
 	case "UpdateApi":
@@ -61,7 +64,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "GetRoute":
 		return p.getRoute(ctx, params["apiId"], params["routeId"])
 	case "GetRoutes":
-		return p.getRoutes(ctx, params["apiId"])
+		return p.getRoutes(ctx, req, params["apiId"])
 	case "DeleteRoute":
 		return p.deleteRoute(ctx, params["apiId"], params["routeId"])
 	case "UpdateRoute":
@@ -71,7 +74,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "GetIntegration":
 		return p.getIntegration(ctx, params["apiId"], params["intId"])
 	case "GetIntegrations":
-		return p.getIntegrations(ctx, params["apiId"])
+		return p.getIntegrations(ctx, req, params["apiId"])
 	case "DeleteIntegration":
 		return p.deleteIntegration(ctx, params["apiId"], params["intId"])
 	case "CreateStage":
@@ -79,7 +82,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "GetStage":
 		return p.getStageV2(ctx, params["apiId"], params["stageName"])
 	case "GetStages":
-		return p.getStagesV2(ctx, params["apiId"])
+		return p.getStagesV2(ctx, req, params["apiId"])
 	case "DeleteStage":
 		return p.deleteStageV2(ctx, params["apiId"], params["stageName"])
 	case "UpdateStage":
@@ -89,7 +92,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "GetAuthorizer":
 		return p.getAuthorizerV2(ctx, params["apiId"], params["authId"])
 	case "GetAuthorizers":
-		return p.getAuthorizersV2(ctx, params["apiId"])
+		return p.getAuthorizersV2(ctx, req, params["apiId"])
 	case "DeleteAuthorizer":
 		return p.deleteAuthorizerV2(ctx, params["apiId"], params["authId"])
 	case "CreateDeployment":
@@ -103,7 +106,7 @@ func (p *APIGatewayV2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest)
 	case "CreateApiMapping":
 		return p.createAPIMapping(ctx, req, params["name"])
 	case "GetApiMappings":
-		return p.getAPIMappings(ctx, params["name"])
+		return p.getAPIMappings(ctx, req, params["name"])
 	case "GetApiMapping":
 		return p.getAPIMapping(ctx, params["name"], params["apiMappingId"])
 	case "UpdateApiMapping":
@@ -372,7 +375,11 @@ func (p *APIGatewayV2Plugin) getAPI(ctx *RequestContext, apiID string) (*AWSResp
 	return apigwJSONResponse(http.StatusOK, v2APIWire(api))
 }
 
-func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIIDsKey(ctx.AccountID, ctx.Region))
 	if err != nil {
@@ -391,7 +398,7 @@ func (p *APIGatewayV2Plugin) getAPIs(ctx *RequestContext) (*AWSResponse, error) 
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2APIOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 func (p *APIGatewayV2Plugin) deleteAPI(ctx *RequestContext, apiID string) (*AWSResponse, error) {
@@ -511,7 +518,11 @@ func (p *APIGatewayV2Plugin) getRoute(ctx *RequestContext, apiID, routeID string
 	return apigwJSONResponse(http.StatusOK, v2RouteWire(route))
 }
 
-func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2RouteIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -530,7 +541,7 @@ func (p *APIGatewayV2Plugin) getRoutes(ctx *RequestContext, apiID string) (*AWSR
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2RouteOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 func (p *APIGatewayV2Plugin) deleteRoute(ctx *RequestContext, apiID, routeID string) (*AWSResponse, error) {
@@ -599,7 +610,11 @@ func (p *APIGatewayV2Plugin) getIntegration(ctx *RequestContext, apiID, intID st
 	return apigwJSONResponse(http.StatusOK, v2IntegrationWire(integ))
 }
 
-func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2IntegrationIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -618,7 +633,7 @@ func (p *APIGatewayV2Plugin) getIntegrations(ctx *RequestContext, apiID string) 
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2IntegrationOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 func (p *APIGatewayV2Plugin) deleteIntegration(ctx *RequestContext, apiID, intID string) (*AWSResponse, error) {
@@ -692,7 +707,11 @@ func (p *APIGatewayV2Plugin) getStageV2(ctx *RequestContext, apiID, stageName st
 	return apigwJSONResponse(http.StatusOK, v2StageWire(stage))
 }
 
-func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	goCtx := context.Background()
 	names, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2StageNamesKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -711,7 +730,7 @@ func (p *APIGatewayV2Plugin) getStagesV2(ctx *RequestContext, apiID string) (*AW
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2StageOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 func (p *APIGatewayV2Plugin) deleteStageV2(ctx *RequestContext, apiID, stageName string) (*AWSResponse, error) {
@@ -782,7 +801,11 @@ func (p *APIGatewayV2Plugin) getAuthorizerV2(ctx *RequestContext, apiID, authID 
 	return apigwJSONResponse(http.StatusOK, v2AuthorizerWire(auth))
 }
 
-func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, apiID string) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, req *AWSRequest, apiID string) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2AuthorizerIDsKey(ctx.AccountID, ctx.Region, apiID))
 	if err != nil {
@@ -801,7 +824,7 @@ func (p *APIGatewayV2Plugin) getAuthorizersV2(ctx *RequestContext, apiID string)
 		}
 	}
 
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2AuthorizerOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 func (p *APIGatewayV2Plugin) deleteAuthorizerV2(ctx *RequestContext, apiID, authID string) (*AWSResponse, error) {
@@ -913,19 +936,53 @@ func (p *APIGatewayV2Plugin) getDomainNameV2(ctx *RequestContext, name string) (
 	return apigwJSONResponse(http.StatusOK, v2DomainNameWire(dn))
 }
 
+// createAPIMapping handles CreateApiMapping: POST /v2/domainnames/{domainName}/apimappings (#1423).
+//
+// CreateApiMappingInput publishes apiId and stage as Required: True and apiMappingKey as Required:
+// False, and the operation publishes BadRequestException/400, NotFoundException/404 and
+// ConflictException/409, "The resource already exists." So, in order:
+//
+//   - a missing apiId or stage is BadRequestException, before any state is read (#887);
+//   - the domain, the API and the stage must each exist, or the request is NotFoundException — the
+//     mapping routes the domain to that API's stage, so a mapping naming either is a route to nothing;
+//   - an apiMappingKey another mapping of the same domain already uses is ConflictException, since a
+//     domain routes each key to one API. An omitted key is the empty key, the domain's root, and
+//     conflicts the same way.
+//
+// The messages are substrate's own.
 func (p *APIGatewayV2Plugin) createAPIMapping(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
 	var body struct {
-		APIID         string `json:"ApiId"`
-		Stage         string `json:"Stage"`
-		APIMappingKey string `json:"ApiMappingKey"`
+		APIID         string `json:"apiId"`
+		Stage         string `json:"stage"`
+		APIMappingKey string `json:"apiMappingKey"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "BadRequestException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
+	}
+	if body.APIID == "" {
+		return nil, &AWSError{Code: "BadRequestException", Message: "apiId is required", HTTPStatus: http.StatusBadRequest}
+	}
+	if body.Stage == "" {
+		return nil, &AWSError{Code: "BadRequestException", Message: "stage is required", HTTPStatus: http.StatusBadRequest}
 	}
 
 	// CreateApiMapping publishes 404 NotFoundException; a mapping under a domain that does not
 	// exist would be indexed where no GetApiMappings could reach it.
 	if err := p.requireDomainName(ctx, domainName); err != nil {
+		return nil, err
+	}
+	if err := p.requireAPI(ctx, body.APIID); err != nil {
+		return nil, err
+	}
+	if err := p.requireStage(ctx, body.APIID, body.Stage); err != nil {
+		return nil, err
+	}
+
+	// The key check and the write are one critical section, so two concurrent creates of one key
+	// cannot both pass the check.
+	p.mappingMu.Lock()
+	defer p.mappingMu.Unlock()
+	if err := p.requireMappingKeyFree(ctx, domainName, body.APIMappingKey); err != nil {
 		return nil, err
 	}
 

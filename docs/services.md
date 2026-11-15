@@ -17591,31 +17591,31 @@ no error (#529).
 | GetApi | |
 | UpdateApi | Applies `Name` and `Description` when non-empty and ignores every other member, including `RouteSelectionExpression` and the CORS configuration; `404 NotFoundException` for an unknown API |
 | DeleteApi | |
-| GetApis | |
+| GetApis | Pages by `maxResults`/`nextToken`, in ascending API ID — see [The v2 collections page](#the-v2-collections-page) |
 | CreateRoute | |
 | GetRoute | |
-| GetRoutes | One page, in ascending route ID |
+| GetRoutes | Pages by `maxResults`/`nextToken`, in ascending route ID |
 | UpdateRoute | Patches `routeKey`, `target`, `authorizationType` and `authorizerId`; a member absent from the body is left as it was (see *An update changes only what it names*). `404 NotFoundException` for an unknown API or route, `400 BadRequestException` for a body that does not decode |
 | DeleteRoute | |
 | CreateIntegration | |
 | GetIntegration | |
-| GetIntegrations | One page, in ascending integration ID |
+| GetIntegrations | Pages by `maxResults`/`nextToken`, in ascending integration ID |
 | DeleteIntegration | `204`, and idempotent: an integration ID with nothing behind it is not refused |
 | CreateStage | |
 | GetStage | |
-| GetStages | One page, in ascending stage name |
+| GetStages | Pages by `maxResults`/`nextToken`, in ascending stage name |
 | UpdateStage | Patches `autoDeploy`, `accessLogSettings`, `defaultRouteSettings`, `description`, `stageVariables` and `deploymentId`; a member absent from the body is left as it was, and `lastUpdatedDate` is set from the simulated clock. `404 NotFoundException` for an unknown API or stage, `400 BadRequestException` for a body that does not decode |
 | DeleteStage | `204`, and idempotent: a stage name with nothing behind it is not refused |
 | CreateAuthorizer | |
 | GetAuthorizer | `404 NotFoundException` for an unknown authorizer |
-| GetAuthorizers | One page, in ascending authorizer ID |
+| GetAuthorizers | Pages by `maxResults`/`nextToken`, in ascending authorizer ID |
 | DeleteAuthorizer | `204`, and idempotent: an authorizer ID with nothing behind it is not refused |
 | CreateDeployment | Reports `DeploymentStatus` `DEPLOYED` at once and dates the deployment from the simulated clock; the API id is taken from the path and not checked, so a deployment can be recorded against an API that does not exist |
 | GetDeployment | `404 NotFoundException` for an unknown deployment |
 | CreateDomainName | Reads `DomainName` only, and reports one `domainNameConfigurations` entry — `apiGatewayDomainName` derived from the name and the caller's Region, `endpointType` `REGIONAL`, `domainNameStatus` `AVAILABLE`. `DomainNameConfigurations` and `MutualTlsAuthentication` in the request are not read |
 | GetDomainName | `404 NotFoundException` for a domain name the account and Region hold no record of |
-| CreateApiMapping | Mints an `apiMappingId`, keyed by that id within the domain, so two mappings may share one `apiMappingKey`. A domain name the account and Region hold no record of is `404 NotFoundException` (#566) |
-| GetApiMappings | The domain's mappings in creation order, in the `items` envelope; one complete page, with no `nextToken`, like the other v2 lists here. `404 NotFoundException` for a domain that does not exist |
+| CreateApiMapping | Mints an `apiMappingId`. `apiId` and `stage` are required (`400 BadRequestException`); the domain, the API and the stage must exist (`404 NotFoundException`); and an `apiMappingKey` another mapping of the domain already uses, the empty key included, is `409 ConflictException` (#566, #1423) |
+| GetApiMappings | The domain's mappings in ascending mapping ID, in the `items` envelope; pages by `maxResults`/`nextToken`. `404 NotFoundException` for a domain that does not exist |
 | GetApiMapping | `404 NotFoundException` for a mapping, or a domain, that does not exist |
 | UpdateApiMapping | `PATCH`; changes `apiId`, `stage` and `apiMappingKey`, each `Required: No`, so an absent member is left as it was. Answers the mapping. Same refusals as `GetApiMapping` |
 | DeleteApiMapping | `204`, and the mapping leaves `GetApiMappings`. Same refusals as `GetApiMapping`, so deleting twice is refused the second time |
@@ -17631,6 +17631,21 @@ no error (#529).
 | AWS::ApiGatewayV2::Route | RouteId | |
 | AWS::ApiGatewayV2::Integration | IntegrationId | |
 | AWS::ApiGatewayV2::Stage | StageName | |
+
+### The v2 collections page
+
+`GetApis`, `GetRoutes`, `GetIntegrations`, `GetStages`, `GetAuthorizers` and `GetApiMappings` each
+publish `maxResults` and `nextToken`, and until [#1423](https://github.com/scttfrdmn/substrate/issues/1423)
+none read either, so each answered its whole collection in one page. They now page. The pages publish
+no default, maximum or minimum for `maxResults` and no order, so these readings are substrate's:
+
+- A request with no `maxResults` gets the whole collection in one page with no `nextToken`, which is what
+  every list answered before, so an existing fixture is unchanged.
+- `maxResults` must be a positive integer, and a `nextToken` substrate could not have issued is refused
+  rather than answered with page one. Both are `400 BadRequestException`, which every page publishes for
+  *"One of the parameters in the request is invalid"*, and both are checked before any state is read.
+- `nextToken` is the base64 offset the v1 collections use, and the last page carries none. Elements are in
+  ascending ID (or stage name), so the offset is stable between pages.
 
 ### An update changes only what it names
 

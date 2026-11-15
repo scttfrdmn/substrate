@@ -14,9 +14,8 @@ import (
 // IDs of a domain are now indexed under [apigwv2APIMappingIDsKey], written by CreateApiMapping and
 // pruned by DeleteApiMapping, which is the pattern every other v2 collection uses.
 //
-// GetApiMappings publishes maxResults and nextToken. Like GetRoutes, GetIntegrations and the other
-// v2 lists here, it answers every mapping in one page and never emits nextToken, which is a
-// complete, final page under the published contract.
+// GetApiMappings publishes maxResults and nextToken, and since #1423 pages by them like every other
+// routed v2 collection; see apigatewayv2_pagination.go.
 
 // apigwv2APIMappingIDsKey is the state key for the IDs of a domain's API mappings.
 func apigwv2APIMappingIDsKey(accountID, region, domain string) string {
@@ -57,8 +56,55 @@ func (p *APIGatewayV2Plugin) loadAPIMapping(ctx *RequestContext, domainName, map
 	return mapping, nil
 }
 
+// requireStage answers NotFoundException for a stage an API holds no record of.
+func (p *APIGatewayV2Plugin) requireStage(ctx *RequestContext, apiID, stageName string) error {
+	data, err := p.state.Get(context.Background(), apigatewayv2Namespace, apigwv2StageKey(ctx.AccountID, ctx.Region, apiID, stageName))
+	if err != nil {
+		return fmt.Errorf("apigatewayv2 requireStage state.Get: %w", err)
+	}
+	if data == nil {
+		return &AWSError{Code: "NotFoundException", Message: "Stage not found: " + stageName, HTTPStatus: http.StatusNotFound}
+	}
+	return nil
+}
+
+// requireMappingKeyFree answers ConflictException when another mapping of the domain already uses
+// key. A read or decode failure is an error rather than a key reported free.
+func (p *APIGatewayV2Plugin) requireMappingKeyFree(ctx *RequestContext, domainName, key string) error {
+	goCtx := context.Background()
+	ids, err := loadStringIndex(goCtx, p.state, apigatewayv2Namespace, apigwv2APIMappingIDsKey(ctx.AccountID, ctx.Region, domainName))
+	if err != nil {
+		return fmt.Errorf("apigatewayv2 requireMappingKeyFree loadIndex: %w", err)
+	}
+	for _, id := range ids {
+		data, err := p.state.Get(goCtx, apigatewayv2Namespace, apigwv2APIMappingKey(ctx.AccountID, ctx.Region, domainName, id))
+		if err != nil {
+			return fmt.Errorf("apigatewayv2 requireMappingKeyFree state.Get: %w", err)
+		}
+		if data == nil {
+			continue
+		}
+		var mapping v2APIMappingState
+		if err := json.Unmarshal(data, &mapping); err != nil {
+			return fmt.Errorf("apigatewayv2 requireMappingKeyFree unmarshal: %w", err)
+		}
+		if mapping.APIMappingKey == key {
+			return &AWSError{
+				Code:       "ConflictException",
+				Message:    fmt.Sprintf("The API mapping key %q is already mapped on domain name %s.", key, domainName),
+				HTTPStatus: http.StatusConflict,
+			}
+		}
+	}
+	return nil
+}
+
 // getAPIMappings handles GetApiMappings: GET /v2/domainnames/{domainName}/apimappings.
-func (p *APIGatewayV2Plugin) getAPIMappings(ctx *RequestContext, domainName string) (*AWSResponse, error) {
+func (p *APIGatewayV2Plugin) getAPIMappings(ctx *RequestContext, req *AWSRequest, domainName string) (*AWSResponse, error) {
+	pageSize, offset, pageErr := apigwv2PageParams(req)
+	if pageErr != nil {
+		return nil, pageErr
+	}
 	if err := p.requireDomainName(ctx, domainName); err != nil {
 		return nil, err
 	}
@@ -82,7 +128,7 @@ func (p *APIGatewayV2Plugin) getAPIMappings(ctx *RequestContext, domainName stri
 		}
 		items = append(items, v2APIMappingWire(mapping))
 	}
-	return apigwJSONResponse(http.StatusOK, apigwV2ItemsOut[v2APIMappingOut]{Items: items})
+	return apigwJSONResponse(http.StatusOK, apigwv2Page(items, pageSize, offset))
 }
 
 // getAPIMapping handles GetApiMapping: GET /v2/domainnames/{domainName}/apimappings/{apiMappingId}.

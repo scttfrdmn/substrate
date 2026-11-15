@@ -226,9 +226,10 @@ func v2APIMappingWire(m v2APIMappingState) v2APIMappingOut {
 // which is what the member's locationName spells. Emitting "Items" parses to
 // nothing.
 //
-// nextToken is omitted rather than sent empty, because substrate returns every
-// element in one page and honors no token; emitting one would invite a caller to
-// page on nothing.
+// nextToken is omitted on the last page rather than sent empty, because the pages
+// publish it as "Not valid for the last element of the collection"; a request with
+// no maxResults is answered in one page and so never carries one. See
+// apigatewayv2_pagination.go (#1423).
 type apigwV2ItemsOut[T any] struct {
 	Items     []T    `json:"items"`
 	NextToken string `json:"nextToken,omitempty"`

@@ -25,10 +25,17 @@ func agwv2Mapping(t *testing.T, p *emulator.APIGatewayV2Plugin, ctx *emulator.Re
 	return id
 }
 
+// agwv2DefaultStage creates an API's $default stage, which CreateApiMapping requires to exist (#1423).
+func agwv2DefaultStage(t *testing.T, p *emulator.APIGatewayV2Plugin, ctx *emulator.RequestContext, apiID string) {
+	t.Helper()
+	agwv2Wire(t, p, ctx, "POST", "/v2/apis/"+apiID+"/stages", map[string]any{"stageName": "$default"})
+}
+
 // TestAPIGatewayV2Mappings_Lifecycle walks a mapping through every operation.
 func TestAPIGatewayV2Mappings_Lifecycle(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
 	apiID := agwv2API(t, p, ctx, "mappings")
+	agwv2DefaultStage(t, p, ctx, apiID)
 	otherAPI := agwv2API(t, p, ctx, "mappings-other")
 	agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{"domainName": "m.example.com"})
 
@@ -92,6 +99,7 @@ func TestAPIGatewayV2Mappings_Lifecycle(t *testing.T) {
 func TestAPIGatewayV2Mappings_NotFound(t *testing.T) {
 	p, ctx := setupAPIGatewayV2Plugin(t)
 	apiID := agwv2API(t, p, ctx, "mappings-404")
+	agwv2DefaultStage(t, p, ctx, apiID)
 	agwv2Wire(t, p, ctx, "POST", "/v2/domainnames", map[string]any{"domainName": "n.example.com"})
 	id := agwv2Mapping(t, p, ctx, "n.example.com", apiID, "")
 
