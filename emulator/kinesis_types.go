@@ -28,6 +28,15 @@ type KinesisStream struct {
 	// Shards contains the individual shard descriptors.
 	Shards []KinesisShard `json:"Shards,omitempty"`
 
+	// StreamMode is the stream's capacity mode, PROVISIONED or ON_DEMAND (#1118). Empty reads as
+	// PROVISIONED, which is what every stream created before the mode was modelled is; see
+	// kinesis_stream_mode.go.
+	StreamMode string `json:"StreamMode,omitempty"`
+
+	// MaxRecordSizeInKiB is the maximum record size CreateStream was given (#1418). Zero is the
+	// member omitted and reads as the 1 MiB default; see kinesis_record_limits.go.
+	MaxRecordSizeInKiB int `json:"MaxRecordSizeInKiB,omitempty"`
+
 	// RetentionPeriodHours is the number of hours data is retained (default 24).
 	RetentionPeriodHours int `json:"RetentionPeriodHours"`
 

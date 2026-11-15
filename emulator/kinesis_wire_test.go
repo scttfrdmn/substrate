@@ -149,6 +149,11 @@ func TestKinesisWire_StreamResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{op: "RemoveTagsFromStream", body: map[string]any{"StreamName": name, "TagKeys": []string{"team"}}, anchor: "{}"},
 		{op: "UpdateShardCount", body: map[string]any{"StreamName": name, "TargetShardCount": 4, "ScalingType": "UNIFORM_SCALING"},
 			anchor: `"TargetShardCount":4`},
+		// After every reshard, since an on-demand stream refuses one (#1118).
+		{op: "UpdateStreamMode", body: map[string]any{
+			"StreamARN":         "arn:aws:kinesis:" + kinesisWireRegion + ":" + kinesisWireAccount + ":stream/" + name,
+			"StreamModeDetails": map[string]any{"StreamMode": "ON_DEMAND"},
+		}, anchor: "{}"},
 		// Last: it removes the record every case above reads.
 		{op: "DeleteStream", body: stream, anchor: "{}"},
 	} {

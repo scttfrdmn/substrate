@@ -70,6 +70,8 @@ func (p *KinesisPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		return p.listStreams(ctx, req)
 	case "UpdateShardCount":
 		return p.updateShardCount(ctx, req)
+	case "UpdateStreamMode":
+		return p.updateStreamMode(ctx, req)
 	case "PutRecord":
 		return p.putRecord(ctx, req)
 	case "PutRecords":
@@ -101,9 +103,11 @@ func (p *KinesisPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 
 func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		StreamName string            `json:"StreamName"`
-		ShardCount int               `json:"ShardCount"`
-		Tags       map[string]string `json:"Tags"`
+		StreamName         string                    `json:"StreamName"`
+		ShardCount         *int                      `json:"ShardCount"`
+		StreamModeDetails  *kinesisStreamModeDetails `json:"StreamModeDetails"`
+		MaxRecordSizeInKiB *int                      `json:"MaxRecordSizeInKiB"`
+		Tags               map[string]string         `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, kinesisInvalidBody()
@@ -111,8 +115,16 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	if body.StreamName == "" {
 		return nil, kinesisInvalidArgument("StreamName is required")
 	}
-	if body.ShardCount <= 0 {
-		body.ShardCount = 1
+	mode, shardCount, capErr := kinesisCreateStreamCapacity(body.StreamModeDetails, body.ShardCount)
+	if capErr != nil {
+		return nil, capErr
+	}
+	if refusal := kinesisValidateMaxRecordSize(body.MaxRecordSizeInKiB); refusal != nil {
+		return nil, refusal
+	}
+	maxRecordSize := 0
+	if body.MaxRecordSizeInKiB != nil {
+		maxRecordSize = *body.MaxRecordSizeInKiB
 	}
 
 	// CreateStream is the one operation that mints an ARN rather than resolving one, so the caller's
@@ -163,8 +175,10 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 		StreamName:           body.StreamName,
 		StreamArn:            streamARN,
 		StreamStatus:         "ACTIVE",
-		ShardCount:           body.ShardCount,
-		Shards:               kinesisUniformShards(0, body.ShardCount, "0"),
+		StreamMode:           mode,
+		MaxRecordSizeInKiB:   maxRecordSize,
+		ShardCount:           shardCount,
+		Shards:               kinesisUniformShards(0, shardCount, "0"),
 		RetentionPeriodHours: 24,
 		Tags:                 tags,
 		EnhancedMonitoring:   []string{},
@@ -377,6 +391,9 @@ func (p *KinesisPlugin) updateShardCount(ctx *RequestContext, req *AWSRequest) (
 	if vErr := kinesisValidateShardCountUpdate(body.ScalingType, body.TargetShardCount, current); vErr != nil {
 		return nil, vErr
 	}
+	if refusal := kinesisRequireProvisioned(stream, target, "UpdateShardCount"); refusal != nil {
+		return nil, refusal
+	}
 	goCtx := context.Background()
 	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
 		return nil, err
@@ -426,10 +443,17 @@ func (p *KinesisPlugin) putRecord(ctx *RequestContext, req *AWSRequest) (*AWSRes
 	if refErr != nil {
 		return nil, refErr
 	}
+	// The request's own limits come before the stream is read (#1418); see kinesis_record_limits.go.
+	if refusal := kinesisCheckPartitionKey("PartitionKey", body.PartitionKey); refusal != nil {
+		return nil, refusal
+	}
 
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
+	}
+	if refusal := kinesisCheckRecordSize("The record", kinesisRecordSize(body.Data, body.PartitionKey), stream); refusal != nil {
+		return nil, refusal
 	}
 
 	// A record lands on the open shard whose range holds its hash key (#1409); a parent a reshard
@@ -480,10 +504,24 @@ func (p *KinesisPlugin) putRecords(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	if refErr != nil {
 		return nil, refErr
 	}
+	// The request's own limits come before the stream is read (#1418); see kinesis_record_limits.go.
+	entries := make([]kinesisRecordEntry, len(body.Records))
+	for i, rec := range body.Records {
+		entries[i] = kinesisRecordEntry{Data: rec.Data, PartitionKey: rec.PartitionKey}
+	}
+	sizes, refusal := kinesisCheckPutRecordsRequest(entries)
+	if refusal != nil {
+		return nil, refusal
+	}
 
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
+	}
+	for i, size := range sizes {
+		if refusal := kinesisCheckRecordSize(fmt.Sprintf("Records[%d]", i), size, stream); refusal != nil {
+			return nil, refusal
+		}
 	}
 
 	type recordResult struct {
@@ -744,6 +782,9 @@ func (p *KinesisPlugin) mergeShards(ctx *RequestContext, req *AWSRequest) (*AWSR
 	if err != nil {
 		return nil, err
 	}
+	if refusal := kinesisRequireProvisioned(stream, target, "MergeShards"); refusal != nil {
+		return nil, refusal
+	}
 	// API_MergeShards and API_SplitShard both publish ResourceInUseException for a stream that is
 	// not ACTIVE, and both say the operation sets the stream to UPDATING (#1119).
 	goCtx := context.Background()
@@ -782,6 +823,9 @@ func (p *KinesisPlugin) splitShard(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
+	}
+	if refusal := kinesisRequireProvisioned(stream, target, "SplitShard"); refusal != nil {
+		return nil, refusal
 	}
 	// API_MergeShards and API_SplitShard both publish ResourceInUseException for a stream that is
 	// not ACTIVE, and both say the operation sets the stream to UPDATING (#1119).

@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1098 operations**. This
+Substrate ships **68 built-in service plugins** routing **1099 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -55,7 +55,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 34 | Glue | `glue` | JSON | 33 |
 | 35 | Health | `health` | JSON | 4 |
 | 36 | IAM | `iam` | Query | 74 |
-| 37 | Kinesis Data Streams | `kinesis` | JSON | 17 |
+| 37 | Kinesis Data Streams | `kinesis` | JSON | 18 |
 | 38 | KMS | `kms` | JSON | 24 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
 | 40 | CloudWatch Logs | `logs` | JSON | 14 |
@@ -19312,21 +19312,22 @@ Cognito Identity operations are free.
 
 ### Supported operations
 
-All seventeen operations accept `StreamARN`, `StreamName` or both, except the three noted below — see
+All eighteen operations accept `StreamARN`, `StreamName` or both, except the four noted below — see
 [Naming a stream: by name or by ARN](#naming-a-stream-by-name-or-by-arn).
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written |
-| DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard) |
-| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards` |
+| CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written. Records `StreamModeDetails` (an `ON_DEMAND` stream starts with four shards) and `MaxRecordSizeInKiB` (1024–10 240) — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
+| DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard). Carries `StreamModeDetails` |
+| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards`. Carries `StreamModeDetails` and `MaxRecordSizeInKiB` |
 | DeleteStream | A store fault deleting a shard's records is an error, not a stream reported deleted (#1399) |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region. Pages by `Limit` (1–10 000, default 100, at most 100 returned) and `ExclusiveStartStreamName`, reporting `HasMoreStreams`; names are listed lexicographically; `NextToken` is not read — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) |
-| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses) |
-| MergeShards | Merges the two named adjacent shards: both close, and one child covering their union reports them as `ParentShardId`/`AdjacentParentShardId`. Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) and [A stream's status progresses](#a-streams-status-progresses) |
+| UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-streams-status-progresses). Refuses an on-demand stream with `ValidationException`/400 |
+| UpdateStreamMode | Names the stream by `StreamARN` only, which is `Required: Yes`, as is `StreamModeDetails`. Switches the capacity mode and reports `UPDATING` under a seed like a reshard; switching to the mode the stream already has changes nothing. `WarmThroughputMiBps` is not read — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
+| MergeShards | Merges the two named adjacent shards: both close, and one child covering their union reports them as `ParentShardId`/`AdjacentParentShardId`. Reports `UPDATING` under a seed, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 and an on-demand stream with `ValidationException`/400 — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) and [A stream's status progresses](#a-streams-status-progresses) |
 | SplitShard | Splits the named shard at `NewStartingHashKey`: it closes, and two children report it as `ParentShardId`. Otherwise as `MergeShards` |
-| PutRecord | |
-| PutRecords | Batch put |
+| PutRecord | `PartitionKey` is 1–256 characters, and the record is at most the stream's maximum record size — see [What a put may carry](#what-a-put-may-carry) |
+| PutRecords | 1–500 entries, each checked as `PutRecord`'s, and at most 10 MiB in all |
 | GetShardIterator | Returns base64-encoded cursor |
 | GetRecords | Names its stream by `ShardIterator`; a `StreamARN` is optional and is checked against it. This is the one page publishing `StreamARN` and **no** `StreamName`. `ApproximateArrivalTimestamp` is epoch seconds to the millisecond, as the page publishes (#1338) |
 | EnableEnhancedMonitoring | `ShardLevelMetrics` is checked against its published 1–7 range and enum; `ALL` is expanded — see [Shard-level metrics, and the ALL wildcard](#shard-level-metrics-and-the-all-wildcard) |
@@ -19337,7 +19338,7 @@ All seventeen operations accept `StreamARN`, `StreamName` or both, except the th
 
 ### Naming a stream: by name or by ARN
 
-Fifteen of the seventeen operations publish `StreamARN` beside `StreamName`, both `Required: No`, under
+Fifteen of the eighteen operations publish `StreamARN` beside `StreamName`, both `Required: No`, under
 a Note that is byte-identical on every one of their pages: *"you must use either the `StreamARN` or the
 `StreamName` parameter, or both. It is recommended that you use the `StreamARN` input parameter when you
 invoke this API."* Until [#966](https://github.com/scttfrdmn/substrate/issues/966) substrate decoded
@@ -19400,7 +19401,9 @@ at all — not on an operation page, not on the common-errors page, not even in 
 `InvalidArgumentException`/400, which **all sixteen** guarded operation pages publish: *"A specified
 parameter exceeds its restrictions, is not supported, or can't be used. For more information, see the
 returned message."* `ValidationException`, which four of those pages also carry, is not the answer:
-its gloss is specific to capacity mode. So nothing in the plugin answers the old code any longer.
+the SDK model glosses it as specific to capacity mode, and since
+[#1118](https://github.com/scttfrdmn/substrate/issues/1118) it is answered only for a reshard of an
+on-demand stream. So nothing in the plugin answers the old code any longer.
 
 **`GetRecords`' page contradicts itself, and the contradiction is recorded rather than resolved.** It
 publishes `StreamARN` and no `StreamName`, because its stream is implied by the required
@@ -19734,6 +19737,48 @@ caller named were never the ones that changed. Each now follows its page:
   listed lexicographically, which is what makes "start after this name" well defined. A `Limit` outside
   1–10 000 is `InvalidArgumentException`. `NextToken` is not read.
 
+### Capacity mode, and the reshards it refuses
+
+Until [#1118](https://github.com/scttfrdmn/substrate/issues/1118) every stream was implicitly
+provisioned: `CreateStream` discarded `StreamModeDetails` and `UpdateStreamMode` was not routed. A stream
+now records its mode, and `API_StreamModeDetails` publishes the one member, `StreamMode`, as
+`PROVISIONED | ON_DEMAND`.
+
+| Request | Answer |
+|---------|--------|
+| `CreateStream` with no `StreamModeDetails` | `PROVISIONED`, with the shards `ShardCount` asks for (one if it asks for none). The record stores no mode, so it is byte-identical to one written before #1118 |
+| `CreateStream` with `ON_DEMAND` | Four shards, the count the quotas page's *"new data streams created with the on-demand capacity mode have 4 MB/s of write … throughput"* implies at 1 MB/s a shard. On-demand scaling is not modelled |
+| `CreateStream` with `ON_DEMAND` and a `ShardCount` | `InvalidArgumentException`/400. **Substrate's reading:** the page once called the parameter *"no longer supported"* for on-demand streams and now says nothing |
+| A `StreamMode` outside the enum, or missing | `InvalidArgumentException`/400, the code [#950](https://github.com/scttfrdmn/substrate/issues/950) settled on for an unusable parameter |
+| `UpdateShardCount`, `MergeShards` or `SplitShard` on an on-demand stream | `ValidationException`/400 |
+| `UpdateStreamMode` to the mode the stream has | 200, nothing changes. **Substrate's reading**; no page states it |
+| `UpdateStreamMode` to the other mode | The mode changes, the shards stay, and the stream reports `UPDATING` under a seed — see [A stream's status progresses](#a-streams-status-progresses) |
+
+The three reshard pages each say *"This API is only supported for the data streams with the provisioned
+capacity mode"*, and the SDK model glosses their `ValidationException` as *"Specifies that you tried to
+invoke this API for a data stream with the on-demand capacity mode."* The API Reference pages now gloss
+the same code more generally, as data validation *"for this data stream"*, which the refusal still fits.
+The quota of two mode switches in 24 hours, and `WarmThroughputMiBps`, are not modelled. The messages are
+substrate's own.
+
+### What a put may carry
+
+[#1418](https://github.com/scttfrdmn/substrate/issues/1418) added the limits `API_PutRecord` and
+`API_PutRecords` publish. Every refusal is `InvalidArgumentException`/400, the only validation code
+either page's Errors section carries, and the messages are substrate's own.
+
+| Limit | Source |
+|-------|--------|
+| `PartitionKey` is 1–256 characters | The length constraint on both pages. The member is `Required: No` only for a stream using the `AUTO` distribution strategy; substrate models only the default `USER_PARTITION_KEY`, under which the pages say *"a partition key is required"* |
+| `Records` holds 1–500 entries | *"Array Members: Minimum number of 1 item. Maximum number of 500 items."* |
+| A record is at most the stream's maximum record size, partition key included | 1 MiB unless `CreateStream` set `MaxRecordSizeInKiB`. The large-records guide: *"The default maximum record size for existing, and newly created streams is set to 1 MiB."* The blob is counted before base64 encoding |
+| A `PutRecords` request is at most 10 MiB, partition keys included | *"up to a limit of 10 MiB for the entire request, including partition keys"*, on `API_PutRecords` and the quotas page. The older 5 MiB figure is no longer published |
+
+What the request alone decides — the key lengths, the entry count and the 10 MiB total — is checked
+before the stream is read, so it is refused even for a stream that does not exist. The per-record check
+needs the stream's own maximum, so it runs after the stream is loaded, the same order `UpdateShardCount`
+uses for its bounds against the current shard count. `UpdateMaxRecordSize` is not routed.
+
 ### The account and Region a record carries reach no response
 
 `KinesisStream` declares `AccountID`, `Region` and `CreatedAt` under wire-visible `json` tags, plus
@@ -19746,7 +19791,7 @@ reads back. None of them reaches a body:
 - Every other operation answers a map or a list of names.
 - `CreatedAt` reaches the wire only as the published `StreamCreationTimestamp`.
 
-All seventeen routed operations are driven by
+All eighteen routed operations are driven by
 `TestKinesisWire_StreamResponsesCarryNoBookkeepingMember` and its shard-topology sibling in
 `emulator/kinesis_wire_test.go`. Each walks the decoded document and fails on a bookkeeping member at
 any depth. `ever_tagged` carries `,omitempty` and is set only by a tag write (#938). So the test

@@ -84,18 +84,20 @@ func TestKinesisShapes_TheTwoDescribesAnswerDisjointMembers(t *testing.T) {
 	description := kinesisShapesDescribe(t, ts, "DescribeStream", "StreamDescription")
 	assert.Equal(t, []string{
 		"EnhancedMonitoring", "HasMoreShards", "RetentionPeriodHours", "Shards",
-		"StreamARN", "StreamCreationTimestamp", "StreamName", "StreamStatus",
+		"StreamARN", "StreamCreationTimestamp", "StreamModeDetails", "StreamName", "StreamStatus",
 	}, kinesisShapesKeys(description),
-		"StreamDescription publishes eight Required: Yes members and substrate answers those")
+		"StreamDescription publishes eight Required: Yes members, and substrate answers those plus the "+
+			"Required: No StreamModeDetails (#1118)")
 	assert.NotContains(t, description, "OpenShardCount",
 		"OpenShardCount is a StreamDescriptionSummary member; API_StreamDescription publishes it nowhere")
 
 	summary := kinesisShapesDescribe(t, ts, "DescribeStreamSummary", "StreamDescriptionSummary")
 	assert.Equal(t, []string{
-		"EnhancedMonitoring", "OpenShardCount", "RetentionPeriodHours",
-		"StreamARN", "StreamCreationTimestamp", "StreamName", "StreamStatus",
+		"EnhancedMonitoring", "MaxRecordSizeInKiB", "OpenShardCount", "RetentionPeriodHours",
+		"StreamARN", "StreamCreationTimestamp", "StreamModeDetails", "StreamName", "StreamStatus",
 	}, kinesisShapesKeys(summary),
-		"StreamDescriptionSummary publishes seven Required: Yes members and substrate answers those")
+		"StreamDescriptionSummary publishes seven Required: Yes members, and substrate answers those plus "+
+			"the Required: No StreamModeDetails (#1118) and MaxRecordSizeInKiB (#1418)")
 	assert.NotContains(t, summary, "Shards",
 		"Shards is a StreamDescription member; the summary publishes a count and no shard list")
 	assert.NotContains(t, summary, "HasMoreShards",
