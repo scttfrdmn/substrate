@@ -148,7 +148,9 @@ func parseBedrockRuntimeOperation(method, path string) (op, id1, id2 string) {
 	return "", "", ""
 }
 
-func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSRequest, guardrailID, _ string) (*AWSResponse, error) {
+// applyGuardrail handles ApplyGuardrail. Whether the guardrail intervenes is the seeded decision it
+// shares with InvokeModel; see bedrock_guardrail.go (#1183). It reads state and writes none.
+func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSRequest, guardrailID, version string) (*AWSResponse, error) {
 	var body struct {
 		Source  string `json:"source"`
 		Content []struct {
@@ -161,34 +163,22 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 		return nil, bedrockInvalidBody()
 	}
 
-	// Extract input text from first text content item.
+	// The pass-through echoes the first text content item; the decision reads every one.
 	inputText := ""
+	var texts []string
 	for _, item := range body.Content {
 		if item.Text != nil {
-			inputText = item.Text.Text
-			break
+			if texts == nil {
+				inputText = item.Text.Text
+			}
+			texts = append(texts, item.Text.Text)
 		}
 	}
 
-	goCtx := context.Background()
-	blocklistKey := "guardrail:" + ctx.AccountID + "/" + guardrailID + "/blocklist"
-
-	// Auto-create the guardrail state entry on first use (empty blocklist).
-	data, err := p.state.Get(goCtx, bedrockRuntimeNamespace, blocklistKey)
-	if err != nil || data == nil {
-		// Auto-register with empty blocklist.
-		empty, err := json.Marshal([]string{})
-		if err != nil {
-			return nil, fmt.Errorf("bedrock applyGuardrail marshal: %w", err)
-		}
-		if putErr := p.state.Put(goCtx, bedrockRuntimeNamespace, blocklistKey, empty); putErr != nil {
-			return nil, fmt.Errorf("applyGuardrail: put blocklist: %w", putErr)
-		}
-		data = empty
+	intervened, err := p.guardrailIntervenes(ctx, guardrailID, version, texts)
+	if err != nil {
+		return nil, fmt.Errorf("bedrock applyGuardrail: %w", err)
 	}
-
-	var blocklist []string
-	_ = json.Unmarshal(data, &blocklist)
 
 	usage := map[string]int{
 		"topicPolicyUnitsProcessed":                    0,
@@ -199,26 +189,23 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 		"contextualGroundingPolicyUnitsProcessed":      0,
 	}
 
-	// Check blocklist.
-	for _, term := range blocklist {
-		if strings.Contains(inputText, term) {
-			return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{
-				"action": "GUARDRAIL_INTERVENED",
-				"outputs": []map[string]string{
-					{"text": "Sorry, I can't help with that."},
-				},
-				"assessments": []map[string]interface{}{
-					{
-						"topicPolicy": map[string]interface{}{
-							"topics": []map[string]string{
-								{"name": "blocked-topic", "type": "DENY", "action": "BLOCKED"},
-							},
+	if intervened {
+		return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{
+			"action": "GUARDRAIL_INTERVENED",
+			"outputs": []map[string]string{
+				{"text": "Sorry, I can't help with that."},
+			},
+			"assessments": []map[string]interface{}{
+				{
+					"topicPolicy": map[string]interface{}{
+						"topics": []map[string]string{
+							{"name": "blocked-topic", "type": "DENY", "action": "BLOCKED"},
 						},
 					},
 				},
-				"usage": usage,
-			})
-		}
+			},
+			"usage": usage,
+		})
 	}
 
 	// Pass-through: echo input text.
@@ -233,8 +220,14 @@ func (p *BedrockRuntimePlugin) applyGuardrail(ctx *RequestContext, req *AWSReque
 }
 
 // invokeModel handles the InvokeModel operation, returning a seeded or default
-// canned response.
-func (p *BedrockRuntimePlugin) invokeModel(_ *RequestContext, _ *AWSRequest, modelID string) (*AWSResponse, error) {
+// canned response, or a guardrail intervention (#1183). The guardrail headers are checked
+// first, since their refusals depend on the request alone; a seeded response then wins
+// outright; see bedrock_guardrail.go.
+func (p *BedrockRuntimePlugin) invokeModel(ctx *RequestContext, req *AWSRequest, modelID string) (*AWSResponse, error) {
+	guardrailID, guardrailVersion, refusal := bedrockInvokeGuardrail(req)
+	if refusal != nil {
+		return nil, refusal
+	}
 	goCtx := context.Background()
 
 	// Check for seeded response: exact modelID match, then "*" wildcard.
@@ -249,6 +242,18 @@ func (p *BedrockRuntimePlugin) invokeModel(_ *RequestContext, _ *AWSRequest, mod
 				Headers:    map[string]string{"Content-Type": "application/json"},
 				Body:       data,
 			}, nil
+		}
+	}
+
+	if guardrailID != "" {
+		intervened, err := p.guardrailIntervenes(ctx, guardrailID, guardrailVersion, bedrockBodyTexts(req.Body))
+		if err != nil {
+			return nil, fmt.Errorf("bedrock invokeModel: %w", err)
+		}
+		if intervened {
+			return bedrockRuntimeJSONResponse(http.StatusOK, map[string]interface{}{
+				"amazon-bedrock-guardrailAction": "INTERVENED",
+			})
 		}
 	}
 

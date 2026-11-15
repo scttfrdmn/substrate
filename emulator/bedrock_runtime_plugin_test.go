@@ -2,7 +2,6 @@ package emulator_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -136,11 +135,7 @@ func TestBedrockRuntimePlugin_BlocklistIntervened(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
 
 	// Seed the blocklist with "forbidden" term.
-	blocklistKey := "guardrail:123456789012/guardrail-block/blocklist"
-	blocklist, _ := json.Marshal([]string{"forbidden"})
-	if err := setup.state.Put(context.Background(), "bedrock-runtime", blocklistKey, blocklist); err != nil {
-		t.Fatalf("seed blocklist: %v", err)
-	}
+	brSeedBlocklist(t, setup.server, map[string]any{"guardrailIdentifier": "guardrail-block", "terms": []string{"forbidden"}})
 
 	resp := brRequest(t, setup.server, "guardrail-block", "1", brPayload("INPUT", "This contains forbidden content"))
 	if resp.StatusCode != http.StatusOK {
@@ -162,11 +157,7 @@ func TestBedrockRuntimePlugin_BlocklistNonMatching(t *testing.T) {
 	setup := newBedrockRuntimeTestServer(t)
 
 	// Seed blocklist with term that won't match.
-	blocklistKey := "guardrail:123456789012/guardrail-nm/blocklist"
-	blocklist, _ := json.Marshal([]string{"badword"})
-	if err := setup.state.Put(context.Background(), "bedrock-runtime", blocklistKey, blocklist); err != nil {
-		t.Fatalf("seed blocklist: %v", err)
-	}
+	brSeedBlocklist(t, setup.server, map[string]any{"guardrailIdentifier": "guardrail-nm", "terms": []string{"badword"}})
 
 	resp := brRequest(t, setup.server, "guardrail-nm", "1", brPayload("OUTPUT", "This is fine content"))
 	if resp.StatusCode != http.StatusOK {

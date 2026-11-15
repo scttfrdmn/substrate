@@ -23541,8 +23541,8 @@ running.
 
 | Operation | Notes |
 |-----------|-------|
-| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model. Nothing but the model ID is read — not the body, not `accept` or `contentType`, and [not the guardrail headers](#invokemodel-reads-nothing-but-the-model-id) |
-| ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a blocklist](#how-a-guardrail-decides); the version is discarded |
+| InvokeModel | `POST /model/{modelId}/invoke`. Answers a [seeded response body](#seeding-a-model-response) verbatim, or a canned Claude Messages body naming the requested model, or `{"amazon-bedrock-guardrailAction": "INTERVENED"}` when the guardrail [its headers name](#invokemodel-reads-the-guardrail-headers) intervenes. `accept` is not read |
+| ApplyGuardrail | `POST /guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`. [`NONE` or `GUARDRAIL_INTERVENED`, decided by a seeded blocklist](#how-a-guardrail-decides) for that guardrail and version |
 | CreateModelInvocationJob | `POST /model-invocation-job`. Answers `{"jobArn"}`, exactly the published shape, and records the job as `Submitted` — the first state the page documents, so a batch job is deliberately not terminal at birth. All five members marked `Required: Yes` (`jobName`, `modelId`, `roleArn`, `inputDataConfig`, `outputDataConfig`) are checked, and an absent one is `ValidationException`/400 ([#1174](https://github.com/scttfrdmn/substrate/issues/1174)). The job ID is twelve characters of `[a-z0-9]`, the published `jobArn` pattern, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) ([#856](https://github.com/scttfrdmn/substrate/issues/856)) |
 | GetModelInvocationJob | `GET /model-invocation-job/{jobIdentifier}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)), and reports the job's [observed status](#a-batch-jobs-lifecycle): one read is one observation of its countdown |
 | ListModelInvocationJobs | `GET /model-invocation-jobs`. `invocationJobSummaries` of five members each; each summary is one observation of that job's countdown, so a poll on either operation agrees, and one List over N jobs spends one observation of each. Every published query filter is ignored and no `nextToken` is emitted |
@@ -23553,39 +23553,63 @@ Converse-shaped call is served. Nor is the rest of the `bedrock` control plane �
 `ListFoundationModels`, `GetFoundationModel`, `CreateGuardrail`, `GetGuardrail`,
 `CreateModelCustomizationJob` and the provisioned-throughput operations among them.
 
-### InvokeModel reads nothing but the model ID
+### InvokeModel reads the guardrail headers
 
-The handler takes its request as `_ *AWSRequest`, so every part of the call except the path's model ID
-is discarded. Three consequences are worth knowing before writing a test.
+Until [#1183](https://github.com/scttfrdmn/substrate/issues/1183) `InvokeModel` read nothing but the
+model ID, so an invocation that attached a guardrail was never filtered. It now reads
+`X-Amzn-Bedrock-GuardrailIdentifier` (an ID or a guardrail ARN) and `X-Amzn-Bedrock-GuardrailVersion`
+(a number or `DRAFT`). When both name a guardrail and its [blocklist](#how-a-guardrail-decides) matches
+any string in the request body, the answer is `{"amazon-bedrock-guardrailAction": "INTERVENED"}` in place
+of the inference: the member and its value are the page's own example response. The example's
+`amazon-bedrock-trace` member, whose contents the page does not publish, is not rendered, and
+`X-Amzn-Bedrock-Trace` is not read.
 
-`X-Amzn-Bedrock-GuardrailIdentifier` and `X-Amzn-Bedrock-GuardrailVersion` are published request
-headers and are unread, so an invocation that attaches a guardrail is never filtered. The published
-`"amazon-bedrock-guardrailAction": "INTERVENED | NONE"` member therefore never appears in a canned
-body — the only way to observe an intervention is to call `ApplyGuardrail` directly, which is a
-different operation most consumers do not make. The decision itself already exists next door
-([see above](#how-a-guardrail-decides)); what is missing is the header read that would reach it.
+A non-intervening invocation answers exactly what it answered before, byte for byte, so a recorded run
+replays identically. A [seeded response](#seeding-a-model-response) wins outright: a response seed is
+the caller stating what the wire carries, and a guardrail decision does not rewrite it.
 
-The page publishes three conditions under which the *request* is an error, and none is checked: a body
-naming `amazon-bedrock-guardrailConfig` with no guardrail identifier, a guardrail enabled with a
-`contentType` other than `application/json`, and a guardrail identifier with no `guardrailVersion`.
+The page lists three request errors, and each is `ValidationException`/400, which the page publishes:
 
-And because the body is never parsed, a malformed or entirely absent one is accepted — the canned
-Claude Messages body comes back regardless.
-[#1183](https://github.com/scttfrdmn/substrate/issues/1183).
+| Request | Answer |
+|---------|--------|
+| A body with `amazon-bedrock-guardrailConfig` and no guardrail identifier | `ValidationException`/400 |
+| A guardrail identifier and no `guardrailVersion` | `ValidationException`/400 |
+| A guardrail with a `Content-Type` other than `application/json` | `ValidationException`/400 |
+| An identifier or version outside its published pattern | `ValidationException`/400 |
+| A version and no identifier | Accepted, and no guardrail is applied: *"If you don't provide a value, no guardrail is applied to the invocation"*, and the page lists no error for it |
+
+These are checked before anything else, so a seeded response does not mask them. The messages are
+substrate's own.
 
 ### How a guardrail decides
 
-A guardrail's blocklist is a list of substrings held in state. If any of them occurs in the request's
-first text content item, the response is `action: GUARDRAIL_INTERVENED` with a fixed output
-(*"Sorry, I can't help with that."*) and a single fabricated `topicPolicy` assessment naming
-`blocked-topic`; otherwise it is `action: NONE` with the input echoed back and an empty assessment
-list. `usage` is a fixed set of counters in both cases.
+Substrate evaluates no guardrail policy, since content filtering is resource-internal. Whether a
+guardrail intervenes is **seeded**: a blocklist names the substrings it blocks, and `ApplyGuardrail` and
+`InvokeModel` share the one decision.
 
-Two consequences worth knowing before writing a test. There is no control-plane endpoint for the
-blocklist, so `GUARDRAIL_INTERVENED` is reachable only by writing the blocklist key into state
-directly — every ordinary call gets `NONE`. And the blocklist key is auto-created empty on first use
-and omits both the Region and the guardrail version, so `ApplyGuardrail` can never answer
-`ResourceNotFoundException`: any guardrail identifier, for any version, is valid.
+```
+POST   /v1/bedrock/guardrail-blocklist   {"guardrailIdentifier": "gr1", "guardrailVersion": "1",
+                                          "accountId": "…", "region": "…", "terms": ["forbidden"]}
+DELETE /v1/bedrock/guardrail-blocklist   (all, or ?guardrailIdentifier=…&guardrailVersion=…&accountId=…&region=… for one)
+```
+
+`terms` is required. Each of the other four members defaults to `"*"`, which matches anything, and a
+guardrail named by ARN is keyed by the ID the ARN ends in. A request is matched against the most specific
+seed only, trying the guardrail's own ID before `"*"`, then its version, then the account, then the
+Region. An unseeded guardrail intervenes on nothing.
+
+`ApplyGuardrail` matches every text content item. If a term occurs in one, the response is
+`action: GUARDRAIL_INTERVENED` with a fixed output (*"Sorry, I can't help with that."*) and a single
+fabricated `topicPolicy` assessment naming `blocked-topic`; otherwise it is `action: NONE` with the first
+input echoed back and an empty assessment list. `usage` is a fixed set of counters in both cases.
+`InvokeModel` matches every string value in its JSON body, at any depth, so a term matches wherever the
+model's request format puts the prompt.
+
+Until #1183 the blocklist was a state key with no Region and no version, writable only by a test that
+wrote the state store directly, and `ApplyGuardrail` created it empty on first use. That was a state
+write on a read and then a discarded decode error. Both reads now write nothing, and a seed that does not
+decode is an error. `ApplyGuardrail` still never answers `ResourceNotFoundException`, since substrate
+holds no guardrail resources: any identifier, for any version, is valid.
 
 ### Seeding a model response
 
@@ -23650,17 +23674,18 @@ status it observed.
 | a batch job that does not exist | `ResourceNotFoundException` | 404 |
 | `StopModelInvocationJob` on a job in a terminal status | `ConflictException` | 400 |
 
-All four match what the pages publish. Those two are the only operations that parse a body at all:
-`InvokeModel` [reads nothing but the model ID](#invokemodel-reads-nothing-but-the-model-id), so it has
-no body-parse refusal to answer.
+All four match what the pages publish. `InvokeModel` also answers `ValidationException`/400 for the
+[guardrail request errors](#invokemodel-reads-the-guardrail-headers) its page lists. It reads its body
+only to match a guardrail's blocklist, so a body that will not parse is not refused.
 
 The rest of what the pages publish has no site, because none of the conditions is modelled.
 `InvokeModel` alone publishes ten errors — `AccessDeniedException`/403, `InternalServerException`/500,
 `ModelErrorException`/424, `ModelNotReadyException`/429, `ModelTimeoutException`/408,
 `ResourceNotFoundException`/404, `ServiceQuotaExceededException`/400,
 `ServiceUnavailableException`/503, `ThrottlingException`/429 and `ValidationException`/400 — of which
-Substrate answers none: there is no quota, no model readiness, no timeout and no unknown model, so
-every invocation succeeds. `ConflictException`/400 is published on the batch create and the batch stop.
+substrate answers only `ValidationException`, for the guardrail request errors: there is no quota, no
+model readiness, no timeout and no unknown model, so every other invocation succeeds.
+`ConflictException`/400 is published on the batch create and the batch stop.
 The stop answers it for a terminal job (#1174); the create does not, so a duplicate `jobName` is accepted.
 `ModelStreamErrorException` belongs to `InvokeModelWithResponseStream`, which is not routed.
 
