@@ -411,34 +411,40 @@ func TestCFN_AStackThatAdmitsNoUpdateIsRefused(t *testing.T) {
 }
 
 // TestCFN_ARefusalForChangedInputsFailsTheResource pins that a re-create refused as already
-// existing is cleared only when the resource's resolved inputs are identical. A named role whose
-// Description GetAtts a KMS key the update replaces resolves differently; keeping its previous
-// record would leave it naming the key the update deletes. So the refusal fails the role, the
-// update rolls back, and the original key is still the stack's and still enabled.
+// existing is cleared only when the resource's resolved inputs are identical. A named secret whose
+// Description Refs a VPC the update re-creates under a new ID resolves differently; keeping its
+// previous record would leave it naming the VPC the update deletes. So the refusal fails the
+// secret, the update rolls back, and the original VPC is still the stack's and still exists.
+//
+// A VPC and a secret because both are still on the re-create path (#1565): the KMS key and IAM
+// role this used before are updated in place as of #1545, so neither re-creates.
 func TestCFN_ARefusalForChangedInputsFailsTheResource(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()
-	tmpl := func(description string) string {
+	tmpl := func(cidr string) string {
 		return `{"Resources":{
-			"Key":{"Type":"AWS::KMS::Key","Properties":{"Description":"` + description + `"}},
-			"Role":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"refused-role",
-				"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]},
-				"Description":{"Fn::GetAtt":["Key","Arn"]}}}}}`
+			"Net":{"Type":"AWS::EC2::VPC","Properties":{"CidrBlock":"` + cidr + `"}},
+			"Secret":{"Type":"AWS::SecretsManager::Secret","Properties":{"Name":"refused-secret",
+				"Description":{"Ref":"Net"}}}}}`
 	}
-	created, err := d.Deploy(ctx, tmpl("first"), "changed-inputs", nil)
+	created, err := d.Deploy(ctx, tmpl("10.0.0.0/16"), "changed-inputs", nil)
 	require.NoError(t, err)
-	keyID := resourceByLogicalID(t, created, "Key").PhysicalID
+	vpcID := resourceByLogicalID(t, created, "Net").PhysicalID
 
-	result, err := d.UpdateStack(ctx, tmpl("second"), "changed-inputs", nil, emulator.CFNDeployOptions{})
+	result, err := d.UpdateStack(ctx, tmpl("10.1.0.0/16"), "changed-inputs", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status)
-	assert.Contains(t, result.StatusReason, "Role")
-	assert.Contains(t, result.StatusReason, "EntityAlreadyExists")
-	assert.Equal(t, keyID, resourceByLogicalID(t, result, "Key").PhysicalID)
+	assert.Contains(t, result.StatusReason, "Secret")
+	assert.Contains(t, result.StatusReason, "ResourceExistsException")
+	assert.Equal(t, vpcID, resourceByLogicalID(t, result, "Net").PhysicalID)
 
-	out := cfnStubDispatch(t, d, "kms", "DescribeKey", map[string]any{"KeyId": keyID})
-	meta, _ := out["KeyMetadata"].(map[string]any)
-	assert.Equal(t, "Enabled", meta["KeyState"], "the original key was not deleted")
+	var vpcs struct {
+		IDs []string `xml:"vpcSet>item>vpcId"`
+	}
+	cfnDescribeEC2(t, d, map[string]string{
+		"Action": "DescribeVpcs", "Filter.1.Name": "vpc-id", "Filter.1.Value.1": vpcID,
+	}, &vpcs)
+	assert.Equal(t, []string{vpcID}, vpcs.IDs, "the original VPC was not deleted")
 }
 
 // TestCFN_ARollbackOrdersAPreviousTemplateTolerantly pins that the rollback of a failed update

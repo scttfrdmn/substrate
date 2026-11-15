@@ -229,8 +229,10 @@ func (d *StackDeployer) deployECSService(
 		"serviceName":    serviceName,
 		"cluster":        cluster,
 		"taskDefinition": resolveStringProp(props, "TaskDefinition", "", cctx),
-		"desiredCount":   1,
-		"launchType":     resolveStringProp(props, "LaunchType", "FARGATE", cctx),
+		// The declared DesiredCount, which this sent as a constant 1 before #1545 gave the
+		// service an update path that applies it.
+		"desiredCount": cfnECSDesiredCount(props, cctx),
+		"launchType":   resolveStringProp(props, "LaunchType", "FARGATE", cctx),
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {

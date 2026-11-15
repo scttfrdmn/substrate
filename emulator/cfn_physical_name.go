@@ -130,6 +130,11 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 // physical ID (MyStack-MyBucket-abcdefghijk1).
 const cfnGeneratedNameSuffixLen = 12
 
+// cfnNameSuffixAlphabet is the alphabet of a generated name's suffix: base 36 in lowercase, which
+// is what the derived suffix renders in, so a minted suffix is indistinguishable in shape and fits
+// a lowercase-only name.
+const cfnNameSuffixAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
 // cfnGeneratedName returns the physical name to use for a resource of resType
 // whose template omitted its name property, or logicalID unchanged when resType
 // has no entry in cfnGeneratedNameTypes.
@@ -146,6 +151,13 @@ const cfnGeneratedNameSuffixLen = 12
 // stack, logical ID) while still differing between stacks, which is the property
 // #560 needs, and keeps the emulator deterministic by construction.
 //
+// A **replacement** is the exception, and the one place the suffix is minted rather
+// than derived (#1545). A change to an "Update requires: Replacement" property creates
+// a new resource while the old one still exists, so the derived name is taken; the
+// deployer mints the replacement a suffix through the request's [IDMint]
+// ([cfnContext.mintReplacementName]), which a replay of the request mints again. The
+// name a resource is first created under is unchanged.
+//
 // The account and Region are in the hash because two same-named stacks in
 // different Regions are different stacks, which sameScope already treats them
 // as.
@@ -161,6 +173,11 @@ func cfnGeneratedName(cctx *cfnContext, resType, logicalID string) string {
 	}
 
 	suffix := cfnNameSuffix(accountID, region, stackName, logicalID)
+	if cctx != nil {
+		if minted, ok := cctx.nameSuffixes[logicalID]; ok {
+			suffix = minted
+		}
+	}
 
 	// A generated name must begin with a letter. The stack segment leads, so the
 	// guarantee is applied there, before the length budget is spent — prefixing

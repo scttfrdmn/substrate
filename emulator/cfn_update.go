@@ -49,6 +49,9 @@ import (
 // the resource with a reason saying so rather than replacing a resource AWS would have kept. Every
 // other type is re-created, which is the pre-#1427 behavior, and when the re-create yields a new
 // physical ID the old resource is now deleted after the update succeeds, as a replacement is.
+//
+// **A resource the template no longer deploys is deleted** once the update succeeds, under its
+// DeletionPolicy, in the same sweep as the replaced ones (#1547; see [StackDeployer.deleteSuperseded]).
 
 // cfnUpdateFunc updates one resource in place: prior is what the stack recorded for it, and the
 // returned DeployedResource replaces that record. A refusal is reported on the resource, exactly as
@@ -68,10 +71,22 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::Transfer::Server":    (*StackDeployer).updateTransferServer,
 	"AWS::Backup::BackupPlan":  (*StackDeployer).updateBackupBackupPlan,
 	"AWS::EC2::LaunchTemplate": (*StackDeployer).updateEC2LaunchTemplate,
+	// The types CDK templates most often change in place (#1545, #1550); see
+	// cfn_resources_v129.go.
+	"AWS::Lambda::Function":   (*StackDeployer).updateLambdaFunction,
+	"AWS::DynamoDB::Table":    (*StackDeployer).updateDynamoDBTable,
+	"AWS::SQS::Queue":         (*StackDeployer).updateSQSQueue,
+	"AWS::SNS::Topic":         (*StackDeployer).updateSNSTopic,
+	"AWS::S3::Bucket":         (*StackDeployer).updateS3Bucket,
+	"AWS::KMS::Key":           (*StackDeployer).updateKMSKey,
+	"AWS::EC2::SecurityGroup": (*StackDeployer).updateEC2SecurityGroup,
+	"AWS::ECS::Service":       (*StackDeployer).updateECSService,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be
 // applied: AWS updates the property in place, and substrate does not route the operation that would.
+// It covers every updatable property of a type with no updater; cfnUpdateUnmodelledProperties
+// names the individual properties an updater's type cannot apply.
 //
 // Failing the resource is deliberate. Re-creating it would answer a new physical ID for a change
 // AWS makes in place — a plausible-looking wrong answer — and an MSK cluster's re-create is refused
@@ -92,9 +107,22 @@ var cfnUpdateUnmodelled = map[string]string{
 // create the server. If you change its value in a later stack update, the update fails and the
 // server is left unchanged." The message is substrate's own; the page publishes the behavior, not
 // the text.
+//
+// AWS::KMS::Key's KeySpec, KeyUsage and MultiRegion are Update requires: Replacement on the page,
+// and the page then says the replacement never happens: "If you change the value of the KeySpec
+// property on an existing KMS key, the update request fails, regardless of the value of the
+// UpdateReplacePolicy attribute. This prevents you from accidentally deleting a KMS key by changing
+// an immutable property value", and the same of the other two. Origin is No interruption, and "You
+// cannot change the origin after you create the KMS key" is its page's sentence.
 var cfnCreateOnlyProperties = map[string]map[string]string{
 	"AWS::Transfer::Server": {
 		"CreateWithHostKey": "it can be set only when the server is created",
+	},
+	"AWS::KMS::Key": {
+		"KeySpec":     "a key's key spec cannot change, and CloudFormation does not replace a key for it",
+		"KeyUsage":    "a key's key usage cannot change, and CloudFormation does not replace a key for it",
+		"MultiRegion": "a key's multi-Region setting cannot change, and CloudFormation does not replace a key for it",
+		"Origin":      "a key's origin cannot change after the key is created",
 	},
 }
 
@@ -190,6 +218,15 @@ type cfnResourcePlan struct {
 	// deployment's did, which for a resource that is nonetheless dispatched means a rollback is
 	// applying it again.
 	resolvedSame bool
+
+	// replacement is set when a changed property's "Update requires" is Replacement, so the
+	// create that follows makes a new resource beside the old one and the old one is deleted once
+	// the update succeeds. Such a resource is given a fresh generated name (#1545).
+	replacement bool
+
+	// priorResolved is the previous declaration's properties resolved against the previous
+	// deployment, which an updater reads through [cfnContext.priorProps].
+	priorResolved map[string]interface{}
 }
 
 // plan decides what this deployment does with one resource.
@@ -211,7 +248,8 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 		// replaced, which is how a change set reports it (Remove and Add).
 		return p
 	}
-	changed, resolved := b.changedProperties(priorDecl, res, cctx)
+	changed, old, resolved := b.changedProperties(priorDecl, res, cctx)
+	p.priorResolved = old
 	if !resolved {
 		// The new declaration does not resolve. Dispatching is what reports why.
 		return p
@@ -243,6 +281,18 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 		}
 	}
 	if cfnRequiresReplacement(res.Type, changed) {
+		p.replacement = true
+		return p
+	}
+	var unmodelled []string
+	for _, prop := range changed {
+		if reason, ok := cfnUpdateUnmodelledProperties[res.Type][prop]; ok {
+			unmodelled = append(unmodelled, prop+" ("+reason+")")
+		}
+	}
+	if len(unmodelled) > 0 {
+		p.refusal = fmt.Sprintf("updating %s of %s is not modeled: %s",
+			strings.Join(changed, ", "), res.Type, strings.Join(unmodelled, "; "))
 		return p
 	}
 	if up, ok := cfnResourceUpdaters[res.Type]; ok {
@@ -257,15 +307,18 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 }
 
 // changedProperties resolves both declarations and returns the top-level properties whose values
-// differ, sorted. The second result is false when the new declaration recorded a resolution
-// failure; the failure is drained, since the deploy that follows resolves it again and reports it.
-func (b *cfnBaseline) changedProperties(before, after cfnResource, cctx *cfnContext) ([]string, bool) {
+// differ, sorted, and the previous declaration's resolved properties. The third result is false
+// when the new declaration recorded a resolution failure; the failure is drained, since the deploy
+// that follows resolves it again and reports it.
+func (b *cfnBaseline) changedProperties(
+	before, after cfnResource, cctx *cfnContext,
+) ([]string, map[string]interface{}, bool) {
 	old, _ := resolveNested(before.Properties, b.cctx).(map[string]interface{})
 	b.cctx.takeFailures()
 	cctx.takeFailures()
 	updated, _ := resolveNested(after.Properties, cctx).(map[string]interface{})
 	if len(cctx.takeFailures()) > 0 {
-		return nil, false
+		return nil, old, false
 	}
 	keys := map[string]bool{}
 	for k := range old {
@@ -281,7 +334,7 @@ func (b *cfnBaseline) changedProperties(before, after cfnResource, cctx *cfnCont
 		}
 	}
 	sort.Strings(changed)
-	return changed, true
+	return changed, old, true
 }
 
 // replacedBy reports whether dr, just deployed under this plan, replaced the previous resource:
@@ -342,34 +395,108 @@ func (p cfnResourcePlan) clearsRefusal(res cfnResource, dr DeployedResource) boo
 		cfnSameDeclaration(p.priorDecl, res)
 }
 
-// deleteReplaced deletes the resources an update replaced, once the update has succeeded, and
-// reports what happened to each.
+// deleteSuperseded deletes the resources a successful update no longer holds — the ones it replaced
+// and the ones its template no longer declares — and reports what happened to each.
+//
+// Both go in one sweep, in the reverse of the previous template's dependency order, because a
+// removed resource may depend on a replaced one or the other way round, and two sweeps would order
+// each set only against itself (#1547).
 //
 // Each is deleted with the declaration it was deployed from, in base's template, so a delete that
 // needs its properties — an IAM policy's roles, an API Gateway child's parent — finds the values the
-// old resource was created with; references resolve against base's resources. Its UpdateReplacePolicy
-// governs: "By default, CloudFormation then deletes the old resource. Using the UpdateReplacePolicy,
-// you can specify that CloudFormation retain" it.
+// old resource was created with; references resolve against base's resources. The policy differs
+// by why the resource is going:
 //
-// A delete that fails does not fail the update. The troubleshooting guide's "Resource removed from
-// stack but not deleted": "CloudFormation removes the old resource from the stack and continues
-// updating the stack. When the stack update is complete, CloudFormation issues an UPDATE_COMPLETE
-// stack event, but includes a StatusReason that states that one or more resources couldn't be
-// deleted." So the reason is reported on the result and the stack still completes.
-func (d *StackDeployer) deleteReplaced(
-	ctx context.Context, base *CFNStackState, replaced []DeployedResource, streamID string,
+//   - **Replaced**: its UpdateReplacePolicy. "By default, CloudFormation then deletes the old
+//     resource. Using the UpdateReplacePolicy, you can specify that CloudFormation retain" it.
+//   - **Removed from the template**, or declared under a Condition that is now false: its
+//     DeletionPolicy. The UpdateReplacePolicy page draws the line — DeletionPolicy is what applies
+//     "when the resource definition itself is deleted from the template as part of a stack update"
+//     — and the troubleshooting guide's "Resource removed from stack but not deleted" describes the
+//     same path: "You have removed the resource from the stack template, so CloudFormation attempts
+//     to delete the resource from the stack". The op is the DeleteStack one, so
+//     RetainExceptOnCreate retains: the operation removing the resource is not the one that
+//     created it.
+//
+// A delete that fails does not fail the update. The same troubleshooting entry: "CloudFormation
+// removes the old resource from the stack and continues updating the stack. When the stack update
+// is complete, CloudFormation issues an UPDATE_COMPLETE stack event, but includes a StatusReason
+// that states that one or more resources couldn't be deleted." So the reason is reported on the
+// result and the stack still completes.
+//
+// A failed update reaches none of this: it rolls back onto the previous record, which still holds
+// every resource this would have deleted.
+func (d *StackDeployer) deleteSuperseded(
+	ctx context.Context, base *CFNStackState, replaced, removed []DeployedResource, streamID string,
 ) ([]CFNResourceDeletion, string) {
-	if base == nil || len(replaced) == 0 {
+	if base == nil || len(replaced)+len(removed) == 0 {
 		return nil, ""
 	}
+	removedIDs := make(map[string]bool, len(removed))
+	for _, r := range removed {
+		removedIDs[r.LogicalID] = true
+	}
+	all := make([]DeployedResource, 0, len(replaced)+len(removed))
+	all = append(all, replaced...)
+	all = append(all, removed...)
 	sweep := CFNStackState{StackName: base.StackName, TemplateBody: base.TemplateBody,
-		Parameters: base.Parameters, Resources: replaced}
-	deletions := d.sweepResources(ctx, &sweep, base.Resources, streamID, cfnUpdateReplaceOp)
-	failed := cfnFailedDeletions(deletions)
-	if len(failed) == 0 {
+		Parameters: base.Parameters, Resources: all}
+	deletions := d.sweepResourcesByOp(ctx, &sweep, base.Resources, streamID,
+		func(dr DeployedResource) cfnDeletionOp {
+			if removedIDs[dr.LogicalID] {
+				return cfnDeleteStackOp
+			}
+			return cfnUpdateReplaceOp
+		})
+	var failedReplaced, failedRemoved []CFNResourceDeletion
+	for _, del := range deletions {
+		if del.Status != cfnDeleteFailed {
+			continue
+		}
+		if removedIDs[del.LogicalID] {
+			failedRemoved = append(failedRemoved, del)
+		} else {
+			failedReplaced = append(failedReplaced, del)
+		}
+	}
+	var reasons []string
+	if failed := cfnFailedDeletions(failedReplaced); len(failed) > 0 {
+		reasons = append(reasons, "the update could not delete the resources it replaced: "+
+			strings.Join(failed, "; "))
+	}
+	if failed := cfnFailedDeletions(failedRemoved); len(failed) > 0 {
+		reasons = append(reasons, "the update could not delete the resources removed from the template: "+
+			strings.Join(failed, "; "))
+	}
+	if len(reasons) == 0 {
 		return deletions, ""
 	}
-	d.logger.Warn("cfn: an update could not delete the resources it replaced",
-		"stack", base.StackName, "undeleted", len(failed))
-	return deletions, "the update could not delete the resources it replaced: " + strings.Join(failed, "; ")
+	d.logger.Warn("cfn: an update could not delete the resources it no longer holds",
+		"stack", base.StackName, "undeleted", len(failedReplaced)+len(failedRemoved))
+	return deletions, strings.Join(reasons, "; ")
+}
+
+// cfnRemovedResources returns the resources base holds that tmpl no longer deploys: a logical ID
+// the template does not declare, or declares under a Condition that is now false (#1547). They are
+// in base's order, so the sweep's tie-break is stable.
+//
+// A resource whose logical ID is still active is never here, whatever its type: a changed type is
+// a replacement, which [cfnResourcePlan.replacedBy] reports.
+func cfnRemovedResources(baseline *cfnBaseline, tmpl *cfnTemplate, cctx *cfnContext) []DeployedResource {
+	if baseline == nil {
+		return nil
+	}
+	active := cfnActiveResources(tmpl, cctx)
+	var removed []DeployedResource
+	for _, r := range baseline.record.Resources {
+		held, ok := baseline.resources[r.LogicalID]
+		if !ok || held.PhysicalID != r.PhysicalID || held.Type != r.Type {
+			continue
+		}
+		if _, still := active[r.LogicalID]; still {
+			continue
+		}
+		removed = append(removed, r)
+	}
+	return removed
 }

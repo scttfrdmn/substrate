@@ -461,7 +461,7 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	// The previous template's tags go back with it. A rollback converges on the stack
 	// as it was, and the tags are part of that: leaving the failed update's tags in
 	// place would report a stack tagged by an operation that did not survive.
-	result, _, err := d.deploy(ctx, prev.TemplateBody, streamID, prev.Parameters,
+	result, reDeployed, err := d.deploy(ctx, prev.TemplateBody, streamID, prev.Parameters,
 		CFNDeployOptions{OnFailure: CFNOnFailureDoNothing, Tags: prev.Tags}, &prev, force)
 	if err != nil {
 		return nil, fmt.Errorf("roll back update of stack %s: %w", prev.StackName, err)
@@ -481,7 +481,12 @@ func (d *StackDeployer) rollbackFailedUpdate(
 
 	reason := strings.Join(failures, "; ")
 	status := cfnStackUpdateRollbackComplete
-	if reDeployFailures := cfnFailedResources(result.Resources); len(reDeployFailures) > 0 {
+	reDeployFailures := cfnFailedResources(result.Resources)
+	if reDeployed != nil {
+		// An Output of the previous template that no longer resolves fails the rollback too (#1429).
+		reDeployFailures = reDeployed.failures
+	}
+	if len(reDeployFailures) > 0 {
 		// The stack is now in neither shape. Saying so is the whole value of the
 		// status: the previous template no longer describes what is deployed.
 		status = cfnStackUpdateRollbackFailed
