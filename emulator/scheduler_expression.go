@@ -54,7 +54,6 @@ type schedExpression struct {
 // never fires.
 var errSchedExpression = errors.New("unparseable schedule expression")
 
-
 // parseSchedExpression parses expr, evaluated in tz.
 func parseSchedExpression(expr, tz string) (*schedExpression, error) {
 	loc, err := schedLocation(tz)
