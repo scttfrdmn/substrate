@@ -138,9 +138,9 @@ func TestS3Authz_CreateSideEffectsNeedTheirOwnPermission(t *testing.T) {
 		{name: "PutObject untagged", actions: []string{"s3:PutObject"}, req: putObject("")},
 		{name: "PutObject tagged without PutObjectTagging", actions: []string{"s3:PutObject"}, req: putObject("a=1"), missing: "s3:PutObjectTagging"},
 		{name: "PutObject tagged with PutObjectTagging", actions: []string{"s3:PutObject", "s3:PutObjectTagging"}, req: putObject("a=1")},
-		// The create itself is authorized as s3:CreateMultipartUpload here, a pre-existing mapping
-		// (AWS authorizes it as s3:PutObject; #1489); the point is that nothing beyond it is required.
-		{name: "CreateMultipartUpload tagged: no extra permission is published", actions: []string{"s3:PutObject", "s3:CreateMultipartUpload"},
+		// The create itself is authorized as s3:PutObject (#1489); the point is that nothing beyond
+		// it is required.
+		{name: "CreateMultipartUpload tagged: no extra permission is published", actions: []string{"s3:PutObject"},
 			req: &emulator.AWSRequest{Service: "s3", Operation: "CreateMultipartUpload", Path: "/b/k",
 				Headers: map[string]string{"x-amz-tagging": "a=1"}, Params: map[string]string{"uploads": ""}}},
 		{name: "CreateBucket plain", actions: []string{"s3:CreateBucket"}, req: createBucket(nil, "")},
@@ -183,4 +183,100 @@ func TestS3Authz_TagOnCreateSeesTheRequestTags(t *testing.T) {
 	}
 	assert.NoError(t, s3AuthzCheck(t, "scoped", doc, put("team=infra")))
 	requireS3Denied(t, s3AuthzCheck(t, "scoped", doc, put("team=web")), "s3:PutObjectTagging")
+}
+
+// TestS3Authz_MultipartOperationsAuthorizeAsThePublishedAction is #1489: each multipart operation
+// is authorized under the action the S3 User Guide's multipart permissions table names, so a policy
+// granting exactly that action is allowed and one naming the operation instead is denied.
+func TestS3Authz_MultipartOperationsAuthorizeAsThePublishedAction(t *testing.T) {
+	src := map[string]string{"X-Amz-Copy-Source": "/src/object"}
+	cases := []struct {
+		op      string
+		action  string
+		path    string
+		params  map[string]string
+		headers map[string]string
+		extra   []string // further actions the request needs, granted alongside
+	}{
+		{op: "CreateMultipartUpload", action: "s3:PutObject", path: "/b/k", params: map[string]string{"uploads": ""}},
+		{op: "UploadPart", action: "s3:PutObject", path: "/b/k", params: map[string]string{"partNumber": "1", "uploadId": "u"}},
+		{op: "UploadPartCopy", action: "s3:PutObject", path: "/b/k",
+			params: map[string]string{"partNumber": "1", "uploadId": "u"}, headers: src, extra: []string{"s3:GetObject"}},
+		{op: "CompleteMultipartUpload", action: "s3:PutObject", path: "/b/k", params: map[string]string{"uploadId": "u"}},
+		{op: "AbortMultipartUpload", action: "s3:AbortMultipartUpload", path: "/b/k", params: map[string]string{"uploadId": "u"}},
+		{op: "ListParts", action: "s3:ListMultipartUploadParts", path: "/b/k", params: map[string]string{"uploadId": "u"}},
+		{op: "ListMultipartUploads", action: "s3:ListBucketMultipartUploads", path: "/b", params: map[string]string{"uploads": ""}},
+		// Not multipart, but the same defect: there is no s3:CopyObject action (API_CopyObject).
+		{op: "CopyObject", action: "s3:PutObject", path: "/b/k", params: map[string]string{}, headers: src,
+			extra: []string{"s3:GetObject"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.op, func(t *testing.T) {
+			req := func() *emulator.AWSRequest {
+				h := map[string]string{}
+				for k, v := range tc.headers {
+					h[k] = v
+				}
+				return &emulator.AWSRequest{Service: "s3", Operation: tc.op, Path: tc.path, Params: tc.params, Headers: h}
+			}
+			assert.NoError(t, s3AuthzCheck(t, "published", s3AuthzPolicy(append([]string{tc.action}, tc.extra...)), req()))
+			if tc.action != "s3:"+tc.op {
+				requireS3Denied(t,
+					s3AuthzCheck(t, "named", s3AuthzPolicy(append([]string{"s3:" + tc.op}, tc.extra...)), req()),
+					tc.action)
+			}
+		})
+	}
+}
+
+// TestS3Authz_CopyNeedsGetObjectOnTheSource is #1489's second half: CopyObject and UploadPartCopy
+// need s3:GetObject on the source object as well as s3:PutObject on the destination, as both API
+// pages state. The source ARN drops the version suffix and URL-decodes the key.
+func TestS3Authz_CopyNeedsGetObjectOnTheSource(t *testing.T) {
+	scopedRead := func(resource string) emulator.PolicyDocument {
+		return s3AuthzPolicy([]string{"s3:PutObject"}, emulator.PolicyStatement{
+			Effect: "Allow", Action: emulator.StringOrSlice{"s3:GetObject"}, Resource: emulator.StringOrSlice{resource},
+		})
+	}
+	copyReq := func(op, source string) *emulator.AWSRequest {
+		params := map[string]string{}
+		if op == "UploadPartCopy" {
+			params = map[string]string{"partNumber": "1", "uploadId": "u"}
+		}
+		return &emulator.AWSRequest{Service: "s3", Operation: op, Path: "/dst/k", Params: params,
+			Headers: map[string]string{"X-Amz-Copy-Source": source}}
+	}
+	for _, op := range []string{"CopyObject", "UploadPartCopy"} {
+		t.Run(op, func(t *testing.T) {
+			cases := []struct {
+				name    string
+				doc     emulator.PolicyDocument
+				source  string
+				missing string
+			}{
+				{name: "PutObject alone is denied", doc: s3AuthzPolicy([]string{"s3:PutObject"}),
+					source: "src/obj", missing: "s3:GetObject on resource: arn:aws:s3:::src/obj"},
+				{name: "GetObject on the source is allowed", doc: scopedRead("arn:aws:s3:::src/obj"), source: "/src/obj"},
+				{name: "GetObject on another object is denied", doc: scopedRead("arn:aws:s3:::src/other"),
+					source: "src/obj", missing: "s3:GetObject"},
+				{name: "a version suffix is not part of the ARN", doc: scopedRead("arn:aws:s3:::src/obj"),
+					source: "src/obj?versionId=abc"},
+				{name: "an encoded key is decoded", doc: scopedRead("arn:aws:s3:::src/a b"), source: "src/a%20b"},
+				{name: "an explicit Deny on the source wins", doc: s3AuthzPolicy([]string{"s3:PutObject", "s3:GetObject"},
+					emulator.PolicyStatement{Effect: "Deny", Action: emulator.StringOrSlice{"s3:GetObject"},
+						Resource: emulator.StringOrSlice{"arn:aws:s3:::src/*"}}),
+					source: "src/obj", missing: "s3:GetObject"},
+			}
+			for _, tc := range cases {
+				t.Run(tc.name, func(t *testing.T) {
+					err := s3AuthzCheck(t, "copier", tc.doc, copyReq(op, tc.source))
+					if tc.missing == "" {
+						assert.NoError(t, err)
+						return
+					}
+					requireS3Denied(t, err, tc.missing)
+				})
+			}
+		})
+	}
 }

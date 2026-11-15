@@ -330,6 +330,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		now, haveClock); err != nil {
 		return err
 	}
+	if err := a.checkS3CopySource(reqCtx, req, docs, boundary, deniedCode, now, haveClock); err != nil {
+		return err
+	}
 	return a.checkELBTagOnCreate(reqCtx, req, docs, boundary, requestTags, deniedCode, now, haveClock)
 }
 
@@ -872,6 +875,26 @@ var operationActionOverrides = map[string]string{
 	// permission" — API_DeleteBucketOwnershipControls; there is no
 	// s3:DeleteBucketOwnershipControls action (#1445).
 	"s3:DeleteBucketOwnershipControls": "s3:PutBucketOwnershipControls",
+
+	// The multipart operations, from the S3 User Guide's "Multipart upload API and
+	// permissions" table (mpuoverview.html#mpuAndPermissions): "You must be allowed to
+	// perform the s3:PutObject action on an object" to create a multipart upload, upload a
+	// part, upload a part by copy, and complete the upload, and "the
+	// s3:ListMultipartUploadParts action to list parts". None of s3:CreateMultipartUpload,
+	// s3:UploadPart, s3:UploadPartCopy, s3:CompleteMultipartUpload or s3:ListParts is an IAM
+	// action, so until #1489 a policy granting exactly s3:PutObject was denied a multipart
+	// upload. AbortMultipartUpload's action is its own name ("the s3:AbortMultipartUpload
+	// action"), and ListMultipartUploads is mapped above. UploadPartCopy also needs
+	// s3:GetObject on its source, which [AuthController.checkS3CopySource] evaluates.
+	"s3:CreateMultipartUpload":   "s3:PutObject",
+	"s3:UploadPart":              "s3:PutObject",
+	"s3:UploadPartCopy":          "s3:PutObject",
+	"s3:CompleteMultipartUpload": "s3:PutObject",
+	"s3:ListParts":               "s3:ListMultipartUploadParts",
+	// CopyObject is the same case outside multipart: "If the destination bucket is a general
+	// purpose bucket, you must have s3:PutObject permission to write the object copy to the
+	// destination bucket" (API_CopyObject). There is no s3:CopyObject action.
+	"s3:CopyObject": "s3:PutObject",
 }
 
 // serviceToAction maps a request to the IAM action a policy must allow,

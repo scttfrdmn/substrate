@@ -6593,6 +6593,31 @@ needs the permission its page names, checked in a second pass after the create i
 `CreateMultipartUpload` and `CopyObject` also apply `x-amz-tagging`, but neither page, nor the User
 Guide's multipart-upload permissions table, names a permission for it, so substrate requires none.
 
+### Multipart and copy permissions
+
+The multipart operations authorize under the actions the S3 User Guide's "Multipart upload API and
+permissions" table names, not under their operation names, which are not IAM actions
+([#1489](https://github.com/scttfrdmn/substrate/issues/1489)):
+
+| Operation | Action | Also required |
+|---|---|---|
+| `CreateMultipartUpload` | `s3:PutObject` | |
+| `UploadPart` | `s3:PutObject` | |
+| `UploadPartCopy` | `s3:PutObject` | `s3:GetObject` on the source object |
+| `CompleteMultipartUpload` | `s3:PutObject` | |
+| `AbortMultipartUpload` | `s3:AbortMultipartUpload` | |
+| `ListParts` | `s3:ListMultipartUploadParts` | |
+| `ListMultipartUploads` | `s3:ListBucketMultipartUploads` | |
+| `CopyObject` | `s3:PutObject` | `s3:GetObject` on the source object |
+
+`CopyObject` is the same defect outside multipart: there is no `s3:CopyObject` action, and its page
+says "you must have `s3:PutObject` permission to write the object copy to the destination bucket".
+The source permission comes from both copy pages — "you must have `s3:GetObject` permission to read
+the source object that is being copied" — and is checked in a second pass against the object
+`x-amz-copy-source` names, after its `?versionId=` suffix is dropped and its key URL-decoded. An
+access-point ARN as the copy source is evaluated as it stands. Until #1489 no copy checked its
+source, so a caller allowed to write could copy an object it was not allowed to read.
+
 ### Object Ownership
 
 `PutBucketOwnershipControls`, `GetBucketOwnershipControls` and `DeleteBucketOwnershipControls`
