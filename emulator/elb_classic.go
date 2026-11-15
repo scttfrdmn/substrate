@@ -542,7 +542,7 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 	type createResult struct {
 		DNSName string `xml:"DNSName"`
 	}
-	return elbOKResponse(reqCtx, "CreateLoadBalancer", elbClassicXMLNS,
+	return queryOKResponse(reqCtx, "CreateLoadBalancer", elbClassicXMLNS,
 		createResult{DNSName: lb.DNSName})
 }
 
@@ -598,7 +598,7 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 		LoadBalancerDescriptions []elbClassicLBItem `xml:"LoadBalancerDescriptions>member"`
 		NextMarker               string             `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeLoadBalancers", elbClassicXMLNS,
+	return queryOKResponse(reqCtx, "DescribeLoadBalancers", elbClassicXMLNS,
 		describeResult{LoadBalancerDescriptions: items, NextMarker: next})
 }
 

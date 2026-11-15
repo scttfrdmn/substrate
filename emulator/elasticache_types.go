@@ -5,8 +5,15 @@ import "time"
 // elasticacheNamespace is the state namespace used by the ElastiCache plugin.
 const elasticacheNamespace = "elasticache"
 
-// elasticacheXMLNS is the XML namespace used in ElastiCache API responses.
-const elasticacheXMLNS = "https://elasticache.amazonaws.com/doc/2015-02-02/"
+// elasticacheXMLNS is the document namespace every ElastiCache success response carries, read off the
+// sample response on `API_CreateCacheCluster` (and every other ElastiCache page with one):
+// `<CreateCacheClusterResponse xmlns="http://elasticache.amazonaws.com/doc/2015-02-02/">`.
+//
+// It was spelled `https://` until #1238. A sibling's `https://` is not evidence either way: IAM, SNS,
+// STS and Route 53 genuinely publish `https://` and ELB, RDS and Redshift publish `http://`, so each
+// constant is read off its own service's page. The shared Query error document carries no namespace,
+// so this governs success documents only ([queryOKResponse]).
+const elasticacheXMLNS = "http://elasticache.amazonaws.com/doc/2015-02-02/"
 
 // ElastiCacheCacheCluster represents an Amazon ElastiCache cache cluster.
 type ElastiCacheCacheCluster struct {

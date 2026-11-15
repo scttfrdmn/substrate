@@ -3,7 +3,6 @@ package emulator
 import (
 	"context"
 	"encoding/json"
-	"encoding/xml"
 	"fmt"
 	"net/http"
 	"strings"
@@ -880,17 +879,12 @@ const redshiftXMLNS = "http://redshift.amazonaws.com/doc/2012-12-01/"
 //
 // Until #1208 the result was marshaled as the document root, with no namespace and the request ID
 // accepted and discarded, so an SDK looking for `{Operation}Response` found nothing and every routed
-// Redshift operation was undecodable. The envelope is ELB's (#1149): [elbResponseEnvelope] and
-// [elbResultElement] are protocol-generic, deriving both element names from the operation, and a
-// second copy of them would be a second place for the shape to drift. The request ID is the
-// context's, as [elbOKResponse] explains, so a replayed body is byte-identical to the recorded one.
+// Redshift operation was undecodable. The envelope is the shared awsQuery one, [queryOKResponse]
+// (`query_envelope.go`), which derives both element names from the operation; a second copy would be
+// a second place for the shape to drift. The request ID is the context's, as that file explains, so a
+// replayed body is byte-identical to the recorded one.
 func redshiftOKResponse(reqCtx *RequestContext, operation string, result any) (*AWSResponse, error) {
-	return redshiftXMLResponse(http.StatusOK, elbResponseEnvelope{
-		XMLName:          xml.Name{Local: operation + "Response"},
-		XMLNS:            redshiftXMLNS,
-		Result:           &elbResultElement{name: operation + "Result", value: result},
-		ResponseMetadata: responseMetadata{RequestID: reqCtx.RequestID},
-	})
+	return queryOKResponse(reqCtx, operation, redshiftXMLNS, result)
 }
 
 // redshiftClusterNotFound is the refusal for a cluster identifier that names no cluster.
@@ -927,18 +921,4 @@ func redshiftUnroutedAction(action string) *AWSError {
 		Message:    fmt.Sprintf("The action %s is not valid for this endpoint.", action),
 		HTTPStatus: http.StatusBadRequest,
 	}
-}
-
-// redshiftXMLResponse marshals a response document to XML and returns an AWSResponse with
-// Content-Type text/xml as required by the Redshift query protocol.
-func redshiftXMLResponse(status int, document any) (*AWSResponse, error) {
-	body, err := xml.Marshal(document)
-	if err != nil {
-		return nil, fmt.Errorf("redshift xml.Marshal: %w", err)
-	}
-	return &AWSResponse{
-		StatusCode: status,
-		Headers:    map[string]string{"Content-Type": "text/xml; charset=UTF-8"},
-		Body:       append([]byte(xml.Header), body...),
-	}, nil
 }

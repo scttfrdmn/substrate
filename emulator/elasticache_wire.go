@@ -15,8 +15,8 @@ import "time"
 // AccountID and Region, two of them carry CreatedAt and one carries EverTagged: eleven baseline
 // lines. But `grep 'ElastiCache[A-Za-z]* .*`xml:'` matches nothing in the tree. Not one record is
 // XML-encoded directly; every one of the twelve sites that answers a resource hands a *…ToXML item
-// struct to elasticacheXMLResponse, so no bookkeeping member could reach a body even before this
-// change.
+// struct to elasticacheXMLResponse (now [elasticacheOKResponse], #1242), so no bookkeeping member
+// could reach a body even before this change.
 //
 // What was missing was therefore not a projection but the assertion that one exists: the eleven
 // lines were reachable-by-declaration with nothing pinning them shut, the position ECS's four

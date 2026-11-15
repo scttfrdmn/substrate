@@ -329,8 +329,8 @@ func TestRDSWire_DBInstanceResponsesCarryOnlyPublishedMembers(t *testing.T) {
 	})
 
 	// The remaining seven operations that answer a DBInstance. Start, Stop and Reboot all go through
-	// setDBInstanceStatus, the one site that does not use rdsXMLResponse, so each is driven rather
-	// than assumed to agree with the others.
+	// setDBInstanceStatus, which built its own document until #1242, so each is driven rather than
+	// assumed to agree with the others.
 	for _, tc := range []struct {
 		action string
 		params map[string]string

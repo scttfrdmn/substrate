@@ -295,7 +295,7 @@ func (p *ELBPlugin) describeClassicTags(reqCtx *RequestContext, req *AWSRequest)
 			LoadBalancerName: names[i],
 		})
 	}
-	return elbOKResponse(reqCtx, "DescribeTags", elbClassicXMLNS, result)
+	return queryOKResponse(reqCtx, "DescribeTags", elbClassicXMLNS, result)
 }
 
 // elbClassicTagDescriptionItem is the XML representation of a classic `TagDescription`.

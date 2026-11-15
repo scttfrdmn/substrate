@@ -196,7 +196,7 @@ func (p *ELBPlugin) describeAccountLimits(reqCtx *RequestContext, req *AWSReques
 		Limits     []elbLimitItem `xml:"Limits>member"`
 		NextMarker string         `xml:"NextMarker,omitempty"`
 	}
-	return elbOKResponse(reqCtx, "DescribeAccountLimits", elbXMLNS,
+	return queryOKResponse(reqCtx, "DescribeAccountLimits", elbXMLNS,
 		limitsResult{Limits: page, NextMarker: nextMarker})
 }
 

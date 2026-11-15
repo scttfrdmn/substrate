@@ -12713,8 +12713,9 @@ protocol's `ResponseMetadata`:
 </CreateLoadBalancerResponse>
 ```
 
-It is built in one place (`elb_response_envelope.go`) rather than in the ~30 handlers, and that is the
-substantive part of the rule. Substrate emitted the element nowhere in this plugin for exactly the
+It is built in one place rather than in the ~30 handlers, and that is the substantive part of the
+rule. The builder began as ELB's and is now shared by every awsQuery plugin that answers through it
+(`query_envelope.go`, #1242): ELB, Redshift, Auto Scaling, RDS and ElastiCache. Substrate emitted the element nowhere in this plugin for exactly the
 reason a per-handler convention fails: each handler declared its own inline response struct, so the
 member was something every handler could omit, and every handler did. The handlers now pass a
 *result* and the envelope decides the root element, the namespace, the result wrapper and the
@@ -12731,9 +12732,11 @@ Which other Query-protocol plugins answer the envelope today:
 |---|---|---|
 | CloudFormation, CloudWatch, IAM, SNS, SQS, STS | yes | — |
 | ELB (both generations) | yes | all 27 routed actions |
-| EC2 | **no** | publishes a root-level lowercase `<requestId>`, not `ResponseMetadata` — a different document |
-| Redshift | **no** | and the result wrapper is the document root, so no SDK decodes it |
-| RDS, ElastiCache | **no** | built exactly as ELB's were: one inline response struct per handler |
+| Redshift | yes | since #1208; the result wrapper was the document root before it, so no SDK decoded it |
+| Auto Scaling | yes | operations with no output shape answer no result element |
+| RDS | yes | all 23 routed actions since #1242; `DeleteDBSubnetGroup`, `DeleteDBParameterGroup`, `AddTagsToResource` and `RemoveTagsFromResource` answer no result element, as their sample responses show |
+| ElastiCache | yes | all 17 routed actions since #1242; `DeleteCacheSubnetGroup` and `DeleteCacheParameterGroup` answer no result element |
+| EC2 | **no** | publishes a root-level lowercase `<requestId>`, not `ResponseMetadata` — a different document (#1189) |
 
 An XML **error** response carries the same request ID, in the Query protocol's
 `<ErrorResponse>…<RequestId>` document every Query plugin shares. No ELB page publishes a sample error
@@ -20648,13 +20651,31 @@ CloudFront HTTPS requests: $0.0100 per 10,000 requests (approximate).
 | DeleteDBCluster | Same cluster shape as CreateDBCluster, with `Status` `deleting`. It reported only `DBClusterIdentifier`, `Status` and `DBClusterArn` until #756, where `API_DeleteDBCluster`'s response element is the whole `DBCluster` |
 | CreateDBSubnetGroup | No creation time: `API_DBSubnetGroup` publishes none. `Subnets` and `SupportedNetworkTypes` are absent because substrate reads no `SubnetIds` and so has no subnet to report |
 | DescribeDBSubnetGroups | Same subnet-group shape as CreateDBSubnetGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBSubnetGroupName` for a group that does not exist answers `DBSubnetGroupNotFoundFault` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteDBSubnetGroup | Answers an empty result, as AWS publishes |
+| DeleteDBSubnetGroup | Answers the root and `ResponseMetadata` with no result element, as the sample response shows |
 | CreateDBParameterGroup | All four of `API_DBParameterGroup`'s members, which is the one RDS shape substrate models completely. No creation time: the shape publishes none |
 | DescribeDBParameterGroups | Same parameter-group shape as CreateDBParameterGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does not publish — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `DBParameterGroupName` for a group that does not exist answers `DBParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteDBParameterGroup | Answers an empty result, as AWS publishes |
+| DeleteDBParameterGroup | Answers the root and `ResponseMetadata` with no result element, as the sample response shows |
 | ListTagsForResource | `TagList` sorted by key — see below |
-| AddTagsToResource | |
-| RemoveTagsFromResource | |
+| AddTagsToResource | No result element, as the sample response shows |
+| RemoveTagsFromResource | No result element, as the sample response shows |
+
+### The RDS response document
+
+Every RDS success response is the awsQuery document its page's sample shows: an
+`{Operation}Response` root in the `http://rds.amazonaws.com/doc/2014-10-31/` namespace, the
+`{Operation}Result` element when the operation has an output, and `ResponseMetadata` carrying the
+request's own `RequestId` — the value `Event.RequestID` records and a replay reproduces.
+
+Two things were wrong with it. The namespace was spelled `https://` (#1238); an XML
+namespace is an opaque string, so no SDK noticed, but an XSD step, a prefix-bound XPath or a golden
+file recorded from AWS did. And no RDS response carried `ResponseMetadata` at all (#1242), so a
+logging wrapper reading `ResponseMetadata.RequestId` off a successful call read the empty string.
+Both are now built in one place for every routed action (see
+[The response envelope](#the-response-envelope-and-which-plugins-still-lack-it)). Four operations
+have no output shape and their pages show no result element — `DeleteDBSubnetGroup`,
+`DeleteDBParameterGroup`, `AddTagsToResource` and `RemoveTagsFromResource` — so they answer the root
+and the metadata alone. An error response is the shared Query `<ErrorResponse>`, which carries no
+namespace.
 
 ### An RDS ARN addresses the resource it names
 
@@ -20782,13 +20803,26 @@ RDS db.t3.micro on-demand: $0.017 per hour (approximate for testing purposes).
 | DeleteReplicationGroup | Same replication-group shape as CreateReplicationGroup, reported with `Status` `deleting` |
 | CreateCacheSubnetGroup | Answers the `CacheSubnetGroup` of `API_CacheSubnetGroup`, which publishes no creation time, so none is reported. `Subnets` and `SupportedNetworkTypes` are absent because the request's `SubnetIds` is not read. Carries no account or Region member |
 | DescribeCacheSubnetGroups | Same subnet-group shape as CreateCacheSubnetGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page does **not** publish although its two ElastiCache siblings do — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `CacheSubnetGroupName` for a group that does not exist answers `CacheSubnetGroupNotFoundFault` / **400**, the one status outlier among the six — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteCacheSubnetGroup | Answers an empty result, as AWS publishes |
+| DeleteCacheSubnetGroup | Answers the root and `ResponseMetadata` with no result element, as the sample response shows |
 | CreateCacheParameterGroup | Answers the `CacheParameterGroup` of `API_CacheParameterGroup`, which publishes no creation time, so none is reported. `IsGlobal` is absent rather than reported `false`, substrate modelling no Global datastore. Carries no account or Region member |
 | DescribeCacheParameterGroups | Same parameter-group shape as CreateCacheParameterGroup. Paginates on `Marker`/`MaxRecords`; a `Marker` it did not issue and a `MaxRecords` outside the published 20–100 are refused with `InvalidParameterValue`, which this page publishes — see [Six describes published a cursor](#six-describes-published-a-cursor-and-implemented-none-of-it). Filtering by `CacheParameterGroupName` for a group that does not exist answers `CacheParameterGroupNotFound` / 404 — see [A single-resource filter that names nothing](#a-single-resource-filter-that-names-nothing-answers-the-published-fault) |
-| DeleteCacheParameterGroup | Answers an empty result, as AWS publishes |
+| DeleteCacheParameterGroup | Answers the root and `ResponseMetadata` with no result element, as the sample response shows |
 | ListTagsForResource | Resolves a `cluster` or `replicationgroup` ARN; a `subnetgroup` or `parametergroup` ARN is refused with `InvalidParameterValue` |
-| AddTagsToResource | Same ARN resolution as ListTagsForResource |
-| RemoveTagsFromResource | Same ARN resolution as ListTagsForResource |
+| AddTagsToResource | Same ARN resolution as ListTagsForResource. Answers the resource's `TagList` after the change, sorted by key — the page's one response element; it answered an empty document until #1242 |
+| RemoveTagsFromResource | Same ARN resolution as ListTagsForResource. Answers the resource's remaining `TagList`, sorted by key — same fix |
+
+### The ElastiCache response document
+
+Every ElastiCache success response is the awsQuery document its page's sample shows: an
+`{Operation}Response` root in the `http://elasticache.amazonaws.com/doc/2015-02-02/` namespace, the
+`{Operation}Result` element when the operation has an output, and `ResponseMetadata` carrying the
+request's own `RequestId`. The namespace was spelled `https://` until #1238 and no response carried
+`ResponseMetadata` until #1242, exactly as on RDS (see [The RDS response document](#the-rds-response-document)).
+
+The result element is read off each page rather than carried over from RDS, and the two services
+differ on the tag operations: RDS's `AddTagsToResource` and `RemoveTagsFromResource` have no output,
+while ElastiCache's both publish `TagListMessage`, the same output as `ListTagsForResource`. So only
+`DeleteCacheSubnetGroup` and `DeleteCacheParameterGroup` answer the root and the metadata alone.
 
 **Responses are rendered from the published shape.** All four ElastiCache records — cache cluster,
 replication group, cache subnet group and cache parameter group — already were, as RDS's five were
