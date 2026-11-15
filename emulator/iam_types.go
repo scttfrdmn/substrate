@@ -158,8 +158,44 @@ type IAMAttachedPolicy struct {
 
 // PolicyDocument represents a parsed IAM policy document.
 type PolicyDocument struct {
-	Version   string            `json:"Version"`
-	Statement []PolicyStatement `json:"Statement"`
+	Version   string           `json:"Version"`
+	Statement PolicyStatements `json:"Statement"`
+}
+
+// PolicyStatements is a policy document's Statement element: an array of statements, or a single
+// statement object without the brackets.
+//
+// The IAM policy grammar defines `<statement_block> = "Statement" : [ <statement>, ... ]`, and its
+// conventions say "If the element takes an array (marked with [ and ]) but only one value is
+// included, the brackets are optional" (IAM User Guide, "Grammar of the IAM JSON policy language").
+// AWS's own sample responses use the bare form — `GetGroupPolicy`'s shows
+// `"Statement":{"Effect":"Allow",...}`. Until #1477 substrate decoded only the array, so every policy
+// writer answered `MalformedPolicyDocument` for a document IAM accepts.
+//
+// Both forms decode to the same list, so evaluation, the STS trust gate and
+// [policyDocumentsEqual] see a one-element list for the bare object and cannot tell the forms apart.
+// The list always marshals as an array; a caller is served the text it submitted rather than this
+// re-marshaled form wherever substrate kept that text (#1452).
+type PolicyStatements []PolicyStatement
+
+// UnmarshalJSON implements json.Unmarshaler for PolicyStatements, accepting an array of statements
+// or a single statement object.
+func (s *PolicyStatements) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var one PolicyStatement
+		if err := json.Unmarshal(trimmed, &one); err != nil {
+			return fmt.Errorf("unmarshal Statement object: %w", err)
+		}
+		*s = PolicyStatements{one}
+		return nil
+	}
+	var list []PolicyStatement
+	if err := json.Unmarshal(trimmed, &list); err != nil {
+		return fmt.Errorf("unmarshal Statement list: %w", err)
+	}
+	*s = list
+	return nil
 }
 
 // PolicyStatement represents a single statement within an IAM policy document.
