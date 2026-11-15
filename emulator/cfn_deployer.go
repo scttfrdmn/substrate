@@ -3321,6 +3321,8 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployEC2SecurityGroupIngress(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::EC2::SecurityGroupEgress":
 		return d.deployEC2SecurityGroupEgress(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::EC2::VPCGatewayAttachment":
+		return d.deployEC2VPCGatewayAttachment(ctx, logicalID, res.Properties, streamID, cctx)
 	default:
 		d.logger.Warn("unknown CloudFormation resource type; using generic stub",
 			"logical_id", logicalID,
@@ -3880,7 +3882,7 @@ func (d *StackDeployer) deployEC2SecurityGroup(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	groupName := resolveStringProp(props, "GroupName", logicalID, cctx)
+	groupName := resolveStringProp(props, "GroupName", cfnGeneratedName(cctx, "AWS::EC2::SecurityGroup", logicalID), cctx)
 	description := resolveStringProp(props, "GroupDescription", groupName, cctx)
 	vpcID := resolveStringProp(props, "VpcId", "", cctx)
 	req := &AWSRequest{

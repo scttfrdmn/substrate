@@ -159,6 +159,7 @@ emulator/ec2_fleet.go	EC2Fleet	Region	region
 emulator/ec2_spot_requests.go	EC2SpotInstanceRequest	AccountID	account_id
 emulator/ec2_spot_requests.go	EC2SpotInstanceRequest	Region	region
 emulator/ec2_types.go	EC2ElasticIP	AccountID	account_id
+emulator/ec2_types.go	EC2ElasticIP	EverTagged	ever_tagged,omitempty
 emulator/ec2_types.go	EC2ElasticIP	Region	region
 emulator/ec2_types.go	EC2Image	AccountID	account_id
 emulator/ec2_types.go	EC2Image	Region	region

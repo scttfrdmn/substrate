@@ -41,7 +41,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 20 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 21 | Config | `config` | JSON | 25 |
 | 22 | DynamoDB | `dynamodb` | JSON | 26 |
-| 23 | EC2 / VPC | `ec2` | Query | 98 |
+| 23 | EC2 / VPC | `ec2` | Query | 99 |
 | 24 | ECR | `ecr` | JSON | 26 |
 | 25 | ECS | `ecs` | JSON | 21 |
 | 26 | EFS | `efs` | REST/JSON | 13 |
@@ -8016,28 +8016,29 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
-| CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
+| CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport` and `EnableDnsHostnames` are the two modelled attributes; `EnableNetworkAddressUsageMetrics` is unread. **Both are read under a parameter name AWS does not publish** — `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends — so a modify is answered `return=true` and discarded ([#1151](https://github.com/scttfrdmn/substrate/issues/1151)). Neither attribute is readable back either way: `DescribeVpcs` publishes no member for them, and `DescribeVpcAttribute` is not routed. The two published combination rules — not both attributes in one request, and hostnames only where support is already enabled — are not enforced |
-| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again. Dependencies are not checked — AWS's `DependencyViolation` is not raised, and the VPC's subnets, groups and gateways stay listed |
+| ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). The two published combination rules — not both DNS attributes in one request, and hostnames only where support is already enabled — are not enforced ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) |
+| DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
+| DeleteVpc | [Explicit resource IDs](#explicit-resource-ids). Refused with `DependencyViolation` while the VPC holds a subnet, an attached internet gateway, a security group other than `default`, a route table other than its main one, a NAT gateway not yet `deleted`, or an instance not yet `terminated`, and nothing is written; otherwise its `default` security group and main route table go with it — see [A VPC's dependents](#a-vpc-s-dependents). Deleting the [default VPC](#the-default-vpc) leaves a tombstone, so it is not seeded again |
 | CreateSubnet | `TagSpecification.N` scoped to `subnet`, and it renders the same subnet `DescribeSubnets` does — see [A subnet reports its tags, and filters on them](#a-subnet-reports-its-tags-and-filters-on-them) |
 | DescribeSubnets | [Explicit resource IDs](#explicit-resource-ids); fourteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); [reports `tagSet`, `subnetArn`, `ownerId` and `defaultForAz`](#a-subnet-reports-its-tags-and-filters-on-them). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. **It too is read under an unpublished parameter name** (`MapPublicIPOnLaunch.Value`), so a modify is answered `return=true` and discarded ([#1151](https://github.com/scttfrdmn/substrate/issues/1151)). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
+| ModifySubnetAttribute | `SubnetId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `MapPublicIpOnLaunch` is the one modelled attribute — it decides whether a launch into the subnet gets a public IPv4 address, and it is readable back through [`DescribeSubnets`](#a-subnet-reports-its-tags-and-filters-on-them) — and the other ten published parameters are unread. It is read as `MapPublicIpOnLaunch.Value`, the page's own spelling ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then it was read as `MapPublicIPOnLaunch.Value` and every SDK's modify was discarded). AWS's *"You can only modify one attribute at a time"* is not enforced, which is inert while one attribute is modelled |
 | DeleteSubnet | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`) — see [Security group tags and rules](#security-group-tags-and-rules) |
-| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids) |
-| AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules |
-| AuthorizeSecurityGroupEgress | Supports destination security groups |
+| CreateSecurityGroup | `TagSpecification.N` scoped to `security-group`, answered in `tagSet`; an absent `VpcId` places the group in the [default VPC](#the-default-vpc), or is `VPCIdNotSpecified` without one; the name `default` is reserved (`InvalidParameterValue`), and a name another group in the same VPC holds, compared case-insensitively, is `InvalidGroup.Duplicate` ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)) — see [Security group tags and rules](#security-group-tags-and-rules) |
+| DescribeSecurityGroups | [Explicit resource IDs](#explicit-resource-ids); `GroupName.N` selects among the [default VPC](#the-default-vpc)'s groups only, as the page scopes it ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)); reports `ownerId` and `tagSet`, and evaluates every filter it documents, `tag:<key>` and the rule filters included — see [Security group tags and rules](#security-group-tags-and-rules); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range, and `GroupName.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
+| DeleteSecurityGroup | [Explicit resource IDs](#explicit-resource-ids). `GroupName` names a group in the [default VPC](#the-default-vpc), case-insensitively, and one that resolves to nothing there is `InvalidGroup.NotFound`; `GroupId` wins when both are sent ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). A group still referenced or in use is not refused, and nor is a VPC's `default` group ([#1551](https://github.com/scttfrdmn/substrate/issues/1551)) |
+| AuthorizeSecurityGroupIngress | Supports source security groups (`IpPermissions.N.Groups.M.GroupId`), including self-referencing rules. A source the group already allows for the same protocol and ports is `InvalidPermission.Duplicate`, checked per source, and nothing is written ([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). CIDRs are compared as sent, not canonicalised, and `GroupName` is unread ([#1553](https://github.com/scttfrdmn/substrate/issues/1553)) |
+| AuthorizeSecurityGroupEgress | Supports destination security groups. A duplicate is refused as for `AuthorizeSecurityGroupIngress` — including the all-traffic `0.0.0.0/0` rule every new group carries |
 | RevokeSecurityGroupIngress | Matches on protocol, ports, **and** source, and removes [each named source on its own](#security-group-tags-and-rules), not the permission it was authorized in; a rule the group does not hold is `InvalidPermission.NotFound` outside the default VPC and `unknownIpPermissionSet` inside it. `SecurityGroupRuleId.N` is unread |
 | RevokeSecurityGroupEgress | As `RevokeSecurityGroupIngress` |
 | CreateInternetGateway | Renders the same gateway `DescribeInternetGateways` does — see [Twelve describes gained filters](#twelve-describes-gained-filters) |
-| AttachInternetGateway | |
-| DetachInternetGateway | `InternetGatewayId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and the named VPC is removed from the gateway's `attachmentSet`, so the detach is visible through `DescribeInternetGateways`. `VpcId` is `Required: Yes` on the page but is read without being resolved, so a detach naming a VPC the gateway is not attached to removes nothing and still answers `return=true`. AWS's precondition — *"The VPC must not contain any running instances with Elastic IP addresses or public IPv4 addresses"* — is not enforced |
+| AttachInternetGateway | `InternetGatewayId` and `VpcId` are both required and resolved ([Explicit resource IDs](#explicit-resource-ids)). A gateway already attached — to this VPC or another — is `Resource.AlreadyAssociated`, whose client-error-table entry reads *"You also cannot attach an internet gateway to more than one VPC at a time"* ([#1194](https://github.com/scttfrdmn/substrate/issues/1194)). A VPC that already has another gateway attached is not refused ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) |
+| DetachInternetGateway | `InternetGatewayId` and `VpcId` are both required ([#1194](https://github.com/scttfrdmn/substrate/issues/1194)), and the named VPC is removed from the gateway's `attachmentSet`, so the detach is visible through `DescribeInternetGateways`. A VPC the gateway is not attached to — including a gateway attached to nothing — is `Gateway.NotAttached`, the code the client-error table gives for *"If you are trying to detach an internet gateway, ensure that you specify the correct VPC"*; the page itself publishes none. AWS's precondition — *"The VPC must not contain any running instances with Elastic IP addresses or public IPv4 addresses"* — is **not enforced**, because the page states it with no code |
 | DescribeInternetGateways | [Explicit resource IDs](#explicit-resource-ids); **all six** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `ownerId`, `attachmentSet` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
-| DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids) |
+| DeleteInternetGateway | [Explicit resource IDs](#explicit-resource-ids). A gateway still attached is `DependencyViolation` — *"You must detach the internet gateway from the VPC before you can delete it"* ([#1492](https://github.com/scttfrdmn/substrate/issues/1492)) |
 | DescribeAvailabilityZones | Three zones per region, from the same list the offerings and spot-price operations use — see [Instance types are a seeded catalog](#instance-types-are-a-seeded-catalog). `ZoneName.N`, `ZoneId.N`, and four of eleven filters. `zoneId` takes AWS's published shape (`use1-az1`) and always maps zone `a` to `-az1` — see [Zone IDs](#zone-ids-take-aws-s-published-shape-and-always-map-zone-a-to-az1) |
 | DescribeRegions | **All three** filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). `AllRegions` is accepted and inert — every seeded region is `opt-in-not-required`, so it is already in the answer |
 | DescribeInstanceTypes | Answers from a [seeded catalog](#instance-types-are-a-seeded-catalog). `InstanceType.N` is an assertion: a type outside the catalog is refused with `InvalidInstanceType`. Six of fifty-six filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range, and `InstanceType.N` does not conflict with `MaxResults` — see [One offset paginator, shared](#one-offset-paginator-shared) |
@@ -8053,9 +8054,9 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DisassociateRouteTable | `AssociationId` is resolved by scanning the region's route tables, and the matching association is removed, so the disassociation is visible through `DescribeRouteTables`. Unlike `ReplaceRouteTableAssociation` it answers `return=true` for an `AssociationId` naming nothing rather than `InvalidAssociationID.NotFound`, and the main-table association — which AWS refuses to disassociate — is removed like any other |
 | DescribeRouteTables | [Explicit resource IDs](#explicit-resource-ids); [filter names are checked](#one-rule-for-an-unrecognized-filter-name). Paginates on `MaxResults`/`NextToken`, over the published 5–**100** range — the ceiling two of its siblings do not share, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteRouteTable | [Explicit resource IDs](#explicit-resource-ids) |
-| CreateRoute | `RouteTableId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); the route is appended with `state` `active`. Three published rules are not enforced: a destination is not required (AWS: *"You must specify either a destination CIDR block or a prefix list ID"*), a target is not required and not resolved (AWS: *"You must also specify exactly one of the resources from the parameter list"*), and a second route to the same destination is appended rather than refused, so one route table can report two routes to `0.0.0.0/0`. `GatewayId` is the only target parameter read here, where `ReplaceRoute` reads six — so a `NatGatewayId` route is stored with an empty target |
-| ReplaceRoute | `RouteTableId` is required and checked; the route matching `DestinationCidrBlock` has its target and `state` rewritten, and a destination no route carries answers `InvalidRoute.NotFound`/400. The target is taken from the first of `GatewayId`, `NatGatewayId`, `InstanceId`, `NetworkInterfaceId`, `TransitGatewayId` and `VpcPeeringConnectionId` that is set, normalised onto the one gateway field substrate stores per route — so which of the six a caller used is not recoverable |
-| DeleteRoute | `RouteTableId` is required and checked; every route matching `DestinationCidrBlock` is dropped. Silently idempotent: a destination no route carries answers `return=true`, where `ReplaceRoute` refuses the same absence with `InvalidRoute.NotFound`. Neither page publishes a service-specific error, so the divergence is between substrate's two readings rather than against a published code |
+| CreateRoute | `RouteTableId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); the route is appended with `state` `active`. All twelve published targets are read and each renders under its own `Route` element — see [Route targets](#route-targets) ([#1187](https://github.com/scttfrdmn/substrate/issues/1187)). No destination, or no target, is `MissingParameter`; two destinations, or two targets, is `InvalidParameterCombination`. A `DestinationCidrBlock` is canonicalised (`100.68.0.18/18` is stored as `100.68.0.0/18`), a destination the table already routes is `RouteAlreadyExists`, and an internet gateway, NAT gateway or instance target that does not exist is `InvalidGatewayID.NotFound`, `InvalidNatGatewayID.NotFound` or `InvalidInstanceID.NotFound` |
+| ReplaceRoute | `RouteTableId` is required and checked; the route matching the destination exactly has its target and `state` rewritten, and a destination no route carries answers `InvalidRoute.NotFound`/400. The destination and target are read as `CreateRoute` reads them, plus `LocalTarget=true` for `local`, and the previous target is cleared — see [Route targets](#route-targets) |
+| DeleteRoute | `RouteTableId` is required and checked; every route matching `DestinationCidrBlock`, `DestinationIpv6CidrBlock` or `DestinationPrefixListId` exactly is dropped, and a request naming none is `MissingParameter`. Silently idempotent: a destination no route carries answers `return=true`, where `ReplaceRoute` refuses the same absence with `InvalidRoute.NotFound`. Neither page publishes a service-specific error, so the divergence is between substrate's two readings rather than against a published code |
 | CreateVolume | `TagSpecification.N` scoped to `volume`, validated [before the volume is written](#a-tagged-create-is-authorized-twice) — see [A volume carries tags](#a-volume-carries-tags). Exactly one of `AvailabilityZone`/`AvailabilityZoneId` and at least one of `Size`/`SnapshotId` are required, both refused with `InvalidParameterCombination`; a named snapshot is resolved, must be observed `completed` (`IncorrectState`), and sets the size floor — see [`CreateVolume` invents neither a size nor a zone](#createvolume-invents-neither-a-size-nor-a-zone). `VolumeType` defaults to `gp2`, and `Iops`/`Throughput` are stored without the per-type rules AWS publishes for them |
 | DescribeVolumes | [Explicit resource IDs](#explicit-resource-ids) — `VolumeId.N` [asserts existence](#which-selectors-assert-existence) as of [#731](https://github.com/scttfrdmn/substrate/issues/731), where it used to answer a superset; eleven of twenty filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` and the volume's `attachmentSet`. Paginates on `MaxResults`/`NextToken`, with **no published range** — so a floor of 1 and no ceiling, and `VolumeId.N` with `MaxResults` is `InvalidParameterCombination`, see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeleteVolume | `VolumeId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)); an `in-use` volume is refused with `VolumeInUse`/400, and the record is deleted rather than marked, so the delete is **not** idempotent |
@@ -8073,7 +8074,7 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | RegisterImage | `Name` is required; `TagSpecification.N` must be scoped to `image` and any other type is refused before anything is written. [The whole block device mapping is recorded](#registerimage-records-the-whole-block-device-mapping), and each mapping naming a snapshot is resolved, so a dangling reference cannot be stored — but only that rule of the launch path's set, since the rest is not published for this operation. `Architecture` defaults to **`i386`** and `VirtualizationType` to **`paravirtual`**, which are AWS's published defaults rather than the `x86_64`/`hvm` a modern caller expects; `rootDeviceType` is derived from whether `ImageLocation` is present. Response is `imageId` alone |
 | DescribeImages | [Explicit resource IDs](#explicit-resource-ids) — `ImageId.N` [asserts existence](#which-selectors-assert-existence) as of [#731](https://github.com/scttfrdmn/substrate/issues/731), where before it was not read at all; eighteen of forty-three filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name) — see [`DescribeImages` filters](#describeimages-filters). Reports [`architecture`, `platform`, the root device and the block device mapping](#an-ami-reports-its-architecture-platform-and-root-device). `Owner.N` and `ExecutableBy.N` are **not read**, deliberately: substrate stores only images the account owns, so reading them would report a narrowing that did not happen. A [bundled AMI](#which-amis-resolve) resolves by explicit ID but is not listed by an unqualified describe. Paginates on `MaxResults`/`NextToken`, with no published range, and `ImageId.N` with `MaxResults` is `InvalidParameterCombination` — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | DeregisterImage | `ImageId` is required; the record is deleted, so the AMI stops resolving for `RunInstances` and stops being reported by `DescribeImages` — and a [snapshot it protected](#deleting-a-snapshot-refuses-what-aws-refuses) becomes deletable. Silently idempotent: an `ImageId` naming nothing answers `return=true`, and the ID is not checked for shape, so it is the one AMI operation that does not resolve what it names |
-| AllocateAddress | `Domain` defaults to `vpc`; the `publicIp` is derived deterministically from the minted `allocationId`, so the same event log replays the same address. Four of the eight published response elements are rendered — `publicIp`, `allocationId`, `domain` and `networkBorderGroup`, the last hardcoded to the request's Region — and the carrier, customer-owned and `publicIpv4Pool` members are absent because none is modelled. `TagSpecification.N` is published here and **is not read**, so tags on a new address are silently dropped and `DescribeAddresses` reports the address untagged |
+| AllocateAddress | `Domain` defaults to `vpc` and must be `vpc` or `standard` (`InvalidParameterValue` otherwise); the `publicIp` is derived deterministically from the minted `allocationId`, so the same event log replays the same address. `TagSpecification.N` scoped to `elastic-ip` is stored, so `DescribeAddresses` reports it and filters on it, and the Resource Groups Tagging API finds the address ([#1191](https://github.com/scttfrdmn/substrate/issues/1191)). `NetworkBorderGroup` is echoed as sent — an unknown group is not refused — and is the Region when absent. `Address` is refused, because `ReleaseAddress` keeps no record of what it released: `InvalidAddress.Malformed` for a value that is not an IPv4 address, `InvalidIPAddress.InUse` for one the account holds, `InvalidAddress.NotFound` for any other ([#1555](https://github.com/scttfrdmn/substrate/issues/1555)). `PublicIpv4Pool`, `CustomerOwnedIpv4Pool` and `IpamPoolId` are `InvalidParameterValue`: no address pools are modelled. Four of the eight published response elements are rendered — `publicIp`, `allocationId`, `domain` and `networkBorderGroup` |
 | AssociateAddress | `AllocationId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)), and a fresh `associationId` is minted. When `InstanceId` names an instance the instance's `publicIp` and `publicDnsName` are set, so the association is visible through `DescribeInstances` as well as `DescribeAddresses` — but `InstanceId` and `NetworkInterfaceId` are **not resolved**, so an association naming neither, or naming an instance that does not exist, is recorded and answered `return=true`. `AllowReassociation` is inert, and the deprecated EC2-Classic `PublicIp` form is not read |
 | DescribeAddresses | [Explicit resource IDs](#explicit-resource-ids); `AllocationId.N` and `PublicIp.N` [union](#twelve-describes-gained-filters); eight of ten filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `tagSet` |
 | DisassociateAddress | `AssociationId` is resolved by scanning the region's addresses; the association is cleared and, where it named an instance, the instance's `publicIp` and `publicDnsName` are cleared with it. An `AssociationId` naming nothing answers `return=true` — which is **not** a divergence here: AWS publishes *"This is an idempotent operation. If you perform the operation more than once, Amazon EC2 doesn't return an error."* The page marks `AssociationId` `Required: No` while its own prose says *"This parameter is required"*, and substrate follows the prose only to the extent of reading it |
@@ -8943,7 +8944,9 @@ seed: one account and Region always get the same default VPC ID, and the trigger
 mint is not advanced, so a recorded `CreateVpc` that was the first EC2 call in its run still mints
 the `vpc-…` it recorded. The check every later request makes is one read of a marker record.
 
-**A deleted default VPC stays deleted.** `DeleteVpc` on it leaves a tombstone in the marker, so the
+**A deleted default VPC stays deleted.** It is deleted as any VPC is, once its subnets are deleted
+and its gateway detached and deleted — see [A VPC's dependents](#a-vpc-s-dependents). `DeleteVpc`
+on it leaves a tombstone in the marker, so the
 next request does not seed it again — as on AWS, where an account gets one back only by asking. A
 launch naming no subnet is then refused with `VPCIdNotSpecified` (the client-error table's "You
 have no default VPC in which to carry out the request"), and so is a `CreateSecurityGroup` naming
@@ -8971,6 +8974,92 @@ group IDs, and every later event naming them diverges. No compatibility shim is 
 such a stream. A recording that names its own VPCs and subnets — one starting with `CreateVpc`, say
 — keeps its identifiers, and differs only by the seeded records a state-hash comparison sees. A
 recording made under this release replays identically, state hashes included.
+
+### A VPC's dependents
+
+**`DeleteVpc` refuses a VPC that still holds something**
+([#1492](https://github.com/scttfrdmn/substrate/issues/1492)). `API_DeleteVpc`: "You must detach
+or delete all gateways and resources that are associated with the VPC before you can delete it ...
+When you delete the VPC, it deletes the default security group, network ACL, and route table for
+the VPC." Until this change the VPC record was deleted whatever it held, and its subnets, groups and
+route tables stayed listed, so a teardown in the wrong order passed here and failed against AWS.
+
+| Dependent | Holds the VPC while |
+|---|---|
+| a subnet | it exists |
+| an internet gateway | it is attached (detach it with `DetachInternetGateway`) |
+| a security group | it exists and is not the VPC's `default` group |
+| a route table | it exists and is not the VPC's main one |
+| a NAT gateway | its state is not `deleted` |
+| an instance | its state is not `terminated` |
+
+Any of them is `DependencyViolation` / "The specified object has dependent resources." — the
+client-error table's gloss — and nothing is written. Once none remains the VPC is deleted, and its
+`default` security group and main route table with it. Dependents substrate does not store as
+records of their own — network interfaces, VPC endpoints, peering connections, egress-only
+gateways — cannot hold a VPC here.
+
+**Every VPC has a `default` security group.** `CreateVpc` writes one alongside the main route
+table, as the VPC User Guide describes — "Your default VPCs and any VPCs that you create come with a
+default security group" — with the same rules as the [default VPC](#the-default-vpc)'s. Before,
+only the seeded default VPC had one.
+
+**`DeleteInternetGateway` refuses an attached gateway** with `DependencyViolation`, per "You must
+detach the internet gateway from the VPC before you can delete it". So does a gateway's teardown in
+CloudFormation: `AWS::EC2::VPCGatewayAttachment` now really attaches its internet gateway, and the
+stack's delete detaches it before the gateway and the VPC are deleted. A virtual private gateway
+attachment is still a stub.
+
+**Compatibility.** A teardown that deletes a VPC before its subnets, groups, route tables or
+gateway — or deletes an attached gateway — is now refused, as on AWS. A test counting a new VPC's
+security groups counts the `default` one. `CreateVpc` mints the group's ID after the route table's,
+so a recorded `CreateVpc` replays to the same VPC, route table and association IDs; the group is a
+record the recording did not have.
+
+### Route targets
+
+**`CreateRoute` reads every target it publishes**
+([#1187](https://github.com/scttfrdmn/substrate/issues/1187)). Until this change it read
+`GatewayId` alone, so the private-subnet default route every three-tier template emits —
+`NatGatewayId` to `0.0.0.0/0` — was stored with an empty target, and `ReplaceRoute` read six
+targets and folded them onto one field. Both now read the twelve the pages publish, and a route
+stores and renders each under its own `Route` element:
+
+| Request parameter | Rendered as | Resolved |
+|---|---|---|
+| `GatewayId` | `gatewayId` | an `igw-` gateway, as `InvalidGatewayID.NotFound` |
+| `NatGatewayId` | `natGatewayId` | yes, as `InvalidNatGatewayID.NotFound` |
+| `InstanceId` | `instanceId`, with `instanceOwnerId` | yes, as `InvalidInstanceID.NotFound` |
+| `NetworkInterfaceId` | `networkInterfaceId` | no — network interfaces are not stored as their own records yet ([#1522](https://github.com/scttfrdmn/substrate/issues/1522)) |
+| `TransitGatewayId` | `transitGatewayId` | no |
+| `VpcPeeringConnectionId` | `vpcPeeringConnectionId` | no |
+| `EgressOnlyInternetGatewayId` | `egressOnlyInternetGatewayId` | no |
+| `LocalGatewayId` | `localGatewayId` | no |
+| `CarrierGatewayId` | `carrierGatewayId` | no |
+| `CoreNetworkArn` | `coreNetworkArn` | no |
+| `OdbNetworkArn` | `odbNetworkArn` | no |
+| `VpcEndpointId` | `gatewayId`, because `Route` publishes no `vpcEndpointId` member | no |
+
+A target substrate does not store is recorded as sent. A target that does not exist is refused
+rather than stored `blackhole`: `API_Route` describes that state as a target that "isn't available
+(for example, the specified gateway isn't attached to the VPC, or the specified NAT instance has
+been terminated)", which is a target that went away after the route was made. A route is not moved
+to `blackhole` when its target is later deleted ([#1552](https://github.com/scttfrdmn/substrate/issues/1552)).
+
+The two composition rules both pages open with are enforced, in that order, after the route table
+resolves: "You must specify either a destination CIDR block or a prefix list ID" — none of
+`DestinationCidrBlock`, `DestinationIpv6CidrBlock` and `DestinationPrefixListId` is
+`MissingParameter`, more than one `InvalidParameterCombination` — and "You must also specify exactly
+one of the resources from the parameter list", refused the same two ways. Neither page publishes a
+code, so both come from the client-error table, and the messages are substrate's own. `ReplaceRoute`
+also accepts `LocalTarget=true` as its target.
+
+`CreateRoute` canonicalises an IPv4 destination, "if you specify `100.68.0.18/18`, we modify it to
+`100.68.0.0/18`"; `ReplaceRoute` and `DeleteRoute` match a destination exactly, as their pages say
+it must. A destination the table already routes is `RouteAlreadyExists`. A route to an internet
+gateway with a canonical CIDR answers exactly as before, and a route stored by an earlier substrate
+— whatever target it folded into the gateway field — still renders as `gatewayId`. `gatewayId` is
+now omitted from a route that names another target, where an empty `gatewayId` used to render.
 
 ### Security groups on an instance
 
@@ -9100,6 +9189,34 @@ the same VPC, "The source security group must be in the same VPC", on authorize 
 so a rule authorized by name is revoked by ID and the other way round. The seeded default group's
 self-reference renders `userId` and `groupId` without a `groupName`, which is the shape AWS's own
 DescribeSecurityGroups Example 4 shows for a default VPC's default group.
+
+**An authorize of a rule the group holds is refused**
+([#1491](https://github.com/scttfrdmn/substrate/issues/1491)). Each source an
+`AuthorizeSecurityGroupIngress` or `Egress` names is checked against the group's rules with the same
+protocol and port range — the granularity a revoke removes at — and one already held, or named twice
+in the request, is `InvalidPermission.Duplicate` / "The specified inbound or outbound rule already
+exists for that security group.", HTTP 400, with nothing written. Before, the rule was appended a
+second time. That includes the all-traffic egress rule every group is created with, which is why
+CloudFormation revokes it before applying a group's inline `SecurityGroupEgress`: "When you create a
+security group, if you do not add egress rules, we add egress rules that allow all outbound IPv4 and
+IPv6 traffic. Otherwise, we do not add them" (`AWS::EC2::SecurityGroup`). CIDRs are compared as
+sent; AWS canonicalises them first.
+
+**A group name is unique within its VPC.** "Names are case-insensitive and must be unique within
+the VPC" (`API_CreateSecurityGroup`): a name another group in the VPC holds, in any case, is
+`InvalidGroup.Duplicate` / "You cannot create a security group with the same name as an existing
+security group in the same VPC." The same name in another VPC is another group. A CloudFormation
+group with no `GroupName` is named `{stack}-{logicalId}-{suffix}`, as CloudFormation names an
+unnamed resource, rather than by its logical ID, so two stacks of one template no longer collide.
+
+**`GroupName` means the default VPC.** `DescribeSecurityGroups`' `GroupName.N` — "[Default VPC]
+The names of the security groups" — selects only the [default VPC](#the-default-vpc)'s groups, and
+`DeleteSecurityGroup`'s `GroupName` resolves there too; a group in any other VPC is named by its ID.
+Before, `GroupName.N` matched account-wide and `DeleteSecurityGroup` did not read `GroupName`.
+
+**Compatibility.** A duplicate authorize, a duplicate group name in one VPC, and a describe by name of
+a group outside the default VPC all answered differently before: the first two succeeded, and the
+third selected the group.
 
 ### Launch-time storage
 
@@ -10732,7 +10849,7 @@ for them:
 | `DescribeFleets`' `FleetId.N` | AWS publishes **no** `InvalidFleetId.NotFound`. The only fleet-ID absence code in the reference is `InvalidSpotFleetRequestId.*`, which is a `sfr-` request, not a `fleet-` fleet. |
 | `DescribeCapacityReservations`' `CapacityReservationId.N` | AWS **does** publish `InvalidCapacityReservationId.NotFound`, and `CancelCapacityReservation` answers it — but nothing says whether a *describe* raises it, since the operation's Errors section is the common-types boilerplate. Narrowing is what keeps a sweep over a list of IDs from failing because one reservation had already been cancelled and swept. A **malformed** ID is refused here, because that is a mistake in the request rather than an absent resource. |
 | `DescribeRegions`' `RegionName.N` | The parameter explicitly permits naming any Region, enabled for the account or not, so "this Region is not in your answer" is not absence. |
-| `DescribeSecurityGroups`' `GroupName.N` | The kind **is** registered and its `GroupId.N` asserts, but the code is `InvalidGroup.NotFound` and both AWS's client-error table and substrate's message for it describe a missing security group *ID*. This operation's own Errors section is empty, so a name-shaped refusal would be invented wording. AWS also scopes the parameter to the default VPC where substrate matches account-wide, so absence here is not the absence AWS would be reporting. |
+| `DescribeSecurityGroups`' `GroupName.N` | The kind **is** registered and its `GroupId.N` asserts, but the code is `InvalidGroup.NotFound` and both AWS's client-error table and substrate's message for it describe a missing security group *ID*. This operation's own Errors section is empty, so a name-shaped refusal would be invented wording. |
 
 Four more have a published code but no registered `ec2IDKind`, so the assertion is
 unimplemented rather than declined: `DescribeKeyPairs`' `KeyName.N`/`KeyPairId.N`
@@ -10744,23 +10861,18 @@ and `DescribeAddresses`' `PublicIp.N` (its `AllocationId.N` **does** assert).
 [#749](https://github.com/scttfrdmn/substrate/issues/749) — it was read by nothing before, so a
 caller naming one group by name was answered about **every** group in the account — and it
 unions with `GroupId.N` like the [other paired identity
-parameters](#twelve-describes-gained-filters). Two things about it are substrate's reading:
+parameters](#twelve-describes-gained-filters). A name is matched in the [default
+VPC](#the-default-vpc) only, as AWS scopes the parameter ("[Default VPC] The names of the
+security groups"), as of [#1491](https://github.com/scttfrdmn/substrate/issues/1491); before it, a
+name matched account-wide and could select several groups. One thing about it is substrate's
+reading:
 
-- **A name is matched account-wide**, where AWS scopes the parameter to the default VPC
-  ("[Default VPC] The names of the security groups"). The scope was first declined because
-  substrate created its default VPC lazily, so scoping the parameter to it would have answered
-  nothing in a fresh account. The default VPC is [seeded eagerly](#the-default-vpc) as of #1464,
-  and the reading is kept anyway: narrowing it now would refuse lookups of groups in other VPCs
-  that callers make here today, a behavior change of its own. A consequence: a name may legitimately match **several** groups here, because
-  `CreateSecurityGroup` enforces no name uniqueness where AWS's is per-VPC. Narrow with the
-  `vpc-id` filter, which composes with the name.
 - **A name matching nothing answers an empty set**, not `InvalidGroup.NotFound`. This
   operation's Errors section is empty, and EC2's client-error table describes that code as a
   missing security group *ID* — which is what substrate's own message for it says — so refusing
-  here would mean inventing wording AWS does not publish for this operation, on top of
-  asserting a default-VPC scope substrate does not implement. The ID half keeps its full
-  contract either way: a malformed `GroupId.N` is refused before the walk and an unresolved one
-  after it, whether or not a name selected something.
+  here would mean inventing wording AWS does not publish for this operation. The ID half keeps
+  its full contract either way: a malformed `GroupId.N` is refused before the walk and an
+  unresolved one after it, whether or not a name selected something.
 
 `DescribeImages` reads `Owner.N` as of #1432 — `self` and the caller's account ID select its
 own images, `amazon` the bundled catalog, anything else nothing — and still does not read
@@ -13268,8 +13380,9 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans thirty-five resource types: S3 buckets, Lambda functions, SQS
-queues, DynamoDB tables, EC2 instances, IAM users and roles, API Gateway REST
+`GetResources` scans thirty-six resource types: S3 buckets, Lambda functions, SQS
+queues, DynamoDB tables, EC2 instances and Elastic IP addresses (`elastic-ip`, as of #1191), IAM
+users and roles, API Gateway REST
 APIs, API Gateway v2 HTTP and WebSocket APIs, Step Functions state machines and activities, ECR repositories, ECS
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache

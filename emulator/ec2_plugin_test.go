@@ -797,7 +797,8 @@ func TestEC2_RouteTable_DescribeDeleteRoute(t *testing.T) {
 		"Action":               "CreateRoute",
 		"RouteTableId":         rtbID,
 		"DestinationCidrBlock": "0.0.0.0/0",
-		"GatewayId":            "igw-00000000",
+		// A route's internet-gateway target is resolved since #1187.
+		"GatewayId": ec2CreateIGW(t, ts),
 	})
 	if crResp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateRoute: expected 200, got %d", crResp.StatusCode)
@@ -1891,11 +1892,12 @@ func TestEC2_ModifySubnetAttribute(t *testing.T) {
 	_ = xml.NewDecoder(subResp.Body).Decode(&subResult)
 	subnetID := subResult.Subnet.SubnetID
 
-	// Modify to enable MapPublicIPOnLaunch.
+	// Modify to enable MapPublicIpOnLaunch, under the spelling API_ModifySubnetAttribute
+	// publishes (#1151).
 	modResp := ec2Request(t, ts, map[string]string{
 		"Action":                    "ModifySubnetAttribute",
 		"SubnetId":                  subnetID,
-		"MapPublicIPOnLaunch.Value": "true",
+		"MapPublicIpOnLaunch.Value": "true",
 	})
 	defer modResp.Body.Close() //nolint:errcheck
 	if modResp.StatusCode != http.StatusOK {
@@ -1933,11 +1935,11 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 	_ = xml.NewDecoder(vpcResp.Body).Decode(&vpcResult)
 	vpcID := vpcResult.Vpc.VpcID
 
-	// Enable DNS hostnames.
+	// Enable DNS hostnames, under the spelling API_ModifyVpcAttribute publishes (#1151).
 	modResp := ec2Request(t, ts, map[string]string{
 		"Action":                   "ModifyVpcAttribute",
 		"VpcId":                    vpcID,
-		"EnableDNSHostnames.Value": "true",
+		"EnableDnsHostnames.Value": "true",
 	})
 	defer modResp.Body.Close() //nolint:errcheck
 	if modResp.StatusCode != http.StatusOK {
@@ -1948,12 +1950,16 @@ func TestEC2_ModifyVpcAttribute(t *testing.T) {
 	modResp2 := ec2Request(t, ts, map[string]string{
 		"Action":                 "ModifyVpcAttribute",
 		"VpcId":                  vpcID,
-		"EnableDNSSupport.Value": "false",
+		"EnableDnsSupport.Value": "false",
 	})
 	defer modResp2.Body.Close() //nolint:errcheck
 	if modResp2.StatusCode != http.StatusOK {
 		t.Fatalf("ModifyVpcAttribute (dns support): expected 200, got %d", modResp2.StatusCode)
 	}
+
+	// Both writes are readable back through DescribeVpcAttribute.
+	assert.True(t, ec2VPCAttribute(t, ts, vpcID, "enableDnsHostnames"))
+	assert.False(t, ec2VPCAttribute(t, ts, vpcID, "enableDnsSupport"))
 }
 
 func TestEC2_ElasticIP_AllocateRelease(t *testing.T) {
@@ -3202,24 +3208,26 @@ func TestEC2_ReplaceRoute(t *testing.T) {
 	rtbResp.Body.Close() //nolint:errcheck
 	rtbID := rtbResult.RouteTable.RouteTableID
 
-	// Create a route to igw-aaa, then replace its target with igw-bbb.
+	// Create a route to one gateway, then replace its target with another. Both are real
+	// gateways, since a route's internet-gateway target is resolved as of #1187.
+	igwA, igwB := ec2CreateIGW(t, ts), ec2CreateIGW(t, ts)
 	r := ec2Request(t, ts, map[string]string{
 		"Action": "CreateRoute", "RouteTableId": rtbID,
-		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-aaa",
+		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": igwA,
 	})
 	r.Body.Close() //nolint:errcheck
 
 	repl := ec2Request(t, ts, map[string]string{
 		"Action": "ReplaceRoute", "RouteTableId": rtbID,
-		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": "igw-bbb",
+		"DestinationCidrBlock": "0.0.0.0/0", "GatewayId": igwB,
 	})
 	assert.Equal(t, http.StatusOK, repl.StatusCode)
 	repl.Body.Close() //nolint:errcheck
 
 	desc := ec2Request(t, ts, map[string]string{"Action": "DescribeRouteTables", "RouteTableId.1": rtbID})
 	body := readBody(t, desc)
-	assert.Contains(t, body, "igw-bbb")
-	assert.NotContains(t, body, "igw-aaa")
+	assert.Contains(t, body, igwB)
+	assert.NotContains(t, body, igwA)
 
 	// Replacing a non-existent route → InvalidRoute.NotFound.
 	bad := ec2Request(t, ts, map[string]string{

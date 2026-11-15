@@ -161,25 +161,10 @@ func (p *EC2Plugin) createDefaultVPCResources(ctx context.Context, reqCtx *Reque
 	// grants instances unrestricted network access to each other" (API_CreateSecurityGroup)
 	// — an all-traffic ingress rule from the group itself, as AWS's DescribeSecurityGroups
 	// Example 4 renders it — and the all-traffic egress rule every new group carries.
-	sgID := generateSGID(reqCtx.IDs)
-	sg := EC2SecurityGroup{
-		GroupID:     sgID,
-		GroupName:   "default",
-		Description: "default VPC security group",
-		VPCID:       vpcID,
-		AccountID:   reqCtx.AccountID,
-		Region:      reqCtx.Region,
-		IngressRules: []EC2IPPermission{{
-			IPProtocol:       "-1",
-			UserIDGroupPairs: []EC2UserIDGroupPair{{GroupID: sgID, UserID: reqCtx.AccountID}},
-		}},
-		EgressRules: []EC2IPPermission{{IPProtocol: "-1", IPRanges: []string{"0.0.0.0/0"}}},
-	}
-	if err := p.putEC2Record(ctx, "sg:"+scope+"/"+sgID, sg); err != nil {
-		return nil, fmt.Errorf("ec2 default VPC security group: %w", err)
-	}
-	if err := p.appendToList(scope, "sg_ids", sgID); err != nil {
-		return nil, fmt.Errorf("ec2 default VPC index security group: %w", err)
+	// The group is the one [ec2NewDefaultSecurityGroup] describes, shared with CreateVpc since
+	// #1492.
+	if err := p.createDefaultSecurityGroup(ctx, reqCtx, vpcID); err != nil {
+		return nil, fmt.Errorf("ec2 default VPC: %w", err)
 	}
 
 	igwID := generateIGWID(reqCtx.IDs)

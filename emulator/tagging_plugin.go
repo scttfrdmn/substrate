@@ -355,6 +355,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "sqs", scan: p.scanSQSQueues},
 		{typePrefix: "dynamodb", scan: p.scanDynamoDBTables},
 		{typePrefix: "ec2", scan: p.scanEC2Instances},
+		{typePrefix: "ec2", scan: p.scanEC2ElasticIPs},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayV2APIs},
@@ -586,6 +587,34 @@ func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestConte
 			ResourceARN: arn,
 			Tags:        ec2TagsToTaggingTags(inst.Tags),
 			everTagged:  inst.EverTagged,
+		})
+	}
+	return out, nil
+}
+
+// scanEC2ElasticIPs returns the caller's Elastic IP addresses (#1191), under the ARN the
+// Service Authorization Reference publishes for the type,
+// arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}.
+func (p *TaggingPlugin) scanEC2ElasticIPs(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, ec2Namespace, taggingScanPrefix("eip:", reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list ec2 elastic IPs: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, ec2Namespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var eip EC2ElasticIP
+		if err := json.Unmarshal(raw, &eip); err != nil {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: "arn:aws:ec2:" + eip.Region + ":" + eip.AccountID + ":elastic-ip/" + eip.AllocationID,
+			Tags:        ec2TagsToTaggingTags(eip.Tags),
+			everTagged:  eip.EverTagged,
 		})
 	}
 	return out, nil
@@ -1777,6 +1806,10 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 			acct := parts[4]
 			return ec2Namespace, "instance:" + acct + "/" + region + "/" + id, nil
 		}
+		// arn:aws:ec2:{region}:{acct}:elastic-ip/{allocationId} (#1191).
+		if id, ok := strings.CutPrefix(resource, "elastic-ip/"); ok && id != "" {
+			return ec2Namespace, "eip:" + parts[4] + "/" + parts[3] + "/" + id, nil
+		}
 		return "", "", unsupportedTagResource("EC2 %q is not a taggable resource type", resource)
 
 	case "iam":
@@ -2226,6 +2259,21 @@ func mergeResourceTags(
 		return state.Put(goCtx, ns, key, updated)
 
 	case ec2Namespace:
+		// The namespace holds Elastic IPs as well as instances since #1191, and decoding one as
+		// the other would rewrite it without its own members.
+		if strings.HasPrefix(key, "eip:") {
+			var eip EC2ElasticIP
+			if err := json.Unmarshal(raw, &eip); err != nil {
+				return fmt.Errorf("unmarshal EC2ElasticIP: %w", err)
+			}
+			eip.EverTagged = taggingEverTagged(eip.EverTagged, len(eip.Tags), len(addTags))
+			eip.Tags = mergeEC2Tags(eip.Tags, addTags, removeKeys)
+			updated, err := json.Marshal(eip)
+			if err != nil {
+				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+			}
+			return state.Put(goCtx, ns, key, updated)
+		}
 		var inst EC2Instance
 		if err := json.Unmarshal(raw, &inst); err != nil {
 			return fmt.Errorf("unmarshal EC2Instance: %w", err)

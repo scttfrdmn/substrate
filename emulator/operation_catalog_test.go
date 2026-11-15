@@ -97,7 +97,7 @@ func TestOperationCatalog_ReportsTheOperationsTheDispatchSwitchRoutes(t *testing
 	t.Parallel()
 
 	counts := map[string]int{
-		"ec2":                  98,
+		"ec2":                  99,
 		"cloudfront":           17,
 		"iam":                  74,
 		"s3":                   53,

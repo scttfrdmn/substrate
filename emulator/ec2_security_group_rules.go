@@ -62,8 +62,9 @@ func (p *EC2Plugin) resolveGroupPairNames(reqCtx *RequestContext, vpcID string, 
 	return nil
 }
 
-// securityGroupIDsByName maps the lower-cased name of each group in vpcID to its ID, the
-// first group in key order winning where substrate holds two of one name.
+// securityGroupIDsByName maps the lower-cased name of each group in vpcID to its ID. Names are
+// unique per VPC since #1491; for state an earlier substrate wrote, which may hold two groups of
+// one name, the first in key order wins.
 func (p *EC2Plugin) securityGroupIDsByName(reqCtx *RequestContext, vpcID string) (map[string]string, error) {
 	keys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -84,6 +85,139 @@ func (p *EC2Plugin) securityGroupIDsByName(reqCtx *RequestContext, vpcID string)
 		}
 	}
 	return out, nil
+}
+
+// refuseDuplicateGroupName returns InvalidGroup.Duplicate when a group in vpcID already holds
+// name, compared case-insensitively — API_CreateSecurityGroup: "Names are case-insensitive and
+// must be unique within the VPC" (#1491). The message is the client-error table's gloss for the
+// code. The caller holds [EC2Plugin.sgMu].
+func (p *EC2Plugin) refuseDuplicateGroupName(reqCtx *RequestContext, vpcID, name string) error {
+	if name == "" {
+		return nil
+	}
+	byName, err := p.securityGroupIDsByName(reqCtx, vpcID)
+	if err != nil {
+		return err
+	}
+	if _, taken := byName[strings.ToLower(name)]; taken {
+		return &AWSError{
+			Code: "InvalidGroup.Duplicate",
+			Message: "You cannot create a security group with the same name as an existing " +
+				"security group in the same VPC.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return nil
+}
+
+// defaultVPCGroupByName resolves a [Default VPC] group name, as DeleteSecurityGroup's GroupName
+// is published, to the ID of the group of that name in the account's default VPC.
+//
+// A name that resolves to nothing — including in an account with no default VPC — is
+// InvalidGroup.NotFound. It is written by hand rather than through [ec2SecurityGroupIDKind]
+// because the kind's message is about an ID, and what failed here is a name; the message is
+// substrate's own. The lookup is case-insensitive, as names are.
+func (p *EC2Plugin) defaultVPCGroupByName(reqCtx *RequestContext, name string) (string, error) {
+	vpc, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
+	if err != nil {
+		return "", err
+	}
+	if vpc != nil {
+		byName, listErr := p.securityGroupIDsByName(reqCtx, vpc.VPCID)
+		if listErr != nil {
+			return "", listErr
+		}
+		if id, ok := byName[strings.ToLower(name)]; ok {
+			return id, nil
+		}
+	}
+	return "", &AWSError{
+		Code:       "InvalidGroup.NotFound",
+		Message:    "No security group named '" + name + "' exists in the default VPC",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2AuthorizeDuplicates reports whether an authorize would add a source a group already allows,
+// so the request must be refused with InvalidPermission.Duplicate.
+//
+// EC2 stores one rule per source — "Each rule has a protocol, from and to ports, and source"
+// (API_RevokeSecurityGroupIngress) — so a duplicate is a source already held for the same
+// protocol and port range, wherever in the group's stored permissions it sits, and whichever
+// other sources the request's permission carries alongside it. That is the granularity
+// [ec2RevokePermissions] removes at (#1453), so a rule that one revoke can remove is exactly a
+// rule one authorize can duplicate. A source repeated within the request is a duplicate too.
+//
+// A permission naming no source at all is a duplicate of a stored sourceless permission with the
+// same protocol and ports, the reading [ec2RevokePermissions] gives that shape.
+func ec2AuthorizeDuplicates(stored, perms []EC2IPPermission) bool {
+	held := slices.Clone(stored)
+	holds := func(perm EC2IPPermission, has func(EC2IPPermission) bool) bool {
+		for _, r := range held {
+			if ec2SamePortRange(r, perm) && has(r) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, perm := range perms {
+		port := EC2IPPermission{IPProtocol: perm.IPProtocol, FromPort: perm.FromPort, ToPort: perm.ToPort}
+		if !ec2PermHasSource(perm) {
+			if holds(perm, func(r EC2IPPermission) bool { return !ec2PermHasSource(r) }) {
+				return true
+			}
+			held = append(held, port)
+			continue
+		}
+		for _, cidr := range perm.IPRanges {
+			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPRanges, cidr) }) {
+				return true
+			}
+			one := port
+			one.IPRanges = []string{cidr}
+			held = append(held, one)
+		}
+		for _, cidr := range perm.IPv6Ranges {
+			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPv6Ranges, cidr) }) {
+				return true
+			}
+			one := port
+			one.IPv6Ranges = []string{cidr}
+			held = append(held, one)
+		}
+		for _, id := range perm.PrefixListIDs {
+			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.PrefixListIDs, id) }) {
+				return true
+			}
+			one := port
+			one.PrefixListIDs = []string{id}
+			held = append(held, one)
+		}
+		for _, pair := range perm.UserIDGroupPairs {
+			if holds(perm, func(r EC2IPPermission) bool {
+				return slices.ContainsFunc(r.UserIDGroupPairs, func(s EC2UserIDGroupPair) bool {
+					return ec2GroupPairMatches(s, pair)
+				})
+			}) {
+				return true
+			}
+			one := port
+			one.UserIDGroupPairs = []EC2UserIDGroupPair{pair}
+			held = append(held, one)
+		}
+	}
+	return false
+}
+
+// ec2PermissionDuplicateError is InvalidPermission.Duplicate, with the client-error table's gloss
+// as its message, "The specified inbound or outbound rule already exists for that security
+// group.", verbatim.
+func ec2PermissionDuplicateError() *AWSError {
+	return &AWSError{
+		Code:       "InvalidPermission.Duplicate",
+		Message:    "The specified inbound or outbound rule already exists for that security group.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // ec2RevokePermissions subtracts the rules a RevokeSecurityGroupIngress/Egress request names

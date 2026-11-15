@@ -472,6 +472,7 @@ var routedOperations = map[string][]string{
 		"DescribeSubnets",
 		"DescribeTags",
 		"DescribeVolumes",
+		"DescribeVpcAttribute",
 		"DescribeVpcs",
 		"DetachInternetGateway",
 		"DetachVolume",

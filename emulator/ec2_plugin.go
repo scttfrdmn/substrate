@@ -48,6 +48,11 @@ type EC2Plugin struct {
 	// defaultVPCMu serializes the default VPC's check-then-create; see
 	// [EC2Plugin.seedDefaultVPC].
 	defaultVPCMu sync.Mutex
+
+	// sgMu serializes the read-check-write of a security group's name and rules, so two
+	// concurrent creates cannot both pass the per-VPC name check and two concurrent authorizes
+	// cannot both pass the duplicate-rule check (#1491).
+	sgMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -210,6 +215,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.modifySubnetAttribute(ctx, req)
 	case "ModifyVpcAttribute":
 		return p.modifyVpcAttribute(ctx, req)
+	case "DescribeVpcAttribute":
+		return p.describeVpcAttribute(ctx, req)
 	// Elastic IP operations
 	case "AllocateAddress":
 		return p.allocateAddress(ctx, req)
@@ -1790,6 +1797,13 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if _, err := p.createRouteTableForVPC(reqCtx, vpcID, cidr, true, ""); err != nil {
 		p.logger.Warn("ec2: failed to create default route table", "err", err)
 	}
+	// "Your default VPCs and any VPCs that you create come with a default security group"
+	// (VPC User Guide). Through v0.127.0 only the seeded default VPC had one (#1492). It is
+	// minted after the route table, so the route table's and association's IDs a recorded
+	// CreateVpc minted are unchanged on replay.
+	if err := p.createDefaultSecurityGroup(context.Background(), reqCtx, vpcID); err != nil {
+		return nil, err
+	}
 
 	type response struct {
 		XMLName xml.Name   `xml:"CreateVpcResponse"`
@@ -1944,6 +1958,21 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	var vpc EC2VPC
 	if err := json.Unmarshal(existing, &vpc); err != nil {
 		return nil, fmt.Errorf("ec2 deleteVpc unmarshal: %w", err)
+	}
+	// A VPC still holding a dependent is refused before anything is written, and one that holds
+	// none takes its default security group and main route table with it (#1492); see
+	// [EC2Plugin.vpcDependents].
+	held, owned, err := p.vpcDependents(reqCtx, vpcID)
+	if err != nil {
+		return nil, err
+	}
+	if held {
+		return nil, ec2DependencyViolationError()
+	}
+	for _, k := range owned {
+		if err := p.state.Delete(context.Background(), ec2Namespace, k); err != nil {
+			return nil, fmt.Errorf("ec2 deleteVpc %s: %w", k, err)
+		}
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteVpc: %w", err)
@@ -2125,6 +2154,11 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 // because "Names are case-insensitive". The refusal is also what keeps
 // [ec2LookupDefaultSecurityGroup], which resolves the default VPC's group by that name,
 // unambiguous.
+//
+// A name another group in the same VPC already holds is InvalidGroup.Duplicate (#1491), per
+// "Names are case-insensitive and must be unique within the VPC"; see
+// [EC2Plugin.refuseDuplicateGroupName]. Through v0.127.0 any number of groups could share a
+// name.
 func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	groupName := req.Params["GroupName"]
 	description := req.Params["GroupDescription"]
@@ -2152,6 +2186,11 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 			return nil, ec2NoDefaultVPCError()
 		}
 		vpcID = vpc.VPCID
+	}
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
+	if err := p.refuseDuplicateGroupName(reqCtx, vpcID, groupName); err != nil {
+		return nil, err
 	}
 	sgID := generateSGID(reqCtx.IDs)
 	sg := EC2SecurityGroup{
@@ -2195,23 +2234,19 @@ func (p *EC2Plugin) createSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 // superset failure #731 fixed for DescribeImages — and the two identity lists union rather
 // than intersect, per [ec2IDFilter.matchOrNamed].
 //
-// Two things about the name half are substrate's reading rather than AWS's text, both recorded
-// in docs/services.md:
+// A name is matched **in the default VPC only**, as AWS scopes the parameter: "[Default VPC] The
+// names of the security groups" (#1491). Through v0.127.0 it matched account-wide — first because
+// substrate created its default VPC lazily, so a default-VPC scope would have answered nothing in
+// a fresh account, and then, after #1464 seeded the default VPC eagerly, to keep that behavior
+// change out of the seeding release. In an account with no default VPC a name selects nothing.
+// Names are unique per VPC since #1491, so a name selects at most one group.
 //
-// A name is matched **account-wide**, where AWS scopes the parameter to the default VPC
-// ("[Default VPC] The names of the security groups"). The scope was first declined because
-// substrate created its default VPC lazily, so a default-VPC scope would have answered nothing
-// in a fresh account. The default VPC is seeded eagerly as of #1464 — [EC2Plugin.seedDefaultVPC]
-// — so that reason is gone, but the reading is kept: narrowing it now would refuse lookups of
-// groups in other VPCs that callers make here today, which is a behavior change of its own
-// rather than part of seeding the VPC. Account-wide also means a name may legitimately match several groups here,
-// because [EC2Plugin.createSecurityGroup] enforces no name uniqueness where AWS's is per-VPC.
-//
-// A name matching nothing answers an **empty set** rather than InvalidGroup.NotFound. This
-// operation's Errors section is empty, and EC2's client-error table describes that code as a
-// missing security group *ID* — which is what [ec2SecurityGroupIDKind]'s own message says — so
-// refusing here would mean inventing wording for a refusal AWS does not publish on this
-// operation, and asserting a default-VPC scope substrate does not implement. It follows
+// One thing about the name half is substrate's reading rather than AWS's text, recorded in
+// docs/services.md: a name matching nothing answers an **empty set** rather than
+// InvalidGroup.NotFound. This operation's Errors section is empty, and EC2's client-error table
+// describes that code as a missing security group *ID* — which is what [ec2SecurityGroupIDKind]'s
+// own message says — so refusing here would mean inventing wording for a refusal AWS does not
+// publish on this operation. It follows
 // [EC2Plugin.describeKeyPairs], which declines the same invention for the same reason. The ID
 // half keeps its full contract: a malformed ID is refused before the walk and an unresolved one
 // after it.
@@ -2248,6 +2283,16 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	if err := ec2SecurityGroupFilterSpec().check(req.Params); err != nil {
 		return nil, err
 	}
+	defaultVPCID := ""
+	if len(names) > 0 {
+		vpc, _, lookupErr := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if vpc != nil {
+			defaultVPCID = vpc.VPCID
+		}
+	}
 	filters := extractEC2Filters(req.Params)
 	allKeys, err := p.state.List(context.Background(), ec2Namespace, "sg:"+reqCtx.AccountID+"/"+reqCtx.Region+"/")
 	if err != nil {
@@ -2283,7 +2328,17 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 		if json.Unmarshal(data, &sg) != nil {
 			continue
 		}
-		if !ids.matchOrNamed(sg.GroupID, names, sg.GroupName) {
+		// The ID half and the name half union, as [ec2IDFilter.matchOrNamed] describes, and the
+		// name half is scoped to the default VPC (#1491): a group outside it is selected by its ID
+		// alone. Either way the ID filter sees every group, so its resolution bookkeeping is
+		// unaffected.
+		var selected bool
+		if len(names) > 0 && (defaultVPCID == "" || sg.VPCID != defaultVPCID) {
+			selected = ids.matchOrNamed(sg.GroupID, nil, "") && len(groupIDs) > 0
+		} else {
+			selected = ids.matchOrNamed(sg.GroupID, names, sg.GroupName)
+		}
+		if !selected {
 			continue
 		}
 		// A filter naming no values matches nothing, as it does everywhere else (#696). Every
@@ -2310,8 +2365,24 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
+// deleteSecurityGroup deletes a group named by GroupId or, for a group in the default VPC, by
+// GroupName.
+//
+// API_DeleteSecurityGroup publishes GroupName as "[Default VPC] The name of the security group.
+// You can specify either the security group name or the security group ID. For security groups
+// in a nondefault VPC, you must specify the security group ID." Through v0.127.0 it was not read,
+// so a delete by name answered MissingParameter for GroupId. It is resolved among the default
+// VPC's groups as of #1491 — see [EC2Plugin.defaultVPCGroupByName] — and a name that resolves to
+// nothing there is InvalidGroup.NotFound. GroupId wins when both are sent.
 func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	sgID := req.Params["GroupId"]
+	if sgID == "" && req.Params["GroupName"] != "" {
+		resolved, err := p.defaultVPCGroupByName(reqCtx, req.Params["GroupName"])
+		if err != nil {
+			return nil, err
+		}
+		sgID = resolved
+	}
 	if sgID == "" {
 		return nil, ec2MissingParameter("GroupId")
 	}
@@ -2364,9 +2435,16 @@ func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRe
 //
 // SecurityGroupRuleId.N is not read: substrate assigns no sgr- rule IDs, so a revoke naming
 // rules only by ID still answers MissingParameter.
+//
+// An authorize naming a source the group already allows for the same protocol and ports is
+// InvalidPermission.Duplicate, and nothing is written (#1491); the check is per source, the
+// granularity the revoke above works at — see [ec2AuthorizeDuplicates]. Through v0.127.0 the
+// rule was appended a second time.
 func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
 	sgID := req.Params["GroupId"]
 	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 modifySGRules get: %w", err)
@@ -2399,6 +2477,9 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 	}
 	var unknown []EC2IPPermission
 	if add {
+		if ec2AuthorizeDuplicates(*rules, perms) {
+			return nil, ec2PermissionDuplicateError()
+		}
 		*rules = append(*rules, perms...)
 	} else {
 		*rules, unknown = ec2RevokePermissions(*rules, perms)
@@ -2611,6 +2692,18 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 	return ec2XMLResponse(http.StatusOK, resp)
 }
 
+// attachInternetGateway attaches a gateway to a VPC.
+//
+// Both InternetGatewayId and VpcId are "Required: Yes" on API_AttachInternetGateway, and
+// through v0.127.0 only the gateway was required: an attach with no VpcId appended an
+// attachment to the empty-string VPC (#1194). Each is now MissingParameter when absent and
+// resolved through its kind, so an unknown VPC is InvalidVpcID.NotFound.
+//
+// A gateway already attached, to this VPC or another, is refused with
+// Resource.AlreadyAssociated, whose client-error-table gloss names exactly this case: "You
+// also cannot attach an internet gateway to more than one VPC at a time." The operation's own
+// Errors section is the Common Error Types boilerplate, so the code is that table's. Before
+// #1194 a second attach appended a second attachment.
 func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	igwID := req.Params["InternetGatewayId"]
 	vpcID := req.Params["VpcId"]
@@ -2622,9 +2715,29 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	if reqErr := ec2RequireNamedResource(ec2InternetGatewayIDKind, "InternetGatewayId", igwID, data != nil); reqErr != nil {
 		return nil, reqErr
 	}
+	if vpcID == "" {
+		return nil, ec2MissingParameter("VpcId")
+	}
+	vpcData, err := p.state.Get(context.Background(), ec2Namespace, "vpc:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+vpcID)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 attachInternetGateway get vpc: %w", err)
+	}
+	if reqErr := ec2RequireResource(ec2VPCIDKind, vpcID, vpcData != nil); reqErr != nil {
+		return nil, reqErr
+	}
 	var igw EC2InternetGateway
 	if unmarshalErr := json.Unmarshal(data, &igw); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 attachInternetGateway unmarshal: %w", unmarshalErr)
+	}
+	if len(igw.Attachments) > 0 {
+		// The client-error table's gloss for Resource.AlreadyAssociated; its third sentence is
+		// the internet-gateway case.
+		return nil, &AWSError{
+			Code: "Resource.AlreadyAssociated",
+			Message: "The specified resource is already in use. You also cannot attach an internet " +
+				"gateway to more than one VPC at a time.",
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
 	igw.Attachments = append(igw.Attachments, EC2IGWAttachment{VPCID: vpcID, State: "available"})
 	newData, err := json.Marshal(igw)
@@ -2642,6 +2755,32 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// ec2GatewayNotAttachedError is Gateway.NotAttached, whose client-error-table gloss names the
+// detach case: "If you are trying to detach an internet gateway, ensure that you specify the
+// correct VPC." The message is the gloss's first two sentences.
+func ec2GatewayNotAttachedError() *AWSError {
+	return &AWSError{
+		Code: "Gateway.NotAttached",
+		Message: "An internet gateway is not attached to a VPC. If you are trying to detach an " +
+			"internet gateway, ensure that you specify the correct VPC.",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// detachInternetGateway detaches a gateway from the VPC the request names.
+//
+// VpcId is "Required: Yes" on API_DetachInternetGateway and was not required through
+// v0.127.0, so an omitted or mismatched VpcId filtered nothing out and answered return=true
+// with the gateway still attached (#1194). An omitted VpcId is now MissingParameter, and a
+// VPC the gateway is not attached to (including a gateway attached to nothing) is
+// Gateway.NotAttached; see [ec2GatewayNotAttachedError]. The VPC is not resolved first: a VPC
+// that does not exist is also one the gateway is not attached to, and the client-error table
+// files the mismatched-VPC case under this code.
+//
+// The page's precondition, "The VPC must not contain any running instances with Elastic IP
+// addresses or public IPv4 addresses", is **not enforced**. The page states it in prose with
+// no code (its Errors section is the Common Error Types boilerplate), so enforcing it would
+// mean choosing a refusal AWS does not name for it. docs/services.md records the gap.
 func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	igwID := req.Params["InternetGatewayId"]
 	vpcID := req.Params["VpcId"]
@@ -2653,15 +2792,21 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	if reqErr := ec2RequireNamedResource(ec2InternetGatewayIDKind, "InternetGatewayId", igwID, data != nil); reqErr != nil {
 		return nil, reqErr
 	}
+	if vpcID == "" {
+		return nil, ec2MissingParameter("VpcId")
+	}
 	var igw EC2InternetGateway
 	if unmarshalErr := json.Unmarshal(data, &igw); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 detachInternetGateway unmarshal: %w", unmarshalErr)
 	}
-	newAttachments := igw.Attachments[:0]
+	newAttachments := make([]EC2IGWAttachment, 0, len(igw.Attachments))
 	for _, a := range igw.Attachments {
 		if a.VPCID != vpcID {
 			newAttachments = append(newAttachments, a)
 		}
+	}
+	if len(newAttachments) == len(igw.Attachments) {
+		return nil, ec2GatewayNotAttachedError()
 	}
 	igw.Attachments = newAttachments
 	newData, err := json.Marshal(igw)
@@ -2679,6 +2824,12 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// deleteInternetGateway deletes a gateway.
+//
+// API_DeleteInternetGateway: "You must detach the internet gateway from the VPC before you can
+// delete it." A gateway still attached is refused with DependencyViolation (#1492); see
+// [ec2DependencyViolationError]. Through v0.127.0 it was deleted attached, taking its
+// attachment with it.
 func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	igwID := req.Params["InternetGatewayId"]
 	if igwID == "" {
@@ -2691,6 +2842,13 @@ func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSReques
 	}
 	if lookupErr := ec2RequireResource(ec2InternetGatewayIDKind, igwID, existing != nil); lookupErr != nil {
 		return nil, lookupErr
+	}
+	var igw EC2InternetGateway
+	if err := json.Unmarshal(existing, &igw); err != nil {
+		return nil, fmt.Errorf("ec2 deleteInternetGateway unmarshal: %w", err)
+	}
+	if len(igw.Attachments) > 0 {
+		return nil, ec2DependencyViolationError()
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteInternetGateway: %w", err)
@@ -2805,21 +2963,16 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 describeRouteTables: %w", err)
 	}
-	type routeItem struct {
-		DestCIDR  string `xml:"destinationCidrBlock"`
-		GatewayID string `xml:"gatewayId"`
-		State     string `xml:"state"`
-	}
 	type assocItem struct {
 		AssociationID string `xml:"routeTableAssociationId"`
 		SubnetID      string `xml:"subnetId,omitempty"`
 		Main          bool   `xml:"main"`
 	}
 	type rtbItem struct {
-		RouteTableID string      `xml:"routeTableId"`
-		VpcID        string      `xml:"vpcId"`
-		Routes       []routeItem `xml:"routeSet>item"`
-		Associations []assocItem `xml:"associationSet>item"`
+		RouteTableID string         `xml:"routeTableId"`
+		VpcID        string         `xml:"vpcId"`
+		Routes       []ec2RouteItem `xml:"routeSet>item"`
+		Associations []assocItem    `xml:"associationSet>item"`
 	}
 	type response struct {
 		XMLName     xml.Name  `xml:"DescribeRouteTablesResponse"`
@@ -2851,7 +3004,7 @@ func (p *EC2Plugin) describeRouteTables(reqCtx *RequestContext, req *AWSRequest)
 		}
 		item := rtbItem{RouteTableID: rtb.RouteTableID, VpcID: rtb.VPCID}
 		for _, r := range rtb.Routes {
-			item.Routes = append(item.Routes, routeItem{DestCIDR: r.DestinationCIDR, GatewayID: r.GatewayID, State: r.State})
+			item.Routes = append(item.Routes, ec2RouteXML(r, rtb.AccountID))
 		}
 		for _, a := range rtb.Associations {
 			item.Associations = append(item.Associations, assocItem{AssociationID: a.AssociationID, SubnetID: a.SubnetID, Main: a.Main}) //nolint:staticcheck // XML tags differ from JSON tags.
@@ -2941,10 +3094,17 @@ func (p *EC2Plugin) disassociateRouteTable(reqCtx *RequestContext, req *AWSReque
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// createRoute adds a route to a route table.
+//
+// The destination and the target are read through [ec2ParseRouteDestination] and
+// [ec2ParseRouteTarget], which [EC2Plugin.replaceRoute] shares, and a target substrate stores is
+// resolved through [EC2Plugin.resolveRouteTarget] (#1187). An IPv4 destination is canonicalised,
+// and a destination the table already routes is RouteAlreadyExists, the client-error table's
+// "A route for the specified CIDR block already exists in this route table" — through v0.127.0 a
+// second route to one destination was appended. The checks run in that order, after the route
+// table resolves, and a refused request writes nothing.
 func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
-	destCIDR := req.Params["DestinationCidrBlock"]
-	gwID := req.Params["GatewayId"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
@@ -2953,11 +3113,31 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
 		return nil, reqErr
 	}
+	dest, err := ec2ParseRouteDestination(req.Params, true)
+	if err != nil {
+		return nil, err
+	}
+	route, err := ec2ParseRouteTarget(req.Params, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.resolveRouteTarget(reqCtx, route); err != nil {
+		return nil, err
+	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 createRoute unmarshal: %w", unmarshalErr)
 	}
-	rtb.Routes = append(rtb.Routes, EC2Route{DestinationCIDR: destCIDR, GatewayID: gwID, State: "active"})
+	for _, existing := range rtb.Routes {
+		if dest.matches(existing) {
+			return nil, ec2RouteAlreadyExistsError()
+		}
+	}
+	route.DestinationCIDR = dest.IPv4
+	route.DestinationIPv6CIDR = dest.IPv6
+	route.DestinationPrefixListID = dest.PrefixList
+	route.State = "active"
+	rtb.Routes = append(rtb.Routes, route)
 	newData, err := json.Marshal(rtb)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 createRoute marshal: %w", err)
@@ -2973,23 +3153,15 @@ func (p *EC2Plugin) createRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
-// routeTargetGateway returns the route target gateway ID from whichever EC2
-// route-target parameter the caller supplied (internet/NAT gateway, instance,
-// or network interface), normalised to the single GatewayID field Substrate
-// stores per route.
-func routeTargetGateway(params map[string]string) string {
-	for _, k := range []string{"GatewayId", "NatGatewayId", "InstanceId", "NetworkInterfaceId", "TransitGatewayId", "VpcPeeringConnectionId"} {
-		if v := params[k]; v != "" {
-			return v
-		}
-	}
-	return ""
-}
-
+// replaceRoute rewrites the target of the route matching the request's destination.
+//
+// It reads its destination and target through the parsers [EC2Plugin.createRoute] uses, plus
+// ReplaceRoute's own LocalTarget, and resolves a stored target the same way. The destination is
+// matched exactly — "The value that you provide must match the CIDR of an existing route in the
+// table" — and a destination no route carries is InvalidRoute.NotFound. Through v0.127.0 the
+// target was the first of six parameters set, folded onto the gateway field (#1187).
 func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
-	destCIDR := req.Params["DestinationCidrBlock"]
-	gwID := routeTargetGateway(req.Params)
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
@@ -2998,21 +3170,37 @@ func (p *EC2Plugin) replaceRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
 		return nil, reqErr
 	}
+	dest, err := ec2ParseRouteDestination(req.Params, false)
+	if err != nil {
+		return nil, err
+	}
+	target, err := ec2ParseRouteTarget(req.Params, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.resolveRouteTarget(reqCtx, target); err != nil {
+		return nil, err
+	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 replaceRoute unmarshal: %w", unmarshalErr)
 	}
 	found := false
 	for i := range rtb.Routes {
-		if rtb.Routes[i].DestinationCIDR == destCIDR {
-			rtb.Routes[i].GatewayID = gwID
+		if dest.matches(rtb.Routes[i]) {
+			ec2SetRouteTarget(&rtb.Routes[i], target)
 			rtb.Routes[i].State = "active"
 			found = true
 			break
 		}
 	}
 	if !found {
-		return nil, &AWSError{Code: "InvalidRoute.NotFound", Message: "no route with destination " + destCIDR, HTTPStatus: http.StatusBadRequest}
+		// The client-error table's gloss for InvalidRoute.NotFound.
+		return nil, &AWSError{
+			Code:       "InvalidRoute.NotFound",
+			Message:    "The specified route does not exist in the specified route table.",
+			HTTPStatus: http.StatusBadRequest,
+		}
 	}
 	newData, err := json.Marshal(rtb)
 	if err != nil {
@@ -3149,9 +3337,12 @@ func (p *EC2Plugin) replaceRouteTableAssociation(reqCtx *RequestContext, req *AW
 	})
 }
 
+// deleteRoute drops the route matching the request's destination, which is read through
+// [ec2ParseRouteDestination] — so the IPv6 and prefix-list forms the page publishes are matched
+// too, and a request naming no destination is MissingParameter rather than a delete of every
+// route with an empty IPv4 destination (#1187).
 func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	rtbID := req.Params["RouteTableId"]
-	destCIDR := req.Params["DestinationCidrBlock"]
 	key := "rtb:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + rtbID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
@@ -3160,13 +3351,17 @@ func (p *EC2Plugin) deleteRoute(reqCtx *RequestContext, req *AWSRequest) (*AWSRe
 	if reqErr := ec2RequireNamedResource(ec2RouteTableIDKind, "RouteTableId", rtbID, data != nil); reqErr != nil {
 		return nil, reqErr
 	}
+	dest, err := ec2ParseRouteDestination(req.Params, false)
+	if err != nil {
+		return nil, err
+	}
 	var rtb EC2RouteTable
 	if unmarshalErr := json.Unmarshal(data, &rtb); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 deleteRoute unmarshal: %w", unmarshalErr)
 	}
 	newRoutes := rtb.Routes[:0]
 	for _, r := range rtb.Routes {
-		if r.DestinationCIDR != destCIDR {
+		if !dest.matches(r) {
 			newRoutes = append(newRoutes, r)
 		}
 	}
@@ -3720,8 +3915,9 @@ func ec2ApplyTagsToResource(
 	}
 
 	// Stamped on the raw record, because this one writer serves every taggable EC2 type and never
-	// decodes a concrete struct. Only the instance record is scanned by the tagging API, so only its
-	// type carries the field; the member is inert on the others. See [taggingEverTagged] (#938).
+	// decodes a concrete struct. Only the instance and Elastic IP records are scanned by the tagging
+	// API (the latter since #1191), so only their types carry the field; the member is inert on the
+	// others. See [taggingEverTagged] (#938).
 	added := 0
 	if !remove {
 		added = len(tags)
@@ -5466,7 +5662,10 @@ func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSReques
 	if unmarshalErr := json.Unmarshal(data, &subnet); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 modifySubnetAttribute unmarshal: %w", unmarshalErr)
 	}
-	if v, ok := req.Params["MapPublicIPOnLaunch.Value"]; ok {
+	// The published spelling, as API_ModifySubnetAttribute's Example 1 sends it:
+	// MapPublicIpOnLaunch.Value=true. Through v0.127.0 the Go field's initialism spelling was read
+	// instead, so every SDK's modify was discarded (#1151).
+	if v, ok := req.Params["MapPublicIpOnLaunch.Value"]; ok {
 		subnet.MapPublicIPOnLaunch = v == "true"
 	}
 	newData, err := json.Marshal(subnet)
@@ -5498,11 +5697,18 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 	if unmarshalErr := json.Unmarshal(data, &vpc); unmarshalErr != nil {
 		return nil, fmt.Errorf("ec2 modifyVpcAttribute unmarshal: %w", unmarshalErr)
 	}
-	if v, ok := req.Params["EnableDNSSupport.Value"]; ok {
+	// The published spellings, as API_ModifyVpcAttribute's example sends them
+	// (EnableDnsHostnames.Value=false). Through v0.127.0 the Go fields' initialism spellings were
+	// read instead, so every SDK's modify was discarded (#1151). Each is readable back through
+	// DescribeVpcAttribute.
+	if v, ok := req.Params["EnableDnsSupport.Value"]; ok {
 		vpc.EnableDNSSupport = v == "true"
 	}
-	if v, ok := req.Params["EnableDNSHostnames.Value"]; ok {
+	if v, ok := req.Params["EnableDnsHostnames.Value"]; ok {
 		vpc.EnableDNSHostnames = v == "true"
+	}
+	if v, ok := req.Params["EnableNetworkAddressUsageMetrics.Value"]; ok {
+		vpc.EnableNetworkAddressUsageMetrics = v == "true"
 	}
 	newData, err := json.Marshal(vpc)
 	if err != nil {
@@ -5521,10 +5727,65 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 
 // --- Elastic IP operations ---
 
+// allocateAddress allocates an Elastic IP address.
+//
+// Of the seven request parameters API_AllocateAddress publishes, through v0.127.0 only Domain
+// was read, and it was echoed unvalidated (#1191). As of #1191:
+//
+//   - Domain must be one of its Valid Values, vpc | standard, and defaults to vpc. Another
+//     value is InvalidParameterValue.
+//   - TagSpecification.N — "The tags to assign to the Elastic IP address" — is read for the
+//     elastic-ip resource type, checked by the tag rules and the tag limit before anything is
+//     written, and stored, so DescribeAddresses reports it in tagSet and the Resource Groups
+//     Tagging API finds it. AllocateAddress's own response publishes no tagSet.
+//   - NetworkBorderGroup is echoed as supplied, and is the Region when absent. A group naming
+//     no zone substrate seeds is not refused: AWS publishes no list to check it against beyond
+//     DescribeAvailabilityZones, and substrate models no addressing per group.
+//   - Address, the recovery of a previously released address ("To attempt to recover an Elastic
+//     IP address that you released, specify it in this operation"), is refused, because
+//     ReleaseAddress keeps no record of what it released and so no address is recoverable here.
+//     A value that is not an IPv4 address is InvalidAddress.Malformed; one the account holds is
+//     InvalidIPAddress.InUse; any other is InvalidAddress.NotFound. All three codes and glosses
+//     are the client-error table's; choosing them for recovery is substrate's reading.
+//   - PublicIpv4Pool, CustomerOwnedIpv4Pool and IpamPoolId are refused with
+//     InvalidParameterValue, because substrate models no address pools and an address answered
+//     from one would carry a pool ID that names nothing.
+//
+// A request naming none of the new parameters is answered exactly as before.
 func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	domain := req.Params["Domain"]
 	if domain == "" {
 		domain = "vpc"
+	}
+	if domain != "vpc" && domain != "standard" {
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    fmt.Sprintf("Domain %q is not one of vpc and standard", domain),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	for _, pool := range []string{"PublicIpv4Pool", "CustomerOwnedIpv4Pool", "IpamPoolId"} {
+		if req.Params[pool] != "" {
+			return nil, &AWSError{
+				Code:       "InvalidParameterValue",
+				Message:    pool + " is not supported: substrate models no address pools",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		}
+	}
+	if address := req.Params["Address"]; address != "" {
+		return nil, p.refuseAddressRecovery(reqCtx, address)
+	}
+	tags := ec2LaunchTagsForResource(req.Params, "elastic-ip")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+	borderGroup := req.Params["NetworkBorderGroup"]
+	if borderGroup == "" {
+		borderGroup = reqCtx.Region
 	}
 	allocationID := generateAllocationID(reqCtx.IDs)
 	publicIP := generatePublicIP(allocationID)
@@ -5532,6 +5793,7 @@ func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*A
 		AllocationID: allocationID,
 		PublicIP:     publicIP,
 		Domain:       domain,
+		Tags:         tags,
 		AccountID:    reqCtx.AccountID,
 		Region:       reqCtx.Region,
 	}
@@ -5559,8 +5821,38 @@ func (p *EC2Plugin) allocateAddress(reqCtx *RequestContext, req *AWSRequest) (*A
 		PublicIP:           publicIP,
 		AllocationID:       allocationID,
 		Domain:             domain,
-		NetworkBorderGroup: reqCtx.Region,
+		NetworkBorderGroup: borderGroup,
 	})
+}
+
+// refuseAddressRecovery answers an AllocateAddress naming Address; see
+// [EC2Plugin.allocateAddress] for why every recovery is refused. The messages are the
+// client-error table's glosses for the three codes.
+func (p *EC2Plugin) refuseAddressRecovery(reqCtx *RequestContext, address string) error {
+	if ip := net.ParseIP(address); ip == nil || ip.To4() == nil {
+		return &AWSError{
+			Code:       "InvalidAddress.Malformed",
+			Message:    "The specified IP address is not valid.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	held := false
+	if err := ec2ScanRecords(context.Background(), p.state, "eip:"+reqCtx.AccountID+"/"+reqCtx.Region+"/",
+		func(_ string, eip EC2ElasticIP) { held = held || eip.PublicIP == address }); err != nil {
+		return fmt.Errorf("ec2 allocateAddress recovery: %w", err)
+	}
+	if held {
+		return &AWSError{
+			Code:       "InvalidIPAddress.InUse",
+			Message:    "The specified IP address is already in use.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return &AWSError{
+		Code:       "InvalidAddress.NotFound",
+		Message:    "The specified Elastic IP address that you are describing cannot be found.",
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 func (p *EC2Plugin) associateAddress(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

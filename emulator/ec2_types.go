@@ -259,6 +259,11 @@ type EC2VPC struct {
 	// EnableDNSHostnames indicates whether instances receive public DNS hostnames.
 	EnableDNSHostnames bool `json:"enable_dns_hostnames"`
 
+	// EnableNetworkAddressUsageMetrics indicates whether Network Address Usage metrics are
+	// enabled for the VPC. It is recorded and reported by DescribeVpcAttribute; no metric is
+	// produced.
+	EnableNetworkAddressUsageMetrics bool `json:"enable_network_address_usage_metrics,omitempty"`
+
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
@@ -410,15 +415,57 @@ type EC2InternetGateway struct {
 }
 
 // EC2Route represents a single route in a route table.
+//
+// A route names exactly one target, in the field for its type (#1187). The fields after
+// GatewayID are additive and omitted when empty, so a stored route to a gateway is the record it
+// was before them; a route written before them holds whatever target it had in GatewayID, and
+// still reads that way.
 type EC2Route struct {
 	// DestinationCIDR is the IPv4 destination CIDR block.
 	DestinationCIDR string `json:"destination_cidr"`
 
-	// GatewayID is the target gateway ID (e.g. "igw-..." or "local").
+	// GatewayID is the target gateway ID (e.g. "igw-..." or "local"), or a Gateway Load
+	// Balancer endpoint, which API_Route renders as gatewayId.
 	GatewayID string `json:"gateway_id"`
 
 	// State is the route state: "active" or "blackhole".
 	State string `json:"state"`
+
+	// DestinationIPv6CIDR is the IPv6 destination CIDR block.
+	DestinationIPv6CIDR string `json:"destination_ipv6_cidr,omitempty"`
+
+	// DestinationPrefixListID is the destination prefix list.
+	DestinationPrefixListID string `json:"destination_prefix_list_id,omitempty"`
+
+	// NatGatewayID is the target NAT gateway.
+	NatGatewayID string `json:"nat_gateway_id,omitempty"`
+
+	// InstanceID is the target NAT instance.
+	InstanceID string `json:"instance_id,omitempty"`
+
+	// NetworkInterfaceID is the target network interface.
+	NetworkInterfaceID string `json:"network_interface_id,omitempty"`
+
+	// TransitGatewayID is the target transit gateway.
+	TransitGatewayID string `json:"transit_gateway_id,omitempty"`
+
+	// VpcPeeringConnectionID is the target VPC peering connection.
+	VpcPeeringConnectionID string `json:"vpc_peering_connection_id,omitempty"`
+
+	// EgressOnlyInternetGatewayID is the target egress-only internet gateway.
+	EgressOnlyInternetGatewayID string `json:"egress_only_internet_gateway_id,omitempty"`
+
+	// LocalGatewayID is the target local gateway.
+	LocalGatewayID string `json:"local_gateway_id,omitempty"`
+
+	// CarrierGatewayID is the target carrier gateway.
+	CarrierGatewayID string `json:"carrier_gateway_id,omitempty"`
+
+	// CoreNetworkARN is the target core network.
+	CoreNetworkARN string `json:"core_network_arn,omitempty"`
+
+	// OdbNetworkARN is the target ODB network.
+	OdbNetworkARN string `json:"odb_network_arn,omitempty"`
 }
 
 // EC2RTAssociation represents an association between a route table and a subnet
@@ -838,6 +885,10 @@ type EC2ElasticIP struct {
 
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
+
+	// EverTagged records that this address has carried a tag; see [taggingEverTagged] (#938).
+	// It is read since the Resource Groups Tagging API scans Elastic IPs (#1191).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 
 	// AccountID is the AWS account that owns the Elastic IP.
 	AccountID string `json:"account_id"`

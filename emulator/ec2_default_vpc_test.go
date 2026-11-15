@@ -256,7 +256,8 @@ func TestEC2_DefaultVPC_DeletedStaysDeleted(t *testing.T) {
 	call := ec2CallHTTP(t, func(p map[string]string) *http.Response { return ec2Request(t, ts, p) })
 	seeded := ec2ReadDefaultVPC(t, call)
 
-	call(map[string]string{"Action": "DeleteVpc", "VpcId": seeded.vpcID})
+	// A default VPC is deleted the way any VPC is: its dependents first (#1492).
+	ec2TearDownVPC(t, call, seeded.vpcID)
 	assert.Empty(t, ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "is-default", "true")),
 		"a deleted default VPC is not seeded again by the next request")
 
@@ -337,7 +338,7 @@ func TestEC2_CreateDefaultSubnet(t *testing.T) {
 	assert.True(t, created.Subnet.MapPublicIPOnLaunch)
 	assert.Equal(t, view.vpcID, created.Subnet.VpcID)
 
-	call(map[string]string{"Action": "DeleteVpc", "VpcId": view.vpcID})
+	ec2TearDownVPC(t, call, view.vpcID)
 	status, code, _ := ec2ErrorDetail(t, ts, map[string]string{
 		"Action": "CreateDefaultSubnet", "AvailabilityZone": "us-east-1a",
 	})
