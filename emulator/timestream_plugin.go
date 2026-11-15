@@ -504,7 +504,7 @@ func (p *TimestreamPlugin) query(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 		return p.queryPage(reqCtx, q, offset)
 	}
 
-	result, seeded, err := p.seededQueryResult(input.QueryString)
+	result, seeded, err := p.seededQueryResult(reqCtx.AccountID, reqCtx.Region, input.QueryString)
 	if err != nil {
 		return nil, err
 	}
@@ -550,12 +550,23 @@ func timestreamQueryID(m *IDMint) string {
 	return m.Hex(16)
 }
 
-// seededQueryResult returns the result seeded for the query string, falling back to the wildcard
-// "*" seed, and reports whether either was found.
-func (p *TimestreamPlugin) seededQueryResult(qs string) (TimestreamQueryResult, bool, error) {
+// seededQueryResult returns the result seeded for the query string in the caller's account and
+// Region, and reports whether one was found.
+//
+// The query string is the stronger match: a seed for this exact query in any scope wins over the "*"
+// wildcard query in the caller's own scope, because a test that seeds one query means that query.
+// Within each, the most specific scope wins — the caller's account and Region, then the account in any
+// Region, then the Region in any account, then any — the order [cfgsvcCtrlKeyCandidates] gives.
+func (p *TimestreamPlugin) seededQueryResult(acct, region, qs string) (TimestreamQueryResult, bool, error) {
 	goCtx := context.Background()
-	for _, key := range []string{qs, "*"} {
-		raw, err := p.state.Get(goCtx, timestreamCtrlNamespace, timestreamCtrlResultKey(key))
+	var keys []string
+	for _, q := range []string{qs, "*"} {
+		keys = append(keys, cfgsvcCtrlKeyCandidates(func(a, r string) string {
+			return timestreamCtrlResultKey(a, r, q)
+		}, acct, region)...)
+	}
+	for _, key := range keys {
+		raw, err := p.state.Get(goCtx, timestreamCtrlNamespace, key)
 		if err != nil {
 			return TimestreamQueryResult{}, false, fmt.Errorf("timestream query read seed: %w", err)
 		}

@@ -25,12 +25,12 @@ cd "$(dirname "$0")/.."
 # The eight string-index helpers #1365 listed here for #1175 now return their marshal
 # errors with the rest of their failures, so they need no entry.
 #
-# openSearchError marshals a literal map of strings and an int; s3ErrorResponseWith
-# marshals an s3ErrorXML of strings with element names taken from non-empty detail
-# names, which encoding/xml cannot fail to encode. Both return a bare *AWSResponse to
-# error paths that have no error of their own to return.
+# s3ErrorResponseWith marshals an s3ErrorXML of strings with element names taken from
+# non-empty detail names, which encoding/xml cannot fail to encode, and returns a bare
+# *AWSResponse to error paths that have no error of their own to return. OpenSearch's
+# openSearchError held the other entry until #1590, when its refusals became values
+# rendered by a method that returns the marshal error.
 ALLOWED=(
-  "emulator/opensearch_plugin.go:openSearchError"
   "emulator/s3_plugin.go:s3ErrorResponseWith"
 )
 

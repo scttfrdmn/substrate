@@ -409,6 +409,13 @@ func defaultCostTable() map[string]float64 {
 		"apigateway/CreateDeployment": 0.0000035,
 		// API Gateway HTTP APIs: cheaper than REST.
 		"apigatewayv2/CreateApi": 0.000001,
+		// execute-api: a request to a deployed stage, priced per request at the first tier the API
+		// Gateway pricing page's examples use — $3.50 per million for a REST API and $1.00 per
+		// million for an HTTP API, the latter metered in 512 KB increments. These two keys name no
+		// operation: execute-api routes none (its IAM action is the single execute-api:Invoke), so
+		// the proxy charges them on the request's behalf (cost_internal.go, #1202).
+		executeAPIRESTCostKey: 0.0000035,
+		executeAPIHTTPCostKey: 0.000001,
 		// ACM: public certificates are free.
 		"acm/RequestCertificate": 0.0,
 		// Step Functions: $0.025 per 1k state transitions (Standard Workflows).
@@ -429,10 +436,12 @@ func defaultCostTable() map[string]float64 {
 		// ElastiCache: per-node-hour prorated per API call.
 		"elasticache/CreateCacheCluster":     0.017,
 		"elasticache/CreateReplicationGroup": 0.034,
-		// EFS: per-GB-month prorated per API call.
-		"elasticfilesystem/CreateFileSystem":  0.00003,
-		"elasticfilesystem/CreateAccessPoint": 0.00001,
-		"elasticfilesystem/CreateMountTarget": 0.00001,
+		// EFS: per-GB-month prorated per API call. Keyed `efs`, the plugin's name: the SigV4
+		// signing name `elasticfilesystem` these keys once used is never a request's service
+		// once parsed, so the three entries matched nothing (#1202).
+		"efs/CreateFileSystem":  0.00003,
+		"efs/CreateAccessPoint": 0.00001,
+		"efs/CreateMountTarget": 0.00001,
 		// Glue: per-DPU-hour prorated per API call.
 		"glue/CreateDatabase": 0.00002,
 		"glue/CreateJob":      0.0001,
@@ -451,8 +460,11 @@ func defaultCostTable() map[string]float64 {
 		// RDS Aurora: per-cluster-hour prorated per API call.
 		"rds/CreateDBCluster":                 0.0001,
 		"rds/RestoreDBInstanceFromDBSnapshot": 0.0001,
-		// MSK: per-broker-hour prorated per API call.
+		// MSK: per-broker-hour prorated per API call. CreateClusterV2 is charged as CreateCluster:
+		// MSK pricing is per broker-hour and does not depend on which API version created the
+		// cluster (#1202).
 		"msk/CreateCluster":       0.0002,
+		"msk/CreateClusterV2":     0.0002,
 		"msk/GetBootstrapBrokers": 0.000001,
 		// EC2 Elastic IPs: $0.005/hr when unattached.
 		"ec2/AllocateAddress": 0.005,
@@ -485,9 +497,15 @@ func defaultCostTable() map[string]float64 {
 		"athena/StartQueryExecution": 0.000005,
 		// S3 Select: per query request.
 		"s3/SelectObjectContent": 0.0000004,
-		// OpenSearch: per document indexed.
-		"opensearch/IndexDocument": 0.0000001,
-		"opensearch/Bulk":          0.0000001,
+		// OpenSearch: a nominal per-write charge. The data plane dispatches on the HTTP method, so
+		// req.Operation is the verb and these keys are verbs: every PUT and POST — a document write,
+		// a bulk request, an index create, and a search sent as POST — is charged, and GET, HEAD and
+		// DELETE are free. Keyed by verb rather than by a semantic name because OpenSearch is kept
+		// out of operationResolvers on purpose: its IAM actions are the per-verb es:ESHttp* family
+		// (operation_catalog_gen.go). The IndexDocument and Bulk keys these replace could never
+		// match (#1202).
+		"opensearch/PUT":  0.0000001,
+		"opensearch/POST": 0.0000001,
 		// WAFv2: $5.00 per Web ACL per month, approximated per creation call.
 		"wafv2/CreateWebACL":    5.00,
 		"wafv2/AssociateWebACL": 0.000001,

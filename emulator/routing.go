@@ -420,9 +420,10 @@ var pluginRouting = map[string]PluginRouting{
 		},
 		SigningNames: []string{"es", "aoss"},
 		Why: "A managed domain's and a Serverless collection's hosts both carry the name " +
-			"as data ahead of the es/aoss label. The plugin is data-plane only, so the " +
-			"OpenSearchServerless control-plane target prefix names operations substrate " +
-			"does not implement and is deliberately absent.",
+			"as data ahead of the es/aoss label; it scopes the plugin's state rather than " +
+			"routing. The plugin is data-plane only, so the OpenSearchServerless " +
+			"control-plane target prefix names operations substrate does not implement and " +
+			"is deliberately absent, and an es control-plane path is refused rather than routed.",
 		Source: "botocore opensearch and opensearchserverless service-2.json",
 	},
 	"organizations": {

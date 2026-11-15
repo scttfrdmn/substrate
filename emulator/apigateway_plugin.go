@@ -1636,6 +1636,10 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 		return proxyError(http.StatusBadGateway, "no Lambda integration found: "+err.Error())
 	}
 
+	// The stage request is charged once an API has resolved it — before then there is no API to
+	// bill — at the rate of the API's type (#1202).
+	chargeOnBehalf(reqCtx, executeAPICostRequest(isV2), executeAPICostUnits(isV2, len(req.Body)))
+
 	// Extract function name from ARN.
 	arnParts := strings.Split(lambdaARN, ":")
 	fnName := arnParts[len(arnParts)-1]
@@ -1678,6 +1682,15 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 	}
 	if invokeResp == nil {
 		return proxyError(http.StatusBadGateway, "nil lambda response")
+	}
+	// The invocation the registry served is charged as the Lambda Invoke it is, under the name a
+	// wire Invoke resolves to. A copy is resolved, so the request the Lambda plugin saw is the one
+	// it has always seen. A refused invocation ran nothing and is not charged; a function error is
+	// an invocation that ran, and is.
+	if invokeResp.StatusCode < http.StatusBadRequest {
+		invokeCost := *invokeReq
+		resolveOperationName(&invokeCost)
+		chargeOnBehalf(reqCtx, &invokeCost, 1)
 	}
 
 	// Parse Lambda proxy response.
@@ -1871,12 +1884,7 @@ func apigwInternalRequestID(m *IDMint) string {
 
 // buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload.
 func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
-	rawQS := ""
-	sep := ""
-	for k, v := range req.Params {
-		rawQS += sep + k + "=" + v
-		sep = "&"
-	}
+	rawQS := apigwV2RawQueryString(req)
 	event := map[string]interface{}{
 		"version":         "2.0",
 		"routeKey":        req.Operation + " " + resourcePath,

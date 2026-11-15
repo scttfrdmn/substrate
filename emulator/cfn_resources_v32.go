@@ -37,11 +37,12 @@ func (d *StackDeployer) stubStore(ctx context.Context, acct, region, logicalID s
 // whose Ref is the domain name for both types.
 //
 // It stays a stub in cfnStubNamespace, by decision rather than by omission: the OpenSearch plugin
-// has no control plane (no CreateDomain or DescribeDomain is routed, #1212), so the deployer has
+// has no control plane (no CreateDomain or DescribeDomain is routed, #1564), so the deployer has
 // no create handler to call. The plugin's data plane answers every *.es.amazonaws.com host, and it
-// holds one cluster rather than one per domain. So the DomainEndpoint recorded here is a host that
-// data plane serves, and the documents a consumer writes to it are visible to every other domain.
-// When the control plane is routed, this deploy should dispatch CreateDomain instead.
+// scopes its state by the domain a `search-{domain}-{id}` host names (#1200). So the
+// DomainEndpoint recorded here is a host that data plane serves, and the documents a consumer
+// writes to it belong to this domain alone. When the control plane is routed, this deploy should
+// dispatch CreateDomain instead.
 //
 // AWS::Elasticsearch::Domain is deployed here too, rather than declined. AWS still documents it
 // ("While the legacy Elasticsearch resource and options are still supported"), and its Ref and its

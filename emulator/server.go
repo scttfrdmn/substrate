@@ -1045,7 +1045,9 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// Step 6: compute cost.
 	var cost float64
 	if s.opts.Costs != nil {
-		cost = s.opts.Costs.CostForRequest(req)
+		// Plus whatever the plugin dispatched on the request's behalf — the execute-api proxy's
+		// stage charge and the Lambda invocation behind it — folded into this one event (#1202).
+		cost = s.opts.Costs.CostForRequest(req) + s.opts.Costs.costOnBehalf(reqCtx)
 	}
 
 	// Step 7: record write for consistency tracking on success.

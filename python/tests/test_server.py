@@ -257,6 +257,21 @@ class TestSeedResult:
         body = json_mod.loads(req.data)
         assert body["sql"] == "*"
 
+    @pytest.mark.parametrize("service", ["timestream-query", "timestream"])
+    def test_timestream_sends_query_string_field(self, service: str) -> None:
+        # The Timestream seed endpoint reads queryString and ignores sql, so sending sql there
+        # installed every seed as the "*" wildcard (#1200).
+        server = SubstrateServer()
+        result = {"Rows": [], "ColumnInfo": []}
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.seed_result(service, result, sql="SELECT 1")
+
+        req = mock_open.call_args[0][0]
+        assert req.full_url.endswith("/v1/timestream-query/results")
+        import json as json_mod
+        body = json_mod.loads(req.data)
+        assert body == {"queryString": "SELECT 1", "result": result}
+
     def test_content_type_is_json(self) -> None:
         server = SubstrateServer()
         with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
@@ -310,6 +325,15 @@ class TestClearSeeds:
         req = mock_open.call_args[0][0]
         assert req.full_url.endswith("/v1/redshift-data/results")
         assert "sql=" not in req.full_url
+        assert req.get_method() == "DELETE"
+
+    def test_timestream_clears_by_query_string_param(self) -> None:
+        server = SubstrateServer()
+        with patch("urllib.request.urlopen", return_value=_fake_healthy_response()) as mock_open:
+            server.clear_seeds("timestream", sql="SELECT 1")
+
+        req = mock_open.call_args[0][0]
+        assert "/v1/timestream-query/results?queryString=SELECT%201" in req.full_url
         assert req.get_method() == "DELETE"
 
     def test_deletes_specific_sql_with_query_param(self) -> None:
