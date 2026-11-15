@@ -220,6 +220,64 @@ func TestEC2_DeleteRoute_MatchesEveryDestinationForm(t *testing.T) {
 	ec2OK(t, ts, map[string]string{"Action": "DeleteRoute", "RouteTableId": f.rtbID, "DestinationIpv6CidrBlock": "::/0"})
 	ec2OK(t, ts, map[string]string{"Action": "DeleteRoute", "RouteTableId": f.rtbID, "DestinationPrefixListId": "pl-63a5400a"})
 	assert.Empty(t, f.routeItems(t, ts))
+	ec2RequireRefusal(t, ts, map[string]string{"Action": "DeleteRoute", "RouteTableId": f.rtbID, "DestinationIpv6CidrBlock": "::/0"},
+		"InvalidRoute.NotFound")
+}
+
+// TestEC2_Route_NonCanonicalDestinationFindsItsRoute pins that ReplaceRoute and DeleteRoute
+// canonicalise an IPv4 destination as CreateRoute does, so the block a route was created with
+// finds the canonical form it was stored as, and that a delete matching nothing is
+// InvalidRoute.NotFound rather than return=true.
+func TestEC2_Route_NonCanonicalDestinationFindsItsRoute(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	f := newEC2RouteTableFixture(t, ts)
+	ec2OK(t, ts, f.create(map[string]string{"DestinationCidrBlock": "100.68.0.18/18", "TransitGatewayId": "tgw-0123456789abcdef0"}))
+
+	ec2OK(t, ts, map[string]string{
+		"Action": "ReplaceRoute", "RouteTableId": f.rtbID,
+		"DestinationCidrBlock": "100.68.0.18/18", "VpcPeeringConnectionId": "pcx-111aaa22",
+	})
+	assert.Equal(t, []string{"<item><destinationCidrBlock>100.68.0.0/18</destinationCidrBlock><vpcPeeringConnectionId>" +
+		"pcx-111aaa22</vpcPeeringConnectionId><state>active</state></item>"}, f.routeItems(t, ts))
+
+	del := map[string]string{"Action": "DeleteRoute", "RouteTableId": f.rtbID, "DestinationCidrBlock": "100.68.0.18/18"}
+	ec2OK(t, ts, del)
+	assert.Empty(t, f.routeItems(t, ts))
+	ec2RequireRefusal(t, ts, del, "InvalidRoute.NotFound")
+}
+
+// TestEC2_Route_UnavailableTargetIsBlackhole pins API_Route's blackhole state for a target that
+// exists but is not available — a deleted NAT gateway, a terminated NAT instance — on create and
+// on replace.
+func TestEC2_Route_UnavailableTargetIsBlackhole(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	f := newEC2RouteTableFixture(t, ts)
+	nat := ec2CreateNatGatewayID(t, ts)
+	ec2OK(t, ts, map[string]string{"Action": "DeleteNatGateway", "NatGatewayId": nat})
+	instance := ec2RunInstanceIDs(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
+	})[0]
+	live := ec2CreateIGW(t, ts)
+
+	ec2OK(t, ts, f.create(map[string]string{"DestinationCidrBlock": "0.0.0.0/0", "NatGatewayId": nat}))
+	ec2OK(t, ts, f.create(map[string]string{"DestinationCidrBlock": "10.80.0.0/16", "InstanceId": instance}))
+	ec2OK(t, ts, map[string]string{"Action": "TerminateInstances", "InstanceId.1": instance})
+	ec2OK(t, ts, f.create(map[string]string{"DestinationCidrBlock": "10.81.0.0/16", "InstanceId": instance}))
+	assert.Equal(t, []string{
+		"<item><destinationCidrBlock>0.0.0.0/0</destinationCidrBlock><natGatewayId>" + nat +
+			"</natGatewayId><state>blackhole</state></item>",
+		"<item><destinationCidrBlock>10.80.0.0/16</destinationCidrBlock><instanceId>" + instance +
+			"</instanceId><instanceOwnerId>123456789012</instanceOwnerId><state>active</state></item>",
+		"<item><destinationCidrBlock>10.81.0.0/16</destinationCidrBlock><instanceId>" + instance +
+			"</instanceId><instanceOwnerId>123456789012</instanceOwnerId><state>blackhole</state></item>",
+	}, f.routeItems(t, ts), "a route made while its instance ran keeps active (#1552)")
+
+	ec2OK(t, ts, map[string]string{
+		"Action": "ReplaceRoute", "RouteTableId": f.rtbID, "DestinationCidrBlock": "0.0.0.0/0", "GatewayId": live,
+	})
+	assert.Contains(t, f.routeItems(t, ts)[0], "<state>active</state>", "replacing the target re-decides the state")
 }
 
 // TestEC2_Route_StoredBeforeTargetFieldsReadsAsGatewayID pins the additive schema: a route

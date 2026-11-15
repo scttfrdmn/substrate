@@ -18,9 +18,49 @@ func ec2PermHasSource(perm EC2IPPermission) bool {
 }
 
 // ec2SamePortRange reports whether two permissions share protocol and port range, which is
-// the half of a rule's identity a revoke must match before its sources are compared.
+// the half of a rule's identity a revoke must match before its sources are compared, and an
+// authorize must match before it can be a duplicate. Both sides are compared in the canonical
+// form [ec2CanonicalPortRange] gives, so the two operations agree on what one rule is.
 func ec2SamePortRange(a, b EC2IPPermission) bool {
-	return a.IPProtocol == b.IPProtocol && a.FromPort == b.FromPort && a.ToPort == b.ToPort
+	return ec2CanonicalPortRange(a) == ec2CanonicalPortRange(b)
+}
+
+// ec2RulePortRange is a rule's protocol and port range in canonical form.
+type ec2RulePortRange struct {
+	protocol string
+	from, to int
+}
+
+// ec2CanonicalPortRange returns the protocol and port range a permission means, rather than how
+// the request spelled them (#1491).
+//
+// API_IpPermission's IpProtocol is "The IP protocol name (tcp, udp, icmp, icmpv6) or number", so a
+// name and its IANA number — tcp and 6, udp and 17, icmp and 1, icmpv6 and 58 — are one protocol,
+// and so are tcp and TCP: the names are compared case-insensitively, which is substrate's reading,
+// since the page lists them lower-case without saying how others are treated. The same gloss says
+// "specifying -1 or a protocol number other than tcp, udp, icmp, or icmpv6 allows traffic on all
+// ports, regardless of any port range you specify", so for every such protocol the ports are not
+// part of the rule's identity: `-1` sent with -1/-1 and `-1` sent with no ports (stored 0/0) are one
+// rule. The stored permission keeps the spelling it was authorized with; only comparison is
+// canonical.
+func ec2CanonicalPortRange(perm EC2IPPermission) ec2RulePortRange {
+	protocol := strings.ToLower(strings.TrimSpace(perm.IPProtocol))
+	switch protocol {
+	case "6":
+		protocol = "tcp"
+	case "17":
+		protocol = "udp"
+	case "1":
+		protocol = "icmp"
+	case "58":
+		protocol = "icmpv6"
+	}
+	switch protocol {
+	case "tcp", "udp", "icmp", "icmpv6":
+		return ec2RulePortRange{protocol: protocol, from: perm.FromPort, to: perm.ToPort}
+	default:
+		return ec2RulePortRange{protocol: protocol}
+	}
 }
 
 // ec2GroupPairMatches reports whether a referenced-group source a revoke names is the one a
@@ -87,6 +127,12 @@ func (p *EC2Plugin) securityGroupIDsByName(reqCtx *RequestContext, vpcID string)
 	return out, nil
 }
 
+// ec2NoGroupName stands in for the name of a group a name list cannot select, so the name half
+// of [ec2IDFilter.matchOrNamed] never matches it. It is a NUL, which no group name can contain:
+// API_CreateSecurityGroup's valid characters are "a-z, A-Z, 0-9, spaces, and
+// ._-:/()#,@[]+=&;{}!$*", and an empty string would not do, because a request may name one.
+const ec2NoGroupName = "\x00"
+
 // refuseDuplicateGroupName returns InvalidGroup.Duplicate when a group in vpcID already holds
 // name, compared case-insensitively — API_CreateSecurityGroup: "Names are case-insensitive and
 // must be unique within the VPC" (#1491). The message is the client-error table's gloss for the
@@ -116,7 +162,8 @@ func (p *EC2Plugin) refuseDuplicateGroupName(reqCtx *RequestContext, vpcID, name
 // A name that resolves to nothing — including in an account with no default VPC — is
 // InvalidGroup.NotFound. It is written by hand rather than through [ec2SecurityGroupIDKind]
 // because the kind's message is about an ID, and what failed here is a name; the message is
-// substrate's own. The lookup is case-insensitive, as names are.
+// substrate's own. The lookup is case-insensitive: "Security group names are not case-sensitive"
+// (VPC User Guide, "Security group basics").
 func (p *EC2Plugin) defaultVPCGroupByName(reqCtx *RequestContext, name string) (string, error) {
 	vpc, _, err := ec2LookupDefaultVPC(context.Background(), p.state, reqCtx, "")
 	if err != nil {

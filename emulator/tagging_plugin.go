@@ -595,27 +595,20 @@ func (p *TaggingPlugin) scanEC2Instances(_ context.Context, reqCtx *RequestConte
 // scanEC2ElasticIPs returns the caller's Elastic IP addresses (#1191), under the ARN the
 // Service Authorization Reference publishes for the type,
 // arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}.
-func (p *TaggingPlugin) scanEC2ElasticIPs(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, ec2Namespace, taggingScanPrefix("eip:", reqCtx))
-	if err != nil {
-		return nil, fmt.Errorf("list ec2 elastic IPs: %w", err)
-	}
+//
+// A record that cannot be read or decoded fails the scan, through [ec2ScanRecords], rather than
+// being dropped from the listing; [TaggingPlugin.scanAllResources] logs the failure.
+func (p *TaggingPlugin) scanEC2ElasticIPs(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
 	var out []resourceTagMapping
-	for _, k := range keys {
-		raw, err := p.state.Get(goCtx, ec2Namespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var eip EC2ElasticIP
-		if err := json.Unmarshal(raw, &eip); err != nil {
-			continue
-		}
+	err := ec2ScanRecords(ctx, p.state, taggingScanPrefix("eip:", reqCtx), func(_ string, eip EC2ElasticIP) {
 		out = append(out, resourceTagMapping{
 			ResourceARN: "arn:aws:ec2:" + eip.Region + ":" + eip.AccountID + ":elastic-ip/" + eip.AllocationID,
 			Tags:        ec2TagsToTaggingTags(eip.Tags),
 			everTagged:  eip.EverTagged,
 		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan ec2 elastic IPs: %w", err)
 	}
 	return out, nil
 }

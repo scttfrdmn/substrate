@@ -3889,10 +3889,12 @@ func (d *StackDeployer) deployEC2SecurityGroup(
 		Service:   "ec2",
 		Operation: "CreateSecurityGroup",
 		Params: map[string]string{
-			"Action":      "CreateSecurityGroup",
-			"GroupName":   groupName,
-			"Description": description,
-			"VpcId":       vpcID,
+			"Action":    "CreateSecurityGroup",
+			"GroupName": groupName,
+			// API_CreateSecurityGroup's parameter is GroupDescription; this sent Description,
+			// which the handler never read, so every stack's group had an empty description.
+			"GroupDescription": description,
+			"VpcId":            vpcID,
 		},
 		Headers: map[string]string{},
 	}

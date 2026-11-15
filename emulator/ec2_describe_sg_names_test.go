@@ -255,6 +255,10 @@ func TestEC2_DescribeSecurityGroups_NameIsScopedToTheDefaultVPC(t *testing.T) {
 	}
 	assert.Equal(t, []string{inDefault}, ids(map[string]string{"GroupName.1": "shared"}),
 		"a name selects in the default VPC only")
+	assert.Equal(t, []string{inDefault}, ids(map[string]string{"GroupName.1": "SHARED"}),
+		`"Security group names are not case-sensitive" (VPC User Guide)`)
+	assert.Empty(t, ids(map[string]string{"Filter.1.Name": "group-name", "Filter.1.Value.1": "SHARED"}),
+		`the group-name filter stays exact: "Filter values are case-sensitive"`)
 	assert.ElementsMatch(t, []string{inDefault, inA}, ids(map[string]string{"GroupId.1": inA, "GroupName.1": "shared"}),
 		"the other VPC's group is reachable by ID, and the two lists still union")
 

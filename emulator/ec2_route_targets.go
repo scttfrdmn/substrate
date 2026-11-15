@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -75,7 +76,8 @@ type ec2RouteDestination struct {
 }
 
 // matches reports whether a stored route has this destination, compared exactly. API_DeleteRoute
-// and API_ReplaceRoute both say the value "must match the CIDR for the route exactly".
+// and API_ReplaceRoute both say the value "must match the CIDR for the route exactly"; the
+// request's IPv4 block has been canonicalised by then, as the stored one was.
 func (d ec2RouteDestination) matches(r EC2Route) bool {
 	switch {
 	case d.IPv4 != "":
@@ -94,10 +96,12 @@ func (d ec2RouteDestination) matches(r EC2Route) bool {
 // publish no code for either, so both come from the client-error table, and the messages are
 // substrate's own.
 //
-// canonical applies CreateRoute's "We modify the specified CIDR block to its canonical form; for
-// example, if you specify 100.68.0.18/18, we modify it to 100.68.0.0/18." to an IPv4 block. A
-// block that does not parse as a CIDR is kept verbatim, as every route was before #1187.
-func ec2ParseRouteDestination(params map[string]string, canonical bool) (ec2RouteDestination, error) {
+// The IPv4 block is canonicalised for every caller, per CreateRoute's "We modify the specified
+// CIDR block to its canonical form; for example, if you specify 100.68.0.18/18, we modify it to
+// 100.68.0.0/18." CreateRoute stores the canonical form, so ReplaceRoute and DeleteRoute
+// canonicalise theirs to find it. A block that does not parse as a CIDR is kept verbatim, as
+// every route was before #1187.
+func ec2ParseRouteDestination(params map[string]string) (ec2RouteDestination, error) {
 	d := ec2RouteDestination{
 		IPv4:       params["DestinationCidrBlock"],
 		IPv6:       params["DestinationIpv6CidrBlock"],
@@ -125,7 +129,7 @@ func ec2ParseRouteDestination(params map[string]string, canonical bool) (ec2Rout
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
-	if canonical && d.IPv4 != "" {
+	if d.IPv4 != "" {
 		if _, block, err := net.ParseCIDR(d.IPv4); err == nil && block.IP.To4() != nil {
 			d.IPv4 = block.String()
 		}
@@ -184,30 +188,80 @@ func ec2ParseRouteTarget(params map[string]string, localTarget bool) (EC2Route, 
 // network or an ODB network. NetworkInterfaceId is in that list too until substrate models
 // network interfaces as their own records (#1522).
 //
-// A target that does not exist is refused rather than stored in API_Route's blackhole state:
-// "The blackhole state indicates that the route's target isn't available (for example, the
-// specified gateway isn't attached to the VPC, or the specified NAT instance has been
-// terminated)" describes a target that went away after the route was made, which a create
-// cannot observe. Reporting blackhole for a target deleted later is not modeled.
-func (p *EC2Plugin) resolveRouteTarget(reqCtx *RequestContext, route EC2Route) error {
+// It returns the state the route is stored in. A target that resolves but is not available is
+// stored `blackhole`, which is what API_Route defines the state as: "The blackhole state indicates
+// that the route's target isn't available (for example, the specified gateway isn't attached to
+// the VPC, or the specified NAT instance has been terminated)." A NAT gateway counts as
+// unavailable once it is `deleting`, `deleted` or `failed` (the record keeps the settled state), and
+// an instance once it is `shutting-down` or `terminated`. Every other target is `active`. A target
+// that does not exist at all is refused rather than stored `blackhole`: the page publishes the
+// NotFound codes for that, and blackhole describes a target that exists but cannot carry traffic.
+//
+// The state is decided when the route is written. A route whose target goes away later keeps the
+// state it was written with (#1552).
+func (p *EC2Plugin) resolveRouteTarget(reqCtx *RequestContext, route EC2Route) (string, error) {
 	scope := reqCtx.AccountID + "/" + reqCtx.Region + "/"
-	var kind ec2IDKind
-	var id, key string
+	ctx := context.Background()
 	switch {
 	case strings.HasPrefix(route.GatewayID, "igw-"):
-		kind, id, key = ec2RouteGatewayIDKind, route.GatewayID, "igw:"+scope+route.GatewayID
+		data, err := p.state.Get(ctx, ec2Namespace, "igw:"+scope+route.GatewayID)
+		if err != nil {
+			return "", fmt.Errorf("ec2 resolve route target %s: %w", route.GatewayID, err)
+		}
+		return ec2RouteActive, ec2RequireResource(ec2RouteGatewayIDKind, route.GatewayID, data != nil)
 	case route.NatGatewayID != "":
-		kind, id, key = ec2NatGatewayIDKind, route.NatGatewayID, "nat:"+scope+route.NatGatewayID
+		data, err := p.state.Get(ctx, ec2Namespace, "nat:"+scope+route.NatGatewayID)
+		if err != nil {
+			return "", fmt.Errorf("ec2 resolve route target %s: %w", route.NatGatewayID, err)
+		}
+		if reqErr := ec2RequireResource(ec2NatGatewayIDKind, route.NatGatewayID, data != nil); reqErr != nil {
+			return "", reqErr
+		}
+		var gw EC2NATGateway
+		if err := json.Unmarshal(data, &gw); err != nil {
+			return "", fmt.Errorf("ec2 resolve route target %s: %w", route.NatGatewayID, err)
+		}
+		switch gw.State {
+		case "deleting", "deleted", "failed":
+			return ec2RouteBlackhole, nil
+		}
+		return ec2RouteActive, nil
 	case route.InstanceID != "":
-		kind, id, key = ec2InstanceIDKind, route.InstanceID, "instance:"+scope+route.InstanceID
+		data, err := p.state.Get(ctx, ec2Namespace, "instance:"+scope+route.InstanceID)
+		if err != nil {
+			return "", fmt.Errorf("ec2 resolve route target %s: %w", route.InstanceID, err)
+		}
+		if reqErr := ec2RequireResource(ec2InstanceIDKind, route.InstanceID, data != nil); reqErr != nil {
+			return "", reqErr
+		}
+		var inst EC2Instance
+		if err := json.Unmarshal(data, &inst); err != nil {
+			return "", fmt.Errorf("ec2 resolve route target %s: %w", route.InstanceID, err)
+		}
+		switch inst.State.Name {
+		case "shutting-down", "terminated":
+			return ec2RouteBlackhole, nil
+		}
+		return ec2RouteActive, nil
 	default:
-		return nil
+		return ec2RouteActive, nil
 	}
-	data, err := p.state.Get(context.Background(), ec2Namespace, key)
-	if err != nil {
-		return fmt.Errorf("ec2 resolve route target %s: %w", id, err)
+}
+
+// API_Route's two published states.
+const (
+	ec2RouteActive    = "active"
+	ec2RouteBlackhole = "blackhole"
+)
+
+// ec2RouteNotFoundError is InvalidRoute.NotFound, with the first sentence of the client-error
+// table's gloss as its message.
+func ec2RouteNotFoundError() *AWSError {
+	return &AWSError{
+		Code:       "InvalidRoute.NotFound",
+		Message:    "The specified route does not exist in the specified route table.",
+		HTTPStatus: http.StatusBadRequest,
 	}
-	return ec2RequireResource(kind, id, data != nil)
 }
 
 // ec2RouteAlreadyExistsError is RouteAlreadyExists, with the client-error table's gloss as its

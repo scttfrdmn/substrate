@@ -78,6 +78,12 @@ func TestCFN_PublicVPCDeploysAndTearsDown(t *testing.T) {
 		}
 		return out
 	}
+	var described struct {
+		Description string `xml:"securityGroupInfo>item>groupDescription"`
+	}
+	cfnDescribeEC2(t, d, map[string]string{"Action": "DescribeSecurityGroups", "GroupId.1": ids["AllOut"]}, &described)
+	assert.Equal(t, "all out", described.Description, "GroupDescription reaches the group")
+
 	assert.Equal(t, []string{"-1 0.0.0.0/0"}, egress(ids["AllOut"]), "the declared rule replaces the default, once")
 	assert.Equal(t, []string{"tcp 10.0.0.0/8"}, egress(ids["Narrow"]), "declared egress removes the default")
 

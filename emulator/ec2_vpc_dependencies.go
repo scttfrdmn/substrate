@@ -70,8 +70,12 @@ func (p *EC2Plugin) createDefaultSecurityGroup(ctx context.Context, reqCtx *Requ
 	return nil
 }
 
-// ec2ScanRecords decodes every record under prefix into a T and calls visit with its key. A
-// record that does not decode is skipped, as every describe in this plugin skips one.
+// ec2ScanRecords decodes every record under prefix into a T and calls visit with its key.
+//
+// A record that cannot be read or decoded is an error rather than a skip. Its callers decide
+// something from the whole set — whether a VPC is empty, whether an address is held, which
+// resources the tagging API reports — and a skipped record would answer that question wrongly
+// and silently, where a describe that skips one merely omits it.
 func ec2ScanRecords[T any](ctx context.Context, state StateManager, prefix string, visit func(key string, rec T)) error {
 	keys, err := state.List(ctx, ec2Namespace, prefix)
 	if err != nil {
@@ -86,8 +90,8 @@ func ec2ScanRecords[T any](ctx context.Context, state StateManager, prefix strin
 			continue
 		}
 		var rec T
-		if json.Unmarshal(data, &rec) != nil {
-			continue
+		if err := json.Unmarshal(data, &rec); err != nil {
+			return fmt.Errorf("unmarshal %s: %w", k, err)
 		}
 		visit(k, rec)
 	}

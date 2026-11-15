@@ -101,6 +101,10 @@ func TestEC2_AllocateAddress_Parameters(t *testing.T) {
 		{"PublicIpv4Pool", map[string]string{"PublicIpv4Pool": "ipv4pool-ec2-012345"}, "InvalidParameterValue"},
 		{"CustomerOwnedIpv4Pool", map[string]string{"CustomerOwnedIpv4Pool": "ipv4pool-coip-012345"}, "InvalidParameterValue"},
 		{"IpamPoolId", map[string]string{"IpamPoolId": "ipam-pool-012345"}, "InvalidParameterValue"},
+		{"a TagSpecification for another resource type", map[string]string{
+			"TagSpecification.1.ResourceType": "instance", "TagSpecification.1.Tag.1.Key": "k",
+			"TagSpecification.1.Tag.1.Value": "v",
+		}, "InvalidParameterValue"},
 		{"a reserved tag key", map[string]string{
 			"TagSpecification.1.ResourceType": "elastic-ip", "TagSpecification.1.Tag.1.Key": "aws:owner",
 			"TagSpecification.1.Tag.1.Value": "x",

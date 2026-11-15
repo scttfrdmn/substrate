@@ -67,6 +67,17 @@ func TestEC2_AuthorizeSecurityGroup_DuplicateIsRefused(t *testing.T) {
 			"Action": "AuthorizeSecurityGroupEgress", "GroupId": sg,
 			"IpPermissions.1.IpProtocol": "-1", "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
 		}},
+		{"the default egress rule with -1 ports, which the all-traffic protocol ignores", map[string]string{
+			"Action": "AuthorizeSecurityGroupEgress", "GroupId": sg,
+			"IpPermissions.1.IpProtocol": "-1", "IpPermissions.1.FromPort": "-1", "IpPermissions.1.ToPort": "-1",
+			"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+		}},
+		{"the protocol in capitals", ingress(map[string]string{
+			"IpPermissions.1.IpProtocol": "TCP", "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+		})},
+		{"the protocol by number", ingress(map[string]string{
+			"IpPermissions.1.IpProtocol": "6", "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+		})},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ec2RequireRefusal(t, ts, tc.params, "InvalidPermission.Duplicate")
@@ -87,13 +98,50 @@ func TestEC2_AuthorizeSecurityGroup_DuplicateIsRefused(t *testing.T) {
 		"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
 	})
 
-	// A revoke then frees the source for a fresh authorize.
+	// A revoke, spelling the protocol by number, matches the same canonical rule, and frees the
+	// source for a fresh authorize.
 	ec2OK(t, ts, map[string]string{
 		"Action": "RevokeSecurityGroupIngress", "GroupId": sg,
-		"IpPermissions.1.IpProtocol": "tcp", "IpPermissions.1.FromPort": "443", "IpPermissions.1.ToPort": "443",
+		"IpPermissions.1.IpProtocol": "6", "IpPermissions.1.FromPort": "443", "IpPermissions.1.ToPort": "443",
 		"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
 	})
 	ec2OK(t, ts, ingress(map[string]string{"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0"}))
+
+	// The default egress rule, stored with no ports, is revoked by the -1/-1 spelling.
+	ec2OK(t, ts, map[string]string{
+		"Action": "RevokeSecurityGroupEgress", "GroupId": sg,
+		"IpPermissions.1.IpProtocol": "-1", "IpPermissions.1.FromPort": "-1", "IpPermissions.1.ToPort": "-1",
+		"IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+	})
+	assert.Equal(t, []string{"0.0.0.0/0"}, ec2GroupRuleSources(t, ts, sg, true), "only the tcp/443 egress rule is left")
+}
+
+// TestEC2_DeleteVpc_ConcurrentGroupCreateIsNotOrphaned pins the lock DeleteVpc holds across its
+// dependency check: a CreateSecurityGroup racing a DeleteVpc either lands before the check, and the
+// delete is refused, or after the delete, and the create is refused. A group is never left in a VPC
+// that no longer exists.
+func TestEC2_DeleteVpc_ConcurrentGroupCreateIsNotOrphaned(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	for i := 0; i < 10; i++ {
+		vpcID := ec2CreateVPC(t, ts, "10.75.0.0/16")
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = ec2Request(t, ts, map[string]string{"Action": "DeleteVpc", "VpcId": vpcID}).Body.Close()
+		}()
+		go func() {
+			defer wg.Done()
+			_ = ec2Request(t, ts, map[string]string{
+				"Action": "CreateSecurityGroup", "GroupName": "racer", "GroupDescription": "d", "VpcId": vpcID,
+			}).Body.Close()
+		}()
+		wg.Wait()
+		if len(ec2DescribeVPCs(t, ts, ec2OneFilter("DescribeVpcs", "vpc-id", vpcID))) == 0 {
+			assert.Empty(t, ec2SecurityGroupNames(t, ts, ec2Filter("vpc-id", vpcID)), "no group outlives its VPC")
+		}
+	}
 }
 
 // TestEC2_CreateSecurityGroup_NameIsUniquePerVPC is #1491's second half: a name another group in
@@ -118,6 +166,7 @@ func TestEC2_CreateSecurityGroup_NameIsUniquePerVPC(t *testing.T) {
 	ec2CreateSG(t, ts, "app", "app", vpcB)
 	ec2CreateSG(t, ts, "app", "in the default VPC", "")
 	ec2RequireRefusal(t, ts, create("App", ""), "InvalidGroup.Duplicate")
+	ec2RequireRefusal(t, ts, create("orphan", "vpc-0000000000000dead"), "InvalidVpcID.NotFound")
 	assert.ElementsMatch(t, []string{"default", "app"}, ec2SecurityGroupNames(t, ts, ec2Filter("vpc-id", vpcA)))
 }
 
