@@ -788,6 +788,16 @@ type CFNResourceDeletion struct {
 	// Type is the CloudFormation resource type.
 	Type string `json:"Type"`
 
+	// PhysicalID is the physical ID of the resource the sweep acted on, empty in a record
+	// written before #1427.
+	//
+	// It is what tells two resources under one logical ID apart. An update that replaces a
+	// resource deletes the old one while the new one keeps the logical ID, and a rollback
+	// deletes the replacement a failed update created while the restored resource takes the
+	// logical ID back — so a deletion matched on the logical ID alone would report the live
+	// resource as deleted, and an update would treat it as gone.
+	PhysicalID string `json:"PhysicalID,omitempty"`
+
 	// Status is "DELETE_COMPLETE", "DELETE_SKIPPED" or "DELETE_FAILED".
 	Status string `json:"Status"`
 
@@ -875,8 +885,10 @@ func (d *StackDeployer) sweepResources(
 	ordered := cfnDeleteOrder(parsed, stack.Resources)
 	results := make([]CFNResourceDeletion, 0, len(ordered))
 	for _, dr := range ordered {
-		results = append(results, d.deleteOneResource(ctx, dr, policies[dr.LogicalID],
-			props[dr.LogicalID], cctx, streamID, op))
+		result := d.deleteOneResource(ctx, dr, policies[dr.LogicalID], props[dr.LogicalID], cctx,
+			streamID, op)
+		result.PhysicalID = dr.PhysicalID
+		results = append(results, result)
 	}
 	return results
 }
@@ -905,7 +917,7 @@ func (d *StackDeployer) deleteOneResource(
 	if op == cfnUpdateReplaceOp {
 		attribute = "UpdateReplacePolicy"
 	}
-	if !cfnValidDeletionPolicies[policy] {
+	if !cfnValidPolicyForOp(policy, op) {
 		result.Status = cfnDeleteFailed
 		result.Reason = fmt.Sprintf("invalid %s %q", attribute, policy)
 		return result

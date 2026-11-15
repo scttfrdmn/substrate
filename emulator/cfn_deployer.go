@@ -182,6 +182,64 @@ func cfnPolicyForOp(res cfnResource, op cfnDeletionOp) string {
 	return cfnDeletionPolicyFor(res)
 }
 
+// cfnNotUpdatableStatuses are the stack statuses an update is refused in; see
+// [ErrCFNStackNotUpdatable] for the source of each.
+var cfnNotUpdatableStatuses = map[string]bool{
+	cfnStackRollbackComplete: true,
+	cfnStackRollbackFailed:   true,
+	cfnStackDeleteFailed:     true,
+}
+
+// checkUpdatable refuses an update of a stack whose status admits none.
+func (d *StackDeployer) checkUpdatable(stack *CFNStackState) error {
+	if stack == nil || !cfnNotUpdatableStatuses[stack.Status] {
+		return nil
+	}
+	return cfnErrf(ErrCFNStackNotUpdatable, "Stack:%s is in %s state and can not be updated.",
+		cfnStackARN(d.identity.region, d.identity.accountID, stack.StackName), stack.Status)
+}
+
+// cfnValidUpdateReplacePolicies is the set the UpdateReplacePolicy attribute page publishes:
+// Delete, Retain and Snapshot. RetainExceptOnCreate is a DeletionPolicy value only — the page
+// lists no such option — so it is not accepted here.
+var cfnValidUpdateReplacePolicies = map[string]bool{
+	cfnPolicyDelete:   true,
+	cfnPolicyRetain:   true,
+	cfnPolicySnapshot: true,
+}
+
+// cfnValidPolicyForOp reports whether policy is one op's attribute accepts.
+func cfnValidPolicyForOp(policy string, op cfnDeletionOp) bool {
+	if op == cfnUpdateReplaceOp {
+		return cfnValidUpdateReplacePolicies[policy]
+	}
+	return cfnValidDeletionPolicies[policy]
+}
+
+// cfnValidateUpdateReplacePolicies refuses a template declaring an UpdateReplacePolicy outside the
+// published set, before anything deploys.
+//
+// Refused at the request because the value is only read when an update replaces the resource,
+// which may be long after the template was accepted; a typo'd "Retian" found then would delete the
+// old resource the attribute exists to keep. The code is the template-format ValidationError every
+// other malformed template answers; **the message is substrate's own**, since no AWS source
+// publishes the wording for this refusal.
+func cfnValidateUpdateReplacePolicies(tmpl *cfnTemplate) error {
+	ids := make([]string, 0, len(tmpl.Resources))
+	for id := range tmpl.Resources {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		if p := tmpl.Resources[id].UpdateReplacePolicy; p != "" && !cfnValidUpdateReplacePolicies[p] {
+			return cfnErrf(ErrCFNTemplateInvalid,
+				"Invalid UpdateReplacePolicy %q for resource %s: the value must be Delete, Retain or Snapshot",
+				p, id)
+		}
+	}
+	return nil
+}
+
 // cfnValidDeletionPolicies is the set a template may declare. A value outside it
 // is a template error rather than a silent fall back to the default: a typo'd
 // "Retian" that deletes the resource is exactly what the attribute exists to
@@ -605,6 +663,16 @@ var (
 	//     carries no "Template format error:" prefix. Which resources it lists is substrate's
 	//     reading of those reports: every resource that cannot be ordered, sorted.
 	ErrCFNInvalidDependency = errors.New("invalid resource dependency")
+
+	// ErrCFNStackNotUpdatable is returned when UpdateStack or CreateChangeSet names a stack
+	// whose status admits no update. The status codes page publishes the rule for each:
+	// ROLLBACK_COMPLETE — "When in this state, only a delete operation can be performed";
+	// DELETE_FAILED — "you can't work with or update the stack"; ROLLBACK_FAILED — "Delete the
+	// stack". The wire maps it to ValidationError at 400 with the message verbatim, and the
+	// message — "Stack:{arn} is in {status} state and can not be updated." — is observed
+	// behavior: no AWS page publishes it, and it is the text CLI users report from
+	// CreateChangeSet and UpdateStack.
+	ErrCFNStackNotUpdatable = errors.New("stack cannot be updated")
 
 	// ErrCFNResourceDeployFailed is returned when a template resource could not
 	// be deployed.
@@ -1338,9 +1406,20 @@ func (d *StackDeployer) deploy(
 	// The deploy order is the dependency order (#1420), and a template whose resources
 	// cannot be ordered is refused here, before any resource deploys and before any record
 	// is written — the request fails, as CloudFormation's does.
-	order, err := cfnValidateDependencies(tmpl, cctx)
-	if err != nil {
-		return nil, nil, err
+	//
+	// A rollback (base set) is the exception: it re-deploys the previous template, which may
+	// predate that validation, and must converge on it regardless, so it orders tolerantly,
+	// as the delete path does.
+	var order []string
+	if base == nil {
+		if order, err = cfnValidateDependencies(tmpl, cctx); err != nil {
+			return nil, nil, err
+		}
+		if err := cfnValidateUpdateReplacePolicies(tmpl); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		order = cfnTolerantDeployOrder(tmpl, cctx)
 	}
 	for logicalID, res := range tmpl.Resources {
 		if res.Condition != "" {
@@ -1541,6 +1620,11 @@ func (d *StackDeployer) UpdateStack(
 	// description of the pre-update state a rollback has to converge on, and the only
 	// record of the tags an update that omits Tags has to preserve.
 	prev, prevErr := d.loadStack(ctx, stackName)
+	if prevErr == nil {
+		if err := d.checkUpdatable(prev); err != nil {
+			return nil, err
+		}
+	}
 
 	// "If you don't specify this parameter, CloudFormation doesn't modify the stack's
 	// tags. If you specify an empty value, CloudFormation removes all associated tags."
@@ -2028,6 +2112,9 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	if err := json.Unmarshal(data, &stack); err != nil {
 		return nil, fmt.Errorf("cfn CreateChangeSet: unmarshal stack: %w", err)
 	}
+	if err := d.checkUpdatable(&stack); err != nil {
+		return nil, err
+	}
 
 	// Parse old and new templates.
 	oldTmpl, err := d.parseCFNTemplate(stack.TemplateBody)
@@ -2043,6 +2130,9 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	newCtx := buildCFNContext(newTmpl, params, d.identity.region, d.identity.accountID, stackName)
 	evaluateConditions(newTmpl, newCtx)
 	if _, err := cfnValidateDependencies(newTmpl, newCtx); err != nil {
+		return nil, err
+	}
+	if err := cfnValidateUpdateReplacePolicies(newTmpl); err != nil {
 		return nil, err
 	}
 

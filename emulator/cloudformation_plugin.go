@@ -1660,9 +1660,9 @@ func cfnMapDeployerError(err error) *AWSError {
 		// The code is substrate's choice — see [ErrCFNInvalidTag] for why this one.
 		errors.Is(err, ErrCFNInvalidTag):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
-	case errors.Is(err, ErrCFNInvalidDependency):
+	case errors.Is(err, ErrCFNInvalidDependency), errors.Is(err, ErrCFNStackNotUpdatable):
 		// AWS's own wording, answered without the "update stack …" context a caller's wrap
-		// adds — see [ErrCFNInvalidDependency] for the sources.
+		// adds — see [ErrCFNInvalidDependency] and [ErrCFNStackNotUpdatable] for the sources.
 		var classified *cfnClassifiedError
 		if errors.As(err, &classified) {
 			msg = classified.msg

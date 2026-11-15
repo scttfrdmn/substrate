@@ -53,7 +53,7 @@ func cfnResourceStatus(s CFNStackState, r DeployedResource) (status, reason stri
 	// A rollback swept the resources the failed create had created, so reporting
 	// CREATE_COMPLETE for one would claim a resource that is gone. The sweep's own
 	// record is what says which, and why.
-	if del := cfnDeletionFor(s.ResourceDeletions, r.LogicalID); del != nil && r.Error == "" {
+	if del := cfnDeletionFor(s.ResourceDeletions, r); del != nil && r.Error == "" {
 		status = del.Status
 		reason = del.Reason
 	}

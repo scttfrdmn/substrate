@@ -238,22 +238,66 @@ func TestCFN_UnorderableTemplatesAreRefused(t *testing.T) {
 	}
 }
 
-// TestCFN_ConditionedOutDependencyIsNotAnEdge pins that a resource skipped by a false Condition
-// orders nothing: it does not deploy, so neither a reference to it nor a DependsOn naming it is a
-// dependency, and the template declares it, so the DependsOn is not unresolved.
-func TestCFN_ConditionedOutDependencyIsNotAnEdge(t *testing.T) {
-	d, _, _, _ := newSweepDeployer(t)
-	const tmpl = `{
-		"Conditions":{"Never":{"Fn::Equals":["a","b"]}},
-		"Resources":{
+// TestCFN_ConditionedOutResourceAndDependencies pins the two sides of a resource skipped by a false
+// Condition. A DependsOn naming it is unresolved and refuses the template, which is what user
+// reports of the refusal trace it to. A Ref to it inside the untaken branch of an Fn::If is no edge
+// and deploys, which the same reports say is accepted.
+func TestCFN_ConditionedOutResourceAndDependencies(t *testing.T) {
+	const conditions = `"Conditions":{"Never":{"Fn::Equals":["a","b"]}},`
+	t.Run("a DependsOn naming it is refused", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		_, err := d.Deploy(context.Background(), `{`+conditions+`"Resources":{
 			"Skipped":{"Type":"AWS::SNS::Topic","Condition":"Never","Properties":{"TopicName":"skipped"}},
 			"Bucket":{"Type":"AWS::S3::Bucket","DependsOn":"Skipped",
-				"Properties":{"BucketName":"conditioned-bucket"}}}}`
-	result, err := d.Deploy(context.Background(), tmpl, "conditioned", nil)
-	require.NoError(t, err)
-	requireNoResourceErrors(t, result)
-	require.Len(t, result.Resources, 1)
-	assert.Equal(t, "Bucket", result.Resources[0].LogicalID)
+				"Properties":{"BucketName":"conditioned-bucket"}}}}`, "conditioned", nil)
+		require.ErrorIs(t, err, emulator.ErrCFNInvalidDependency)
+		assert.Equal(t, "Template format error: Unresolved resource dependencies [Skipped] in the "+
+			"Resources block of the template", err.Error())
+	})
+	t.Run("a Ref in an untaken Fn::If branch deploys", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		result, err := d.Deploy(context.Background(), `{`+conditions+`"Resources":{
+			"Skipped":{"Type":"AWS::SNS::Topic","Condition":"Never","Properties":{"TopicName":"skipped"}},
+			"Bucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"conditioned-bucket",
+				"Tags":[{"Key":"topic","Value":{"Fn::If":["Never",{"Ref":"Skipped"},"none"]}}]}}}}`,
+			"conditioned", nil)
+		require.NoError(t, err)
+		requireNoResourceErrors(t, result)
+		require.Len(t, result.Resources, 1)
+		assert.Equal(t, "Bucket", result.Resources[0].LogicalID)
+	})
+}
+
+// TestCFN_SubVariablesAndIntrinsicAttributes pins two reference forms the dependency walk reads
+// precisely (#1420 review). A `${Name}` that is a key of a two-argument Fn::Sub's variable map is
+// the variable, not the resource of the same name, so it creates no edge — and here no false cycle.
+// An Fn::GetAtt whose attribute name is itself an intrinsic still depends on its resource.
+func TestCFN_SubVariablesAndIntrinsicAttributes(t *testing.T) {
+	t.Run("a Fn::Sub variable is not a reference", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		result, err := d.Deploy(context.Background(), `{"Resources":{
+			"Topic":{"Type":"AWS::SNS::Topic","Properties":{
+				"TopicName":{"Fn::Sub":["subvar-${Bucket}",{"Bucket":"literal"}]}}},
+			"Bucket":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"subvar-bucket",
+				"Tags":[{"Key":"t","Value":{"Ref":"Topic"}}]}}}}`, "subvars", nil)
+		require.NoError(t, err, "the Topic's ${Bucket} names its variable, so there is no cycle")
+		requireNoResourceErrors(t, result)
+	})
+	t.Run("an intrinsic attribute name still orders", func(t *testing.T) {
+		d, _, _, store := newSweepDeployer(t)
+		result, err := d.Deploy(context.Background(), `{
+			"Parameters":{"Attr":{"Type":"String","Default":"Arn"}},
+			"Resources":{
+				"Queue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"intrinsic-attr"}},
+				"Role":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"intrinsic-attr-role",
+					"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]},
+					"Description":{"Fn::GetAtt":["Queue",{"Ref":"Attr"}]}}}}}`, "intrinsic-attr", nil)
+		require.NoError(t, err)
+		requireNoResourceErrors(t, result)
+		assert.Equal(t, []string{"CreateQueue", "CreateRole"},
+			cfnCreateOperations(sweepOperations(t, store, "intrinsic-attr")),
+			"the role follows the queue its attribute names, though the role's priority is lower")
+	})
 }
 
 // TestCFNPlugin_UnorderableTemplateIsAValidationError pins the wire shape of both refusals, on

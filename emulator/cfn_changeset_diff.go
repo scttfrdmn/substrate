@@ -182,12 +182,24 @@ type cfnReferences struct {
 	params    map[string]bool
 	resources map[string]bool
 	attrs     map[string]bool // "Logical.Attribute"
+
+	// attrTargets names every resource read by Fn::GetAtt or a dotted Fn::Sub, whatever the
+	// attribute. attrs needs the attribute's name and so has no entry for
+	// `Fn::GetAtt: [Logical, {Ref: P}]`, whose attribute is only known once P resolves; the
+	// dependency on Logical is known regardless, and the deploy order keys on it (#1420).
+	attrTargets map[string]bool
 }
 
 // cfnCollectReferences walks v and records every Ref, Fn::GetAtt and Fn::Sub reference, sorting
 // each name into params or resources by what the template declares.
+//
+// In the two-argument Fn::Sub, a `${Name}` naming a key of the variable map is that variable, not
+// a reference to a parameter or resource of the same name — the Fn::Sub page defines the map's
+// keys as the names of variables the string uses. Such names are skipped in the template string,
+// and the map's values are walked as ordinary property values.
 func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources map[string]cfnResource) cfnReferences {
-	refs := cfnReferences{params: map[string]bool{}, resources: map[string]bool{}, attrs: map[string]bool{}}
+	refs := cfnReferences{params: map[string]bool{}, resources: map[string]bool{}, attrs: map[string]bool{},
+		attrTargets: map[string]bool{}}
 	addRef := func(name string) {
 		if _, ok := params[name]; ok {
 			refs.params[name] = true
@@ -196,11 +208,15 @@ func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources m
 		}
 	}
 	addAttr := func(logical, attr string) {
-		if _, ok := resources[logical]; ok && attr != "" {
+		if _, ok := resources[logical]; !ok {
+			return
+		}
+		refs.attrTargets[logical] = true
+		if attr != "" {
 			refs.attrs[logical+"."+attr] = true
 		}
 	}
-	subRefs := func(s string) {
+	subRefs := func(s string, vars map[string]interface{}) {
 		for {
 			start := strings.Index(s, "${")
 			if start < 0 {
@@ -214,6 +230,9 @@ func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources m
 			s = s[start+end+1:]
 			if strings.HasPrefix(expr, "!") {
 				continue // "${!Literal}" is an escaped literal, not a reference.
+			}
+			if _, isVar := vars[expr]; isVar {
+				continue // a variable of the two-argument form, not a reference.
 			}
 			if logical, attr, dotted := strings.Cut(expr, "."); dotted {
 				addAttr(logical, attr)
@@ -238,6 +257,11 @@ func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources m
 							logical, _ := g[0].(string)
 							attr, _ := g[1].(string)
 							addAttr(logical, attr)
+							if _, literal := g[1].(string); !literal {
+								// An intrinsic attribute name, such as a Ref to a parameter:
+								// whatever it references is referenced too.
+								walk(g[1])
+							}
 						}
 					case string:
 						logical, attr, _ := strings.Cut(g, ".")
@@ -248,11 +272,15 @@ func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources m
 				if sub, ok := t["Fn::Sub"]; ok {
 					switch s := sub.(type) {
 					case string:
-						subRefs(s)
+						subRefs(s, nil)
 					case []interface{}:
+						var vars map[string]interface{}
+						if len(s) > 1 {
+							vars, _ = s[1].(map[string]interface{})
+						}
 						if len(s) > 0 {
 							if str, ok := s[0].(string); ok {
-								subRefs(str)
+								subRefs(str, vars)
 							}
 						}
 						if len(s) > 1 {

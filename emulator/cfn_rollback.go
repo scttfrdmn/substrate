@@ -473,8 +473,10 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	if len(created) > 0 && outcome != nil {
 		sweep := CFNStackState{StackName: prev.StackName, TemplateBody: outcome.templateBody,
 			Parameters: outcome.params, Resources: created}
-		result.ResourceDeletions = d.sweepResources(ctx, &sweep, failed.Resources, streamID,
-			cfnCreateRollbackOp)
+		// Merged with whatever the re-deploy itself deleted, rather than replacing it, so the
+		// record says what happened to every resource the rollback touched.
+		result.ResourceDeletions = append(result.ResourceDeletions,
+			d.sweepResources(ctx, &sweep, failed.Resources, streamID, cfnCreateRollbackOp)...)
 	}
 
 	reason := strings.Join(failures, "; ")
@@ -490,10 +492,32 @@ func (d *StackDeployer) rollbackFailedUpdate(
 	}
 	result.Status = status
 	result.StatusReason = reason
-	if err := d.setStackStatus(ctx, prev.StackName, status, reason); err != nil {
+	if err := d.setStackOutcome(ctx, prev.StackName, status, reason, result.ResourceDeletions); err != nil {
 		return nil, err
 	}
 	return result, nil
+}
+
+// setStackOutcome is [StackDeployer.setStackStatus] that also records the sweep's per-resource
+// outcomes on the stack, so DescribeStackResources and the next update read the same deletions
+// the result reported.
+func (d *StackDeployer) setStackOutcome(
+	ctx context.Context, stackName, status, reason string, deletions []CFNResourceDeletion,
+) error {
+	if d.state == nil {
+		return nil
+	}
+	stack, err := d.loadStack(ctx, stackName)
+	if err != nil || stack == nil {
+		d.logger.Warn("cfn: cannot set stack status; stack not readable",
+			"stack", stackName, "status", status)
+		return nil //nolint:nilerr // an unreadable stack is logged and skipped, as setStackStatus does.
+	}
+	stack.Status = status
+	stack.StatusReason = reason
+	stack.ResourceDeletions = deletions
+	stack.UpdatedAt = d.tc.Now()
+	return d.persistStack(ctx, *stack)
 }
 
 // setStackStatus overwrites a persisted stack's status and reason, leaving the rest
@@ -576,12 +600,19 @@ func cfnResolveFailureOptions(onFailure, disableRollback string, disableRollback
 	return opts, nil
 }
 
-// cfnDeletionFor finds a sweep's record for one logical ID, or nil when the sweep
-// did not touch it — which for a rollback means the resource was never created.
-func cfnDeletionFor(deletions []CFNResourceDeletion, logicalID string) *CFNResourceDeletion {
+// cfnDeletionFor finds a sweep's record for one resource, or nil when the sweep did
+// not touch it — which for a rollback means the resource was never created.
+//
+// The match is on the logical ID and, when the record carries one, the physical ID: a
+// deletion of the resource an update replaced, or of the replacement a failed update
+// created, shares its logical ID with the resource the stack now holds, and is not a
+// deletion of it. A record written before #1427 carries no physical ID and matches on
+// the logical ID alone, which is all its sweeps could mean.
+func cfnDeletionFor(deletions []CFNResourceDeletion, r DeployedResource) *CFNResourceDeletion {
 	for i := range deletions {
-		if deletions[i].LogicalID == logicalID {
-			return &deletions[i]
+		d := &deletions[i]
+		if d.LogicalID == r.LogicalID && (d.PhysicalID == "" || d.PhysicalID == r.PhysicalID) {
+			return d
 		}
 	}
 	return nil

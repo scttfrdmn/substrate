@@ -257,7 +257,9 @@ func backupSelectionDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]
 // cfnTransferUpdateExcluded are the AWS::Transfer::Server properties UpdateServer does not take.
 // Domain is Update requires: Replacement, so a change to it never reaches the update. Tags is a
 // TagResource call rather than an UpdateServer member, and TagResource is not routed for Transfer.
-// CreateWithHostKey "can be set only when you create the server".
+// CreateWithHostKey "can be set only when you create the server"; a change to it fails the
+// resource before this is reached (cfnCreateOnlyProperties), so it is excluded only from the body
+// a rollback re-applies.
 var cfnTransferUpdateExcluded = map[string]bool{"Domain": true, "Tags": true, "CreateWithHostKey": true}
 
 // updateTransferServer applies a changed AWS::Transfer::Server through UpdateServer, keeping the

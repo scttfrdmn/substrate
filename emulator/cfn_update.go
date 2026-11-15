@@ -84,6 +84,20 @@ var cfnUpdateUnmodelled = map[string]string{
 		"operations, which substrate does not route",
 }
 
+// cfnCreateOnlyProperties are properties a resource page says an update cannot change at all —
+// neither in place nor by replacement — keyed by type, with the page's reason. A change to one fails
+// the resource without a call and the update rolls back, which leaves the resource as it was.
+//
+// AWS::Transfer::Server's CreateWithHostKey is the one: "You can set this property only when you
+// create the server. If you change its value in a later stack update, the update fails and the
+// server is left unchanged." The message is substrate's own; the page publishes the behavior, not
+// the text.
+var cfnCreateOnlyProperties = map[string]map[string]string{
+	"AWS::Transfer::Server": {
+		"CreateWithHostKey": "it can be set only when the server is created",
+	},
+}
+
 // cfnBaseline is the deployment an update is compared against: the stack's previous record, the
 // template it was deployed from, and a resolution context seeded with what it deployed.
 type cfnBaseline struct {
@@ -119,11 +133,38 @@ func (d *StackDeployer) newCFNBaseline(record *CFNStackState, exports map[string
 		resources: make(map[string]DeployedResource, len(record.Resources)), force: force}
 	for _, r := range record.Resources {
 		cctx.resources[r.LogicalID] = r
-		if r.Error == "" {
+		if cfnRecordHoldsResource(record, r) {
 			b.resources[r.LogicalID] = r
 		}
 	}
 	return b
+}
+
+// cfnRecordHoldsResource reports whether a stack record's resource still exists as the stack's:
+// it deployed, and no sweep since has deleted it or put it out of the stack's scope.
+//
+// A record keeps its resource list after a sweep — a ROLLBACK_COMPLETE or DELETE_FAILED stack
+// still names everything it created, so DescribeStackResources can report what happened — and
+// reading that list as live would make the next deployment "keep" resources that are gone, under
+// phantom IDs. So:
+//
+//   - A ROLLBACK_COMPLETE record holds nothing: its rollback deleted every resource the create
+//     made, or retained it outside the stack's scope ("Any resources that were created during
+//     the create stack operation are deleted").
+//   - Otherwise a resource the record's ResourceDeletions shows as deleted or skipped is gone
+//     from the stack: DELETE_COMPLETE removed it, and DELETE_SKIPPED either never had it or
+//     retained it, which "removes it from the stack's scope". One whose delete failed is still
+//     there. The deletion is matched by physical ID as well as logical ID (see
+//     [cfnDeletionFor]), so the deleted predecessor of a replaced resource does not hide the
+//     resource that replaced it.
+func cfnRecordHoldsResource(record *CFNStackState, r DeployedResource) bool {
+	if r.Error != "" || record.Status == cfnStackRollbackComplete {
+		return false
+	}
+	if del := cfnDeletionFor(record.ResourceDeletions, r); del != nil && del.Status != cfnDeleteFailed {
+		return false
+	}
+	return true
 }
 
 // cfnResourcePlan is what a deployment does with one resource.
@@ -144,6 +185,11 @@ type cfnResourcePlan struct {
 
 	// refusal fails the resource without a call, for a change substrate cannot apply.
 	refusal string
+
+	// resolvedSame is set when the declaration resolves to exactly the values the previous
+	// deployment's did, which for a resource that is nonetheless dispatched means a rollback is
+	// applying it again.
+	resolvedSame bool
 }
 
 // plan decides what this deployment does with one resource.
@@ -175,6 +221,7 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 		return p
 	}
 	if len(changed) == 0 {
+		p.resolvedSame = true
 		// Forced: the declaration matches the baseline, and the live resource does not, so
 		// every declared property is applied again. Replacement is still decided on them, but
 		// none of them differs from the baseline, so a forced resource is never replaced.
@@ -189,6 +236,12 @@ func (b *cfnBaseline) plan(logicalID string, res cfnResource, cctx *cfnContext) 
 		return p
 	}
 	p.changed = changed
+	for _, prop := range changed {
+		if reason, ok := cfnCreateOnlyProperties[res.Type][prop]; ok {
+			p.refusal = fmt.Sprintf("%s of %s cannot be updated: %s", prop, res.Type, reason)
+			return p
+		}
+	}
 	if cfnRequiresReplacement(res.Type, changed) {
 		return p
 	}
@@ -273,19 +326,20 @@ func cfnRequiresReplacement(resType string, changed []string) bool {
 }
 
 // clearsRefusal reports whether a create's refusal only says the resource already exists, for a
-// resource the previous deployment created from a declaration this template still spells the same
-// way — in which case the refusal is an artifact of the re-create rather than a failure, and the
+// resource the previous deployment created from a declaration that resolves exactly as this one
+// does — in which case the refusal is an artifact of the re-create rather than a failure, and the
 // previous record stands.
 //
 // This is what is left of clearUnchangedRedeploys. An unchanged resource is no longer re-created,
-// so the refusal it cleared no longer happens for it; it can still happen for a resource whose
-// text is unchanged but whose inputs changed (a sibling it references was replaced) and whose type
-// has no update path, and for a resource a rollback re-applies. The three conditions it states are
-// unchanged and each is still load-bearing: a previous record, a successful previous deployment of
-// the slot, and an identical declaration — compared as text, so that a template edited to point
-// the slot at a name another stack owns still fails.
+// so the only resource that reaches here with identical resolved inputs is one a rollback applies
+// again (see [cfnBaseline.force]). A resource whose text is unchanged but whose *resolved* inputs
+// changed — it references a sibling that was replaced — is not cleared: keeping the previous record
+// would leave it naming the sibling the update is about to delete, so the refusal fails the
+// resource and the update rolls back instead. The text comparison stays as well, so a template
+// edited to point the slot at a name another stack owns still fails.
 func (p cfnResourcePlan) clearsRefusal(res cfnResource, dr DeployedResource) bool {
-	return p.hasPrior && dr.Error != "" && cfnCreateIsExists(dr.Error) && cfnSameDeclaration(p.priorDecl, res)
+	return p.hasPrior && p.resolvedSame && dr.Error != "" && cfnCreateIsExists(dr.Error) &&
+		cfnSameDeclaration(p.priorDecl, res)
 }
 
 // deleteReplaced deletes the resources an update replaced, once the update has succeeded, and

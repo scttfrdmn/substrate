@@ -3100,13 +3100,39 @@ reports `UPDATE_COMPLETE`, with a status reason naming the resource that could n
 deleted, which is what the troubleshooting guide's "Resource removed from stack but not
 deleted" describes; the per-resource outcome is on the result's `ResourceDeletions`.
 
-A re-created resource whose plugin refuses it as already existing — a fixed-name
-resource whose inputs changed but whose type has no update path — is **not** a failure
-of the update when the stack's previous deployment created that logical ID
-successfully *and* the template still declares it identically: the previous record
-stands. A rename into a name another stack owns, a resource that failed the previous
-time, and a record belonging to another account or region are all left standing as real
-failures.
+A re-created resource whose plugin refuses it as already existing **fails**, and the
+update rolls back — including a fixed-name resource whose text is unchanged but whose
+resolved inputs changed, such as a named IAM role whose `Description` reads the ARN of a
+KMS key the update replaces. Keeping the role's previous record would leave it naming
+the key the update is about to delete. Such a type needs an update path (#1545). The one
+refusal that is not a failure is a rollback applying a resource's previous declaration
+again, when the resolved inputs are identical to that deployment's.
+
+A change to a property the resource's page says no update can change fails the resource
+without a call, and the update rolls back, leaving it as it was.
+`AWS::Transfer::Server`'s `CreateWithHostKey` is the one modeled: "If you change its
+value in a later stack update, the update fails and the server is left unchanged." The
+reason text is substrate's own.
+
+`UpdateReplacePolicy` must be `Delete`, `Retain` or `Snapshot`, the three options its
+page lists. Any other value refuses the template at the request, as a `ValidationError`
+with a template format error whose wording is substrate's own. `RetainExceptOnCreate`
+is a `DeletionPolicy` value only. `DeletionPolicy` itself is still checked when the
+sweep reads it.
+
+An update is refused outright for a stack whose status admits none, as the status codes
+page states: `ROLLBACK_COMPLETE` ("only a delete operation can be performed"),
+`DELETE_FAILED` ("you can't work with or update the stack") and `ROLLBACK_FAILED`
+("Delete the stack"). `UpdateStack` and `CreateChangeSet` answer `ValidationError`/400,
+`Stack:{arn} is in ROLLBACK_COMPLETE state and can not be updated.` That text is what
+CLI users report; no AWS page publishes it.
+
+A deployment never reuses a resource a sweep removed. A stack record keeps its resource
+list after a rollback or a failed delete, so the next deployment reads the record's
+deletions: everything is gone after `ROLLBACK_COMPLETE`, and after `DELETE_FAILED` only
+the resource whose delete failed remains. Each deletion records the physical ID it
+removed, so the deleted predecessor of a replaced resource is not mistaken for the
+resource that replaced it.
 
 A resource removed from the template is not yet deleted by the update; see
 [#1547](https://github.com/scttfrdmn/substrate/issues/1547).
@@ -3123,8 +3149,11 @@ A stack's resources deploy in **dependency order**
 page states the rule: a resource that references another "in the form of target
 properties `!Ref`, `!GetAtt`, and `!Sub`" is created after it, updated after it and
 deleted before it, and `DependsOn` — "a single string or list of strings" — adds an edge
-of the same kind. Every form counts: `Ref`, both forms of `Fn::GetAtt`, and both forms
-of `Fn::Sub`, including a `${Logical.Attribute}` inside the string. AWS Config's
+of the same kind. Every form counts: `Ref`, both forms of `Fn::GetAtt` (one whose
+attribute name is itself an intrinsic still depends on its resource), and both forms of
+`Fn::Sub`, including a `${Logical.Attribute}` inside the string. In the two-argument
+`Fn::Sub`, a `${Name}` that is a key of the variable map is that variable, not a
+reference to a resource of the same name. AWS Config's
 recorder, delivery channel and rule carry the order their pages state without a
 `DependsOn`: a channel follows the stack's recorder, and a rule follows both.
 
@@ -3136,8 +3165,15 @@ bucket or a table — the grant CDK emits — found nothing deployed and stored 
 same time, and a template whose references they already agreed with deploys exactly as
 it did before.
 
-A reference to, or a `DependsOn` naming, a resource skipped by a false `Condition` is
-not an edge: that resource does not deploy.
+A reference to a resource skipped by a false `Condition` is not an edge: that resource
+does not deploy, and a `Ref` to it inside an `Fn::If` branch the condition does not take
+deploys. A `DependsOn` naming one is refused, like an undeclared name. That is observed
+behaviour — user reports trace the "Unresolved resource dependencies" refusal to such a
+`DependsOn` — not a published rule.
+
+A rollback re-deploys the stack's previous template without these refusals, ordering what
+it can and placing the rest last, as a `DeleteStack` sweep does: a stack recorded before
+#1420 with a `DependsOn` the validation would now refuse can still roll back.
 
 Two templates are refused at the **request**, before anything deploys or any stack
 record is written, as CloudFormation refuses them — a `CreateStack` leaves no stack, an
@@ -3146,7 +3182,7 @@ are `ValidationError` at 400, with AWS's message:
 
 | Template | Message |
 |---|---|
-| A `DependsOn` naming a resource the template does not declare | `Template format error: Unresolved resource dependencies [Ghost] in the Resources block of the template` |
+| A `DependsOn` naming a resource the template does not declare, or declares under a false `Condition` | `Template format error: Unresolved resource dependencies [Ghost] in the Resources block of the template` |
 | Resources that depend on each other, directly or through others | `Circular dependency between resources: [A, B]` |
 
 The first is quoted by the AWS re:Post Knowledge Center article on template validation

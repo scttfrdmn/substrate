@@ -327,4 +327,187 @@ func TestCFN_AFailedUpdateRestoresWhatItReplaced(t *testing.T) {
 			assert.Equal(t, replacedID, r.PhysicalID, "and the record says so")
 		}
 	}
+
+	// The sweep of the failed update's replacement is persisted, and is told apart from the
+	// restored server by its physical ID: DescribeStackResources still reports that one complete.
+	require.Len(t, stacks[0].ResourceDeletions, 1)
+	swept := stacks[0].ResourceDeletions[0]
+	assert.Equal(t, "Replaced", swept.LogicalID)
+	assert.NotEqual(t, replacedID, swept.PhysicalID)
+	assert.Equal(t, "DELETE_COMPLETE", swept.Status)
+	for _, r := range stacks[0].Resources {
+		status, _ := emulator.CFNResourceStatusForTest(stacks[0], r)
+		assert.Equal(t, "CREATE_COMPLETE", status, "%s is the stack's", r.LogicalID)
+	}
+}
+
+// TestCFN_ASweptRecordHoldsNoPhantoms pins that a deployment does not "keep" a resource its stack
+// record names but a sweep removed. After ROLLBACK_COMPLETE every created resource is gone; after
+// DELETE_FAILED the ones that deleted are gone and the one that failed is still there. A second
+// in-process deploy of the stream recreates what is gone rather than reusing its ID.
+func TestCFN_ASweptRecordHoldsNoPhantoms(t *testing.T) {
+	t.Run("ROLLBACK_COMPLETE", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		ctx := context.Background()
+		failed, err := d.Deploy(ctx, cfnRollbackTemplate, "phantom-rollback", nil)
+		require.NoError(t, err)
+		require.Equal(t, "ROLLBACK_COMPLETE", failed.Status)
+		require.False(t, queueExists(t, d, "rollback-trailing"), "the rollback swept the queue")
+
+		again, err := d.Deploy(ctx, cfnRollbackCleanTemplate, "phantom-rollback", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "CREATE_COMPLETE", again.Status, again.StatusReason)
+		assert.True(t, queueExists(t, d, "rollback-trailing"), "the queue is created again, not kept")
+		assert.Equal(t, http.StatusOK, headBucket(t, d, "rollback-kept"))
+	})
+	t.Run("DELETE_FAILED", func(t *testing.T) {
+		d, _, _, _ := newSweepDeployer(t)
+		ctx := context.Background()
+		const tmpl = `{"Resources":{
+			"Data":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"phantom-data"}},
+			"Queue":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"phantom-queue"}}}}`
+		_, err := d.Deploy(ctx, tmpl, "phantom-delete", nil)
+		require.NoError(t, err)
+		_, err = d.DispatchForTest(ctx, &emulator.AWSRequest{Service: "s3", Operation: "PUT",
+			Path: "/phantom-data/held.txt", Body: []byte("x"), Headers: map[string]string{},
+			Params: map[string]string{}}, "probe")
+		require.NoError(t, err)
+		require.ErrorIs(t, d.DeleteStack(ctx, "phantom-delete"), emulator.ErrCFNDeleteFailed)
+		require.False(t, queueExists(t, d, "phantom-queue"))
+
+		again, err := d.Deploy(ctx, tmpl, "phantom-delete", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "CREATE_COMPLETE", again.Status, again.StatusReason)
+		assert.True(t, queueExists(t, d, "phantom-queue"), "the deleted queue is created again")
+	})
+}
+
+// TestCFN_AStackThatAdmitsNoUpdateIsRefused pins the status codes page's rule — ROLLBACK_COMPLETE:
+// "only a delete operation can be performed"; DELETE_FAILED: "you can't work with or update the
+// stack" — for UpdateStack and CreateChangeSet, in process and on the wire.
+func TestCFN_AStackThatAdmitsNoUpdateIsRefused(t *testing.T) {
+	d, _, _, _ := newSweepDeployer(t)
+	ctx := context.Background()
+	failed, err := d.Deploy(ctx, cfnRollbackTemplate, "not-updatable", nil)
+	require.NoError(t, err)
+	require.Equal(t, "ROLLBACK_COMPLETE", failed.Status)
+
+	_, err = d.UpdateStack(ctx, cfnRollbackCleanTemplate, "not-updatable", nil, emulator.CFNDeployOptions{})
+	require.ErrorIs(t, err, emulator.ErrCFNStackNotUpdatable)
+	assert.Contains(t, err.Error(), "is in ROLLBACK_COMPLETE state and can not be updated.")
+	_, err = d.CreateChangeSet(ctx, "not-updatable", "cs", cfnRollbackCleanTemplate, nil, nil)
+	require.ErrorIs(t, err, emulator.ErrCFNStackNotUpdatable)
+
+	ts := newCFNTestServer(t)
+	code, body := cfnAction(t, ts, "CreateStack", map[string]string{"StackName": "wire-rolled",
+		"TemplateBody": `{"Resources":{"Refused":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"no"}}}}`})
+	require.Equal(t, http.StatusOK, code, body)
+	code, body = cfnAction(t, ts, "UpdateStack", map[string]string{"StackName": "wire-rolled",
+		"TemplateBody": cfnBucketTemplate})
+	assert.Equal(t, http.StatusBadRequest, code, body)
+	assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
+	assert.Regexp(t, `Stack:arn:aws:cloudformation:us-east-1:\d{12}:stack/wire-rolled/[0-9a-f-]+ is in `+
+		`ROLLBACK_COMPLETE state and can not be updated\.`, body)
+}
+
+// TestCFN_ARefusalForChangedInputsFailsTheResource pins that a re-create refused as already
+// existing is cleared only when the resource's resolved inputs are identical. A named role whose
+// Description GetAtts a KMS key the update replaces resolves differently; keeping its previous
+// record would leave it naming the key the update deletes. So the refusal fails the role, the
+// update rolls back, and the original key is still the stack's and still enabled.
+func TestCFN_ARefusalForChangedInputsFailsTheResource(t *testing.T) {
+	d, _, _, _ := newSweepDeployer(t)
+	ctx := context.Background()
+	tmpl := func(description string) string {
+		return `{"Resources":{
+			"Key":{"Type":"AWS::KMS::Key","Properties":{"Description":"` + description + `"}},
+			"Role":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"refused-role",
+				"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]},
+				"Description":{"Fn::GetAtt":["Key","Arn"]}}}}}`
+	}
+	created, err := d.Deploy(ctx, tmpl("first"), "changed-inputs", nil)
+	require.NoError(t, err)
+	keyID := resourceByLogicalID(t, created, "Key").PhysicalID
+
+	result, err := d.UpdateStack(ctx, tmpl("second"), "changed-inputs", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status)
+	assert.Contains(t, result.StatusReason, "Role")
+	assert.Contains(t, result.StatusReason, "EntityAlreadyExists")
+	assert.Equal(t, keyID, resourceByLogicalID(t, result, "Key").PhysicalID)
+
+	out := cfnStubDispatch(t, d, "kms", "DescribeKey", map[string]any{"KeyId": keyID})
+	meta, _ := out["KeyMetadata"].(map[string]any)
+	assert.Equal(t, "Enabled", meta["KeyState"], "the original key was not deleted")
+}
+
+// TestCFN_ARollbackOrdersAPreviousTemplateTolerantly pins that the rollback of a failed update
+// converges on a previous template the request-level validation would refuse — one recorded
+// before #1420, with a DependsOn naming a resource it does not declare.
+func TestCFN_ARollbackOrdersAPreviousTemplateTolerantly(t *testing.T) {
+	d, _, _, _ := newSweepDeployer(t)
+	ctx := context.Background()
+	_, err := d.Deploy(ctx, cfnRollbackCleanTemplate, "legacy-order", nil)
+	require.NoError(t, err)
+	stacks, err := d.ListStacks(ctx)
+	require.NoError(t, err)
+	require.Len(t, stacks, 1)
+	legacy := stacks[0]
+	legacy.TemplateBody = `{"Resources":{` +
+		`"Kept":{"Type":"AWS::S3::Bucket","DependsOn":"Gone","Properties":{"BucketName":"rollback-kept"}},` +
+		`"Trailing":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"rollback-trailing"}}}}`
+	require.NoError(t, d.PersistStackForTest(ctx, legacy))
+
+	result, err := d.UpdateStack(ctx, cfnRollbackTemplate, "legacy-order", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err, "the rollback is not refused for its previous template's DependsOn")
+	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status, result.StatusReason)
+	assert.Equal(t, http.StatusOK, headBucket(t, d, "rollback-kept"))
+	assert.True(t, queueExists(t, d, "rollback-trailing"))
+}
+
+// TestCFN_TransferCreateWithHostKeyCannotChange pins the resource page's rule: "If you change its
+// value in a later stack update, the update fails and the server is left unchanged." The update rolls
+// back, and no call reaches the server.
+func TestCFN_TransferCreateWithHostKeyCannotChange(t *testing.T) {
+	d, _, _, store := newSweepDeployer(t)
+	ctx := context.Background()
+	tmpl := func(v string) string {
+		return `{"Resources":{"Server":{"Type":"AWS::Transfer::Server","Properties":{
+			"Protocols":["SFTP"],"CreateWithHostKey":` + v + `}}}}`
+	}
+	created, err := d.Deploy(ctx, tmpl("true"), "host-key", nil)
+	require.NoError(t, err)
+	id := resourceByLogicalID(t, created, "Server").PhysicalID
+	before := len(sweepOperations(t, store, "host-key"))
+
+	result, err := d.UpdateStack(ctx, tmpl("false"), "host-key", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	assert.Equal(t, "UPDATE_ROLLBACK_COMPLETE", result.Status)
+	assert.Contains(t, result.StatusReason, "CreateWithHostKey of AWS::Transfer::Server cannot be updated")
+	assert.Equal(t, id, resourceByLogicalID(t, result, "Server").PhysicalID)
+	ops := sweepOperations(t, store, "host-key")[before:]
+	assert.Zero(t, countOps(ops, "UpdateServer")+countOps(ops, "CreateServer"),
+		"the server is left unchanged: %v", ops)
+}
+
+// TestCFN_UpdateReplacePolicyIsValidated pins that an UpdateReplacePolicy outside the page's three
+// options — RetainExceptOnCreate is a DeletionPolicy value only — refuses the template at the
+// request, before anything deploys.
+func TestCFN_UpdateReplacePolicyIsValidated(t *testing.T) {
+	for _, policy := range []string{"RetainExceptOnCreate", "Retian"} {
+		t.Run(policy, func(t *testing.T) {
+			d, _, _, store := newSweepDeployer(t)
+			_, err := d.Deploy(context.Background(), `{"Resources":{"Data":{"Type":"AWS::S3::Bucket",
+				"UpdateReplacePolicy":"`+policy+`","Properties":{"BucketName":"urp-bucket"}}}}`, "urp", nil)
+			require.ErrorIs(t, err, emulator.ErrCFNTemplateInvalid)
+			assert.Contains(t, err.Error(), `Invalid UpdateReplacePolicy "`+policy+`" for resource Data`)
+			assert.Empty(t, sweepOperations(t, store, "urp"))
+		})
+	}
+	d, _, _, _ := newSweepDeployer(t)
+	for _, policy := range []string{"Delete", "Retain", "Snapshot"} {
+		_, err := d.Deploy(context.Background(), `{"Resources":{"Data":{"Type":"AWS::S3::Bucket",
+			"UpdateReplacePolicy":"`+policy+`","Properties":{"BucketName":"urp-ok"}}}}`, "urp-ok", nil)
+		require.NoError(t, err, policy)
+	}
 }
