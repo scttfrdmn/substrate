@@ -24564,14 +24564,22 @@ last page carries none.
   ("Multiple tag filters are evaluated as an OR condition"), and a filter with no `tagValues` matches
   any value of its key. A filter with no `tagKey` is `InvalidParameterException`/400.
 
-The token is an offset into the listing, which is in creation order. An offset counts positions, so a
-listing that changes between two pages shifts every later page. A create lands on the last page and
-shifts nothing. A deleted share expiring out of `GetResourceShares` after its two-hour window, or a
-delete, associate or disassociate changing what `ListPrincipals` and `ListResources` report, skips one
-item for a walk that spans it; a token past a listing that has since shrunk answers an empty final page
-rather than an error. A value cursor, as the RDS and ElastiCache describes use, would not skip, but it
-needs the listing rendered in the order it compares in, which would reorder all three responses; that
-is tracked separately.
+The two kinds of listing use two kinds of token, and neither accepts the other's:
+
+- **`GetResourceShares`** lists shares in ARN order, so its token is a value cursor, as the RDS and
+  ElastiCache describes use: the ARN of the page's last share, and the next page starts strictly after
+  it. That matters because this listing shrinks on its own. A `DELETED` share is listed for its
+  two-hour window and then removed, and a walk that spans the removal resumes after the expired ARN
+  rather than skipping the share that moved into its position. A token is refused unless it names a
+  resource share in the caller's own account and Region; a share that has since expired still resumes.
+- **`ListPrincipals` and `ListResources`** list the principals or resources of every live share, in
+  share-ARN order and then association order, with duplicates across shares removed. Those items have
+  no identifier of their own in that order, so the token is an offset. An offset counts positions:
+  a delete, associate or disassociate between two pages shifts later pages, and a walk spanning it
+  skips or repeats one item. A token past a listing that has since shrunk answers an empty final page
+  rather than an error. An expiry does not shift them, because a `DELETED` share contributes nothing
+  to either. A value cursor here would reorder both responses, and is tracked as
+  [#1566](https://github.com/scttfrdmn/substrate/issues/1566).
 
 ### resourceOwner is required and read
 

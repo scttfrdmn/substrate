@@ -192,7 +192,7 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 	if err := ramValidateTagFilters(input.TagFilters); err != nil {
 		return nil, err
 	}
-	page, err := ramReadPage(input.MaxResults, input.NextToken)
+	cursor, err := ramReadShareCursor(input.MaxResults, input.NextToken, reqCtx.AccountID, reqCtx.Region)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +219,15 @@ func (p *RAMPlugin) getResourceShares(reqCtx *RequestContext, req *AWSRequest) (
 			shares = append(shares, ramResourceShareToWire(share))
 		}
 	}
-	return ramPaged("resourceShares", shares, page)
+	// The cursor is a value in ARN order, so the listing is put in that order here rather than relying
+	// on the index's; see ram_pagination.go (#1542).
+	slices.SortFunc(shares, func(a, b ramResourceShareOut) int { return strings.Compare(a.ResourceShareArn, b.ResourceShareArn) })
+	page, next := ramPageShares(shares, cursor)
+	out := map[string]interface{}{"resourceShares": page}
+	if next != "" {
+		out["nextToken"] = next
+	}
+	return ramJSONResponse(http.StatusOK, out)
 }
 
 func (p *RAMPlugin) updateResourceShare(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {

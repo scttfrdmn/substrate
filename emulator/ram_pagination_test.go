@@ -4,6 +4,7 @@ package emulator_test
 // GetResourceShares applies tagFilters (#1542). Every assertion is over the wire.
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -90,49 +91,121 @@ func TestRAMPagination_EveryListingPages(t *testing.T) {
 func TestRAMPagination_RefusesWhatItCannotPage(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	const ownShare = "arn:aws:ram:us-east-1:123456789012:resource-share/0000"
 	for _, path := range []string{"/getresourceshares", "/listprincipals", "/listresources"} {
 		for _, tc := range []struct {
 			name string
 			body map[string]any
-			code string
 		}{
-			{"maxResults 0", map[string]any{"maxResults": 0}, "InvalidParameterException"},
-			{"maxResults 501", map[string]any{"maxResults": 501}, "InvalidParameterException"},
-			{"maxResults -1", map[string]any{"maxResults": -1}, "InvalidParameterException"},
-			{"a token that is not base64", map[string]any{"nextToken": "not a token!"}, "InvalidNextTokenException"},
-			{"a token naming no offset", map[string]any{"nextToken": "YWJj"}, "InvalidNextTokenException"},
-			{"a token substrate never emits", map[string]any{"nextToken": "MDU="}, "InvalidNextTokenException"},
+			{"maxResults 0", map[string]any{"maxResults": 0}},
+			{"maxResults 501", map[string]any{"maxResults": 501}},
+			{"maxResults -1", map[string]any{"maxResults": -1}},
+			{"a token that is not base64", map[string]any{"nextToken": "not a token!"}},
+			{"a token that is neither form", map[string]any{"nextToken": b64("abc")}},
+			{"an offset in a form never emitted", map[string]any{"nextToken": b64("05")}},
+			{"a share ARN in another account", map[string]any{"nextToken": b64("arn:aws:ram:us-east-1:210987654321:resource-share/0000")}},
+			{"a share ARN in another Region", map[string]any{"nextToken": b64("arn:aws:ram:eu-west-1:123456789012:resource-share/0000")}},
 		} {
 			tc.body["resourceOwner"] = "SELF"
+			want := "InvalidNextTokenException"
+			if _, ok := tc.body["maxResults"]; ok {
+				want = "InvalidParameterException"
+			}
 			status, code := ramOwnershipErrorCode(t, ts, path, tc.body)
 			assert.Equal(t, http.StatusBadRequest, status, "%s %s", path, tc.name)
-			assert.Equal(t, tc.code, code, "%s %s", path, tc.name)
+			assert.Equal(t, want, code, "%s %s", path, tc.name)
 		}
+	}
+
+	// Each listing's token is its own: GetResourceShares issues an ARN cursor and the two list
+	// operations an offset, and neither accepts the other's.
+	for _, tc := range []struct{ path, token string }{
+		{"/getresourceshares", b64("1")},
+		{"/listprincipals", b64(ownShare)},
+		{"/listresources", b64(ownShare)},
+	} {
+		status, code := ramOwnershipErrorCode(t, ts, tc.path, map[string]any{"resourceOwner": "SELF", "nextToken": tc.token})
+		assert.Equal(t, http.StatusBadRequest, status, tc.path)
+		assert.Equal(t, "InvalidNextTokenException", code, tc.path)
 	}
 }
 
-// TestRAMPagination_AnExpiryMidWalkClampsRatherThanFails records the offset cursor's behaviour when the
-// listing shrinks between pages: a token past the shrunken end is still one substrate issued, and
-// answers an empty final page.
-func TestRAMPagination_AnExpiryMidWalkClampsRatherThanFails(t *testing.T) {
+// TestRAMPagination_AnExpiryMidWalkSkipsNoShare pins why GetResourceShares pages on a value cursor: a
+// DELETED share expiring between two pages removes it from the listing, and the walk resumes after its
+// ARN rather than at a position that has moved.
+func TestRAMPagination_AnExpiryMidWalkSkipsNoShare(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
-	doomed := ramOwnershipShare(t, ts, "doomed", nil, nil)
-	ramOwnershipShare(t, ts, "kept", nil, nil)
-	status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": doomed})
+	for _, name := range []string{"a", "b", "c"} {
+		ramOwnershipShare(t, ts, name, nil, nil)
+	}
+	all := ramOwnershipGet(t, ts, map[string]any{"resourceOwner": "SELF"}).ResourceShares
+	require.Len(t, all, 3)
+	first := all[0].ResourceShareArn
+	status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": first})
 	require.Equal(t, http.StatusOK, status, "%s", raw)
 
-	first := ramPageCall(t, ts, "/getresourceshares", "resourceShares", map[string]any{"resourceOwner": "SELF", "maxResults": 1})
-	require.Len(t, first.Items, 1)
-	require.NotEmpty(t, first.NextToken)
+	page1 := ramOwnershipGetPage(t, ts, map[string]any{"resourceOwner": "SELF", "maxResults": 1})
+	require.Equal(t, []string{first}, page1.arns(), "the deleted share is still listed, first")
+	require.NotEmpty(t, page1.NextToken)
 
-	// The deleted share's window passes between the two pages, and the listing shrinks to one share.
+	// Its window passes between the two pages, and the next listing prunes it from the index.
 	ts.AdvanceTime(2*time.Hour + time.Second)
-	second := ramPageCall(t, ts, "/getresourceshares", "resourceShares", map[string]any{
-		"resourceOwner": "SELF", "maxResults": 1, "nextToken": first.NextToken,
+	page2 := ramOwnershipGetPage(t, ts, map[string]any{"resourceOwner": "SELF", "maxResults": 2, "nextToken": page1.NextToken})
+	assert.Equal(t, []string{all[1].ResourceShareArn, all[2].ResourceShareArn}, page2.arns(),
+		"the walk resumes after the expired share; an offset would have skipped the second share")
+	assert.Empty(t, page2.NextToken)
+}
+
+// TestRAMPagination_AnOffsetPastAShrunkenListingClamps records the offset cursor's behavior on
+// ListPrincipals when the listing shrinks between pages: a token past the shrunken end is still one
+// substrate issued, and answers an empty final page.
+func TestRAMPagination_AnOffsetPastAShrunkenListingClamps(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	a := ramOwnershipShare(t, ts, "a", []string{"111111111111"}, nil)
+	b := ramOwnershipShare(t, ts, "b", []string{"222222222222"}, nil)
+
+	page1 := ramPageCall(t, ts, "/listprincipals", "principals", map[string]any{"resourceOwner": "SELF", "maxResults": 1})
+	require.Len(t, page1.Items, 1)
+	require.NotEmpty(t, page1.NextToken)
+	for _, arn := range []string{a, b} {
+		status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": arn})
+		require.Equal(t, http.StatusOK, status, "%s", raw)
+	}
+	page2 := ramPageCall(t, ts, "/listprincipals", "principals", map[string]any{
+		"resourceOwner": "SELF", "maxResults": 1, "nextToken": page1.NextToken,
 	})
-	assert.Empty(t, second.Items, "the offset past the shrunken end clamps to an empty page")
-	assert.Empty(t, second.NextToken, "and the walk ends")
+	assert.Empty(t, page2.Items, "the offset past the shrunken end clamps to an empty page")
+	assert.Empty(t, page2.NextToken, "and the walk ends")
+}
+
+// ramOwnershipPage is one GetResourceShares page with its token.
+type ramOwnershipPage struct {
+	NextToken      string `json:"nextToken"`
+	ResourceShares []struct {
+		ResourceShareArn string `json:"resourceShareArn"`
+	} `json:"resourceShares"`
+}
+
+// arns is the page's share ARNs in the order listed.
+func (p ramOwnershipPage) arns() []string {
+	out := []string{}
+	for _, s := range p.ResourceShares {
+		out = append(out, s.ResourceShareArn)
+	}
+	return out
+}
+
+// ramOwnershipGetPage reads one GetResourceShares page.
+func ramOwnershipGetPage(t *testing.T, ts *emulator.TestServer, body map[string]any) ramOwnershipPage {
+	t.Helper()
+	status, raw := ramOwnershipCall(t, ts, "/getresourceshares", body)
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+	var out ramOwnershipPage
+	require.NoError(t, json.Unmarshal(raw, &out))
+	return out
 }
 
 func TestRAMPagination_TagFiltersFilterGetResourceShares(t *testing.T) {
@@ -170,7 +243,7 @@ func TestRAMPagination_TagFiltersFilterGetResourceShares(t *testing.T) {
 		}, []string{prod, dev}},
 		{"a key nothing carries", []map[string]any{{"tagKey": "owner"}}, []string{}},
 	} {
-		assert.Equal(t, tc.want, names(tc.filters), tc.name)
+		assert.ElementsMatch(t, tc.want, names(tc.filters), tc.name)
 	}
 
 	status, code := ramOwnershipErrorCode(t, ts, "/getresourceshares", map[string]any{
