@@ -1934,3 +1934,6 @@ func SchedQueryParamsForTest(input, sdkID, op string) (map[string]string, error)
 	}
 	return params, nil
 }
+
+// PolicyDocumentsEqualForTest wraps policyDocumentsEqual for external tests.
+func PolicyDocumentsEqualForTest(a, b PolicyDocument) bool { return policyDocumentsEqual(a, b) }

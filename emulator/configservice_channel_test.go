@@ -252,12 +252,10 @@ func TestConfigChannel_ThePolicyMatcherAcceptsWhatAWSAccepts(t *testing.T) {
 			  "Action":"s3:PutObject","Resource":"arn:aws:s3:::some-other-bucket/*"}]}`,
 		},
 		{
-			"a shape substrate's parser cannot decode",
-			// IAM grammar permits a single Statement as an object rather than a one-element
-			// array, and S3 stores it, but substrate decodes Statement into a slice and so
-			// cannot read this one. It passes: refusing here would be substrate blaming the
-			// consumer for its own parser's narrowness, which is the failure direction that
-			// breaks working code. This is the case the permissive rule exists for.
+			"a single-object Statement",
+			// The IAM grammar permits a single Statement as an object rather than a
+			// one-element array. Until #1477 substrate could not decode it and passed it as
+			// unreadable; it is now read as a one-element list and passes on its merits.
 			`{"Version":"2012-10-17","Statement":{"Effect":"Allow",
 			  "Principal":{"Service":"config.amazonaws.com"},
 			  "Action":"s3:PutObject","Resource":"*"}}`,
@@ -310,6 +308,12 @@ func TestConfigChannel_ThePolicyMatcherRefusesWhatAdmitsNothing(t *testing.T) {
 			"the right pairing under a Deny",
 			`{"Statement":[{"Effect":"Deny","Principal":{"Service":"config.amazonaws.com"},
 			  "Action":"s3:PutObject","Resource":"*"}]}`,
+		},
+		{
+			// It passed as unreadable until #1477 gave this check the shared Statement rule.
+			"a single-object Statement that admits nothing",
+			`{"Statement":{"Effect":"Deny","Principal":{"Service":"config.amazonaws.com"},
+			  "Action":"s3:PutObject","Resource":"*"}}`,
 		},
 	}
 

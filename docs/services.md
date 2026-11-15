@@ -1241,9 +1241,8 @@ every other caller exposed.
   RDS's and ElastiCache's describes are the other: their pages state no order either, but they
   do state what the `Marker` means — "the response includes only records beyond the marker" — and
   a record cannot be *beyond* another without an order to be beyond it in. AWS also publishes a
-  `Marker` and `PageSize` on the four ELBv2 describes, though substrate implements neither
-  parameter there yet ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)), so ELBv2's
-  order rests on the replay promise alone for now. A cursor over
+  `Marker` and `PageSize` on the four ELBv2 describes, and substrate pages them over this key order
+  ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). A cursor over
   an unstable order is the worst form of this defect, because it loses and duplicates resources
   rather than merely reordering them.
 - **AWS documents no order at all, and lexicographic is substrate's reading.** `ListBuckets` says
@@ -1361,7 +1360,7 @@ code serves both families, as it does for the `Marker`, so the two parameters of
 be refused under different codes. Both parameters are validated before any state is read.
 
 **Elastic Load Balancing joined this rule later, and from the other side.** Its two paginated
-operations published one range — `PageSize` 1–400, on both generations' pages — and answered it two
+operations at the time published one range — `PageSize` 1–400, on both generations' pages — and answered it two
 ways: the classic `DescribeLoadBalancers` refused an out-of-range value while ELBv2
 `DescribeAccountLimits` substituted its default and answered 200. The fallback rested on the
 operation publishing no error of its own, which
@@ -5379,7 +5378,7 @@ STS operations are free.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); tags the bucket from `CreateBucketConfiguration`'s `<Tags>` — see [Tag sets](#tag-sets); records `x-amz-object-ownership`, or the `BucketOwnerEnforced` default — see [Object Ownership](#object-ownership) |
+| CreateBucket | Stores an ACL named by `x-amz-acl` / `x-amz-grant-*` — see [Access control lists](#access-control-lists); tags the bucket from `CreateBucketConfiguration`'s `<Tags>` — see [Tag sets](#tag-sets); records `x-amz-object-ownership`, or the `BucketOwnerEnforced` default, and refuses an ACL granting others under it with `400 InvalidBucketAclWithObjectOwnership` — see [Object Ownership](#object-ownership) |
 | HeadBucket | |
 | DeleteBucket | |
 | ListBuckets | Honours `max-buckets`, `continuation-token`, `prefix` and `bucket-region`; reports `Owner` and a conditional `BucketRegion` — see [Listing buckets](#listing-buckets) |
@@ -5394,8 +5393,8 @@ STS operations are free.
 | ListObjectVersions | `GET /{bucket}?versions`; honours `prefix`, and reports every version in one response — `max-keys` is echoed as 1000 and `key-marker` / `version-id-marker` are not read, so the result is never truncated. Keys come out lexicographically and versions within a key newest-first; a key in a bucket that was never versioned is reported as one version with `VersionId` `null`; a delete marker is reported under `<DeleteMarker>` rather than `<Version>` |
 | CreateMultipartUpload | Accepts `x-amz-storage-class` and the [system-metadata family](#object-system-metadata), applied to the assembled object; `Content-Encoding` less any `aws-chunked` — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked); `x-amz-checksum-algorithm` / `x-amz-checksum-type` — see [Additional checksums](#additional-checksums); records the encryption for the whole upload — see [Server-side encryption](#server-side-encryption); records the ACL for the whole upload — see [Access control lists](#access-control-lists); records the `x-amz-tagging` tag set for the assembled object — see [Tag sets](#tag-sets) |
 | UploadPart | Verifies the part checksum, including a trailing one — see [Additional checksums](#additional-checksums) |
-| UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part) |
-| ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list |
+| UploadPartCopy | Copies an existing object, or a byte range of one, into a part — see [Copying into a part](#copying-into-a-part); authorized as `s3:PutObject` plus `s3:GetObject` on the source — see [Multipart and copy permissions](#multipart-and-copy-permissions) |
+| ListParts | Lists an upload's stored parts, with `max-parts` / `part-number-marker` paging; an upload with no parts is `200` with an empty list; authorized as `s3:ListMultipartUploadParts` — see [Multipart and copy permissions](#multipart-and-copy-permissions) |
 | CompleteMultipartUpload | Validates part order, ETags, and part sizes — see [Multipart upload validation](#multipart-upload-validation); conditional writes, including a seedable `409 ConditionalRequestConflict` that invalidates the upload — see [Conditional requests](#conditional-requests); assembles the object checksum — see [Additional checksums](#additional-checksums); reports the upload's recorded encryption — see [Server-side encryption](#server-side-encryption); applies the upload's recorded ACL — see [Access control lists](#access-control-lists); applies the upload's recorded tag set — see [Tag sets](#tag-sets) |
 | AbortMultipartUpload | |
 | ListMultipartUploads | Emits `<StorageClass>` per in-progress upload |
@@ -5405,10 +5404,10 @@ STS operations are free.
 | PutPublicAccessBlock | Records the configuration and enforces `BlockPublicAcls` / `BlockPublicPolicy`; a partial body reports omitted settings as `false` — see [Block Public Access](#block-public-access) |
 | GetPublicAccessBlock | `404 NoSuchPublicAccessBlockConfiguration` when the bucket has none — see [Block Public Access](#block-public-access) |
 | DeletePublicAccessBlock | Idempotent; removes only the configuration, never the bucket — see [Block Public Access](#block-public-access) |
-| GetBucketAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
-| PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
-| GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists) |
-| PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
+| GetBucketAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists); the owner-only one whatever is stored when the bucket is `BucketOwnerEnforced` — see [Object Ownership](#object-ownership) |
+| PutBucketAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `400 AccessControlListNotSupported` on a `BucketOwnerEnforced` bucket — see [Object Ownership](#object-ownership); `403 AccessDenied` for a public ACL when `BlockPublicAcls` is set — see [Block Public Access](#block-public-access) |
+| GetObjectAcl | Reports the stored ACL, or the default owner-only one — see [Access control lists](#access-control-lists); the owner-only one whatever is stored when the bucket is `BucketOwnerEnforced` — see [Object Ownership](#object-ownership) |
+| PutObjectAcl | Accepts an XML body, a canned `x-amz-acl` or the `x-amz-grant-*` family — see [Access control lists](#access-control-lists); `400 AccessControlListNotSupported` on a `BucketOwnerEnforced` bucket — see [Object Ownership](#object-ownership); `403 AccessDenied` for a public ACL when the *bucket* has `BlockPublicAcls` set — see [Block Public Access](#block-public-access) |
 | GetBucketNotificationConfiguration | Reports the stored configuration in the API's element names; an unconfigured bucket is an empty `NotificationConfiguration` — see [Event notifications](#event-notifications) |
 | PutBucketNotificationConfiguration | Dispatches to Lambda, SQS and SNS on `PutObject`/`DeleteObject`; a body naming no recognized element is `400 MalformedXML` — see [Event notifications](#event-notifications) |
 | PutBucketTagging | Replaces the tag set; `400 InvalidTag` past 50 tags or a published length limit — see [Tag sets](#tag-sets) |
@@ -5428,7 +5427,7 @@ STS operations are free.
 | PutBucketEncryption | `PUT /{bucket}?encryption`; records the default `ServerSideEncryptionConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse or has no `Rule`, `400 InvalidArgument` for an unpublished `SSEAlgorithm` or a `KMSMasterKeyID` beside a non-KMS algorithm — see [Bucket default encryption](#bucket-default-encryption) |
 | GetBucketEncryption | `GET /{bucket}?encryption`; answers the recorded configuration, or the SSE-S3 default every bucket has — see [Bucket default encryption](#bucket-default-encryption) |
 | DeleteBucketEncryption | `DELETE /{bucket}?encryption`; `204`, idempotent, resets the default to SSE-S3 and never deletes the bucket — see [Bucket default encryption](#bucket-default-encryption) |
-| PutBucketOwnershipControls | `PUT /{bucket}?ownershipControls`; `200`, empty body, replacing the setting; `400 MalformedXML` for a body with no `Rule` or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`. Recorded, not enforced — see [Object Ownership](#object-ownership) |
+| PutBucketOwnershipControls | `PUT /{bucket}?ownershipControls`; `200`, empty body, replacing the setting; `400 MalformedXML` for a body with no `Rule` or an `ObjectOwnership` outside `BucketOwnerPreferred` / `ObjectWriter` / `BucketOwnerEnforced`; `400 InvalidBucketAclWithObjectOwnership` setting `BucketOwnerEnforced` on a bucket whose ACL grants others. Enforced — see [Object Ownership](#object-ownership) |
 | GetBucketOwnershipControls | `GET /{bucket}?ownershipControls`; a new bucket answers `BucketOwnerEnforced`, or what `CreateBucket`'s `x-amz-object-ownership` named; `404 OwnershipControlsNotFoundError` after `DeleteBucketOwnershipControls` — see [Object Ownership](#object-ownership) |
 | DeleteBucketOwnershipControls | `DELETE /{bucket}?ownershipControls`; `204`, idempotent, removes only the setting and never the bucket — see [Object Ownership](#object-ownership) |
 | SelectObjectContent | `POST /{bucket}/{key}?select` (the `select-type=2` an SDK sends alongside is not read); a deliberately small SQL subset — `SELECT *` with an optional `WHERE <column> = '<value>'` and an optional `LIMIT n` — over CSV (`<FileHeaderInfo>USE</FileHeaderInfo>` names the columns) or JSON Lines input. Output is newline-delimited JSON whatever `<OutputSerialization>` asks for. The reply is a real event stream: a `Records` frame when any row matched, then `Stats` carrying scanned and returned byte counts, then `End`, each with the API's prelude and message CRCs |
@@ -6271,9 +6270,11 @@ setting's third bullet says "PUT Bucket calls fail if the request includes a pub
 ACL", but the configuration that refuses such a call is the **account-level** one — a
 bucket-level configuration cannot exist before the bucket does. Substrate models no
 account-level Block Public Access, so gating this one operation would mean modeling a
-control the emulator does not otherwise have. A bucket created with `--acl public-read`
-therefore succeeds and reports the public grant, and the next `PutBucketAcl` on it is
-subject to whatever configuration has since been written.
+control the emulator does not otherwise have. A bucket created with `--acl public-read` and
+`x-amz-object-ownership: ObjectWriter` therefore succeeds and reports the public grant, and the next
+`PutBucketAcl` on it is subject to whatever configuration has since been written. Without the
+ownership header the create is refused anyway, by Object Ownership rather than by Block Public
+Access — see [Object Ownership](#object-ownership).
 
 **A public policy is decided by assuming public and then trying to disqualify —
 not by looking for `Principal: "*"`.** This is stronger than wildcard-detection and is
@@ -6410,11 +6411,27 @@ omits `x-amz-grant-write` (the permissions table gives `WRITE` no object meaning
 substrate records it there anyway rather than inventing a rejection no error code is
 documented for.
 
-**An `emailAddress` grantee is skipped, not refused.** S3 ended support for it — "As of
-October 1, 2025, Amazon S3 has discontinued support for Email Grantee Access Control
-Lists (ACLs) … the request will receive an `HTTP 405` (Method Not Allowed) error" — and
-substrate's clock is past that date, but the 405 is Region-conditional and applies to the
-XML body form too, so returning it is tracked separately rather than guessed at.
+**An email-address grantee is refused** ([#507](https://github.com/scttfrdmn/substrate/issues/507)),
+whether it arrives as `emailAddress=` in an `x-amz-grant-*` header or as an
+`AmazonCustomerByEmail` grantee in an XML body. Every ACL-bearing operation's API reference
+carries the same notice: "As of October 1, 2025, Amazon S3 has discontinued support for Email
+Grantee Access Control Lists (ACLs). If you attempt to use an Email Grantee ACL in a request after
+October 1, 2025, the request will receive an `HTTP 405` (Method Not Allowed) error", in eight
+named Regions. Substrate's clock is past that date, so the refusal is Region-gated by the bucket's
+Region:
+
+| Bucket Region | Answer |
+|---------------|--------|
+| `us-east-1`, `us-west-1`, `us-west-2`, `ap-southeast-1`, `ap-southeast-2`, `ap-northeast-1`, `eu-west-1`, `sa-east-1` | `405 MethodNotAllowed` |
+| any other | `400 InvalidArgument` |
+
+The notice publishes a status and nothing else. `MethodNotAllowed` is the code S3's error list
+gives HTTP 405, and the message is substrate's own. Outside the eight Regions email grantees were
+never supported, so the notice says nothing about them; the `400 InvalidArgument` there is
+substrate's reading, not a capture. Either way nothing is written, which replaces the silent skip
+that stored the rest of the ACL and dropped the grantee. `PutObject`, `CopyObject`,
+`CreateMultipartUpload`, `CreateBucket`, `PutBucketAcl` and `PutObjectAcl` all refuse it. On a
+bucket whose Object Ownership disables ACLs, the Object Ownership refusal below answers first.
 
 **The two forms are documented mutually exclusive** — "If you use these ACL-specific
 headers, you cannot use the `x-amz-acl` header to set a canned ACL" — but no error code
@@ -6594,6 +6611,49 @@ needs the permission its page names, checked in a second pass after the create i
 `CreateMultipartUpload` and `CopyObject` also apply `x-amz-tagging`, but neither page, nor the User
 Guide's multipart-upload permissions table, names a permission for it, so substrate requires none.
 
+### Multipart and copy permissions
+
+The multipart operations authorize under the actions the S3 User Guide's "Multipart upload API and
+permissions" table names, not under their operation names, which are not IAM actions
+([#1489](https://github.com/scttfrdmn/substrate/issues/1489)):
+
+| Operation | Action | Also required |
+|---|---|---|
+| `CreateMultipartUpload` | `s3:PutObject` | |
+| `UploadPart` | `s3:PutObject` | |
+| `UploadPartCopy` | `s3:PutObject` | `s3:GetObject` on the source object |
+| `CompleteMultipartUpload` | `s3:PutObject` | |
+| `AbortMultipartUpload` | `s3:AbortMultipartUpload` | |
+| `ListParts` | `s3:ListMultipartUploadParts` | |
+| `ListMultipartUploads` | `s3:ListBucketMultipartUploads` | |
+| `CopyObject` | `s3:PutObject` | `s3:GetObject` on the source object |
+
+`CopyObject` is the same defect outside multipart: there is no `s3:CopyObject` action, and its page
+says "you must have `s3:PutObject` permission to write the object copy to the destination bucket".
+The source permission comes from both copy pages — "you must have `s3:GetObject` permission to read
+the source object that is being copied" — and is checked in a second pass against the object
+`x-amz-copy-source` names. Until #1489 no copy checked its source, so a caller allowed to write could
+copy an object it was not allowed to read.
+
+**One parser reads `x-amz-copy-source`**, for the authorization pass and for both `CopyObject` and
+`UploadPartCopy`, so the object a policy is evaluated against is the object the copy reads. The
+header "must be URL-encoded", so a `?` belonging to the key arrives as `%3F`, and the first unencoded
+`?` begins the suffix: "append `?versionId=<version-id>` to the value". The split is made before
+decoding, which is what keeps a key spelled `k%3FversionId%3Dv` from being read as key `k` at
+version `v`.
+
+| Copy source | Answer |
+|---|---|
+| `bucket/key`, with or without a leading `/` | the current version |
+| `bucket/key?versionId=v` | version `v` of the key, also for `UploadPartCopy` |
+| a version that does not exist, or a key whose current version is a delete marker | `404 NoSuchKey`, as `GetObject` answers; the copy page says a delete-marker current version "behaves as if the object was deleted" |
+| a `versionId` naming a delete marker | `400 InvalidRequest`; the `UploadPartCopy` page says "HTTP 400 Bad Request", the code is substrate's reading and the message its own |
+| no key | `400 InvalidArgument` |
+| an access-point or Outposts ARN | `501 NotImplemented`, S3's code for unimplemented functionality, with substrate's own message: substrate models no access points |
+
+A copy source the parser refuses needs no authorization pass, because the handler refuses it before
+reading anything.
+
 ### Object Ownership
 
 `PutBucketOwnershipControls`, `GetBucketOwnershipControls` and `DeleteBucketOwnershipControls`
@@ -6622,13 +6682,46 @@ must have the `s3:PutBucketOwnershipControls` permission", and there is no
 `s3:DeleteBucketOwnershipControls` action. A `CreateBucket` naming `x-amz-object-ownership` also
 needs `s3:PutBucketOwnershipControls`; see [Tag sets](#tag-sets) for the second authorization pass.
 
-**Recorded, not enforced.** Under `BucketOwnerEnforced` real S3 disables ACLs: a write naming an
-ACL other than `bucket-owner-full-control` fails with `400 AccessControlListNotSupported`, and
-setting `BucketOwnerEnforced` on a bucket whose ACL grants others fails with `400
-InvalidBucketAclWithObjectOwnership`. Substrate keeps accepting ACLs whatever the setting, so a
-bucket reporting `BucketOwnerEnforced` still honours one. Enforcing it by default would change the
-answer every existing ACL caller gets, so it is tracked separately in
-[#1474](https://github.com/scttfrdmn/substrate/issues/1474).
+**Enforced** ([#1474](https://github.com/scttfrdmn/substrate/issues/1474)). Under
+`BucketOwnerEnforced`, the default for every new bucket, ACLs are disabled: "Requests to set ACLs or
+update ACLs fail with a `400` error and return the `AccessControlListNotSupported` error code.
+Requests to read ACLs are still supported. Requests to read ACLs always return a response that shows
+full control for the bucket owner" (Object Ownership troubleshooting).
+
+| Request on a `BucketOwnerEnforced` bucket | Answer |
+|---|---|
+| `PutBucketAcl`, `PutObjectAcl`, or `PutObject` / `CopyObject` / `CreateMultipartUpload` with an ACL header, naming any ACL other than bucket owner full control | `400 AccessControlListNotSupported`, "The bucket does not allow ACLs"; nothing is written |
+| The same, with the `bucket-owner-full-control` canned ACL, or grants of `FULL_CONTROL` to the bucket owner and nobody else (an `x-amz-grant-full-control` header or an XML body) | accepted |
+| `PutObject` / `CopyObject` / `CreateMultipartUpload` naming no ACL | accepted |
+| `GetBucketAcl`, `GetObjectAcl` | `200`, the owner's `FULL_CONTROL` only |
+| `CreateBucket` with an ACL granting anyone but the owner (`BucketOwnerEnforced` named or defaulted) | `400 InvalidBucketAclWithObjectOwnership`; no bucket is created |
+| `PutBucketOwnershipControls(BucketOwnerEnforced)` on a bucket whose ACL grants anyone but the owner | `400 InvalidBucketAclWithObjectOwnership`; the setting is unchanged |
+
+The accepted forms are the guide's: buckets with ACLs disabled accept "`PUT` requests that do not
+specify an ACL or `PUT` requests with bucket owner full control ACLs, for example, the
+`bucket-owner-full-control` canned ACL or equivalent forms of this ACL expressed in XML". The canned
+`private` is refused, being no bucket owner full control ACL. `PutBucketAcl` and `PutObjectAcl` sent
+with no ACL resolve to `private`, so they are refused too. The Object Ownership check comes before
+the email-grantee refusal and before Block Public Access, so a public ACL on such a bucket is a 400,
+not a 403. The messages are the ones the troubleshooting page shows.
+
+`CreateBucket` answers `InvalidBucketAclWithObjectOwnership` rather than
+`AccessControlListNotSupported` because the troubleshooting page names that code for it: "if your
+`CreateBucket` request sets Bucket owner enforced and specifies a bucket ACL that provides access to
+an external AWS account, your request fails with a `400` error and returns the
+InvalidBucketAclWithObjectOwnership error code". An ACL granting only the owner, `private` included,
+is accepted at create. `PutBucketOwnershipControls` reads only the bucket's ACL; object ACLs do not
+block the setting.
+
+A stored ACL is kept while ACLs are disabled, not deleted, and is reported again when the bucket
+returns to `ObjectWriter` or `BucketOwnerPreferred`: "you can re-enable ACLs at any time after you
+disable them, and your preexisting bucket and object ACLs are restored".
+
+`BucketOwnerPreferred` and `ObjectWriter` keep ACLs enabled, as does a bucket whose ownership controls
+`DeleteBucketOwnershipControls` removed. That last case is how every bucket behaved before Object
+Ownership existed, and it is substrate's reading. **To write ACLs, create the bucket with
+`x-amz-object-ownership: ObjectWriter`** (or `BucketOwnerPreferred`), or set it afterwards with
+`PutBucketOwnershipControls`, as on AWS.
 
 ### CORS configuration
 
@@ -12051,29 +12144,51 @@ EC2 instance costs approximate on-demand pricing for the instance type.
 | Operation | Notes |
 |-----------|-------|
 | CreateLoadBalancer | ALB and NLB supported; accepts `Tags.member.N`. Answers the `LoadBalancer` of `API_LoadBalancer`, including the `AvailabilityZones.member.N` derived from `Subnets.member.N` and the `SecurityGroups.member.N` the create named — both persisted and reported nowhere before [#756](https://github.com/scttfrdmn/substrate/issues/756). Carries no account or Region member |
-| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N`. Same load-balancer shape as CreateLoadBalancer |
+| DescribeLoadBalancers | `Names.member.N` and `LoadBalancerArns.member.N`. Same load-balancer shape as CreateLoadBalancer. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244); see [Paging](#paging-the-six-paginated-operations)) |
 | DeleteLoadBalancer | |
 | DescribeLoadBalancerAttributes | |
 | ModifyLoadBalancerAttributes | |
 | CreateTargetGroup | Accepts `Tags.member.N`. Answers the `TargetGroup` of `API_TargetGroup`; `LoadBalancerArns` is absent, a target group's record holding no association to a load balancer, and the registered targets are reported by `DescribeTargetHealth` as AWS publishes them |
-| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. An ARN in `TargetGroupArns` or a name in `Names` naming nothing is refused `TargetGroupNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeTargetGroups | Same target-group shape as CreateTargetGroup. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `TargetGroupArns` or a name in `Names` naming nothing is refused `TargetGroupNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteTargetGroup | |
 | ModifyTargetGroup | Answers the modified target group, as `API_ModifyTargetGroup` publishes; it answered an **empty** `TargetGroups` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | RegisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DeregisterTargets | An ARN naming nothing is refused `TargetGroupNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | DescribeTargetHealth | An ARN naming nothing is refused `TargetGroupNotFound`/400 rather than answered an empty list ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateListener | Accepts `Tags.member.N`. Answers the `Listener` of `API_Listener`; a default action's `Order` is absent rather than reported `0`, no create recording one |
-| DescribeListeners | Same listener shape as CreateListener. An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeListeners | Same listener shape as CreateListener. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `ListenerArns` naming nothing is refused `ListenerNotFound`/400, and a `LoadBalancerArn` naming nothing `LoadBalancerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteListener | An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | ModifyListener | Answers the modified listener. An ARN naming nothing is refused `ListenerNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | CreateRule | Accepts `Tags.member.N`. Answers the `Rule` of `API_Rule`, which publishes no `ListenerArn` — the listener is how `DescribeRules` selects, not something it reports |
-| DescribeRules | Same rule shape as CreateRule. An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400, and a `ListenerArn` naming nothing `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
+| DescribeRules | Same rule shape as CreateRule. Paged by `Marker`/`PageSize` with `NextMarker` ([#1244](https://github.com/scttfrdmn/substrate/issues/1244)). An ARN in `RuleArns` naming nothing is refused `RuleNotFound`/400, and a `ListenerArn` naming nothing `ListenerNotFound`/400 ([#1370](https://github.com/scttfrdmn/substrate/issues/1370), [#1375](https://github.com/scttfrdmn/substrate/issues/1375)) |
 | DeleteRule | An ARN naming nothing is refused `RuleNotFound`/400 ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | SetRulePriorities | Answers the rules it repriced in request order, as `API_SetRulePriorities` publishes; it answered an **empty** `Rules` list until [#756](https://github.com/scttfrdmn/substrate/issues/756). A rule ARN naming nothing is refused `RuleNotFound`/400, and every pair is resolved before any is written, so a refused call reprices nothing ([#1313](https://github.com/scttfrdmn/substrate/issues/1313)) |
 | AddTags | Up to 50 user tags per resource |
 | RemoveTags | |
 | DescribeTags | At most 20 resources per request |
 | DescribeAccountLimits | Reports 23 limits, seedable; `Marker`/`PageSize` paginated |
+
+### Paging the six paginated operations
+
+All six paginated operations — ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`,
+`DescribeListeners`, `DescribeRules` and `DescribeAccountLimits`, and classic
+`DescribeLoadBalancers` — read `Marker` and `PageSize` through one rule
+([#1244](https://github.com/scttfrdmn/substrate/issues/1244),
+[#1245](https://github.com/scttfrdmn/substrate/issues/1245)):
+
+- `PageSize` absent is the published default of 400; a value outside the published 1–400, or one
+  that is not a number, is refused `ValidationError`/400.
+- `Marker` is an opaque cursor substrate issues as `NextMarker`. A marker substrate could not have
+  issued is refused `ValidationError`/400, never answered with page one, because a paging loop
+  cannot see a cursor that resets ([#915](https://github.com/scttfrdmn/substrate/issues/915)). No
+  operation publishes a code for a bad marker; `ValidationError` is the Query Common Errors page's
+  code, which each operation links as its own, and the message is substrate's own. A marker past the
+  end answers an empty last page, because a listing can shrink during a walk.
+- `NextMarker` is present when a further page exists and **absent**, not empty, when the walk is
+  exhausted, as the v2 pages publish ("Otherwise, this is null").
+- The four describes page over the key order the state store guarantees
+  ([#865](https://github.com/scttfrdmn/substrate/issues/865)), after every named ARN or name has
+  been resolved, so a name naming nothing is refused whichever page it would have fallen on.
 
 Every operation whose output shape carries no members answers
 `<OperationResponse><OperationResult/><ResponseMetadata>…</ResponseMetadata></OperationResponse>`.
@@ -12252,8 +12367,8 @@ Details a consumer can observe:
   `ValidationError`. The operation publishes no token code of its own, so the code comes from the
   Common Errors page that covers it; the refusal itself is substrate's reading, for the reason
   [#915](https://github.com/scttfrdmn/substrate/issues/915) records — a paging loop cannot see a
-  cursor that resets. ELBv2 `DescribeAccountLimits` still restarts the walk for the same cursor,
-  which is [#1245](https://github.com/scttfrdmn/substrate/issues/1245).
+  cursor that resets. Every paginated ELBv2 operation now answers the same cursor the same way
+  ([#1245](https://github.com/scttfrdmn/substrate/issues/1245); see [Paging](#paging-the-six-paginated-operations)).
 - **`PageSize` is refused outside its published 1–400**, through the rule both generations now
   share — see [Account limits](#account-limits) for why refusing replaced the fallback the other
   operation had ([#1150](https://github.com/scttfrdmn/substrate/issues/1150)).
@@ -12400,26 +12515,22 @@ what ELB's Common Errors page publishes — but the rule no longer does.
 **The sweep behind that decision, and its count.** The plugin has six paginated operations:
 ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`
 and `DescribeAccountLimits`, plus classic `DescribeLoadBalancers`, each publishing `PageSize`
-1–400 and `Marker`. Two read the member and now answer through one rule. The other **four read
-neither `Marker` nor `PageSize` at all**, which was a third answer rather than a second, and is
-[#1244](https://github.com/scttfrdmn/substrate/issues/1244) — closing it means implementing the
-cursor, not validating a member, and when they gain it they take the same rule. ELBv2
-`DescribeTags` publishes no pagination member and is correctly unpaginated.
+1–400 and `Marker`. Two read the member and answered through one rule after #1150. The other
+**four read neither `Marker` nor `PageSize` at all**, which was a third answer rather than a
+second; [#1244](https://github.com/scttfrdmn/substrate/issues/1244) gave them the cursor and the
+same rule. ELBv2 `DescribeTags` publishes no pagination member and is correctly unpaginated.
 
-`Marker` is a decimal offset into a fixed, name-ordered set, so a paged walk returns each
-limit exactly once. An unparseable `Marker` restarts the walk and an offset past the end
-answers an empty last page — neither being an error the operation publishes a code for.
-
-**The `Marker` half of this cursor is still answered two ways**, and that is now a recorded
-defect rather than a recorded decision: the classic `DescribeLoadBalancers` refuses a marker it
-never issued, for the reason
-[#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a
-cursor that resets — while the restart above stands on the same "no published code" step #1064
-answered for `PageSize`. It is
-[#1245](https://github.com/scttfrdmn/substrate/issues/1245), kept out of #1150 so that one
-change's diff is one member of the cursor. An offset past the end stays an empty last page
-either way: that is a walk that has ended, not a malformed cursor, and both operations already
-agree on it.
+`Marker` is an offset into a fixed, name-ordered set, so a paged walk returns each limit exactly
+once. **Until [#1245](https://github.com/scttfrdmn/substrate/issues/1245) it was a bare decimal,
+and an unparseable or negative `Marker` restarted the walk at page one** — recorded here as a
+decision, on the ground that the operation publishes no code for a bad marker. That is the same
+"no published code" step #1064 answered for `PageSize`, while the classic `DescribeLoadBalancers`
+already refused a marker it never issued, for the reason
+[#915](https://github.com/scttfrdmn/substrate/issues/915) gives — a paging loop cannot see a cursor
+that resets. The operation now takes the plugin's one cursor rule (see [Paging](#paging-the-six-paginated-operations)): the
+marker is the same opaque cursor the other five operations issue, an unissued one is refused
+`ValidationError`/400, and an offset past the end stays an empty last page, which is a walk that has
+ended rather than a malformed cursor.
 
 Authorization needed nothing: `elasticloadbalancing:DescribeAccountLimits` was **already** in
 substrate's generated authorization reference with an empty resource list, which is exactly

@@ -152,8 +152,13 @@ func TestS3_BucketACLLifecycle(t *testing.T) {
 		o.RetryMaxAttempts = 1
 	})
 
+	// ObjectWriter, as on AWS: a bucket created with the default BucketOwnerEnforced disables
+	// ACLs and refuses both writes below with AccessControlListNotSupported (#1474).
 	const bucket = "e2e-acl-bucket"
-	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	_, err := client.CreateBucket(ctx, &s3.CreateBucketInput{
+		Bucket:          aws.String(bucket),
+		ObjectOwnership: s3types.ObjectOwnershipObjectWriter,
+	})
 	require.NoError(t, err, "CreateBucket")
 
 	_, err = client.PutBucketAcl(ctx, &s3.PutBucketAclInput{

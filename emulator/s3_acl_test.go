@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -36,10 +37,30 @@ func putObjectWithACL(t *testing.T, srv *emulator.Server, bucket, key string, he
 }
 
 // createBucketWithACL creates a bucket with the supplied headers, requiring a 200.
+//
+// The bucket is created with ObjectOwnership=ObjectWriter unless headers name another, because
+// every new bucket otherwise defaults to BucketOwnerEnforced, which disables ACLs (#1474) — and
+// these tests are about what an ACL does on a bucket that allows one.
 func createBucketWithACL(t *testing.T, srv *emulator.Server, bucket string, headers map[string]string) {
 	t.Helper()
-	w := s3Request(t, srv, http.MethodPut, "/"+bucket, nil, headers)
+	w := s3Request(t, srv, http.MethodPut, "/"+bucket, nil, s3ACLsEnabled(headers))
 	require.Equal(t, http.StatusOK, w.Code, "CreateBucket: %s", w.Body.String())
+}
+
+// s3ACLsEnabled returns headers plus x-amz-object-ownership: ObjectWriter, the opt-in a CreateBucket
+// needs for its bucket to accept ACLs (#1474). An ownership header already present is kept.
+func s3ACLsEnabled(headers map[string]string) map[string]string {
+	out := make(map[string]string, len(headers)+1)
+	for k, v := range headers {
+		out[k] = v
+	}
+	for k := range out {
+		if strings.EqualFold(k, "x-amz-object-ownership") {
+			return out
+		}
+	}
+	out["x-amz-object-ownership"] = "ObjectWriter"
+	return out
 }
 
 // storedACLAbsent reports whether no ACL is stored for a key at all, which is a
@@ -318,25 +339,6 @@ func TestS3_ACL_GrantHeaderGranteeForms(t *testing.T) {
 				getBucketACLGrants(t, srv, "forms"))
 		})
 	}
-}
-
-// TestS3_ACL_EmailGranteeSkipped pins the scope decision behind #507: an emailAddress
-// grantee is skipped, not stored and not refused.
-//
-// S3 has ended support for email grantees — "As of October 1, 2025 … the request will
-// receive an HTTP 405 (Method Not Allowed) error" — and substrate's clock is past that
-// date, but returning the 405 is Region-conditional and applies to the XML body form
-// too, so it is filed rather than guessed at. This test exists so that when #507 lands
-// it changes this behavior deliberately.
-func TestS3_ACL_EmailGranteeSkipped(t *testing.T) {
-	t.Parallel()
-	srv, _ := newS3TestServer(t)
-	createBucketWithACL(t, srv, "email-grantee", map[string]string{
-		"x-amz-grant-read": `emailAddress="someone@example.com"`,
-	})
-
-	assert.Equal(t, []string{ownerGrant("email-grantee")}, getBucketACLGrants(t, srv, "email-grantee"),
-		"an email grantee is skipped today; #507 makes it a 405")
 }
 
 // TestS3_ACL_GrantHeadersAugmentTheOwnerGrant asserts a grant header adds to the
@@ -626,8 +628,11 @@ func TestS3_ACL_NonCanonicalHeaderNames(t *testing.T) {
 	// operation from it and the path, exactly as the server pipeline does.
 	_, err := p.HandleRequest(rctx, &emulator.AWSRequest{
 		Service: "s3", Operation: http.MethodPut, Path: "/acl-fold",
-		Params:  map[string]string{},
-		Headers: map[string]string{"X-AMZ-ACL": "public-read"}, // canonical is X-Amz-Acl
+		Params: map[string]string{},
+		Headers: map[string]string{
+			"X-AMZ-ACL":              "public-read",  // canonical is X-Amz-Acl
+			"X-AMZ-OBJECT-OWNERSHIP": "ObjectWriter", // ACLs enabled (#1474), and folded too
+		},
 	})
 	require.NoError(t, err)
 

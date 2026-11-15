@@ -39,10 +39,9 @@ type elbPageSizeOperation struct {
 	params func(pageSize string) map[string]string
 }
 
-// elbPageSizeOperations are the plugin's two operations that read `PageSize`.
+// elbPageSizeOperations are the plugin's six operations that read `PageSize`.
 //
-// The other four ELBv2 describes publish the member and read neither it nor `Marker` (#1244), so they
-// have no answer to compare yet; when they gain the cursor they join this table. ELBv2 `DescribeTags`
+// The four ELBv2 describes joined the table when #1244 gave them the cursor. ELBv2 `DescribeTags`
 // publishes no pagination member at all.
 var elbPageSizeOperations = []elbPageSizeOperation{
 	{
@@ -59,6 +58,20 @@ var elbPageSizeOperations = []elbPageSizeOperation{
 			}
 		},
 	},
+	elbV2PageSizeOperation("DescribeLoadBalancers"),
+	elbV2PageSizeOperation("DescribeTargetGroups"),
+	elbV2PageSizeOperation("DescribeListeners"),
+	elbV2PageSizeOperation("DescribeRules"),
+}
+
+// elbV2PageSizeOperation is one of the four ELBv2 describes #1244 paginated, as a table row.
+func elbV2PageSizeOperation(action string) elbPageSizeOperation {
+	return elbPageSizeOperation{
+		name: "ELBv2 " + action,
+		params: func(pageSize string) map[string]string {
+			return map[string]string{"Action": action, "PageSize": pageSize}
+		},
+	}
 }
 
 // elbPageSizeAnswer is what one operation answered one `PageSize`: the status, and the error's code
@@ -94,7 +107,7 @@ func elbSendForPageSizeAnswer(t *testing.T, baseURL string, params map[string]st
 // TestELBPageSize_BothGenerationsRefuseTheSameValueTheSameWay is #1150's rule on the wire.
 func TestELBPageSize_BothGenerationsRefuseTheSameValueTheSameWay(t *testing.T) {
 	t.Parallel()
-	require.Len(t, elbPageSizeOperations, 2, "both generations are compared, or nothing is")
+	require.Len(t, elbPageSizeOperations, 6, "every paginated operation is compared, or nothing is")
 
 	for _, tc := range []struct {
 		name     string
@@ -119,11 +132,13 @@ func TestELBPageSize_BothGenerationsRefuseTheSameValueTheSameWay(t *testing.T) {
 				answers[op.name] = elbSendForPageSizeAnswer(t, ts.URL, op.params(tc.pageSize))
 			}
 
-			first, second := elbPageSizeOperations[0].name, elbPageSizeOperations[1].name
-			assert.Equal(t, answers[first].code, answers[second].code,
-				"%s and %s answer one published range with two codes", first, second)
-			assert.Equal(t, answers[first].status, answers[second].status,
-				"%s and %s answer one published range with two statuses", first, second)
+			first := elbPageSizeOperations[0].name
+			for _, op := range elbPageSizeOperations[1:] {
+				assert.Equal(t, answers[first].code, answers[op.name].code,
+					"%s and %s answer one published range with two codes", first, op.name)
+				assert.Equal(t, answers[first].status, answers[op.name].status,
+					"%s and %s answer one published range with two statuses", first, op.name)
+			}
 
 			for name, got := range answers {
 				// `ValidationError`/400 is the code the consolidated Query Common Errors page both

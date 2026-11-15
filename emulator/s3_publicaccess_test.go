@@ -905,8 +905,10 @@ func TestS3_BlockPublicAcls_CreateBucket(t *testing.T) {
 	blocked := newPABBucket(t, srv, "already-blocked")
 	require.Equal(t, http.StatusOK, putPAB(t, srv, blocked, pabAllTrue).Code)
 
+	// ObjectWriter, because a bucket created with the default BucketOwnerEnforced refuses any
+	// granting ACL for a reason of its own (#1474); this test is about Block Public Access.
 	w := s3Request(t, srv, http.MethodPut, "/fresh-public", nil,
-		map[string]string{"x-amz-acl": "public-read"})
+		s3ACLsEnabled(map[string]string{"x-amz-acl": "public-read"}))
 	require.Equal(t, http.StatusOK, w.Code,
 		"substrate models no account-level Block Public Access: %s", w.Body.String())
 	assert.Contains(t, getBucketACLGrants(t, srv, "fresh-public"), testGroupAllUsers+"/READ")

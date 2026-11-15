@@ -9,7 +9,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -605,6 +604,12 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 	if ownErr != nil {
 		return ownErr, nil
 	}
+	// A bucket created with BucketOwnerEnforced — the default — cannot also be given an ACL
+	// granting anyone but its owner (#1474), and an email grantee is refused (#507). Both
+	// before anything is written; see s3_acl_enforcement.go.
+	if refusal := s3CreateBucketACLRefusal(req.Headers, bucket, ownership, region); refusal != nil {
+		return refusal, nil
+	}
 
 	b := S3Bucket{
 		Name:         bucket,
@@ -777,10 +782,15 @@ func (p *S3Plugin) headBucket(_ *RequestContext, _ *AWSRequest, bucket string) (
 //
 // It exists so the one string is built in one place: the CloudFormation deployer records
 // it as a bucket's ARN, the tagging API reports it, and an event notification embeds it.
-// buildS3ARN in authz.go deliberately does not call it — that one builds an ARN from a
-// request path, which may name an object as well as its bucket.
 func s3BucketARN(bucket string) string {
-	return "arn:aws:s3:::" + bucket
+	return s3ResourceARN(bucket)
+}
+
+// s3ResourceARN returns the ARN of an S3 resource named by its bucket-relative path: a bucket
+// ("b"), an object ("b/k"), or a pattern ("*"). It is the one place the prefix is written, shared by
+// [s3BucketARN], buildS3ARN in authz.go, and the copy-source ARN (s3_copy_source.go).
+func s3ResourceARN(resource string) string {
+	return "arn:aws:s3:::" + resource
 }
 
 // s3BucketSubresourceKey returns the state key holding one of a bucket's
@@ -1017,7 +1027,7 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	// accepted such an upload with a 200 until this fix, which meant a bucket real S3
 	// would have refused took the object.
 	objectACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, objectACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, bucket, bucketData, req.Headers, objectACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -1525,51 +1535,22 @@ func (p *S3Plugin) deleteObjects(reqCtx *RequestContext, req *AWSRequest, bucket
 	return s3XMLResponse(http.StatusOK, result)
 }
 
-// parseS3CopySource resolves an X-Amz-Copy-Source header into its bucket and key.
-// A non-nil *AWSResponse is the S3 error to return.
-//
-// Shared by CopyObject and UploadPartCopy, which document the same header with the
-// same `\/?.+\/.+` pattern. It is one function because the two are otherwise
-// unrelated code paths that must agree on what a copy source means (#532).
-func parseS3CopySource(copySource string) (string, string, *AWSResponse) {
-	if copySource == "" {
-		return "", "", s3ErrorResponse("InvalidArgument", "Copy Source must be specified.", http.StatusBadRequest)
-	}
-
-	// URL-decode the source path.
-	srcPath, decodeErr := url.QueryUnescape(copySource)
-	if decodeErr != nil {
-		srcPath = copySource
-	}
-	srcPath = strings.TrimPrefix(srcPath, "/")
-
-	slashIdx := strings.IndexByte(srcPath, '/')
-	if slashIdx < 0 {
-		return "", "", s3ErrorResponse("InvalidArgument", "Copy source must include an object key.", http.StatusBadRequest)
-	}
-	return srcPath[:slashIdx], srcPath[slashIdx+1:], nil
-}
-
 // copyObject handles PUT /<bucket>/<key> with X-Amz-Copy-Source header.
 func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dstKey string) (*AWSResponse, error) {
 	ctx := context.Background()
 
-	srcBucket, srcKey, srcErr := parseS3CopySource(req.Headers["X-Amz-Copy-Source"])
+	// One parser and one loader for the copy source, shared with UploadPartCopy and with the
+	// s3:GetObject authorization pass, so all three read the same object (s3_copy_source.go).
+	src, srcErr := parseS3CopySource(headerValueFold(req.Headers, "x-amz-copy-source"))
 	if srcErr != nil {
 		return srcErr, nil
 	}
-
-	srcMeta, err := p.state.Get(ctx, s3Namespace, "object:"+srcBucket+"/"+srcKey)
+	srcObj, missing, err := p.loadS3CopySourceObject(ctx, src)
 	if err != nil {
-		return nil, fmt.Errorf("get source metadata: %w", err)
+		return nil, err
 	}
-	if srcMeta == nil {
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
-	}
-
-	var srcObj S3Object
-	if err := json.Unmarshal(srcMeta, &srcObj); err != nil {
-		return nil, fmt.Errorf("unmarshal source metadata: %w", err)
+	if missing != nil {
+		return missing, nil
 	}
 
 	dstBucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+dstBucket)
@@ -1632,7 +1613,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	// before the body is written, so a refused copy leaves the destination key exactly
 	// as it was — the same all-or-nothing property PutObject has.
 	dstACL := s3RequestACL(req.Headers, dstBucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, dstBucket, dstACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, dstBucket, dstBucketData, req.Headers, dstACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -1679,13 +1660,9 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	// marker key records only state. srcBody stays nil for a marker source, which is
 	// the body it has, so the ETag and checksum below are computed over the right
 	// bytes either way.
-	var srcBody []byte
-	if s3ObjectHasBody(srcKey) {
-		read, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
-		if readErr != nil {
-			return nil, fmt.Errorf("read source body: %w", readErr)
-		}
-		srcBody = read
+	srcBody, err := p.readS3CopySourceBody(src)
+	if err != nil {
+		return nil, err
 	}
 
 	if s3ObjectHasBody(dstKey) {
@@ -2008,7 +1985,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 	// against an upload whose Complete was always going to be refused. Nothing has been
 	// written at this point, so the refusal leaves no upload behind.
 	uploadACL := s3RequestACL(req.Headers, bucket, s3ACLObject)
-	if denied, dErr := p.s3RequestACLDenied(ctx, bucket, uploadACL, req.Headers); dErr != nil {
+	if denied, dErr := p.s3ACLWriteRefusal(ctx, bucket, bucketData, req.Headers, uploadACL, false); dErr != nil {
 		return nil, dErr
 	} else if denied != nil {
 		return denied, nil
@@ -2183,21 +2160,16 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 		return s3SSEPartRefusal(present), nil
 	}
 
-	srcBucket, srcKey, srcErr := parseS3CopySource(req.Headers["X-Amz-Copy-Source"])
+	src, srcErr := parseS3CopySource(headerValueFold(req.Headers, "x-amz-copy-source"))
 	if srcErr != nil {
 		return srcErr, nil
 	}
-
-	srcMeta, err := p.state.Get(ctx, s3Namespace, "object:"+srcBucket+"/"+srcKey)
+	srcObj, missing, err := p.loadS3CopySourceObject(ctx, src)
 	if err != nil {
-		return nil, fmt.Errorf("get copy source metadata: %w", err)
+		return nil, err
 	}
-	if srcMeta == nil {
-		return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
-	}
-	var srcObj S3Object
-	if err := json.Unmarshal(srcMeta, &srcObj); err != nil {
-		return nil, fmt.Errorf("unmarshal copy source metadata: %w", err)
+	if missing != nil {
+		return missing, nil
 	}
 
 	// An archived source has no readable body, exactly as for CopyObject: "you must
@@ -2214,13 +2186,9 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 		return s3PreconditionFailedResponse(), nil
 	}
 
-	var srcBody []byte
-	if s3ObjectHasBody(srcKey) {
-		read, readErr := afero.ReadFile(p.fs, "/"+srcBucket+"/"+srcKey)
-		if readErr != nil {
-			return nil, fmt.Errorf("read copy source body: %w", readErr)
-		}
-		srcBody = read
+	srcBody, err := p.readS3CopySourceBody(src)
+	if err != nil {
+		return nil, err
 	}
 
 	body, rangeResp := s3CopySourceRangeBytes(headerValueFold(req.Headers, "x-amz-copy-source-range"), srcBody)
@@ -3590,6 +3558,17 @@ func (p *S3Plugin) getBucketACL(_ *RequestContext, _ *AWSRequest, bucket string)
 			"The specified bucket does not exist.", http.StatusNotFound), nil
 	}
 
+	// A bucket with ACLs disabled reports the owner-full-control ACL whatever is stored
+	// (#1474): "Requests to read ACLs always return a response that shows full control
+	// for the bucket owner." The stored ACL is kept, to be restored if ACLs are re-enabled.
+	disabled, err := p.s3ACLsDisabled(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return s3XMLResponse(http.StatusOK, s3DefaultACL(bucket))
+	}
+
 	raw, err := p.state.Get(ctx, s3Namespace, "bucket_acl:"+bucket)
 	if err != nil {
 		return nil, fmt.Errorf("get bucket acl: %w", err)
@@ -3621,6 +3600,7 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 		return s3ErrorResponse("NoSuchBucket",
 			"The specified bucket does not exist.", http.StatusNotFound), nil
 	}
+	aclBucketRecord := existing
 
 	var acl S3AccessControlList
 	if len(req.Body) > 0 {
@@ -3635,11 +3615,12 @@ func (p *S3Plugin) putBucketACL(_ *RequestContext, req *AWSRequest, bucket strin
 		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLBucket)
 	}
 
-	// BlockPublicAcls rejects a PutBucketAcl carrying a public ACL, without
-	// modifying the ACL already in place (#458). The check runs after the ACL is
-	// resolved from whichever of the three forms the caller used, so a canned
-	// header, an XML grant and an x-amz-grant-* header are all covered.
-	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+	// A bucket whose Object Ownership disables ACLs refuses the write (#1474), an email
+	// grantee is refused (#507), and BlockPublicAcls rejects a public ACL (#458) — each
+	// without modifying the ACL already in place. The checks run after the ACL is
+	// resolved from whichever of the three forms the caller used, so a canned header,
+	// an XML grant and an x-amz-grant-* header are all covered.
+	if denied, err := p.s3ACLWriteRefusal(ctx, bucket, aclBucketRecord, req.Headers, &acl, len(req.Body) > 0); err != nil {
 		return nil, err
 	} else if denied != nil {
 		return denied, nil
@@ -3674,6 +3655,16 @@ func (p *S3Plugin) getObjectACL(_ *RequestContext, _ *AWSRequest, bucket, key st
 			"The specified key does not exist.", http.StatusNotFound), nil
 	}
 
+	// As GetBucketAcl: the bucket's Object Ownership decides, there being no per-object
+	// setting (#1474).
+	disabled, err := p.s3ACLsDisabled(ctx, bucket)
+	if err != nil {
+		return nil, err
+	}
+	if disabled {
+		return s3XMLResponse(http.StatusOK, s3DefaultACL(bucket))
+	}
+
 	raw, err := p.state.Get(ctx, s3Namespace, "object_acl:"+bucket+"/"+key)
 	if err != nil {
 		return nil, fmt.Errorf("get object acl: %w", err)
@@ -3705,6 +3696,8 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 		return s3ErrorResponse("NoSuchKey",
 			"The specified key does not exist.", http.StatusNotFound), nil
 	}
+	// The bucket record is not otherwise needed here; the refusal reads it only if it must.
+	var aclBucketRecord []byte
 
 	var acl S3AccessControlList
 	if len(req.Body) > 0 {
@@ -3716,9 +3709,9 @@ func (p *S3Plugin) putObjectACL(_ *RequestContext, req *AWSRequest, bucket, key 
 		acl = s3ResolveRequestACL(req.Headers, bucket, s3ACLObject)
 	}
 
-	// The configuration consulted is the *bucket's*: Block Public Access has no
-	// per-object setting (#458).
-	if denied, err := p.s3PublicACLDenied(ctx, bucket, acl, req.Headers); err != nil {
+	// The configuration consulted is the *bucket's*: neither Object Ownership (#1474) nor
+	// Block Public Access (#458) has a per-object setting.
+	if denied, err := p.s3ACLWriteRefusal(ctx, bucket, aclBucketRecord, req.Headers, &acl, len(req.Body) > 0); err != nil {
 		return nil, err
 	} else if denied != nil {
 		return denied, nil

@@ -92,6 +92,75 @@ func s3AuthzCreateSideEffectActions(req *AWSRequest, requestTags map[string]stri
 	return actions
 }
 
+// s3AuthzCopySourceARN returns the ARN of the object a CopyObject or UploadPartCopy request reads,
+// and false for any other request or one whose x-amz-copy-source does not parse.
+//
+// The header is read by [parseS3CopySource], the parser both handlers use, so the object s3:GetObject
+// is evaluated against is the object the copy reads: the bucket and URL-decoded key before the first
+// unencoded "?", without the version suffix, which is not part of an object's ARN. A header that does
+// not parse — no key, or an access-point ARN substrate does not model — needs no second pass, because
+// the handler refuses it with the same parser's answer before reading anything.
+func s3AuthzCopySourceARN(req *AWSRequest) (string, bool) {
+	if _, _, op := parseS3Operation(req); op != "CopyObject" && op != "UploadPartCopy" {
+		return "", false
+	}
+	src, errResp := parseS3CopySource(headerValueFold(req.Headers, "x-amz-copy-source"))
+	if errResp != nil {
+		return "", false
+	}
+	return src.ARN(), true
+}
+
+// checkS3CopySource runs the second authorization pass a copy needs: s3:GetObject on the source
+// object, in addition to s3:PutObject on the destination the primary decision already allowed.
+// Both API_CopyObject and API_UploadPartCopy state it — "If the source object is in a general
+// purpose bucket, you must have s3:GetObject permission to read the source object that is being
+// copied" — and so does the multipart permissions table for UploadPartCopy. Until #1489 no copy
+// read its source's permission at all, so a caller allowed to write anywhere could copy an object
+// it could not read.
+//
+// The pass follows [AuthController.checkS3CreateSideEffects]: it runs after the primary decision,
+// against the identity policies and the boundary, with the request's time and principal keys. It
+// reports no aws:ResourceTag/* for the source, matching the primary S3 pass, which reports a
+// bucket's tags only.
+func (a *AuthController) checkS3CopySource(reqCtx *RequestContext, req *AWSRequest,
+	docs []PolicyDocument, boundary *PolicyDocument, deniedCode string, now time.Time, haveClock bool) error {
+	if req.Service != "s3" {
+		return nil
+	}
+	source, ok := s3AuthzCopySourceARN(req)
+	if !ok {
+		return nil
+	}
+	const action = "s3:GetObject"
+	condCtx := make(map[string]string, 4)
+	a.authzTimeContext(condCtx, now, haveClock)
+	authzPrincipalContext(condCtx, reqCtx.Principal)
+	evalReq := EvaluationRequest{
+		Principal: reqCtx.Principal.ARN,
+		Action:    action,
+		Resource:  source,
+		Context:   condCtx,
+	}
+	if Evaluate(docs, evalReq).Decision != DecisionAllow {
+		return &AWSError{
+			Code: deniedCode,
+			Message: fmt.Sprintf("User: %s is not authorized to perform: %s on resource: %s",
+				reqCtx.Principal.ARN, action, source),
+			HTTPStatus: http.StatusForbidden,
+		}
+	}
+	if boundary != nil && Evaluate([]PolicyDocument{*boundary}, evalReq).Decision != DecisionAllow {
+		return &AWSError{
+			Code: deniedCode,
+			Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by permission boundary)",
+				reqCtx.Principal.ARN, action),
+			HTTPStatus: http.StatusForbidden,
+		}
+	}
+	return nil
+}
+
 // checkS3CreateSideEffects runs the additional authorization pass S3 documents for a create that
 // also tags, or sets ownership controls, returning nil when the request needs none or the caller
 // holds every one. It follows [AuthController.checkEC2TagOnCreate]: it runs after the primary

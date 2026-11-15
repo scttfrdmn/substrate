@@ -66,14 +66,17 @@ var s3GrantHeaders = []s3GrantHeader{
 // be quoted, so quotes are trimmed, and the type is matched case-insensitively
 // because the documented spelling of one of them is mixed-case (emailAddress).
 //
-// Only id and uri produce a grantee, which is exactly the pair the user guide's
-// "Who is a grantee?" section lists. An emailAddress grantee is skipped rather
-// than stored: S3 has ended support for it — "As of October 1, 2025, Amazon S3 has
-// discontinued support for Email Grantee Access Control Lists (ACLs). If you
-// attempt to use an Email Grantee ACL in a request after October 1, 2025, the
-// request will receive an HTTP 405 (Method Not Allowed) error" — and substrate's
-// clock is past that date. Returning the 405 is a separate behavior, scoped out
-// because it is Region-conditional and applies to the XML body form too (#507).
+// id and uri produce the two grantees the user guide's "Who is a grantee?" section
+// lists. emailAddress produces an AmazonCustomerByEmail grantee, the same one an XML
+// body expresses, so that the email-grantee refusal reads the header through this
+// function rather than a second splitter; it never reaches storage, because every ACL
+// write refuses a request naming one before it stores an ACL — the 405 S3's
+// end-of-support notice publishes, in the Regions it names (#507). See
+// [S3Plugin.s3ACLWriteRefusal] and s3_acl_enforcement.go.
+//
+// An entry with an empty value names no grantee of any type and is skipped, whatever
+// its type: `emailAddress=""` is skipped as `id=""` is. No source publishes an answer
+// for an empty grantee value, so skipping keeps the one rule for all three types.
 func s3ParseGrantees(value string) []S3Grantee {
 	if value == "" {
 		return nil
@@ -93,6 +96,8 @@ func s3ParseGrantees(value string) []S3Grantee {
 			grantees = append(grantees, S3Grantee{Type: "CanonicalUser", ID: val})
 		case strings.EqualFold(strings.TrimSpace(kind), "uri"):
 			grantees = append(grantees, S3Grantee{Type: "Group", URI: val})
+		case strings.EqualFold(strings.TrimSpace(kind), "emailAddress"):
+			grantees = append(grantees, S3Grantee{Type: s3EmailGranteeXMLType, EmailAddress: val})
 		}
 	}
 	return grantees
@@ -140,7 +145,7 @@ func s3RequestNamesACL(headers map[string]string) bool {
 // CreateBucket all store an ACL only when one was asked for, so "the caller named
 // none and got the default" stays distinguishable in state from "the caller named
 // the default". [S3Plugin.s3StoreObjectACL] and
-// [S3Plugin.s3RequestACLDenied] both read the distinction from this one pointer
+// [S3Plugin.s3ACLWriteRefusal] both read the distinction from this one pointer
 // rather than from a parallel boolean.
 func s3RequestACL(headers map[string]string, resource string, kind s3ACLResourceKind) *S3AccessControlList {
 	if !s3RequestNamesACL(headers) {
@@ -249,9 +254,9 @@ func s3CannedACL(cannedACL, resource string, kind s3ACLResourceKind) S3AccessCon
 // canonical user IDs: there is one owner per bucket and it owns everything in it.
 func s3DefaultACL(resource string) S3AccessControlList {
 	return S3AccessControlList{
-		Owner: S3Owner{ID: resource + "-owner", DisplayName: resource},
+		Owner: S3Owner{ID: s3ACLOwnerID(resource), DisplayName: resource},
 		Grants: []S3Grant{{
-			Grantee:    S3Grantee{Type: "CanonicalUser", ID: resource + "-owner"},
+			Grantee:    S3Grantee{Type: "CanonicalUser", ID: s3ACLOwnerID(resource)},
 			Permission: s3PermissionFull,
 		}},
 	}

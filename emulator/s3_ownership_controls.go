@@ -27,15 +27,14 @@ import (
 // removing it. Here a delete removes, so the default has to be a stored record for the delete to be
 // observable.
 //
-// # What is not modeled
+// # Enforcement
 //
-// The setting is recorded and reported; it is not enforced. Under BucketOwnerEnforced real S3
-// disables ACLs — a write naming any ACL other than bucket-owner-full-control fails with
-// AccessControlListNotSupported, and PutBucketOwnershipControls(BucketOwnerEnforced) on a bucket
-// whose ACL grants others fails with InvalidBucketAclWithObjectOwnership. Substrate keeps accepting
-// ACLs whatever the setting, so a bucket reporting BucketOwnerEnforced still honors one. That is
-// tracked separately (#1474) rather than folded in here, because enforcing it by default would
-// change the answer every existing ACL caller gets.
+// #1445 recorded and reported the setting without enforcing it, because enforcing it by default
+// changes the answer every existing ACL caller gets. #1474 enforced it: under BucketOwnerEnforced an
+// ACL write other than bucket owner full control fails with AccessControlListNotSupported, reads
+// report the owner-full-control ACL, and PutBucketOwnershipControls(BucketOwnerEnforced) on a bucket
+// whose ACL grants others fails with InvalidBucketAclWithObjectOwnership. The rules and their
+// sources are in s3_acl_enforcement.go.
 
 // s3OwnershipControlsKeyPrefix is the state-key prefix of a bucket's ownership controls, keyed by
 // bucket name alone. It is listed in [s3BucketSubresourcePrefixes] so DeleteBucket clears it.
@@ -130,9 +129,24 @@ func (p *S3Plugin) putBucketOwnershipControls(_ *RequestContext, req *AWSRequest
 	if err := xml.NewDecoder(bytes.NewReader(body)).Decode(&in); err != nil || len(in.Rules) == 0 {
 		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // the decode error is the refusal
 	}
+	enforced := false
 	for _, r := range in.Rules {
 		if !s3ValidObjectOwnership(r.ObjectOwnership) {
 			return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil
+		}
+		enforced = enforced || r.ObjectOwnership == s3OwnershipEnforced
+	}
+	// "If your PutBucketOwnershipControls request sets Bucket owner enforced on a bucket that has a
+	// bucket ACL that grants permissions to others, the request fails" with
+	// InvalidBucketAclWithObjectOwnership (#1474). Only the bucket's ACL is consulted: object ACLs
+	// stop mattering under the setting rather than blocking it.
+	if enforced {
+		grantsOthers, err := p.s3StoredBucketACLGrantsOthers(ctx, bucket)
+		if err != nil {
+			return nil, err
+		}
+		if grantsOthers {
+			return s3InvalidBucketACLWithOwnershipResponse(), nil
 		}
 	}
 
