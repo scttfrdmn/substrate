@@ -180,7 +180,7 @@ func TestAutoScaling_Authz_CreateChecksRunInstances(t *testing.T) {
 		// The template is created without a principal, as setup rather than as the subject.
 		_, err := ec2.HandleRequest(&emulator.RequestContext{RequestID: "req-lt", AccountID: asgAuthzAccount, Region: asgAuthzRegion},
 			&emulator.AWSRequest{Service: "ec2", Operation: "CreateLaunchTemplate", Params: map[string]string{
-				"LaunchTemplateName": "lt", "LaunchTemplateData.ImageId": ec2TestImage,
+				"LaunchTemplateName": "pool-lt", "LaunchTemplateData.ImageId": ec2TestImage,
 			}})
 		require.NoError(t, err)
 		return asg, state
@@ -194,7 +194,7 @@ func TestAutoScaling_Authz_CreateChecksRunInstances(t *testing.T) {
 			"MinSize":                           "1",
 			"MaxSize":                           "2",
 			"AvailabilityZones.member.1":        "us-east-1a",
-			"LaunchTemplate.LaunchTemplateName": "lt",
+			"LaunchTemplate.LaunchTemplateName": "pool-lt",
 		}})
 		return err
 	}

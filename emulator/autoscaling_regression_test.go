@@ -246,11 +246,11 @@ func newASGInProcess(t *testing.T) (*asgFailingState, *emulator.EC2Plugin, *emul
 		return &emulator.RequestContext{RequestID: id, AccountID: asgAuthzAccount, Region: asgAuthzRegion, IDs: emulator.NewIDMint(id)}
 	}
 	_, err := ec2.HandleRequest(ctx("req-lt"), &emulator.AWSRequest{Service: "ec2", Operation: "CreateLaunchTemplate",
-		Params: map[string]string{"LaunchTemplateName": "lt", "LaunchTemplateData.ImageId": ec2TestImage}})
+		Params: map[string]string{"LaunchTemplateName": "pool-lt", "LaunchTemplateData.ImageId": ec2TestImage}})
 	require.NoError(t, err)
 	_, err = asg.HandleRequest(ctx("req-create"), &emulator.AWSRequest{Service: "autoscaling", Operation: "CreateAutoScalingGroup",
 		Params: map[string]string{"AutoScalingGroupName": "pool", "MinSize": "0", "MaxSize": "2", "DesiredCapacity": "2",
-			"AvailabilityZones.member.1": "us-east-1a", "LaunchTemplate.LaunchTemplateName": "lt"}})
+			"AvailabilityZones.member.1": "us-east-1a", "LaunchTemplate.LaunchTemplateName": "pool-lt"}})
 	require.NoError(t, err)
 	return state, ec2, asg, ctx
 }

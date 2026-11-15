@@ -257,10 +257,13 @@ func TestEC2_BundledImages_SSMDiscoveryThenLaunch(t *testing.T) {
 			assert.Equal(t, emulator.BundledImageID(ec2TestRegion, param), imageID,
 				"GetParameter and BundledImageID disagree about %s", param)
 
-			launch := ec2Request(t, ec2, map[string]string{
-				"Action":  "RunInstances",
-				"ImageId": imageID,
-			})
+			// An arm64 image launches on a Graviton type: the default t3.micro is x86_64,
+			// and a mismatch is refused (#1505).
+			launchParams := map[string]string{"Action": "RunInstances", "ImageId": imageID}
+			if strings.Contains(param, "arm64") {
+				launchParams["InstanceType"] = "t4g.micro"
+			}
+			launch := ec2Request(t, ec2, launchParams)
 			defer launch.Body.Close() //nolint:errcheck
 			body, err := io.ReadAll(launch.Body)
 			require.NoError(t, err)

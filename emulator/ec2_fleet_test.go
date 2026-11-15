@@ -485,10 +485,29 @@ func TestEC2_CreateFleet_Errors(t *testing.T) {
 			name: "unknown launch template id",
 			params: map[string]string{
 				"Action": "CreateFleet",
-				"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": "lt-doesnotexist",
+				"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": "lt-0d0e5f00ba5e00000",
 				"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
 			},
 			wantCode: "InvalidLaunchTemplateId.NotFound",
+		},
+		{
+			// Not hex after the prefix, so the shape is refused before the lookup (#1507).
+			name: "malformed launch template id",
+			params: map[string]string{
+				"Action": "CreateFleet",
+				"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": "lt-doesnotexist",
+				"TargetCapacitySpecification.TotalTargetCapacity":                      "1",
+			},
+			wantCode: "InvalidLaunchTemplateId.Malformed",
+		},
+		{
+			name: "malformed launch template name",
+			params: map[string]string{
+				"Action": "CreateFleet",
+				"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateName": "no",
+				"TargetCapacitySpecification.TotalTargetCapacity":                        "1",
+			},
+			wantCode: "InvalidLaunchTemplateName.MalformedException",
 		},
 		{
 			name: "unknown launch template name",

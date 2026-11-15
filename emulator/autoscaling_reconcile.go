@@ -157,6 +157,15 @@ func (p *AutoScalingPlugin) asgImageArchitecture(reqCtx *RequestContext, imageID
 	if imageID == "" {
 		return ""
 	}
+	// A resolve:ssm: ImageId narrows by the AMI it resolves to now, through the resolver the
+	// launch itself uses (#1506), so the type chosen here can run the image the launch gets.
+	// One that does not resolve narrows as an unknown architecture; the launch then fails with
+	// EC2's own refusal, which names the parameter.
+	resolved, awsErr := ec2ResolveSSMImageID(context.Background(), p.state, reqCtx, imageID)
+	if awsErr != nil {
+		return ""
+	}
+	imageID = resolved
 	ec2, err := p.ec2()
 	if err != nil {
 		return ""

@@ -527,14 +527,17 @@ func (p *EC2Plugin) launchInstances(
 	// [ec2ResolveTemplateVersion] (#456).
 	ltID := req.Params["LaunchTemplate.LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplate.LaunchTemplateName"]
-	lt := p.resolveLaunchTemplate(context.Background(), reqCtx, ltID, ltName)
-	if lt == nil && (ltID != "" || ltName != "") {
+	var lt *EC2LaunchTemplate
+	if ltID != "" || ltName != "" {
 		// A named template that does not exist is refused rather than skipped (#1469). It
 		// was skipped, so the launch went on without the template and failed — when it
 		// failed — on whatever the template would have supplied, usually the AMI, which
-		// named the wrong cause. The two codes are the ones the authorization decision
-		// defers to the handler for; see [ec2AuthzTemplateData].
-		return nil, "", nil, ec2LaunchTemplateNotFound(ltID, ltName)
+		// named the wrong cause. The codes are the ones the authorization decision defers
+		// to the handler for; see [ec2AuthzTemplateData]. An identifier of the wrong shape
+		// is refused as Malformed before the lookup (#1507).
+		if lt, awsErr = p.requireLaunchTemplate(context.Background(), reqCtx, ltID, ltName); awsErr != nil {
+			return nil, "", nil, awsErr
+		}
 	}
 	if lt != nil {
 		version, awsErr := ec2ResolveTemplateVersion(lt, req.Params["LaunchTemplate.Version"])
@@ -646,6 +649,17 @@ func (p *EC2Plugin) launchInstances(
 		return nil, "", nil, ec2MissingParameter("ImageId")
 	}
 
+	// An ImageId of resolve:ssm:<parameter>, from the request or the template, resolves to
+	// the AMI the parameter holds now (#1506); see ec2_ssm_image.go. It is resolved here,
+	// after the merge and before the AMI's existence is checked, so every rule below holds
+	// the resolved AMI to the same standard as a literal one, and the instance reports the
+	// AMI ID — what DescribeInstances' imageId is — rather than the parameter.
+	resolvedImageID, awsErr := ec2ResolveSSMImageID(context.Background(), p.state, reqCtx, imageID)
+	if awsErr != nil {
+		return nil, "", nil, awsErr
+	}
+	imageID = resolvedImageID
+
 	// And it must be an AMI that exists. Through v0.107.0 substrate launched from any
 	// string beginning "ami-", and from several that did not, so a template naming a
 	// region-specific literal, a placeholder an AI left in, or an AMI that had never
@@ -673,6 +687,13 @@ func (p *EC2Plugin) launchInstances(
 	if awsErr := ec2ImageIDKind.requireResource(imageID, imageFound); awsErr != nil {
 		// The not-found refusal says where an AMI comes from (#1432); the code is unchanged.
 		return nil, "", nil, ec2AMINotFoundHint(awsErr)
+	}
+
+	// An AMI whose architecture the instance type cannot run is refused (#1505); see
+	// [ec2CheckLaunchArchitecture] for what is and is not refused. Fleet and Auto Scaling
+	// launch through this function and inherit the rule.
+	if awsErr := ec2CheckLaunchArchitecture(instanceType, launchedImage.Architecture); awsErr != nil {
+		return nil, "", nil, awsErr
 	}
 
 	// Block device mappings are validated here for two reasons that fix the position
@@ -4891,11 +4912,12 @@ func ec2RegisteredRootDeviceType(params map[string]string) string {
 // aws-marketplace" — because a fresh server holds no image the account owns, and the way
 // AWS's own examples discover one is Owners=amazon. `self` and the caller's account ID
 // select the account's own images; `amazon` selects the bundled catalog's AMIs published
-// under that alias (see [ec2ImageOwnerSelected]); every other value selects nothing
-// substrate holds. An absent Owner.N still answers the account's own images alone, where AWS
-// would add every public image: substrate's reading, kept so an unqualified describe keeps
-// meaning what it meant. `ExecutableBy.N` remains unread. A bundled AMI is also reachable by
-// naming it in ImageId.N.
+// under that alias, and Canonical's account ID its Ubuntu entries (see [ec2ImageOwnerSelected]);
+// every other value selects nothing substrate holds. An absent Owner.N still answers the
+// account's own images alone, where AWS would add every public image: substrate's reading, kept
+// so an unqualified describe keeps meaning what it meant. `ExecutableBy.N` is read as of #1494
+// — see [ec2ImageExecutableSelected] — and narrows alongside Owner.N. A bundled AMI is also
+// reachable by naming it in ImageId.N.
 //
 // It paginates as of #917. API_DescribeImages publishes MaxResults with **no** Valid Range and no
 // Default — only "The maximum number of items to return for this request" — so, per #671, the
@@ -4929,6 +4951,12 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		return nil, err
 	}
 	owners := extractIndexedParams(req.Params, "Owner")
+	executableBy := extractIndexedParams(req.Params, "ExecutableBy")
+	// selected is the two scopes together: an image is answered when Owner.N and ExecutableBy.N
+	// both select it, as two request parameters narrowing one result set do (#1494).
+	selected := func(img EC2Image) bool {
+		return ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) && ec2ImageExecutableSelected(img, executableBy)
+	}
 
 	if err := ec2ImageFilterSpec().check(req.Params); err != nil {
 		return nil, err
@@ -5122,7 +5150,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 		// Apply filters. Every named filter must match — AWS ANDs filters and ORs the
 		// values within one — so the map's iteration order does not affect the outcome.
-		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
+		if !selected(img) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
@@ -5130,17 +5158,19 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 
 	// Owner.N naming an alias the bundled catalog publishes under — "amazon" — lists those
 	// AMIs (#1432), so a caller discovering an image the way AWS's own examples do,
-	// DescribeImages with Owners=amazon and a name filter, finds one on a fresh server. They
-	// are not part of an *unqualified* describe's answer, which keeps reporting what the
-	// account owns, as it did before.
-	if ec2OwnersNameBundledAlias(owners) {
+	// DescribeImages with Owners=amazon and a name filter, finds one on a fresh server. So does
+	// Owner.N naming Canonical's account, the way Ubuntu's own documentation discovers its
+	// images, and ExecutableBy.N=all, which names every public AMI (#1494). They are not part of
+	// an *unqualified* describe's answer, which keeps reporting what the account owns, as it did
+	// before.
+	if ec2OwnersNameBundledPublisher(owners) || containsStr(executableBy, "all") {
 		for _, b := range bundledImages {
 			img := b.image(reqCtx.Region)
 			if listed[img.ImageID] || !ids.match(img.ImageID) {
 				continue
 			}
 			listed[img.ImageID] = true
-			if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
+			if !selected(img) || !ec2ImageMatchesFilters(img, filters) {
 				continue
 			}
 			resp.Images = append(resp.Images, renderImage(img))
@@ -5159,7 +5189,7 @@ func (p *EC2Plugin) describeImages(reqCtx *RequestContext, req *AWSRequest) (*AW
 		// Records the resolution, so unresolved below does not report an AMI that exists.
 		// It cannot return false: the ID came from the request's own list.
 		_ = ids.match(id)
-		if !ec2ImageOwnerSelected(img, owners, reqCtx.AccountID) || !ec2ImageMatchesFilters(img, filters) {
+		if !selected(img) || !ec2ImageMatchesFilters(img, filters) {
 			continue
 		}
 		resp.Images = append(resp.Images, renderImage(img))
@@ -7092,6 +7122,11 @@ func (p *EC2Plugin) createLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "LaunchTemplateName is required", HTTPStatus: http.StatusBadRequest}
 	}
+	// A name outside the published rule is refused before the collision check (#1507). It was
+	// accepted, so a template named "ab" or "my template" was created here and refused on AWS.
+	if !ec2LaunchTemplateNameWellFormed(name) {
+		return nil, ec2LaunchTemplateNameMalformed()
+	}
 	goCtx := context.Background()
 
 	// Check for name collision.
@@ -7351,6 +7386,21 @@ func (p *EC2Plugin) describeLaunchTemplates(ctx *RequestContext, req *AWSRequest
 	}
 	filters := extractEC2Filters(req.Params)
 
+	// Every named identifier's shape is checked before any is looked up — IDs, then names, each
+	// list in request order — so a malformed one is InvalidLaunchTemplateId.Malformed or
+	// InvalidLaunchTemplateName.MalformedException rather than the NotFound it used to share
+	// (#1507). Syntax before existence is the [ec2IDFilter] order.
+	for _, id := range filterIDs {
+		if !ec2LaunchTemplateIDKind.wellFormed(id) {
+			return nil, ec2LaunchTemplateIDMalformed(id)
+		}
+	}
+	for _, name := range filterNames {
+		if !ec2LaunchTemplateNameWellFormed(name) {
+			return nil, ec2LaunchTemplateNameMalformed()
+		}
+	}
+
 	switch {
 	case len(filterIDs) > 0 || len(filterNames) > 0:
 		// Dedup by ID: a request may name the same template by both spellings, and
@@ -7417,11 +7467,11 @@ func (p *EC2Plugin) deleteLaunchTemplate(ctx *RequestContext, req *AWSRequest) (
 	ltID := req.Params["LaunchTemplateId"]
 	ltName := req.Params["LaunchTemplateName"]
 
-	lt := p.resolveLaunchTemplate(goCtx, ctx, ltID, ltName)
-	if lt == nil {
-		// By the identifier the request used: a delete by name answered the ID code
-		// until #1469.
-		return nil, ec2LaunchTemplateNotFound(ltID, ltName)
+	// By the identifier the request used: a delete by name answered the ID code until #1469,
+	// and an identifier of the wrong shape answered NotFound until #1507.
+	lt, awsErr := p.requireLaunchTemplate(goCtx, ctx, ltID, ltName)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	ltKey := ec2LaunchTemplateStateKey(ctx.AccountID, ctx.Region, lt.LaunchTemplateID)

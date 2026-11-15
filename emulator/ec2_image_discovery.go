@@ -14,10 +14,10 @@ package emulator
 // An empty list selects every image the describe walks. Otherwise each value is one of the
 // forms API_DescribeImages publishes: `self` or an account ID matches the image's owning
 // account, and an alias (`amazon`, `aws-marketplace`, `aws-backup-vault`) matches the image's
-// imageOwnerAlias. A bundled AMI has no owning account substrate can name — see
-// [bundledImage.image] — so it is selected by its alias alone, and the two Canonical entries,
-// which carry none, are selected by no owner value: their owner is an account substrate does
-// not model, and naming one here would be an observation nothing backs.
+// imageOwnerAlias. An AWS-published bundled AMI has no owning account substrate can name — see
+// [bundledImage.image] — so it is selected by its alias alone. The four Canonical entries carry
+// no alias and report Canonical's documented account instead ([bundledImage.OwnerID]), so
+// Owner.N naming 099720109477 selects them (#1494); until then no owner value did.
 func ec2ImageOwnerSelected(img EC2Image, owners []string, accountID string) bool {
 	if len(owners) == 0 {
 		return true
@@ -37,14 +37,40 @@ func ec2ImageOwnerSelected(img EC2Image, owners []string, accountID string) bool
 	return false
 }
 
-// ec2OwnersNameBundledAlias reports whether Owner.N names an alias some bundled AMI is
-// published under, which is what makes the catalog part of a describe's answer.
-func ec2OwnersNameBundledAlias(owners []string) bool {
+// ec2OwnersNameBundledPublisher reports whether Owner.N names an alias some bundled AMI is
+// published under, or the account one is published from, which is what makes the catalog part
+// of a describe's answer.
+func ec2OwnersNameBundledPublisher(owners []string) bool {
 	for _, owner := range owners {
 		for _, b := range bundledImages {
-			if b.OwnerAlias != "" && owner == b.OwnerAlias {
+			if (b.OwnerAlias != "" && owner == b.OwnerAlias) || (b.OwnerID != "" && owner == b.OwnerID) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// ec2ImageExecutableSelected reports whether ExecutableBy.N selects img (#1494).
+//
+// API_DescribeImages: "Scopes the images by users with explicit launch permissions. Specify an
+// AWS account ID, self (the sender of the request), or all (public AMIs)." — all returns "all
+// public AMIs", self or the caller's own account ID returns the "AMIs shared with your
+// account", and another account ID "only AMIs shared with that specific AWS account ID".
+//
+// Substrate stores no launch permissions: ModifyImageAttribute is not modeled, so no AMI is ever
+// shared with an account. all therefore selects the public images — the bundled catalog, since
+// a registered AMI is never public — and every account form, self included, selects nothing.
+// An AMI the caller owns is not "shared with" it, which is why self does not select one; the
+// owner's images are what Owner.N=self names. An empty list selects every image, and several
+// values union.
+func ec2ImageExecutableSelected(img EC2Image, executableBy []string) bool {
+	if len(executableBy) == 0 {
+		return true
+	}
+	for _, who := range executableBy {
+		if who == "all" && img.Public {
+			return true
 		}
 	}
 	return false

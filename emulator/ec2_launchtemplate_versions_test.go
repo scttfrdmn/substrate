@@ -145,7 +145,7 @@ func TestEC2_CreateLaunchTemplateVersion_AppendsWithoutChangingDefault(t *testin
 
 	second := createLTVersion(t, ts, map[string]string{
 		"LaunchTemplateId":           ltID,
-		"LaunchTemplateData.ImageId": ec2TestImageArm,
+		"LaunchTemplateData.ImageId": ec2TestImageECS2,
 	})
 	assert.Equal(t, int64(2), second.VersionNumber)
 	assert.False(t, second.DefaultVersion, "a new version must not become the default")
@@ -181,9 +181,9 @@ func TestEC2_CreateLaunchTemplateVersion_SourceVersion(t *testing.T) {
 		v2 := createLTVersion(t, ts, map[string]string{
 			"LaunchTemplateId":           ltID,
 			"SourceVersion":              "1",
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
-		assert.Equal(t, ec2TestImageArm, v2.Data.ImageID, "the request's AMI wins")
+		assert.Equal(t, ec2TestImageECS2, v2.Data.ImageID, "the request's AMI wins")
 		assert.Equal(t, "t3.small", v2.Data.InstanceType, "inherited from version 1")
 		assert.Equal(t, "inherited-key", v2.Data.KeyName, "inherited from version 1")
 	})
@@ -198,9 +198,9 @@ func TestEC2_CreateLaunchTemplateVersion_SourceVersion(t *testing.T) {
 
 		v2 := createLTVersion(t, ts, map[string]string{
 			"LaunchTemplateId":           ltID,
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
-		assert.Equal(t, ec2TestImageArm, v2.Data.ImageID)
+		assert.Equal(t, ec2TestImageECS2, v2.Data.ImageID)
 		assert.Empty(t, v2.Data.InstanceType, "an omitted SourceVersion inherits nothing")
 		assert.Empty(t, v2.Data.KeyName, "an omitted SourceVersion inherits nothing")
 	})
@@ -212,7 +212,7 @@ func TestEC2_CreateLaunchTemplateVersion_SourceVersion(t *testing.T) {
 		})
 		createLTVersion(t, ts, map[string]string{
 			"LaunchTemplateId":                ltID,
-			"LaunchTemplateData.ImageId":      ec2TestImageArm,
+			"LaunchTemplateData.ImageId":      ec2TestImageECS2,
 			"LaunchTemplateData.InstanceType": "t3.large",
 		})
 		v3 := createLTVersion(t, ts, map[string]string{
@@ -220,7 +220,7 @@ func TestEC2_CreateLaunchTemplateVersion_SourceVersion(t *testing.T) {
 			"SourceVersion":              "$Latest",
 			"LaunchTemplateData.KeyName": "k",
 		})
-		assert.Equal(t, ec2TestImageArm, v3.Data.ImageID, "inherited from version 2")
+		assert.Equal(t, ec2TestImageECS2, v3.Data.ImageID, "inherited from version 2")
 		assert.Equal(t, "t3.large", v3.Data.InstanceType)
 	})
 
@@ -233,7 +233,7 @@ func TestEC2_CreateLaunchTemplateVersion_SourceVersion(t *testing.T) {
 			"Action":                     "CreateLaunchTemplateVersion",
 			"LaunchTemplateId":           ltID,
 			"SourceVersion":              "7",
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
 		assert.Equal(t, http.StatusBadRequest, status)
 		assert.Equal(t, "InvalidLaunchTemplateId.VersionNotFound", code)
@@ -256,7 +256,7 @@ func TestEC2_RunInstances_AbsentVersionMeansDefault(t *testing.T) {
 	})
 	createLTVersion(t, ts, map[string]string{
 		"LaunchTemplateId":           ltID,
-		"LaunchTemplateData.ImageId": ec2TestImageArm,
+		"LaunchTemplateData.ImageId": ec2TestImageECS2,
 	})
 	createLTVersion(t, ts, map[string]string{
 		"LaunchTemplateId":           ltID,
@@ -284,7 +284,7 @@ func TestEC2_RunInstances_AbsentVersionMeansDefault(t *testing.T) {
 	assert.Equal(t, int64(3), modified.LaunchTemplate.LatestVersionNum)
 
 	instID = runInstance(t, ts, map[string]string{"LaunchTemplate.LaunchTemplateId": ltID})
-	assert.Equal(t, ec2TestImageArm, describeInstance(t, ts, instID).ImageID,
+	assert.Equal(t, ec2TestImageECS2, describeInstance(t, ts, instID).ImageID,
 		"an absent version must follow the new default (2), not the latest (3)")
 }
 
@@ -297,12 +297,12 @@ func TestEC2_RunInstances_VersionSpecifiers(t *testing.T) {
 		version string
 		wantAMI string
 	}{
-		{name: "absent means the default", version: "", wantAMI: ec2TestImageArm},
-		{name: "$Default", version: "$Default", wantAMI: ec2TestImageArm},
+		{name: "absent means the default", version: "", wantAMI: ec2TestImageECS2},
+		{name: "$Default", version: "$Default", wantAMI: ec2TestImageECS2},
 		{name: "$Latest", version: "$Latest", wantAMI: ec2TestImageMinimal},
 		{name: "lowercase $latest", version: "$latest", wantAMI: ec2TestImageMinimal},
 		{name: "an explicit number", version: "1", wantAMI: ec2TestImage},
-		{name: "the default's own number", version: "2", wantAMI: ec2TestImageArm},
+		{name: "the default's own number", version: "2", wantAMI: ec2TestImageECS2},
 	}
 
 	for _, tt := range tests {
@@ -311,7 +311,7 @@ func TestEC2_RunInstances_VersionSpecifiers(t *testing.T) {
 			ltID := createLaunchTemplate(t, ts, "specifiers", map[string]string{
 				"LaunchTemplateData.ImageId": ec2TestImage,
 			})
-			for _, ami := range []string{ec2TestImageArm, ec2TestImageMinimal} {
+			for _, ami := range []string{ec2TestImageECS2, ec2TestImageMinimal} {
 				createLTVersion(t, ts, map[string]string{
 					"LaunchTemplateId":           ltID,
 					"LaunchTemplateData.ImageId": ami,
@@ -395,7 +395,7 @@ func TestEC2_DescribeLaunchTemplateVersions_Selection(t *testing.T) {
 			"LaunchTemplateData.ImageId": ec2TestImage,
 		})
 		for _, ami := range []string{
-			ec2TestImageArm, ec2TestImageMinimal, ec2TestImageMinimalArm,
+			ec2TestImageECS2, ec2TestImageMinimal, ec2TestImageMinimalArm,
 		} {
 			createLTVersion(t, ts, map[string]string{
 				"LaunchTemplateId":           ltID,
@@ -495,7 +495,7 @@ func TestEC2_DescribeLaunchTemplateVersions_AccountWide(t *testing.T) {
 		// One AMI per template per version, all four distinct, so no assertion below
 		// can pass because two templates happened to hold the same image.
 		images := [][2]string{
-			{ec2TestImage, ec2TestImageArm},
+			{ec2TestImage, ec2TestImageECS2},
 			{ec2TestImageMinimal, ec2TestImageMinimalArm},
 		}
 		for i, name := range []string{"acct-a", "acct-b"} {
@@ -591,7 +591,7 @@ func TestEC2_DeleteLaunchTemplateVersions(t *testing.T) {
 		ltID := createLaunchTemplate(t, ts, "deletes", map[string]string{
 			"LaunchTemplateData.ImageId": ec2TestImage,
 		})
-		for _, ami := range []string{ec2TestImageArm, ec2TestImageMinimal} {
+		for _, ami := range []string{ec2TestImageECS2, ec2TestImageMinimal} {
 			createLTVersion(t, ts, map[string]string{
 				"LaunchTemplateId":           ltID,
 				"LaunchTemplateData.ImageId": ami,
@@ -724,7 +724,7 @@ func TestEC2_LaunchTemplate_PreVersioningStateStillWorks(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	// Exactly the shape createLaunchTemplate wrote before #456: no "versions" key.
-	const acct, region, ltID = "123456789012", "us-east-1", "lt-0legacy00000001"
+	const acct, region, ltID = "123456789012", "us-east-1", "lt-0a1e9ac000000001"
 	legacy := map[string]any{
 		"launchTemplateId":     ltID,
 		"launchTemplateName":   "legacy",
@@ -779,7 +779,7 @@ func TestEC2_LaunchTemplate_PreVersioningStateStillWorks(t *testing.T) {
 		v2 := createLTVersion(t, ts, map[string]string{
 			"LaunchTemplateId":           ltID,
 			"SourceVersion":              "1",
-			"LaunchTemplateData.ImageId": ec2TestImageArm,
+			"LaunchTemplateData.ImageId": ec2TestImageECS2,
 		})
 		assert.Equal(t, int64(2), v2.VersionNumber)
 		assert.Equal(t, "t3.small", v2.Data.InstanceType, "inherited from the synthesized version 1")
@@ -822,7 +822,7 @@ func TestEC2_Fleet_HonorsLaunchTemplateVersion(t *testing.T) {
 	})
 	createLTVersion(t, ts, map[string]string{
 		"LaunchTemplateId":                ltID,
-		"LaunchTemplateData.ImageId":      ec2TestImageArm,
+		"LaunchTemplateData.ImageId":      ec2TestImageECS2,
 		"LaunchTemplateData.InstanceType": "t3.small",
 	})
 
@@ -832,8 +832,8 @@ func TestEC2_Fleet_HonorsLaunchTemplateVersion(t *testing.T) {
 		wantAMI string
 	}{
 		{name: "pinned to version 1", version: "1", wantAMI: ec2TestImage},
-		{name: "pinned to version 2", version: "2", wantAMI: ec2TestImageArm},
-		{name: "$Latest", version: "$Latest", wantAMI: ec2TestImageArm},
+		{name: "pinned to version 2", version: "2", wantAMI: ec2TestImageECS2},
+		{name: "$Latest", version: "$Latest", wantAMI: ec2TestImageECS2},
 		// An absent version follows the default, which is still 1 even though
 		// version 2 exists.
 		{name: "absent means the default", version: "", wantAMI: ec2TestImage},

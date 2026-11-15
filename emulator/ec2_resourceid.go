@@ -332,3 +332,22 @@ func ec2MissingParameter(name string) error {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// ec2LaunchTemplateIDKind is the launch-template ID family (#1507), with both codes verbatim
+// from the error table: InvalidLaunchTemplateId.Malformed ("The ID for the launch template is
+// malformed. Ensure that you specify the launch template ID in the form lt-xxxxxxxxxxxxxxxxx.")
+// and InvalidLaunchTemplateId.NotFound.
+//
+// Its refusals are not the kind's generic [ec2IDKind.malformedError] and
+// [ec2IDKind.notFoundError]: each has an observed wording of its own, so they are built by
+// [ec2LaunchTemplateIDMalformed] and [ec2LaunchTemplateNotFound], which read the codes from
+// here. A launch template can also be named by LaunchTemplateName, a second identifier no
+// other kind has; [ec2LaunchTemplateIdentifierMalformed] checks whichever one a request
+// resolves by.
+//
+// Substrate mints "lt-" and 16 hex characters where AWS mints 17; [ec2IDKind.wellFormed]
+// skips the length check, so a substrate-minted ID stays well formed.
+var ec2LaunchTemplateIDKind = ec2IDKind{
+	Prefix: "lt-", NotFound: "InvalidLaunchTemplateId.NotFound",
+	Malformed: "InvalidLaunchTemplateId.Malformed", Noun: "launch template",
+}

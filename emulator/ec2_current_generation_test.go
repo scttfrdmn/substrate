@@ -45,7 +45,7 @@ type ec2GenerationType struct {
 // one request carries every type and the count below is the catalog's own rather than a page's.
 //
 // The total is asserted as well as the exceptions, because a per-type loop alone would pass
-// against a constant false as readily as against the fix. The total (210 since #1497) is hard-coded rather than
+// against a constant false as readily as against the fix. The total (349 since #1509) is hard-coded rather than
 // derived so that widening the catalog has to come past this test: a family added without a
 // generation decision changes the total and fails here, which is the point of classifying by
 // family name instead of by a p3 special case.
@@ -57,7 +57,7 @@ func TestEC2_CurrentGenerationIsPerFamily(t *testing.T) {
 		Items []ec2GenerationType `xml:"instanceTypeSet>item"`
 	}
 	ec2DescribeXML(t, ts, map[string]string{"Action": "DescribeInstanceTypes"}, &doc)
-	require.Len(t, doc.Items, 210, "the seeded catalog is 210 types across thirty-one families")
+	require.Len(t, doc.Items, 349, "the seeded catalog is 349 types across forty-seven families")
 
 	var previous []string
 	for _, it := range doc.Items {
@@ -69,10 +69,10 @@ func TestEC2_CurrentGenerationIsPerFamily(t *testing.T) {
 		"p3 is the one cataloged family on AWS's previous-generation page, and it has three sizes")
 }
 
-// TestEC2_CurrentGenerationByFamily states the answer for each of the thirty-one cataloged
+// TestEC2_CurrentGenerationByFamily states the answer for each of the forty-seven cataloged
 // families, which is the granularity AWS publishes the property at.
 //
-// Only these thirty-one are asserted, and the fourteen further names in AWS's table are not: a1, c1,
+// Only these forty-seven are asserted, and the fourteen further names in AWS's table are not: a1, c1,
 // c3, c4, g3, i2, m1, m2, m3, m4, p3dn, r3, r4 and t1 are families the catalog does not carry, so
 // DescribeInstanceTypes has nothing to report for them and an assertion would be reading
 // substrate's own copy of the table back to itself. They are transcribed in the source for the
@@ -99,6 +99,10 @@ func TestEC2_CurrentGenerationByFamily(t *testing.T) {
 		"t4g": true, "m6g": true, "m7g": true, "m8g": true, "m9g": true,
 		"c6g": true, "c7g": true, "c8g": true, "c9g": true,
 		"r6g": true, "r7g": true, "r8g": true, "r9g": true,
+		"m6gd": true, "m7gd": true, "m8gd": true, "m9gd": true,
+		"c6gd": true, "c7gd": true, "c8gd": true, "c9gd": true,
+		"r6gd": true, "r7gd": true, "r8gd": true, "r9gd": true,
+		"c6gn": true, "c7gn": true, "c8gn": true, "g5g": true,
 	} {
 		var doc struct {
 			Items []ec2GenerationType `xml:"instanceTypeSet>item"`

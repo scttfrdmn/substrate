@@ -63,12 +63,28 @@ type bundledImage struct {
 
 	// OwnerAlias is the AWS-maintained owner alias the image is published under.
 	//
-	// "amazon" for the AWS-published parameters, and deliberately empty for the two
+	// "amazon" for the AWS-published parameters, and deliberately empty for the four
 	// Canonical Ubuntu entries: the aliases are "defined in an Amazon-maintained list"
 	// of which Canonical is not a member, so aliasing them would be an observation
 	// nothing backs (#750).
 	OwnerAlias string
+
+	// OwnerID is the account the image is published from, rendered as imageOwnerId and
+	// matched by Owner.N and the owner-id filter. It is set only where the publisher
+	// documents the account: Canonical's, 099720109477, which Ubuntu's own "Find Ubuntu
+	// images on AWS" page (documentation.ubuntu.com/aws/aws-how-to/instances/find-ubuntu-images/)
+	// gives as the owner to filter on (`aws ec2 describe-images --owners 099720109477`) and
+	// to verify an AMI's OwnerId against (#1494). That is the commercial partition's account;
+	// substrate does not model GovCloud or China, whose Canonical accounts differ.
+	//
+	// It is empty on the AWS-published entries. Amazon's AMI-owning account varies by
+	// Region and AWS publishes no stable mapping, so the alias is rendered and the account
+	// is left out (#750).
+	OwnerID string
 }
+
+// bundledImageCanonicalOwnerID is Canonical's publishing account; see [bundledImage.OwnerID].
+const bundledImageCanonicalOwnerID = "099720109477"
 
 // Values every bundled image shares, named rather than repeated ten times.
 //
@@ -183,6 +199,7 @@ var bundledImages = []bundledImage{
 		PlatformDetails: "Linux/UNIX",
 		UsageOperation:  "RunInstances",
 		RootDeviceName:  ec2RootDeviceSDA1,
+		OwnerID:         bundledImageCanonicalOwnerID,
 	},
 	{
 		Parameter:       "/aws/service/canonical/ubuntu/server/22.04/stable/current/amd64/hvm/ebs-gp2/ami-id",
@@ -192,6 +209,7 @@ var bundledImages = []bundledImage{
 		PlatformDetails: "Linux/UNIX",
 		UsageOperation:  "RunInstances",
 		RootDeviceName:  ec2RootDeviceSDA1,
+		OwnerID:         bundledImageCanonicalOwnerID,
 	},
 	// The arm64 counterparts of the ECS-optimized and Ubuntu entries above (#1497), so a
 	// Graviton launch that discovers its AMI the documented way has one. The ECS paths are
@@ -227,6 +245,7 @@ var bundledImages = []bundledImage{
 		PlatformDetails: "Linux/UNIX",
 		UsageOperation:  "RunInstances",
 		RootDeviceName:  ec2RootDeviceSDA1,
+		OwnerID:         bundledImageCanonicalOwnerID,
 	},
 	{
 		Parameter:       "/aws/service/canonical/ubuntu/server/22.04/stable/current/arm64/hvm/ebs-gp2/ami-id",
@@ -236,6 +255,7 @@ var bundledImages = []bundledImage{
 		PlatformDetails: "Linux/UNIX",
 		UsageOperation:  "RunInstances",
 		RootDeviceName:  ec2RootDeviceSDA1,
+		OwnerID:         bundledImageCanonicalOwnerID,
 	},
 }
 
@@ -314,9 +334,10 @@ func (b bundledImage) idIn(region string) string {
 
 // image renders the bundled descriptor as the record the rest of the plugin reads.
 //
-// AccountID is deliberately empty. A public AWS-owned AMI is not owned by the caller, and
-// substrate holds no account for the "amazon" owner alias — so attributing it to the
-// requesting account would be a claim nothing backs and would make an Owners=self
+// AccountID is the publisher's documented account ([bundledImage.OwnerID]) — Canonical's,
+// on the Ubuntu entries (#1494) — and otherwise empty. A public AWS-owned AMI is not owned by
+// the caller, and substrate holds no account for the "amazon" owner alias — so attributing it
+// to the requesting account would be a claim nothing backs and would make an Owners=self
 // DescribeImages match an image the caller does not own. DescribeImages renders
 // imageOwnerId omitted rather than empty for exactly that reason (#750); through v0.108.0
 // it rendered an empty element, because the member had no omitempty and this comment
@@ -328,6 +349,7 @@ func (b bundledImage) idIn(region string) string {
 func (b bundledImage) image(region string) EC2Image {
 	return EC2Image{
 		ImageID:                b.idIn(region),
+		AccountID:              b.OwnerID,
 		Name:                   b.Name,
 		Description:            b.Description,
 		State:                  "available",

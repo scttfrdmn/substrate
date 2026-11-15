@@ -80,7 +80,9 @@ func asgFamilyCPUManufacturer(family string) string {
 	case "t3a", "m5a", "c5a", "p5", "g5", "g6", "inf2":
 		return "amd"
 	case "t4g", "m6g", "m7g", "m8g", "m9g", "c6g", "c7g", "c8g", "c9g",
-		"r6g", "r7g", "r8g", "r9g":
+		"r6g", "r7g", "r8g", "r9g",
+		"m6gd", "m7gd", "m8gd", "m9gd", "c6gd", "c7gd", "c8gd", "c9gd",
+		"r6gd", "r7gd", "r8gd", "r9gd", "c6gn", "c7gn", "c8gn", "g5g":
 		return "amazon-web-services"
 	}
 	return ""
@@ -100,13 +102,17 @@ func asgFamilyBurstable(family string) bool {
 }
 
 // asgFamilyHasInstanceStore reports whether a family carries instance store volumes, as the
-// accelerated-computing page's "Instance store specifications" table lists them. The naming
-// convention's `d` option is not used: g5, g6, p5, trn1 and trn2 carry NVMe instance store
-// without it. None of the twenty non-accelerated families in the catalog has any — the
-// Graviton `gd` variants that would are not carried — and p3, inf1 and inf2 are EBS-only.
+// "Instance store specifications" tables of the accelerated-computing, general purpose,
+// compute optimized and memory optimized pages list them. The naming convention's `d` option
+// is not used as the rule: g5, g6, p5, trn1 and trn2 carry NVMe instance store without it.
+// Among the non-accelerated families only the Graviton `gd` variants (#1509) carry any — their
+// tables list NVMe SSD for every size — while the `gn` variants read "Instance store not
+// supported", and p3, inf1, inf2 and g5g are EBS-only.
 func asgFamilyHasInstanceStore(family string) bool {
 	switch family {
-	case "g4dn", "g5", "g6", "p4d", "p4de", "p5", "trn1", "trn2":
+	case "g4dn", "g5", "g6", "p4d", "p4de", "p5", "trn1", "trn2",
+		"m6gd", "m7gd", "m8gd", "m9gd", "c6gd", "c7gd", "c8gd", "c9gd",
+		"r6gd", "r7gd", "r8gd", "r9gd":
 		return true
 	}
 	return false

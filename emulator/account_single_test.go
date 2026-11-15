@@ -39,8 +39,12 @@ import (
 // TestSingleAccount_NoSecondHardcodedAccountInProduction is the tripwire.
 //
 // It parses every non-test Go file in the repository and refuses any string literal
-// carrying an account-shaped run of digits, with exactly one exemption: the
-// declaration of defaultAccountID itself. That is a stronger rule than "no
+// carrying an account-shaped run of digits, with exactly two exemptions: the
+// declaration of defaultAccountID itself, and bundledImageCanonicalOwnerID — Canonical's
+// publishing account, which the bundled Ubuntu AMIs report as their owner (#1494). That
+// one is a third party's account, never the caller's, so it is not a second account the
+// caller could be resolved into; it is exempted by name for the same reason the first
+// is. That is a stronger rule than "no
 // 000000000000" — a second literal 123456789012 would be just as wrong, because the
 // property #734 buys is that the account is resolved in one place and overridable
 // from configuration. A literal anywhere else is a service that cannot be moved.
@@ -89,8 +93,8 @@ func TestSingleAccount_NoSecondHardcodedAccountInProduction(t *testing.T) {
 			return parseErr
 		}
 
-		// The one exemption, identified structurally rather than by file name: the
-		// value of the const named defaultAccountID.
+		// The two exemptions, identified structurally rather than by file name: the
+		// values of the consts named defaultAccountID and bundledImageCanonicalOwnerID.
 		exempt := map[ast.Expr]bool{}
 		rel, relErr := filepath.Rel(root, path)
 		if relErr != nil {
@@ -100,7 +104,7 @@ func TestSingleAccount_NoSecondHardcodedAccountInProduction(t *testing.T) {
 		ast.Inspect(f, func(n ast.Node) bool {
 			if spec, ok := n.(*ast.ValueSpec); ok {
 				for _, name := range spec.Names {
-					if name.Name == "defaultAccountID" {
+					if name.Name == "defaultAccountID" || name.Name == "bundledImageCanonicalOwnerID" {
 						for _, v := range spec.Values {
 							exempt[v] = true
 						}
