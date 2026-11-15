@@ -81,6 +81,12 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::KMS::Key":           (*StackDeployer).updateKMSKey,
 	"AWS::EC2::SecurityGroup": (*StackDeployer).updateEC2SecurityGroup,
 	"AWS::ECS::Service":       (*StackDeployer).updateECSService,
+	// The IAM types (#1545, #1560, #1562); see cfn_resources_v129_iam.go.
+	"AWS::IAM::Role":          (*StackDeployer).updateIAMRole,
+	"AWS::IAM::User":          (*StackDeployer).updateIAMUser,
+	"AWS::IAM::Group":         (*StackDeployer).updateIAMGroup,
+	"AWS::IAM::Policy":        (*StackDeployer).updateIAMPolicy,
+	"AWS::IAM::ManagedPolicy": (*StackDeployer).updateIAMManagedPolicy,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

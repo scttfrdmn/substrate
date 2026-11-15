@@ -181,6 +181,35 @@ func TestIAMWire_UserResponsesCarryNoBookkeepingMember(t *testing.T) {
 	})
 }
 
+// TestIAMWire_InstanceProfileResponsesCarryNoBookkeepingMember covers the profile's EverTagged,
+// which the record declares since GetResources scans instance profiles (#1523).
+func TestIAMWire_InstanceProfileResponsesCarryNoBookkeepingMember(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	srv := newIAMTestServerWithState(t, state)
+
+	const name = "wire-tagged-profile"
+	created := iamFormRaw(t, srv, "CreateInstanceProfile", map[string]string{"InstanceProfileName": name})
+	profile := map[string]string{"InstanceProfileName": name}
+
+	tagged := iamFormRaw(t, srv, "TagInstanceProfile", iamWireWith(profile))
+	require.JSONEq(t, "true", string(iamWireRecord(t, state, "instance_profile:", "/"+name)["ever_tagged"]),
+		"the profile must persist ever_tagged before an absence assertion on it means anything")
+
+	iamWireRun(t, srv, []iamWireCase{
+		{op: "CreateInstanceProfile", held: created, anchor: "<InstanceProfileName>" + name + "</InstanceProfileName>"},
+		{op: "TagInstanceProfile", held: tagged, anchor: "<RequestId>"},
+		{op: "GetInstanceProfile", params: profile, anchor: "<InstanceProfileName>" + name + "</InstanceProfileName>"},
+		{op: "ListInstanceProfiles", anchor: "<InstanceProfileName>" + name + "</InstanceProfileName>"},
+		{op: "ListInstanceProfileTags", params: profile, anchor: "<Key>team</Key>"},
+		{op: "GetAccountAuthorizationDetails", anchor: "<RequestId>"},
+		{op: "UntagInstanceProfile", params: map[string]string{"InstanceProfileName": name, "TagKeys.member.1": "team"},
+			anchor: "<RequestId>"},
+		// Last: it removes the record every case above reads.
+		{op: "DeleteInstanceProfile", params: profile, anchor: "<RequestId>"},
+	})
+}
+
 func TestIAMWire_AccessKeyResponsesCarryNoBookkeepingMember(t *testing.T) {
 	t.Parallel()
 	state := emulator.NewMemoryStateManager()

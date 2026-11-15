@@ -172,6 +172,7 @@ emulator/ec2_types.go	EC2KeyPair	AccountID	accountId
 emulator/ec2_types.go	EC2KeyPair	CreatedAt	createdAt,omitempty
 emulator/ec2_types.go	EC2KeyPair	Region	region
 emulator/ec2_types.go	EC2LaunchTemplate	AccountID	accountID
+emulator/ec2_types.go	EC2LaunchTemplate	EverTagged	ever_tagged,omitempty
 emulator/ec2_types.go	EC2LaunchTemplate	Region	region
 emulator/ec2_types.go	EC2NATGateway	AccountID	account_id
 emulator/ec2_types.go	EC2NATGateway	Region	region
@@ -180,6 +181,7 @@ emulator/ec2_types.go	EC2PlacementGroup	Region	region
 emulator/ec2_types.go	EC2RouteTable	AccountID	account_id
 emulator/ec2_types.go	EC2RouteTable	Region	region
 emulator/ec2_types.go	EC2SecurityGroup	AccountID	account_id
+emulator/ec2_types.go	EC2SecurityGroup	EverTagged	ever_tagged,omitempty
 emulator/ec2_types.go	EC2SecurityGroup	Region	region
 emulator/ec2_types.go	EC2Snapshot	AccountID	account_id
 emulator/ec2_types.go	EC2Snapshot	Region	region
@@ -188,6 +190,7 @@ emulator/ec2_types.go	EC2Subnet	Region	region
 emulator/ec2_types.go	EC2VPC	AccountID	account_id
 emulator/ec2_types.go	EC2VPC	Region	region
 emulator/ec2_types.go	EC2Volume	AccountID	account_id
+emulator/ec2_types.go	EC2Volume	EverTagged	ever_tagged,omitempty
 emulator/ec2_types.go	EC2Volume	Region	region
 emulator/ecr_pull_through.go	ecrValidationSeed	AccountID	accountId,omitempty
 emulator/ecr_pull_through.go	ecrValidationSeed	Region	region,omitempty
@@ -278,6 +281,7 @@ emulator/glue_types.go	GlueTable	AccountID	AccountID
 emulator/glue_types.go	GlueTable	CreatedAt	CreatedAt
 emulator/glue_types.go	GlueTable	Region	Region
 emulator/iam_types.go	IAMAccessKey	AccountID	AccountId,omitempty
+emulator/iam_types.go	IAMInstanceProfile	EverTagged	ever_tagged,omitempty
 emulator/iam_types.go	IAMRole	EverTagged	ever_tagged,omitempty
 emulator/iam_types.go	IAMUser	EverTagged	ever_tagged,omitempty
 emulator/kinesis_plugin.go	kinesisIterator	AccountID	a

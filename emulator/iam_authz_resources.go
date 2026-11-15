@@ -111,6 +111,7 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 	"GetRole":                       {Type: "role", NameParams: []string{"RoleName"}},
 	"DeleteRole":                    {Type: "role", NameParams: []string{"RoleName"}},
 	"UpdateAssumeRolePolicy":        {Type: "role", NameParams: []string{"RoleName"}},
+	"UpdateRole":                    {Type: "role", NameParams: []string{"RoleName"}},
 	"TagRole":                       {Type: "role", NameParams: []string{"RoleName"}},
 	"UntagRole":                     {Type: "role", NameParams: []string{"RoleName"}},
 	"ListRoleTags":                  {Type: "role", NameParams: []string{"RoleName"}},
@@ -141,14 +142,17 @@ var iamAuthzOperationResource = map[string]iamResourceRef{
 
 	// Policies. Only the create carries a name; the rest carry the finished ARN, which
 	// costs no state read and no path lookup.
-	"CreatePolicy":       {Type: "policy", NameParams: []string{"PolicyName"}},
-	"GetPolicy":          {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"DeletePolicy":       {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"GetPolicyVersion":   {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"ListPolicyVersions": {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"TagPolicy":          {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"UntagPolicy":        {Type: "policy", NameParams: []string{"PolicyArn"}},
-	"ListPolicyTags":     {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"CreatePolicy":            {Type: "policy", NameParams: []string{"PolicyName"}},
+	"GetPolicy":               {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"DeletePolicy":            {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"GetPolicyVersion":        {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"ListPolicyVersions":      {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"CreatePolicyVersion":     {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"DeletePolicyVersion":     {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"SetDefaultPolicyVersion": {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"TagPolicy":               {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"UntagPolicy":             {Type: "policy", NameParams: []string{"PolicyArn"}},
+	"ListPolicyTags":          {Type: "policy", NameParams: []string{"PolicyArn"}},
 
 	// Instance profiles. AddRoleToInstanceProfile carries a RoleName too, and AWS still
 	// publishes only `instance-profile` for it — the profile is the resource a policy

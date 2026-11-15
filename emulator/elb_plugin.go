@@ -17,6 +17,10 @@ type ELBPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// registry is how a classic load balancer's create reads its subnets' VPC and its security
+	// groups from EC2 (#1421); nil for an embedder that did not pass one, which derives nothing.
+	registry *PluginRegistry
 }
 
 // Name returns the service name "elasticloadbalancing".
@@ -31,6 +35,7 @@ func (p *ELBPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
+	p.registry, _ = cfg.Options["registry"].(*PluginRegistry)
 	return nil
 }
 

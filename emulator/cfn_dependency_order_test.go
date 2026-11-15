@@ -144,14 +144,16 @@ func TestCFN_DeleteOrderIsTheReverseOfTheDependencyOrder(t *testing.T) {
 // TestCFN_IAMPolicyGetAttResolvesAfterItsTarget is #1153's remaining criterion and #1420's third:
 // an AWS::IAM::Policy whose PolicyDocument names a queue by Fn::GetAtt stores the queue's ARN.
 //
-// AWS::IAM::Policy is the one type at priority 0, so it deployed before every other resource and
+// AWS::IAM::Policy was the one type at priority 0, so it deployed before every other resource and
 // the GetAtt found nothing — the stored Resource was the literal "Data.Arn". Read back through
-// GetPolicyVersion over the registry, the way a caller would, with no Fn:: key anywhere.
+// GetRolePolicy over the registry, the way a caller would, with no Fn:: key anywhere.
 func TestCFN_IAMPolicyGetAttResolvesAfterItsTarget(t *testing.T) {
 	const tmpl = `{"Resources":{
 		"Data":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"cfn-doc-getatt"}},
+		"Reader":{"Type":"AWS::IAM::Role","Properties":{"RoleName":"queue-reader",
+			"AssumeRolePolicyDocument":{"Version":"2012-10-17","Statement":[]}}},
 		"ReadData":{"Type":"AWS::IAM::Policy","Properties":{
-			"PolicyName":"read-the-queue",
+			"PolicyName":"read-the-queue","Roles":[{"Ref":"Reader"}],
 			"PolicyDocument":{"Version":"2012-10-17","Statement":[{
 				"Effect":"Allow","Action":"sqs:ReceiveMessage",
 				"Resource":{"Fn::GetAtt":["Data","Arn"]}}]}}}}}`
@@ -160,12 +162,13 @@ func TestCFN_IAMPolicyGetAttResolvesAfterItsTarget(t *testing.T) {
 	require.NoError(t, err)
 	requireNoResourceErrors(t, result)
 
+	// Read back through GetRolePolicy: the type is an inline policy on its role (#1562).
 	body := cfnDocRoute(t, registry, &emulator.AWSRequest{
-		Service: "iam", Operation: "GetPolicyVersion",
-		Body: []byte(`{"PolicyArn":"arn:aws:iam::123456789012:policy/read-the-queue","VersionId":"v1"}`),
+		Service: "iam", Operation: "GetRolePolicy",
+		Body: []byte(`{"RoleName":"queue-reader","PolicyName":"read-the-queue"}`),
 	})
 	var out struct {
-		Document string `xml:"GetPolicyVersionResult>PolicyVersion>Document"`
+		Document string `xml:"GetRolePolicyResult>PolicyDocument"`
 	}
 	require.NoError(t, xml.Unmarshal(body, &out), string(body))
 	doc, err := url.QueryUnescape(out.Document)

@@ -125,10 +125,18 @@ func TestDeployStack_IAMPolicy(t *testing.T) {
 	const tmpl = `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
+			"MyRole": {
+				"Type": "AWS::IAM::Role",
+				"Properties": {
+					"RoleName": "MyPolicyRole",
+					"AssumeRolePolicyDocument": {"Version": "2012-10-17", "Statement": []}
+				}
+			},
 			"MyPolicy": {
 				"Type": "AWS::IAM::Policy",
 				"Properties": {
 					"PolicyName": "MyTestPolicy",
+					"Roles": [{"Ref": "MyRole"}],
 					"PolicyDocument": {
 						"Version": "2012-10-17",
 						"Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]
@@ -140,14 +148,20 @@ func TestDeployStack_IAMPolicy(t *testing.T) {
 
 	result, err := client.Deploy(ctx, tmpl, emulator.Intent{})
 	require.NoError(t, err)
-	require.Len(t, result.Resources, 1)
+	require.Len(t, result.Resources, 2)
 
-	res := result.Resources[0]
-	assert.Equal(t, "MyPolicy", res.LogicalID)
+	var res emulator.DeployedResource
+	for _, r := range result.Resources {
+		if r.LogicalID == "MyPolicy" {
+			res = r
+		}
+	}
 	assert.Equal(t, "AWS::IAM::Policy", res.Type)
-	assert.Equal(t, "MyTestPolicy", res.PhysicalID)
 	assert.Empty(t, res.Error, "policy should deploy without error")
-	assert.NotEmpty(t, res.ARN, "policy ARN should be populated")
+	// An inline policy has a generated physical ID and no ARN of its own (#1562).
+	assert.NotEqual(t, "MyTestPolicy", res.PhysicalID)
+	assert.NotEmpty(t, res.PhysicalID)
+	assert.Empty(t, res.ARN, "an inline policy has no ARN")
 }
 
 func TestDeployStack_MultipleResources(t *testing.T) {
@@ -173,6 +187,7 @@ func TestDeployStack_MultipleResources(t *testing.T) {
 				"Type": "AWS::IAM::Policy",
 				"Properties": {
 					"PolicyName": "AppPolicy",
+					"Roles": [{"Ref": "AppRole"}],
 					"PolicyDocument": {"Version": "2012-10-17", "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}]}
 				}
 			}

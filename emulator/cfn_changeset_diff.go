@@ -81,6 +81,10 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::DynamoDB::Table":  {"ImportSourceSpecification": "Always", "TableName": "Always"},
 	"AWS::IAM::Role":        {"Path": "Always", "RoleName": "Always"},
 	"AWS::Lambda::Function": {"DurableConfig": "Always", "FunctionName": "Always", "PackageType": "Always", "TenancyConfig": "Always"},
+	// The IAM types v0.129.0 gives an update path (#1545, #1560), each from its own page.
+	"AWS::IAM::User":          {"UserName": "Always"},
+	"AWS::IAM::Group":         {"GroupName": "Always"},
+	"AWS::IAM::ManagedPolicy": {"Description": "Always", "ManagedPolicyName": "Always", "Path": "Always"},
 	// From the "Example change sets" page's own sample, which reports these two.
 	"AWS::EC2::Instance": {"KeyName": "Always", "InstanceType": "Conditionally"},
 	// The types #1427 and #1428 give an update path, whose replacement decision reads this

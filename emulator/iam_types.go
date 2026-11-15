@@ -112,6 +112,35 @@ type IAMPolicy struct {
 	// `Tags.member.N`, max 50, `Required: No`. A record written before #796 has none, which
 	// reads back as an untagged policy — the same thing an untagged policy is.
 	Tags []IAMTag `json:"Tags,omitempty"`
+
+	// Versions holds every version of the policy once CreatePolicyVersion has given it a
+	// second (#1560), in creation order. Nil means the policy has exactly the one version
+	// CreatePolicy made, held in Document and DocumentText under DefaultVersionID — which is
+	// every record written before #1560 and every policy no version was ever added to. When it
+	// is set it is authoritative, and Document, DocumentText and DefaultVersionID mirror its
+	// default member, so the evaluator, which reads Document, needs no version awareness.
+	Versions []IAMPolicyVersionRecord `json:"Versions,omitempty"`
+
+	// LastVersionNumber is the highest version number the policy has ever had, so a version
+	// created after one was deleted takes the next number rather than reusing the deleted
+	// one. Zero on a record written before #1560, where it is read off DefaultVersionID.
+	LastVersionNumber int `json:"LastVersionNumber,omitempty"`
+}
+
+// IAMPolicyVersionRecord is one stored version of a customer managed policy (#1560).
+type IAMPolicyVersionRecord struct {
+	// VersionID is the version's identifier, "v1", "v2" and so on.
+	VersionID string `json:"VersionId"`
+
+	// Document is the version's document parsed, for evaluation once it is the default.
+	Document PolicyDocument `json:"Document"`
+
+	// DocumentText is the document exactly as CreatePolicy or CreatePolicyVersion received it,
+	// which is what GetPolicyVersion serves (#1452).
+	DocumentText string `json:"DocumentText,omitempty"`
+
+	// CreateDate is when the version was created.
+	CreateDate time.Time `json:"CreateDate"`
 }
 
 // IAMAccessKey represents an AWS IAM access key credential.
@@ -455,4 +484,8 @@ type IAMInstanceProfile struct {
 	// documents as `Tags.member.N`, max 50, `Required: No`. A record written before #796 has
 	// none, which reads back as an untagged profile — the same thing an untagged profile is.
 	Tags []IAMTag `json:"Tags,omitempty"`
+
+	// EverTagged records that this profile has carried a tag; see [taggingEverTagged]. It is read
+	// since the Resource Groups Tagging API scans instance profiles (#1523).
+	EverTagged bool `json:"ever_tagged,omitempty"`
 }

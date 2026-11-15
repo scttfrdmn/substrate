@@ -206,7 +206,7 @@ func RegisterDefaultPlugins(
 		{&EC2Plugin{}, "ec2", ec2Opts},
 		{&S3Plugin{}, "s3", registryOpt},
 		{&CloudFormationPlugin{}, "cloudformation", cfnOpts},
-		{&ELBPlugin{}, "elb", nil},
+		{&ELBPlugin{}, "elb", registryOpt},
 		{&Route53Plugin{}, "route53", nil},
 		{&TaggingPlugin{}, "tagging", nil},
 		{&SNSPlugin{}, "sns", registryOpt},
