@@ -539,3 +539,57 @@ func TestAutoScaling_WeightsAreStoredCanonically(t *testing.T) {
 	assert.NotContains(t, string(body), "007")
 	assert.Len(t, e.group("c").Instances, 1, "one 4-unit m5.large")
 }
+
+// TestAutoScaling_GravitonVCPUPool is #1502's repro on #1497's Graviton catalog, the
+// aws-elastic-globus-compute pool: a vcpu group on the ECS-optimized AL2023 arm64 AMI, selecting
+// amazon-web-services types by attribute, all Spot. Six vCPUs are three 2-vCPU c7g.large, and a
+// decrementing terminate takes desired down by two.
+func TestAutoScaling_GravitonVCPUPool(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	const lt = "graviton-lt"
+	e.ec2XML("CreateLaunchTemplate", map[string]string{
+		"LaunchTemplateName": lt,
+		"LaunchTemplateData.ImageId": emulator.BundledImageID("us-east-1",
+			"/aws/service/ecs/optimized-ami/amazon-linux-2023/arm64/recommended/image_id"),
+	}, nil)
+	const (
+		ir  = asgMIP + "LaunchTemplate.Overrides.member.1.InstanceRequirements."
+		dst = asgMIP + "InstancesDistribution."
+	)
+	e.mustASG("CreateAutoScalingGroup", map[string]string{
+		"AutoScalingGroupName": "g", "DesiredCapacityType": "vcpu",
+		"MinSize": "0", "MaxSize": "32", "DesiredCapacity": "0", "VPCZoneIdentifier": e.subnetA,
+		asgMIP + "LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName": lt,
+		ir + "VCpuCount.Min":                        "2",
+		ir + "VCpuCount.Max":                        "16",
+		ir + "MemoryMiB.Min":                        "4096",
+		ir + "CpuManufacturers.member.1":            "amazon-web-services",
+		ir + "BurstablePerformance":                 "excluded",
+		ir + "AllowedInstanceTypes.member.1":        "c8g.*",
+		ir + "AllowedInstanceTypes.member.2":        "m8g.*",
+		ir + "AllowedInstanceTypes.member.3":        "c7g.*",
+		ir + "AllowedInstanceTypes.member.4":        "m7g.*",
+		dst + "OnDemandPercentageAboveBaseCapacity": "0",
+		dst + "SpotAllocationStrategy":              "price-capacity-optimized",
+	})
+	e.mustASG("SetDesiredCapacity", map[string]string{"AutoScalingGroupName": "g", "DesiredCapacity": "6"})
+
+	g := e.group("g")
+	assert.Equal(t, 6, g.Desired)
+	require.Len(t, g.Instances, 3, "AWS launches enough instances to reach 6 vCPUs: 3 x 2-vCPU")
+	for _, inst := range g.Instances {
+		assert.Equal(t, "c7g.large", inst.InstanceType)
+		assert.Equal(t, "2", inst.Weighted)
+	}
+	for _, inst := range e.ec2GroupInstances("g") {
+		assert.Equal(t, "spot", inst.Lifecycle, "OnDemandPercentageAboveBaseCapacity 0 is all Spot")
+	}
+
+	e.mustASG("TerminateInstanceInAutoScalingGroup", map[string]string{
+		"InstanceId": g.Instances[0].InstanceID, "ShouldDecrementDesiredCapacity": "true",
+	})
+	g = e.group("g")
+	assert.Equal(t, 4, g.Desired, "desired drops by the instance's 2 vCPUs")
+	assert.Len(t, g.Instances, 2)
+}
