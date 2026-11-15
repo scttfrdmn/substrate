@@ -50,7 +50,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DescribeLaunchTemplates` with a name or ID that does not exist is an error, not an empty list. A launch-template operation naming a missing template by name answers `InvalidLaunchTemplateName.NotFoundException` instead of `InvalidLaunchTemplateId.NotFound`, and the messages changed. `RunInstances` with a missing template answers that code instead of `MissingParameter`, and `CreateFleet`'s missing-template messages changed (its codes did not).
   - `DescribeLaunchTemplateVersions` omits empty list elements, and an interface's unstated `deleteOnTermination`, that it used to emit. Code reading `NetworkInterfaces` (and the other lists) must treat absence as empty.
   - Every instance carries a `metadataOptions` element.
-  - The routed-operation catalog grows from 1,088 to 1,089.
+  - The routed-operation catalog grows by one, `ModifyInstanceMetadataOptions` (1,090 to 1,091 after #1498).
 
 ## [v0.126.0] - 2026-11-14
 
