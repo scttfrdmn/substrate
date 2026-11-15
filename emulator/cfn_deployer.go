@@ -598,6 +598,13 @@ type cfnContext struct {
 	// observable a plugin's own refusal already produces (#519), rather than
 	// failing the whole Deploy call and needing #502's typed errors first.
 	failures []string
+
+	// priorPhysicalID is the physical ID the previous deployment recorded for the
+	// resource being deployed, or "" on its first create. deployResource sets it for
+	// each resource, so a create helper can tell a replacement from a first create
+	// without drawing from the deployment's mint — a CloudFront distribution's
+	// CallerReference is derived from it (#1116; see cfnDistributionCallerReference).
+	priorPhysicalID string
 }
 
 // fail records a resolution failure against the resource being deployed.
@@ -2860,6 +2867,10 @@ func (d *StackDeployer) deployResource(
 	// after every resource. Outputs are resolved after the last resource and are
 	// not attributable to one, so their failures are dropped here deliberately.
 	cctx.takeFailures()
+	cctx.priorPhysicalID = ""
+	if plan.hasPrior {
+		cctx.priorPhysicalID = plan.prior.PhysicalID
+	}
 
 	var (
 		dr   DeployedResource

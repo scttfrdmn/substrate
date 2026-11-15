@@ -92,6 +92,8 @@ func TestOmicsPlugin_StartGetDeleteRun(t *testing.T) {
 		"workflowType": "PRIVATE",
 		"name":         "my-run",
 		"roleArn":      "arn:aws:iam::123456789012:role/OmicsRole",
+		"outputUri":    "s3://omics-out/my-run",
+		"requestId":    "my-run",
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("startRun: expected 201, got %d; body: %s", resp.StatusCode, omicsBody(t, resp))
@@ -156,6 +158,8 @@ func TestOmicsPlugin_ListRuns(t *testing.T) {
 		r := omicsRequest(t, ts, http.MethodPost, "/run", map[string]string{
 			"workflowId": "wf-1",
 			"roleArn":    "arn:aws:iam::123456789012:role/R",
+			"outputUri":  "s3://omics-out/list",
+			"requestId":  "list-" + string(rune('a'+i)),
 		})
 		omicsBody(t, r)
 	}

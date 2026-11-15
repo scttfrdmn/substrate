@@ -295,7 +295,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 				const host, signing = "cloudfront.amazonaws.com", "cloudfront"
 				created := pluginClockREST(t, ts, host, signing, "/2020-05-31/distribution",
 					"application/xml",
-					`<DistributionConfig><Comment>clock</Comment><Enabled>true</Enabled></DistributionConfig>`,
+					`<DistributionConfig><CallerReference>clock</CallerReference><Comment>clock</Comment><Enabled>true</Enabled></DistributionConfig>`,
 					http.StatusCreated)
 				var dist struct {
 					ID string `xml:"Id"`

@@ -27,9 +27,15 @@ func setupCloudFrontPlugin(t *testing.T) (*emulator.CloudFrontPlugin, *emulator.
 	return p, &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
 }
 
-const cfDistributionConfigXML = `<DistributionConfig><Comment>` + cfTestComment + `</Comment><Enabled>true</Enabled></DistributionConfig>`
+// cfTestConfigXML is the smallest DistributionConfig CreateDistribution accepts: the CallerReference
+// it requires (#1116), cfTestComment and Enabled. Each create in one account needs its own ref,
+// because a reused one is DistributionAlreadyExists.
+func cfTestConfigXML(ref string) string {
+	return `<DistributionConfig><CallerReference>` + ref + `</CallerReference><Comment>` + cfTestComment +
+		`</Comment><Enabled>true</Enabled></DistributionConfig>`
+}
 
-// cfTestComment is the comment cfDistributionConfigXML creates a distribution with.
+// cfTestComment is the comment cfTestConfigXML creates a distribution with.
 const cfTestComment = "test distribution"
 
 func cfRequest(method, path string, params map[string]string, body string) *emulator.AWSRequest {
@@ -46,10 +52,10 @@ func cfRequest(method, path string, params map[string]string, body string) *emul
 	}
 }
 
-// createTestDistribution creates a distribution and returns its ID.
-func createTestDistribution(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emulator.RequestContext) string {
+// createTestDistribution creates a distribution under CallerReference ref and returns its ID.
+func createTestDistribution(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emulator.RequestContext, ref string) string {
 	t.Helper()
-	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodPost, "/2020-05-31/distribution", nil, cfDistributionConfigXML))
+	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodPost, "/2020-05-31/distribution", nil, cfTestConfigXML(ref)))
 	if err != nil {
 		t.Fatalf("CreateDistribution: %v", err)
 	}
@@ -77,7 +83,7 @@ func createTestDistribution(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emu
 func TestCloudFrontPlugin_CreateAndGetDistribution(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	// Verify ID format: E followed by 13 uppercase alphanumeric chars.
 	if len(distID) != 14 {
@@ -130,8 +136,8 @@ func TestCloudFrontPlugin_ListDistributions(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
 	// Create 2 distributions.
-	id1 := createTestDistribution(t, p, ctx)
-	id2 := createTestDistribution(t, p, ctx)
+	id1 := createTestDistribution(t, p, ctx, "list-1")
+	id2 := createTestDistribution(t, p, ctx, "list-2")
 
 	if id1 == id2 {
 		t.Errorf("expected unique distribution IDs, got duplicate %q", id1)
@@ -173,7 +179,7 @@ func TestCloudFrontPlugin_ListDistributions(t *testing.T) {
 func TestCloudFrontPlugin_CreateInvalidation(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	invalidationBody := `<InvalidationBatch><Paths><Quantity>1</Quantity><Items><Path>/*</Path></Items></Paths><CallerReference>ref-1</CallerReference></InvalidationBatch>`
 	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodPost, "/2020-05-31/distribution/"+distID+"/invalidation", nil, invalidationBody))
@@ -208,7 +214,7 @@ func TestCloudFrontPlugin_CreateInvalidation(t *testing.T) {
 func TestCloudFrontPlugin_DeleteDistribution(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	// Delete distribution: API_DeleteDistribution requires it disabled first, and the If-Match is
 	// the ETag the disable answered (#1271).
@@ -239,7 +245,7 @@ func TestCloudFrontPlugin_DeleteDistribution(t *testing.T) {
 
 func TestCloudFrontPlugin_UpdateDistribution(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	// Read-modify-write, the procedure API_UpdateDistribution publishes: the configuration and its
 	// ETag from GetDistributionConfig, one member changed, the rest sent back as read (#1271).
@@ -289,7 +295,7 @@ func cfDisableDistribution(t *testing.T, p *emulator.CloudFrontPlugin, ctx *emul
 
 func TestCloudFrontPlugin_TagAndListTags(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	arn := "arn:aws:cloudfront::123456789012:distribution/" + distID
 
@@ -329,7 +335,7 @@ func TestCloudFrontPlugin_TagAndListTags(t *testing.T) {
 func TestCloudFrontPlugin_GetDistributionConfig(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
-	distID := createTestDistribution(t, p, ctx)
+	distID := createTestDistribution(t, p, ctx, "test-1")
 
 	// Get distribution config via GET /2020-05-31/distribution/{id}/config.
 	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodGet, "/2020-05-31/distribution/"+distID+"/config", nil, ""))
@@ -370,7 +376,7 @@ func TestCloudFront_Invalidation_GetAndList(t *testing.T) {
 	p, ctx := setupCloudFrontPlugin(t)
 
 	// Create distribution.
-	resp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution", nil, cfDistributionConfigXML))
+	resp, err := p.HandleRequest(ctx, cfRequest("POST", "/2020-05-31/distribution", nil, cfTestConfigXML("get-and-list")))
 	if err != nil {
 		t.Fatalf("CreateDistribution: %v", err)
 	}

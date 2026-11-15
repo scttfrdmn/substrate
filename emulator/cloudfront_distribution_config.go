@@ -48,8 +48,9 @@ import (
 // # What is not enforced, and why
 //
 // API_DistributionConfig marks five members Required: Yes — CallerReference, Comment,
-// DefaultCacheBehavior, Enabled and Origins. CreateDistribution does not enforce them (it never has;
-// that is #1197's class), so a distribution substrate holds may lack Origins or DefaultCacheBehavior.
+// DefaultCacheBehavior, Enabled and Origins. CreateDistribution enforces CallerReference since #1116
+// (cloudfront_caller_reference.go) and not the others (it never has; that is #1197's class), so a
+// distribution substrate holds may lack Origins or DefaultCacheBehavior.
 // Refusing those on update alone would make a distribution substrate itself created un-updatable,
 // which is worse than either consistent answer. The update therefore enforces Comment and Enabled —
 // the two scalars it must have to replace the record's own values, and which every caller sends —

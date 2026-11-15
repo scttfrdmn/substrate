@@ -20307,13 +20307,13 @@ Kinesis shard: $0.015 per shard-hour. PUT payload: $0.014 per million 25KB units
 
 | Operation | Notes |
 |-----------|-------|
-| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277). An empty body is `MissingBody`/400, and one holding no readable `DistributionConfig` is `InvalidArgument`/400 — see [The `WithTags` query key selects an operation](#the-withtags-query-key-selects-an-operation) |
-| CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`, whose nested `DistributionConfig` is applied exactly as `CreateDistribution` applies it and whose `Tags` are stored on the distribution. The same refusals (#1133) |
-| GetDistribution | Answers the `ETag` header (#1271). Observes the seeded `Status` window — see [A distribution reports InProgress for a seeded window](#a-distribution-reports-inprogress-for-a-seeded-window) (#1381) |
+| CreateDistribution | Distribution IDs: `E{13-char upper alphanum}`, derived from the request ID (#1277). An empty body is `MissingBody`/400, and one holding no readable `DistributionConfig` is `InvalidArgument`/400 — see [The `WithTags` query key selects an operation](#the-withtags-query-key-selects-an-operation). `CallerReference` is required, and a reused one is `DistributionAlreadyExists`/409 — see [A CallerReference is used once](#a-callerreference-is-used-once) (#1116). Answers the whole `Distribution` (#1115) |
+| CreateDistributionWithTags | Same path as `CreateDistribution` with `?WithTags`; body is a `<DistributionConfigWithTags>`, whose nested `DistributionConfig` is applied exactly as `CreateDistribution` applies it and whose `Tags` are stored on the distribution. The same refusals (#1133, #1116) |
+| GetDistribution | Answers the `ETag` header (#1271) and the `Distribution` members — see [A configuration is not a distribution](#a-configuration-is-not-a-distribution) (#1115). Observes the seeded `Status` window — see [A distribution reports InProgress for a seeded window](#a-distribution-reports-inprogress-for-a-seeded-window) (#1381) |
 | GetDistributionConfig | Answers the configuration the create or last update sent, with what `CreateDistribution` defaults filled in, and the `ETag` header — see [An update replaces the configuration](#an-update-replaces-the-configuration) |
 | UpdateDistribution | Shares the `/config` path with `GetDistributionConfig`, told apart by the verb. Replaces the configuration; requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412); refuses `MissingBody`, `IllegalUpdate` and `InvalidArgument`/400 one member per call (#1271) |
-| DeleteDistribution | Requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412) and a disabled distribution (`DistributionNotDisabled`/409) (#1271) |
-| ListDistributions | Each distribution it reports spends one observation of its own seeded `Status` window (#1381) |
+| DeleteDistribution | Requires `If-Match` (`InvalidIfMatchVersion`/400, `PreconditionFailed`/412) and a disabled distribution (`DistributionNotDisabled`/409) (#1271). Releases the distribution's `CallerReference` (#1116) |
+| ListDistributions | Each `DistributionSummary` copies its configuration members from the stored configuration and answers `LastModifiedTime` and `ETag` (#1115). Each distribution it reports spends one observation of its own seeded `Status` window (#1381) |
 | CreateInvalidation | Keeps and answers the `InvalidationBatch`; a resubmitted batch returns the first invalidation (#1360) |
 | GetInvalidation | `NoSuchDistribution` and `NoSuchInvalidation` are both published and name different absences (#1091) |
 | ListInvalidations | Refuses a distribution that does not exist rather than answering an empty list (#1091) |
@@ -20419,13 +20419,43 @@ Since #1271 the configuration is the document the create or the last update sent
 section), and `Comment` and `Enabled` are always among its members: both are `Required: Yes` and
 rendered unconditionally by the Response Syntax.
 
+**The `Distribution` side.** `API_Distribution` marks seven members `Required: Yes` — `ARN`,
+`DistributionConfig`, `DomainName`, `Id`, `InProgressInvalidationBatches`, `LastModifiedTime` and
+`Status` — and `CreateDistribution`, `GetDistribution` and `UpdateDistribution` answer all seven,
+through one renderer ([#1115](https://github.com/scttfrdmn/substrate/issues/1115)). Until #1115 there
+were two renderers with two member sets. `GetDistribution` and `UpdateDistribution` answered `Comment`
+and `Enabled` beside `Id`, one level too high, and no `DistributionConfig` or
+`InProgressInvalidationBatches`. `CreateDistribution` answered four members, not even
+`LastModifiedTime`. `Comment` and `Enabled` now appear only inside the nested `DistributionConfig`,
+which is the stored configuration exactly as `GetDistributionConfig` answers it, so the two documents
+cannot disagree about it. `InProgressInvalidationBatches` is always 0: Substrate completes an
+invalidation when it creates one (there is no edge cache to purge), so none is ever in progress. A
+seeded `InProgress` window for invalidations is
+[#1581](https://github.com/scttfrdmn/substrate/issues/1581). The three optional members
+(`ActiveTrustedKeyGroups`, `ActiveTrustedSigners`, `AliasICPRecordals`) are absent: they report
+signer and ICP-recordal state Substrate does not model.
+
+`ListDistributions`' `DistributionSummary` answers its six distribution members (`Id`, `ARN`,
+`ETag`, `Status`, `LastModifiedTime`, `DomainName`) and copies each configuration member it publishes
+from the stored configuration, in the summary's order. `Aliases`, `Comment` and `Enabled` are always
+present. The summary's other eleven `Required: Yes` configuration members (`Origins`,
+`DefaultCacheBehavior`, `CacheBehaviors`, `CustomErrorResponses`, `PriceClass`,
+`ViewerCertificate`, `Restrictions`, `WebACLId`, `HttpVersion`, `IsIPV6Enabled`, `Staging`) are
+answered when the configuration carries them and absent when it does not, for the reason below.
+Until #1115 a summary answered six members, and `Comment` only when it was non-empty. A stored
+configuration that does not parse falls back to the record's own `Comment` and `Enabled` and is
+logged, rather than failing the list. Every summary is built before any seeded `Status` observation
+is spent, so nothing about a summary can consume a countdown for a list that then fails.
+
 **Two divergences remain, and are deliberate.**
 
 `DistributionConfig` marks five members `Required: Yes` — `CallerReference`, `Comment`,
-`DefaultCacheBehavior`, `Enabled` and `Origins` — and `CreateDistribution` does not require them, as
-it never has (#1197's class). A distribution created without `Origins`, `DefaultCacheBehavior` or a
-`CallerReference` answers a configuration without them: substrate holds no value for them, and
-inventing one would assert a shape AWS has not published.
+`DefaultCacheBehavior`, `Enabled` and `Origins` — and `CreateDistribution` requires `CallerReference`
+(since #1116) but not `Origins` or `DefaultCacheBehavior`, as it never has (#1197's class). So three
+of the five are always answered. A distribution created without `Origins` or `DefaultCacheBehavior`
+answers a configuration without them: Substrate holds no value for them, and inventing one would
+assert a shape AWS has not published. A record written before #1116 may also lack
+`CallerReference`.
 
 `API_GetDistributionConfig` publishes, on its `Id` parameter: *"The distribution's ID. If the ID is
 empty, an empty distribution configuration is returned."* An empty ID is reachable — the path
@@ -20438,6 +20468,57 @@ true; it is simply not what AWS says for this one input.
 A path ending in a bare slash is *not* that case. `/2020-05-31/distribution/` has its trailing
 slash trimmed before routing, so it is `ListDistributions` — not a `GetDistribution` with an empty
 ID, which is the natural reading of the routing arithmetic and is wrong.
+
+`DistributionList`'s `Marker` and `MaxItems` are `Required: Yes` and are not rendered: Substrate
+paginates no list of distributions, and the page publishes no default page size to report (#1568).
+
+### A CallerReference is used once
+
+`API_DistributionConfig` describes `CallerReference` as a behaviour: *"A unique value … that ensures
+that the request can't be replayed. If the value of `CallerReference` is new (regardless of the
+content of the `DistributionConfig` object), CloudFront creates a new distribution. If
+`CallerReference` is a value that you already sent in a previous request to create a distribution,
+CloudFront returns a `DistributionAlreadyExists` error."* Until
+[#1116](https://github.com/scttfrdmn/substrate/issues/1116) neither create read the member, so a
+create without one was answered 201 and a replayed create minted a second distribution.
+
+| Create | Code | Status |
+|--------|------|--------|
+| no `CallerReference`, or a blank one | `InvalidArgument` | 400 |
+| a `CallerReference` one of the account's distributions was created with | `DistributionAlreadyExists` | 409 |
+
+Both creates answer both. The refusal of a reused reference holds whatever the configuration says,
+an identical one included: the page states the refusal "regardless of the content", and unlike
+`InvalidationBatch` and `CloudFrontOriginAccessIdentityConfig`, whose pages do describe an identical
+retry returning the original, `DistributionConfig` publishes no such case. A caller retrying a create
+whose answer it lost should list to find the distribution. The `DistributionAlreadyExists` message is
+the code's published description. `InvalidArgument` is the code the page publishes for "An argument
+is invalid", and its message is Substrate's own.
+
+A reference belongs to the account that created the distribution. **Deleting the distribution
+releases it**, so a later create may reuse it; disabling does not. AWS publishes nothing on the
+point, so that reading is Substrate's. The reference is kept in the stored configuration, which
+`GetDistributionConfig` answers back, and in a per-account index entry naming the distribution that
+holds it. A create reads that one entry, and a delete removes it. An entry counts only when the
+distribution it names exists and still holds the reference. So an entry a half-finished delete left
+behind, or a record that cannot be read (which is logged), never refuses a create.
+
+A distribution created before #1116 may hold no reference, and an update may give it one. One
+another distribution holds is `IllegalUpdate`/400, because `DistributionAlreadyExists` is not on
+`API_UpdateDistribution`'s Errors list; the message is Substrate's own.
+
+Both creates answer a `Location` header,
+`https://cloudfront.amazonaws.com/2020-05-31/distribution/{Id}`. The API model publishes the member
+as "The fully qualified URI of the new distribution resource just created". No page publishes an
+example value, so the form is the one `CreateOriginAccessControl` already answers.
+
+A CloudFormation-deployed distribution sends a reference of `{stack}-{logicalId}-{suffix}`. The
+suffix is a hash of the stack ARN, the logical ID and the physical ID the stack last recorded for the
+resource. A replay of the deployment sends the same one, and a replacement sends a fresh one, so it
+can be created while its predecessor still holds the old. Nothing is drawn from the deployment's
+mint, so no other identifier in the stack moves. One collision remains: Substrate derives a stack's
+ARN from its name, so a stack deleted with its distribution retained (`DeletionPolicy: Retain`) and
+re-created under the same name gets `DistributionAlreadyExists`.
 
 ### An update replaces the configuration
 
@@ -20471,9 +20552,11 @@ Then, in substrate's own wording:
 - an update that changes or drops the `CallerReference` the distribution was created with is
   `IllegalUpdate`/400 (*"You can't change the value of `CallerReference`"*).
 
-The three other `Required: Yes` members (`Origins`, `DefaultCacheBehavior`, `CallerReference`) are
-not required on update, because `CreateDistribution` does not require them. Requiring them on update
-alone would make a distribution substrate itself created un-updatable.
+The two other `Required: Yes` members (`Origins`, `DefaultCacheBehavior`) are not required on
+update, because `CreateDistribution` does not require them. Requiring them on update alone would make
+a distribution substrate itself created un-updatable. `CallerReference` is required on create since
+#1116, so the unchanged-reference rule above already requires it on update for every distribution
+created since.
 
 **Versions.** A create mints the distribution's `ETag`, and each update mints a new one. `CreateDistribution`,
 `GetDistribution`, `GetDistributionConfig` and `UpdateDistribution` answer it as the `ETag` header.
@@ -24204,8 +24287,8 @@ seeded](#a-runs-status-progresses-only-when-seeded).
 
 | Operation | Notes |
 |-----------|-------|
-| StartRun | `POST /run`. Answers HTTP 201 with `id` and `status` — [two of the eight published members](#startrun-answers-an-id-and-a-status) — and checks none of the three required ones |
-| GetRun | `GET /run/{id}`. Returns the stored record whole, so `accountID` and `region` reach the wire ([#756](https://github.com/scttfrdmn/substrate/issues/756)) and eight members stand in for the roughly forty-four published ones — `arn`, `uuid`, `creationTime`, `startTime`, `stopTime`, `runOutputUri` and the whole resource-usage set are absent |
+| StartRun | `POST /run`. Answers HTTP 201 with seven of the eight published members, refuses a request missing `outputUri`, `requestId` or `roleArn`, and starts a run once per `requestId` — see [StartRun's members, refusals and requestId](#startrun-s-members-refusals-and-requestid) (#1166) |
+| GetRun | `GET /run/{id}`. Answers the thirteen published members the record models (`arn`, `uuid`, `runOutputUri`, `networkingMode` and `tags` joined in #1166) of the roughly forty-four published; `creationTime`, `startTime`, `stopTime`, `outputUriPrefixMode` and the whole resource-usage set are absent |
 | ListRuns | `GET /run`. `items` of `id`, `status` and `name` only, where `RunListItem` publishes ten members. Each run listed is observed, as `GetRun` observes it. `maxResults`, `startingToken`, `name`, `runGroupId` and `status` are ignored and no `nextToken` is emitted |
 | CancelRun | `POST /run/{id}/cancel`, 202 with an empty body. An active run passes through `STOPPING` to `CANCELLED`; a settled one is `ConflictException`/409. See [Cancelling and deleting a run](#cancelling-and-deleting-a-run) |
 | DeleteRun | `DELETE /run/{id}`, 202 with an empty body. Only a `COMPLETED`, `FAILED` or `CANCELLED` run; any other is `ConflictException`/409 |
@@ -24215,20 +24298,49 @@ Nothing else is routed: `ListRunTasks`, `GetRunTask`, the workflow surface
 read-set and annotation-store import jobs, and the three tag operations are all absent. HealthOmics
 resources are not scanned by the Resource Groups Tagging API either.
 
-### StartRun answers an id and a status
+### StartRun's members, refusals and requestId
 
 `API_StartRun` publishes eight response members — `arn`, `configuration`, `id`, `networkingMode`,
-`runOutputUri`, `status`, `tags` and `uuid` — and Substrate answers `id` and `status`. The status is
-what the run's first observation would report, peeked rather than observed, so a `"*"` seed's
-countdown is not spent by the create (#1371).
+`runOutputUri`, `status`, `tags` and `uuid`. Until
+[#1166](https://github.com/scttfrdmn/substrate/issues/1166) Substrate answered `id` and `status`; it
+now answers seven:
 
-The same operation marks `outputUri`, `requestId` and `roleArn` `Required: Yes` and checks none of
-them, so a run starts with no role and no destination. `requestId` is the idempotency token and is
-not read at all, so the same request twice creates two runs.
-[#1166](https://github.com/scttfrdmn/substrate/issues/1166).
+| Member | What Substrate answers |
+|--------|------------------------|
+| `arn` | `arn:aws:omics:{region}:{account}:run/{id}`, the run resource's form in the Service Authorization Reference |
+| `id` | a ten-digit run ID — see [Run IDs](#run-ids) |
+| `uuid` | an RFC 4122 version-4 UUID, minted at start and persisted |
+| `status` | what the run's first observation would report, peeked rather than observed, so a `"*"` seed's countdown is not spent by the start (#1371) |
+| `networkingMode` | the request's, or `RESTRICTED`, the default the request member publishes |
+| `runOutputUri` | `{outputUri}/{id}`, or `outputUri` itself under `outputUriPrefixMode` `NONE_WITH_OVERWRITE` |
+| `tags` | the request's tags, when it sends any |
 
-No HealthOmics response carries an ARN anywhere in the plugin, though `API_StartRun` and `API_GetRun`
-both publish `arn`.
+**`configuration` is omitted.** It is a `ConfigurationDetails` (`arn`, `name`, `uuid`) resolved from
+the request's `configurationName`, and Substrate models no HealthOmics configuration resource to
+resolve one against (#1569).
+
+`runOutputUri` follows the user guide's *HealthOmics run outputs* page: under the default
+`SERVICE_DEFINED` mode the outputs go "under a prefix named after the run ID", and under
+`NONE_WITH_OVERWRITE` "directly to the output location"; a trailing slash on `outputUri` is
+insignificant. WDL and CWL runs nest one level further, under an `out` prefix. Substrate models no
+workflow, so it knows no engine, and answers the run-ID prefix both engines share. `GetRun` answers
+`arn`, `uuid`, `runOutputUri`, `networkingMode` and `tags` as `StartRun` does.
+
+**Refusals.** The page marks `outputUri`, `requestId` and `roleArn` `Required: Yes`. A request is
+`ValidationException`/400, the page's code, when it misses any of them, names a `roleArn` outside the
+published pattern `arn:.+`, or sends a `networkingMode` or `outputUriPrefixMode` outside its
+published values. The messages are Substrate's own. `requestId` is an idempotency token in the API
+model, so an AWS SDK fills it in when the caller does not; only a hand-built request is refused for
+it.
+
+**`requestId`.** *"If you provide request IDs, AWS HealthOmics identifies duplicate requests and starts
+the run only once."* A `StartRun` whose `requestId` names a run already started in the account and
+Region answers 201 with that run and starts nothing. The page publishes neither the token's lifetime
+nor what a retry with a different body gets, so both readings are Substrate's:
+
+- the token lives as long as its run, so `DeleteRun` releases it;
+- the first run is answered whatever the retry's body says, since the page describes a duplicate as
+  starting "the run only once" and publishes no conflict code for it.
 
 ### A run's status progresses only when seeded
 
@@ -24282,7 +24394,7 @@ countdown, so `GetRun` then answers `ResourceNotFoundException`, as the page say
 
 | Condition | Code | Status |
 |-----------|------|--------|
-| a body that will not parse | `ValidationException` | 400 |
+| a body that will not parse, or a `StartRun` missing a required member or outside a published constraint | `ValidationException` | 400 |
 | a run that does not exist | `ResourceNotFoundException` | 404 |
 | `CancelRun` of a settled run, or `DeleteRun` of an active one | `ConflictException` | 409 |
 
@@ -24293,15 +24405,18 @@ and have no site: no quota or transient failure is modelled.
 
 ### Run IDs
 
-A run ID is a ten-digit number drawn from a per-process pseudo-random source that `ResetForRun`
-rewinds, so a recorded run replays with the same run IDs it was recorded with. Nothing checks that a
-freshly minted ID is unused; the sequence makes a collision vanishingly unlikely rather than
-impossible.
+A run ID is a ten-digit number with no leading zero, and the run's `uuid` is minted with it. Both are
+derived from the request's own ID (the per-request mint every plugin shares), so a recorded run replays
+with the run ID and `uuid` it was recorded with, in any process. Until #1166 the run ID came from a
+per-process pseudo-random source that `ResetForRun` rewound: a replay in the recording process
+reproduced it, a replay in another process did not. Nothing checks that a freshly minted ID is
+unused; the derivation makes a collision vanishingly unlikely rather than impossible.
 
 ### The account and Region a run carries reach no response
 
 `OmicsRun` declares its account and Region under wire-visible `json` tags, because the record is what
-`MemoryStateManager` snapshots and a replay reads back. Neither reaches a body: `GetRun` used to answer the record whole, and answers `omicsRunToWire` now. `StartRun` and `ListRuns` answer members built one by one.
+`MemoryStateManager` snapshots and a replay reads back, and since #1166 the `requestId` it was started
+with. None of the three reaches a body: `GetRun` used to answer the record whole, and answers `omicsRunToWire` now. `StartRun` and `ListRuns` answer members built one by one.
 `TestOmicsWire_RunResponsesCarryNoBookkeepingMember` in `emulator/omics_wire_test.go` drives the three routed operations that answer a body and walks each decoded document for either member at any
 depth ([#756](https://github.com/scttfrdmn/substrate/issues/756)). `CancelRun` and `DeleteRun` answer 202 with no body, so they have nothing to walk.
 

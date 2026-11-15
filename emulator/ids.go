@@ -32,8 +32,8 @@ import (
 // Reproducible across a replay, and across processes: [RequestContext.RequestID] during a
 // replay is the *recorded* one, because replayEvent dispatches with replayRequestID (#866),
 // so the same recorded request mints the same identifiers however many times and wherever it
-// is replayed. A per-plugin seeded PRNG — [OmicsPlugin]'s pattern, the nearest thing
-// substrate had — cannot reach that: its seed is per process, which its own doc comment says.
+// is replayed. A per-plugin seeded PRNG — HealthOmics' run-ID source until #1166, the nearest
+// thing substrate had — cannot reach that: its seed was per process.
 //
 // Two identical creates still differ. Two CreateAccessKey calls for one user must produce
 // two distinct keys, which is what rules out hashing the request: the requests are byte

@@ -37,8 +37,8 @@ var idsUUIDv4Shape = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[
 // state beyond its seed and its ordinal, so a second mint over the same seed reproduces the
 // first mint's sequence draw for draw — in this process or any other.
 //
-// This is what a per-plugin seeded PRNG cannot give. Its seed is per process, which
-// [emulator.OmicsPlugin]'s own doc comment says, and the sequence it produces depends on
+// This is what a per-plugin seeded PRNG cannot give. Its seed is per process — HealthOmics drew
+// run IDs from one until #1166 — and the sequence it produces depends on
 // which goroutine won a mutex.
 func TestIDMint_TwoMintsOverOneSeedAgree(t *testing.T) {
 	t.Parallel()

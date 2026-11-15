@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand" // nosemgrep
 	"net/http"
 	"strings"
 	"sync"
@@ -24,24 +23,13 @@ type OmicsPlugin struct {
 	logger Logger
 	tc     *TimeController
 
-	// rngMu guards rng, which is written by both a request and a reset: Int63n
-	// advances the source in place, and ResetForRun replaces it. A *rand.Rand is
-	// not safe for concurrent use, and two concurrent StartRun calls could
-	// previously race on it.
-	rngMu sync.Mutex
-
-	// rng is the source run IDs are drawn from.
-	rng *rand.Rand
-
-	// rngSeed is the seed rng was built from, kept so ResetForRun can rewind the
-	// source to the position it had at the start of the run rather than to an
-	// unrelated one. The seed itself is still per-process wall-clock; making it
-	// reproducible across processes is #856.
-	rngSeed int64
-
 	// seedMu serializes the read-modify-write of a run-status countdown; see
 	// [progression.observe].
 	seedMu sync.Mutex
+
+	// startMu serializes StartRun's requestId lookup with its write, so two concurrent starts
+	// carrying one requestId cannot both find it unused (#1166; see omics_start_run.go).
+	startMu sync.Mutex
 }
 
 // Name returns the service name "omics".
@@ -56,30 +44,11 @@ func (p *OmicsPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
-	p.rngSeed = time.Now().UnixNano()
-	p.rng = rand.New(rand.NewSource(p.rngSeed)) //nolint:gosec
 	return nil
 }
 
 // Shutdown is a no-op for OmicsPlugin.
 func (p *OmicsPlugin) Shutdown(_ context.Context) error { return nil }
-
-// ResetForRun rewinds the random source run IDs are drawn from to the position it
-// held when the plugin was initialized, by rebuilding it from the same seed. It
-// implements [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay
-// needs it.
-//
-// Rewinding to the original seed rather than to a fresh one is what makes a replay
-// reproduce the run it is replaying: the recording drew from position 0 of this
-// seed, so a replay must too. The seed remains per-process, so two processes still
-// mint different run IDs from the same events — that is #856, and it is a separate
-// question from whether one process is self-consistent.
-func (p *OmicsPlugin) ResetForRun(_ context.Context) error {
-	p.rngMu.Lock()
-	defer p.rngMu.Unlock()
-	p.rng = rand.New(rand.NewSource(p.rngSeed)) //nolint:gosec
-	return nil
-}
 
 // HandleRequest dispatches a HealthOmics REST/JSON request to the appropriate handler.
 func (p *OmicsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -153,61 +122,30 @@ type OmicsRun struct {
 	// StatusMessage is an optional human-readable status message.
 	StatusMessage string `json:"statusMessage,omitempty"`
 
+	// UUID is the run's universally unique identifier, minted at StartRun (#1166). Empty on a record
+	// written before #1166.
+	UUID string `json:"uuid,omitempty"`
+
+	// RequestID is the StartRun idempotency token the run was started with (#1166). It is a request
+	// member and is answered by no response.
+	RequestID string `json:"requestId,omitempty"`
+
+	// Tags are the tags StartRun was sent.
+	Tags map[string]string `json:"tags,omitempty"`
+
+	// NetworkingMode is the run's networking mode: the one StartRun was sent, or the published
+	// default RESTRICTED. Empty on a record written before #1166.
+	NetworkingMode string `json:"networkingMode,omitempty"`
+
+	// OutputURIPrefixMode is the outputUriPrefixMode StartRun was sent, or "" for the published
+	// default SERVICE_DEFINED. It decides runOutputUri; see [omicsRunOutputURI].
+	OutputURIPrefixMode string `json:"outputUriPrefixMode,omitempty"`
+
 	// AccountID is the AWS account that owns the run.
 	AccountID string `json:"accountID"`
 
 	// Region is the AWS region where the run executes.
 	Region string `json:"region"`
-}
-
-func (p *OmicsPlugin) startRun(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var body struct {
-		WorkflowID   string          `json:"workflowId"`
-		WorkflowType string          `json:"workflowType"`
-		Name         string          `json:"name"`
-		RoleArn      string          `json:"roleArn"`
-		OutputURI    string          `json:"outputUri"`
-		Parameters   json.RawMessage `json:"parameters"`
-	}
-	if err := json.Unmarshal(req.Body, &body); err != nil {
-		return nil, &AWSError{Code: "ValidationException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
-	}
-
-	runID := p.generateOmicsRunID()
-	run := OmicsRun{
-		ID:           runID,
-		Status:       "COMPLETED",
-		WorkflowID:   body.WorkflowID,
-		WorkflowType: body.WorkflowType,
-		Name:         body.Name,
-		RoleArn:      body.RoleArn,
-		OutputURI:    body.OutputURI,
-		AccountID:    ctx.AccountID,
-		Region:       ctx.Region,
-	}
-
-	goCtx := context.Background()
-	runKey := "run:" + ctx.AccountID + "/" + ctx.Region + "/" + runID
-	data, err := json.Marshal(run)
-	if err != nil {
-		return nil, fmt.Errorf("startRun: marshal: %w", err)
-	}
-	if err := p.state.Put(goCtx, omicsNamespace, runKey, data); err != nil {
-		return nil, fmt.Errorf("startRun: put: %w", err)
-	}
-	idsKey := "run_ids:" + ctx.AccountID + "/" + ctx.Region
-	if err := updateStringIndex(goCtx, p.state, omicsNamespace, idsKey, runID); err != nil {
-		return nil, fmt.Errorf("omics startRun index: %w", err)
-	}
-
-	// API_StartRun publishes the run's status in the create response. It is what the run's first
-	// observation would report, peeked rather than observed, so a "*" seed's countdown is not
-	// spent by the create.
-	obs, err := p.peekRun(goCtx, run)
-	if err != nil {
-		return nil, fmt.Errorf("startRun: status: %w", err)
-	}
-	return omicsJSONResponse(http.StatusCreated, map[string]string{"id": runID, "status": obs.status})
 }
 
 // loadRun reads one run, answering ResourceNotFoundException when it does not exist and the store's
@@ -294,6 +232,13 @@ func (p *OmicsPlugin) deleteRun(ctx *RequestContext, _ *AWSRequest, runID string
 	if !obs.settled() {
 		return nil, omicsConflict("DeleteRun", runID, obs.status)
 	}
+	// The run's requestId is released with it (#1166), under the StartRun mutex so a start racing
+	// this delete sees the token either held or free.
+	p.startMu.Lock()
+	defer p.startMu.Unlock()
+	if err := p.releaseRequestID(goCtx, run); err != nil {
+		return nil, err
+	}
 	if err := p.state.Delete(goCtx, omicsNamespace, runKey); err != nil {
 		return nil, fmt.Errorf("deleteRun: delete: %w", err)
 	}
@@ -338,18 +283,6 @@ func (p *OmicsPlugin) listRuns(ctx *RequestContext, _ *AWSRequest) (*AWSResponse
 		items = append(items, runItem{ID: run.ID, Status: obs.status, Name: run.Name})
 	}
 	return omicsJSONResponse(http.StatusOK, map[string]interface{}{"items": items})
-}
-
-// generateOmicsRunID generates a 10-digit numeric string matching real HealthOmics run IDs.
-//
-// The lock is held only for the draw: rng is shared mutable state that a reset can
-// replace under a concurrent request (#886), and a *rand.Rand cannot be used from
-// two goroutines at once.
-func (p *OmicsPlugin) generateOmicsRunID() string {
-	p.rngMu.Lock()
-	n := p.rng.Int63n(9000000000) + 1000000000 //nolint:gosec
-	p.rngMu.Unlock()
-	return fmt.Sprintf("%d", n)
 }
 
 // omicsJSONResponse serializes v to JSON and returns an AWSResponse.

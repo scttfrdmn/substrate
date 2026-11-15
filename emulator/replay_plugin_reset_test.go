@@ -5,7 +5,7 @@ package emulator_test
 // ReplayEngine.resetState reset the StateManager and nothing else, while three
 // plugins keep the state they mint identifiers from on their own struct: the S3
 // version-ID counter, the SES v2 message counter, and the HealthOmics random
-// source. None of them was reachable from a reset, so replaying one recorded
+// source (since #1166 drawn from the request mint instead). None of them was reachable from a reset, so replaying one recorded
 // stream twice in a single process minted different identifiers the second time
 // from byte-identical events — the one property the event log exists to rule out.
 //
@@ -205,6 +205,8 @@ func resetStartRuns(t *testing.T, ts *emulator.TestServer, count int) []string {
 			"workflowType": "PRIVATE",
 			"name":         fmt.Sprintf("run-%d", i),
 			"roleArn":      "arn:aws:iam::123456789012:role/OmicsRole",
+			"outputUri":    "s3://omics-out/reset",
+			"requestId":    fmt.Sprintf("reset-%d", i),
 		})
 		require.NoError(t, err)
 
@@ -301,7 +303,7 @@ func TestPluginReset_ReplayingTwiceMintsTheSameIdentifiers(t *testing.T) {
 			field:   "MessageId",
 		},
 		{
-			name: "omics run IDs come from OmicsPlugin.rng",
+			name: "omics run IDs come from the request mint (OmicsPlugin.rng until #1166)",
 			record: func(t *testing.T, ts *emulator.TestServer) []string {
 				return resetStartRuns(t, ts, 3)
 			},
@@ -507,10 +509,10 @@ func TestPluginReset_DefaultPluginsImplementingTheHook(t *testing.T) {
 		}
 	}
 
-	assert.Equal(t, []string{"lambda", "omics", "rds", "s3", "sesv2"}, got,
+	assert.Equal(t, []string{"lambda", "rds", "s3", "sesv2"}, got,
 		"the plugins holding mutable state outside the StateManager: S3's version-ID counter and "+
-			"object payloads (#886, #902), SES v2's message counter and HealthOmics' random source "+
-			"(#886), Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres "+
+			"object payloads (#886, #902), SES v2's message counter (#886; HealthOmics' random source "+
+			"moved onto the request mint in #1166), Lambda's event-source-mapping pollers and warm containers, and RDS's Postgres "+
 			"containers (#903)")
 }
 

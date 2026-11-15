@@ -23,6 +23,9 @@ type CloudFrontPlugin struct {
 	tc     *TimeController
 	// seedMu serializes advancing a seeded distribution-status countdown (cloudfront_progression.go).
 	seedMu sync.Mutex
+	// createMu serializes a create's CallerReference check with its write, so two concurrent
+	// creates carrying one reference cannot both find it unused (#1116; cloudfront_caller_reference.go).
+	createMu sync.Mutex
 }
 
 // Name returns the service name "cloudfront".
@@ -324,7 +327,26 @@ func (p *CloudFrontPlugin) createDistributionWithTags(ctx *RequestContext, req *
 // create: writing the record and then tagging it would make a distribution observable untagged
 // between the two writes, and would answer the create's 201 with the tagging's own errors still
 // ahead of it.
+//
+// The configuration's CallerReference is required and must not name another of the account's
+// distributions (#1116; see cloudfront_caller_reference.go): InvalidArgument/400 without one,
+// DistributionAlreadyExists/409 for a reused one. Both are checked before anything is minted.
 func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfConfigNode, tags map[string]string) (*AWSResponse, error) {
+	ref := cfConfigCallerReference(&cfg)
+	if ref == "" {
+		return nil, cfCallerReferenceRequired()
+	}
+	goCtx := context.Background()
+	p.createMu.Lock()
+	defer p.createMu.Unlock()
+	existing, err := p.callerReferenceHolder(goCtx, ctx.AccountID, ref)
+	if err != nil {
+		return nil, err
+	}
+	if existing != "" {
+		return nil, cfDistributionAlreadyExists()
+	}
+
 	distID := generateCloudFrontID(ctx.IDs)
 	// Minted after the ID, from the same request's mint, so a replayed create reproduces both.
 	etag := cfMintETag(ctx.IDs)
@@ -374,7 +396,6 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfCon
 		return nil, fmt.Errorf("cloudfront createDistribution marshal: %w", err)
 	}
 
-	goCtx := context.Background()
 	stateKey := cfDistKey(ctx.AccountID, distID)
 	if err := p.state.Put(goCtx, cloudfrontNamespace, stateKey, data); err != nil {
 		return nil, fmt.Errorf("cloudfront createDistribution state.Put: %w", err)
@@ -384,32 +405,31 @@ func (p *CloudFrontPlugin) createDistributionFrom(ctx *RequestContext, cfg cfCon
 	if err := updateStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey, distID); err != nil {
 		return nil, fmt.Errorf("cloudfront createDistributionFrom index: %w", err)
 	}
-
-	type xmlDist struct {
-		XMLName    xml.Name `xml:"Distribution"`
-		ID         string   `xml:"Id"`
-		ARN        string   `xml:"ARN"`
-		Status     string   `xml:"Status"`
-		DomainName string   `xml:"DomainName"`
+	if err := p.putCallerReference(goCtx, ctx.AccountID, ref, distID); err != nil {
+		return nil, err
 	}
+
 	// The create's own response peeks at the seeded window (#1381): it reports the first
-	// observation of the new distribution without spending it.
+	// observation of the new distribution without spending it. It answers the whole Distribution,
+	// as GetDistribution does (#1115).
 	status, err := p.distributionStatus(goCtx, dist, false)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := cloudfrontXMLResponse(http.StatusCreated, xmlDist{
-		ID:         distID,
-		ARN:        arn,
-		Status:     status,
-		DomainName: domainName,
-	})
+	resp, err := p.distributionResponse(dist, status, http.StatusCreated)
 	if err != nil {
 		return nil, err
 	}
-	resp.Headers["ETag"] = etag
+	// Both creates' output shapes carry Location, "The fully qualified URI of the new distribution
+	// resource just created", as a header. The API Reference's Response Syntax shows the body alone
+	// and publishes no example value, so the form is substrate's, the one CreateOriginAccessControl
+	// already answers: the endpoint and the resource's own path.
+	resp.Headers["Location"] = cfDistributionLocation + distID
 	return resp, nil
 }
+
+// cfDistributionLocation is the prefix of the Location header both creates answer.
+const cfDistributionLocation = "https://cloudfront.amazonaws.com/2020-05-31/distribution/"
 
 func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, distID string) (*AWSResponse, error) {
 	dist, err := p.loadDistribution(ctx, distID)
@@ -421,7 +441,7 @@ func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, d
 	if err != nil {
 		return nil, err
 	}
-	return p.marshalDistributionXML(dist, status)
+	return p.distributionResponse(dist, status, http.StatusOK)
 }
 
 // getDistributionConfig answers the distribution's configuration.
@@ -434,9 +454,12 @@ func (p *CloudFrontPlugin) getDistribution(ctx *RequestContext, _ *AWSRequest, d
 //
 // Since #1271 the configuration is the one the create or the last update sent, with what
 // CreateDistribution defaults filled in, and the response carries the distribution's ETag, so a
-// read-modify-write round-trips (see cloudfront_distribution_config.go). A required member the
-// caller never sent — `Origins`, `DefaultCacheBehavior`, `CallerReference` — is still absent:
-// CreateDistribution does not require them (#1197's class), and substrate will not invent one.
+// read-modify-write round-trips (see cloudfront_distribution_config.go). Since #1116 a create
+// requires `CallerReference`, so it is answered for every distribution created since; a record
+// written before then may still lack it. A required member the caller never sent — `Origins`,
+// `DefaultCacheBehavior` — is still absent: CreateDistribution does not require them (#1197's
+// class), and substrate will not invent one. GetDistribution, CreateDistribution and
+// UpdateDistribution nest this same document in their `Distribution` (#1115).
 //
 // One divergence from the published contract remains, recorded rather than papered over:
 //
@@ -504,8 +527,25 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront updateDistribution decode stored config: %w", err)
 	}
-	if err := cfCheckUpdatedConfig(&cfg, cfConfigCallerReference(&prior)); err != nil {
+	priorRef := cfConfigCallerReference(&prior)
+	if err := cfCheckUpdatedConfig(&cfg, priorRef); err != nil {
 		return nil, err
+	}
+	// A record written before #1116 holds no reference, so an update may give it one. That is the
+	// one way an update can claim a reference, and it must not claim one another distribution holds
+	// (#1116): checked and recorded under the create mutex, as a create's is.
+	adopted := ""
+	if newRef := cfConfigCallerReference(&cfg); priorRef == "" && newRef != "" {
+		p.createMu.Lock()
+		defer p.createMu.Unlock()
+		holder, err := p.callerReferenceHolder(context.Background(), ctx.AccountID, newRef)
+		if err != nil {
+			return nil, err
+		}
+		if holder != "" && holder != distID {
+			return nil, cfCallerReferenceHeldOnUpdate()
+		}
+		adopted = newRef
 	}
 
 	cfg.XMLName = xml.Name{Local: "DistributionConfig"}
@@ -526,6 +566,11 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 	if err := p.state.Put(context.Background(), cloudfrontNamespace, cfDistKey(ctx.AccountID, distID), data); err != nil {
 		return nil, fmt.Errorf("cloudfront updateDistribution state.Put: %w", err)
 	}
+	if adopted != "" {
+		if err := p.putCallerReference(context.Background(), ctx.AccountID, adopted, distID); err != nil {
+			return nil, err
+		}
+	}
 
 	// Every update starts a new propagation, so it restarts the seeded window, and its own
 	// response peeks at the window's first observation (#1381).
@@ -536,7 +581,7 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 	if err != nil {
 		return nil, err
 	}
-	return p.marshalDistributionXML(dist, status)
+	return p.distributionResponse(dist, status, http.StatusOK)
 }
 
 // deleteDistribution handles DELETE /2020-05-31/distribution/{Id}.
@@ -551,6 +596,9 @@ func (p *CloudFrontPlugin) updateDistribution(ctx *RequestContext, req *AWSReque
 //
 // The page publishes no refusal for a distribution still InProgress, so a disabled distribution
 // deletes whatever its seeded Status window would report (#1381; see cloudfront_progression.go).
+//
+// A deleted distribution releases its CallerReference, so a later create may reuse it (#1116).
+// AWS publishes nothing on the point; the reading is substrate's — see cloudfront_caller_reference.go.
 func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSRequest, distID string) (*AWSResponse, error) {
 	dist, err := p.loadDistribution(ctx, distID)
 	if err != nil {
@@ -568,6 +616,17 @@ func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSReque
 	}
 
 	goCtx := context.Background()
+	// The reference's index entry goes first, under the create mutex, so a create racing this
+	// delete either sees the distribution holding the reference or sees it released. A stored
+	// configuration that does not parse releases nothing here; its entry, if any, then names a
+	// distribution that is gone, which callerReferenceHolder treats as free.
+	p.createMu.Lock()
+	defer p.createMu.Unlock()
+	if cfg, cfgErr := cfStoredConfig(dist); cfgErr == nil {
+		if err := p.releaseCallerReference(goCtx, ctx.AccountID, cfConfigCallerReference(&cfg), distID); err != nil {
+			return nil, err
+		}
+	}
 	if err := p.state.Delete(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, distID)); err != nil {
 		return nil, fmt.Errorf("cloudfront deleteDistribution state.Delete: %w", err)
 	}
@@ -592,17 +651,11 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest)
 		return nil, fmt.Errorf("cloudfront listDistributions loadIndex: %w", err)
 	}
 
-	type xmlSummary struct {
-		XMLName    xml.Name `xml:"DistributionSummary"`
-		ID         string   `xml:"Id"`
-		ARN        string   `xml:"ARN"`
-		Status     string   `xml:"Status"`
-		DomainName string   `xml:"DomainName"`
-		Comment    string   `xml:"Comment,omitempty"`
-		Enabled    bool     `xml:"Enabled"`
-	}
-
-	summaries := make([]xmlSummary, 0, len(ids))
+	// Every summary is built before any observation is spent (#1115): the summary's configuration
+	// members come from the stored configuration (see distributionSummary), and building them first
+	// means nothing about a summary can fail a list that has already consumed seeded countdowns.
+	dists := make([]CloudFrontDistribution, 0, len(ids))
+	summaries := make([]cfConfigNode, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, id))
 		if getErr != nil || data == nil {
@@ -612,27 +665,24 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest)
 		if err := json.Unmarshal(data, &dist); err != nil {
 			continue
 		}
-		// ListDistributions is polled like GetDistribution, so each distribution it reports spends
-		// one observation of its own countdown (#1381, #582).
+		dists = append(dists, dist)
+		summaries = append(summaries, p.distributionSummary(dist))
+	}
+	// ListDistributions is polled like GetDistribution, so each distribution it reports spends one
+	// observation of its own countdown (#1381, #582).
+	for i, dist := range dists {
 		status, err := p.distributionStatus(goCtx, dist, true)
 		if err != nil {
 			return nil, err
 		}
-		summaries = append(summaries, xmlSummary{
-			ID:         dist.ID,
-			ARN:        dist.ARN,
-			Status:     status,
-			DomainName: dist.DomainName,
-			Comment:    dist.Comment,
-			Enabled:    dist.Enabled,
-		})
+		summaries[i].setText("Status", status)
 	}
 
 	type xmlList struct {
-		XMLName     xml.Name     `xml:"DistributionList"`
-		Items       []xmlSummary `xml:"Items>DistributionSummary"`
-		Quantity    int          `xml:"Quantity"`
-		IsTruncated bool         `xml:"IsTruncated"`
+		XMLName     xml.Name       `xml:"DistributionList"`
+		Items       []cfConfigNode `xml:"Items>DistributionSummary"`
+		Quantity    int            `xml:"Quantity"`
+		IsTruncated bool           `xml:"IsTruncated"`
 	}
 	return cloudfrontXMLResponse(http.StatusOK, xmlList{
 		Items:       summaries,
@@ -757,6 +807,9 @@ func (p *CloudFrontPlugin) createInvalidation(ctx *RequestContext, req *AWSReque
 
 	// Use I prefix for invalidation IDs per CloudFront API convention.
 	invID := "I" + generateCloudFrontID(ctx.IDs)[1:]
+	// Completed at birth: substrate holds no edge cache for the batch to be in progress on, so a
+	// Distribution's InProgressInvalidationBatches counts none (#1115; see
+	// [cfInProgressInvalidationBatches]).
 	inv := CloudFrontInvalidation{
 		ID:              invID,
 		Status:          "Completed",
@@ -1144,37 +1197,6 @@ func (p *CloudFrontPlugin) loadDistributionForAccount(accountID, distID string) 
 		return CloudFrontDistribution{}, fmt.Errorf("cloudfront loadDistribution unmarshal: %w", err)
 	}
 	return dist, nil
-}
-
-// marshalDistributionXML serializes a distribution to a <Distribution> XML response, reporting
-// status — the read's observation of the seeded window (#1381) — rather than the record's own.
-func (p *CloudFrontPlugin) marshalDistributionXML(dist CloudFrontDistribution, status string) (*AWSResponse, error) {
-	type xmlDist struct {
-		XMLName          xml.Name `xml:"Distribution"`
-		ID               string   `xml:"Id"`
-		ARN              string   `xml:"ARN"`
-		Status           string   `xml:"Status"`
-		DomainName       string   `xml:"DomainName"`
-		Comment          string   `xml:"Comment,omitempty"`
-		Enabled          bool     `xml:"Enabled"`
-		LastModifiedTime string   `xml:"LastModifiedTime"`
-	}
-	resp, err := cloudfrontXMLResponse(http.StatusOK, xmlDist{
-		ID:               dist.ID,
-		ARN:              dist.ARN,
-		Status:           status,
-		DomainName:       dist.DomainName,
-		Comment:          dist.Comment,
-		Enabled:          dist.Enabled,
-		LastModifiedTime: dist.LastModifiedTime.UTC().Format(time.RFC3339),
-	})
-	if err != nil {
-		return nil, err
-	}
-	// GetDistribution and UpdateDistribution both publish the ETag header (#1271): it is the
-	// version the next update or delete must echo.
-	resp.Headers["ETag"] = cfDistributionETag(dist)
-	return resp, nil
 }
 
 // cfIDAlphabet is the alphabet every CloudFront identifier substrate mints draws from: the

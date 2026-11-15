@@ -85,7 +85,7 @@ func cloudfrontTagServer(t *testing.T) (*emulator.TestServer, string) {
 	ts := emulator.StartTestServer(t, emulator.WithAccounts(taggingTestAccount))
 
 	status, body := cloudfrontRequest(t, ts, http.MethodPost, "/2020-05-31/distribution", "",
-		`<DistributionConfig><Comment>tagging</Comment><Enabled>true</Enabled></DistributionConfig>`)
+		`<DistributionConfig><CallerReference>tagging</CallerReference><Comment>tagging</Comment><Enabled>true</Enabled></DistributionConfig>`)
 	require.Equal(t, http.StatusCreated, status, "CreateDistribution: %s", body)
 
 	var created struct {

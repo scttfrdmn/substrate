@@ -364,12 +364,12 @@ func cfnDottedDistributionComment(t *testing.T, registry *emulator.PluginRegistr
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, resp.StatusCode, "GetDistribution: %s", resp.Body)
 
-	// GetDistribution renders Comment directly inside <Distribution> — see
-	// marshalDistributionXML, which is also what GetDistributionConfig reports under its own
-	// wrapper. Either would answer; this one is the operation a consumer reads a distribution with.
+	// Comment is a DistributionConfig member, which a Distribution reaches only through its nested
+	// DistributionConfig (#1115) — the same document GetDistributionConfig answers. This is the
+	// operation a consumer reads a distribution with.
 	var out struct {
 		XMLName xml.Name `xml:"Distribution"`
-		Comment string   `xml:"Comment"`
+		Comment string   `xml:"DistributionConfig>Comment"`
 	}
 	require.NoError(t, xml.Unmarshal(resp.Body, &out))
 	return out.Comment
