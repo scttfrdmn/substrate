@@ -160,9 +160,13 @@ func TestCFNRoute53_AStackDeleteRemovesARecordSetGroupsRecordSetsAndItsZone(t *t
 
 	deletions := d.DeleteStackResourcesForTest(ctx, "r53-group-delete")
 	byLogical := map[string]emulator.CFNResourceDeletion{}
-	for _, del := range deletions {
+	position := map[string]int{}
+	for i, del := range deletions {
 		byLogical[del.LogicalID] = del
+		position[del.LogicalID] = i
 	}
+	// The group's Ref to the zone orders it: it is deleted before the zone it depends on (#1420).
+	assert.Less(t, position["Group"], position["MyZone"], "%+v", deletions)
 	assert.Equal(t, "DELETE_COMPLETE", byLogical["Group"].Status, "%+v", byLogical["Group"])
 	assert.Equal(t, "DELETE_COMPLETE", byLogical["MyZone"].Status, "%+v", byLogical["MyZone"])
 }
