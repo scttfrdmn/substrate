@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.127.0] - 2026-11-14
+
 ### Added
 
 - **Service Quotas publishes EC2's vCPU quotas for On-Demand and Spot, and `ListAWSDefaultServiceQuotas` is routed (#1498).** `GetServiceQuota` for `L-34B43A08` was `NoSuchResourceException`, and `ListAWSDefaultServiceQuotas` was `UnknownOperationException`.
@@ -21200,7 +21202,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.126.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...HEAD
+[v0.127.0]: https://github.com/scttfrdmn/substrate/compare/v0.126.0...v0.127.0
 [v0.126.0]: https://github.com/scttfrdmn/substrate/compare/v0.125.0...v0.126.0
 [v0.125.0]: https://github.com/scttfrdmn/substrate/compare/v0.124.0...v0.125.0
 [v0.124.0]: https://github.com/scttfrdmn/substrate/compare/v0.123.0...v0.124.0
