@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.128.0] - 2026-11-15
+
 ### Added
 
 - **The four ELBv2 describes page on `Marker` and `PageSize` (#1244).** `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners` and `DescribeRules` publish both members and read neither, so a request for one target group got all of them and no `NextMarker`, and a consumer's paging loop ran once. They now page over the state store's key order, after every named ARN or name is resolved, and emit `NextMarker` only when a further page exists. `PageSize` goes through the plugin's one rule: absent is 400, and outside 1–400 or non-numeric is `ValidationError`/400. A `Marker` follows the rule below.
@@ -21392,7 +21394,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.128.0...HEAD
+[v0.128.0]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...v0.128.0
 [v0.127.0]: https://github.com/scttfrdmn/substrate/compare/v0.126.0...v0.127.0
 [v0.126.0]: https://github.com/scttfrdmn/substrate/compare/v0.125.0...v0.126.0
 [v0.125.0]: https://github.com/scttfrdmn/substrate/compare/v0.124.0...v0.125.0
