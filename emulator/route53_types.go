@@ -130,7 +130,10 @@ func parseRoute53Operation(method, path string) (op, zoneID string) {
 			return "", ""
 		}
 		zoneID = zonePart[:slash]
-		sub := zonePart[slash:]
+		// botocore's model publishes ChangeResourceRecordSets as .../rrset/ (trailing
+		// slash) and ListResourceRecordSets as .../rrset; aws-sdk-go-v2 sends neither
+		// with a slash. Both spellings name the same resource, so accept both (#1559).
+		sub := strings.TrimSuffix(zonePart[slash:], "/")
 		switch {
 		case sub == "/rrset" && method == "POST":
 			return "ChangeResourceRecordSets", zoneID
