@@ -242,8 +242,9 @@ func TestEC2_GetSpotPlacementScores_Deterministic(t *testing.T) {
 		"TargetCapacity":         "1",
 		"SingleAvailabilityZone": "true",
 	}
-	first := ec2DescribeBody(t, ts, params)
-	second := ec2DescribeBody(t, ts, params)
+	// Apart from each request's own requestId (#1189).
+	first := ec2StripRequestID(ec2DescribeBody(t, ts, params))
+	second := ec2StripRequestID(ec2DescribeBody(t, ts, params))
 	assert.Equal(t, first, second)
 }
 

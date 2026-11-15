@@ -51,8 +51,15 @@ type EC2Plugin struct {
 
 	// sgMu serializes the read-check-write of a security group's name and rules, so two
 	// concurrent creates cannot both pass the per-VPC name check and two concurrent authorizes
-	// cannot both pass the duplicate-rule check (#1491).
+	// cannot both pass the duplicate-rule check (#1491). Since #1551 it also serializes an
+	// instance launch, from its subnet and group checks through its writes, with DeleteSubnet's
+	// and DeleteSecurityGroup's dependency checks and deletes.
 	sgMu sync.Mutex
+
+	// igwMu serializes every read-check-write of an internet gateway's attachments (#1554):
+	// AttachInternetGateway, DetachInternetGateway, DeleteInternetGateway, and DeleteVpc's
+	// dependency check. Where both locks are held, igwMu is taken first.
+	igwMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -86,7 +93,17 @@ func (p *EC2Plugin) Shutdown(_ context.Context) error { return nil }
 //
 // The account and Region's default VPC is seeded first, so the request — whatever it is —
 // sees the state a real account starts with (#1464); see [EC2Plugin.seedDefaultVPC].
-func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+//
+// Every success document is stamped with the request's ID as its leading requestId element
+// (#1189); see [ec2StampRequestID] for why here rather than in each response struct. The stamp
+// is deferred, rather than applied by a wrapper around a separate dispatch method, so the
+// dispatch switch stays in this function, where the operation-catalog generator reads it.
+func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *AWSResponse, err error) {
+	defer func() {
+		if err == nil {
+			resp = ec2StampRequestID(resp, ctx)
+		}
+	}()
 	action := req.Operation
 	if action == "" {
 		action = req.Params["Action"]
@@ -389,6 +406,12 @@ func (p *EC2Plugin) launchInstances(
 	tags []EC2Tag,
 	spot *ec2SpotLaunch,
 ) ([]EC2Instance, string, []EC2SpotInstanceRequest, error) {
+	// Held from the subnet and security-group checks through the instance writes, so a
+	// concurrent DeleteSubnet or DeleteSecurityGroup — which hold it across their dependency
+	// checks and deletes — cannot remove a subnet or group a launch has validated but not yet
+	// recorded an instance in (#1551). No caller holds it, and nothing below takes igwMu.
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	imageID := req.Params["ImageId"]
 	// The call-level instance type is kept verbatim, with no default applied yet: a
 	// launch template may supply one, and the default can only be resolved once the
@@ -448,12 +471,11 @@ func (p *EC2Plugin) launchInstances(
 	}
 
 	// If a placement group is named, it must exist — mirrors AWS so a
-	// create → poll(available) → launch ordering is testable (#344).
-	if pgName := req.Params["Placement.GroupName"]; pgName != "" {
-		pgKey := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, pgName)
-		if data, _ := p.state.Get(context.Background(), ec2Namespace, pgKey); data == nil {
-			return nil, "", nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + pgName + "' is unknown.", HTTPStatus: http.StatusBadRequest}
-		}
+	// create → poll(available) → launch ordering is testable (#344). The resolved group is
+	// stored on each instance (#1193); see [EC2Plugin.resolveLaunchPlacementGroup].
+	placementGroup, err := p.resolveLaunchPlacementGroup(reqCtx, req.Params)
+	if err != nil {
+		return nil, "", nil, err
 	}
 
 	// Networking can be specified either at the top level (above) or nested in a
@@ -777,10 +799,19 @@ func (p *EC2Plugin) launchInstances(
 		securityGroupIDs = []string{sgID}
 	}
 
-	// Resolve VPCID from subnet for SG validation.
+	// Resolve VPCID from subnet for SG validation. The subnet must exist (#1551): a launch naming
+	// one that does not — including one a DeleteSubnet removed while this launch waited for
+	// sgMu — is InvalidSubnetID.NotFound, rather than an instance recorded in a subnet nothing
+	// holds. Through v0.128.0 an unknown subnet was accepted and stored on the instance.
 	var targetVPCID string
 	if subnetID != "" {
-		subData, _ := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
+		subData, subErr := p.state.Get(context.Background(), ec2Namespace, "subnet:"+reqCtx.AccountID+"/"+reqCtx.Region+"/"+subnetID)
+		if subErr != nil {
+			return nil, "", nil, fmt.Errorf("ec2 runInstances get subnet: %w", subErr)
+		}
+		if reqErr := ec2RequireResource(ec2SubnetIDKind, subnetID, subData != nil); reqErr != nil {
+			return nil, "", nil, reqErr
+		}
 		if subData != nil {
 			var sub EC2Subnet
 			if json.Unmarshal(subData, &sub) == nil {
@@ -840,6 +871,17 @@ func (p *EC2Plugin) launchInstances(
 
 			DisableAPITermination: disableAPITermination,
 			AvailabilityZone:      placementAZ,
+
+			// The image's architecture, which is what API_Instance reports (#1525); an image
+			// that states none falls back to the type's — see [ec2InstanceArchitecture].
+			Architecture: launchedImage.Architecture,
+		}
+		if inst.Architecture == "" {
+			inst.Architecture = ec2InstanceTypeArchitecture(instanceType)
+		}
+		if placementGroup != nil {
+			inst.PlacementGroupName = placementGroup.GroupName
+			inst.PlacementGroupID = placementGroup.GroupID
 		}
 		if !metadataOptions.empty() {
 			opts := metadataOptions
@@ -948,14 +990,29 @@ type ec2InstanceStateItem struct {
 	Name string `xml:"name"`
 }
 
-// ec2PlacementItem is an instance's placement element.
+// ec2PlacementItem is an instance's placement element, AWS's Placement.
 //
-// Only availabilityZone is emitted: it is the one member substrate records, and it
-// must be readable for a caller to reason about TerminateInstances' zone-scoped
-// protection rule (#489).
+// Three of API_Placement's ten members are emitted. availabilityZone must be readable for a
+// caller to reason about TerminateInstances' zone-scoped protection rule (#489). groupName and
+// groupId — "The name of the placement group that the instance is in" — are the group the launch
+// named, stored since #1193 and omitted for an instance in none, so a launch with no placement
+// group renders exactly as before.
+//
+// The other seven are deliberately absent, each because substrate records nothing that would
+// back it: affinity, hostId and hostResourceGroupArn (no Dedicated Hosts are modeled),
+// availabilityZoneId (no per-account zone-ID mapping; see the launch's Placement comment),
+// partitionNumber (partition assignment is not modeled), spreadDomain ("Reserved for future
+// use") and tenancy (Placement.Tenancy is not read, so reporting "default" would be a claim
+// about a parameter substrate ignores).
 type ec2PlacementItem struct {
 	// AvailabilityZone is the zone the instance was placed in.
 	AvailabilityZone string `xml:"availabilityZone"`
+
+	// GroupName is the placement group the instance is in, omitted when it is in none.
+	GroupName string `xml:"groupName,omitempty"`
+
+	// GroupID is that group's ID, omitted when it is in none.
+	GroupID string `xml:"groupId,omitempty"`
 }
 
 // ec2IAMInstanceProfileItem is an instance's iamInstanceProfile element.
@@ -997,7 +1054,13 @@ type ec2InstanceItem struct {
 	State              ec2InstanceStateItem       `xml:"instanceState"`
 	Placement          ec2PlacementItem           `xml:"placement"`
 	Groups             []ec2GroupItem             `xml:"groupSet>item"`
-	Tags               []ec2TagItem               `xml:"tagSet>item"`
+
+	// Architecture is Instance's architecture, "The architecture of the image" (#1525), placed
+	// after groupSet as AWS's DescribeInstances sample places it. Omitted only for an instance
+	// whose image stated none and whose type the catalog does not carry; see
+	// [ec2InstanceArchitecture].
+	Architecture string       `xml:"architecture,omitempty"`
+	Tags         []ec2TagItem `xml:"tagSet>item"`
 
 	// BlockDeviceMappings is the instance's view of its EBS volumes, derived from the
 	// volume records rather than from the mappings the launch recorded (#669). It is
@@ -1036,20 +1099,25 @@ func (p *EC2Plugin) ec2InstanceItemFor(
 	metadataState string,
 ) ec2InstanceItem {
 	item := ec2InstanceItem{
-		InstanceID:          inst.InstanceID,
-		ImageID:             inst.ImageID,
-		InstanceType:        inst.InstanceType,
-		LaunchTime:          inst.LaunchTime,
-		PrivateIPAddress:    inst.PrivateIPAddress,
-		PublicIPAddress:     inst.PublicIPAddress,
-		PublicDNSName:       inst.PublicDNSName,
-		PrivateDNSName:      inst.PrivateDNSName,
-		SubnetID:            inst.SubnetID,
-		VpcID:               inst.VPCID,
-		KeyName:             inst.KeyName,
-		State:               ec2InstanceStateItem{Code: inst.State.Code, Name: inst.State.Name},
-		Placement:           ec2PlacementItem{AvailabilityZone: inst.AvailabilityZone},
+		InstanceID:       inst.InstanceID,
+		ImageID:          inst.ImageID,
+		InstanceType:     inst.InstanceType,
+		LaunchTime:       inst.LaunchTime,
+		PrivateIPAddress: inst.PrivateIPAddress,
+		PublicIPAddress:  inst.PublicIPAddress,
+		PublicDNSName:    inst.PublicDNSName,
+		PrivateDNSName:   inst.PrivateDNSName,
+		SubnetID:         inst.SubnetID,
+		VpcID:            inst.VPCID,
+		KeyName:          inst.KeyName,
+		State:            ec2InstanceStateItem{Code: inst.State.Code, Name: inst.State.Name},
+		Placement: ec2PlacementItem{
+			AvailabilityZone: inst.AvailabilityZone,
+			GroupName:        inst.PlacementGroupName,
+			GroupID:          inst.PlacementGroupID,
+		},
 		Groups:              p.ec2GroupItems(reqCtx, inst.SecurityGroupIDs),
+		Architecture:        ec2InstanceArchitecture(inst),
 		BlockDeviceMappings: mappings,
 		NetworkInterfaces:   p.ec2NetworkInterfaceItems(reqCtx, inst),
 
@@ -1244,7 +1312,7 @@ func ec2InstanceMatchesFilters(inst EC2Instance, filters map[string][]string) bo
 
 // ec2InstanceMatchesFilter evaluates a single filter against an instance.
 //
-// A name it does not handle is one of the 125 DescribeInstances documents over instance
+// A name it does not handle is one of the 122 DescribeInstances documents over instance
 // members substrate does not model, and it is **inert** — the instance matches. Until
 // #687 it matched nothing, which was defensible while an unknown name landed here too
 // ("never return resources the caller meant to exclude"), but a refused typo is the
@@ -1290,6 +1358,14 @@ func ec2InstanceMatchesFilter(inst EC2Instance, name string, values []string) bo
 		// "placement.availability-zone" — the placement family's filters are
 		// spelled out individually in DescribeInstances' filter list.
 		return ec2FilterAccepts(values, inst.AvailabilityZone)
+	case "architecture":
+		// Evaluated against the value the instance renders (#1525), so a filter and a read agree,
+		// as #750's rule for a newly rendered member requires.
+		return ec2FilterAccepts(values, ec2InstanceArchitecture(inst))
+	case "placement-group-name":
+		// An instance in no placement group carries no name and matches no value (#1193). The page
+		// publishes no placement-group-id filter.
+		return inst.PlacementGroupName != "" && ec2FilterAccepts(values, inst.PlacementGroupName)
 	case "tag-key":
 		// Instance has a tag with any of the requested keys (any value).
 		for _, t := range inst.Tags {
@@ -1992,8 +2068,12 @@ func (p *EC2Plugin) deleteVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	// none takes its default security group and main route table with it (#1492); see
 	// [EC2Plugin.vpcDependents]. The check and the deletes hold sgMu, the lock every security-group
 	// write holds, so a group cannot be created in the VPC between the check and the delete, and the
-	// default group cannot be written back by a concurrent authorize. DeleteVpc takes no other lock,
-	// and nothing holding sgMu takes one, so the order cannot invert.
+	// default group cannot be written back by a concurrent authorize. It also takes igwMu, first,
+	// so a concurrent AttachInternetGateway cannot attach to the VPC after the check found no
+	// gateway (#1554). The order is igwMu then sgMu everywhere both are held, and nothing holding
+	// sgMu takes igwMu, so the order cannot invert.
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	p.sgMu.Lock()
 	defer p.sgMu.Unlock()
 	held, owned, err := p.vpcDependents(reqCtx, vpcID)
@@ -2148,6 +2228,10 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	if subnetID == "" {
 		return nil, ec2MissingParameter("SubnetId")
 	}
+	// Held across the dependency check and the delete, as a launch holds it from its subnet check
+	// through its writes, so a launch cannot land in a subnet this delete has just removed (#1551).
+	p.sgMu.Lock()
+	defer p.sgMu.Unlock()
 	key := "subnet:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + subnetID
 	existing, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
@@ -2155,6 +2239,16 @@ func (p *EC2Plugin) deleteSubnet(reqCtx *RequestContext, req *AWSRequest) (*AWSR
 	}
 	if lookupErr := ec2RequireResource(ec2SubnetIDKind, subnetID, existing != nil); lookupErr != nil {
 		return nil, lookupErr
+	}
+	// A subnet still holding an instance or a NAT gateway is refused before anything is
+	// written (#1551); see [EC2Plugin.subnetInUse]. Through v0.128.0 it was deleted and its
+	// instances kept its ID.
+	inUse, err := p.subnetInUse(reqCtx, subnetID)
+	if err != nil {
+		return nil, err
+	}
+	if inUse {
+		return nil, ec2SubnetDependencyViolationError(subnetID)
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteSubnet: %w", err)
@@ -2422,6 +2516,10 @@ func (p *EC2Plugin) describeSecurityGroups(reqCtx *RequestContext, req *AWSReque
 // so a delete by name answered MissingParameter for GroupId. It is resolved among the default
 // VPC's groups as of #1491 — see [EC2Plugin.defaultVPCGroupByName] — and a name that resolves to
 // nothing there is InvalidGroup.NotFound. GroupId wins when both are sent.
+//
+// A VPC's default group is refused with CannotDelete, and a group an instance carries or another
+// group's rule references with DependencyViolation (#1551); see [ec2IsDefaultSecurityGroup] and
+// [EC2Plugin.securityGroupInUse].
 func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// Held across the name resolution, the lookup and the delete, as every security-group write
 	// holds it, so a concurrent authorize cannot write back a group this delete removed.
@@ -2445,6 +2543,23 @@ func (p *EC2Plugin) deleteSecurityGroup(reqCtx *RequestContext, req *AWSRequest)
 	}
 	if lookupErr := ec2RequireResource(ec2SecurityGroupIDKind, sgID, existing != nil); lookupErr != nil {
 		return nil, lookupErr
+	}
+	var sg EC2SecurityGroup
+	if err := json.Unmarshal(existing, &sg); err != nil {
+		return nil, fmt.Errorf("ec2 deleteSecurityGroup unmarshal: %w", err)
+	}
+	// A default group is refused with CannotDelete and a group still in use with
+	// DependencyViolation, before anything is written (#1551). Through v0.128.0 both were
+	// deleted, leaving instances and rules naming a group that no longer existed.
+	if ec2IsDefaultSecurityGroup(sg) {
+		return nil, ec2CannotDeleteDefaultGroupError()
+	}
+	inUse, err := p.securityGroupInUse(reqCtx, sg)
+	if err != nil {
+		return nil, err
+	}
+	if inUse {
+		return nil, ec2GroupDependencyViolationError(sgID)
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deleteSecurityGroup: %w", err)
@@ -2492,11 +2607,30 @@ func (p *EC2Plugin) revokeSecurityGroupEgress(reqCtx *RequestContext, req *AWSRe
 // InvalidPermission.Duplicate, and nothing is written (#1491); the check is per source, the
 // granularity the revoke above works at — see [ec2AuthorizeDuplicates]. Through v0.127.0 the
 // rule was appended a second time.
+//
+// Every IPv4 and IPv6 range is canonicalised before it is compared or stored (#1553), as the
+// operation pages publish: "AWS canonicalizes IPv4 and IPv6 CIDRs" — see
+// [ec2CanonicalizePermissions]. So 100.68.0.18/18 is stored and described as 100.68.0.0/18, and
+// authorizing it beside a stored 100.68.0.0/18 is a duplicate.
+//
+// GroupName is read as both pages publish it — "[Default VPC] The name of the security group.
+// For security groups for a default VPC you can specify either the ID or the name of the
+// security group" — and resolved among the default VPC's groups by
+// [EC2Plugin.defaultVPCGroupByName], the rule DeleteSecurityGroup follows (#1491). GroupId wins
+// when both are sent. Through v0.128.0 the name was not read, so a request by name was
+// MissingParameter.
 func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direction string, add bool) (*AWSResponse, error) {
-	sgID := req.Params["GroupId"]
-	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
 	p.sgMu.Lock()
 	defer p.sgMu.Unlock()
+	sgID := req.Params["GroupId"]
+	if sgID == "" && req.Params["GroupName"] != "" {
+		resolved, resolveErr := p.defaultVPCGroupByName(reqCtx, req.Params["GroupName"])
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		sgID = resolved
+	}
+	key := "sg:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + sgID
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("ec2 modifySGRules get: %w", err)
@@ -2517,16 +2651,25 @@ func (p *EC2Plugin) modifySGRules(reqCtx *RequestContext, req *AWSRequest, direc
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	rules := &sg.IngressRules
+	if direction == "egress" {
+		rules = &sg.EgressRules
+	}
+	// A revoke may name a malformed range an earlier substrate stored verbatim; see
+	// [ec2CanonicalizePermissions].
+	var held []EC2IPPermission
+	if !add {
+		held = *rules
+	}
+	if err := ec2CanonicalizePermissions(perms, held); err != nil {
+		return nil, err
+	}
 	// A group named rather than identified is resolved to its ID within the group's VPC, on
 	// authorize and revoke alike, so the two forms address one rule.
 	if err := p.resolveGroupPairNames(reqCtx, sg.VPCID, perms); err != nil {
 		return nil, err
 	}
 
-	rules := &sg.IngressRules
-	if direction == "egress" {
-		rules = &sg.EgressRules
-	}
 	var unknown []EC2IPPermission
 	if add {
 		if ec2AuthorizeDuplicates(*rules, perms) {
@@ -2756,7 +2899,14 @@ func (p *EC2Plugin) describeInternetGateways(reqCtx *RequestContext, req *AWSReq
 // also cannot attach an internet gateway to more than one VPC at a time." The operation's own
 // Errors section is the Common Error Types boilerplate, so the code is that table's. Before
 // #1194 a second attach appended a second attachment.
+//
+// A VPC that already has a gateway attached refuses a second one with InvalidParameterValue
+// (#1554); through v0.128.0 it was accepted, so a VPC could report two. The default VPC is seeded
+// with one, so attaching a new gateway to it is refused until that one is detached. The check and
+// the write hold igwMu, so two concurrent attaches cannot both find the VPC empty.
 func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	igwID := req.Params["InternetGatewayId"]
 	vpcID := req.Params["VpcId"]
 	key := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
@@ -2791,6 +2941,21 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	if attached, findErr := p.vpcInternetGateway(reqCtx, vpcID); findErr != nil {
+		return nil, findErr
+	} else if attached != "" {
+		// A VPC holds one internet gateway — "You can attach only one internet gateway to a VPC
+		// at a time" (Amazon VPC quotas, "Internet gateways per Region") (#1554). No operation
+		// page publishes a code for it, so the code and message are EC2's observed answer,
+		// verbatim: InvalidParameterValue / "Network vpc-… already has an internet gateway
+		// attached" (terraform-aws-modules/terraform-aws-vpc#282,
+		// cloudfoundry-incubator/kubo-deployment#167).
+		return nil, &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "Network " + vpcID + " already has an internet gateway attached",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	igw.Attachments = append(igw.Attachments, EC2IGWAttachment{VPCID: vpcID, State: "available"})
 	newData, err := json.Marshal(igw)
 	if err != nil {
@@ -2805,6 +2970,25 @@ func (p *EC2Plugin) attachInternetGateway(reqCtx *RequestContext, req *AWSReques
 		Return  bool     `xml:"return"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
+}
+
+// vpcInternetGateway returns the ID of the internet gateway attached to vpcID, or "" when none
+// is. A record that cannot be read is an error, as it is for [ec2ScanRecords]' other callers:
+// the answer decides whether an attach is refused.
+func (p *EC2Plugin) vpcInternetGateway(reqCtx *RequestContext, vpcID string) (string, error) {
+	attached := ""
+	err := ec2ScanRecords(context.Background(), p.state, "igw:"+reqCtx.AccountID+"/"+reqCtx.Region+"/",
+		func(_ string, igw EC2InternetGateway) {
+			for _, a := range igw.Attachments {
+				if a.VPCID == vpcID && attached == "" {
+					attached = igw.InternetGatewayID
+				}
+			}
+		})
+	if err != nil {
+		return "", fmt.Errorf("ec2 attachInternetGateway scan: %w", err)
+	}
+	return attached, nil
 }
 
 // ec2GatewayNotAttachedError is Gateway.NotAttached, whose client-error-table gloss names the
@@ -2834,6 +3018,10 @@ func ec2GatewayNotAttachedError() *AWSError {
 // no code (its Errors section is the Common Error Types boilerplate), so enforcing it would
 // mean choosing a refusal AWS does not name for it. docs/services.md records the gap.
 func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Held so a detach's read-modify-write of the attachment list cannot interleave with an
+	// attach's (#1554).
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	igwID := req.Params["InternetGatewayId"]
 	vpcID := req.Params["VpcId"]
 	key := "igw:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + igwID
@@ -2883,6 +3071,10 @@ func (p *EC2Plugin) detachInternetGateway(reqCtx *RequestContext, req *AWSReques
 // [ec2DependencyViolationError]. Through v0.127.0 it was deleted attached, taking its
 // attachment with it.
 func (p *EC2Plugin) deleteInternetGateway(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	// Held across the attachment check and the delete, so a concurrent attach cannot attach the
+	// gateway after the check and leave a VPC attached to a gateway that no longer exists (#1554).
+	p.igwMu.Lock()
+	defer p.igwMu.Unlock()
 	igwID := req.Params["InternetGatewayId"]
 	if igwID == "" {
 		return nil, ec2MissingParameter("InternetGatewayId")
@@ -4035,13 +4227,22 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
 	}
+	if awsErr := ec2CheckKeyName(name); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckKeyFormat(req.Params["KeyFormat"]); awsErr != nil {
+		return nil, awsErr
+	}
 	tags, awsErr := ec2KeyPairTags(req.Params)
 	if awsErr != nil {
 		return nil, awsErr
 	}
 
 	// Check for duplicate.
-	existing, _ := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
+	existing, err := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
+	if err != nil {
+		return nil, fmt.Errorf("ec2 createKeyPair get: %w", err)
+	}
 	if existing != nil {
 		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
 	}
@@ -4087,13 +4288,15 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
+	// The published Response Elements are keyFingerprint, keyMaterial, keyName, keyPairId,
+	// requestId and tagSet. keyType is not among them — it is API_KeyPairInfo's, which
+	// DescribeKeyPairs answers — and is no longer rendered here (#1190).
 	type response struct {
 		XMLName        xml.Name      `xml:"CreateKeyPairResponse"`
 		XMLNS          string        `xml:"xmlns,attr"`
 		KeyPairID      string        `xml:"keyPairId"`
 		KeyName        string        `xml:"keyName"`
 		KeyFingerprint string        `xml:"keyFingerprint"`
-		KeyType        string        `xml:"keyType"`
 		KeyMaterial    string        `xml:"keyMaterial"`
 		Tags           *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
@@ -4102,7 +4305,6 @@ func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyPairID:      kp.KeyPairID,
 		KeyName:        kp.KeyName,
 		KeyFingerprint: kp.Fingerprint,
-		KeyType:        kp.KeyType,
 		KeyMaterial:    keyMaterial,
 		Tags:           ec2TagSet(kp.Tags),
 	})
@@ -4220,33 +4422,34 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	if pubKeyMaterial == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "PublicKeyMaterial is required", HTTPStatus: http.StatusBadRequest}
 	}
+	if awsErr := ec2CheckKeyName(name); awsErr != nil {
+		return nil, awsErr
+	}
 	tags, awsErr := ec2KeyPairTags(req.Params)
 	if awsErr != nil {
 		return nil, awsErr
 	}
 
 	// Check for duplicate.
-	existing, _ := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
+	existing, err := p.state.Get(context.Background(), ec2Namespace, ec2KeyPairStateKey(reqCtx.AccountID, reqCtx.Region, name))
+	if err != nil {
+		return nil, fmt.Errorf("ec2 importKeyPair get: %w", err)
+	}
 	if existing != nil {
 		return nil, &AWSError{Code: "InvalidKeyPair.Duplicate", Message: "The keypair '" + name + "' already exists.", HTTPStatus: http.StatusBadRequest}
 	}
 
-	// Decode the public key material and compute a fingerprint.
+	// PublicKeyMaterial is "Base64-encoded binary data", which the SDKs encode on the caller's
+	// behalf; a value that is not base64 is read as the key text itself, as before. The key is
+	// parsed, and its type and fingerprint follow the published rules (#1190) — see
+	// [ec2ImportedKey].
 	pubBytes, err := base64.StdEncoding.DecodeString(pubKeyMaterial)
 	if err != nil {
-		// Treat as raw bytes if not base64.
 		pubBytes = []byte(pubKeyMaterial)
 	}
-	fp := ec2KeyFingerprint(pubBytes)
-
-	// Infer key type from SSH public key prefix.
-	keyType := "rsa"
-	pubStr := string(pubBytes)
-	switch {
-	case strings.HasPrefix(pubStr, "ssh-ed25519"):
-		keyType = "ed25519"
-	case strings.HasPrefix(pubStr, "ecdsa-"):
-		keyType = "rsa" // EC keys are treated as rsa in EC2 API
+	keyType, fp, awsErr := ec2ImportedKey(pubBytes)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	kp := EC2KeyPair{
@@ -4270,13 +4473,14 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, err
 	}
 
+	// The published Response Elements are keyFingerprint, keyName, keyPairId, requestId and
+	// tagSet; keyType is DescribeKeyPairs', not this operation's (#1190).
 	type response struct {
 		XMLName        xml.Name      `xml:"ImportKeyPairResponse"`
 		XMLNS          string        `xml:"xmlns,attr"`
 		KeyPairID      string        `xml:"keyPairId"`
 		KeyName        string        `xml:"keyName"`
 		KeyFingerprint string        `xml:"keyFingerprint"`
-		KeyType        string        `xml:"keyType"`
 		Tags           *ec2TagSetXML `xml:"tagSet,omitempty"`
 	}
 	return ec2XMLResponse(http.StatusOK, response{
@@ -4284,21 +4488,8 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		KeyPairID:      kp.KeyPairID,
 		KeyName:        kp.KeyName,
 		KeyFingerprint: kp.Fingerprint,
-		KeyType:        kp.KeyType,
 		Tags:           ec2TagSet(kp.Tags),
 	})
-}
-
-// ec2KeyFingerprint returns a colon-separated SHA-256 hex fingerprint of
-// the provided DER-encoded key bytes, matching the format AWS uses for
-// EC2 key pairs.
-func ec2KeyFingerprint(derBytes []byte) string {
-	sum := sha256.Sum256(derBytes)
-	parts := make([]string, len(sum))
-	for i, b := range sum {
-		parts[i] = fmt.Sprintf("%02x", b)
-	}
-	return strings.Join(parts, ":")
 }
 
 // --- Helper functions ---
@@ -5624,15 +5815,36 @@ func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequ
 
 // deletePlacementGroup removes a placement group by name (#344). Deleting an
 // unknown group returns InvalidPlacementGroup.Unknown.
+//
+// A group holding an instance not yet terminated is refused with InvalidPlacementGroup.InUse
+// (#1193), per the page's "You must terminate all instances in the placement group before you can
+// delete the placement group"; see [EC2Plugin.placementGroupInUse]. The page's second
+// precondition — "You cannot delete a placement group that is a parent of a cluster placement
+// group" — is declined: substrate models no parent/child relation between placement groups, so
+// no group can be such a parent.
 func (p *EC2Plugin) deletePlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["GroupName"]
 	if name == "" {
 		return nil, &AWSError{Code: "MissingParameter", Message: "GroupName is required", HTTPStatus: http.StatusBadRequest}
 	}
 	key := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name)
-	data, _ := p.state.Get(context.Background(), ec2Namespace, key)
+	data, err := p.state.Get(context.Background(), ec2Namespace, key)
+	if err != nil {
+		return nil, fmt.Errorf("ec2 deletePlacementGroup get: %w", err)
+	}
 	if data == nil {
-		return nil, &AWSError{Code: "InvalidPlacementGroup.Unknown", Message: "The placement group '" + name + "' is unknown.", HTTPStatus: http.StatusBadRequest}
+		return nil, ec2UnknownPlacementGroupError(name)
+	}
+	var pg EC2PlacementGroup
+	if err := json.Unmarshal(data, &pg); err != nil {
+		return nil, fmt.Errorf("ec2 deletePlacementGroup unmarshal: %w", err)
+	}
+	inUse, err := p.placementGroupInUse(reqCtx, pg)
+	if err != nil {
+		return nil, err
+	}
+	if inUse {
+		return nil, ec2PlacementGroupInUseError()
 	}
 	if err := p.state.Delete(context.Background(), ec2Namespace, key); err != nil {
 		return nil, fmt.Errorf("ec2 deletePlacementGroup delete: %w", err)
@@ -5750,6 +5962,62 @@ func (p *EC2Plugin) modifySubnetAttribute(reqCtx *RequestContext, req *AWSReques
 	return ec2XMLResponse(http.StatusOK, response{XMLNS: "http://ec2.amazonaws.com/doc/2016-11-15/", Return: true})
 }
 
+// ec2VPCAttributeParams are ModifyVpcAttribute's three attributes, each with the camelCase name
+// EC2 uses for it in the refusal [ec2CheckVPCAttributeRequest] answers, in the order that refusal
+// was observed to list them.
+var ec2VPCAttributeParams = []struct{ param, name string }{
+	{"EnableDnsSupport.Value", "enableDnsSupport"},
+	{"EnableDnsHostnames.Value", "enableDnsHostnames"},
+	{"EnableNetworkAddressUsageMetrics.Value", "enableNetworkAddressUsageMetrics"},
+}
+
+// ec2CheckVPCAttributeRequest enforces API_ModifyVpcAttribute's two rules before anything is
+// written (#1554).
+//
+//   - One attribute per request. The page: "You cannot modify the DNS resolution and DNS
+//     hostnames attributes in the same request. Use separate requests for each attribute." EC2
+//     answers a request naming two with InvalidParameterCombination / "Fields for multiple
+//     attribute types specified: enableDnsSupport, enableDnsHostnames" (aws/aws-sdk-go#415, an
+//     SDK capture). The message names attribute *types* generically, so substrate applies the
+//     rule to EnableNetworkAddressUsageMetrics too, which is its reading of that message rather
+//     than a published sentence. A request naming none is the same code, whose client-error
+//     table gloss covers "a missing parameter"; that message is substrate's own.
+//   - "You can only enable DNS hostnames if you've enabled DNS support." Enabling hostnames on a
+//     VPC whose DNS support is off is InvalidParameterValue, with that sentence as the message.
+//     No operation-specific code is published, so the code is the client-error table's, and the
+//     choice is substrate's reading.
+func ec2CheckVPCAttributeRequest(params map[string]string, vpc EC2VPC) *AWSError {
+	var named []string
+	for _, a := range ec2VPCAttributeParams {
+		if _, ok := params[a.param]; ok {
+			named = append(named, a.name)
+		}
+	}
+	switch {
+	case len(named) == 0:
+		return &AWSError{
+			Code: "InvalidParameterCombination",
+			Message: "The request must contain exactly one of the parameters EnableDnsSupport, " +
+				"EnableDnsHostnames or EnableNetworkAddressUsageMetrics",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	case len(named) > 1:
+		return &AWSError{
+			Code:       "InvalidParameterCombination",
+			Message:    "Fields for multiple attribute types specified: " + strings.Join(named, ", "),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	if params["EnableDnsHostnames.Value"] == "true" && !vpc.EnableDNSSupport {
+		return &AWSError{
+			Code:       "InvalidParameterValue",
+			Message:    "You can only enable DNS hostnames if you've enabled DNS support.",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	return nil
+}
+
 func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	vpcID := req.Params["VpcId"]
 	key := "vpc:" + reqCtx.AccountID + "/" + reqCtx.Region + "/" + vpcID
@@ -5768,6 +6036,9 @@ func (p *EC2Plugin) modifyVpcAttribute(reqCtx *RequestContext, req *AWSRequest) 
 	// (EnableDnsHostnames.Value=false). Through v0.127.0 the Go fields' initialism spellings were
 	// read instead, so every SDK's modify was discarded (#1151). Each is readable back through
 	// DescribeVpcAttribute.
+	if awsErr := ec2CheckVPCAttributeRequest(req.Params, vpc); awsErr != nil {
+		return nil, awsErr
+	}
 	if v, ok := req.Params["EnableDnsSupport.Value"]; ok {
 		vpc.EnableDNSSupport = v == "true"
 	}

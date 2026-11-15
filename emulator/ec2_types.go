@@ -139,6 +139,17 @@ type EC2Instance struct {
 
 	// EverTagged records that this instance has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
+
+	// Architecture is the launched image's architecture, which API_Instance reports as "The
+	// architecture of the image" (#1525). An instance from an event log predating the field reads
+	// back empty and is described with its instance type's; see [ec2InstanceArchitecture].
+	Architecture string `json:"architecture,omitempty"`
+
+	// PlacementGroupName and PlacementGroupID are the placement group the launch named by
+	// Placement.GroupName or Placement.GroupId, resolved to both (#1193). Empty for a launch that
+	// named none, and for an instance from an event log predating the fields.
+	PlacementGroupName string `json:"placement_group_name,omitempty"`
+	PlacementGroupID   string `json:"placement_group_id,omitempty"`
 }
 
 // EC2NetworkInterface is one interface attached to an instance at launch, from a
@@ -215,7 +226,8 @@ type EC2KeyPair struct {
 	// KeyName is the user-supplied name for the key pair.
 	KeyName string `json:"keyName"`
 
-	// Fingerprint is the SHA-256 fingerprint of the public key.
+	// Fingerprint is the key's fingerprint by the published rule for its type and source; see
+	// [ec2RSAMaterial], [ec2Ed25519Material] and [ec2ImportedKey].
 	Fingerprint string `json:"fingerprint"`
 
 	// KeyType is the type of key pair (e.g. "rsa" or "ed25519").
@@ -370,6 +382,12 @@ type EC2SecurityGroup struct {
 
 	// VPCID is the VPC this security group is associated with.
 	VPCID string `json:"vpc_id"`
+
+	// IsDefault marks the default group a VPC is created with, set when the group is minted
+	// (#1551). DeleteSecurityGroup refuses such a group. A group from an event log predating the
+	// field reads back false and is recognized by its name instead; see
+	// [ec2IsDefaultSecurityGroup].
+	IsDefault bool `json:"is_default,omitempty"`
 
 	// IngressRules holds the ingress (inbound) permission rules.
 	IngressRules []EC2IPPermission `json:"ingress_rules,omitempty"`

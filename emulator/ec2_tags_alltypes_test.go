@@ -378,7 +378,7 @@ func TestEC2_TagOnCreate_KeyPairAndPlacementGroup(t *testing.T) {
 		ec2FleetXML(t, ts, map[string]string{
 			"Action":                          "ImportKeyPair",
 			"KeyName":                         "imported-key",
-			"PublicKeyMaterial":               "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample",
+			"PublicKeyMaterial":               ec2TestEd25519AuthorizedKey(),
 			"TagSpecification.1.ResourceType": "key-pair",
 			"TagSpecification.1.Tag.1.Key":    "Env",
 			"TagSpecification.1.Tag.1.Value":  "prod",
@@ -484,7 +484,7 @@ func TestEC2_TagOnCreate_NoTagSpecificationOmitsTheElement(t *testing.T) {
 			name: "ImportKeyPair",
 			params: map[string]string{
 				"Action": "ImportKeyPair", "KeyName": "bare-import",
-				"PublicKeyMaterial": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample",
+				"PublicKeyMaterial": ec2TestEd25519AuthorizedKey(),
 			},
 		},
 		{

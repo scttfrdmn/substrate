@@ -5,10 +5,123 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
 )
+
+// ec2CanonicalRuleCIDR returns a rule CIDR in the canonical form AWS stores it in (#1553).
+//
+// API_AuthorizeSecurityGroupIngress, on CidrIp: "AWS canonicalizes IPv4 and IPv6 CIDRs. For
+// example, if you specify 100.68.0.18/18 for the CIDR block, AWS canonicalizes the CIDR block to
+// 100.68.0.0/18. Any subsequent DescribeSecurityGroups and DescribeSecurityGroupRules calls will
+// return the canonicalized form of the CIDR block." The canonical form is the network address the
+// prefix length leaves, rendered as [netip.Prefix.String] renders it — dotted quad for IPv4, the
+// compressed RFC 5952 text for IPv6 — the step [ec2ParseRouteDestination] takes for a route's
+// destination (#1187).
+//
+// v6 says which family the parameter carries, and the family is decided by the text: CidrIp must
+// be an IPv4 dotted quad and CidrIpv6 an IPv6 address that is not IPv4-mapped. So `::ffff:0:0/96`
+// is refused in both: as CidrIp it would otherwise unmap to 0.0.0.0/0 and open the rule to every
+// IPv4 address, and as CidrIpv6 it names IPv4 space through the other family's parameter. A value
+// of the wrong family is refused like any other unparseable one. The refusal is
+// InvalidParameterValue with "CIDR block <value> is malformed", EC2's observed answer to an
+// unparseable rule CIDR on both families (aws/aws-cli#2846 for an IPv6 range,
+// hashicorp/terraform#9481 for an IPv4 address with no prefix length, NixOS/nixops-aws#63 for an
+// IPv6 range sent as CidrIp); the operation's Errors section is the Common Error Types
+// boilerplate. That the IPv4-mapped form is refused rather than unmapped is substrate's reading.
+func ec2CanonicalRuleCIDR(cidr string, v6 bool) (string, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	family := err == nil && prefix.Addr().Is4()
+	if v6 {
+		family = err == nil && prefix.Addr().Is6() && !prefix.Addr().Is4In6()
+	}
+	if !family {
+		return "", ec2MalformedCIDRError(cidr)
+	}
+	return prefix.Masked().String(), nil
+}
+
+// ec2MalformedCIDRError is the refusal [ec2CanonicalRuleCIDR] answers.
+func ec2MalformedCIDRError(cidr string) *AWSError {
+	return &AWSError{
+		Code:       "InvalidParameterValue",
+		Message:    "CIDR block " + cidr + " is malformed",
+		HTTPStatus: http.StatusBadRequest,
+	}
+}
+
+// ec2CanonicalizePermissions rewrites every IPv4 and IPv6 range in perms to its canonical form,
+// in place, so that the duplicate check, the revoke match and the stored record all see the form
+// AWS stores (#1553). It runs on authorize and revoke alike, so a revoke naming the
+// non-canonical spelling of a stored rule removes it.
+//
+// held, when non-nil, is the group's stored rules in the request's direction, and is passed by a
+// revoke. A value that does not canonicalise but is held verbatim is kept as sent rather than
+// refused: an earlier substrate stored each range as it was sent, malformed or not, and without
+// this a rule it stored could never be revoked — the revoke would be refused before it was
+// matched. [ec2SameRuleCIDR] then matches it by its exact text. An authorize passes nil, so a
+// malformed range is never written.
+func ec2CanonicalizePermissions(perms []EC2IPPermission, held []EC2IPPermission) error {
+	heldVerbatim := func(cidr string, v6 bool) bool {
+		for _, r := range held {
+			ranges := r.IPRanges
+			if v6 {
+				ranges = r.IPv6Ranges
+			}
+			if slices.Contains(ranges, cidr) {
+				return true
+			}
+		}
+		return false
+	}
+	canonicalize := func(ranges []string, v6 bool) error {
+		for j, cidr := range ranges {
+			canonical, err := ec2CanonicalRuleCIDR(cidr, v6)
+			if err != nil {
+				if heldVerbatim(cidr, v6) {
+					continue
+				}
+				return err
+			}
+			ranges[j] = canonical
+		}
+		return nil
+	}
+	for i := range perms {
+		if err := canonicalize(perms[i].IPRanges, false); err != nil {
+			return err
+		}
+		if err := canonicalize(perms[i].IPv6Ranges, true); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ec2SameRuleCIDR reports whether a stored rule CIDR names the range target does. target is
+// canonical by the time it is compared, or a held malformed value kept verbatim; the stored side
+// is canonicalised here, because a group written before #1553 holds each range as it was sent, and
+// its rule must still match a revoke or a duplicate authorize naming it in either spelling. A
+// stored value that does not parse — which only an earlier substrate could have accepted —
+// matches only its own exact text. A stored IPv4-mapped value canonicalises to IPv6 text, so it
+// never matches an IPv4 target.
+func ec2SameRuleCIDR(stored, target string) bool {
+	if stored == target {
+		return true
+	}
+	if prefix, err := netip.ParsePrefix(stored); err == nil {
+		return prefix.Masked().String() == target
+	}
+	return false
+}
+
+// ec2HoldsRuleCIDR reports whether a stored range list holds cidr, compared as
+// [ec2SameRuleCIDR] compares.
+func ec2HoldsRuleCIDR(stored []string, cidr string) bool {
+	return slices.ContainsFunc(stored, func(s string) bool { return ec2SameRuleCIDR(s, cidr) })
+}
 
 // ec2PermHasSource reports whether a permission names any source at all: an IPv4 or IPv6
 // range, a prefix list, or a referenced security group.
@@ -217,7 +330,7 @@ func ec2AuthorizeDuplicates(stored, perms []EC2IPPermission) bool {
 			continue
 		}
 		for _, cidr := range perm.IPRanges {
-			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPRanges, cidr) }) {
+			if holds(perm, func(r EC2IPPermission) bool { return ec2HoldsRuleCIDR(r.IPRanges, cidr) }) {
 				return true
 			}
 			one := port
@@ -225,7 +338,7 @@ func ec2AuthorizeDuplicates(stored, perms []EC2IPPermission) bool {
 			held = append(held, one)
 		}
 		for _, cidr := range perm.IPv6Ranges {
-			if holds(perm, func(r EC2IPPermission) bool { return slices.Contains(r.IPv6Ranges, cidr) }) {
+			if holds(perm, func(r EC2IPPermission) bool { return ec2HoldsRuleCIDR(r.IPv6Ranges, cidr) }) {
 				return true
 			}
 			one := port
@@ -316,7 +429,9 @@ func ec2RevokePermissions(stored, targets []EC2IPPermission) (remaining, unknown
 		}
 
 		missed := EC2IPPermission{IPProtocol: target.IPProtocol, FromPort: target.FromPort, ToPort: target.ToPort}
-		removeString := func(get func(*EC2IPPermission) *[]string, value string) bool {
+		// same compares a stored value with the request's: CIDRs canonically (#1553), so a
+		// rule stored before canonicalisation still matches; prefix-list IDs exactly.
+		removeString := func(get func(*EC2IPPermission) *[]string, value string, same func(stored, target string) bool) bool {
 			removed := false
 			for i := range rules {
 				if dropped[i] || !ec2SamePortRange(rules[i], target) {
@@ -324,24 +439,25 @@ func ec2RevokePermissions(stored, targets []EC2IPPermission) (remaining, unknown
 				}
 				list := get(&rules[i])
 				if before := len(*list); before > 0 {
-					*list = slices.DeleteFunc(*list, func(v string) bool { return v == value })
+					*list = slices.DeleteFunc(*list, func(v string) bool { return same(v, value) })
 					removed = removed || len(*list) < before
 				}
 			}
 			return removed
 		}
+		exact := func(stored, target string) bool { return stored == target }
 		for _, cidr := range target.IPRanges {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPRanges }, cidr) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPRanges }, cidr, ec2SameRuleCIDR) {
 				missed.IPRanges = append(missed.IPRanges, cidr)
 			}
 		}
 		for _, cidr := range target.IPv6Ranges {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPv6Ranges }, cidr) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.IPv6Ranges }, cidr, ec2SameRuleCIDR) {
 				missed.IPv6Ranges = append(missed.IPv6Ranges, cidr)
 			}
 		}
 		for _, id := range target.PrefixListIDs {
-			if !removeString(func(r *EC2IPPermission) *[]string { return &r.PrefixListIDs }, id) {
+			if !removeString(func(r *EC2IPPermission) *[]string { return &r.PrefixListIDs }, id, exact) {
 				missed.PrefixListIDs = append(missed.PrefixListIDs, id)
 			}
 		}

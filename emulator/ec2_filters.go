@@ -152,7 +152,7 @@ func ec2FilterLimitError(detail string) *AWSError {
 // ec2InstanceFilterSpec is DescribeInstances' filter set, from
 // https://docs.aws.amazon.com/AWSEC2/latest/APIReference/API_DescribeInstances.html.
 //
-// The widest set of the ten, at 136 names. Substrate evaluates ten of them plus
+// The widest set of the ten, at 136 names. Substrate evaluates fourteen of them plus
 // tag:<key>; the rest describe instance members it does not model.
 func ec2InstanceFilterSpec() ec2FilterSpec {
 	return ec2FilterSpec{
@@ -161,9 +161,10 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 			"availability-zone", "image-id", "instance-id", "instance-state-code",
 			"instance-state-name", "instance-type", "key-name", "subnet-id", "tag-key",
 			"vpc-id", "instance-lifecycle", "spot-instance-request-id",
+			"architecture", "placement-group-name",
 		},
 		accepted: []string{
-			"affinity", "architecture", "availability-zone-id",
+			"affinity", "availability-zone-id",
 			"block-device-mapping.attach-time",
 			"block-device-mapping.delete-on-termination",
 			"block-device-mapping.device-name", "block-device-mapping.status",
@@ -228,7 +229,7 @@ func ec2InstanceFilterSpec() ec2FilterSpec {
 			"network-interface.tag-key", "network-interface.tag-value",
 			"network-interface.vpc-id",
 			"network-performance-options.bandwidth-weighting", "operator.managed",
-			"operator.principal", "outpost-arn", "owner-id", "placement-group-name",
+			"operator.principal", "outpost-arn", "owner-id",
 			"placement-partition-number", "platform", "platform-details",
 			"private-dns-name",
 			"private-dns-name-options.enable-resource-name-dns-a-record",
