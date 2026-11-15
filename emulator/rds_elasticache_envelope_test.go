@@ -122,7 +122,7 @@ func assertEnvelope(t *testing.T, baseURL, host, namespace string, row envelopeR
 	assert.Equal(t, !row.noResult, env.hasChild(row.operation+"Result"),
 		"%s: result element presence must match the page", row.operation)
 	require.NotEmpty(t, env.Children, body)
-	last :=env.Children[len(env.Children)-1].XMLName.Local
+	last := env.Children[len(env.Children)-1].XMLName.Local
 	assert.Equal(t, "ResponseMetadata", last, "%s: the metadata closes the document", row.operation)
 }
 
