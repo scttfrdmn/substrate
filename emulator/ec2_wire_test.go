@@ -247,10 +247,11 @@ func TestEC2Wire_VPCResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "CreateVpc", held: created, anchor: "<vpcId>" + vpcID + "</vpcId>"},
 		{action: "DescribeVpcs", params: map[string]string{"VpcId.1": vpcID},
 			anchor: "<vpcId>" + vpcID + "</vpcId>"},
-		// The published parameter name. The handler reads EnableDNSHostnames.Value, so this modify is
-		// discarded (#1151); the response it answers is the same either way, which is all this asserts.
+		// The published parameter name, which the handler reads as of #1151.
 		{action: "ModifyVpcAttribute", params: map[string]string{"VpcId": vpcID, "EnableDnsHostnames.Value": "true"},
 			anchor: ec2WireReturn},
+		{action: "DescribeVpcAttribute", params: map[string]string{"VpcId": vpcID, "Attribute": "enableDnsHostnames"},
+			anchor: "<enableDnsHostnames><value>true</value></enableDnsHostnames>"},
 		// Last: it removes the record every case above reads.
 		{action: "DeleteVpc", params: map[string]string{"VpcId": vpcID}, anchor: ec2WireReturn},
 	})
@@ -273,7 +274,7 @@ func TestEC2Wire_SubnetResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{action: "CreateSubnet", held: created, anchor: "<subnetId>" + subnetID + "</subnetId>"},
 		{action: "DescribeSubnets", params: map[string]string{"SubnetId.1": subnetID},
 			anchor: "<subnetId>" + subnetID + "</subnetId>"},
-		// The published parameter name, which the handler does not read (#1151).
+		// The published parameter name, which the handler reads as of #1151.
 		{action: "ModifySubnetAttribute", params: map[string]string{"SubnetId": subnetID, "MapPublicIpOnLaunch.Value": "true"},
 			anchor: ec2WireReturn},
 		{action: "DeleteSubnet", params: map[string]string{"SubnetId": subnetID}, anchor: ec2WireReturn},

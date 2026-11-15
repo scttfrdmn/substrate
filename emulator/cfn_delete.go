@@ -181,6 +181,22 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 			Headers: map[string]string{},
 			Params:  map[string]string{"AllocationId": dr.PhysicalID}}
 	},
+	// An attachment is removed by detaching it, which DeleteInternetGateway and DeleteVpc both
+	// require first (#1492). Both IDs come from the template: the physical ID is the logical ID.
+	// A virtual private gateway attachment deployed as a stub has no InternetGatewayId and is
+	// skipped, as it was before.
+	"AWS::EC2::VPCGatewayAttachment": func(_ *StackDeployer, _ DeployedResource, props map[string]interface{}, cctx *cfnContext) *AWSRequest {
+		igwID := resolveStringProp(props, "InternetGatewayId", "", cctx)
+		if igwID == "" {
+			return nil
+		}
+		return &AWSRequest{Service: "ec2", Operation: "DetachInternetGateway",
+			Headers: map[string]string{},
+			Params: map[string]string{
+				"Action": "DetachInternetGateway", "InternetGatewayId": igwID,
+				"VpcId": resolveStringProp(props, "VpcId", "", cctx),
+			}}
+	},
 	"AWS::EC2::SecurityGroupIngress": sgRuleDeleter("RevokeSecurityGroupIngress"),
 	"AWS::EC2::SecurityGroupEgress":  sgRuleDeleter("RevokeSecurityGroupEgress"),
 
@@ -1056,17 +1072,20 @@ func (d *StackDeployer) dispatchResourceDelete(
 // those as success would report a resource deleted that was never asked about
 // correctly.
 var cfnDeleteAbsentCodes = map[string]bool{
-	"ActivityDoesNotExist":              true,
-	"CacheClusterNotFound":              true,
-	"CacheParameterGroupNotFound":       true,
-	"CacheSubnetGroupNotFoundFault":     true,
-	"ClientException":                   true, // ECS's code for an absent task definition.
-	"ClusterNotFoundException":          true,
-	"DBClusterNotFoundFault":            true,
-	"DBInstanceNotFound":                true,
-	"DBParameterGroupNotFound":          true,
-	"DBSubnetGroupNotFoundFault":        true,
-	"FileSystemNotFound":                true,
+	"ActivityDoesNotExist":          true,
+	"CacheClusterNotFound":          true,
+	"CacheParameterGroupNotFound":   true,
+	"CacheSubnetGroupNotFoundFault": true,
+	"ClientException":               true, // ECS's code for an absent task definition.
+	"ClusterNotFoundException":      true,
+	"DBClusterNotFoundFault":        true,
+	"DBInstanceNotFound":            true,
+	"DBParameterGroupNotFound":      true,
+	"DBSubnetGroupNotFoundFault":    true,
+	"FileSystemNotFound":            true,
+	// A VPCGatewayAttachment's detach when the gateway is attached to that VPC no longer: the
+	// attachment is what is gone (#1492).
+	"Gateway.NotAttached":               true,
 	"InvalidAllocationID.NotFound":      true,
 	"InvalidGroup.NotFound":             true,
 	"InvalidInstanceID.NotFound":        true,

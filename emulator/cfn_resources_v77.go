@@ -231,6 +231,51 @@ func (d *StackDeployer) deployEC2SecurityGroupEgress(
 		"AuthorizeSecurityGroupEgress", props, streamID, cctx)
 }
 
+// deployEC2VPCGatewayAttachment attaches an internet gateway to a VPC for an
+// AWS::EC2::VPCGatewayAttachment, which "Attaches an internet gateway, or a virtual private
+// gateway to a VPC".
+//
+// Until #1492 the type fell through to [StackDeployer.deployGenericStub], so a stack's gateway
+// was never attached; now that DeleteVpc and DeleteInternetGateway refuse an attached gateway
+// with DependencyViolation, the attachment is real and the sweep detaches it (see
+// [cfnResourceDeleters]) before either delete runs. A virtual private gateway attachment is still
+// a stub, because substrate models no virtual private gateways.
+//
+// The physical ID stays the logical ID the stub recorded, so a Ref to the attachment — "the ID of
+// the VPC gateway attachment", whose format AWS does not publish — resolves as it did.
+func (d *StackDeployer) deployEC2VPCGatewayAttachment(
+	ctx context.Context,
+	logicalID string,
+	props map[string]interface{},
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	igwID := resolveStringProp(props, "InternetGatewayId", "", cctx)
+	if igwID == "" {
+		return d.deployGenericStub(ctx, logicalID, "AWS::EC2::VPCGatewayAttachment", props, cctx)
+	}
+	_, cost, routeErr := d.dispatch(ctx, &AWSRequest{
+		Service:   "ec2",
+		Operation: "AttachInternetGateway",
+		Params: map[string]string{
+			"Action":            "AttachInternetGateway",
+			"InternetGatewayId": igwID,
+			"VpcId":             resolveStringProp(props, "VpcId", "", cctx),
+		},
+		Headers: map[string]string{},
+	}, streamID)
+	dr := DeployedResource{
+		LogicalID:  logicalID,
+		Type:       "AWS::EC2::VPCGatewayAttachment",
+		PhysicalID: logicalID,
+		ARN:        logicalID,
+	}
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+	}
+	return dr, cost, nil
+}
+
 // deploySGRule authorizes one standalone security-group rule via action.
 func (d *StackDeployer) deploySGRule(
 	ctx context.Context,
@@ -366,6 +411,27 @@ func (d *StackDeployer) authorizeInlineSGRules(
 		}
 		if count == 0 {
 			continue
+		}
+		// AWS::EC2::SecurityGroup: "When you create a security group, if you do not add egress
+		// rules, we add egress rules that allow all outbound IPv4 and IPv6 traffic. Otherwise, we
+		// do not add them." CreateSecurityGroup always adds the IPv4 one, so a template declaring
+		// egress has it revoked first — without that, a declared `-1` to 0.0.0.0/0 duplicates it
+		// and is refused with InvalidPermission.Duplicate (#1491), and any other declared egress
+		// leaves the group allowing everything.
+		if spec.propKey == "SecurityGroupEgress" {
+			_, revokeCost, revokeErr := d.dispatch(ctx, &AWSRequest{
+				Service:   "ec2",
+				Operation: "RevokeSecurityGroupEgress",
+				Params: map[string]string{
+					"Action": "RevokeSecurityGroupEgress", "GroupId": groupID,
+					"IpPermissions.1.IpProtocol": "-1", "IpPermissions.1.IpRanges.1.CidrIp": "0.0.0.0/0",
+				},
+				Headers: map[string]string{},
+			}, streamID)
+			totalCost += revokeCost
+			if revokeErr != nil && firstErr == "" {
+				firstErr = revokeErr.Error()
+			}
 		}
 		_, cost, routeErr := d.dispatch(ctx, &AWSRequest{
 			Service:   "ec2",

@@ -93,6 +93,14 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// replace a name the service assigns and could not collide with anything anyway.
 	"AWS::Config::ConfigRule": {maxLen: 128},
 
+	// A security group name is unique within its VPC, case-insensitively, and up to 255
+	// characters (API_CreateSecurityGroup's GroupName). It joined this table when substrate began
+	// enforcing that uniqueness (#1491): with the logical ID as the name, two stacks of one
+	// template in one VPC — the default VPC, for a template naming none — collided with
+	// InvalidGroup.Duplicate where "If you don't specify a name, CloudFormation generates a
+	// unique physical ID to name the resource" (CloudFormation resource custom naming).
+	"AWS::EC2::SecurityGroup": {maxLen: 255},
+
 	// AWS::ApiGateway::Method is the one entry with no name property at all, and
 	// so the one whose bound does not come from a service limit. API Gateway's
 	// REST API has no method identifier — API_Method carries the eleven

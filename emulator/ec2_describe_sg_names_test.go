@@ -19,9 +19,8 @@ import (
 // Two decisions here are substrate's reading, and each has a test below that pins it rather than
 // leaving it to be rediscovered:
 //
-//   - A name is matched **account-wide**, not scoped to the default VPC — kept even now that the
-//     default VPC is seeded on an account's first request (#1464), so the default group named
-//     "default" is one of the groups an unqualified describe answers.
+//   - A name is matched **in the default VPC only**, as AWS documents it (#1491). Through
+//     v0.127.0 it was matched account-wide.
 //   - A name matching nothing answers an **empty set**, not InvalidGroup.NotFound. The
 //     operation's Errors section is empty and EC2's client-error table describes that code as a
 //     missing security group *ID*, so refusing would mean inventing wording AWS does not publish
@@ -219,44 +218,51 @@ func TestEC2_DescribeSecurityGroups_NameDoesNotWeakenTheIDContract(t *testing.T)
 	}
 }
 
-// TestEC2_DescribeSecurityGroups_NameIsMatchedAccountWide pins the scope decision.
+// TestEC2_DescribeSecurityGroups_NameIsScopedToTheDefaultVPC pins the scope decision (#1491).
 //
-// AWS scopes GroupName.N to the default VPC. Substrate matches account-wide, because its default
-// VPC is created lazily — only when a launch path asks for one — so a default-VPC scope would
-// answer nothing at all in a fresh account, which is the superset bug's mirror image and just as
-// silent. Two consequences follow and are asserted here: a group in a caller-made VPC is
-// selectable by name, and a name may match several groups, because CreateSecurityGroup enforces
-// no name uniqueness where AWS's is per-VPC.
-func TestEC2_DescribeSecurityGroups_NameIsMatchedAccountWide(t *testing.T) {
+// AWS scopes GroupName.N to the default VPC, "[Default VPC] The names of the security groups",
+// and through v0.127.0 substrate matched account-wide, so one name could select groups in several
+// VPCs. A group of the same name in a caller-made VPC is now selected by its ID, not its name.
+func TestEC2_DescribeSecurityGroups_NameIsScopedToTheDefaultVPC(t *testing.T) {
 	ts := newEC2TestServer(t)
 
-	var vpcA, vpcB struct {
+	var vpcA struct {
 		VpcID string `xml:"vpc>vpcId"`
 	}
 	ec2FleetXML(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.0.0.0/16"}, &vpcA)
-	ec2FleetXML(t, ts, map[string]string{"Action": "CreateVpc", "CidrBlock": "10.1.0.0/16"}, &vpcB)
 	require.NotEmpty(t, vpcA.VpcID)
-	require.NotEqual(t, vpcA.VpcID, vpcB.VpcID)
 
-	a := ec2CreateSG(t, ts, "shared", "in vpc A", vpcA.VpcID)
-	b := ec2CreateSG(t, ts, "shared", "in vpc B", vpcB.VpcID)
-	require.NotEqual(t, a, b)
+	inDefault := ec2CreateSG(t, ts, "shared", "in the default VPC", "")
+	inA := ec2CreateSG(t, ts, "shared", "in vpc A", vpcA.VpcID)
+	require.NotEqual(t, inDefault, inA, "one name in two VPCs is two groups")
 
-	assert.Equal(t, []string{"shared", "shared"}, ec2DescribeSGNames(t, ts, map[string]string{"GroupName.1": "shared"}),
-		"a name is not unique in substrate, so it may select more than one group")
-
-	// Narrowing to one of them is what vpc-id is for, and it composes with the name.
-	var doc struct {
-		Groups []struct {
-			GroupID string `xml:"groupId"`
-		} `xml:"securityGroupInfo>item"`
+	ids := func(params map[string]string) []string {
+		var doc struct {
+			Groups []struct {
+				GroupID string `xml:"groupId"`
+			} `xml:"securityGroupInfo>item"`
+		}
+		req := map[string]string{"Action": "DescribeSecurityGroups"}
+		for k, v := range params {
+			req[k] = v
+		}
+		ec2FleetXML(t, ts, req, &doc)
+		out := []string{}
+		for _, g := range doc.Groups {
+			out = append(out, g.GroupID)
+		}
+		return out
 	}
-	ec2FleetXML(t, ts, map[string]string{
-		"Action":           "DescribeSecurityGroups",
-		"GroupName.1":      "shared",
-		"Filter.1.Name":    "vpc-id",
-		"Filter.1.Value.1": vpcB.VpcID,
-	}, &doc)
-	require.Len(t, doc.Groups, 1)
-	assert.Equal(t, b, doc.Groups[0].GroupID)
+	assert.Equal(t, []string{inDefault}, ids(map[string]string{"GroupName.1": "shared"}),
+		"a name selects in the default VPC only")
+	assert.Equal(t, []string{inDefault}, ids(map[string]string{"GroupName.1": "SHARED"}),
+		`"Security group names are not case-sensitive" (VPC User Guide)`)
+	assert.Empty(t, ids(map[string]string{"Filter.1.Name": "group-name", "Filter.1.Value.1": "SHARED"}),
+		`the group-name filter stays exact: "Filter values are case-sensitive"`)
+	assert.ElementsMatch(t, []string{inDefault, inA}, ids(map[string]string{"GroupId.1": inA, "GroupName.1": "shared"}),
+		"the other VPC's group is reachable by ID, and the two lists still union")
+
+	ec2CreateSG(t, ts, "only-in-a", "in vpc A", vpcA.VpcID)
+	assert.Empty(t, ec2DescribeSGNames(t, ts, map[string]string{"GroupName.1": "only-in-a"}),
+		"a name held only outside the default VPC selects nothing")
 }

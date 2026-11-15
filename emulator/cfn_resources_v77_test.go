@@ -190,11 +190,12 @@ func TestCFN_SecurityGroupIngress_SelfReferencing(t *testing.T) {
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
+			"Net": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
 			"ComputeSG": {
 				"Type": "AWS::EC2::SecurityGroup",
 				"Properties": {
 					"GroupDescription": "Slurm compute nodes",
-					"VpcId": "vpc-01234567"
+					"VpcId": {"Ref": "Net"}
 				}
 			},
 			"SlurmdIngress": {
@@ -240,11 +241,12 @@ func TestCFN_SecurityGroup_InlineRules(t *testing.T) {
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
+			"Net": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
 			"HeadSG": {
 				"Type": "AWS::EC2::SecurityGroup",
 				"Properties": {
 					"GroupDescription": "Head node",
-					"VpcId": "vpc-01234567",
+					"VpcId": {"Ref": "Net"},
 					"SecurityGroupIngress": [
 						{"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "10.0.0.0/8"},
 						{"IpProtocol": "tcp", "FromPort": 6817, "ToPort": 6817, "CidrIp": "10.1.0.0/16"}
@@ -283,13 +285,14 @@ func TestCFN_SecurityGroupEgress_Standalone(t *testing.T) {
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
+			"Net": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
 			"AppSG": {
 				"Type": "AWS::EC2::SecurityGroup",
-				"Properties": {"GroupDescription": "App", "VpcId": "vpc-01234567"}
+				"Properties": {"GroupDescription": "App", "VpcId": {"Ref": "Net"}}
 			},
 			"DBSG": {
 				"Type": "AWS::EC2::SecurityGroup",
-				"Properties": {"GroupDescription": "DB", "VpcId": "vpc-01234567"}
+				"Properties": {"GroupDescription": "DB", "VpcId": {"Ref": "Net"}}
 			},
 			"AppToDB": {
 				"Type": "AWS::EC2::SecurityGroupEgress",
@@ -328,6 +331,7 @@ func TestCFN_SecurityGroupIngress_MutualReference(t *testing.T) {
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
+			"Net": {"Type": "AWS::EC2::VPC", "Properties": {"CidrBlock": "10.0.0.0/16"}},
 			"AToB": {
 				"Type": "AWS::EC2::SecurityGroupIngress",
 				"Properties": {
@@ -346,11 +350,11 @@ func TestCFN_SecurityGroupIngress_MutualReference(t *testing.T) {
 			},
 			"GroupA": {
 				"Type": "AWS::EC2::SecurityGroup",
-				"Properties": {"GroupDescription": "A", "VpcId": "vpc-01234567"}
+				"Properties": {"GroupDescription": "A", "VpcId": {"Ref": "Net"}}
 			},
 			"GroupB": {
 				"Type": "AWS::EC2::SecurityGroup",
-				"Properties": {"GroupDescription": "B", "VpcId": "vpc-01234567"}
+				"Properties": {"GroupDescription": "B", "VpcId": {"Ref": "Net"}}
 			}
 		}
 	}`
