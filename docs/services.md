@@ -12803,17 +12803,23 @@ are in the group's units, and each instance contributes its weight
 ([#1502](https://github.com/scttfrdmn/substrate/issues/1502)). With `DesiredCapacityType` `vcpu` or
 `memory-mib`, the weight is the instance type's vCPUs or MiB from EC2's catalog. Both need an
 `InstanceRequirements` override, since API_CreateAutoScalingGroup supports `DesiredCapacityType`
-"for attribute-based instance type selection only"; without one, Create and Update refuse with
-`ValidationError`/400 (AWS's observed wording). With `units`, an override's `WeightedCapacity` is the
-weight of every instance launched from it, and an `InstanceRequirements` override's weight covers each
-type it matches. It must be an integer from 1 to 999 and present on every override or on none, else
-`ValidationError`/400. Without weights, every instance counts as one. A scale-out launches until the
+"for attribute-based instance type selection only"; without one, Create refuses with
+`ValidationError`/400 (AWS's observed wording), as does an Update that sends `DesiredCapacityType`
+or changes the launch configuration. A group recorded before this rule with `vcpu` or `memory-mib`
+and no `InstanceRequirements` override keeps counting instances. With `units`, an override's
+`WeightedCapacity` is the weight of every instance launched from it: an `InstanceRequirements`
+override's weight covers each type it matches, and an override naming no type covers the template's.
+It must be an integer from 1 to 999 and present on every override or on none, else
+`ValidationError`/400. A spelling such as `+4` or `007` is accepted as the live service accepts it,
+and stored as `4` or `7`. Without weights, every instance counts as one. A scale-out launches until the
 summed weight reaches desired, and the last launch may overshoot: weights "do not change which instance
 types Amazon EC2 Auto Scaling chooses to launch", so the first candidate still launches. Launching stops
 at desired, which is at most `MaxSize`, so capacity stays below `MaxSize` plus one instance's weight.
-The On-Demand/Spot split and zone balance are computed in units. A scale-in terminates only an instance
-whose weight fits in the excess over desired, so the group never drops below it (AWS publishes no finer
-rule). A decrementing `TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight.
+The On-Demand/Spot split and zone balance are computed in units, for the size the launch or
+termination leaves the group at. A scale-in terminates only an instance whose weight fits in the
+excess over desired, so the group never drops below it (AWS publishes no finer rule). A decrementing
+`TerminateInstanceInAutoScalingGroup` lowers desired by the instance's weight, held at zero. It is
+refused, as before, when desired less the full decrement would fall below `MinSize`.
 Changing an override's weight reconciles to desired, and an instance whose type no override names any
 more keeps its last weight, as the instance-weighting guide states. A weighted group's members report
 `WeightedCapacity` (a string) in `DescribeAutoScalingGroups` and `DescribeAutoScalingInstances`; the

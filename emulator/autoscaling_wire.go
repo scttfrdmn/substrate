@@ -283,8 +283,7 @@ func asgGroupToXML(g *AutoScalingGroup, includeInstances bool) asgGroupXML {
 	out.SuspendedProcesses = asgListOf(sps)
 	if includeInstances {
 		insts := make([]asgInstanceXML, 0, len(g.Instances))
-		for i := range g.Instances {
-			inst := g.Instances[i]
+		for _, inst := range g.Instances {
 			lt := inst.LaunchTemplate
 			insts = append(insts, asgInstanceXML{
 				InstanceID:           inst.InstanceID,
@@ -295,7 +294,7 @@ func asgGroupToXML(g *AutoScalingGroup, includeInstances bool) asgGroupXML {
 				LaunchTemplate:       asgSpecXML(&lt),
 				ImageID:              inst.ImageID,
 				ProtectedFromScaleIn: inst.ProtectedFromScaleIn,
-				WeightedCapacity:     asgWeightedCapacityXML(g, &g.Instances[i]),
+				WeightedCapacity:     asgWeightedCapacityXML(g, &inst),
 			})
 		}
 		out.Instances = asgListOf(insts)

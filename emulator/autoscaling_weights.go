@@ -20,7 +20,8 @@ import (
 //     [asgCheckCapacityType] enforces.
 //   - **WeightedCapacity** on the overrides, with DesiredCapacityType `units`: a member weighs
 //     what the override it launched from declares. An InstanceRequirements override's weight
-//     applies to every type it matches.
+//     applies to every type it matches, and an override naming no type — its type is the
+//     template's — weighs what it declares too, carried on the launch candidate.
 //
 // Otherwise every member weighs one, which is the instance count.
 //
@@ -36,7 +37,8 @@ import (
 //     weight" (API_CreateAutoScalingGroup): a scale-out stops as soon as capacity reaches
 //     desired, which is at most MaxSize, so the overshoot is less than the last launch's weight.
 //   - OnDemandBaseCapacity "has the same unit of measurement as the group's desired capacity"
-//     (API_InstancesDistribution): the On-Demand/Spot split is computed in units.
+//     (API_InstancesDistribution): the On-Demand/Spot split is computed in units, for the size
+//     the group will be after the launch or termination being decided.
 //   - A scale-in never takes the group below desired: it terminates only a member whose weight
 //     fits in the excess, and stops when none does, leaving the overshoot standing. AWS
 //     publishes no finer rule; this one is substrate's, and keeps "at the desired capacity or
@@ -45,7 +47,9 @@ import (
 //     and "when you add or change weights … launch or terminate instances to reach the desired
 //     capacity based on the new weight values": every reconciliation re-reads each member's
 //     weight from the current configuration ([AutoScalingGroup.refreshWeights]) and keeps the
-//     stored one when the configuration no longer names the type.
+//     stored one when the configuration no longer names the type. A member launched from an
+//     override naming no type of its own is not named by type, so it keeps the weight it
+//     launched with.
 
 // asgCapacityUnits, asgCapacityVCPU and asgCapacityMemoryMiB are the three DesiredCapacityType
 // values API_CreateAutoScalingGroup lists.
@@ -62,6 +66,18 @@ func (g *AutoScalingGroup) capacityType() string {
 		return asgCapacityUnits
 	}
 	return g.DesiredCapacityType
+}
+
+// weightBasis is the capacity type the group's members are weighted by: its
+// DesiredCapacityType when the configuration permits it, units otherwise. Create and Update
+// refuse a vcpu or memory-mib group with no InstanceRequirements override (#1502), but a group
+// recorded before that refusal existed can still be in state. It keeps counting instances, as
+// it always did, rather than being reinterpreted — and scaled in — by its next observation.
+func (g *AutoScalingGroup) weightBasis() string {
+	if asgCheckCapacityType(g) != nil {
+		return asgCapacityUnits
+	}
+	return g.capacityType()
 }
 
 // overridesWeighted reports whether the group's overrides declare WeightedCapacity.
@@ -81,20 +97,22 @@ func (g *AutoScalingGroup) overridesWeighted() bool {
 // memory-mib group, or a units group whose overrides declare WeightedCapacity. Only a weighted
 // group's members report WeightedCapacity.
 func (g *AutoScalingGroup) weighted() bool {
-	return g.capacityType() != asgCapacityUnits || g.overridesWeighted()
+	return g.weightBasis() != asgCapacityUnits || g.overridesWeighted()
 }
 
 // typeWeight is the weight the group's current configuration gives an instance type, and
-// false when the configuration gives it none — a type no override names any more, or one the
-// catalog does not hold for a vcpu or memory-mib group.
+// false when the configuration gives it none — a type no override names any more, one an
+// override naming no type took from the template (whose weight is the candidate's, see
+// [AutoScalingGroup.overrideWeight]), or one the catalog does not hold for a vcpu or
+// memory-mib group.
 func (g *AutoScalingGroup) typeWeight(instanceType string) (int, bool) {
-	switch g.capacityType() {
+	switch basis := g.weightBasis(); basis {
 	case asgCapacityVCPU, asgCapacityMemoryMiB:
 		info, ok := ec2InstanceTypeIndex[instanceType]
 		if !ok {
 			return 0, false
 		}
-		if g.capacityType() == asgCapacityVCPU {
+		if basis == asgCapacityVCPU {
 			return info.VCpus, info.VCpus > 0
 		}
 		return info.MemoryMiB, info.MemoryMiB > 0
@@ -108,7 +126,7 @@ func (g *AutoScalingGroup) typeWeight(instanceType string) (int, bool) {
 			continue
 		}
 		if ov.InstanceRequirements == nil {
-			if ov.InstanceType == instanceType {
+			if ov.InstanceType != "" && ov.InstanceType == instanceType {
 				return w, true
 			}
 			continue
@@ -118,6 +136,33 @@ func (g *AutoScalingGroup) typeWeight(instanceType string) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// overrideWeight is the weight of a launch candidate built from ov — nil for a group with no
+// overrides — launching instanceType, empty when the type is the template's. It is the
+// catalog's for a vcpu or memory-mib group, and for a units group the override's own
+// WeightedCapacity, which is how an override naming no type of its own still weighs what it
+// declares. Zero means the weight is the launched type's, known only once it has launched.
+func (g *AutoScalingGroup) overrideWeight(ov *AutoScalingOverride, instanceType string) int {
+	if g.weightBasis() == asgCapacityUnits {
+		if ov != nil && ov.WeightedCapacity != "" {
+			if w, err := strconv.Atoi(ov.WeightedCapacity); err == nil {
+				return w
+			}
+		}
+		if g.overridesWeighted() {
+			return 0
+		}
+		return 1
+	}
+	if instanceType == "" {
+		return 0
+	}
+	w, ok := g.typeWeight(instanceType)
+	if !ok {
+		return 0
+	}
+	return w
 }
 
 // weightOf is the capacity one member contributes. A stored weight of zero reads as one, which
@@ -151,30 +196,51 @@ func (g *AutoScalingGroup) refreshWeights() {
 
 // capacity is the group's current capacity in its own units: the summed weight of its members.
 func (g *AutoScalingGroup) capacity() int {
-	n := 0
-	for i := range g.Instances {
-		n += g.Instances[i].weightOf()
-	}
-	return n
+	return g.tally().capacity
 }
 
-// onDemandCapacity is the summed weight of the group's On-Demand members.
-func (g *AutoScalingGroup) onDemandCapacity() int {
-	n := 0
+// asgTally is a group's capacity broken down the ways a reconciliation reads it — in total,
+// On-Demand, and per zone and subnet. A scale-out or scale-in builds it once and keeps it
+// current as it launches and terminates, rather than rescanning every member at each step.
+type asgTally struct {
+	capacity  int
+	onDemand  int
+	perAZ     map[string]int
+	perSubnet map[string]int
+}
+
+// tally adds up the group's members.
+func (g *AutoScalingGroup) tally() *asgTally {
+	t := &asgTally{perAZ: map[string]int{}, perSubnet: map[string]int{}}
 	for i := range g.Instances {
-		if !g.Instances[i].Spot {
-			n += g.Instances[i].weightOf()
-		}
+		t.add(&g.Instances[i])
 	}
-	return n
+	return t
+}
+
+// add counts a member in.
+func (t *asgTally) add(inst *AutoScalingInstance) { t.adjust(inst, inst.weightOf()) }
+
+// remove counts a member out.
+func (t *asgTally) remove(inst *AutoScalingInstance) { t.adjust(inst, -inst.weightOf()) }
+
+// adjust moves every total by w.
+func (t *asgTally) adjust(inst *AutoScalingInstance, w int) {
+	t.capacity += w
+	if !inst.Spot {
+		t.onDemand += w
+	}
+	t.perAZ[inst.AvailabilityZone] += w
+	t.perSubnet[inst.SubnetID] += w
 }
 
 // asgWeightedCapacityXML renders a member's WeightedCapacity, a string as the Instance and
 // AutoScalingInstanceDetails shapes type it, and empty — omitted — for an unweighted group.
 //
 // Both shapes constrain the member to 1–999. A memory-mib group's weights are MiB, which
-// exceed that for every type in the catalog; substrate reports the MiB regardless, since the
-// weight is what the capacity is summed from and no page says what AWS reports instead.
+// exceed that for every type in the catalog. No page, sample or published output shows what
+// AWS reports for such a member — another unit, a clamped value, or nothing — so substrate
+// reports the MiB, the weight the capacity is summed from, and documents the departure.
 func asgWeightedCapacityXML(g *AutoScalingGroup, inst *AutoScalingInstance) string {
 	if !g.weighted() {
 		return ""
@@ -202,10 +268,16 @@ func asgCheckCapacityType(g *AutoScalingGroup) *AWSError {
 // ("Value must be in the range of 1–999"; "If you specify a value for WeightedCapacity for one
 // instance type, you must specify a value for WeightedCapacity for all of them"). The wording
 // is real Auto Scaling's as captured against the live service, not published.
+//
+// The reference also gives the member a pattern, one to three digits with no leading zero, but
+// the live service does not refuse by it: "0" is refused with the range message and "two" with
+// the number message, neither of which a pattern check would reach first. So a value the
+// pattern would exclude only by its spelling — "+4", "007" — is taken as the integer it reads
+// as, and stored, and echoed, in canonical form.
 func asgCheckWeights(overrides []AutoScalingOverride) *AWSError {
 	weighted := 0
-	for _, ov := range overrides {
-		v := ov.WeightedCapacity
+	for i := range overrides {
+		v := overrides[i].WeightedCapacity
 		if v == "" {
 			continue
 		}
@@ -220,6 +292,7 @@ func asgCheckWeights(overrides []AutoScalingOverride) *AWSError {
 		if n < 1 || n > 999 {
 			return asgValidationError("WeightedCapacity must be a positive number between 1 and 999.")
 		}
+		overrides[i].WeightedCapacity = strconv.Itoa(n)
 	}
 	if weighted > 0 && weighted < len(overrides) {
 		return asgValidationError("Not all instance types have a defined WeightedCapacity. Specify missing weights, or remove all weights, and try again.")

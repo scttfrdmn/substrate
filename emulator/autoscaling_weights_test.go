@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"bytes"
+	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
@@ -396,4 +397,145 @@ func TestAutoScaling_AWeightedSessionReplaysIdentically(t *testing.T) {
 	replayed := asgReplayGroupRecord(t, ts)
 	assert.Equal(t, recorded.DesiredCapacity, replayed.DesiredCapacity)
 	assert.Equal(t, recorded.Instances, replayed.Instances)
+}
+
+// TestAutoScaling_TemplateTypedOverrideKeepsItsWeight covers an override that names no type
+// of its own — the template's t3.micro launches — but declares WeightedCapacity: each instance
+// weighs what the override declares, not one.
+func TestAutoScaling_TemplateTypedOverrideKeepsItsWeight(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	const ov = asgMIP + "LaunchTemplate.Overrides.member.1."
+	e.mustASG("CreateAutoScalingGroup", map[string]string{
+		"AutoScalingGroupName": "w", "MinSize": "0", "MaxSize": "12", "DesiredCapacity": "8",
+		"VPCZoneIdentifier": e.subnetA,
+		asgMIP + "LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName": e.ltName,
+		ov + "LaunchTemplateSpecification.LaunchTemplateName":                    e.ltName,
+		ov + "WeightedCapacity": "4",
+	})
+	g := e.group("w")
+	require.Len(t, g.Instances, 2, "two 4-unit instances reach 8")
+	for _, inst := range g.Instances {
+		assert.Equal(t, "t3.micro", inst.InstanceType, "the template's type")
+		assert.Equal(t, "4", inst.Weighted)
+	}
+	assert.Len(t, e.group("w").Instances, 2, "an observation keeps the weight rather than resetting it")
+	e.mustASG("TerminateInstanceInAutoScalingGroup", map[string]string{
+		"InstanceId": g.Instances[0].InstanceID, "ShouldDecrementDesiredCapacity": "true",
+	})
+	g = e.group("w")
+	assert.Equal(t, 4, g.Desired)
+	assert.Len(t, g.Instances, 1)
+}
+
+// TestAutoScaling_WeightedScaleInKeepsTheSplit scales a 50% vcpu group in from 2 On-Demand and
+// 1 Spot instance. The purchase option is chosen for the size the termination leaves, as a
+// launch's is for the size it reaches.
+func TestAutoScaling_WeightedScaleInKeepsTheSplit(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	const dst = asgMIP + "InstancesDistribution."
+	e.mustASG("CreateAutoScalingGroup", e.irGroup("g", "vcpu", 0, 32, 6, map[string]string{
+		dst + "OnDemandPercentageAboveBaseCapacity": "50",
+	}))
+	split := func() (int, int) {
+		onDemand, spot := 0, 0
+		for _, inst := range ec2ByState(e.ec2GroupInstances("g"), "running") {
+			if inst.Lifecycle == "spot" {
+				spot++
+			} else {
+				onDemand++
+			}
+		}
+		return onDemand, spot
+	}
+	tests := []struct {
+		desired              int
+		wantOnDemand, wantSp int
+	}{
+		{6, 2, 1}, // ceil(50% of 6) = 3 On-Demand vCPUs, which is two 2-vCPU instances
+		{4, 1, 1}, // ceil(50% of 4) = 2: an On-Demand instance goes
+		{2, 1, 0}, // ceil(50% of 2) = 1: the Spot instance goes, rounding in favor of On-Demand
+	}
+	for _, tc := range tests {
+		e.mustASG("SetDesiredCapacity", map[string]string{"AutoScalingGroupName": "g", "DesiredCapacity": fmt.Sprint(tc.desired)})
+		onDemand, spot := split()
+		assert.Equal(t, tc.wantOnDemand, onDemand, "On-Demand at desired %d", tc.desired)
+		assert.Equal(t, tc.wantSp, spot, "Spot at desired %d", tc.desired)
+	}
+}
+
+// TestAutoScaling_LegacyVCPUGroupKeepsCountingInstances is a group recorded before #1502 with
+// DesiredCapacityType vcpu and no InstanceRequirements, which Create now refuses. It keeps
+// counting instances — no observation reinterprets and scales it in — and an update that does
+// not touch the capacity type or the launch configuration still succeeds.
+func TestAutoScaling_LegacyVCPUGroupKeepsCountingInstances(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	e.createGroup("legacy", 0, 5, 3, nil)
+	const key = "group:123456789012/us-east-1/legacy"
+	raw, err := e.ts.StateManager().Get(t.Context(), "autoscaling", key)
+	require.NoError(t, err)
+	var rec emulator.AutoScalingGroup
+	require.NoError(t, json.Unmarshal(raw, &rec))
+	rec.DesiredCapacityType = "vcpu"
+	raw, err = json.Marshal(rec)
+	require.NoError(t, err)
+	require.NoError(t, e.ts.StateManager().Put(t.Context(), "autoscaling", key, raw), "write the pre-#1502 record")
+
+	g := e.group("legacy")
+	assert.Equal(t, "vcpu", g.CapacityType, "echoed as recorded")
+	assert.Equal(t, 3, g.Desired)
+	require.Len(t, g.Instances, 3, "still three instances: nothing scaled in")
+	for _, inst := range g.Instances {
+		assert.Empty(t, inst.Weighted)
+	}
+
+	e.mustASG("UpdateAutoScalingGroup", map[string]string{"AutoScalingGroupName": "legacy", "HealthCheckGracePeriod": "60"})
+	e.mustASG("SetDesiredCapacity", map[string]string{"AutoScalingGroupName": "legacy", "DesiredCapacity": "4"})
+	assert.Len(t, e.group("legacy").Instances, 4, "it still counts instances")
+
+	_, code, _ := e.asgErr("UpdateAutoScalingGroup", map[string]string{"AutoScalingGroupName": "legacy", "DesiredCapacityType": "vcpu"})
+	assert.Equal(t, "ValidationError", code, "naming the type again holds it to the rule")
+}
+
+// TestAutoScaling_DecrementBelowMinimumIsStillRefused keeps the unweighted guard: a group at
+// desired 0 whose protected members survived the scale-in cannot be decremented further.
+func TestAutoScaling_DecrementBelowMinimumIsStillRefused(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	e.createGroup("p", 0, 5, 2, map[string]string{"NewInstancesProtectedFromScaleIn": "true"})
+	e.mustASG("SetDesiredCapacity", map[string]string{"AutoScalingGroupName": "p", "DesiredCapacity": "0"})
+	g := e.group("p")
+	require.Equal(t, 0, g.Desired)
+	require.Len(t, g.Instances, 2, "protected members survive the scale-in")
+
+	_, code, msg := e.asgErr("TerminateInstanceInAutoScalingGroup", map[string]string{
+		"InstanceId": g.Instances[0].InstanceID, "ShouldDecrementDesiredCapacity": "true",
+	})
+	assert.Equal(t, "ValidationError", code)
+	assert.Contains(t, msg, "min size")
+	assert.Len(t, e.group("p").Instances, 2, "the refusal terminated nothing")
+}
+
+// TestAutoScaling_WeightsAreStoredCanonically accepts a weight the reference's pattern would
+// exclude only by its spelling, as the live service does, and echoes the integer.
+func TestAutoScaling_WeightsAreStoredCanonically(t *testing.T) {
+	t.Parallel()
+	e := newASGEnv(t)
+	params := e.typedOverrides("m5.large", "+4", "c5.large", "007")
+	for k, v := range map[string]string{
+		"AutoScalingGroupName": "c", "MinSize": "0", "MaxSize": "8", "DesiredCapacity": "4",
+		"VPCZoneIdentifier": e.subnetA,
+		asgMIP + "LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName": e.ltName,
+	} {
+		params[k] = v
+	}
+	e.mustASG("CreateAutoScalingGroup", params)
+	_, body := e.asg("DescribeAutoScalingGroups", map[string]string{"AutoScalingGroupNames.member.1": "c"})
+	assert.Contains(t, string(body), "<WeightedCapacity>4</WeightedCapacity>")
+	assert.Contains(t, string(body), "<WeightedCapacity>7</WeightedCapacity>")
+	assert.NotContains(t, string(body), "+4")
+	assert.NotContains(t, string(body), "007")
+	assert.Len(t, e.group("c").Instances, 1, "one 4-unit m5.large")
 }

@@ -366,8 +366,14 @@ func (p *AutoScalingPlugin) updateAutoScalingGroup(reqCtx *RequestContext, req *
 	if awsErr := asgApplyCommon(req.Params, &next); awsErr != nil {
 		return nil, awsErr
 	}
-	if awsErr := asgCheckCapacityType(&next); awsErr != nil {
-		return nil, awsErr
+	// The capacity type is checked only when the request changes it or the launch
+	// configuration it depends on. A vcpu or memory-mib group recorded before the check
+	// existed (#1502) is held to it when it is next reconfigured, not on every update: it
+	// counts instances meanwhile (see [AutoScalingGroup.weightBasis]).
+	if _, typeSent := req.Params["DesiredCapacityType"]; typeSent || launchChanged {
+		if awsErr := asgCheckCapacityType(&next); awsErr != nil {
+			return nil, awsErr
+		}
 	}
 	// The launch configuration is re-validated only when the request touches it or where the
 	// group launches, so an update of, say, HealthCheckType does not start failing because
