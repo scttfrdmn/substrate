@@ -37,6 +37,16 @@ func CFNUsesGeneratedNameForTest(resType string, props map[string]interface{}) b
 	})
 }
 
+// CFNResolveStructuredForTest wraps cfnResolveStructured over a context whose conditions are given,
+// so its Fn::If and AWS::NoValue edges can be pinned without a template shaped around each.
+func CFNResolveStructuredForTest(v interface{}, conditions map[string]bool) interface{} {
+	cctx := &cfnContext{
+		params: map[string]string{}, conditions: conditions,
+		resources: map[string]DeployedResource{}, evaluating: map[string]bool{},
+	}
+	return cfnResolveStructured(v, cctx)
+}
+
 // GenerateIAMIDForTest wraps generateIAMID for external tests, minting from a fresh
 // [IDMint] over seed. An empty seed exercises the crypto/rand fallback, which is what
 // a mint site reached outside a request still does (#856).
