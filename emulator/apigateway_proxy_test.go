@@ -108,6 +108,48 @@ func TestBuildV2ProxyEvent(t *testing.T) {
 	}
 }
 
+// TestBuildV2ProxyEvent_RawQueryStringIsDeterministic builds the same event repeatedly and asserts
+// one rawQueryString: keys sorted, a repeated key's values in the order sent, every value
+// percent-encoded (#1201). A single build cannot catch the defect, which was Go map order deciding
+// the key order, so the request is built many times in one process.
+func TestBuildV2ProxyEvent_RawQueryStringIsDeterministic(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+		multi  map[string][]string
+		want   string
+	}{
+		{"none", map[string]string{}, nil, ""},
+		{"sorted keys", map[string]string{"zeta": "1", "alpha": "2", "mid": "3", "beta": "4"}, nil,
+			"alpha=2&beta=4&mid=3&zeta=1"},
+		{"reserved characters are encoded", map[string]string{"q": "a&b=c", "path": "/x y"}, nil,
+			"path=%2Fx+y&q=a%26b%3Dc"},
+		{"a repeated key keeps its order", map[string]string{"p": "second", "a": "1"},
+			map[string][]string{"p": {"second", "first"}}, "a=1&p=second&p=first"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			req := &emulator.AWSRequest{Operation: "GET", Params: tc.params, MultiValueParams: tc.multi, Headers: map[string]string{}}
+			for range 50 {
+				data, err := emulator.BuildV2ProxyEventForTest(req, "api", "prod", "/r")
+				if err != nil {
+					t.Fatalf("BuildV2ProxyEvent: %v", err)
+				}
+				var event struct {
+					RawQueryString string `json:"rawQueryString"`
+				}
+				if err := json.Unmarshal(data, &event); err != nil {
+					t.Fatalf("unmarshal: %v", err)
+				}
+				if event.RawQueryString != tc.want {
+					t.Fatalf("rawQueryString = %q; want %q", event.RawQueryString, tc.want)
+				}
+			}
+		})
+	}
+}
+
 // TestExtractLambdaARNFromURI verifies that Lambda ARNs are parsed correctly
 // from integration URIs.
 func TestExtractLambdaARNFromURI(t *testing.T) {

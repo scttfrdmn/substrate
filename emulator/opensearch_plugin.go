@@ -8,20 +8,58 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // opensearchNamespace is the state namespace used by OpenSearchPlugin.
 const opensearchNamespace = "opensearch"
 
+// opensearchPrimaryTerm is the `_primary_term` every write reports. A primary term increments when a
+// shard's primary is reassigned to another node; substrate models one node that never fails over, so
+// the term is the first one a primary is given, 1, for the life of the run.
+const opensearchPrimaryTerm = 1
+
 // OpenSearchPlugin emulates Amazon OpenSearch Service (formerly Elasticsearch Service).
 // It handles REST requests on hosts matching *.es.amazonaws.com or *.aoss.amazonaws.com
 // and supports index lifecycle, document CRUD, search with simple query DSL,
 // aggregations, and scroll pagination.
+//
+// # What a state key is scoped by
+//
+// Every key carries the request's account and Region and a domain segment (#1200), so two accounts,
+// two Regions or two domains in one run are separate clusters. The domain is read from the Host
+// header: a documented domain endpoint, `search-{domain}-{id}.{region}.es.amazonaws.com` or
+// `vpc-{domain}-{id}.…`, names its domain, and a Serverless collection endpoint
+// `{id}.{region}.aoss.amazonaws.com` names its collection. Any other host — a base endpoint such as
+// `localhost:4566`, which is what a client configured with an endpoint URL sends — resolves to the
+// domain `_default`, so every client addressing a base endpoint shares one cluster per account and
+// Region. That is a deliberate simplification rather than an accident: the domain is otherwise
+// unobservable to the data plane, which has no domain in its paths. See [openSearchDomainFromHost].
+//
+// # Determinism
+//
+// Every response is a function of the request and the stored state. Query clauses are evaluated in
+// sorted key order, every hit's `_score` is the constant 1.0, and results are ordered by the `sort`
+// member when one is given and otherwise by score and then by insertion order (`_seq_no`), which —
+// unlike the document ID — does not depend on an identifier minted from the wall-clock request ID
+// (#1201). See osSortDocs.
+//
+// # The control plane
+//
+// The `opensearch` and `es` control-plane APIs are not emulated; a call to either is refused with an
+// AWS-shaped UnknownOperationException rather than misread as an index (#1212, #1564). See
+// opensearch_control_plane.go.
 type OpenSearchPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// mu serializes every data-plane request. A write reads and rewrites the index record (its
+	// `_seq_no` counter) and the document record, and the StateManager has no compare-and-swap, so
+	// two concurrent writes to one index would otherwise hand out the same `_seq_no` and lose a
+	// `_version` increment. It guards no field of the plugin, only the read-modify-write sequences.
+	mu sync.Mutex
 }
 
 // Name returns the canonical service name for routing.
@@ -44,102 +82,278 @@ func (p *OpenSearchPlugin) Shutdown(_ context.Context) error { return nil }
 
 // HandleRequest dispatches incoming requests to the appropriate handler.
 func (p *OpenSearchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	method := req.Operation // For REST plugins, Operation holds the HTTP method.
-	path := req.Path
-
-	// Trim leading slash.
-	rest := strings.TrimPrefix(path, "/")
-
-	// Clear scroll: DELETE /_search/scroll
-	if rest == "_search/scroll" && method == http.MethodDelete {
-		return p.clearScroll(ctx, req)
+	// For REST plugins Operation holds the HTTP method unless something resolved it; requestMethod
+	// reads whichever field carries the verb.
+	method := requestMethod(req)
+	if method == "" {
+		method = req.Operation
 	}
-	// Scroll continuation: GET or POST /_search/scroll
-	if rest == "_search/scroll" {
-		return p.scroll(ctx, req)
+
+	if isOpenSearchControlPlanePath(req.Path) {
+		return nil, openSearchControlPlaneRefusal(method, req.Path)
 	}
-	// Cluster health: GET /_cluster/health
-	if rest == "_cluster/health" {
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	resp, err := p.route(ctx, req, openSearchScopeFor(ctx, req), method)
+	// HEAD carries no body, whatever the answer: the index-exists reference publishes a status code
+	// alone, and the get-document reference the same for a document.
+	if method == http.MethodHead && resp != nil {
+		resp.Body = nil
+	}
+	return resp, err
+}
+
+// route dispatches a data-plane request on its method and path shape.
+func (p *OpenSearchPlugin) route(ctx *RequestContext, req *AWSRequest, scope openSearchScope, method string) (*AWSResponse, error) {
+	rest := strings.TrimPrefix(req.Path, "/")
+
+	switch {
+	case rest == "_search/scroll" && method == http.MethodDelete:
+		return p.clearScroll(req, scope)
+	case rest == "_search/scroll":
+		return p.scroll(req, scope)
+	case rest == "_cluster/health":
 		return p.clusterHealth()
+	case (rest == "_bulk" || rest == "_bulk/") && (method == http.MethodPost || method == http.MethodPut):
+		return p.bulk(ctx, req, scope, "")
 	}
 
 	// Parse index name from path: /{index}/{rest...}
-	parts := strings.SplitN(rest, "/", 2)
-	index := parts[0]
-	var subPath string
-	if len(parts) == 2 {
-		subPath = parts[1]
-	}
-
+	index, subPath, _ := strings.Cut(rest, "/")
 	if index == "" {
-		return openSearchError(http.StatusBadRequest, "index_not_specified", "index name required"), nil
+		return openSearchError(http.StatusBadRequest, "index_not_specified", "index name required").response()
 	}
 
 	switch {
 	case subPath == "" && method == http.MethodPut:
-		return p.createIndex(ctx, req, index)
+		return p.createIndex(ctx, req, scope, index)
 	case subPath == "" && method == http.MethodDelete:
-		return p.deleteIndex(ctx, req, index)
-	case subPath == "" && (method == http.MethodGet || method == http.MethodHead):
-		return p.getIndex(ctx, index)
+		return p.deleteIndex(scope, index)
+	case subPath == "" && method == http.MethodGet:
+		return p.getIndex(scope, index)
+	case subPath == "" && method == http.MethodHead:
+		return p.headIndex(scope, index)
 	case subPath == "_search" || subPath == "_search/":
-		return p.search(ctx, req, index)
-	case subPath == "_bulk" || subPath == "_bulk/":
-		return p.bulk(ctx, req, index)
-	case strings.HasPrefix(subPath, "_doc/"):
+		return p.search(ctx, req, scope, index)
+	case (subPath == "_bulk" || subPath == "_bulk/") && (method == http.MethodPost || method == http.MethodPut):
+		return p.bulk(ctx, req, scope, index)
+	case subPath == "_mapping" || subPath == "_mappings":
+		switch method {
+		case http.MethodGet:
+			return p.getMapping(scope, index)
+		case http.MethodPut, http.MethodPost:
+			return p.putMapping(req, scope, index)
+		}
+	case strings.HasPrefix(subPath, "_doc/") && strings.TrimPrefix(subPath, "_doc/") != "":
 		docID := strings.TrimPrefix(subPath, "_doc/")
 		switch method {
 		case http.MethodPut, http.MethodPost:
-			return p.indexDocument(ctx, req, index, docID)
+			return p.indexDocument(ctx, req, scope, index, docID, req.Params["op_type"] == "create")
 		case http.MethodGet:
-			return p.getDocument(ctx, index, docID)
+			return p.getDocument(req, scope, index, docID)
+		case http.MethodHead:
+			return p.headDocument(scope, index, docID)
 		case http.MethodDelete:
-			return p.deleteDocument(ctx, index, docID)
+			return p.deleteDocument(scope, index, docID)
 		}
-	case subPath == "_doc" && (method == http.MethodPost):
-		return p.indexDocument(ctx, req, index, "")
-	case strings.HasPrefix(subPath, "_mapping") || strings.HasPrefix(subPath, "_mappings"):
-		return p.putMapping(ctx, index)
+	case strings.HasPrefix(subPath, "_create/") && strings.TrimPrefix(subPath, "_create/") != "" &&
+		(method == http.MethodPut || method == http.MethodPost):
+		return p.indexDocument(ctx, req, scope, index, strings.TrimPrefix(subPath, "_create/"), true)
+	case (subPath == "_doc" || subPath == "_doc/") && method == http.MethodPost:
+		return p.indexDocument(ctx, req, scope, index, "", false)
 	case subPath == "_refresh":
 		return openSearchOK(map[string]interface{}{"_shards": map[string]int{"total": 1, "successful": 1, "failed": 0}})
 	}
 
-	return openSearchError(http.StatusNotFound, "route_not_found", "no handler for "+method+" /"+rest), nil
+	return openSearchError(http.StatusNotFound, "route_not_found", "no handler for "+method+" /"+rest).response()
+}
+
+// --- Stored records ---
+
+// openSearchIndexRecord is an index as substrate stores it.
+type openSearchIndexRecord struct {
+	// Name is the index name, the setting `provided_name` reports.
+	Name string `json:"name"`
+	// UUID is the index's `uuid` setting, minted at creation and the `index_uuid` a bulk item
+	// error reports.
+	UUID string `json:"uuid"`
+	// CreationDate is the `creation_date` setting: epoch milliseconds, as a string, which is how
+	// the get-index reference prints every setting.
+	CreationDate string `json:"creation_date"`
+	// Settings holds the settings the create supplied, flattened to dotted keys without the
+	// `index.` prefix and with every scalar rendered as a string, the form a read reports.
+	Settings map[string]interface{} `json:"settings,omitempty"`
+	// Mappings is the index's mapping, as the create supplied it and `PUT _mapping` merged into it.
+	Mappings map[string]interface{} `json:"mappings,omitempty"`
+	// NextSeqNo is the `_seq_no` the next write to the index is assigned. OpenSearch numbers
+	// operations per shard; substrate models one primary shard, so per index.
+	NextSeqNo int64 `json:"next_seq_no"`
+}
+
+// openSearchDocRecord is a document as substrate stores it: its source and the metadata every
+// write and read reports alongside it (#1213).
+type openSearchDocRecord struct {
+	// Source is the document body, as the last write sent it.
+	Source json.RawMessage `json:"_source"`
+	// Version is `_version`: 1 on creation, incremented by every later write.
+	Version int64 `json:"_version"`
+	// SeqNo is `_seq_no` of the write that produced this version.
+	SeqNo int64 `json:"_seq_no"`
+	// PrimaryTerm is `_primary_term` of that write.
+	PrimaryTerm int64 `json:"_primary_term"`
+}
+
+// loadIndex returns the stored index, or nil when it does not exist.
+func (p *OpenSearchPlugin) loadIndex(goCtx context.Context, scope openSearchScope, index string) (*openSearchIndexRecord, error) {
+	data, err := p.state.Get(goCtx, opensearchNamespace, scope.indexKey(index))
+	if err != nil {
+		return nil, fmt.Errorf("opensearch load index %s: %w", index, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var rec openSearchIndexRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("opensearch decode index %s: %w", index, err)
+	}
+	if rec.Name == "" {
+		rec.Name = index
+	}
+	return &rec, nil
+}
+
+// putIndex stores rec.
+func (p *OpenSearchPlugin) putIndex(goCtx context.Context, scope openSearchScope, rec *openSearchIndexRecord) error {
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return fmt.Errorf("opensearch marshal index %s: %w", rec.Name, err)
+	}
+	if err := p.state.Put(goCtx, opensearchNamespace, scope.indexKey(rec.Name), data); err != nil {
+		return fmt.Errorf("opensearch put index %s: %w", rec.Name, err)
+	}
+	return nil
+}
+
+// newIndexRecord builds the record of a new index, minting its UUID from the request's mint so a
+// replayed create reports the UUID it reported when recorded.
+func (p *OpenSearchPlugin) newIndexRecord(ctx *RequestContext, index string) *openSearchIndexRecord {
+	var ids *IDMint
+	if ctx != nil {
+		ids = ctx.IDs
+	}
+	return &openSearchIndexRecord{
+		Name: index,
+		// Twenty-two URL-safe characters, the width of the uuid the get-index reference's example
+		// prints ("Onnd4TKBQMODrfvAvNXjAg").
+		UUID:         ids.Base64URL(16),
+		CreationDate: strconv.FormatInt(p.tc.Now().UnixMilli(), 10),
+	}
+}
+
+// ensureIndex returns the stored index, creating it first when it does not exist — the automatic
+// index creation a document write performs.
+func (p *OpenSearchPlugin) ensureIndex(goCtx context.Context, ctx *RequestContext, scope openSearchScope, index string) (*openSearchIndexRecord, error) {
+	rec, err := p.loadIndex(goCtx, scope, index)
+	if err != nil || rec != nil {
+		return rec, err
+	}
+	rec = p.newIndexRecord(ctx, index)
+	if err := p.putIndex(goCtx, scope, rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// loadDoc returns the stored document, or nil when it does not exist.
+func (p *OpenSearchPlugin) loadDoc(goCtx context.Context, scope openSearchScope, index, id string) (*openSearchDocRecord, error) {
+	data, err := p.state.Get(goCtx, opensearchNamespace, scope.docKey(index, id))
+	if err != nil {
+		return nil, fmt.Errorf("opensearch load document %s/%s: %w", index, id, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var rec openSearchDocRecord
+	if err := json.Unmarshal(data, &rec); err != nil {
+		return nil, fmt.Errorf("opensearch decode document %s/%s: %w", index, id, err)
+	}
+	return &rec, nil
+}
+
+// writeDoc stores source as document id of idx, given the document's current record (nil when it
+// does not exist), and returns the record written. The version increments from existing's; the
+// sequence number is the index's next, and idx's counter is advanced. The index record is not
+// rewritten here: a caller persists it once per request, which lets a bulk request write each index
+// record once rather than once per item.
+func (p *OpenSearchPlugin) writeDoc(goCtx context.Context, scope openSearchScope, idx *openSearchIndexRecord, id string, source json.RawMessage, existing *openSearchDocRecord) (*openSearchDocRecord, error) {
+	rec := &openSearchDocRecord{Source: source, Version: 1, SeqNo: idx.NextSeqNo, PrimaryTerm: opensearchPrimaryTerm}
+	if existing != nil {
+		rec.Version = existing.Version + 1
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		return nil, fmt.Errorf("opensearch marshal document %s/%s: %w", idx.Name, id, err)
+	}
+	if err := p.state.Put(goCtx, opensearchNamespace, scope.docKey(idx.Name, id), data); err != nil {
+		return nil, fmt.Errorf("opensearch put document %s/%s: %w", idx.Name, id, err)
+	}
+	idx.NextSeqNo++
+	return rec, nil
+}
+
+// removeDoc deletes document id of idx, given its current record (nil when it does not exist), and
+// reports the version and sequence number the delete answers. Like [OpenSearchPlugin.writeDoc] it
+// advances idx's counter and leaves persisting the index record to the caller.
+//
+// A delete of an absent document still consumes a sequence number and reports `_version: 1`, which
+// is what the Bulk API reference's example shows for its `not_found` delete item.
+func (p *OpenSearchPlugin) removeDoc(goCtx context.Context, scope openSearchScope, idx *openSearchIndexRecord, id string, existing *openSearchDocRecord) (version, seqNo int64, err error) {
+	version = 1
+	if existing != nil {
+		version = existing.Version + 1
+		if err := p.state.Delete(goCtx, opensearchNamespace, scope.docKey(idx.Name, id)); err != nil {
+			return 0, 0, fmt.Errorf("opensearch delete document %s/%s: %w", idx.Name, id, err)
+		}
+	}
+	seqNo = idx.NextSeqNo
+	idx.NextSeqNo++
+	return version, seqNo, nil
 }
 
 // --- Index operations ---
 
-func (p *OpenSearchPlugin) createIndex(_ *RequestContext, req *AWSRequest, index string) (*AWSResponse, error) {
+func (p *OpenSearchPlugin) createIndex(ctx *RequestContext, req *AWSRequest, scope openSearchScope, index string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	key := "index:" + index
-	existing, _ := p.state.Get(goCtx, opensearchNamespace, key)
+	existing, err := p.loadIndex(goCtx, scope, index)
+	if err != nil {
+		return nil, err
+	}
 	if existing != nil {
 		return openSearchError(http.StatusBadRequest, "resource_already_exists_exception",
-			"index ["+index+"] already exists"), nil
+			"index ["+index+"] already exists").response()
 	}
-	meta := map[string]interface{}{
-		"index":      index,
-		"created_at": p.tc.Now().Format(time.RFC3339),
-		"doc_count":  0,
-	}
-	// Optionally parse mappings/settings from body.
+	rec := p.newIndexRecord(ctx, index)
 	if len(req.Body) > 0 {
-		var body map[string]interface{}
-		if err := json.Unmarshal(req.Body, &body); err == nil {
-			if m, ok := body["mappings"]; ok {
-				meta["mappings"] = m
-			}
-			if s, ok := body["settings"]; ok {
-				meta["settings"] = s
-			}
+		var body struct {
+			Settings map[string]interface{} `json:"settings"`
+			Mappings map[string]interface{} `json:"mappings"`
 		}
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			// The refusal travels in the response: this is the domain's own REST API, whose errors
+			// are JSON bodies rather than AWSErrors.
+			return openSearchInvalidBody().response()
+		}
+		settings, bad := openSearchFlattenSettings(body.Settings)
+		if bad != nil {
+			return bad.response()
+		}
+		rec.Settings = settings
+		rec.Mappings = body.Mappings
 	}
-	data, err := json.Marshal(meta)
-	if err != nil {
-		return nil, fmt.Errorf("opensearch createIndex marshal: %w", err)
-	}
-	if err := p.state.Put(goCtx, opensearchNamespace, key, data); err != nil {
-		return nil, fmt.Errorf("opensearch createIndex put: %w", err)
+	if err := p.putIndex(goCtx, scope, rec); err != nil {
+		return nil, err
 	}
 	return openSearchOK(map[string]interface{}{
 		"acknowledged":        true,
@@ -148,437 +362,279 @@ func (p *OpenSearchPlugin) createIndex(_ *RequestContext, req *AWSRequest, index
 	})
 }
 
-func (p *OpenSearchPlugin) deleteIndex(_ *RequestContext, _ *AWSRequest, index string) (*AWSResponse, error) {
+func (p *OpenSearchPlugin) deleteIndex(scope openSearchScope, index string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	key := "index:" + index
-	existing, _ := p.state.Get(goCtx, opensearchNamespace, key)
-	if existing == nil {
-		return openSearchError(http.StatusNotFound, "index_not_found_exception",
-			"no such index ["+index+"]"), nil
+	rec, err := p.loadIndex(goCtx, scope, index)
+	if err != nil {
+		return nil, err
 	}
-	if err := p.state.Delete(goCtx, opensearchNamespace, key); err != nil {
+	if rec == nil {
+		return openSearchIndexNotFound(index).response()
+	}
+	keys, err := p.state.List(goCtx, opensearchNamespace, scope.docPrefix(index))
+	if err != nil {
+		return nil, fmt.Errorf("opensearch deleteIndex list documents: %w", err)
+	}
+	for _, k := range keys {
+		if err := p.state.Delete(goCtx, opensearchNamespace, k); err != nil {
+			return nil, fmt.Errorf("opensearch deleteIndex document: %w", err)
+		}
+	}
+	if err := p.state.Delete(goCtx, opensearchNamespace, scope.indexKey(index)); err != nil {
 		return nil, fmt.Errorf("opensearch deleteIndex: %w", err)
 	}
-	// Also delete all documents in the index.
-	docIDs := p.loadDocIDs(goCtx, index)
-	for _, id := range docIDs {
-		_ = p.state.Delete(goCtx, opensearchNamespace, "doc:"+index+"/"+id)
-	}
-	_ = p.state.Delete(goCtx, opensearchNamespace, "doc_ids:"+index)
 	return openSearchOK(map[string]interface{}{"acknowledged": true})
 }
 
-func (p *OpenSearchPlugin) getIndex(_ *RequestContext, index string) (*AWSResponse, error) {
-	goCtx := context.Background()
-	key := "index:" + index
-	data, _ := p.state.Get(goCtx, opensearchNamespace, key)
-	if data == nil {
-		return openSearchError(http.StatusNotFound, "index_not_found_exception",
-			"no such index ["+index+"]"), nil
+// getIndex answers GET /{index}: the index's aliases, mappings and settings, keyed by its name.
+//
+// The settings are the ones the create stored, nested under `index` with every value a string, plus
+// `creation_date`, `uuid` and `provided_name`, which is the shape the get-index reference's example
+// prints. A create that supplied no shard or replica count reports one primary shard and no replicas:
+// substrate models a single node, on which a replica could never be allocated, and the cluster health
+// it reports is green.
+func (p *OpenSearchPlugin) getIndex(scope openSearchScope, index string) (*AWSResponse, error) {
+	rec, err := p.loadIndex(context.Background(), scope, index)
+	if err != nil {
+		return nil, err
 	}
-	var meta map[string]interface{}
-	_ = json.Unmarshal(data, &meta)
+	if rec == nil {
+		return openSearchIndexNotFound(index).response()
+	}
 	return openSearchOK(map[string]interface{}{
 		index: map[string]interface{}{
 			"aliases":  map[string]interface{}{},
-			"mappings": orEmpty(meta["mappings"]),
-			"settings": map[string]interface{}{
-				"index": map[string]interface{}{
-					"number_of_shards":   "1",
-					"number_of_replicas": "0",
-				},
-			},
+			"mappings": orEmpty(rec.Mappings),
+			"settings": openSearchNestSettings(rec),
 		},
 	})
 }
 
-func (p *OpenSearchPlugin) putMapping(_ *RequestContext, index string) (*AWSResponse, error) {
-	// Accept and ignore mapping updates; return acknowledged.
-	_ = index
+// headIndex answers HEAD /{index}: 200 or 404 and no body, which is all the index-exists reference
+// publishes.
+func (p *OpenSearchPlugin) headIndex(scope openSearchScope, index string) (*AWSResponse, error) {
+	rec, err := p.loadIndex(context.Background(), scope, index)
+	if err != nil {
+		return nil, err
+	}
+	status := http.StatusOK
+	if rec == nil {
+		status = http.StatusNotFound
+	}
+	return &AWSResponse{StatusCode: status, Headers: map[string]string{"Content-Type": "application/json"}}, nil
+}
+
+// getMapping answers GET /{index}/_mapping as `{"{index}": {"mappings": {…}}}`, the get-mapping
+// reference's shape.
+func (p *OpenSearchPlugin) getMapping(scope openSearchScope, index string) (*AWSResponse, error) {
+	rec, err := p.loadIndex(context.Background(), scope, index)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return openSearchIndexNotFound(index).response()
+	}
+	return openSearchOK(map[string]interface{}{
+		index: map[string]interface{}{"mappings": orEmpty(rec.Mappings)},
+	})
+}
+
+// putMapping answers PUT|POST /{index}/_mapping. The body's members are merged into the stored
+// mapping — a field the body names replaces or extends the stored one, and a field it does not name
+// is kept — which is the additive behavior the put-mapping reference's follow-up reads show. The
+// reference also states that an existing field's type cannot be changed once it holds data; substrate
+// does not refuse that, since it indexes nothing by type.
+func (p *OpenSearchPlugin) putMapping(req *AWSRequest, scope openSearchScope, index string) (*AWSResponse, error) {
+	goCtx := context.Background()
+	rec, err := p.loadIndex(goCtx, scope, index)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return openSearchIndexNotFound(index).response()
+	}
+	var body map[string]interface{}
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &body); err != nil {
+			return openSearchInvalidBody().response()
+		}
+	}
+	if rec.Mappings == nil {
+		rec.Mappings = map[string]interface{}{}
+	}
+	osDeepMerge(rec.Mappings, body)
+	if err := p.putIndex(goCtx, scope, rec); err != nil {
+		return nil, err
+	}
 	return openSearchOK(map[string]interface{}{"acknowledged": true})
 }
 
 // --- Document operations ---
 
-func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, index, docID string) (*AWSResponse, error) {
+// indexDocument answers a single-document write: PUT|POST /{index}/_doc/{id}, POST /{index}/_doc,
+// and the create-only forms PUT|POST /{index}/_create/{id} and `?op_type=create`.
+//
+// A write that creates the document answers 201 with `result: "created"`; one that replaces an
+// existing document answers 200 with `result: "updated"` and the incremented `_version`. The index
+// document reference publishes both result values and the version increment, and the Bulk API
+// reference's example item statuses — 201 for `created`, 200 for `updated` — are the per-write
+// statuses. Every write reports `_seq_no` and `_primary_term`.
+func (p *OpenSearchPlugin) indexDocument(ctx *RequestContext, req *AWSRequest, scope openSearchScope, index, docID string, createOnly bool) (*AWSResponse, error) {
 	goCtx := context.Background()
+	if bad := openSearchValidateSource(req.Body); bad != nil {
+		return bad.response()
+	}
 	if docID == "" {
 		docID = generateOpenSearchID(ctx.IDs)
 	}
-	// Ensure the index exists (auto-create).
-	indexKey := "index:" + index
-	if data, _ := p.state.Get(goCtx, opensearchNamespace, indexKey); data == nil {
-		meta := map[string]interface{}{"index": index, "created_at": p.tc.Now().Format(time.RFC3339), "doc_count": 0}
-		d, err := json.Marshal(meta)
-		if err != nil {
-			return nil, fmt.Errorf("opensearch indexDocument marshal: %w", err)
-		}
-		if err := p.state.Put(goCtx, opensearchNamespace, indexKey, d); err != nil {
-			return nil, fmt.Errorf("opensearch indexDocument state.Put: %w", err)
-		}
-	}
-
-	docKey := "doc:" + index + "/" + docID
-	isNew := true
-	if existing, _ := p.state.Get(goCtx, opensearchNamespace, docKey); existing != nil {
-		isNew = false
-	}
-
-	// Store the raw document source.
-	if err := p.state.Put(goCtx, opensearchNamespace, docKey, req.Body); err != nil {
-		return nil, fmt.Errorf("opensearch indexDocument put: %w", err)
-	}
-	if isNew {
-		if err := updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID); err != nil {
-			return nil, fmt.Errorf("opensearch indexDocument index: %w", err)
-		}
-	}
-
-	result := "updated"
-	if isNew {
-		result = "created"
-	}
-	return openSearchStatusOK(http.StatusCreated, map[string]interface{}{
-		"_index":   index,
-		"_id":      docID,
-		"_version": 1,
-		"result":   result,
-		"_shards":  map[string]int{"total": 1, "successful": 1, "failed": 0},
-		"_seq_no":  0,
-	})
-}
-
-func (p *OpenSearchPlugin) getDocument(_ *RequestContext, index, docID string) (*AWSResponse, error) {
-	goCtx := context.Background()
-	docKey := "doc:" + index + "/" + docID
-	data, _ := p.state.Get(goCtx, opensearchNamespace, docKey)
-	if data == nil {
-		return openSearchError(http.StatusNotFound, "not_found", "document not found"), nil
-	}
-	var source interface{} // nosemgrep
-	_ = json.Unmarshal(data, &source)
-	return openSearchOK(map[string]interface{}{
-		"_index":   index,
-		"_id":      docID,
-		"_version": 1,
-		"found":    true,
-		"_source":  source,
-	})
-}
-
-func (p *OpenSearchPlugin) deleteDocument(_ *RequestContext, index, docID string) (*AWSResponse, error) {
-	goCtx := context.Background()
-	docKey := "doc:" + index + "/" + docID
-	if err := p.state.Delete(goCtx, opensearchNamespace, docKey); err != nil {
-		return nil, fmt.Errorf("opensearch deleteDocument: %w", err)
-	}
-	if err := removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+index, docID); err != nil {
-		return nil, fmt.Errorf("opensearch deleteDocument index: %w", err)
-	}
-	return openSearchOK(map[string]interface{}{
-		"_index":   index,
-		"_id":      docID,
-		"_version": 2,
-		"result":   "deleted",
-		"_shards":  map[string]int{"total": 1, "successful": 1, "failed": 0},
-	})
-}
-
-// --- Bulk API ---
-
-func (p *OpenSearchPlugin) bulk(ctx *RequestContext, req *AWSRequest, defaultIndex string) (*AWSResponse, error) {
-	goCtx := context.Background()
-	lines := strings.Split(strings.TrimSpace(string(req.Body)), "\n")
-	var items []interface{}
-	i := 0
-	for i < len(lines) {
-		if lines[i] == "" {
-			i++
-			continue
-		}
-		var action map[string]map[string]string
-		if err := json.Unmarshal([]byte(lines[i]), &action); err != nil {
-			i++
-			continue
-		}
-		i++
-		for op, meta := range action {
-			idx := meta["_index"]
-			if idx == "" {
-				idx = defaultIndex
-			}
-			docID := meta["_id"]
-			switch op {
-			case "index", "create":
-				if i < len(lines) {
-					body := []byte(lines[i])
-					i++
-					if docID == "" {
-						docID = generateOpenSearchID(ctx.IDs)
-					}
-					docKey := "doc:" + idx + "/" + docID
-					isNew := true
-					if existing, _ := p.state.Get(goCtx, opensearchNamespace, docKey); existing != nil {
-						isNew = false
-					}
-					if err := p.state.Put(goCtx, opensearchNamespace, docKey, body); err != nil {
-						return nil, fmt.Errorf("opensearch bulk state.Put: %w", err)
-					}
-					if isNew {
-						if err := updateStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID); err != nil {
-							return nil, fmt.Errorf("opensearch bulk index: %w", err)
-						}
-						// Ensure index exists.
-						indexKey := "index:" + idx
-						if d, _ := p.state.Get(goCtx, opensearchNamespace, indexKey); d == nil {
-							m := map[string]interface{}{"index": idx, "created_at": p.tc.Now().Format(time.RFC3339)}
-							d2, err := json.Marshal(m)
-							if err != nil {
-								return nil, fmt.Errorf("opensearch bulk marshal: %w", err)
-							}
-							if err := p.state.Put(goCtx, opensearchNamespace, indexKey, d2); err != nil {
-								return nil, fmt.Errorf("opensearch bulk state.Put: %w", err)
-							}
-						}
-					}
-					result := "updated"
-					if isNew {
-						result = "created"
-					}
-					items = append(items, map[string]interface{}{
-						op: map[string]interface{}{"_index": idx, "_id": docID, "result": result, "status": 200},
-					})
-				}
-			case "delete":
-				docKey := "doc:" + idx + "/" + docID
-				_ = p.state.Delete(goCtx, opensearchNamespace, docKey)
-				if err := removeFromStringIndex(goCtx, p.state, opensearchNamespace, "doc_ids:"+idx, docID); err != nil {
-					return nil, fmt.Errorf("opensearch bulk index: %w", err)
-				}
-				items = append(items, map[string]interface{}{
-					"delete": map[string]interface{}{"_index": idx, "_id": docID, "result": "deleted", "status": 200},
-				})
-			}
-		}
-	}
-	return openSearchOK(map[string]interface{}{
-		"took":   1,
-		"errors": false,
-		"items":  items,
-	})
-}
-
-// --- Search ---
-
-func (p *OpenSearchPlugin) search(ctx *RequestContext, req *AWSRequest, index string) (*AWSResponse, error) {
-	goCtx := context.Background()
-
-	// Parse request body.
-	var body openSearchSearchRequest
-	if len(req.Body) > 0 {
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			// The refusal travels in the response, not the error slot: this is the domain's own
-			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
-			// bad-scroll-state return below.
-			return openSearchInvalidBody(), nil //nolint:nilerr
-		}
-	}
-
-	// Load all documents in this index.
-	docs := p.loadDocs(goCtx, index)
-
-	// Apply query filter.
-	filtered := osFilterDocs(docs, body.Query)
-
-	// Determine pagination.
-	size := body.Size
-	if size <= 0 {
-		size = 10
-	}
-	from := body.From
-
-	// Scroll support: save full result set and return first page.
-	scrollTTL := req.Params["scroll"]
-	if scrollTTL == "" && body.Scroll != "" {
-		scrollTTL = body.Scroll
-	}
-	if scrollTTL != "" {
-		scrollID := generateOpenSearchID(ctx.IDs)
-		// Store remaining IDs (skip first page) as scroll state.
-		allIDs := make([]string, 0, len(filtered))
-		for _, d := range filtered {
-			allIDs = append(allIDs, d["_id"].(string))
-		}
-		var remaining []string
-		if from+size < len(allIDs) {
-			remaining = allIDs[from+size:]
-		}
-		scrollState := map[string]interface{}{
-			"index":     index,
-			"remaining": remaining,
-			"size":      size,
-		}
-		sd, err := json.Marshal(scrollState)
-		if err != nil {
-			return nil, fmt.Errorf("opensearch search marshal: %w", err)
-		}
-		if err := p.state.Put(goCtx, opensearchNamespace, "scroll:"+scrollID, sd); err != nil {
-			return nil, fmt.Errorf("opensearch search state.Put: %w", err)
-		}
-		hits := osPageHits(filtered, from, size)
-		return openSearchOK(p.buildSearchResponse(filtered, hits, body, scrollID))
-	}
-
-	hits := osPageHits(filtered, from, size)
-	return openSearchOK(p.buildSearchResponse(filtered, hits, body, ""))
-}
-
-func (p *OpenSearchPlugin) buildSearchResponse(allDocs []map[string]interface{}, pageHits []map[string]interface{}, body openSearchSearchRequest, scrollID string) map[string]interface{} {
-	resp := map[string]interface{}{
-		"took":      1,
-		"timed_out": false,
-		"_shards":   map[string]int{"total": 1, "successful": 1, "skipped": 0, "failed": 0},
-		"hits": map[string]interface{}{
-			"total":     map[string]interface{}{"value": len(allDocs), "relation": "eq"},
-			"max_score": 1.0,
-			"hits":      pageHits,
-		},
-	}
-	if scrollID != "" {
-		resp["_scroll_id"] = scrollID
-	}
-	if len(body.Aggs) > 0 {
-		resp["aggregations"] = osComputeAggs(allDocs, body.Aggs)
-	}
-	return resp
-}
-
-// --- Scroll ---
-
-func (p *OpenSearchPlugin) scroll(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-
-	var scrollID string
-	var body struct {
-		ScrollID string `json:"scroll_id"`
-	}
-	if len(req.Body) > 0 {
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			// The refusal travels in the response, not the error slot: this is the domain's own
-			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
-			// bad-scroll-state return below.
-			return openSearchInvalidBody(), nil //nolint:nilerr
-		}
-		scrollID = body.ScrollID
-	}
-	if scrollID == "" {
-		scrollID = req.Params["scroll_id"]
-	}
-	if scrollID == "" {
-		return openSearchError(http.StatusBadRequest, "illegal_argument_exception", "scroll_id required"), nil
-	}
-
-	stateKey := "scroll:" + scrollID
-	data, _ := p.state.Get(goCtx, opensearchNamespace, stateKey)
-	if data == nil {
-		return openSearchError(http.StatusNotFound, "search_context_missing_exception", "scroll context expired"), nil
-	}
-
-	var state struct {
-		Index     string   `json:"index"`
-		Remaining []string `json:"remaining"`
-		Size      int      `json:"size"`
-	}
-	if err := json.Unmarshal(data, &state); err != nil {
-		return openSearchError(http.StatusInternalServerError, "internal_error", "bad scroll state"), nil //nolint:nilerr
-	}
-
-	size := state.Size
-	if size <= 0 {
-		size = 10
-	}
-
-	// Build page from remaining IDs.
-	var page []string
-	var newRemaining []string
-	if len(state.Remaining) <= size {
-		page = state.Remaining
-	} else {
-		page = state.Remaining[:size]
-		newRemaining = state.Remaining[size:]
-	}
-
-	// Load docs for this page.
-	hits := make([]map[string]interface{}, 0, len(page))
-	for _, id := range page {
-		docData, _ := p.state.Get(goCtx, opensearchNamespace, "doc:"+state.Index+"/"+id)
-		if docData != nil {
-			var src interface{} // nosemgrep
-			_ = json.Unmarshal(docData, &src)
-			hits = append(hits, map[string]interface{}{
-				"_index":  state.Index,
-				"_id":     id,
-				"_score":  1.0,
-				"_source": src,
-			})
-		}
-	}
-
-	// Update scroll state.
-	state.Remaining = newRemaining
-	updated, err := json.Marshal(state)
+	idx, err := p.ensureIndex(goCtx, ctx, scope, index)
 	if err != nil {
-		return nil, fmt.Errorf("opensearch scroll marshal: %w", err)
+		return nil, err
 	}
-	if err := p.state.Put(goCtx, opensearchNamespace, stateKey, updated); err != nil {
-		return nil, fmt.Errorf("opensearch scroll state.Put: %w", err)
+	existing, err := p.loadDoc(goCtx, scope, index, docID)
+	if err != nil {
+		return nil, err
 	}
-
-	return openSearchOK(map[string]interface{}{
-		"_scroll_id": scrollID,
-		"took":       1,
-		"timed_out":  false,
-		"_shards":    map[string]int{"total": 1, "successful": 1, "skipped": 0, "failed": 0},
-		"hits": map[string]interface{}{
-			"total":     map[string]interface{}{"value": len(hits), "relation": "eq"},
-			"max_score": 1.0,
-			"hits":      hits,
-		},
-	})
+	if createOnly && existing != nil {
+		return openSearchVersionConflict(docID, existing.Version).response()
+	}
+	rec, err := p.writeDoc(goCtx, scope, idx, docID, json.RawMessage(req.Body), existing)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.putIndex(goCtx, scope, idx); err != nil {
+		return nil, err
+	}
+	status, result := http.StatusOK, "updated"
+	if existing == nil {
+		status, result = http.StatusCreated, "created"
+	}
+	return openSearchStatusOK(status, openSearchWriteResult(index, docID, rec.Version, rec.SeqNo, result))
 }
 
-func (p *OpenSearchPlugin) clearScroll(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+// getDocument answers GET /{index}/_doc/{id}.
+//
+// An absent document is not an error: the get-document reference publishes `found: false` in a
+// normal body at 404, and a client switches on `found`. A missing index is an error, the
+// index_not_found_exception every other read of a missing index answers. `_source`,
+// `_source_includes` and `_source_excludes` filter the source as they do on a search.
+func (p *OpenSearchPlugin) getDocument(req *AWSRequest, scope openSearchScope, index, docID string) (*AWSResponse, error) {
 	goCtx := context.Background()
-	var body struct {
-		ScrollID interface{} `json:"scroll_id"`
+	idx, err := p.loadIndex(goCtx, scope, index)
+	if err != nil {
+		return nil, err
 	}
-	if len(req.Body) > 0 {
-		if err := json.Unmarshal(req.Body, &body); err != nil {
-			// The refusal travels in the response, not the error slot: this is the domain's own
-			// REST API, whose errors are JSON bodies rather than AWSErrors. Same shape as the
-			// bad-scroll-state return below.
-			return openSearchInvalidBody(), nil //nolint:nilerr
+	if idx == nil {
+		return openSearchIndexNotFound(index).response()
+	}
+	filter, bad := parseOSSourceFilter(nil, req.Params)
+	if bad != nil {
+		return bad.response()
+	}
+	rec, err := p.loadDoc(goCtx, scope, index, docID)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return openSearchStatusOK(http.StatusNotFound, map[string]interface{}{
+			"_index": index,
+			"_id":    docID,
+			"found":  false,
+		})
+	}
+	body := map[string]interface{}{
+		"_index":        index,
+		"_id":           docID,
+		"_version":      rec.Version,
+		"_seq_no":       rec.SeqNo,
+		"_primary_term": rec.PrimaryTerm,
+		"found":         true,
+	}
+	if !filter.Disabled {
+		decoded, err := osDecodeSource(rec.Source)
+		if err != nil {
+			return nil, fmt.Errorf("opensearch getDocument %s/%s: %w", index, docID, err)
 		}
+		body["_source"] = filter.apply(decoded)
 	}
-	// Accept single ID or slice.
-	var ids []string
-	switch v := body.ScrollID.(type) {
-	case string:
-		ids = []string{v}
-	case []interface{}:
-		for _, x := range v {
-			if s, ok := x.(string); ok {
-				ids = append(ids, s)
-			}
-		}
+	return openSearchOK(body)
+}
+
+// headDocument answers HEAD /{index}/_doc/{id}: 200 when the document exists and 404 when it does
+// not, which is what the get-document reference states for HEAD.
+func (p *OpenSearchPlugin) headDocument(scope openSearchScope, index, docID string) (*AWSResponse, error) {
+	rec, err := p.loadDoc(context.Background(), scope, index, docID)
+	if err != nil {
+		return nil, err
 	}
-	for _, id := range ids {
-		_ = p.state.Delete(goCtx, opensearchNamespace, "scroll:"+id)
+	status := http.StatusOK
+	if rec == nil {
+		status = http.StatusNotFound
 	}
-	return openSearchOK(map[string]interface{}{
-		"succeeded": true,
-		"num_freed": len(ids),
-	})
+	return &AWSResponse{StatusCode: status, Headers: map[string]string{"Content-Type": "application/json"}}, nil
+}
+
+// deleteDocument answers DELETE /{index}/_doc/{id}.
+//
+// The delete-document reference publishes `result` as "deleted if the document was successfully
+// deleted or not_found if the document did not exist", and a missing index as
+// index_not_found_exception. An absent document answers 404 with `result: "not_found"`, the status
+// the Bulk API reference's example gives its `not_found` delete item.
+func (p *OpenSearchPlugin) deleteDocument(scope openSearchScope, index, docID string) (*AWSResponse, error) {
+	goCtx := context.Background()
+	idx, err := p.loadIndex(goCtx, scope, index)
+	if err != nil {
+		return nil, err
+	}
+	if idx == nil {
+		return openSearchIndexNotFound(index).response()
+	}
+	existing, err := p.loadDoc(goCtx, scope, index, docID)
+	if err != nil {
+		return nil, err
+	}
+	version, seqNo, err := p.removeDoc(goCtx, scope, idx, docID, existing)
+	if err != nil {
+		return nil, err
+	}
+	if err := p.putIndex(goCtx, scope, idx); err != nil {
+		return nil, err
+	}
+	status, result := http.StatusOK, "deleted"
+	if existing == nil {
+		status, result = http.StatusNotFound, "not_found"
+	}
+	return openSearchStatusOK(status, openSearchWriteResult(index, docID, version, seqNo, result))
+}
+
+// openSearchWriteResult is the body of a document write or delete: the members the index-document
+// and delete-document references publish.
+func openSearchWriteResult(index, id string, version, seqNo int64, result string) map[string]interface{} {
+	return map[string]interface{}{
+		"_index":        index,
+		"_id":           id,
+		"_version":      version,
+		"result":        result,
+		"_shards":       map[string]int{"total": 1, "successful": 1, "failed": 0},
+		"_seq_no":       seqNo,
+		"_primary_term": opensearchPrimaryTerm,
+	}
+}
+
+// openSearchValidateSource refuses a document body that is not a JSON object, or nil when it is one.
+//
+// Documents are stored with their metadata, so a body that is not JSON cannot be stored verbatim as
+// it once was. The type names are the engine's: action_request_validation_exception for a missing
+// source and mapper_parsing_exception for one that will not parse. The reasons are substrate's own.
+func openSearchValidateSource(body []byte) *openSearchRefusal {
+	if len(strings.TrimSpace(string(body))) == 0 {
+		return openSearchError(http.StatusBadRequest, "action_request_validation_exception", "the document source is missing")
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+		return openSearchError(http.StatusBadRequest, "mapper_parsing_exception", "the document source is not a JSON object")
+	}
+	return nil
 }
 
 // --- Cluster health ---
@@ -601,430 +657,140 @@ func (p *OpenSearchPlugin) clusterHealth() (*AWSResponse, error) {
 	})
 }
 
-// --- Helpers ---
+// --- Settings and mappings ---
 
-func (p *OpenSearchPlugin) loadDocIDs(ctx context.Context, index string) []string {
-	ids, _ := loadStringIndex(ctx, p.state, opensearchNamespace, "doc_ids:"+index)
-	return ids
-}
-
-func (p *OpenSearchPlugin) loadDocs(ctx context.Context, index string) []map[string]interface{} {
-	ids := p.loadDocIDs(ctx, index)
-	docs := make([]map[string]interface{}, 0, len(ids))
-	for _, id := range ids {
-		data, _ := p.state.Get(ctx, opensearchNamespace, "doc:"+index+"/"+id)
-		if data == nil {
-			continue
-		}
-		var src map[string]interface{}
-		if err := json.Unmarshal(data, &src); err != nil {
-			continue
-		}
-		docs = append(docs, map[string]interface{}{
-			"_id":     id,
-			"_source": src,
-		})
+// openSearchFlattenSettings flattens a create's `settings` object to dotted keys without the
+// `index.` prefix, rendering every scalar as a string. `{"number_of_shards": 2}`,
+// `{"index": {"number_of_shards": 2}}` and `{"index.number_of_shards": "2"}` all flatten to
+// `number_of_shards: "2"`, which is why a read reports the same thing whichever form the create used.
+//
+// Because those forms converge, one body can name a setting twice — `{"number_of_shards": 1,
+// "index": {"number_of_shards": 2}}`. No published page says which wins, and choosing by map order
+// would give a different index on different runs (#1201), so a setting named twice is refused:
+// illegal_argument_exception at 400, with substrate's own reason naming the setting. The walk is in
+// sorted key order so that the setting the refusal names is the same on every run.
+func openSearchFlattenSettings(in map[string]interface{}) (map[string]interface{}, *openSearchRefusal) {
+	if len(in) == 0 {
+		return nil, nil
 	}
-	return docs
-}
-
-// openSearchSearchRequest mirrors the OpenSearch search request body.
-type openSearchSearchRequest struct {
-	Query  map[string]interface{} `json:"query"`
-	Size   int                    `json:"size"`
-	From   int                    `json:"from"`
-	Source interface{}            `json:"_source"`
-	Sort   interface{}            `json:"sort"`
-	Aggs   map[string]interface{} `json:"aggs"`
-	Scroll string                 `json:"scroll"`
-}
-
-// osFilterDocs applies a query to the document list and returns matching docs.
-func osFilterDocs(docs []map[string]interface{}, query map[string]interface{}) []map[string]interface{} {
-	if len(query) == 0 {
-		return docs
-	}
-	var result []map[string]interface{}
-	for _, doc := range docs {
-		if osMatchDoc(doc, query) {
-			result = append(result, doc)
+	out := make(map[string]interface{})
+	var dup string
+	var walk func(prefix string, v interface{})
+	walk = func(prefix string, v interface{}) {
+		if dup != "" {
+			return
+		}
+		switch t := v.(type) {
+		case map[string]interface{}:
+			for _, k := range osSortedKeys(t) {
+				walk(prefix+k+".", t[k])
+			}
+		default:
+			key := strings.TrimPrefix(strings.TrimSuffix(prefix, "."), "index.")
+			if key == "" || key == "index" {
+				return
+			}
+			if _, seen := out[key]; seen {
+				dup = key
+				return
+			}
+			out[key] = openSearchSettingValue(t)
 		}
 	}
-	return result
-}
-
-// osMatchDoc returns true if a document matches the given query clause.
-func osMatchDoc(doc map[string]interface{}, query map[string]interface{}) bool {
-	src, _ := doc["_source"].(map[string]interface{})
-
-	for qType, qVal := range query {
-		switch qType {
-		case "match_all":
-			return true
-		case "match_none":
-			return false
-		case "term":
-			terms, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			for field, val := range terms {
-				fieldVal, ok := val.(map[string]interface{})
-				if ok {
-					val = fieldVal["value"]
-				}
-				if !osFieldEquals(src, field, val) {
-					return false
-				}
-			}
-		case "terms":
-			terms, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			for field, vals := range terms {
-				list, ok := vals.([]interface{})
-				if !ok {
-					return false
-				}
-				docVal := osGetField(src, field)
-				matched := false
-				for _, v := range list {
-					if fmt.Sprintf("%v", docVal) == fmt.Sprintf("%v", v) {
-						matched = true
-						break
-					}
-				}
-				if !matched {
-					return false
-				}
-			}
-		case "bool":
-			boolQ, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			if must, ok := boolQ["must"]; ok {
-				for _, clause := range osToClauseList(must) {
-					if !osMatchDoc(doc, clause) {
-						return false
-					}
-				}
-			}
-			if should, ok := boolQ["should"]; ok {
-				clauses := osToClauseList(should)
-				if len(clauses) > 0 {
-					anyMatch := false
-					for _, clause := range clauses {
-						if osMatchDoc(doc, clause) {
-							anyMatch = true
-							break
-						}
-					}
-					if !anyMatch {
-						return false
-					}
-				}
-			}
-			if mustNot, ok := boolQ["must_not"]; ok {
-				for _, clause := range osToClauseList(mustNot) {
-					if osMatchDoc(doc, clause) {
-						return false
-					}
-				}
-			}
-		case "exists":
-			existsQ, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			field, _ := existsQ["field"].(string)
-			if osGetField(src, field) == nil {
-				return false
-			}
-		case "range":
-			rangeQ, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			for field, rangeVals := range rangeQ {
-				rv, ok := rangeVals.(map[string]interface{})
-				if !ok {
-					return false
-				}
-				docVal := osGetField(src, field)
-				if !osRangeMatch(docVal, rv) {
-					return false
-				}
-			}
-		case "match":
-			matchQ, ok := qVal.(map[string]interface{})
-			if !ok {
-				return false
-			}
-			for field, val := range matchQ {
-				query, ok := val.(map[string]interface{})
-				if ok {
-					val = query["query"]
-				}
-				docVal := fmt.Sprintf("%v", osGetField(src, field))
-				queryStr := fmt.Sprintf("%v", val)
-				if !strings.Contains(strings.ToLower(docVal), strings.ToLower(queryStr)) {
-					return false
-				}
-			}
-		}
+	walk("", in)
+	if dup != "" {
+		return nil, openSearchError(http.StatusBadRequest, "illegal_argument_exception",
+			"setting [index."+dup+"] is given more than once")
 	}
-	return true
+	return out, nil
 }
 
-func osToClauseList(v interface{}) []map[string]interface{} {
+// openSearchSettingValue renders a setting the way the get-index reference prints it: a string, or a
+// list of strings.
+func openSearchSettingValue(v interface{}) interface{} {
 	switch t := v.(type) {
-	case map[string]interface{}:
-		return []map[string]interface{}{t}
+	case nil:
+		return nil
+	case string:
+		return t
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(t)
 	case []interface{}:
-		var out []map[string]interface{}
-		for _, item := range t {
-			if m, ok := item.(map[string]interface{}); ok {
-				out = append(out, m)
-			}
+		out := make([]interface{}, 0, len(t))
+		for _, e := range t {
+			out = append(out, openSearchSettingValue(e))
 		}
 		return out
+	default:
+		return fmt.Sprintf("%v", t)
 	}
-	return nil
 }
 
-// osGetField retrieves a (possibly dot-separated) field from a document source.
-func osGetField(src map[string]interface{}, field string) interface{} {
-	if src == nil {
-		return nil
+// openSearchNestSettings builds the `settings` object a read reports: the stored settings over the
+// single-node defaults, plus the three the index carries itself, nested under `index`.
+func openSearchNestSettings(rec *openSearchIndexRecord) map[string]interface{} {
+	flat := map[string]interface{}{
+		"number_of_shards":   "1",
+		"number_of_replicas": "0",
 	}
-	if !strings.Contains(field, ".") {
-		return src[field]
+	for k, v := range rec.Settings {
+		flat[k] = v
 	}
-	parts := strings.SplitN(field, ".", 2)
-	nested, ok := src[parts[0]].(map[string]interface{})
-	if !ok {
-		return nil
-	}
-	return osGetField(nested, parts[1])
-}
+	flat["creation_date"] = rec.CreationDate
+	flat["uuid"] = rec.UUID
+	flat["provided_name"] = rec.Name
 
-func osFieldEquals(src map[string]interface{}, field string, val interface{}) bool {
-	docVal := osGetField(src, field)
-	return fmt.Sprintf("%v", docVal) == fmt.Sprintf("%v", val)
-}
-
-func osRangeMatch(docVal interface{}, rv map[string]interface{}) bool {
-	dv, err := strconv.ParseFloat(fmt.Sprintf("%v", docVal), 64)
-	if err != nil {
-		return false
+	keys := make([]string, 0, len(flat))
+	for k := range flat {
+		keys = append(keys, k)
 	}
-	if gte, ok := rv["gte"]; ok {
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", gte), 64)
-		if err != nil || dv < v {
-			return false
-		}
-	}
-	if gt, ok := rv["gt"]; ok {
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", gt), 64)
-		if err != nil || dv <= v {
-			return false
-		}
-	}
-	if lte, ok := rv["lte"]; ok {
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", lte), 64)
-		if err != nil || dv > v {
-			return false
-		}
-	}
-	if lt, ok := rv["lt"]; ok {
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", lt), 64)
-		if err != nil || dv >= v {
-			return false
-		}
-	}
-	return true
-}
-
-func osPageHits(docs []map[string]interface{}, from, size int) []map[string]interface{} {
-	if from >= len(docs) {
-		return []map[string]interface{}{}
-	}
-	end := from + size
-	if end > len(docs) {
-		end = len(docs)
-	}
-	page := docs[from:end]
-	hits := make([]map[string]interface{}, 0, len(page))
-	for _, d := range page {
-		hits = append(hits, map[string]interface{}{
-			"_index":  "unknown",
-			"_id":     d["_id"],
-			"_score":  1.0,
-			"_source": d["_source"],
-		})
-	}
-	return hits
-}
-
-// osComputeAggs computes simple aggregations over a set of documents.
-func osComputeAggs(docs []map[string]interface{}, aggs map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
-	for name, aggDef := range aggs {
-		agg, ok := aggDef.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if termsAgg, ok := agg["terms"].(map[string]interface{}); ok {
-			field, _ := termsAgg["field"].(string)
-			sizeVal := 10
-			if sv, ok := termsAgg["size"].(float64); ok {
-				sizeVal = int(sv)
+	sort.Strings(keys)
+	indexObj := make(map[string]interface{})
+	for _, k := range keys {
+		parts := strings.Split(k, ".")
+		node := indexObj
+		ok := true
+		for _, part := range parts[:len(parts)-1] {
+			child, exists := node[part]
+			if !exists {
+				m := make(map[string]interface{})
+				node[part] = m
+				node = m
+				continue
 			}
-			result[name] = osTermsAgg(docs, field, sizeVal)
-		} else if cardinalityAgg, ok := agg["cardinality"].(map[string]interface{}); ok {
-			field, _ := cardinalityAgg["field"].(string)
-			result[name] = osCardinalityAgg(docs, field)
-		} else if valueCountAgg, ok := agg["value_count"].(map[string]interface{}); ok {
-			field, _ := valueCountAgg["field"].(string)
-			result[name] = osValueCountAgg(docs, field)
-		} else if sumAgg, ok := agg["sum"].(map[string]interface{}); ok {
-			field, _ := sumAgg["field"].(string)
-			result[name] = osSumAgg(docs, field)
-		} else if avgAgg, ok := agg["avg"].(map[string]interface{}); ok {
-			field, _ := avgAgg["field"].(string)
-			result[name] = osAvgAgg(docs, field)
-		} else if maxAgg, ok := agg["max"].(map[string]interface{}); ok {
-			field, _ := maxAgg["field"].(string)
-			result[name] = osMaxAgg(docs, field)
-		} else if minAgg, ok := agg["min"].(map[string]interface{}); ok {
-			field, _ := minAgg["field"].(string)
-			result[name] = osMinAgg(docs, field)
+			m, isMap := child.(map[string]interface{})
+			if !isMap {
+				ok = false
+				break
+			}
+			node = m
+		}
+		if ok {
+			if _, exists := node[parts[len(parts)-1]].(map[string]interface{}); !exists {
+				node[parts[len(parts)-1]] = flat[k]
+			}
 		}
 	}
-	return result
+	return map[string]interface{}{"index": indexObj}
 }
 
-func osTermsAgg(docs []map[string]interface{}, field string, size int) map[string]interface{} {
-	counts := make(map[string]int)
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v := fmt.Sprintf("%v", osGetField(src, field))
-		counts[v]++
-	}
-	type bucket struct {
-		key   string
-		count int
-	}
-	var buckets []bucket
-	for k, c := range counts {
-		buckets = append(buckets, bucket{k, c})
-	}
-	sort.Slice(buckets, func(i, j int) bool {
-		if buckets[i].count != buckets[j].count {
-			return buckets[i].count > buckets[j].count
+// osDeepMerge merges src into dst: an object member merges into an object member of the same name,
+// and anything else replaces it.
+func osDeepMerge(dst, src map[string]interface{}) {
+	for k, v := range src {
+		if sv, ok := v.(map[string]interface{}); ok {
+			if dv, ok := dst[k].(map[string]interface{}); ok {
+				osDeepMerge(dv, sv)
+				continue
+			}
 		}
-		return buckets[i].key < buckets[j].key
-	})
-	if len(buckets) > size {
-		buckets = buckets[:size]
-	}
-	result := make([]map[string]interface{}, 0, len(buckets))
-	for _, b := range buckets {
-		result = append(result, map[string]interface{}{"key": b.key, "doc_count": b.count})
-	}
-	return map[string]interface{}{
-		"doc_count_error_upper_bound": 0,
-		"sum_other_doc_count":         0,
-		"buckets":                     result,
+		dst[k] = v
 	}
 }
 
-func osCardinalityAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	seen := make(map[string]struct{})
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v := fmt.Sprintf("%v", osGetField(src, field))
-		seen[v] = struct{}{}
-	}
-	return map[string]interface{}{"value": len(seen)}
-}
-
-func osValueCountAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	count := 0
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		if osGetField(src, field) != nil {
-			count++
-		}
-	}
-	return map[string]interface{}{"value": count}
-}
-
-func osSumAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	var sum float64
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v, _ := strconv.ParseFloat(fmt.Sprintf("%v", osGetField(src, field)), 64)
-		sum += v
-	}
-	return map[string]interface{}{"value": sum}
-}
-
-func osAvgAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	if len(docs) == 0 {
-		return map[string]interface{}{"value": nil}
-	}
-	var sum float64
-	count := 0
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", osGetField(src, field)), 64)
-		if err == nil {
-			sum += v
-			count++
-		}
-	}
-	if count == 0 {
-		return map[string]interface{}{"value": nil}
-	}
-	return map[string]interface{}{"value": sum / float64(count)}
-}
-
-func osMaxAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	var max float64
-	first := true
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", osGetField(src, field)), 64)
-		if err == nil && (first || v > max) {
-			max = v
-			first = false
-		}
-	}
-	if first {
-		return map[string]interface{}{"value": nil}
-	}
-	return map[string]interface{}{"value": max}
-}
-
-func osMinAgg(docs []map[string]interface{}, field string) map[string]interface{} {
-	var min float64
-	first := true
-	for _, d := range docs {
-		src, _ := d["_source"].(map[string]interface{})
-		v, err := strconv.ParseFloat(fmt.Sprintf("%v", osGetField(src, field)), 64)
-		if err == nil && (first || v < min) {
-			min = v
-			first = false
-		}
-	}
-	if first {
-		return map[string]interface{}{"value": nil}
-	}
-	return map[string]interface{}{"value": min}
-}
+// --- IDs, responses and errors ---
 
 // generateOpenSearchID mints a URL-safe base64 ID from m — sixteen characters from twelve bytes,
 // which is byte-for-byte the width and alphabet the crypto/rand form produced.
@@ -1048,7 +814,7 @@ func generateOpenSearchID(m *IDMint) string {
 	return m.Base64URL(12)
 }
 
-func orEmpty(v interface{}) interface{} {
+func orEmpty(v map[string]interface{}) interface{} {
 	if v == nil {
 		return map[string]interface{}{}
 	}
@@ -1091,23 +857,68 @@ func openSearchStatusOK(status int, body interface{}) (*AWSResponse, error) {
 // what OpenSearch reports for a body it cannot parse. That provenance is the
 // engine's behavior rather than a published AWS API model, and is recorded as such
 // in docs/services.md.
-func openSearchInvalidBody() *AWSResponse {
+func openSearchInvalidBody() *openSearchRefusal {
 	return openSearchError(http.StatusBadRequest, "json_parse_exception", "request body is not valid JSON")
 }
 
-// openSearchError returns an OpenSearch-style error response.
-func openSearchError(status int, errType, reason string) *AWSResponse {
-	body := map[string]interface{}{
-		"error": map[string]interface{}{
-			"type":   errType,
-			"reason": reason,
+// openSearchIndexNotFound is the refusal every operation on a missing index answers.
+func openSearchIndexNotFound(index string) *openSearchRefusal {
+	return openSearchError(http.StatusNotFound, "index_not_found_exception", "no such index ["+index+"]")
+}
+
+// openSearchVersionConflict is the 409 a create-only write answers for a document that exists. The
+// reason is substrate's own.
+func openSearchVersionConflict(id string, version int64) *openSearchRefusal {
+	return openSearchError(http.StatusConflict, "version_conflict_engine_exception",
+		fmt.Sprintf("[%s]: document already exists (current version [%d])", id, version))
+}
+
+// openSearchRefusal is a data-plane refusal: an HTTP status and the engine's error type and reason.
+// It is a value rather than a response so that the helpers building one need not marshal, and the one
+// place that does — [openSearchRefusal.response] — returns the marshal error rather than discarding it.
+type openSearchRefusal struct {
+	status  int
+	errType string
+	reason  string
+}
+
+// openSearchError builds an OpenSearch-style refusal.
+func openSearchError(status int, errType, reason string) *openSearchRefusal {
+	return &openSearchRefusal{status: status, errType: errType, reason: reason}
+}
+
+// openSearchErrorCause is one entry of an error envelope's `root_cause`.
+type openSearchErrorCause struct {
+	Type   string `json:"type"`
+	Reason string `json:"reason"`
+}
+
+// openSearchErrorDetail is the envelope's `error` member.
+type openSearchErrorDetail struct {
+	RootCause []openSearchErrorCause `json:"root_cause"`
+	Type      string                 `json:"type"`
+	Reason    string                 `json:"reason"`
+}
+
+// openSearchErrorBody is the error envelope.
+type openSearchErrorBody struct {
+	Error  openSearchErrorDetail `json:"error"`
+	Status int                   `json:"status"`
+}
+
+// response renders the refusal as the engine's error envelope.
+//
+// The envelope is `{"error": {"root_cause": [{"type", "reason"}], "type", "reason"}, "status"}`, the
+// shape OpenSearch's documented error responses print (the ML Commons delete-task reference shows one
+// for a missing task). substrate has one cause per error, so `root_cause` holds exactly the error
+// itself. A marshal failure is returned, as [openSearchStatusOK] returns one.
+func (r *openSearchRefusal) response() (*AWSResponse, error) {
+	return openSearchStatusOK(r.status, openSearchErrorBody{
+		Error: openSearchErrorDetail{
+			RootCause: []openSearchErrorCause{{Type: r.errType, Reason: r.reason}},
+			Type:      r.errType,
+			Reason:    r.reason,
 		},
-		"status": status,
-	}
-	b, _ := json.Marshal(body)
-	return &AWSResponse{
-		StatusCode: status,
-		Body:       b,
-		Headers:    map[string]string{"Content-Type": "application/json"},
-	}
+		Status: r.status,
+	})
 }

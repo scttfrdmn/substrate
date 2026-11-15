@@ -258,6 +258,42 @@ func BuildV2ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string
 	return buildV2ProxyEvent(req, apiID, stage, resourcePath)
 }
 
+// DefaultCostTableForTest returns a copy of the built-in cost table, so a test can assert every key
+// in it is reachable by some routed request (#1202). The table is otherwise visible only through a
+// price lookup, which cannot enumerate it.
+func DefaultCostTableForTest() map[string]float64 {
+	return defaultCostTable()
+}
+
+// ChargeOnBehalfForTest wraps chargeOnBehalf, which a plugin calls and nothing on the wire can
+// reach with the degenerate inputs its guard refuses.
+func ChargeOnBehalfForTest(reqCtx *RequestContext, req *AWSRequest, units int) {
+	chargeOnBehalf(reqCtx, req, units)
+}
+
+// CostOnBehalfForTest wraps (*CostController).costOnBehalf, including on a nil controller.
+func CostOnBehalfForTest(c *CostController, reqCtx *RequestContext) float64 {
+	return c.costOnBehalf(reqCtx)
+}
+
+// OpenSearchDomainFromHostForTest wraps openSearchDomainFromHost, the parser behind OpenSearch's
+// domain scoping, so every host form can be asserted directly as well as through isolation.
+func OpenSearchDomainFromHostForTest(host string) string {
+	return openSearchDomainFromHost(host)
+}
+
+// OpenSearchControlPlaneOperationForTest wraps openSearchControlPlaneOperation, the template match
+// that names the operation a control-plane refusal declines.
+func OpenSearchControlPlaneOperationForTest(method, path string) string {
+	return openSearchControlPlaneOperation(method, path)
+}
+
+// ExecuteAPICostUnitsForTest wraps executeAPICostUnits, the billable-request count of one stage
+// invocation, which a wire test cannot read apart from the summed cost it feeds.
+func ExecuteAPICostUnitsForTest(isV2 bool, bodyLen int) int {
+	return executeAPICostUnits(isV2, bodyLen)
+}
+
 // ParseProxyResponseForTest wraps parseProxyResponse for external tests.
 func ParseProxyResponseForTest(body []byte) (*AWSResponse, error) {
 	return parseProxyResponse(body)

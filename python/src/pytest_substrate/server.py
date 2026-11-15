@@ -14,6 +14,20 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
+# The body field (and DELETE query parameter) each result-seeding endpoint keys a seed by.
+# Athena and Redshift Data take ``sql``; Timestream's Query seed takes ``queryString``, the
+# member name of the Query request it answers, and ignores ``sql`` entirely.
+_SEED_QUERY_FIELD: dict[str, str] = {"timestream-query": "queryString"}
+
+# Service names accepted as aliases for a seeding endpoint's path segment.
+_SEED_SERVICE_ALIASES: dict[str, str] = {"timestream": "timestream-query"}
+
+
+def _seed_endpoint(service: str) -> tuple[str, str]:
+    """Return the ``/v1/{segment}/results`` path segment and the query field for ``service``."""
+    segment = _SEED_SERVICE_ALIASES.get(service, service)
+    return segment, _SEED_QUERY_FIELD.get(segment, "sql")
+
 
 class SubstrateServer:
     """Lifecycle manager for a substrate server process.
@@ -121,10 +135,15 @@ class SubstrateServer:
         (e.g. ``{"ColumnMetadata": [...], "Records": [[...]]}`` for redshift-data).
         Use :func:`redshift_rows` to build a Redshift-compatible result dict.
         The ``sql`` pattern defaults to ``"*"`` (wildcard — matches any statement).
+
+        For ``"timestream-query"`` (or its alias ``"timestream"``) the pattern is sent as
+        ``queryString``, the field that endpoint reads, and the result shape is
+        ``{"Rows": [...], "ColumnInfo": [...]}``.
         """
-        body = json.dumps({"sql": sql, "result": result}).encode()
+        segment, field = _seed_endpoint(service)
+        body = json.dumps({field: sql, "result": result}).encode()
         req = urllib.request.Request(
-            f"{self.url}/v1/{service}/results",
+            f"{self.url}/v1/{segment}/results",
             data=body,
             headers={"Content-Type": "application/json"},
             method="POST",
@@ -155,9 +174,10 @@ class SubstrateServer:
         Pass ``sql`` to remove only that specific SQL pattern; omit it to
         clear all seeded results for the service.
         """
-        url = f"{self.url}/v1/{service}/results"
+        segment, field = _seed_endpoint(service)
+        url = f"{self.url}/v1/{segment}/results"
         if sql is not None:
-            url += f"?sql={urllib.parse.quote(sql, safe='')}"
+            url += f"?{field}={urllib.parse.quote(sql, safe='')}"
         req = urllib.request.Request(url, method="DELETE")
         with urllib.request.urlopen(req) as resp:  # nosemgrep
             resp.read()

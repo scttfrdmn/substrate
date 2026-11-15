@@ -120,7 +120,22 @@ func timestreamTableNamesKey(acct, region, dbName string) string {
 	return fmt.Sprintf("table_names:%s/%s/%s", acct, region, dbName)
 }
 
-func timestreamCtrlResultKey(qs string) string { return "result:" + qs }
+// timestreamCtrlResultKey is the state key of a seeded Query result,
+// `result:{account}/{region}/{queryString}`, scoped like the three data keys beside it (#1200).
+// Either scope part defaults to the "*" wildcard. The query string is last because it may itself
+// contain a slash; an account ID and a Region cannot, so the prefix of one scope never matches a
+// seed of another.
+func timestreamCtrlResultKey(acct, region, qs string) string {
+	return "result:" + timestreamCtrlScopePart(acct) + "/" + timestreamCtrlScopePart(region) + "/" + qs
+}
+
+// timestreamCtrlScopePart defaults an empty seed scope part to the "*" wildcard.
+func timestreamCtrlScopePart(v string) string {
+	if v == "" {
+		return "*"
+	}
+	return v
+}
 
 func timestreamRecordsKey(acct, region, dbName, tableName string) string {
 	return fmt.Sprintf("records:%s/%s/%s/%s", acct, region, dbName, tableName)
