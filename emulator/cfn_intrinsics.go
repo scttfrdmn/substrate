@@ -371,6 +371,19 @@ func cfnGetAttPerType(dr DeployedResource, attr string, cctx *cfnContext) (strin
 			return cfnGetAttMetadata(dr, strings.Replace(attr, "RedisEndpoint", "RedisEndPoint", 1)), true
 		}
 
+	case "AWS::EC2::SecurityGroup", "AWS::EC2::VPC", "AWS::EC2::Subnet", "AWS::EC2::Instance",
+		"AWS::EC2::InternetGateway", "AWS::EC2::RouteTable", "AWS::EC2::NatGateway":
+		// The attribute each page publishes as "The ID of the …" — GroupId, VpcId, SubnetId,
+		// InstanceId, InternetGatewayId, RouteTableId, NatGatewayId — is the EC2 ID, which is
+		// substrate's physical ID for all seven. Without this arm they resolved to "", and a
+		// standalone AWS::EC2::SecurityGroupIngress written `GroupId: !GetAtt SG.GroupId` — the
+		// form CDK emits — failed with MissingParameter. A security group's own VpcId is its
+		// VPC's, recorded at deploy ([StackDeployer.recordEC2Attributes]) and answered by the
+		// metadata step.
+		if attr == cfnEC2IDAttribute[dr.Type] {
+			return dr.PhysicalID, true
+		}
+
 	case "AWS::DynamoDB::Table":
 		if attr == "StreamArn" {
 			// The *stream's* ARN, not the table's — "You must specify the StreamSpecification

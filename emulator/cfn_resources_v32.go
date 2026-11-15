@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -478,8 +479,9 @@ func (d *StackDeployer) deployAthenaWorkGroup(
 // away from its cause. A refusal names the attribute instead.
 //
 // The refusal is through [cfnContext.fail], so it reaches a resource property. An Output that reads
-// one of these still answers an empty string, because an Output's resolution failures are not
-// attributable to a resource and are dropped (see deployResource).
+// one of these is refused before anything deploys, with CloudFormation's template-validation error
+// ([StackDeployer.cfnValidateOutputAttributes], #1429): the template names the attribute and the
+// resource's type, so whether the read can be answered is known from the template alone.
 var cfnGetAttUnmodelled = map[string]map[string]string{
 	"AWS::Transfer::Server": {
 		"As2ServiceManagedEgressIpAddresses": "the Transfer plugin assigns no AS2 egress addresses",
@@ -504,4 +506,57 @@ func cfnGetAttRefuseUnmodelled(dr DeployedResource, attr string, cctx *cfnContex
 	if reason, ok := cfnGetAttUnmodelled[dr.Type][attr]; ok {
 		cctx.fail("Fn::GetAtt: %s.%s (%s) has no value in substrate: %s", dr.LogicalID, attr, dr.Type, reason)
 	}
+}
+
+// cfnValidateOutputAttributes refuses a template one of whose Outputs reads, through Fn::GetAtt
+// or an Fn::Sub `${Resource.Attribute}`, an attribute listed in cfnGetAttUnmodelled for the
+// resource's type (#1429). It runs where the dependency check runs — before CreateStack or
+// UpdateStack deploys anything, and before CreateChangeSet records anything — so a refused
+// template leaves no stack, or leaves the stack as it was.
+//
+// A resource property reading the same attribute is not refused here: it fails that resource,
+// which rolls the stack back, as #1203 decided. An Output is refused at the request because no
+// resource could carry the failure, and because the template alone says whether the read can be
+// answered. A resource under a false Condition is skipped: it does not deploy, so nothing reads it.
+//
+// Outputs are checked in key order and the first refusal is answered, so the same template is
+// refused with the same message every time. The reason substrate cannot answer the attribute is
+// logged, since the wire message is AWS's and names none.
+func (d *StackDeployer) cfnValidateOutputAttributes(tmpl *cfnTemplate, cctx *cfnContext) error {
+	if len(tmpl.Outputs) == 0 {
+		return nil
+	}
+	active := cfnActiveResources(tmpl, cctx)
+	keys := make([]string, 0, len(tmpl.Outputs))
+	for k := range tmpl.Outputs {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if !cfnOutputActive(tmpl.Outputs[key], cctx) {
+			continue // An output under a false Condition is not created, so it reads nothing.
+		}
+		refs := cfnCollectReferences(tmpl.Outputs[key].Value, tmpl.Parameters, tmpl.Resources)
+		attrs := make([]string, 0, len(refs.attrs))
+		for a := range refs.attrs {
+			attrs = append(attrs, a)
+		}
+		sort.Strings(attrs)
+		for _, a := range attrs {
+			logical, attr, _ := strings.Cut(a, ".")
+			res, ok := active[logical]
+			if !ok {
+				continue
+			}
+			reason, unmodelled := cfnGetAttUnmodelled[res.Type][attr]
+			if !unmodelled {
+				continue
+			}
+			d.logger.Warn("cfn: an Output reads an attribute substrate holds no value for",
+				"output", key, "logical_id", logical, "attribute", attr, "type", res.Type, "reason", reason)
+			return cfnErrf(ErrCFNUnsupportedAttribute,
+				"Template error: resource %s does not support attribute type %s in Fn::GetAtt", logical, attr)
+		}
+	}
+	return nil
 }

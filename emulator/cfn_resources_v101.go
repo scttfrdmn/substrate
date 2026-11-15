@@ -10,7 +10,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"strconv"
 )
 
 // This file replaces the AWS::Config::ConfigRule and
@@ -573,15 +572,5 @@ func cfgsvcCFNStringList(v interface{}) []string {
 // be substrate asserting a choice the author did not make, which the recording-group
 // validation treats as a distinct — and refusable — configuration.
 func cfgsvcCFNBool(src map[string]interface{}, key string) (value, set bool) {
-	switch typed := src[key].(type) {
-	case bool:
-		return typed, true
-	case string:
-		parsed, err := strconv.ParseBool(typed)
-		if err != nil {
-			return false, false
-		}
-		return parsed, true
-	}
-	return false, false
+	return cfnBoolValue(src[key])
 }

@@ -776,25 +776,32 @@ func (d *StackDeployer) sweepResources(
 	ctx context.Context, stack *CFNStackState, seed []DeployedResource, streamID string,
 	op cfnDeletionOp,
 ) []CFNResourceDeletion {
+	return d.sweepResourcesByOp(ctx, stack, seed, streamID, func(DeployedResource) cfnDeletionOp { return op })
+}
+
+// sweepResourcesByOp is [StackDeployer.sweepResources] with the operation chosen per resource,
+// for the one sweep that mixes two: an update deletes the resources it replaced under their
+// UpdateReplacePolicy and the resources its template no longer declares under their
+// DeletionPolicy, and both go in one reverse dependency order (#1547).
+func (d *StackDeployer) sweepResourcesByOp(
+	ctx context.Context, stack *CFNStackState, seed []DeployedResource, streamID string,
+	opFor func(DeployedResource) cfnDeletionOp,
+) []CFNResourceDeletion {
 	// The template supplies the deletion policies and the properties a nested
 	// resource's delete needs. A template that no longer parses is not a reason to
 	// leave every resource behind: the sweep proceeds with no policies and no
 	// properties, which deletes the types that need neither and skips the rest.
 	var (
-		policies = map[string]string{}
-		props    = map[string]map[string]interface{}{}
-		cctx     *cfnContext
-		parsed   *cfnTemplate
+		decls  = map[string]cfnResource{}
+		cctx   *cfnContext
+		parsed *cfnTemplate
 	)
 	if tmpl, err := d.parseCFNTemplate(stack.TemplateBody); err == nil {
 		parsed = tmpl
 		cctx = buildCFNContext(tmpl, stack.Parameters, d.identity.region, d.identity.accountID,
 			stack.StackName)
 		evaluateConditions(tmpl, cctx)
-		for logicalID, res := range tmpl.Resources {
-			policies[logicalID] = cfnPolicyForOp(res, op)
-			props[logicalID] = res.Properties
-		}
+		decls = tmpl.Resources
 	} else {
 		cctx = &cfnContext{
 			params: stack.Parameters, conditions: map[string]bool{},
@@ -819,8 +826,15 @@ func (d *StackDeployer) sweepResources(
 	ordered := cfnDeleteOrder(parsed, stack.Resources)
 	results := make([]CFNResourceDeletion, 0, len(ordered))
 	for _, dr := range ordered {
-		result := d.deleteOneResource(ctx, dr, policies[dr.LogicalID], props[dr.LogicalID], cctx,
-			streamID, op)
+		op := opFor(dr)
+		// A resource the template does not declare has no policy and no properties, which
+		// deletes it under the default.
+		var policy string
+		decl, declared := decls[dr.LogicalID]
+		if declared {
+			policy = cfnPolicyForOp(decl, op)
+		}
+		result := d.deleteOneResource(ctx, dr, policy, decl.Properties, cctx, streamID, op)
 		result.PhysicalID = dr.PhysicalID
 		results = append(results, result)
 	}

@@ -75,6 +75,20 @@ type cfnOutput struct {
 	// is local to its stack. Only an exported output is importable: an output
 	// without an Export is readable through DescribeStacks and nowhere else.
 	Export *cfnExport `json:"Export,omitempty" yaml:"Export,omitempty"`
+
+	// Condition names the template condition the output is created under, empty for an
+	// output that always is.
+	Condition string `json:"Condition,omitempty" yaml:"Condition,omitempty"`
+}
+
+// cfnOutputActive reports whether an output is created: it names no Condition, or one that is
+// true. A condition the context does not know is treated as true, as a resource's is.
+func cfnOutputActive(out cfnOutput, cctx *cfnContext) bool {
+	if out.Condition == "" {
+		return true
+	}
+	val, ok := cctx.conditions[out.Condition]
+	return !ok || val
 }
 
 // cfnExport is an output's Export block, which names the value for import by
@@ -605,6 +619,36 @@ type cfnContext struct {
 	// without drawing from the deployment's mint — a CloudFront distribution's
 	// CallerReference is derived from it (#1116; see cfnDistributionCallerReference).
 	priorPhysicalID string
+
+	// priorProps is the previous deployment's declaration of the resource being updated in
+	// place, resolved against the previous deployment, or nil for a create. An updater reads it
+	// for what a removed property used to be — the TTL attribute an UpdateTimeToLive disabling it
+	// must name (#1545).
+	priorProps map[string]interface{}
+
+	// restoring is set while a rollback re-applies a resource it changed in place: priorProps is
+	// then the failed update's declaration, and the declaration being applied is the one the
+	// resource had before it.
+	restoring bool
+
+	// nameSuffixes holds, by logical ID, the suffix minted for a replacement's generated name;
+	// a resource absent from it gets the derived suffix. See [cfnContext.mintReplacementName].
+	nameSuffixes map[string]string
+}
+
+// mintReplacementName gives logicalID's generated name a fresh suffix for the rest of this
+// deployment, drawn from mint so a replay of the request draws the same one (#1545).
+//
+// A replacement is a new resource: "Recreating the resource generates a new physical ID", and
+// CloudFormation names a resource it generates the name for afresh. The derived suffix is the
+// resource being replaced, which still exists until the update succeeds, so a replacement under
+// the derived name would ask for a name that is taken — an already-exists refusal for a name-keyed
+// type, and a failed update.
+func (c *cfnContext) mintReplacementName(logicalID string, mint *IDMint) {
+	if c.nameSuffixes == nil {
+		c.nameSuffixes = map[string]string{}
+	}
+	c.nameSuffixes[logicalID] = mint.Chars(cfnGeneratedNameSuffixLen, cfnNameSuffixAlphabet)
 }
 
 // fail records a resolution failure against the resource being deployed.
@@ -680,6 +724,18 @@ var (
 	// behavior: no AWS page publishes it, and it is the text CLI users report from
 	// CreateChangeSet and UpdateStack.
 	ErrCFNStackNotUpdatable = errors.New("stack cannot be updated")
+
+	// ErrCFNUnsupportedAttribute is returned when an Output reads, through Fn::GetAtt, an
+	// attribute substrate holds no value for (#1429) — one listed in cfnGetAttUnmodelled. It is a
+	// refusal of the request, made before any resource deploys, by CreateStack, UpdateStack and
+	// CreateChangeSet alike. The wire maps it to ValidationError at 400 and answers the message
+	// verbatim: "Template error: resource {LogicalId} does not support attribute type {Attribute}
+	// in Fn::GetAtt". The wording is observed behavior — no AWS page publishes it — and it is the
+	// ValidationError text user reports quote from CreateStack, in the AWS-org
+	// cloudformation-coverage-roadmap issue #1879 and moto issue #3387. AWS answers it for an
+	// attribute the type does not publish; substrate answers it for a published attribute it
+	// cannot answer, which is the nearest refusal AWS has.
+	ErrCFNUnsupportedAttribute = errors.New("unsupported Fn::GetAtt attribute")
 
 	// ErrCFNResourceDeployFailed is returned when a template resource could not
 	// be deployed.
@@ -1377,6 +1433,11 @@ type cfnDeployOutcome struct {
 	// dispatched names every resource the deploy made a call for. A resource absent from it
 	// was kept from the baseline unchanged.
 	dispatched map[string]bool
+
+	// failures is why the deploy failed, empty when it succeeded: each resource that failed,
+	// then each Output that did not resolve (#1429). An Output failure leaves every resource
+	// deployed, so the resources alone cannot say the deploy failed.
+	failures []string
 }
 
 // deploy runs a template against the stack's previous deployment, or against base when
@@ -1387,7 +1448,7 @@ type cfnDeployOutcome struct {
 // [StackDeployer.rollbackFailedUpdate].
 func (d *StackDeployer) deploy(
 	ctx context.Context, cfn, streamID string, params map[string]string, opts CFNDeployOptions,
-	base *CFNStackState, force map[string]bool,
+	base *CFNStackState, force map[string]map[string]interface{},
 ) (*DeployResult, *cfnDeployOutcome, error) {
 	if err := opts.validate(); err != nil {
 		return nil, nil, err
@@ -1417,12 +1478,20 @@ func (d *StackDeployer) deploy(
 	// A rollback (base set) is the exception: it re-deploys the previous template, which may
 	// predate that validation, and must converge on it regardless, so it orders tolerantly,
 	// as the delete path does.
+	//
+	// rollback is read before base is defaulted below: a rollback re-deploys the template the
+	// stack had, so nothing it does is a removal, and a resource the failed update dropped is
+	// still the stack's (#1547).
+	rollback := base != nil
 	var order []string
 	if base == nil {
 		if order, err = cfnValidateDependencies(tmpl, cctx); err != nil {
 			return nil, nil, err
 		}
 		if err := cfnValidateUpdateReplacePolicies(tmpl); err != nil {
+			return nil, nil, err
+		}
+		if err := d.cfnValidateOutputAttributes(tmpl, cctx); err != nil {
 			return nil, nil, err
 		}
 	} else {
@@ -1468,6 +1537,13 @@ func (d *StackDeployer) deploy(
 			continue
 		}
 		outcome.dispatched[logicalID] = true
+		if plan.replacement && cfnUsesGeneratedName(res.Type, res.Properties, cctx) {
+			// The replacement is a new resource and gets a new generated name, as AWS's does;
+			// the derived one belongs to the resource being replaced (#1545). Only a resource
+			// substrate names draws from the mint, so a replacement of a template-named or
+			// logical-ID-named resource leaves every later identifier where it was.
+			cctx.mintReplacementName(logicalID, d.mint)
+		}
 		dr, cost, deployErr := d.deployResource(ctx, logicalID, res, streamID, cctx, plan)
 		if deployErr != nil {
 			return nil, nil, &CFNResourceDeployError{LogicalID: logicalID, Err: deployErr}
@@ -1506,19 +1582,43 @@ func (d *StackDeployer) deploy(
 	// Sorted so that a template declaring two outputs with the same export name
 	// reports the same one as the conflict every time.
 	sort.Strings(outKeys)
+
+	// An Output that does not resolve fails the stack, as a resource that does not resolve
+	// fails itself (#1429): an Fn::ImportValue of no export, an Fn::FindInMap of no entry, an
+	// Fn::Cidr out of range or a refused Fn::GetAtt would otherwise publish "" — and export it,
+	// handing an importer an empty ID. An Fn::GetAtt substrate knows it cannot answer is refused
+	// at the request instead, by cfnValidateOutputAttributes, so what reaches here is a failure
+	// that depends on what deployed. The reason names the Output; the text is substrate's own.
+	cctx.takeFailures()
+	var outputFailures []string
 	for _, outKey := range outKeys {
 		outVal := tmpl.Outputs[outKey]
-		outputs[outKey] = resolveValue(outVal.Value, cctx)
-		if outVal.Export == nil {
+		if !cfnOutputActive(outVal, cctx) {
+			// "To associate a condition with an output, define the condition in the Conditions
+			// section of the template": an Output whose condition is false is not created, so
+			// it is neither resolved nor published.
 			continue
 		}
-		if name := resolveValue(outVal.Export.Name, cctx); name != "" {
-			exportNames[outKey] = name
+		outputs[outKey] = resolveValue(outVal.Value, cctx)
+		if outVal.Export != nil {
+			if name := resolveValue(outVal.Export.Name, cctx); name != "" {
+				exportNames[outKey] = name
+			}
+		}
+		for _, f := range cctx.takeFailures() {
+			outputFailures = append(outputFailures, fmt.Sprintf("Output %s: %s", outKey, f))
 		}
 	}
+	failures := cfnFailedResources(resources)
+	failures = append(failures, outputFailures...)
+	outcome.failures = failures
 	pending := CFNStackState{Outputs: outputs, ExportNames: exportNames}
-	if err := d.checkExports(ctx, stackName, pending.exports()); err != nil {
-		return nil, nil, err
+	if len(outputFailures) == 0 {
+		// An Output that did not resolve fails the stack, which publishes no exports; checking a
+		// name built from an unresolved value would report a conflict over nothing.
+		if err := d.checkExports(ctx, stackName, pending.exports()); err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Only now is the stack's fate decided. The export checks run first because they
@@ -1535,7 +1635,7 @@ func (d *StackDeployer) deploy(
 	// The resources this deploy replaced are not deleted on this path. A failed update rolls
 	// back onto them — "CloudFormation creates the replacement resource first", and deletes
 	// the old one only once the update has gone through — so they are still the stack's.
-	if failures := cfnFailedResources(resources); len(failures) > 0 {
+	if len(failures) > 0 {
 		failed, failErr := d.handleFailedCreate(ctx, cfnFailedCreate{
 			stackName:    stackName,
 			templateBody: cfn,
@@ -1566,8 +1666,14 @@ func (d *StackDeployer) deploy(
 	}
 
 	// The deployment has gone through, so the resources it replaced are deleted now, after
-	// their replacements and the references to them (#1427).
-	if deletions, reason := d.deleteReplaced(ctx, base, replaced, streamID); len(deletions) > 0 {
+	// their replacements and the references to them (#1427), and so are the ones its template
+	// no longer deploys (#1547). A rollback removes nothing: it re-deploys the template the
+	// stack had.
+	var removed []DeployedResource
+	if !rollback {
+		removed = cfnRemovedResources(baseline, tmpl, cctx)
+	}
+	if deletions, reason := d.deleteSuperseded(ctx, base, replaced, removed, streamID); len(deletions) > 0 {
 		result.ResourceDeletions = deletions
 		result.StatusReason = reason
 	}
@@ -1653,7 +1759,11 @@ func (d *StackDeployer) UpdateStack(
 		return nil, fmt.Errorf("update stack %s: %w", stackName, err)
 	}
 
-	if failures := cfnFailedResources(result.Resources); len(failures) > 0 {
+	failures := cfnFailedResources(result.Resources)
+	if outcome != nil {
+		failures = outcome.failures
+	}
+	if len(failures) > 0 {
 		// With no readable previous template there is nothing to converge on, so
 		// the update stops at UPDATE_FAILED rather than claiming a rollback it
 		// could not perform.
@@ -2140,6 +2250,9 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 		return nil, err
 	}
 	if err := cfnValidateUpdateReplacePolicies(newTmpl); err != nil {
+		return nil, err
+	}
+	if err := d.cfnValidateOutputAttributes(newTmpl, newCtx); err != nil {
 		return nil, err
 	}
 
@@ -2864,13 +2977,15 @@ func (d *StackDeployer) deployResource(
 ) (DeployedResource, float64, error) {
 	// Drain anything a previous resource left behind, so this resource cannot
 	// inherit a reason that is not its own. Nothing should have: Deploy drains
-	// after every resource. Outputs are resolved after the last resource and are
-	// not attributable to one, so their failures are dropped here deliberately.
+	// after every resource, and Outputs, resolved after the last resource, collect
+	// their own failures and fail the stack with them (#1429).
 	cctx.takeFailures()
 	cctx.priorPhysicalID = ""
 	if plan.hasPrior {
 		cctx.priorPhysicalID = plan.prior.PhysicalID
 	}
+	cctx.priorProps = plan.priorResolved
+	cctx.restoring = plan.resolvedSame
 
 	var (
 		dr   DeployedResource
@@ -2885,6 +3000,11 @@ func (d *StackDeployer) deployResource(
 		dr, cost, err = plan.update(d, ctx, logicalID, plan.prior, res.Properties, plan.changed, streamID, cctx)
 	default:
 		dr, cost, err = d.dispatchResource(ctx, logicalID, res, streamID, cctx)
+	}
+	if err == nil && dr.Error == "" {
+		// The attributes only the service's record holds, read once it exists, so Fn::GetAtt
+		// on a later resource or an Output answers them.
+		d.recordEC2Attributes(ctx, &dr)
 	}
 	failures := cctx.takeFailures()
 	if err != nil || len(failures) == 0 {
@@ -3388,19 +3508,19 @@ func (d *StackDeployer) deployS3Bucket(
 		return dr, cost, nil //nolint:nilerr
 	}
 
-	// Apply VersioningConfiguration if present.
-	if vc, ok := props["VersioningConfiguration"].(map[string]interface{}); ok {
-		if status, _ := vc["Status"].(string); status == "Enabled" {
-			vReq := &AWSRequest{
-				Service:   "s3",
-				Operation: "PUT",
-				Path:      "/" + bucketName,
-				Params:    map[string]string{"versioning": "1"},
-				Headers:   map[string]string{"Content-Type": "application/xml"},
-				Body:      []byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`),
-			}
-			_, _, _ = d.dispatch(ctx, vReq, streamID)
+	// The bucket's declared configuration, through the same helper its update uses (#1545):
+	// versioning, which this applied before, and default encryption and CORS, which it did not.
+	// A refusal fails the resource, as an update's does.
+	var declared []string
+	for _, p := range cfnS3BucketConfigProperties {
+		if _, ok := props[p]; ok {
+			declared = append(declared, p)
 		}
+	}
+	configCost, configErr := d.configureS3Bucket(ctx, bucketName, props, declared, true, streamID, cctx)
+	cost += configCost
+	if configErr != nil {
+		dr.Error = configErr.Error()
 	}
 
 	return dr, cost, nil
@@ -3519,26 +3639,11 @@ func (d *StackDeployer) deployLambdaFunction(
 	fnName := resolveStringProp(props, "FunctionName",
 		cfnGeneratedName(cctx, "AWS::Lambda::Function", logicalID), cctx)
 
-	body := map[string]interface{}{
-		"FunctionName": fnName,
-		"Runtime":      resolveStringProp(props, "Runtime", "python3.12", cctx),
-		"Role":         resolveStringProp(props, "Role", "", cctx),
-		"Handler":      resolveStringProp(props, "Handler", "index.handler", cctx),
-		"Description":  resolveStringProp(props, "Description", "", cctx),
-	}
-	// Timeout and MemorySize are numeric in the Lambda API; convert the resolved
-	// string so the JSON body unmarshals into the int fields (CreateFunction
-	// rejects string values otherwise).
-	if timeout := resolveStringProp(props, "Timeout", "", cctx); timeout != "" {
-		if n, convErr := strconv.Atoi(timeout); convErr == nil {
-			body["Timeout"] = n
-		}
-	}
-	if memory := resolveStringProp(props, "MemorySize", "", cctx); memory != "" {
-		if n, convErr := strconv.Atoi(memory); convErr == nil {
-			body["MemorySize"] = n
-		}
-	}
+	// The configuration members are rendered by the same function UpdateFunctionConfiguration's
+	// body is (#1545), so a create and an update of one declaration cannot disagree. Environment
+	// joined them there: it was not forwarded before, so a function's variables never reached it.
+	body := cfnLambdaConfiguration(props, cctx)
+	body["FunctionName"] = fnName
 	// Code is what the function is. Omitting it — as this deployer did — meant every
 	// CloudFormation-deployed function reported CodeSize 0 and an empty CodeSha256
 	// however its template declared its code, and a container-image function lost
@@ -4538,8 +4643,11 @@ func (d *StackDeployer) deployKMSKey(
 		"KeyUsage":    resolveStringProp(props, "KeyUsage", "ENCRYPT_DECRYPT", cctx),
 		"KeySpec":     resolveStringProp(props, "KeySpec", "SYMMETRIC_DEFAULT", cctx),
 	}
-	if enableKeyRotation, ok := props["EnableKeyRotation"]; ok {
-		body["EnableKeyRotation"] = enableKeyRotation
+	// The key policy is CreateKey's Policy member. EnableKeyRotation used to be sent here too, and
+	// CreateKey has no such member, so a template asking for rotation got a key without it; it is
+	// applied after the create now, with Enabled, by configureKMSKey (#1545).
+	if policy := cfnJSONDocument(props["KeyPolicy"], cctx); policy != "" {
+		body["Policy"] = policy
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -4570,6 +4678,19 @@ func (d *StackDeployer) deployKMSKey(
 			// re-derived from the ARN's last segment at resolve time (#827). It was already
 			// being decoded and discarded.
 			dr.Metadata = map[string]interface{}{"KeyId": result.KeyMetadata.KeyID}
+		}
+	}
+	if dr.Error == "" && dr.PhysicalID != "" {
+		var declared []string
+		for _, p := range []string{"Enabled", "EnableKeyRotation", "RotationPeriodInDays"} {
+			if _, ok := props[p]; ok {
+				declared = append(declared, p)
+			}
+		}
+		configCost, configErr := d.configureKMSKey(ctx, dr.PhysicalID, props, declared, true, streamID, cctx)
+		cost += configCost
+		if configErr != nil {
+			dr.Error = configErr.Error()
 		}
 	}
 	return dr, cost, nil

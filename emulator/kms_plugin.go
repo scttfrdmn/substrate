@@ -15,7 +15,7 @@ import (
 // KMSPlugin emulates the AWS Key Management Service (KMS) JSON-protocol API.
 // It handles CreateKey, DescribeKey, ListKeys, EnableKey, DisableKey,
 // ScheduleKeyDeletion, CancelKeyDeletion, GetKeyPolicy, PutKeyPolicy,
-// GetKeyRotationStatus, EnableKeyRotation, DisableKeyRotation,
+// GetKeyRotationStatus, EnableKeyRotation, DisableKeyRotation, UpdateKeyDescription,
 // TagResource, UntagResource, ListResourceTags, CreateAlias, DeleteAlias,
 // UpdateAlias, ListAliases, Encrypt, Decrypt, GenerateDataKey,
 // GenerateDataKeyWithoutPlaintext, and ReEncrypt.
@@ -64,6 +64,8 @@ func (p *KMSPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSRes
 		return p.getKeyPolicy(ctx, req)
 	case "PutKeyPolicy":
 		return p.putKeyPolicy(ctx, req)
+	case "UpdateKeyDescription":
+		return p.updateKeyDescription(ctx, req)
 	case "GetKeyRotationStatus":
 		return p.getKeyRotationStatus(ctx, req)
 	case "EnableKeyRotation":
@@ -821,6 +823,50 @@ func (p *KMSPlugin) putKeyPolicy(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		kmsPolicyKey(target.AccountID, target.Region, target.KeyID), []byte(input.Policy)); err != nil {
 		return nil, fmt.Errorf("kms putKeyPolicy state.Put: %w", err)
 	}
+	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
+}
+
+// updateKeyDescription replaces a key's description (#1545), which DescribeKey reports in
+// KeyMetadata.Description.
+//
+// API_UpdateKeyDescription: both members are Required, and Description's length is 0 to 8192, so an
+// empty description is accepted and clears the one the key had. "If the action is successful, the
+// service sends back an HTTP 200 response with an empty HTTP body." The key states come from the
+// key-state table's UpdateKeyDescription row: Enabled and Disabled succeed, and PendingDeletion is
+// refused with KMSInvalidStateException, the code [kmsInvalidKeyState] answers. The 8192 bound is not
+// enforced: the page publishes the constraint but no error for it, and inventing one would refuse a
+// request with a code AWS may not use. CloudFormation's AWS::KMS::Key update reaches this when its
+// Description changes.
+func (p *KMSPlugin) updateKeyDescription(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	var input struct {
+		KeyID       string `json:"KeyId"`
+		Description string `json:"Description"`
+	}
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return nil, kmsInvalidBody()
+	}
+	goCtx := context.Background()
+	target, err := p.resolveKeyTarget(goCtx, ctx, input.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	key, err := p.loadKey(goCtx, target.AccountID, target.Region, target.KeyID)
+	if err != nil {
+		return nil, err
+	}
+	if key == nil {
+		return nil, kmsNotFound("Key not found")
+	}
+	if key.KeyState == kmsKeyStatePendingDeletion {
+		return nil, kmsInvalidKeyState(key.KeyID, key.KeyState)
+	}
+	key.Description = input.Description
+	if err := p.saveKey(goCtx, key); err != nil {
+		return nil, fmt.Errorf("kms updateKeyDescription saveKey: %w", err)
+	}
+	// An empty object rather than an empty body, as PutKeyPolicy and the rotation operations
+	// answer, so the plugin has one success shape; an SDK reads either as the operation's empty
+	// output.
 	return kmsJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 

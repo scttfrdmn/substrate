@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1100 operations**. This
+Substrate ships **68 built-in service plugins** routing **1101 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -56,7 +56,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 35 | Health | `health` | JSON | 4 |
 | 36 | IAM | `iam` | Query | 74 |
 | 37 | Kinesis Data Streams | `kinesis` | JSON | 18 |
-| 38 | KMS | `kms` | JSON | 24 |
+| 38 | KMS | `kms` | JSON | 25 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
 | 40 | CloudWatch Logs | `logs` | JSON | 14 |
 | 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 11 |
@@ -3037,6 +3037,23 @@ against a value whose resource never deployed would resolve against nothing. A
 duplicate export name is still refused as an error rather than as a rolled-back
 stack, so that refusal reads the same whether or not a resource beside it failed.
 
+An Output under a `Condition` that is false is not created: it is neither resolved nor
+validated, and the stack publishes no value for it.
+
+An **Output that does not resolve fails the stack**, as a resource that does not
+resolve fails itself ([#1429](https://github.com/scttfrdmn/substrate/issues/1429)):
+an `Fn::ImportValue` naming no export, an `Fn::FindInMap` naming no entry, or an
+`Fn::Cidr` out of range rolls a create back and an update back, with a status reason
+beginning `Output {Key}:`. That text is substrate's own. Before, the Output answered an
+empty string, and an exported one handed an importer an empty ID. An Output that reads,
+through `Fn::GetAtt` or an `Fn::Sub` `${Resource.Attribute}`, an attribute substrate
+holds no value for — such as a Transfer server's `As2ServiceManagedEgressIpAddresses` —
+is refused at the request instead, before anything deploys: `CreateStack`, `UpdateStack`
+and `CreateChangeSet` answer `ValidationError`/400, `Template error: resource {LogicalId}
+does not support attribute type {Attribute} in Fn::GetAtt`. No AWS page publishes that
+wording; it is the `ValidationError` text user reports quote from `CreateStack`. A
+resource *property* reading the same attribute still fails only that resource.
+
 Two divergences are substrate's own, both deliberate:
 
 - Substrate deploys the resources declared **after** the failure, where real
@@ -3049,9 +3066,12 @@ Two divergences are substrate's own, both deliberate:
   changed in place has the previous declaration applied again; one it created — an
   addition, or the replacement for a resource whose change required one — is
   deleted, and the resource it replaced, which a successful update would only then
-  have deleted, is the stack's again under its original physical ID. What remains
-  approximate is a property the previous template never declared: applying the
-  previous declaration again leaves whatever the failed update set it to. A previous
+  have deleted, is the stack's again under its original physical ID. A resource changed
+  in place is restored by the difference between the failed update's declaration and
+  the previous one, in both directions, so a property the failed update newly declared
+  returns to the value an undeclared one has, by the type's rule for a removed
+  property. An in-place update refused part-way — a security group whose revoke went
+  through and whose authorize did not — is restored the same way. A previous
   record that cannot be read leaves the stack at `UPDATE_FAILED` with the reason
   logged rather than a rollback attempted against nothing.
 
@@ -3078,41 +3098,112 @@ a new ID, and the first stayed behind.
 - **Changed, and the type's update is modeled.** The change goes through the service's
   own update operation and the physical ID stands. The types are
   `AWS::Transfer::Server` (`UpdateServer`), `AWS::Backup::BackupPlan`
-  (`UpdateBackupPlan`) and `AWS::EC2::LaunchTemplate` (`CreateLaunchTemplateVersion`).
+  (`UpdateBackupPlan`), `AWS::EC2::LaunchTemplate` (`CreateLaunchTemplateVersion`),
+  and as of [#1545](https://github.com/scttfrdmn/substrate/issues/1545):
+
+  | Type | Update operations | Properties applied |
+  |------|-------------------|--------------------|
+  | `AWS::Lambda::Function` | `UpdateFunctionConfiguration`, then `UpdateFunctionCode` | `Runtime`, `Role`, `Handler`, `Description`, `Timeout`, `MemorySize`, `Environment`; `Code` |
+  | `AWS::DynamoDB::Table` | `UpdateTable`, `UpdateTimeToLive` | `BillingMode`, `ProvisionedThroughput`; `TimeToLiveSpecification` |
+  | `AWS::SQS::Queue` | `SetQueueAttributes` | `VisibilityTimeout`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds`, `MaximumMessageSize` |
+  | `AWS::SNS::Topic` | `SetTopicAttributes` | `DisplayName` |
+  | `AWS::S3::Bucket` | `PUT ?versioning`, `PUT`/`DELETE ?encryption`, `PUT`/`DELETE ?cors` | `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration` |
+  | `AWS::KMS::Key` | `UpdateKeyDescription`, `PutKeyPolicy`, `EnableKeyRotation`/`DisableKeyRotation`, `EnableKey`/`DisableKey` | `Description`, `KeyPolicy`, `EnableKeyRotation`, `RotationPeriodInDays`, `Enabled` |
+  | `AWS::EC2::SecurityGroup` | `RevokeSecurityGroupIngress`/`Egress`, then `AuthorizeSecurityGroupIngress`/`Egress` | `SecurityGroupIngress`, `SecurityGroupEgress` |
+  | `AWS::ECS::Service` | `UpdateService` | `TaskDefinition`, `DesiredCount` |
+
+  The properties applied are the ones the type's create forwards, so a create and an
+  update of one declaration agree; a property the create does not forward either — most
+  types' `Tags` ([#1572](https://github.com/scttfrdmn/substrate/issues/1572)), a bucket's
+  `LifecycleConfiguration` ([#1573](https://github.com/scttfrdmn/substrate/issues/1573)), a
+  function's `VpcConfig`, a queue's `RedrivePolicy` — makes no call. The
+  creates gained three of these with the change: a function's `Environment`, a bucket's
+  `BucketEncryption` and `CorsConfiguration`, and a key's `KeyPolicy`, `Enabled` and
+  `EnableKeyRotation` (which used to be sent to `CreateKey`, which has no such member).
+  A property removed from the template returns to the value the page publishes for an
+  undeclared one — SQS's attribute defaults, a function's 3-second `Timeout` and 128 MB
+  `MemorySize`, a table's `PROVISIONED`, a key's default policy, rotation off and
+  enabled — or to what a create without it produces: a bucket's encryption and CORS
+  configuration are deleted, and a topic's `DisplayName` and a key's `Description` are
+  emptied. A removed `VersioningConfiguration` is left as it is, since a versioned
+  bucket cannot return to unversioned and the page does not say what CloudFormation does
+  instead; a removed function `Description` is left too, since substrate's
+  `UpdateFunctionConfiguration` reads an empty one as not sent
+  ([#1575](https://github.com/scttfrdmn/substrate/issues/1575)).
+
+  A security group's rules are diffed **declaration against declaration**, one source at
+  a time, with CIDRs compared in canonical form: each rule the previous declaration held
+  and the new one does not is revoked, then each rule the new one adds is authorized, the
+  order the page gives ("CloudFormation removes the existing rule and then adds a new
+  rule"). A rule the group holds for another reason — an
+  `AWS::EC2::SecurityGroupIngress`/`SecurityGroupEgress` resource, another stack, an
+  out-of-band call — is left alone. The live rules are read only to skip a revoke of a
+  rule already gone and an authorize of one already there. Declaring egress where none
+  was declared revokes the default all-traffic rule, as the create does; a removed
+  `SecurityGroupEgress` leaves the group with no egress rule: "After the security group
+  is created, if you remove all egress rules that you added, we do not add egress rules,
+  so no outbound traffic is allowed." A rollback restoring a declaration with no egress
+  restores the default rule. A rule list may hold `Fn::If` elements; one choosing
+  `AWS::NoValue` is no rule. This is what an update of a
+  default-VPC group whose rules changed needed ([#1550](https://github.com/scttfrdmn/substrate/issues/1550)):
+  re-creating it asked for its own name and was refused with `InvalidGroup.Duplicate`.
 - **Changed, and a changed property is *Update requires: Replacement*.** A new resource
   is created; the references to it resolve to the new ID; and once the whole update
   has succeeded the old one is deleted — "CloudFormation creates the replacement
   resource first … By default, CloudFormation then deletes the old resource." Its
   `UpdateReplacePolicy` governs that delete, so `Retain` keeps it. The replacement
-  table covers the properties each modeled type's page marks Replacement.
+  table covers the properties each modeled type's page marks Replacement. A
+  replacement whose name substrate generates gets a **new** generated name, as AWS's
+  does, with a suffix minted from the request's ID so a replay mints the same one; the
+  derived name belongs to the resource being replaced, which still exists, so reusing
+  it would collide. Only such a replacement draws from the request's mint, so a
+  template-named replacement leaves every later identifier where it was. The name a
+  resource is first created under is unchanged.
 - **Changed, and AWS updates the property in place through an operation substrate does
   not route.** `AWS::FSx::FileSystem` and `AWS::MSK::Cluster` fail the resource with a
-  reason naming the property, and the update rolls back. A new resource would be a new
-  ID where AWS keeps the old one.
+  reason naming the property, and the update rolls back. So do `AWS::DynamoDB::Table`'s
+  `KeySchema`, `AttributeDefinitions`, `GlobalSecondaryIndexes`, `LocalSecondaryIndexes`
+  and `StreamSpecification` ([#1574](https://github.com/scttfrdmn/substrate/issues/1574)),
+  and `AWS::ECS::Service`'s `LaunchType`. A new resource would be a new ID where AWS keeps
+  the old one.
 - **Changed, any other type.** The resource is created again, which is what every
   update did before; when that yields a new physical ID, the old resource is deleted
   after the update succeeds, as a replacement is. Which types still re-create on
   change rather than update in place is tracked in
-  [#1545](https://github.com/scttfrdmn/substrate/issues/1545).
+  [#1565](https://github.com/scttfrdmn/substrate/issues/1565).
+- **Removed from the template**, or declared under a `Condition` that is now false.
+  The resource is deleted once the update has succeeded
+  ([#1547](https://github.com/scttfrdmn/substrate/issues/1547)), under its
+  **`DeletionPolicy`** — the `UpdateReplacePolicy` page: "Use DeletionPolicy for
+  resources deleted when a stack is deleted, or when the resource definition itself is
+  deleted from the template as part of a stack update" — so `Retain` and
+  `RetainExceptOnCreate` keep it, outside the stack. Removed and replaced resources go in
+  one sweep, in the reverse of the previous template's dependency order. A failed update
+  deletes none of them: its rollback re-deploys the previous template, which still
+  declares them.
 
-A delete of a replaced resource that fails does not fail the update. The stack still
-reports `UPDATE_COMPLETE`, with a status reason naming the resource that could not be
+A delete of a replaced or removed resource that fails does not fail the update. The stack
+still reports `UPDATE_COMPLETE`, with a status reason naming the resource that could not be
 deleted, which is what the troubleshooting guide's "Resource removed from stack but not
 deleted" describes; the per-resource outcome is on the result's `ResourceDeletions`.
 
 A re-created resource whose plugin refuses it as already existing **fails**, and the
 update rolls back — including a fixed-name resource whose text is unchanged but whose
-resolved inputs changed, such as a named IAM role whose `Description` reads the ARN of a
-KMS key the update replaces. Keeping the role's previous record would leave it naming
-the key the update is about to delete. Such a type needs an update path (#1545). The one
+resolved inputs changed, such as a named Secrets Manager secret whose `Description` reads
+the ID of a VPC the update re-creates. Keeping the secret's previous record would leave it
+naming the VPC the update is about to delete. Such a type needs an update path (#1565). The one
 refusal that is not a failure is a rollback applying a resource's previous declaration
 again, when the resolved inputs are identical to that deployment's.
 
 A change to a property the resource's page says no update can change fails the resource
 without a call, and the update rolls back, leaving it as it was.
-`AWS::Transfer::Server`'s `CreateWithHostKey` is the one modeled: "If you change its
-value in a later stack update, the update fails and the server is left unchanged." The
-reason text is substrate's own.
+`AWS::Transfer::Server`'s `CreateWithHostKey` is one: "If you change its value in a later
+stack update, the update fails and the server is left unchanged." `AWS::KMS::Key`'s
+`KeySpec`, `KeyUsage` and `MultiRegion` are the others — Replacement on the page, which a
+change set reports, and then: "the update request fails, regardless of the value of the
+UpdateReplacePolicy attribute. This prevents you from accidentally deleting a KMS key by
+changing an immutable property value" — and so is its `Origin` ("You cannot change the
+origin after you create the KMS key"). The reason text is substrate's own.
 
 `UpdateReplacePolicy` must be `Delete`, `Retain` or `Snapshot`, the three options its
 page lists. Any other value refuses the template at the request, as a `ValidationError`
@@ -3134,8 +3225,7 @@ the resource whose delete failed remains. Each deletion records the physical ID 
 removed, so the deleted predecessor of a replaced resource is not mistaken for the
 resource that replaced it.
 
-A resource removed from the template is not yet deleted by the update; see
-[#1547](https://github.com/scttfrdmn/substrate/issues/1547).
+>>>
 
 ### Templates
 
@@ -3424,6 +3514,8 @@ documents:
 | `AWS::DynamoDB::Table` | `StreamArn` — empty unless a stream was recorded, so the table's own ARN is not returned in its place |
 | `AWS::SSM::Parameter` | `Type` and `Value`, recorded at deploy time |
 | `AWS::ElasticLoadBalancing::LoadBalancer` | `DNSName`, recorded at deploy time from the classic create's own response; its four other published attributes answer empty — see [the classic type](#the-classic-type) |
+| `AWS::EC2::SecurityGroup`, `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::Instance`, `AWS::EC2::InternetGateway`, `AWS::EC2::RouteTable`, `AWS::EC2::NatGateway` | The ID attribute — `GroupId`, `VpcId`, `SubnetId`, `InstanceId`, `InternetGatewayId`, `RouteTableId`, `NatGatewayId` — which is the physical ID. These resolved to empty until #1545's sweep, so a standalone `AWS::EC2::SecurityGroupIngress` written `GroupId: !GetAtt SG.GroupId`, the form CDK emits, failed with `MissingParameter` |
+| `AWS::EC2::SecurityGroup`, `AWS::EC2::VPC`, `AWS::EC2::Subnet`, `AWS::EC2::Instance` | Read from EC2's record once the resource deploys and recorded as metadata: a group's `VpcId` (the default VPC's for a group declared without one); a VPC's `CidrBlock` and `DefaultSecurityGroup`; a subnet's `VpcId`, `CidrBlock`, `AvailabilityZone` and `AvailabilityZoneId`; an instance's `VpcId`, `PrivateIp`, `PrivateDnsName`, `PublicIp` and `PublicDnsName`. A VPC's network-ACL, IPv6 and encryption-control attributes, a subnet's `NetworkAclAssociationId`, `Ipv6CidrBlocks` and `OutpostArn`, and a NAT gateway's `EniId` answer empty ([#1591](https://github.com/scttfrdmn/substrate/issues/1591)) |
 
 An S3 bucket's four domain names and an HTTP API's endpoint name **AWS's** hostnames
 rather than substrate's, unlike a queue's `Ref`: they are values a template hands to
@@ -15683,6 +15775,7 @@ SSM standard parameters are free. Advanced parameters: $0.05 per 10,000 API inte
 | GetKeyRotationStatus | Reports the bare key ID and, while rotation is on, `RotationPeriodInDays` and `NextRotationDate`; answers `false` for a key pending deletion and answers in every key state substrate can produce — see below |
 | EnableKeyRotation | Range-checks `RotationPeriodInDays` at 90–2560 and stores it with the date it ran; refuses a key whose spec is not `SYMMETRIC_DEFAULT`, and refuses a disabled key and a key pending deletion with a different code for each — see below |
 | DisableKeyRotation | Same refusals as `EnableKeyRotation`; leaves the stored rotation period and enable date alone |
+| UpdateKeyDescription | Replaces the description `DescribeKey` reports; an empty one is accepted and clears it. Accepts a disabled key and refuses one pending deletion with `KMSInvalidStateException`, per the key-state table; the published 8192-character bound is not enforced, since the page names no error for it (#1545) |
 | TagResource | Tags are keyed `TagKey`/`TagValue`, not `Key`/`Value` |
 | UntagResource | |
 | ListResourceTags | |

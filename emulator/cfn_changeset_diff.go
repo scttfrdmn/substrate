@@ -91,6 +91,13 @@ var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::MSK::Cluster":            {"ClusterName": "Always"},
 	"AWS::EC2::LaunchTemplate":     {"LaunchTemplateName": "Always"},
 	"AWS::Backup::BackupSelection": {"BackupPlanId": "Always", "BackupSelection": "Always"},
+	// The types #1545 gives an update path whose page lists Replacement properties the rows
+	// above do not already hold. KMS's three are Replacement on the page, which a change set
+	// reports; the update itself fails on them first (cfnCreateOnlyProperties).
+	"AWS::KMS::Key":           {"KeySpec": "Always", "KeyUsage": "Always", "MultiRegion": "Always"},
+	"AWS::EC2::SecurityGroup": {"GroupDescription": "Always", "GroupName": "Always", "VpcId": "Always"},
+	"AWS::ECS::Service": {"Cluster": "Always", "Role": "Always", "SchedulingStrategy": "Always",
+		"ServiceName": "Always"},
 }
 
 // cfnRequiresRecreation reports a Target's RequiresRecreation.

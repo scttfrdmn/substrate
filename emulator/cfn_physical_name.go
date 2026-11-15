@@ -27,6 +27,27 @@ type cfnNameConstraint struct {
 	// lower forces the whole name to lowercase, for a service whose names are
 	// case-sensitive and lowercase-only (S3).
 	lower bool
+
+	// nameProp is the property a template names the resource with, whose absence is what makes
+	// the deployer generate a name; empty for a type with no name property, whose identifier is
+	// always generated (AWS::ApiGateway::Method).
+	nameProp string
+}
+
+// cfnUsesGeneratedName reports whether a resource of resType declared with props is named by
+// [cfnGeneratedName]: its type generates a name, and the template declares none, or declares
+// one that resolves to nothing. It is what decides whether a replacement needs a fresh name
+// ([cfnContext.mintReplacementName]); a template-named resource keeps its declared name, and a
+// type outside cfnGeneratedNameTypes is named by its logical ID.
+func cfnUsesGeneratedName(resType string, props map[string]interface{}, cctx *cfnContext) bool {
+	c, ok := cfnGeneratedNameTypes[resType]
+	if !ok {
+		return false
+	}
+	if c.nameProp == "" {
+		return true
+	}
+	return resolveStringProp(props, c.nameProp, "", cctx) == ""
 }
 
 // cfnGeneratedNameTypes maps a resource type to the constraint on the physical
@@ -51,30 +72,30 @@ type cfnNameConstraint struct {
 var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// IAM names: "[\w+=,.@-]+", 64 for a role, 128 for a policy or an instance
 	// profile (CreateRole, CreatePolicy, CreateInstanceProfile).
-	"AWS::IAM::Role":            {maxLen: 64},
-	"AWS::IAM::InstanceProfile": {maxLen: 128},
+	"AWS::IAM::Role":            {maxLen: 64, nameProp: "RoleName"},
+	"AWS::IAM::InstanceProfile": {maxLen: 128, nameProp: "InstanceProfileName"},
 	// AWS::IAM::Policy declares PolicyName as required, so a template that omits
 	// it is already invalid — but substrate deploys the type through CreatePolicy,
 	// which mints an account-unique managed policy, so the omitted case still has
 	// to generate rather than collide.
-	"AWS::IAM::Policy": {maxLen: 128},
+	"AWS::IAM::Policy": {maxLen: 128, nameProp: "PolicyName"},
 
 	// A bucket name is globally unique, lowercase, and 3–63 characters
 	// (validateBucketName enforces the same range).
-	"AWS::S3::Bucket": {maxLen: 63, lower: true},
+	"AWS::S3::Bucket": {maxLen: 63, lower: true, nameProp: "BucketName"},
 
 	// A DynamoDB table name is unique within a Region. CreateTable's own limit is
 	// 1–1024 characters because the parameter also accepts a table ARN; the
 	// name-only limit is the 3–255 in the DynamoDB service quotas, which is the
 	// tighter of the two and so the one to fit.
-	"AWS::DynamoDB::Table": {maxLen: 255},
+	"AWS::DynamoDB::Table": {maxLen: 255, nameProp: "TableName"},
 
 	// A queue name may be up to 80 characters (CreateQueue); a topic name up to
 	// 256 (CreateTopic). Both creates are idempotent, so without a generated
 	// name two stacks silently share one resource rather than colliding — see
 	// #560.
-	"AWS::SQS::Queue": {maxLen: 80},
-	"AWS::SNS::Topic": {maxLen: 256},
+	"AWS::SQS::Queue": {maxLen: 80, nameProp: "QueueName"},
+	"AWS::SNS::Topic": {maxLen: 256, nameProp: "TopicName"},
 
 	// A launch template name is unique within a Region and may be 3–128 characters of letters,
 	// digits and -_./() (API_CreateLaunchTemplate's LaunchTemplateName rule, which EC2 enforces
@@ -82,15 +103,15 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// creates a name for you"; a generated name's letters, digits and hyphens are inside the rule,
 	// and the {stack}-{logical}-{suffix} shape is always longer than 3, so a short logical ID
 	// such as LT no longer becomes a name EC2 refuses.
-	"AWS::EC2::LaunchTemplate": {maxLen: 128},
+	"AWS::EC2::LaunchTemplate": {maxLen: 128, nameProp: "LaunchTemplateName"},
 
 	// A log group name is unique within a Region and may be up to 512
 	// characters (CreateLogGroup).
-	"AWS::Logs::LogGroup": {maxLen: 512},
+	"AWS::Logs::LogGroup": {maxLen: 512, nameProp: "LogGroupName"},
 
 	// A bare Lambda function name "is limited to 64 characters in length"
 	// (CreateFunction).
-	"AWS::Lambda::Function": {maxLen: 64},
+	"AWS::Lambda::Function": {maxLen: 64, nameProp: "FunctionName"},
 
 	// A Config rule name is unique within a Region and may be up to 128 characters
 	// (ConfigRuleName, 1-128). CloudFormation documents generating one — the page's
@@ -99,7 +120,7 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// configuration recorder and a delivery channel "default", and only one of each
 	// may exist per account per Region, so a generated stack-scoped name would
 	// replace a name the service assigns and could not collide with anything anyway.
-	"AWS::Config::ConfigRule": {maxLen: 128},
+	"AWS::Config::ConfigRule": {maxLen: 128, nameProp: "ConfigRuleName"},
 
 	// A security group name is unique within its VPC, case-insensitively, and up to 255
 	// characters (API_CreateSecurityGroup's GroupName). It joined this table when substrate began
@@ -107,7 +128,7 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// template in one VPC — the default VPC, for a template naming none — collided with
 	// InvalidGroup.Duplicate where "If you don't specify a name, CloudFormation generates a
 	// unique physical ID to name the resource" (CloudFormation resource custom naming).
-	"AWS::EC2::SecurityGroup": {maxLen: 255},
+	"AWS::EC2::SecurityGroup": {maxLen: 255, nameProp: "GroupName"},
 
 	// AWS::ApiGateway::Method is the one entry with no name property at all, and
 	// so the one whose bound does not come from a service limit. API Gateway's
@@ -130,6 +151,11 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 // physical ID (MyStack-MyBucket-abcdefghijk1).
 const cfnGeneratedNameSuffixLen = 12
 
+// cfnNameSuffixAlphabet is the alphabet of a generated name's suffix: base 36 in lowercase, which
+// is what the derived suffix renders in, so a minted suffix is indistinguishable in shape and fits
+// a lowercase-only name.
+const cfnNameSuffixAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
+
 // cfnGeneratedName returns the physical name to use for a resource of resType
 // whose template omitted its name property, or logicalID unchanged when resType
 // has no entry in cfnGeneratedNameTypes.
@@ -146,6 +172,13 @@ const cfnGeneratedNameSuffixLen = 12
 // stack, logical ID) while still differing between stacks, which is the property
 // #560 needs, and keeps the emulator deterministic by construction.
 //
+// A **replacement** is the exception, and the one place the suffix is minted rather
+// than derived (#1545). A change to an "Update requires: Replacement" property creates
+// a new resource while the old one still exists, so the derived name is taken; the
+// deployer mints the replacement a suffix through the request's [IDMint]
+// ([cfnContext.mintReplacementName]), which a replay of the request mints again. The
+// name a resource is first created under is unchanged.
+//
 // The account and Region are in the hash because two same-named stacks in
 // different Regions are different stacks, which sameScope already treats them
 // as.
@@ -161,6 +194,11 @@ func cfnGeneratedName(cctx *cfnContext, resType, logicalID string) string {
 	}
 
 	suffix := cfnNameSuffix(accountID, region, stackName, logicalID)
+	if cctx != nil {
+		if minted, ok := cctx.nameSuffixes[logicalID]; ok {
+			suffix = minted
+		}
+	}
 
 	// A generated name must begin with a letter. The stack segment leads, so the
 	// guarantee is applied there, before the length budget is spent — prefixing
