@@ -244,10 +244,13 @@ network access to real AWS, and shuts down automatically when the test finishes.
 
 The [`pytest-substrate`](https://github.com/scttfrdmn/substrate/tree/main/python)
 package provides a session-scoped server fixture with per-test state reset and
-boto3 pre-wired to the emulator. Install it and the substrate binary:
+boto3 pre-wired to the emulator. It is installed from source until it is published
+to PyPI ([#1616](https://github.com/scttfrdmn/substrate/issues/1616)). Install it
+and the substrate binary:
 
 ```bash
-pip install pytest-substrate  # or: pip install -e ./python from a checkout
+pip install "git+https://github.com/scttfrdmn/substrate.git#subdirectory=python"
+# or, from a checkout: pip install ./python
 go install github.com/scttfrdmn/substrate/cmd/substrate@latest
 ```
 
@@ -384,7 +387,7 @@ func TestCostTracking(t *testing.T) {
 
 ## Next steps
 
-- [Service Reference](services.md) — all 63 plugins with full operation lists
+- [Service Reference](services.md) — every plugin with its full operation list
 - [Testing Guide](testing-guide.md) — advanced patterns: fault injection,
   multi-region, time-travel debugging, cost assertions
 - [Endpoint Configuration](endpoint-configuration.md) — configure Terraform,

@@ -510,6 +510,128 @@ func TestClient_IntentMaxCost(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, report.Violations, "should have a MaxCost violation")
 	assert.Contains(t, report.Violations[0], "MaxCost")
+	assert.Equal(t, emulator.ValidationFailed, report.PassFail,
+		"a MaxCost violation must fail the report, not only list itself")
+
+	under, err := emulator.ValidateRecording(ctx, store, streamID, emulator.Intent{MaxCost: 100.0})
+	require.NoError(t, err)
+	assert.Empty(t, under.Violations)
+	assert.NotEqual(t, emulator.ValidationFailed, under.PassFail)
+}
+
+// TestClient_DeployMaxCost checks that a deploy whose metered cost exceeds
+// Intent.MaxCost fails with ErrCostBudgetExceeded and still returns its result,
+// and that one within budget, or with no budget, succeeds.
+func TestClient_DeployMaxCost(t *testing.T) {
+	// A CloudWatch alarm is metered at $0.10 on creation (monitoring/PutMetricAlarm).
+	const tmpl = `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"CPUAlarm": {
+				"Type": "AWS::CloudWatch::Alarm",
+				"Properties": {
+					"AlarmName": "budget-alarm",
+					"MetricName": "CPUUtilization",
+					"Namespace": "AWS/EC2",
+					"Statistic": "Average",
+					"ComparisonOperator": "GreaterThanThreshold",
+					"Threshold": "90",
+					"EvaluationPeriods": "2",
+					"Period": "300"
+				}
+			}
+		}
+	}`
+
+	tests := []struct {
+		name    string
+		maxCost float64
+		wantErr bool
+	}{
+		{name: "over budget", maxCost: 0.05, wantErr: true},
+		{name: "within budget", maxCost: 1.0, wantErr: false},
+		{name: "no budget", maxCost: 0, wantErr: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry, store, state, tc, logger := newClientTestDeps(t)
+			cw := &emulator.CloudWatchPlugin{}
+			require.NoError(t, cw.Initialize(context.Background(), emulator.PluginConfig{
+				State:   state,
+				Logger:  logger,
+				Options: map[string]any{"time_controller": tc},
+			}))
+			registry.Register(cw)
+			client := emulator.NewClient(registry, store, state, tc, logger)
+
+			result, err := client.Deploy(context.Background(), tmpl, emulator.Intent{MaxCost: tt.maxCost})
+			require.NotNil(t, result, "the result is returned whether or not the budget holds")
+			assert.InDelta(t, 0.10, result.TotalCost, 1e-9)
+			require.Len(t, result.Resources, 1)
+			assert.Empty(t, result.Resources[0].Error, "the resource was deployed")
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.ErrorIs(t, err, emulator.ErrCostBudgetExceeded)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestClient_RecordingIntentIsItsOwn checks that a deploy's MaxCost does not carry
+// over to a later recording: StopRecording and Validate apply no budget, and only
+// the *WithIntent variants check one.
+func TestClient_RecordingIntentIsItsOwn(t *testing.T) {
+	ctx := context.Background()
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
+
+	// An under-budget deploy with a tight budget.
+	_, err := client.Deploy(ctx, `{"Resources":{"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"intent-own"}}}}`,
+		emulator.Intent{MaxCost: 0.01})
+	require.NoError(t, err)
+
+	record := func(t *testing.T, name string) *emulator.RecordingSession {
+		t.Helper()
+		session, err := client.StartRecording(ctx, name)
+		require.NoError(t, err)
+		require.NoError(t, store.RecordRequest(ctx,
+			&emulator.RequestContext{
+				RequestID: "req-" + name,
+				AccountID: "123456789012",
+				Region:    "us-east-1",
+				Timestamp: tc.Now(),
+				Metadata:  map[string]interface{}{"stream_id": session.StreamID},
+			},
+			&emulator.AWSRequest{Service: "s3", Operation: "PutObject"},
+			&emulator.AWSResponse{StatusCode: 200},
+			time.Millisecond,
+			0.50, // above the deploy's $0.01 budget
+			nil,
+		))
+		return session
+	}
+
+	plain := record(t, "plain")
+	report, err := client.StopRecording(ctx, plain)
+	require.NoError(t, err)
+	assert.Empty(t, report.Violations, "the deploy's MaxCost must not carry over")
+	assert.Equal(t, emulator.ValidationPassed, report.PassFail)
+
+	again, err := client.Validate(ctx, plain.StreamID)
+	require.NoError(t, err)
+	assert.Equal(t, emulator.ValidationPassed, again.PassFail)
+
+	checked, err := client.ValidateWithIntent(ctx, plain.StreamID, emulator.Intent{MaxCost: 0.10})
+	require.NoError(t, err)
+	assert.Equal(t, emulator.ValidationFailed, checked.PassFail)
+
+	budgeted := record(t, "budgeted")
+	report, err = client.StopRecordingWithIntent(ctx, budgeted, emulator.Intent{MaxCost: 0.10})
+	require.NoError(t, err)
+	assert.NotEmpty(t, report.Violations)
+	assert.Equal(t, emulator.ValidationFailed, report.PassFail)
 }
 
 func TestClient_StartStopRecording(t *testing.T) {

@@ -267,8 +267,8 @@ It is **not** a Go type name. Until
 [#716](https://github.com/scttfrdmn/substrate/issues/716) every plugin wrote this
 refusal itself — 59 sites in eight wordings, each leading with the plugin's Go type
 ("`SSMPlugin: unknown operation "Foo"`"). No AWS endpoint emits that, so a consumer's
-error branch was matching on a substrate internal. A tripwire test now sweeps all 67
-plugins and fails if any answer contains the word `Plugin`.
+error branch was matching on a substrate internal. A tripwire test now sweeps every
+plugin and fails if any answer contains the word `Plugin`.
 
 It is **not** `InvalidAction` on a JSON service. Forty-four of those 59 sites answered the
 Query protocol's code at 400 on a service whose protocol is JSON, which is what the
@@ -546,9 +546,9 @@ code together**, since a decoded error struct carries only the code and a consum
 logic branches on the status. Each table names every operation that carries a guard rather
 than a representative sample, because the defect was per-site duplication of one literal and
 the assertion that matters is that no site was missed.
-`emulator/invalid_body_inventory_test.go` carries **218 guarded operations in 42 services** —
-66 in fourteen when that sentence was first written, grown by #1007's third slice and by #1066's
-thirty-four — plus **35 member-complaint sites in nine** (below), and
+`emulator/invalid_body_inventory_test.go` carries **every guarded operation** —
+the inventory has grown since this sentence was first written, by the third slice of #1007 and
+by #1066 — plus **35 member-complaint sites in nine** (below), and
 `emulator/invalid_body_code_test.go` the Step Functions and Systems Manager sites #1003 fixed.
 
 Three different **35**s appear in this section and they count three different things, which is worth

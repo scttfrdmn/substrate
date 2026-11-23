@@ -5,7 +5,7 @@ const ogImage = siteUrl + 'og-image.png'
 const description =
   'Substrate is an event-sourced AWS emulator for deterministic, offline testing ' +
   'of CloudFormation, CDK, Terraform, and any AWS SDK or CLI call — with time-travel ' +
-  'debugging and cost visibility before you deploy.'
+  'debugging and API-call cost metering before you deploy.'
 
 export default defineConfig({
   title: 'Substrate',

@@ -4,9 +4,12 @@ pytest plugin for the [substrate](https://github.com/scttfrdmn/substrate) AWS em
 
 ## Installation
 
+pytest-substrate is installed from source until it is published to PyPI
+([#1616](https://github.com/scttfrdmn/substrate/issues/1616)):
+
 ```bash
-pip install pytest-substrate
-# or, from source:
+pip install "git+https://github.com/scttfrdmn/substrate.git#subdirectory=python"
+# or, from a checkout:
 pip install -e /path/to/substrate/python
 ```
 

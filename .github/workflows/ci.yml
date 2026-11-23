@@ -143,6 +143,16 @@ jobs:
       - name: Check docs/services.md names each service section once
         run: make docs-headings-check
 
+      # The matrix is the one place a plugin or operation count can be stated, because it
+      # is the one place a generator keeps it true. The README and docs/index.md said 63
+      # plugins while the registry had 68 (#1604). It runs here rather than in docs-ci.yml
+      # because that workflow's paths filter covers docs/** and README.md but neither
+      # python/README.md, which the check also scans, nor scripts/check-doc-counts.sh, so
+      # an edit to either would skip it there. This job runs on every PR, so no paths
+      # entry is needed to keep it from being skipped.
+      - name: Check no prose outside the matrix pins a plugin or operation count
+        run: make docs-counts-check
+
       # The matrix check above compares operation *counts*; this compares the operations
       # themselves against each service's hand-written table, in both directions. It runs
       # in CI and not only in `make` for the reason the wire-bookkeeping baseline does: an

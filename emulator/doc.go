@@ -5,14 +5,20 @@
 //
 // Substrate's core differentiators:
 //
-//  1. Deterministic reproducibility: event sourcing + seeded RNG + time control
-//     means the same test inputs always produce the same outputs.
+//  1. Deterministic reproducibility: every request is recorded with its bodies,
+//     and a replay re-runs it under the recorded request ID and clock. Seeded
+//     request IDs (the default in [StartTestServer]) make two fresh runs mint the
+//     same identifiers; [WithDeterministicRun] pins the clock too. The exceptions
+//     are listed under "Deterministic runs" below.
 //
-//  2. Time-travel debugging: step backward through recorded request history
-//     and inspect AWS service state at any point in time.
+//  2. Time-travel debugging: [ReplaySandbox.StateAt] gives the state before any
+//     recorded event, and [ReplayEngine.StepBackward] and
+//     [ReplayEngine.JumpToEvent] walk a replay through the stream.
 //
-//  3. Cost visibility: real AWS pricing is tracked per operation so you know
-//     projected monthly costs before the bill arrives.
+//  3. API-call cost metering: each emulated request is priced per operation,
+//     and Intent.MaxCost fails a deploy whose metered cost exceeds a budget.
+//     This meters API calls, not resource time; a resource-time cost model is
+//     tracked in #1615.
 //
 //  4. API-surface scope: substrate models what is observable through an AWS API
 //     call — request/response shapes, resource state and its transitions over
@@ -129,7 +135,9 @@
 //	client := emulator.NewClient(registry, store, state, tc, logger)
 //
 //	result, err := client.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
-//	if err != nil { ... }
+//	if errors.Is(err, emulator.ErrCostBudgetExceeded) {
+//		// Deployed, but the metered API-call cost exceeded $1.
+//	} else if err != nil { ... }
 //
 //	session, err := client.StartRecording(ctx, "my-integration-test")
 //	// ... run operations against the emulator ...

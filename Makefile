@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions authz-reference authz-reference-check authz-reference-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -78,6 +78,10 @@ docs-headings-check: ## Fail if docs/services.md names a service section twice
 
 docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
+
+docs-counts-check: ## Fail if docs/README pin a plugin, service or operation count outside the generated matrix
+	./scripts/check-doc-counts.sh --self-test
+	./scripts/check-doc-counts.sh
 
 discarded-unmarshal-check: ## Fail if a plugin decodes a request body and discards the error
 	./scripts/check-discarded-unmarshal.sh
