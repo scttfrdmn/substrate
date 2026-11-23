@@ -78,6 +78,7 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::SQS::Queue":         (*StackDeployer).updateSQSQueue,
 	"AWS::SNS::Topic":         (*StackDeployer).updateSNSTopic,
 	"AWS::S3::Bucket":         (*StackDeployer).updateS3Bucket,
+	"AWS::S3::BucketPolicy":   (*StackDeployer).updateS3BucketPolicy,
 	"AWS::KMS::Key":           (*StackDeployer).updateKMSKey,
 	"AWS::EC2::SecurityGroup": (*StackDeployer).updateEC2SecurityGroup,
 	"AWS::ECS::Service":       (*StackDeployer).updateECSService,

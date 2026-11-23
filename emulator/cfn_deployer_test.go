@@ -2376,9 +2376,13 @@ func TestCFN_ChangeSet_CreateDescribeExecute(t *testing.T) {
 	assert.Contains(t, byLogical, "MyBucket", "the resource the change set left alone")
 	assert.NotContains(t, byLogical, "MyRole", "the Remove the change set described")
 
-	// Describe after execute → not found.
-	_, err = d.DescribeChangeSet(context.Background(), "cs-stack", "my-changes")
-	assert.Error(t, err)
+	// The executed change set remains, reporting that it ran (#1606): "When you execute a change
+	// set, CloudFormation deletes all other change sets associated with the stack", not that one.
+	described, err = d.DescribeChangeSet(context.Background(), "cs-stack", "my-changes")
+	require.NoError(t, err)
+	assert.Equal(t, "EXECUTE_COMPLETE", described.ExecutionStatus)
+	_, err = d.ExecuteChangeSet(context.Background(), "cs-stack", "my-changes")
+	require.ErrorIs(t, err, emulator.ErrCFNChangeSetNotExecutable, "an executed change set cannot run again")
 }
 
 func TestCFN_ChangeSet_ListAndDelete(t *testing.T) {

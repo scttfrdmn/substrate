@@ -330,9 +330,10 @@ func TestCFNPlugin_CreateStack_UnparseableTemplate(t *testing.T) {
 	assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
 }
 
-// TestCFNPlugin_CreateStack_TemplateURLRefused asserts TemplateURL is refused
-// rather than silently ignored: fetching a template is a network read substrate
-// does not perform, and a caller who passed a URL got no resources at all.
+// TestCFNPlugin_CreateStack_TemplateURLRefused asserts a TemplateURL that names no
+// S3 object is refused rather than silently ignored: a caller who passed one got no
+// resources at all. A URL that does name one is read from substrate's S3 (#1606;
+// cfn_template_url_test.go).
 func TestCFNPlugin_CreateStack_TemplateURLRefused(t *testing.T) {
 	ts := newCFNTestServer(t)
 	code, body := cfnAction(t, ts, "CreateStack", map[string]string{
@@ -341,7 +342,7 @@ func TestCFNPlugin_CreateStack_TemplateURLRefused(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusBadRequest, code)
 	assert.Equal(t, "ValidationError", cfnErrorCode(t, body))
-	assert.Contains(t, body, "TemplateBody")
+	assert.Contains(t, body, "TemplateURL must be a supported URL.")
 }
 
 // TestCFNPlugin_ResourceFailureReported asserts a resource that failed to deploy
@@ -1006,7 +1007,7 @@ func TestCFNPlugin_ChangeSetFlow(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	assert.Contains(t, body, "<ChangeSetName>add-bucket</ChangeSetName>")
 
-	// Executing it applies the change and consumes the set.
+	// Executing it applies the change; the set remains, reporting that it ran (#1606).
 	code, body = cfnAction(t, ts, "ExecuteChangeSet", map[string]string{
 		"StackName":     "staged",
 		"ChangeSetName": "add-bucket",
@@ -1023,8 +1024,8 @@ func TestCFNPlugin_ChangeSetFlow(t *testing.T) {
 		"StackName":     "staged",
 		"ChangeSetName": "add-bucket",
 	})
-	assert.Equal(t, http.StatusNotFound, code)
-	assert.Equal(t, "ChangeSetNotFound", cfnErrorCode(t, body), "body was %s", body)
+	assert.Equal(t, http.StatusOK, code, "body was %s", body)
+	assert.Contains(t, body, "<ExecutionStatus>EXECUTE_COMPLETE</ExecutionStatus>")
 }
 
 // TestCFNPlugin_ChangeSetErrors covers the codes and their statuses. The
@@ -1059,7 +1060,7 @@ func TestCFNPlugin_ChangeSetErrors(t *testing.T) {
 			wantCode:   "ValidationError",
 		},
 		{
-			name:       "CreateChangeSet with ChangeSetType CREATE",
+			name:       "CreateChangeSet with ChangeSetType CREATE on an existing stack",
 			action:     "CreateChangeSet",
 			params:     map[string]string{"StackName": "cs-errors", "ChangeSetName": "cs", "TemplateBody": cfnEmptyTemplate, "ChangeSetType": "CREATE"},
 			wantStatus: http.StatusBadRequest,

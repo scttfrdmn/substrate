@@ -53,8 +53,10 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 		return &AWSRequest{Service: "s3", Operation: "DELETE", Path: "/" + dr.PhysicalID,
 			Headers: map[string]string{}, Params: map[string]string{}}
 	},
-	"AWS::DynamoDB::Table": jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
-	"AWS::Kinesis::Stream": jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
+	// The policy, not the bucket: DeleteBucketPolicy on the bucket it was applied to (#1606).
+	"AWS::S3::BucketPolicy": cfnS3BucketPolicyDeleter,
+	"AWS::DynamoDB::Table":  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
+	"AWS::Kinesis::Stream":  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),

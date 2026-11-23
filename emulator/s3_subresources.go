@@ -41,7 +41,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 		"analytics":             {name: "GetBucketAnalyticsConfiguration", listName: "ListBucketAnalyticsConfigurations"},
 		"intelligent-tiering":   {name: "GetBucketIntelligentTieringConfiguration", listName: "ListBucketIntelligentTieringConfigurations"},
 		"inventory":             {name: "GetBucketInventoryConfiguration", listName: "ListBucketInventoryConfigurations"},
-		"location":              {name: "GetBucketLocation"},
 		"logging":               {name: "GetBucketLogging"},
 		"metadataConfiguration": {name: "GetBucketMetadataConfiguration"},
 		"metadataTable":         {name: "GetBucketMetadataTableConfiguration"},

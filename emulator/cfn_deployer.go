@@ -202,6 +202,10 @@ var cfnNotUpdatableStatuses = map[string]bool{
 	cfnStackRollbackComplete: true,
 	cfnStackRollbackFailed:   true,
 	cfnStackDeleteFailed:     true,
+	// A stack a CREATE change set created has no template to update until that change set is
+	// executed: "The stack will be in the REVIEW_IN_PROGRESS state until you execute the change set"
+	// (API_CreateChangeSet), and an UPDATE change set "can't" be used "for a new stack" (#1606).
+	cfnStackReviewInProgress: true,
 }
 
 // checkUpdatable refuses an update of a stack whose status admits none.
@@ -408,6 +412,12 @@ type CFNStackState struct {
 
 	// CreatedAt is the time the stack was first deployed.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// ReviewedAt is when a CREATE change set created the stack in REVIEW_IN_PROGRESS, zero for a
+	// stack CreateStack created (#1606). It is the stack's CreationTime — the stack exists from
+	// that moment, "with a unique stack ID, but no template or resources" — and the time of its
+	// REVIEW_IN_PROGRESS event, which precedes the CREATE_IN_PROGRESS of its execution.
+	ReviewedAt time.Time `json:"ReviewedAt,omitzero"`
 
 	// UpdatedAt is the time the stack was last updated.
 	UpdatedAt time.Time `json:"UpdatedAt"`
@@ -795,6 +805,27 @@ var (
 	// silently. ValidationError is the code this plugin already answers for every
 	// other malformed parameter, so a caller sees one code for one class of mistake.
 	ErrCFNInvalidTag = errors.New("invalid stack tag")
+
+	// ErrCFNChangeSetTypeUnsupported is returned when CreateChangeSet asks for a ChangeSetType
+	// substrate does not model: IMPORT, which brings existing resources under a stack, or a value
+	// outside the documented three (#1606). It maps to ValidationError at 400; the message is
+	// substrate's own.
+	ErrCFNChangeSetTypeUnsupported = errors.New("change set type not supported")
+
+	// ErrCFNStackAlreadyExists is returned when a CREATE change set names a stack that exists and is
+	// not in REVIEW_IN_PROGRESS: "You can't use … the CREATE type to create a change set for an
+	// existing stack" (API_CreateChangeSet). It maps to ValidationError at 400 with the message
+	// verbatim — "Stack [{name}] already exists and cannot be created again with the changeSet
+	// [{changeSet}]." — which is observed behavior: no AWS page publishes it, and it is the
+	// ValidationError text SAM CLI and Copilot users report from CreateChangeSet
+	// (aws/copilot-cli#1376).
+	ErrCFNStackAlreadyExists = errors.New("stack already exists")
+
+	// ErrCFNChangeSetNotExecutable is returned when ExecuteChangeSet names a change set whose
+	// ExecutionStatus is not AVAILABLE — one that FAILED, or that has already executed. It maps to
+	// InvalidChangeSetStatus at 400, ExecuteChangeSet's documented code for "the specified change set
+	// can't be used to update the stack"; the message is substrate's own.
+	ErrCFNChangeSetNotExecutable = errors.New("change set not executable")
 )
 
 // Stack statuses substrate reports, for the ones written from more than one place.
@@ -919,6 +950,36 @@ type CFNChangeSet struct {
 
 	// CreatedAt is the creation timestamp.
 	CreatedAt time.Time `json:"CreatedAt"`
+
+	// The members below record what CreateChangeSet was asked for beyond the template, its
+	// parameters and its tags, and where the change set is in its lifecycle (#1606). Each is
+	// omitted from a record written before #1606, which decodes as an UPDATE change set that is
+	// CREATE_COMPLETE and AVAILABLE — what every such record was. See cfn_changeset_lifecycle.go.
+
+	// Type is the ChangeSetType it was created with, CREATE or UPDATE; empty is UPDATE, the
+	// parameter's documented default.
+	Type string `json:"ChangeSetType,omitempty"`
+
+	// ExecutionStatus is the change set's ExecutionStatus; empty is AVAILABLE for a
+	// CREATE_COMPLETE change set and UNAVAILABLE otherwise.
+	ExecutionStatus string `json:"ExecutionStatus,omitempty"`
+
+	// StatusReason is "a description of the change set's status", set for a FAILED one.
+	StatusReason string `json:"StatusReason,omitempty"`
+
+	// Description is the caller's own description of the change set.
+	Description string `json:"Description,omitempty"`
+
+	// RoleARN is the service role executing the change set runs as, empty for none: "CloudFormation
+	// uses this role for all future operations on the stack".
+	RoleARN string `json:"RoleARN,omitempty"`
+
+	// Capabilities are the capabilities the caller acknowledged, as DescribeChangeSet reports them.
+	Capabilities []string `json:"Capabilities,omitempty"`
+
+	// OnStackFailure is what a failed execution of a CREATE change set does: DO_NOTHING, ROLLBACK or
+	// DELETE. Empty leaves it to ExecuteChangeSet's DisableRollback.
+	OnStackFailure string `json:"OnStackFailure,omitempty"`
 }
 
 // CFNResourceChange describes a single resource-level change in a change set.
@@ -1085,6 +1146,7 @@ var typePriority = map[string]int{
 	"AWS::KMS::Key":             1,
 	"AWS::DynamoDB::Table":      2,
 	"AWS::S3::Bucket":           2,
+	"AWS::S3::BucketPolicy":     3,
 	"AWS::EC2::Subnet":          2,
 	"AWS::EC2::SecurityGroup":   2,
 	"AWS::EC2::InternetGateway": 2,
@@ -1862,7 +1924,12 @@ func (d *StackDeployer) DeleteStack(ctx context.Context, stackName string) error
 		}
 	}
 
-	return d.removeStackRecord(ctx, stackName)
+	if err := d.removeStackRecord(ctx, stackName); err != nil {
+		return err
+	}
+	// A deleted stack's change sets go with it, so a stack recreated under the same name — the
+	// CDK's retry after deleting a REVIEW_IN_PROGRESS stack it could not execute — starts with none.
+	return d.deleteStackChangeSets(ctx, stackName, "")
 }
 
 // loadStack reads a persisted stack by name, returning (nil, nil) when no stack of
@@ -2217,33 +2284,33 @@ func removeStr(list []string, drop string) []string {
 // `Tags` constraints `CreateStack` does, so a change set that could never execute is not
 // worth recording.
 func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSetName, templateBody string, params, tags map[string]string) (*CFNChangeSet, error) {
+	return d.CreateChangeSetWithOptions(ctx, stackName, changeSetName, templateBody, params,
+		CFNChangeSetOptions{Tags: tags})
+}
+
+// CreateChangeSetWithOptions is [StackDeployer.CreateChangeSet] with the rest of what
+// CreateChangeSet takes: the ChangeSetType, and the role, capabilities, description and failure
+// action executing the change set applies (#1606). A CREATE change set creates the stack in
+// REVIEW_IN_PROGRESS — see cfn_changeset_lifecycle.go.
+func (d *StackDeployer) CreateChangeSetWithOptions(ctx context.Context, stackName, changeSetName, templateBody string,
+	params map[string]string, opts CFNChangeSetOptions,
+) (*CFNChangeSet, error) {
 	if d.state == nil {
 		return nil, cfnErrf(ErrCFNStateRequired, "cfn CreateChangeSet: state manager required")
 	}
+	tags := opts.Tags
 	if err := cfnValidateStackTags(tags); err != nil {
 		return nil, err
 	}
-
-	// Load existing stack.
-	data, err := d.stackData(ctx, stackName)
-	if err != nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: %w", err)
-	}
-	if data == nil {
-		return nil, cfnErrf(ErrCFNStackNotFound, "cfn CreateChangeSet: stack %q not found", stackName)
-	}
-	var stack CFNStackState
-	if err := json.Unmarshal(data, &stack); err != nil {
-		return nil, fmt.Errorf("cfn CreateChangeSet: unmarshal stack: %w", err)
-	}
-	if err := d.checkUpdatable(&stack); err != nil {
+	if err := opts.validate(); err != nil {
 		return nil, err
 	}
 
-	// Parse old and new templates.
-	oldTmpl, err := d.parseCFNTemplate(stack.TemplateBody)
+	// The stack the change set is compared against, and its template: the existing stack's for an
+	// UPDATE, and for a CREATE an empty one, so every resource is an Add.
+	stack, oldTmpl, err := d.changeSetBase(ctx, stackName, changeSetName, opts)
 	if err != nil {
-		return nil, cfnErrf(ErrCFNTemplateInvalid, "cfn CreateChangeSet: parse old template: %w", err)
+		return nil, err
 	}
 	newTmpl, err := d.parseCFNTemplate(templateBody)
 	if err != nil {
@@ -2269,17 +2336,27 @@ func (d *StackDeployer) CreateChangeSet(ctx context.Context, stackName, changeSe
 	for _, r := range stack.Resources {
 		physical[r.LogicalID] = r.PhysicalID
 	}
-	changes := diffCFNResources(oldTmpl, newTmpl, stack.Parameters, params, physical)
+	changes := cfnDropInactiveAdds(diffCFNResources(oldTmpl, newTmpl, stack.Parameters, params, physical),
+		cfnActiveResources(newTmpl, newCtx))
 
 	cs := &CFNChangeSet{
-		ChangeSetName: changeSetName,
-		StackName:     stackName,
-		Status:        "CREATE_COMPLETE",
-		TemplateBody:  templateBody,
-		Parameters:    params,
-		Changes:       changes,
-		Tags:          tags,
-		CreatedAt:     d.tc.Now(),
+		ChangeSetName:  changeSetName,
+		StackName:      stackName,
+		Status:         cfnChangeSetCreateComplete,
+		TemplateBody:   templateBody,
+		Parameters:     params,
+		Changes:        changes,
+		Tags:           tags,
+		CreatedAt:      d.tc.Now(),
+		Type:           opts.changeSetType(),
+		Description:    opts.Description,
+		RoleARN:        opts.RoleARN,
+		Capabilities:   opts.Capabilities,
+		OnStackFailure: opts.OnStackFailure,
+	}
+	cfnSettleChangeSet(cs, stack, oldTmpl, newTmpl)
+	if err := d.ensureReviewStack(ctx, stack, cs); err != nil {
+		return nil, err
 	}
 
 	// Persist.
@@ -2326,27 +2403,16 @@ func (d *StackDeployer) DescribeChangeSet(ctx context.Context, stackName, change
 	return &cs, nil
 }
 
-// ExecuteChangeSet applies a change set by calling UpdateStack with the change
-// set's template and parameters, then deletes the consumed change set.
+// ExecuteChangeSet applies a change set: a CREATE change set creates its REVIEW_IN_PROGRESS stack
+// through [StackDeployer.DeployWithOptions], and an UPDATE one updates the stack through
+// [StackDeployer.UpdateStack], each with the change set's template, parameters and tags.
+//
+// The executed change set remains, reporting EXECUTE_COMPLETE or EXECUTE_FAILED, and every other
+// change set of the stack is deleted: "When you execute a change set, CloudFormation deletes all
+// other change sets associated with the stack because they aren't valid for the updated stack"
+// (API_ExecuteChangeSet). See [StackDeployer.ExecuteChangeSetWithOptions].
 func (d *StackDeployer) ExecuteChangeSet(ctx context.Context, stackName, changeSetName string) (*DeployResult, error) {
-	cs, err := d.DescribeChangeSet(ctx, stackName, changeSetName)
-	if err != nil {
-		return nil, err
-	}
-	// The change set's own tags, whatever CreateChangeSet recorded (#824). `ExecuteChangeSet`
-	// says nothing about tags — no request parameter, no response element, an empty result
-	// body — so the documented warrant for applying them here is `DescribeChangeSet`'s
-	// description of the member it reports: "if you execute the change set, the tags that
-	// will be associated with the stack". A change set created without the parameter carries
-	// a nil map, which leaves the stack's own tags exactly as they are, so a change set
-	// recorded before #824 executes as it always did.
-	result, err := d.UpdateStack(ctx, cs.TemplateBody, stackName, cs.Parameters,
-		CFNDeployOptions{Tags: cs.Tags})
-	if err != nil {
-		return nil, err
-	}
-	_ = d.DeleteChangeSet(ctx, stackName, changeSetName)
-	return result, nil
+	return d.ExecuteChangeSetWithOptions(ctx, stackName, changeSetName, CFNExecuteOptions{})
 }
 
 // ListChangeSets returns all change sets for a stack.
@@ -3228,6 +3294,8 @@ func (d *StackDeployer) dispatchResource(
 		return d.deployIAMGroup(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::S3::Bucket":
 		return d.deployS3Bucket(ctx, logicalID, res.Properties, streamID, cctx)
+	case "AWS::S3::BucketPolicy":
+		return d.deployS3BucketPolicy(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::Lambda::Function":
 		return d.deployLambdaFunction(ctx, logicalID, res.Properties, streamID, cctx)
 	case "AWS::SQS::Queue":
@@ -5853,6 +5921,12 @@ func cfnListParameterType(t string) bool {
 func resolveNested(v interface{}, cctx *cfnContext) interface{} {
 	switch val := v.(type) {
 	case map[string]interface{}:
+		if branch, ok := cfnStructuredIfBranch(val, cctx); ok {
+			// An Fn::If choosing a structure is that structure, resolved in turn — the bootstrap
+			// template's trust policies choose a whole Condition block this way. Resolving it as
+			// a scalar marshaled the block into a JSON string, which IAM refused (#1606).
+			return resolveNested(branch, cctx)
+		}
 		if isCFNIntrinsic(val) {
 			return resolveIntrinsicPreservingShape(val, cctx)
 		}
@@ -5871,6 +5945,12 @@ func resolveNested(v interface{}, cctx *cfnContext) interface{} {
 		out := make([]interface{}, 0, len(val))
 		for _, item := range val {
 			m, isMap := item.(map[string]interface{})
+			if branch, ok := cfnStructuredIfBranch(m, cctx); isMap && ok {
+				// A list element an Fn::If chooses as a structure — a policy statement — is one
+				// element, not a list to splice.
+				out = append(out, resolveNested(branch, cctx))
+				continue
+			}
 			if isMap && isCFNIntrinsic(m) {
 				// A list position is where a list-valued intrinsic belongs, so
 				// its elements splice in rather than nesting.
@@ -5884,6 +5964,29 @@ func resolveNested(v interface{}, cctx *cfnContext) interface{} {
 		return out
 	}
 	return v
+}
+
+// cfnStructuredIfBranch returns the branch an Fn::If chooses when that branch is a structure — a
+// map that is not itself an intrinsic function — and reports false for every other value, which
+// the scalar and list resolvers already answer.
+func cfnStructuredIfBranch(m map[string]interface{}, cctx *cfnContext) (map[string]interface{}, bool) {
+	if len(m) != 1 {
+		return nil, false
+	}
+	args, ok := m["Fn::If"].([]interface{})
+	if !ok || len(args) != 3 {
+		return nil, false
+	}
+	name, _ := args[0].(string)
+	branch := args[2]
+	if cctx.condition(name) {
+		branch = args[1]
+	}
+	chosen, isMap := branch.(map[string]interface{})
+	if !isMap || isCFNIntrinsic(chosen) {
+		return nil, false
+	}
+	return chosen, true
 }
 
 // resolveIntrinsicPreservingShape resolves an intrinsic to a string or, when the

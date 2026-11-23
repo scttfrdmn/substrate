@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -197,10 +198,11 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	if req.Params["TemplateBody"] == "" && req.Params["TemplateURL"] != "" {
-		return nil, cfnTemplateURLUnsupported()
+	// TemplateBody, or the object TemplateURL names in substrate's S3 (#1606).
+	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
+	if templateErr != nil {
+		return nil, templateErr
 	}
-	body := req.Params["TemplateBody"]
 	if body == "" {
 		return nil, cfnMissingParameter("TemplateBody")
 	}
@@ -283,9 +285,6 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	if req.Params["TemplateBody"] == "" && req.Params["TemplateURL"] != "" {
-		return nil, cfnTemplateURLUnsupported()
-	}
 
 	stack, err := p.findStack(reqCtx, name)
 	if err != nil {
@@ -295,7 +294,10 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		return nil, cfnStackNotFound(name)
 	}
 
-	body := req.Params["TemplateBody"]
+	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
+	if templateErr != nil {
+		return nil, templateErr
+	}
 	if body == "" {
 		// UsePreviousTemplate is the documented way to change only parameters.
 		body = stack.TemplateBody
@@ -477,7 +479,11 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 			return nil, err
 		}
 		if stack == nil {
-			return nil, cfnStackNotFound(name)
+			// Named by the identifier the caller sent, as AWS names it. The CDK tells "gone"
+			// from a failure by comparing the message with `Stack with id ${what it sent} does
+			// not exist`, and it polls a stack it is deleting by ARN, so a message naming the
+			// resolved name failed every `cdk destroy` (#1606).
+			return nil, cfnStackNotFound(req.Params["StackName"])
 		}
 		stacks = []CFNStackState{*stack}
 	}
@@ -496,7 +502,7 @@ func (p *CloudFormationPlugin) describeStacks(reqCtx *RequestContext, req *AWSRe
 		resp.Result.Stacks = append(resp.Result.Stacks, cfnStackItem{
 			StackID:           cfnStackID(reqCtx, s.StackName),
 			StackName:         s.StackName,
-			CreationTime:      cfnTime(s.CreatedAt),
+			CreationTime:      cfnTime(s.creationTime()),
 			LastUpdatedTime:   cfnTime(s.UpdatedAt),
 			StackStatus:       s.Status,
 			StackStatusReason: s.StatusReason,
@@ -541,7 +547,7 @@ func (p *CloudFormationPlugin) listStacks(reqCtx *RequestContext, req *AWSReques
 		resp.Result.Summaries = append(resp.Result.Summaries, summary{
 			StackID:         cfnStackID(reqCtx, s.StackName),
 			StackName:       s.StackName,
-			CreationTime:    cfnTime(s.CreatedAt),
+			CreationTime:    cfnTime(s.creationTime()),
 			LastUpdatedTime: cfnTime(s.UpdatedAt),
 			StackStatus:     s.Status,
 		})
@@ -572,7 +578,7 @@ func (p *CloudFormationPlugin) describeStackEvents(reqCtx *RequestContext, req *
 		return nil, err
 	}
 	if stack == nil {
-		return nil, cfnStackNotFound(name)
+		return nil, cfnStackNotFound(req.Params["StackName"])
 	}
 
 	page, nextToken, tokenErr := cfnPaginateEvents(
@@ -883,48 +889,68 @@ func (p *CloudFormationPlugin) createChangeSet(reqCtx *RequestContext, req *AWSR
 	if stackName == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	if req.Params["TemplateBody"] == "" && req.Params["TemplateURL"] != "" {
-		return nil, cfnTemplateURLUnsupported()
+	// "By default, CloudFormation specifies UPDATE." CREATE makes a REVIEW_IN_PROGRESS stack and
+	// IMPORT is refused (#1606); the deployer decides both, so an in-process caller is held to the
+	// same rules. See cfn_changeset_lifecycle.go.
+	opts := CFNChangeSetOptions{
+		Type:           req.Params["ChangeSetType"],
+		Description:    req.Params["Description"],
+		RoleARN:        req.Params["RoleARN"],
+		Capabilities:   extractIndexedParams(req.Params, "Capabilities.member"),
+		OnStackFailure: req.Params["OnStackFailure"],
+		// "Key-value pairs to associate with this stack. CloudFormation also propagates these
+		// tags to resources in the stack." The same decoder createStack and updateStack use, so
+		// an omitted Tags, an empty list and a populated one mean here what they mean there; the
+		// deployer validates them, which is why nothing is checked at this layer (#824).
+		Tags: cfnStackTags(req.Params),
 	}
-	// ChangeSetType=CREATE would have to persist a stack in REVIEW_IN_PROGRESS
-	// carrying no template, a state CFNStackState cannot represent and
-	// StackDeployer.CreateChangeSet cannot diff against. Refuse it rather than
-	// half-model it; the change-set family operates on existing stacks.
-	if t := req.Params["ChangeSetType"]; t != "" && t != "UPDATE" {
-		return nil, &AWSError{
-			Code:       "ValidationError",
-			Message:    "ChangeSetType " + t + " is not emulated: substrate supports UPDATE change sets on an existing stack",
-			HTTPStatus: http.StatusBadRequest,
-		}
+	if roleErr := cfnValidateRoleARN(opts.RoleARN); roleErr != nil {
+		return nil, roleErr
+	}
+	if err := opts.validate(); err != nil {
+		return nil, cfnMapDeployerError(err)
 	}
 
 	stack, err := p.findStack(reqCtx, stackName)
 	if err != nil {
 		return nil, err
 	}
-	if stack == nil {
+	creating := opts.changeSetType() == CFNChangeSetTypeCreate
+	if stack == nil && !creating {
 		return nil, cfnStackNotFound(stackName)
 	}
-	if existing, err := p.findChangeSet(reqCtx, stackName, changeSetName); err != nil {
-		return nil, err
-	} else if existing != nil {
-		return nil, &AWSError{
-			Code:       "AlreadyExists",
-			Message:    fmt.Sprintf("ChangeSet [%s] already exists for stack [%s]", changeSetName, stackName),
-			HTTPStatus: http.StatusBadRequest,
+	if stack != nil {
+		if existing, err := p.findChangeSet(reqCtx, stackName, changeSetName); err != nil {
+			return nil, err
+		} else if existing != nil {
+			return nil, &AWSError{
+				Code:       "AlreadyExists",
+				Message:    fmt.Sprintf("ChangeSet [%s] already exists for stack [%s]", changeSetName, stackName),
+				HTTPStatus: http.StatusBadRequest,
+			}
 		}
 	}
 
-	body := req.Params["TemplateBody"]
+	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
+	if templateErr != nil {
+		return nil, templateErr
+	}
+	var previous map[string]string
+	if stack != nil {
+		previous = stack.Parameters
+	}
 	if body == "" {
+		// UsePreviousTemplate: the stack's own template. A stack that has none — one being
+		// created, or still in review — has nothing to reuse.
+		if stack == nil || stack.TemplateBody == "" {
+			return nil, cfnMissingParameter("TemplateBody")
+		}
 		body = stack.TemplateBody
 	}
-	// "Key-value pairs to associate with this stack. CloudFormation also propagates these
-	// tags to resources in the stack." The same decoder createStack and updateStack use, so
-	// an omitted Tags, an empty list and a populated one mean here what they mean there; the
-	// deployer validates them, which is why nothing is checked at this layer (#824).
-	if _, err := p.scopedDeployer(reqCtx).CreateChangeSet(context.Background(), stackName, changeSetName, body,
-		cfnRequestParameters(req.Params, stack.Parameters), cfnStackTags(req.Params)); err != nil {
+	// The creating caller is recorded on the REVIEW_IN_PROGRESS stack a CREATE change set makes;
+	// nothing is dispatched, so nothing is authorized.
+	if _, err := p.deployerFor(reqCtx, cfnAttribution{creator: reqCtx.Principal}).CreateChangeSetWithOptions(
+		context.Background(), stackName, changeSetName, body, cfnRequestParameters(req.Params, previous), opts); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -1001,8 +1027,12 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 		StackID         string            `xml:"StackId"`
 		StackName       string            `xml:"StackName"`
 		Status          string            `xml:"Status"`
+		StatusReason    string            `xml:"StatusReason,omitempty"`
 		ExecutionStatus string            `xml:"ExecutionStatus"`
+		Description     string            `xml:"Description,omitempty"`
 		CreationTime    string            `xml:"CreationTime"`
+		Capabilities    []string          `xml:"Capabilities>member,omitempty"`
+		OnStackFailure  string            `xml:"OnStackFailure,omitempty"`
 		Parameters      []cfnParameterXML `xml:"Parameters>member,omitempty"`
 
 		// Tags are "if you execute the change set, the tags that will be associated with
@@ -1031,10 +1061,14 @@ func (p *CloudFormationPlugin) describeChangeSet(reqCtx *RequestContext, req *AW
 			StackID:       cfnStackID(reqCtx, cs.StackName),
 			StackName:     cs.StackName,
 			Status:        cs.Status,
-			// A change set is deleted when it is executed, so any change set that
-			// still resolves is one that has not run yet and is available to run.
-			ExecutionStatus: "AVAILABLE",
+			StatusReason:  cs.StatusReason,
+			// AVAILABLE until it is executed, then EXECUTE_COMPLETE or EXECUTE_FAILED; UNAVAILABLE
+			// for a FAILED one (#1606).
+			ExecutionStatus: cfnChangeSetExecutionStatus(cs),
+			Description:     cs.Description,
 			CreationTime:    cfnTime(cs.CreatedAt),
+			Capabilities:    cs.Capabilities,
+			OnStackFailure:  cs.OnStackFailure,
 			Parameters:      cfnParametersXML(cs.Parameters),
 			Tags:            cfnStackTagsXML(cs.Tags),
 		},
@@ -1084,19 +1118,37 @@ func (p *CloudFormationPlugin) executeChangeSet(reqCtx *RequestContext, req *AWS
 	if cs == nil {
 		return nil, cfnChangeSetNotFound(changeSetName)
 	}
-	// ExecuteChangeSet routes through UpdateStack to Deploy, so it deploys
-	// resources and takes the executing caller's identity like the other two.
+	// ExecuteChangeSet deploys resources — an UPDATE change set through UpdateStack, a
+	// CREATE one through the create path (#1606) — and takes the executing caller's
+	// identity like the other two.
 	//
 	// Attribution comes from the stack, for the same reason UpdateStack's does: the
 	// stack's service role governs "all future operations on the stack", and
-	// executing a change set is one. A change set against a stack that does not yet
-	// exist has none to inherit, so its resource calls are attributed to the caller
-	// executing it — which is CloudFormation's no-service-role case.
+	// executing a change set is one. A stack a CREATE change set made has had no
+	// operation yet, so its resource calls are attributed to the caller executing it —
+	// which is CloudFormation's no-service-role case. A RoleARN the change set was
+	// created with is "the role that CloudFormation assumes when executing the change
+	// set", and replaces the stack's for this and every later operation.
 	att := cfnAttribution{creator: reqCtx.Principal}
-	if stack, findErr := p.findStack(reqCtx, cs.StackName); findErr == nil && stack != nil {
+	if stack, findErr := p.findStack(reqCtx, cs.StackName); findErr == nil && stack != nil &&
+		stack.Status != cfnStackReviewInProgress {
 		att = stack.attribution()
 	}
-	if _, err := p.deployerFor(reqCtx, att).ExecuteChangeSet(context.Background(), cs.StackName, cs.ChangeSetName); err != nil {
+	if cs.RoleARN != "" {
+		att.roleARN = cs.RoleARN
+	}
+	var execOpts CFNExecuteOptions
+	if raw, present := req.Params["DisableRollback"]; present {
+		v, parseErr := strconv.ParseBool(raw)
+		if parseErr != nil {
+			return nil, &AWSError{Code: "ValidationError",
+				Message:    "DisableRollback must be true or false",
+				HTTPStatus: http.StatusBadRequest}
+		}
+		execOpts.DisableRollback = &v
+	}
+	if _, err := p.deployerFor(reqCtx, att).ExecuteChangeSetWithOptions(context.Background(),
+		cs.StackName, cs.ChangeSetName, execOpts); err != nil {
 		return nil, cfnMapDeployerError(err)
 	}
 
@@ -1132,12 +1184,15 @@ func (p *CloudFormationPlugin) listChangeSets(reqCtx *RequestContext, req *AWSRe
 	}
 
 	type summary struct {
-		ChangeSetID   string `xml:"ChangeSetId"`
-		ChangeSetName string `xml:"ChangeSetName"`
-		StackID       string `xml:"StackId"`
-		StackName     string `xml:"StackName"`
-		Status        string `xml:"Status"`
-		CreationTime  string `xml:"CreationTime"`
+		ChangeSetID     string `xml:"ChangeSetId"`
+		ChangeSetName   string `xml:"ChangeSetName"`
+		StackID         string `xml:"StackId"`
+		StackName       string `xml:"StackName"`
+		Status          string `xml:"Status"`
+		StatusReason    string `xml:"StatusReason,omitempty"`
+		ExecutionStatus string `xml:"ExecutionStatus"`
+		Description     string `xml:"Description,omitempty"`
+		CreationTime    string `xml:"CreationTime"`
 	}
 	type result struct {
 		Summaries []summary `xml:"Summaries>member"`
@@ -1151,12 +1206,15 @@ func (p *CloudFormationPlugin) listChangeSets(reqCtx *RequestContext, req *AWSRe
 	resp := response{XMLNS: cfnXMLNS, Metadata: cfnMetadata(reqCtx)}
 	for _, cs := range sets {
 		resp.Result.Summaries = append(resp.Result.Summaries, summary{
-			ChangeSetID:   cfnChangeSetID(reqCtx, cs.StackName, cs.ChangeSetName),
-			ChangeSetName: cs.ChangeSetName,
-			StackID:       cfnStackID(reqCtx, cs.StackName),
-			StackName:     cs.StackName,
-			Status:        cs.Status,
-			CreationTime:  cfnTime(cs.CreatedAt),
+			ChangeSetID:     cfnChangeSetID(reqCtx, cs.StackName, cs.ChangeSetName),
+			ChangeSetName:   cs.ChangeSetName,
+			StackID:         cfnStackID(reqCtx, cs.StackName),
+			StackName:       cs.StackName,
+			Status:          cs.Status,
+			StatusReason:    cs.StatusReason,
+			ExecutionStatus: cfnChangeSetExecutionStatus(&cs),
+			Description:     cs.Description,
+			CreationTime:    cfnTime(cs.CreatedAt),
 		})
 	}
 	return cfnXMLResponse(http.StatusOK, resp)
@@ -1614,17 +1672,6 @@ func cfnChangeSetNotFound(name string) *AWSError {
 	}
 }
 
-// cfnTemplateURLUnsupported refuses TemplateURL. Fetching a template from S3 or
-// an HTTP URL is a network read substrate deliberately does not perform; a
-// caller passes TemplateBody instead.
-func cfnTemplateURLUnsupported() *AWSError {
-	return &AWSError{
-		Code:       "ValidationError",
-		Message:    "TemplateURL is not emulated: pass the template inline with TemplateBody",
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
 // cfnMapDeployerError maps a StackDeployer failure onto a wire error code.
 //
 // The classification comes from the sentinels StackDeployer wraps, read with
@@ -1660,8 +1707,15 @@ func cfnMapDeployerError(err error) *AWSError {
 		// The code is substrate's choice — see [ErrCFNInvalidTag] for why this one.
 		errors.Is(err, ErrCFNInvalidTag):
 		return &AWSError{Code: "ValidationError", Message: msg, HTTPStatus: http.StatusBadRequest}
+	case errors.Is(err, ErrCFNChangeSetNotExecutable):
+		var classified *cfnClassifiedError
+		if errors.As(err, &classified) {
+			msg = classified.msg
+		}
+		return &AWSError{Code: "InvalidChangeSetStatus", Message: msg, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrCFNInvalidDependency), errors.Is(err, ErrCFNStackNotUpdatable),
-		errors.Is(err, ErrCFNUnsupportedAttribute):
+		errors.Is(err, ErrCFNUnsupportedAttribute), errors.Is(err, ErrCFNStackAlreadyExists),
+		errors.Is(err, ErrCFNChangeSetTypeUnsupported):
 		// AWS's own wording, answered without the "update stack …" context a caller's wrap
 		// adds — see [ErrCFNInvalidDependency], [ErrCFNStackNotUpdatable] and
 		// [ErrCFNUnsupportedAttribute] for the sources.

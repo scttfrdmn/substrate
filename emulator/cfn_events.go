@@ -98,7 +98,17 @@ func cfnResourceStatus(s CFNStackState, r DeployedResource) (status, reason stri
 func cfnDeriveStackEvents(s CFNStackState, stackID string) []cfnStackEvent {
 	// Built oldest-first, because that is the order the record describes, then
 	// reversed at the end.
-	events := make([]cfnStackEvent, 0, len(s.Resources)+2)
+	events := make([]cfnStackEvent, 0, len(s.Resources)+3)
+
+	// A stack a CREATE change set created began in REVIEW_IN_PROGRESS (#1606), which is an event of
+	// its own, before the create its execution started. A stack still in review has had nothing
+	// else happen to it, so that event is all it reports.
+	if !s.ReviewedAt.IsZero() {
+		events = append(events, cfnStackLevelEvent(s, stackID, cfnStackReviewInProgress, cfnUserInitiated, s.ReviewedAt))
+	}
+	if s.Status == cfnStackReviewInProgress {
+		return events
+	}
 
 	// The opening event. Its status names the operation the terminal status
 	// reports on, and "User Initiated" is the reason real CloudFormation puts on a

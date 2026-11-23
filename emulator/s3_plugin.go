@@ -248,6 +248,8 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.putBucketLifecycleConfiguration(ctx, req, bucket)
 	case "GetBucketLifecycleConfiguration":
 		return p.getBucketLifecycleConfiguration(ctx, req, bucket)
+	case "GetBucketLocation":
+		return p.getBucketLocation(ctx, req, bucket)
 	case "DeleteBucketLifecycle":
 		return p.deleteBucketLifecycle(ctx, req, bucket)
 	case "PutPublicAccessBlock":
@@ -458,6 +460,9 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["ownershipControls"]; ok {
 				return bucket, "", "GetBucketOwnershipControls"
+			}
+			if _, ok := req.Params["location"]; ok {
+				return bucket, "", "GetBucketLocation"
 			}
 			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
 			// for what it is and refused, rather than answered as a listing (#1349).

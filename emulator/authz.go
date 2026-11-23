@@ -270,6 +270,8 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 		for k, v := range res.Context {
 			condCtx[k] = v
 		}
+		// The resource's owner, per resource for the same reason (#1606; authz_resource_account.go).
+		a.authzResourceAccountContext(condCtx, reqCtx, req, res.ARN)
 		a.authzTimeContext(condCtx, now, haveClock)
 		authzPrincipalContext(condCtx, reqCtx.Principal)
 
@@ -1073,6 +1075,8 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 		// A Lambda request names its resource in the path, and which path — and so which API
 		// version — depends on the operation; see lambdaAuthzResourceARN.
 		return lambdaAuthzResourceARN(req.Path, region, acct)
+	case "ssm":
+		return ssmAuthzResourceARN(req, region, acct)
 	case "dynamodb":
 		if tbl := req.Params["TableName"]; tbl != "" {
 			return "arn:aws:dynamodb:" + region + ":" + acct + ":table/" + tbl
@@ -1182,8 +1186,15 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 }
 
 // buildS3ARN constructs an S3 resource ARN from the request path.
+//
+// A bucket-level request sent path-style may carry a trailing slash ("/bucket/" — how the AWS SDK
+// for JavaScript addresses ListObjectsV2 on an IP endpoint), which names the bucket, not an object
+// with an empty key (#1606).
 func buildS3ARN(req *AWSRequest) string {
 	path := strings.TrimPrefix(req.Path, "/")
+	if bucket, ok := strings.CutSuffix(path, "/"); ok && !strings.Contains(bucket, "/") {
+		path = bucket
+	}
 	if path == "" {
 		return s3ResourceARN("*")
 	}
