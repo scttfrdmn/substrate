@@ -89,6 +89,7 @@ discarded-state-check: ## Fail if non-test code writes to state and discards the
 	./scripts/check-discarded-state.sh
 
 nondeterminism-check: ## Fail if emulator code reads the wall clock or a random source outside the allowlist
+	./scripts/check-nondeterminism.sh --self-test
 	./scripts/check-nondeterminism.sh
 
 wire-bookkeeping-check: ## Fail if substrate's own bookkeeping fields gain new wire-visible ground

@@ -5382,9 +5382,12 @@ func (d *StackDeployer) dispatch(
 		}
 	}
 
-	start := d.tc.Now()
+	// Wall time, as [Server.handleAWSRequest] measures Event.Duration: a latency is how long
+	// the dispatch took to run. This subtracted a simulated start from the wall clock, so on
+	// a pinned or moved clock it recorded the distance between the two clocks instead.
+	wallStart := time.Now()
 	resp, routeErr := d.registry.RouteRequest(reqCtx, req)
-	duration := time.Since(start)
+	duration := time.Since(wallStart)
 	cost := d.costs.CostForRequest(req)
 
 	_ = d.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr,

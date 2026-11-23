@@ -250,21 +250,40 @@ func (p *LambdaPlugin) LoadReplayForTest(functionARN string, payload []byte) ([]
 
 // BuildV1ProxyEventForTest wraps buildV1ProxyEvent for external tests.
 func BuildV1ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
-	return buildV1ProxyEvent(nil, req, apiID, stage, resourcePath)
+	_, requestID := apigwProxyRequestIDs(nil)
+	return buildV1ProxyEvent(requestID, req, apiID, stage, resourcePath)
 }
 
 // BuildV2ProxyEventForTest wraps buildV2ProxyEvent for external tests.
 func BuildV2ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
-	return buildV2ProxyEvent(nil, req, apiID, stage, resourcePath)
+	_, requestID := apigwProxyRequestIDs(nil)
+	return buildV2ProxyEvent(requestID, req, apiID, stage, resourcePath)
 }
 
 // BuildProxyEventFromRequestIDForTest builds a v1 or v2 proxy event with a mint over
 // requestID, the way the integration builds one for the request that reached it (#1600).
 func BuildProxyEventFromRequestIDForTest(requestID string, v2 bool, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	_, eventRequestID := apigwProxyRequestIDs(NewIDMint(requestID))
 	if v2 {
-		return buildV2ProxyEvent(NewIDMint(requestID), req, apiID, stage, resourcePath)
+		return buildV2ProxyEvent(eventRequestID, req, apiID, stage, resourcePath)
 	}
-	return buildV1ProxyEvent(NewIDMint(requestID), req, apiID, stage, resourcePath)
+	return buildV1ProxyEvent(eventRequestID, req, apiID, stage, resourcePath)
+}
+
+// APIGatewayProxyRequestIDsForTest exposes the two identifiers a proxy integration draws
+// from a mint over requestID, in the order it draws them.
+func APIGatewayProxyRequestIDsForTest(requestID string) (invokeRequestID, eventRequestID string) {
+	return apigwProxyRequestIDs(NewIDMint(requestID))
+}
+
+// IDMintUUIDAtDrawForTest returns the UUID a fresh mint over seed yields at its nth draw
+// (1-based), for tests that pin which draw an identifier comes from.
+func IDMintUUIDAtDrawForTest(seed string, n int) string {
+	m := NewIDMint(seed)
+	for range n - 1 {
+		m.bytes(1)
+	}
+	return m.UUID()
 }
 
 // DefaultCostTableForTest returns a copy of the built-in cost table, so a test can assert every key

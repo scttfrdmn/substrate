@@ -17,24 +17,33 @@
 # check-discarded-state.sh, and every legitimate site is named below with its reason.
 #
 # What it refuses, in emulator/ non-test code:
-#   - a call to time.Now(;
-#   - an import of math/rand, math/rand/v2 or crypto/rand.
-# A mention inside a // comment is not a call and is ignored.
+#   - the wall clock: time.Now, called or passed as a value, and the functions that read
+#     it — time.Since, Until, After, Tick, NewTimer, NewTicker and AfterFunc;
+#   - a random source: an import of math/rand, math/rand/v2 or crypto/rand;
+#   - an unseeded identifier: a call to generateRequestID or NewIDMint(""), each of which
+#     draws a wall-clock or crypto/rand value a seeded run cannot reproduce.
+# A mention inside a // comment or a string literal is not a use and is ignored.
 #
 # If a site is legitimate, add it to ALLOWED with the reason. Prefer fixing it: read the
 # clock through the plugin's TimeController (p.tc.Now()) and mint through the request's
 # IDMint (reqCtx.IDs).
+#
+# `--self-test` runs the line classifier against fixed cases and exits.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Keyed `file:function`, the top-level function enclosing the call, so an entry exempts
-# one reviewed site rather than a whole file. A package-level import is keyed
-# `file:import`. Each group states why its sites cannot reach an AWS response.
+# Keyed `file:function`, the top-level function enclosing the use, so an entry exempts one
+# reviewed function rather than a whole file. A package-level import is keyed
+# `file:import`. An entry may end `=TEXT`, and then it exempts only a use whose code
+# contains TEXT — which is how the two entries reviewed as a pattern rather than a site
+# (the Initialize fallbacks, the latency measurements) stay narrow. A file of `emulator/*`
+# is allowed only with `=TEXT`.
 ALLOWED=(
   # The simulated clock's own wall base: Now() is simulated_baseline + wall elapsed, so
   # the controller is the one place that must read the real clock.
   "emulator/types.go:NewTimeController"
+  "emulator/types.go:running"
   "emulator/types.go:SetTime"
   "emulator/types.go:Freeze"
   "emulator/types.go:Unfreeze"
@@ -44,11 +53,15 @@ ALLOWED=(
   "emulator/request_ids.go:NewTimeController"
 
   # The unseeded request ID: a server configured with no run.seed keeps the
-  # wall-clock-and-random ID it always assigned (#1598), and the in-process dispatch
-  # fallbacks use it for a seedless mint. ParseAWSRequest's placeholders are replaced
-  # by the server before any handler runs.
+  # wall-clock-and-random ID it always assigned (#1598), and RequestIDSource.Next returns
+  # it for an unseeded source. ParseAWSRequest's placeholder is replaced by the server
+  # before any handler runs. The two in-process dispatch fallbacks use it only for a
+  # seedless mint, where a derived ID would collide two dispatches onto one.
   "emulator/parser.go:generateRequestID"
   "emulator/parser.go:ParseAWSRequest"
+  "emulator/request_ids.go:Next"
+  "emulator/apigateway_plugin.go:apigwInternalRequestID"
+  "emulator/cfn_deployer.go:internalRequestID"
 
   # IDMint's seedless fallback: a hand-built RequestContext — every plugin unit test's,
   # substrate's and a consumer's — has no request ID to derive from (ids.go).
@@ -63,34 +76,108 @@ ALLOWED=(
   "emulator/replay.go:import"
 
   # Bookkeeping no AWS call observes: event and snapshot IDs, replay and recording
-  # session IDs and their start times (#1598's documented exceptions). An event ID is
-  # unique by its sequence already; the nanoseconds keep two stores' IDs apart.
+  # session IDs and their start times and durations (#1598's documented exceptions). An
+  # event ID is unique by its sequence already; the nanoseconds keep two stores' IDs apart.
   "emulator/eventstore.go:generateEventID"
   "emulator/eventstore.go:generateSnapshotID"
   "emulator/replay.go:generateReplayID"
   "emulator/replay.go:StartRecording"
+  "emulator/replay.go:StopRecording"
   "emulator/replay.go:Replay"
 
   # Fallback for a plugin or store built without a time controller — a hand-built
   # PluginConfig in a unit test. The registry always injects one, so on a server these
   # read the simulated clock.
-  "emulator/*:Initialize"
-  "emulator/*:now"
-  "emulator/ce_plugin.go:clampedQueryEnd"
+  "emulator/*:Initialize=NewTimeController(time.Now())"
+  "emulator/iam_plugin.go:now=return time.Now()"
+  "emulator/route53_plugin.go:now=return time.Now()"
+  "emulator/sts_plugin.go:now=return time.Now().UTC()"
+  "emulator/eventstore.go:now=return time.Now()"
+  "emulator/costs.go:now=return time.Now()"
+  "emulator/ce_plugin.go:clampedQueryEnd=now := time.Now()"
 
-  # Durations, deadlines and caches measured in real time: request latency, the
-  # test server's startup probe, the pricing cache's age. None is rendered into an AWS
-  # response.
-  "emulator/server.go:handleAWSRequest"
-  "emulator/control_plane_events.go:recordControlPlaneWrites"
-  "emulator/pricing.go:Refresh"
+  # Latency, measured in wall time because it is how long the work took to run: the
+  # request's Event.Duration, a recorded control-plane write's, and a CloudFormation
+  # dispatch's. None is rendered into an AWS response.
+  "emulator/server.go:handleAWSRequest=start := time.Now()"
+  "emulator/server.go:handleAWSRequest=time.Since(start)"
+  "emulator/control_plane_events.go:recordControlPlaneWrites=start := time.Now()"
+  "emulator/control_plane_events.go:recordControlPlaneWrites=time.Since(start)"
+  "emulator/cfn_deployer.go:dispatch=wallStart := time.Now()"
+  "emulator/cfn_deployer.go:dispatch=time.Since(wallStart)"
+
+  # Real-time waits and caches: the graceful-shutdown wait, the test server's startup
+  # probe, the pricing cache's age and TTL.
+  "emulator/server.go:awaitStop=time.After(timeout)"
   "emulator/testing.go:awaitTestServer"
+  "emulator/pricing.go:Refresh"
+  "emulator/pricing.go:CacheAge"
+  "emulator/pricing.go:isCacheStale"
 
   # The Docker executors run a real container and wait on it in real time; #1611 removes
   # them.
   "emulator/lambda_exec.go:*"
   "emulator/rds_exec.go:*"
 )
+
+# CANDIDATE is the broad text a use can contain; offending decides.
+CANDIDATE='time\.(Now|Since|Until|After|Tick|NewTimer|NewTicker|AfterFunc)|generateRequestID\(|NewIDMint\(""\)|"(math/rand|math/rand/v2|crypto/rand)"'
+
+# strip_code LINE prints LINE with each string literal emptied (to "") and any // comment
+# removed. The literals go first, so a // inside one — a URL — does not end the code, and
+# a call spelled inside one is not a call.
+strip_code() {
+  local code
+  code="$(sed -E -e 's/"([^"\\]|\\.)*"/""/g' -e 's/`[^`]*`/""/g' <<<"$1")"
+  printf '%s\n' "${code%%//*}"
+}
+
+# offending LINE succeeds when LINE uses the wall clock, a random source or an unseeded ID.
+offending() {
+  local line="$1" code
+  # An import line is judged on its text, before the literal it names is emptied.
+  if grep -qE '^[[:space:]]*(import[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*[[:space:]]+)?"(math/rand|math/rand/v2|crypto/rand)"' <<<"$line"; then
+    return 0
+  fi
+  code="$(strip_code "$line")"
+  grep -qE '(^|[^A-Za-z0-9_.])time\.(Now([^A-Za-z0-9_]|$)|(Since|Until|After|Tick|NewTimer|NewTicker|AfterFunc)\()|(^|[^A-Za-z0-9_.])generateRequestID\(|(^|[^A-Za-z0-9_.])NewIDMint\(""\)' <<<"$code"
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  fail=0
+  check() {
+    local want="$1" line="$2" got=no
+    if offending "$line"; then got=yes; fi
+    if [[ "$got" != "$want" ]]; then
+      echo "self-test: want offending=$want, got $got: $line"
+      fail=1
+    fi
+  }
+  check yes 'x := f("https://example.com", time.Now())'
+  check yes 'u := fmt.Sprintf("%s//%s", a, time.Now())'
+  check yes '	clock := time.Now'
+  check yes '	opts.Now = time.Now'
+  check yes '	d := time.Since(start)'
+  check yes '	<-time.After(time.Second)'
+  check yes '	t := time.NewTicker(d)'
+  check yes '	id := generateRequestID()'
+  check yes '	m := NewIDMint("")'
+  check yes '	"math/rand" // nosemgrep'
+  check yes '	mrand "math/rand/v2"'
+  check yes 'import "crypto/rand"'
+  check no  '	// time.Now() in a comment'
+  check no  '	s := "time.Now()"'
+  check no  '	raw := `time.Since(x)`'
+  check no  '	t := p.tc.Now()'
+  check no  '	d := time.Duration(5) * time.Second'
+  check no  '	m := NewIDMint(requestID)'
+  check no  '	x := runtime.NumGoroutine() // time.Now()'
+  check no  '	label := "crypto/rand is not imported here"'
+  if [[ "$fail" -eq 0 ]]; then
+    echo "check-nondeterminism: self-test ok"
+  fi
+  exit "$fail"
+fi
 
 # enclosing_func FILE LINE prints the name of the top-level function whose body holds
 # LINE: the last `func` declaration at column 0 before it, or `import` when there is none
@@ -109,26 +196,35 @@ enclosing_func() {
   ' "$1"
 }
 
-# allowed KEY reports whether KEY matches an ALLOWED entry. An entry's file or function
-# may be `*`, for the two shapes that are reviewed as a whole: every Initialize fallback,
-# and a file whose every site is real-time by nature.
-#
-# Each entry that matches is noted in USED, so an entry no site matches any more — the
+# allowed KEY CODE reports whether an ALLOWED entry exempts the use at KEY whose code is
+# CODE. Each entry that does is noted in USED, so an entry no site matches any more — the
 # site was fixed or moved — is reported too: a stale entry would exempt whatever lands in
 # that function next, unreviewed.
 USED="|"
 allowed() {
-  local file="${1%%:*}" fn="${1#*:}" a afile afn
+  local file="${1%%:*}" fn="${1#*:}" code="$2" a spec afile afn text
   for a in "${ALLOWED[@]}"; do
-    afile="${a%%:*}"
-    afn="${a#*:}"
+    spec="${a%%=*}"
+    text=""
+    if [[ "$a" == *=* ]]; then
+      text="${a#*=}"
+    fi
+    afile="${spec%%:*}"
+    afn="${spec#*:}"
+    if [[ "$afile" == "emulator/*" && -z "$text" ]]; then
+      continue
+    fi
     if [[ "$afile" != "emulator/*" && "$afile" != "$file" ]]; then
       continue
     fi
-    if [[ "$afn" == "*" || "$afn" == "$fn" ]]; then
-      USED="$USED$a|"
-      return 0
+    if [[ "$afn" != "*" && "$afn" != "$fn" ]]; then
+      continue
     fi
+    if [[ -n "$text" && "$code" != *"$text"* ]]; then
+      continue
+    fi
+    USED="$USED$a|"
+    return 0
   done
   return 1
 }
@@ -141,23 +237,20 @@ while IFS= read -r hit; do
   rest="${hit#*:}"
   line="${rest%%:*}"
   content="${rest#*:}"
-  # The code before any // comment: a doc comment that names time.Now() is not a call.
-  code="${content%%//*}"
-  if ! grep -qE 'time\.Now\(|"(math/rand|math/rand/v2|crypto/rand)"' <<<"$code"; then
+  if ! offending "$content"; then
     continue
   fi
   key="$file:$(enclosing_func "$file" "$line")"
-  if allowed "$key"; then
+  if allowed "$key" "$content"; then
     continue
   fi
   if [[ "$found" -eq 0 ]]; then
-    echo "The wall clock or a random source is read outside the allowlist (#1600):"
+    echo "The wall clock, a random source or an unseeded ID is used outside the allowlist (#1600):"
     found=1
   fi
   echo "    $hit   [$key]"
   status=1
-done < <(grep -rnE 'time\.Now\(|"(math/rand|math/rand/v2|crypto/rand)"' \
-  --include='*.go' --exclude='*_test.go' emulator/ || true)
+done < <(grep -rnE "$CANDIDATE" --include='*.go' --exclude='*_test.go' emulator/ || true)
 
 for a in "${ALLOWED[@]}"; do
   if [[ "$USED" != *"|$a|"* ]]; then

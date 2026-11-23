@@ -403,6 +403,11 @@ func (s *Server) handleGetTime(w http.ResponseWriter, _ *http.Request) {
 // gives — and "frozen": false resumes it, which is the HTTP form of
 // [TestServer.FreezeTimeAt] and [TestServer.UnfreezeTime] (#1598). With "frozen" omitted the
 // frozen state is left as it is, so a frozen clock moved by "time" alone stays frozen.
+//
+// "frozen": false also unpins a clock POST /v1/control/run pinned, so GET /v1/control/run
+// never reports an epoch for a running clock and a later reset does not freeze it again.
+// "frozen": true freezes without pinning: it names no instant for a reset to return to. Moving
+// a pinned clock with "time" alone leaves it pinned, and a reset returns it to the epoch.
 func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
 	if s.tc == nil {
 		http.Error(w, `{"error":"time controller not configured"}`, http.StatusNotImplemented)
@@ -439,7 +444,7 @@ func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
 		s.tc.SetTime(t)
 	}
 	if body.Frozen != nil && !*body.Frozen {
-		s.tc.Unfreeze()
+		s.unpinClock()
 	}
 	s.handleGetTime(w, r)
 }

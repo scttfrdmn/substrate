@@ -539,9 +539,10 @@ func (ts *TestServer) FreezeTimeAt(t time.Time) {
 	ts.tc.SetTime(t)
 }
 
-// UnfreezeTime resumes the simulated clock from the instant it was frozen at.
+// UnfreezeTime resumes the simulated clock from the instant it was frozen at. It also unpins
+// a clock [WithDeterministicRun] pinned, so a later [TestServer.ResetState] leaves it running.
 func (ts *TestServer) UnfreezeTime() {
-	ts.tc.Unfreeze()
+	ts.srv.unpinClock()
 }
 
 // TimeFrozen reports whether the simulated clock is stopped.

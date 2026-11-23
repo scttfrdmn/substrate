@@ -81,7 +81,10 @@
 // concurrently draw their IDs in scheduling order, the Date header is the wall clock,
 // substrate's bookkeeping IDs (events, snapshots, replay sessions) are not derived, and a
 // plugin path whose output order comes from an unaudited map iteration can differ.
-// `make nondeterminism-check` refuses a new time.Now() or rand draw in emulator code.
+// A seeded stream replays faithfully only between resets, because a reset rewinds the
+// sequence and the request IDs after it repeat the ones before (#1631). `make
+// nondeterminism-check` refuses a new wall-clock read, rand import or unseeded ID in
+// emulator code.
 //
 // # Seeding: determinism without sacrificing coverage
 //

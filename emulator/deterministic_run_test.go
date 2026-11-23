@@ -460,6 +460,103 @@ func TestDeterministicRun_ControlRunEndpoint(t *testing.T) {
 	assert.False(t, ts.RequestIDs().Seeded())
 }
 
+// Pinning, unpinning and resetting concurrently never leaves the run reporting an epoch for a
+// running clock, or no epoch for a clock one of them froze: the flag and the clock change
+// under one lock.
+func TestDeterministicRun_ConcurrentPinUnpinAndResetStayConsistent(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+
+	type runState struct {
+		Epoch  string `json:"epoch"`
+		Frozen bool   `json:"frozen"`
+	}
+	post := func(path, body string) {
+		resp, err := http.Post(ts.URL+path, "application/json", strings.NewReader(body)) //nolint:noctx
+		if err == nil {
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}
+	}
+	get := func() runState {
+		resp, err := http.Get(ts.URL + "/v1/control/run") //nolint:noctx
+		require.NoError(t, err)
+		defer resp.Body.Close() //nolint:errcheck
+		var out runState
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&out))
+		return out
+	}
+
+	var wg sync.WaitGroup
+	for i := range 4 {
+		wg.Go(func() {
+			for range 25 {
+				switch i {
+				case 0:
+					post("/v1/control/run", `{"epoch":"2026-01-02T03:04:05Z"}`)
+				case 1:
+					post("/v1/control/run", `{"epoch":""}`)
+				case 2:
+					post("/v1/state/reset", "")
+				default:
+					post("/v1/control/time", `{"frozen":false}`)
+				}
+			}
+		})
+	}
+	var inconsistent []runState
+	var mu sync.Mutex
+	wg.Go(func() {
+		for range 50 {
+			got := get()
+			if (got.Epoch != "") != got.Frozen {
+				mu.Lock()
+				inconsistent = append(inconsistent, got)
+				mu.Unlock()
+			}
+		}
+	})
+	wg.Wait()
+
+	assert.Empty(t, inconsistent, "an epoch is reported exactly when the clock is frozen")
+	final := get()
+	assert.Equal(t, final.Frozen, ts.TimeFrozen())
+	assert.Equal(t, final.Epoch != "", ts.TimeFrozen())
+}
+
+// Unfreezing a pinned clock, over HTTP or in process, unpins it, so a reset leaves it running.
+func TestDeterministicRun_UnfreezingAPinnedClockUnpinsIt(t *testing.T) {
+	t.Parallel()
+	for _, how := range []string{"http", "in-process"} {
+		t.Run(how, func(t *testing.T) {
+			t.Parallel()
+			ts := emulator.StartTestServer(t, emulator.WithDeterministicRun(detEpoch))
+			if how == "http" {
+				resp, err := http.Post(ts.URL+"/v1/control/time", "application/json", //nolint:noctx
+					strings.NewReader(`{"frozen":false}`))
+				require.NoError(t, err)
+				require.NoError(t, resp.Body.Close())
+				require.Equal(t, http.StatusOK, resp.StatusCode)
+			} else {
+				ts.UnfreezeTime()
+			}
+			ts.ResetState(t)
+			assert.False(t, ts.TimeFrozen(), "the reset does not re-pin an unpinned clock")
+
+			resp, err := http.Get(ts.URL + "/v1/control/run") //nolint:noctx
+			require.NoError(t, err)
+			defer resp.Body.Close() //nolint:errcheck
+			var got struct {
+				Epoch  string `json:"epoch"`
+				Frozen bool   `json:"frozen"`
+			}
+			require.NoError(t, json.NewDecoder(resp.Body).Decode(&got))
+			assert.Empty(t, got.Epoch)
+			assert.False(t, got.Frozen)
+		})
+	}
+}
+
 // POST /v1/control/time freezes and unfreezes the clock, the HTTP form of FreezeTimeAt.
 func TestDeterministicRun_ControlTimeFreezes(t *testing.T) {
 	t.Parallel()
@@ -582,10 +679,27 @@ func TestDeterministicRun_ClientDeployDrawsFromTheGivenSource(t *testing.T) {
 	ts := emulator.StartTestServer(t, emulator.WithDeterministicRun(detEpoch))
 	client := emulator.NewClient(ts.Registry(), ts.Store(), ts.StateManager(), ts.TimeController(),
 		emulator.NewDefaultLogger(0, false), emulator.WithClientRequestIDs(ts.RequestIDs()))
-	_, err := client.Deploy(t.Context(), `{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"det-q"}}}}`,
+	first, err := client.Deploy(t.Context(), `{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"det-q"}}}}`,
 		emulator.Intent{})
 	require.NoError(t, err)
 	assert.EqualValues(t, 1, ts.RequestIDs().Drawn(), "the deployment drew one request ID")
+
+	// The stream is named from that request ID, not the clock's nanoseconds, so two
+	// deployments on the frozen clock record into two streams.
+	second, err := client.Deploy(t.Context(), `{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"det-q2"}}}}`,
+		emulator.Intent{})
+	require.NoError(t, err)
+	assert.Regexp(t, `^deploy-[0-9a-f]{8}-1$`, first.StreamID)
+	assert.NotEqual(t, first.StreamID, second.StreamID)
+
+	// A dispatched resource call's Duration is its wall latency, not the distance between
+	// the pinned epoch and the wall clock.
+	events, err := ts.Store().GetStream(t.Context(), first.StreamID)
+	require.NoError(t, err)
+	require.NotEmpty(t, events)
+	for _, e := range events {
+		assert.Less(t, e.Duration, time.Minute, "%s %s", e.Service, e.Operation)
+	}
 }
 
 // A proxy event's requestContext.requestId is a UUID minted from the request that reached
@@ -612,6 +726,19 @@ func TestAPIGatewayProxyEvent_RequestIDDerivesFromTheRequest(t *testing.T) {
 		assert.Equal(t, first, requestID("req-a"), "one request, one requestId (v2=%v)", v2)
 		assert.NotEqual(t, first, requestID("req-b"), "two requests, two requestIds (v2=%v)", v2)
 	}
+}
+
+// The invocation's request ID stays the mint's first draw, as it was before the event's
+// requestId was minted at all, so a recording made before #1600 replays its invocation under
+// the ID it recorded. The event's requestId is the second draw.
+func TestAPIGatewayProxyEvent_TheInvocationIDKeepsTheFirstDraw(t *testing.T) {
+	t.Parallel()
+	invoke, event := emulator.APIGatewayProxyRequestIDsForTest("req-recorded")
+	assert.Equal(t, emulator.APIGatewayInternalRequestIDForTest("req-recorded"), invoke,
+		"the invocation ID is a fresh mint's first draw")
+	assert.Equal(t, emulator.IDMintUUIDAtDrawForTest("req-recorded", 2), event,
+		"the event's requestId is its second")
+	assert.NotEqual(t, emulator.IDMintUUIDAtDrawForTest("req-recorded", 1), event)
 }
 
 // A credit's expiry follows the simulated clock when one is wired, and credits are numbered

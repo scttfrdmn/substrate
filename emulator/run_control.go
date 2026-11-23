@@ -15,6 +15,9 @@ type runControlResponse struct {
 	// Drawn is how many request IDs the seeded source has assigned since it was seeded or
 	// last rewound.
 	Drawn uint64 `json:"drawn"`
+	// Frozen reports whether the clock is stopped, read together with Epoch: a pinned clock
+	// is always frozen, though a clock frozen by POST /v1/control/time need not be pinned.
+	Frozen bool `json:"frozen"`
 }
 
 // runControlRequest is the body POST /v1/control/run accepts. Both fields are optional;
@@ -29,8 +32,9 @@ type runControlRequest struct {
 // handleGetRun reports the deterministic-run settings: the request-ID seed and the epoch
 // the clock is pinned at, if any (#1598).
 func (s *Server) handleGetRun(w http.ResponseWriter, _ *http.Request) {
-	resp := runControlResponse{Seed: s.ids.Seed(), Drawn: s.ids.Drawn()}
-	if epoch, ok := s.pinnedEpoch(); ok {
+	epoch, pinned, frozen := s.runState()
+	resp := runControlResponse{Seed: s.ids.Seed(), Drawn: s.ids.Drawn(), Frozen: frozen}
+	if pinned {
 		resp.Epoch = epoch.UTC().Format(time.RFC3339Nano)
 	}
 	writeJSONDebug(w, s.logger, resp)

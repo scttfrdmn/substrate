@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -190,10 +191,13 @@ func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*Deploy
 	// events reuses it. The id comes from the client's [RequestIDSource], so a seeded
 	// one reproduces the deployment's identifiers across runs too (#1598); without one
 	// it is unseeded, wall-clock and random.
+	deployRequestID := b.requestIDs.Next()
 	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs,
-		WithDeployerMint(NewIDMint(b.requestIDs.Next())))
+		WithDeployerMint(NewIDMint(deployRequestID)))
 
-	streamID := fmt.Sprintf("deploy-%d", b.tc.Now().UnixNano())
+	// Named from the same request ID rather than the clock's nanoseconds, which two
+	// deployments on a frozen clock shared, so they recorded into one stream.
+	streamID := "deploy-" + strings.TrimPrefix(deployRequestID, "req-")
 	result, err := deployer.Deploy(ctx, cfn, streamID, nil)
 	if err != nil {
 		return nil, err

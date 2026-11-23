@@ -286,8 +286,9 @@ Two CI jobs exist only to catch bookkeeping drift. Run their targets before push
 | Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check` | `make wire-bookkeeping-write` |
 
 The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded
-`json`/`xml.Marshal`, no discarded `state.Put`. So is `nondeterminism-check`: no `time.Now()`
-and no `math/rand` or `crypto/rand` in emulator code outside its allowlist. `make docs-versions` refuses a pinned
+`json`/`xml.Marshal`, no discarded `state.Put`. So is `nondeterminism-check`: no wall-clock read
+(`time.Now`, `time.Since`, `time.After` and their relatives), no `math/rand` or `crypto/rand`,
+and no `generateRequestID` or `NewIDMint("")` in emulator code outside its allowlist. `make docs-versions` refuses a pinned
 release number in README or `docs/` prose. `make e2e` runs the aws-sdk-go-v2 suite in
 `test/e2e` (a separate module with `replace … => ../../`, so a root `go.mod` bump
 needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrate.

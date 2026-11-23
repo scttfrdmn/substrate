@@ -40,6 +40,10 @@ import (
 // A replay never draws from this source: it dispatches every event under the request
 // ID the event recorded ([ReplayEngine]), so replaying a stream on a live server leaves
 // the live counter where it was.
+//
+// [RequestIDSource.Rewind] makes the IDs after a reset repeat the ones before it, so one
+// event log can hold a request ID twice. A seeded stream therefore replays faithfully only
+// between resets; recording the reset itself is #1631.
 type RequestIDSource struct {
 	mu     sync.Mutex
 	seed   int64

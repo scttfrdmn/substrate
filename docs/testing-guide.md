@@ -146,13 +146,16 @@ run:
   epoch: "2026-01-01T00:00:00Z"
 ```
 
-Over HTTP, `GET /v1/control/run` reports `seed`, `epoch` (only while pinned) and `drawn`,
-the number of request IDs assigned since the seed was set or the state last reset.
+Over HTTP, `GET /v1/control/run` reports `seed`, `epoch`, `frozen` and `drawn`. `epoch` is
+present only while the clock is pinned, and it is the instant a reset returns the clock to.
+`drawn` is the number of request IDs assigned since the seed was set or the state last reset.
 `POST /v1/control/run` with `{"seed": 42}` reseeds and restarts the sequence (0 unseeds);
 `{"epoch": "2026-01-01T00:00:00Z"}` pins the clock and `{"epoch": ""}` unpins it. A field
 left out is left as it is. `POST /v1/control/time` accepts `"frozen": true` or `false`
-beside `"time"`, which is the HTTP form of `FreezeTimeAt` and `UnfreezeTime`. Neither
-endpoint is recorded as an event, so a replay does not re-apply them.
+beside `"time"`, which is the HTTP form of `FreezeTimeAt` and `UnfreezeTime`. `"frozen": false`
+(and `UnfreezeTime`) also unpins the clock, so a later reset leaves it running;
+`"frozen": true` freezes without pinning. Neither endpoint is recorded as an event, so a
+replay does not re-apply them.
 
 An in-process `Client` draws from a server's sequence when built with
 `substrate.WithClientRequestIDs(ts.RequestIDs())`.
@@ -165,13 +168,19 @@ An in-process `Client` draws from a server's sequence when built with
 - **The `Date` response header**, which the HTTP server writes from the wall clock.
 - **Substrate's bookkeeping IDs**: event IDs, snapshot IDs, and replay and recording
   session IDs. No AWS call observes them.
+- **Request IDs repeat after a reset.** The reset rewinds the sequence, so a server's event
+  log can hold the same request ID twice: once before a reset and once after it. A replay
+  of that stream re-runs both halves against one state, so a seeded stream replays
+  faithfully only between resets (#1631 tracks recording the reset itself).
 - **Unaudited map iteration.** A response whose order comes from iterating a Go map, in a
   plugin path nobody has checked, can differ between runs. The acceptance test covers EC2,
   KMS, IAM, S3 multipart uploads, Organizations and Firehose; report any other path you
   find.
 
-`make nondeterminism-check` keeps plugin code honest: it refuses a `time.Now()` call or a
-`math/rand` or `crypto/rand` import in emulator code outside a reviewed allowlist.
+`make nondeterminism-check` keeps plugin code honest. Outside a reviewed allowlist, it
+refuses in emulator code: a read of the wall clock (`time.Now`, `time.Since`, `time.After`
+and their relatives), a `math/rand` or `crypto/rand` import, and an unseeded identifier
+(`generateRequestID`, `NewIDMint("")`).
 
 ### Benchmarks
 

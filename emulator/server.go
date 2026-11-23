@@ -110,8 +110,10 @@ type Server struct {
 	// ids assigns every request ID the server mints for itself; see [RequestIDSource].
 	ids *RequestIDSource
 
-	// runMu guards the pinned epoch, which POST /v1/control/run can change while
-	// requests are in flight.
+	// runMu guards the pinned epoch, and is held across every change to it *and* the
+	// clock call that goes with it, so "pinned" and "the clock is frozen at the epoch"
+	// change together: POST /v1/control/run, POST /v1/control/time and POST
+	// /v1/state/reset can all run while requests are in flight.
 	runMu sync.Mutex
 	// epoch is the instant the clock is pinned at, when pinned is set; see [RunCfg.Epoch].
 	epoch  time.Time
@@ -170,11 +172,16 @@ func NewServer(
 func (s *Server) RequestIDs() *RequestIDSource { return s.ids }
 
 // pinClock freezes the clock at epoch and records it as the instant a reset returns to.
-// Freeze before SetTime, for the reason [TimeController.Freeze] gives.
 func (s *Server) pinClock(epoch time.Time) {
 	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	s.pinClockLocked(epoch)
+}
+
+// pinClockLocked is pinClock for a caller holding runMu. Freeze before SetTime, for the
+// reason [TimeController.Freeze] gives.
+func (s *Server) pinClockLocked(epoch time.Time) {
 	s.epoch, s.pinned = epoch, true
-	s.runMu.Unlock()
 	if s.tc != nil {
 		s.tc.Freeze()
 		s.tc.SetTime(epoch)
@@ -184,18 +191,30 @@ func (s *Server) pinClock(epoch time.Time) {
 // unpinClock forgets the pinned epoch and resumes the clock from where it stands.
 func (s *Server) unpinClock() {
 	s.runMu.Lock()
+	defer s.runMu.Unlock()
 	s.epoch, s.pinned = time.Time{}, false
-	s.runMu.Unlock()
 	if s.tc != nil {
 		s.tc.Unfreeze()
 	}
 }
 
-// pinnedEpoch returns the epoch the clock is pinned at, and whether it is.
-func (s *Server) pinnedEpoch() (time.Time, bool) {
+// repinClock returns a pinned clock to its epoch, and leaves an unpinned one alone. The read
+// of the epoch and the re-pin are one step, so a concurrent unpin cannot land between them
+// and leave the clock frozen at an epoch nothing reports.
+func (s *Server) repinClock() {
 	s.runMu.Lock()
 	defer s.runMu.Unlock()
-	return s.epoch, s.pinned
+	if s.pinned {
+		s.pinClockLocked(s.epoch)
+	}
+}
+
+// runState returns the pinned epoch, whether there is one, and whether the clock is frozen,
+// read together.
+func (s *Server) runState() (epoch time.Time, pinned, frozen bool) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.epoch, s.pinned, s.tc != nil && s.tc.Frozen()
 }
 
 // Start binds the listener and begins accepting requests. It blocks until ctx
@@ -741,9 +760,7 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	// shares a server answers what it would answer on a fresh one (#1598). An unpinned
 	// clock is left where it stands: nothing configured an instant to return it to.
 	s.ids.Rewind()
-	if epoch, ok := s.pinnedEpoch(); ok {
-		s.pinClock(epoch)
-	}
+	s.repinClock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
