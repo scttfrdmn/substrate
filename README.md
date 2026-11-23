@@ -90,10 +90,10 @@ this as positioning, not a current audit._
 |---|---|---|---|---|---|
 | Access | Free, open source, no account | Auth token required; the free Hobby plan is non-commercial [1] | Free, open source | Free, open source, no account [4] | Account and spend |
 | Any SDK/CLI over HTTP | ✅ (also in-process in Go) | ✅ | ✅ server mode [3] | ✅ (also embedded in the Rust SDK) [4] | ✅ |
-| Replay of a recorded run | ✅ under the recorded request IDs and clock | ❌ | Partial: the Recorder re-sends requests; no responses are kept or compared [3] | Not documented | ❌ |
-| Same identifiers on a fresh run | In progress ([#1598](https://github.com/scttfrdmn/substrate/issues/1598)) | Not documented | ✅ `/moto-api/seed` [3] | Not documented | ❌ |
+| Replay of a recorded run | ✅ bodies recorded by default; replays under the recorded request IDs and clock | ❌ | Partial: the Recorder re-sends requests; no responses are kept or compared [3] | Not documented | ❌ |
+| Same identifiers on a fresh run | ✅ seeded request IDs by default; clock pinning opt-in; not across concurrent requests | Not documented | ✅ `/moto-api/seed` [3] | Not documented | ❌ |
 | Simulated, controllable clock | ✅ | Not documented | ❌ wall clock | Not documented | ❌ |
-| Time-travel state inspection | Partial ([#1601](https://github.com/scttfrdmn/substrate/issues/1601)) | ❌ | ❌ | Not documented | ❌ |
+| Time-travel state inspection | ✅ state before any event; step backward and forward | ❌ | ❌ | Not documented | ❌ |
 | Seeded failure outcomes | ✅ seed endpoints and deterministic fault rules | Chaos API on the Enterprise plan; each rule fires with a set probability [2] | Partial | Not documented | ❌ |
 | IAM policy evaluation | ✅ | Base plan and up | Partial | ❌, and one account only [4] | ✅ |
 | API-call cost metering | ✅ per call; resource time is [#1615](https://github.com/scttfrdmn/substrate/issues/1615) | ❌ | ❌ | Not documented | After the bill |
@@ -124,32 +124,61 @@ deterministically, and on every AI-generated candidate — that's Substrate.
 
 ### 1. Deterministic reproducibility
 
-Every AWS request is an immutable event over a simulated clock. Same inputs +
-same seed = same outputs, every time — no flakes, and a failing run replays
-identically for debugging.
+Every AWS request is recorded as an immutable event, with its request and response
+bodies, over a simulated clock. A replay re-runs the events under their recorded
+request IDs and clock, so it reproduces the run — and a failing run replays as the
+same failure.
 
 ```go
-session, _ := engine.StartRecording(ctx, "test-lambda-timeout")
-runTests() // fails
-engine.StopRecording(ctx, session)
+func TestCreateBuckets(t *testing.T) {
+    ts := emulator.StartTestServer(t) // records request and response bodies by default
+    createBuckets(t, ts.URL)          // your code under test, pointed at ts.URL
 
-// Replay it 1000 times — identical failure every time.
-for range 1000 {
-    results, _ := engine.Replay(ctx, session.StreamID)
+    // Replay the recorded run into a fresh sandbox, under the recorded request IDs and
+    // clock, and fail the test on any difference from what the live run answered.
+    ts.AssertReplay(t)
 }
 ```
 
+Two *fresh* runs agree too. Every identifier substrate mints is derived from its
+request's ID, and `StartTestServer` and the pytest plugin seed request IDs by default,
+so the same calls in the same order mint the same IDs on every run. Pinning the clock
+as well, so timestamps repeat, is opt-in: `WithDeterministicRun(epoch)`,
+`@pytest.mark.substrate(deterministic=True)`, or `substrate server --seed N --epoch T`.
+The documented exceptions are requests sent concurrently (they draw IDs in scheduling
+order), the HTTP `Date` header, and a stream that spans a state reset, which replays
+faithfully only between resets; see
+[Deterministic Runs](docs/testing-guide.md#deterministic-runs).
+
 ### 2. Time-travel debugging
 
-Step backward through recorded request history and inspect service state at any
-point — see exactly where a sequence of API calls diverged from what you expected.
+Inspect the state a recorded run had before any of its events, or walk a replay
+backward and forward through it, to see where a sequence of API calls diverged from
+what you expected.
 
 ```go
-replay := engine.Replay(ctx, "failing-test")
-engine.JumpToEvent(ctx, 87)                  // jump to the failure
-engine.StepBackward(ctx)                      // step back
-state, _ := engine.InspectState(ctx, "iam")   // see what broke
+sb := ts.ReplaySandbox(t) // a replay of the server's stream, apart from its live state
+events, err := ts.Store().GetStream(ctx, emulator.DefaultStreamID)
+
+// The state before the last request ran: the event's Sequence names the point.
+at, err := sb.StateAt(ctx, emulator.DefaultStreamID, events[len(events)-1].Sequence)
+// at.State is the state snapshot; at.Differences is where replaying to it diverged.
+
+// Or drive the replay engine: replay the stream, then walk back through it.
+engine := sb.Engine()
+results, err := engine.Replay(ctx, emulator.DefaultStreamID)
+ev, err := engine.StepBackward(ctx) // back one event; ev is the next to run
+err = engine.JumpToEvent(ctx, 1) // a stream position: before the second event
+s3State, err := engine.InspectState(ctx, "s3") // one namespace's keys at this point
 ```
+
+`JumpToEvent` takes a position in the stream (0 is before the first event);
+`JumpToSequence` takes an `Event.Sequence`. Both snippets run as
+[`emulator/readme_snippets_test.go`](emulator/readme_snippets_test.go). Outside Go, a
+running server answers `GET /v1/debug/events/{seq}/state`, and
+`substrate debug state-at SEQ --stream S` prints the same for a persisted event store.
+A recorded run can also become a standalone regression test: `GenerateTestFixture`
+embeds its events and replays them in process.
 
 ### 3. API-call cost metering
 

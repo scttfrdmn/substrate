@@ -18,9 +18,9 @@ hero:
 
 features:
   - title: Deterministic reproducibility
-    details: Every AWS request is an immutable event over a simulated clock. Same inputs + same seed = same outputs — no flakes, and a failing run replays identically for debugging.
+    details: Every AWS request is an immutable event, bodies included, over a simulated clock, and a replay reproduces it under the recorded request IDs and clock. Request IDs are seeded by default, so two fresh runs mint the same identifiers; pinning the clock is opt-in. Concurrent requests, the Date header, and a stream that spans a reset are the documented exceptions.
   - title: Time-travel debugging
-    details: Step backward through recorded request history and inspect service state at any point, to see exactly where a sequence of API calls diverged from what you expected.
+    details: Read the state a recorded run had before any of its events, or step a replay backward and forward through it, to see exactly where a sequence of API calls diverged from what you expected.
   - title: API-call cost metering
     details: Every emulated API call is priced per operation and summed per service, and Intent MaxCost fails a deploy whose metered cost exceeds a budget. It meters calls, not resource time; a resource-time model is tracked in #1615.
   - title: Seedable outcomes

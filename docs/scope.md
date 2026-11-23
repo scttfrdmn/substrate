@@ -91,10 +91,10 @@ this as positioning, not a current audit._
 |---|---|---|---|---|---|
 | Access | Free, open source, no account | Auth token required; the free Hobby plan is non-commercial [1] | Free, open source | Free, open source, no account [4] | Account and spend |
 | Any SDK/CLI over HTTP | ✅ (also in-process in Go) | ✅ | ✅ server mode [3] | ✅ (also embedded in the Rust SDK) [4] | ✅ |
-| Replay of a recorded run | ✅ under the recorded request IDs and clock | ❌ | Partial: the Recorder re-sends requests; no responses are kept or compared [3] | Not documented | ❌ |
-| Same identifiers on a fresh run | In progress ([#1598](https://github.com/scttfrdmn/substrate/issues/1598)) | Not documented | ✅ `/moto-api/seed` [3] | Not documented | ❌ |
+| Replay of a recorded run | ✅ bodies recorded by default; replays under the recorded request IDs and clock | ❌ | Partial: the Recorder re-sends requests; no responses are kept or compared [3] | Not documented | ❌ |
+| Same identifiers on a fresh run | ✅ seeded request IDs by default; clock pinning opt-in; not across concurrent requests | Not documented | ✅ `/moto-api/seed` [3] | Not documented | ❌ |
 | Simulated, controllable clock | ✅ | Not documented | ❌ wall clock | Not documented | ❌ |
-| Time-travel state inspection | Partial ([#1601](https://github.com/scttfrdmn/substrate/issues/1601)) | ❌ | ❌ | Not documented | ❌ |
+| Time-travel state inspection | ✅ state before any event; step backward and forward | ❌ | ❌ | Not documented | ❌ |
 | Seeded failure outcomes | ✅ seed endpoints and deterministic fault rules | Chaos API on the Enterprise plan; each rule fires with a set probability [2] | Partial | Not documented | ❌ |
 | IAM policy evaluation | ✅ | Base plan and up | Partial | ❌, and one account only [4] | ✅ |
 | API-call cost metering | ✅ per call; resource time is [#1615](https://github.com/scttfrdmn/substrate/issues/1615) | ❌ | ❌ | Not documented | After the bill |

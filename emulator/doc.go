@@ -5,11 +5,15 @@
 //
 // Substrate's core differentiators:
 //
-//  1. Deterministic reproducibility: event sourcing + seeded RNG + time control
-//     means the same test inputs always produce the same outputs.
+//  1. Deterministic reproducibility: every request is recorded with its bodies,
+//     and a replay re-runs it under the recorded request ID and clock. Seeded
+//     request IDs (the default in [StartTestServer]) make two fresh runs mint the
+//     same identifiers; [WithDeterministicRun] pins the clock too. The exceptions
+//     are listed under "Deterministic runs" below.
 //
-//  2. Time-travel debugging: step backward through recorded request history
-//     and inspect AWS service state at any point in time.
+//  2. Time-travel debugging: [ReplaySandbox.StateAt] gives the state before any
+//     recorded event, and [ReplayEngine.StepBackward] and
+//     [ReplayEngine.JumpToEvent] walk a replay through the stream.
 //
 //  3. API-call cost metering: each emulated request is priced per operation,
 //     and Intent.MaxCost fails a deploy whose metered cost exceeds a budget.
