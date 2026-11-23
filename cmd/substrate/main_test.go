@@ -41,6 +41,29 @@ func TestNewServerCmd(t *testing.T) {
 	if cmd.Use != "server" {
 		t.Errorf("unexpected Use: %q", cmd.Use)
 	}
+	// The deterministic-run flags (#1598): unseeded and unpinned unless passed.
+	for flag, want := range map[string]string{"seed": "0", "epoch": ""} {
+		f := cmd.Flags().Lookup(flag)
+		if f == nil {
+			t.Errorf("server has no --%s flag", flag)
+			continue
+		}
+		if f.DefValue != want {
+			t.Errorf("--%s default = %q, want %q", flag, f.DefValue, want)
+		}
+	}
+}
+
+// TestServerCmd_RefusesAnUnparseableEpoch asserts --epoch is validated before the server
+// binds anything: the flag is applied after the config file is, so the config's own
+// validation never sees it.
+func TestServerCmd_RefusesAnUnparseableEpoch(t *testing.T) {
+	cmd := newServerCmd()
+	cmd.SetArgs([]string{"--address", "127.0.0.1:0", "--epoch", "next tuesday"})
+	err := cmd.Execute()
+	if err == nil || !strings.Contains(err.Error(), "run.epoch") {
+		t.Fatalf("Execute() = %v, want a run.epoch error", err)
+	}
 }
 
 // TestNewReplayCmd verifies the replay subcommand is constructed.

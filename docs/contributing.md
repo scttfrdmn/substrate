@@ -78,7 +78,10 @@ func (p *WeatherPlugin) Shutdown(_ context.Context) error { return nil }
 If your plugin is time-dependent, pull the `*TimeController` from
 `cfg.Options["time_controller"]` in `Initialize` (see any built-in plugin such
 as `ssm_plugin.go`) and read the clock with `p.tc.Now()` — never `time.Now()`,
-which would break deterministic replay.
+which would break deterministic replay. Mint identifiers through the request's
+`IDMint` (`reqCtx.IDs.Hex(n)`, `.UUID()`, `.Chars(n, alphabet)`), never from
+`math/rand` or `crypto/rand`. `make nondeterminism-check` refuses either outside
+the allowlist in `scripts/check-nondeterminism.sh` (#1600).
 
 ## Conventions
 
@@ -280,10 +283,11 @@ Two CI jobs exist only to catch bookkeeping drift. Run their targets before push
 | CI job | Targets | Regenerate after a deliberate change |
 |--------|---------|--------------------------------------|
 | Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check` | `make operation-catalog docs-reference operation-docs-write` |
-| Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check` | `make wire-bookkeeping-write` |
+| Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check` | `make wire-bookkeeping-write` |
 
 The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded
-`json`/`xml.Marshal`, no discarded `state.Put`. `make docs-versions` refuses a pinned
+`json`/`xml.Marshal`, no discarded `state.Put`. So is `nondeterminism-check`: no `time.Now()`
+and no `math/rand` or `crypto/rand` in emulator code outside its allowlist. `make docs-versions` refuses a pinned
 release number in README or `docs/` prose. `make e2e` runs the aws-sdk-go-v2 suite in
 `test/e2e` (a separate module with `replace … => ../../`, so a root `go.mod` bump
 needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrate.

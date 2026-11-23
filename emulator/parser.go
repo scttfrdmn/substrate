@@ -35,6 +35,11 @@ const defaultRegion = "us-east-1"
 // one, and this function has no configuration to consult. A server overrides it
 // from [AccountCfg.Default], from a wired [CredentialRegistry] and from an STS
 // session record, in that order.
+//
+// The request ID, its [IDMint] and the timestamp are placeholders of the same kind: an
+// unseeded request ID and the wall clock, since this function has neither the server's
+// [RequestIDSource] nor its [TimeController]. [Server.handleAWSRequest] replaces all
+// three, so no response a server writes renders them (#1598, #1600).
 func ParseAWSRequest(r *http.Request) (*AWSRequest, *RequestContext, error) {
 	if r == nil {
 		return nil, nil, fmt.Errorf("request must not be nil")
@@ -825,9 +830,12 @@ func extractServiceFromAuth(authHeader string) string {
 	return svc
 }
 
-// generateRequestID produces a unique request ID string.
+// generateRequestID produces a unique, unseeded request ID string. It is what a server
+// with no run.seed assigns, through an unseeded [RequestIDSource]; a seeded source
+// assigns `req-<prefix>-<n>` instead, distinct by its counter rather than by the clock
+// (#1598).
 //
-// A live request's id still derives from the wall clock, deliberately. What the
+// An unseeded request's id still derives from the wall clock, deliberately. What the
 // determinism rule asks for is that a *recorded* run replays to the same bytes, and
 // that is met by recording the value on the event ([Event.RequestID]) and
 // dispatching a replay with it (see replayRequestID) rather than by deriving the id

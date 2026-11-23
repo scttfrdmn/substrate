@@ -1646,9 +1646,9 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 
 	var eventJSON []byte
 	if isV2 {
-		eventJSON, err = buildV2ProxyEvent(req, apiID, stageName, resourcePath)
+		eventJSON, err = buildV2ProxyEvent(reqCtx.IDs, req, apiID, stageName, resourcePath)
 	} else {
-		eventJSON, err = buildV1ProxyEvent(req, apiID, stageName, resourcePath)
+		eventJSON, err = buildV1ProxyEvent(reqCtx.IDs, req, apiID, stageName, resourcePath)
 	}
 	if err != nil {
 		return proxyError(http.StatusInternalServerError, "build proxy event: "+err.Error())
@@ -1829,7 +1829,12 @@ func extractLambdaARNFromURI(uri string) string {
 }
 
 // buildV1ProxyEvent constructs a v1 (REST API) proxy event JSON payload.
-func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+//
+// requestContext.requestId is minted from ids, the mint of the request that reached the
+// integration, in the UUID shape the API Gateway developer guide's example REST proxy event
+// shows. It was a fresh wall-clock request id until #1600, so the invocation's recorded
+// payload differed between a run and its replay.
+func buildV1ProxyEvent(ids *IDMint, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
 	qs := make(map[string]string)
 	for k, v := range req.Params {
 		qs[k] = v
@@ -1857,7 +1862,7 @@ func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]by
 		}(),
 		"requestContext": map[string]interface{}{
 			"stage":        stage,
-			"requestId":    generateRequestID(),
+			"requestId":    ids.UUID(),
 			"httpMethod":   req.Operation,
 			"resourcePath": resourcePath,
 			"apiId":        apiID,
@@ -1882,8 +1887,9 @@ func apigwInternalRequestID(m *IDMint) string {
 	return "req-apigw-" + m.Hex(12)
 }
 
-// buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload.
-func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+// buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload. Its
+// requestContext.requestId is minted from ids for the reason [buildV1ProxyEvent] gives.
+func buildV2ProxyEvent(ids *IDMint, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
 	rawQS := apigwV2RawQueryString(req)
 	event := map[string]interface{}{
 		"version":         "2.0",
@@ -1901,7 +1907,7 @@ func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]by
 		"requestContext": map[string]interface{}{
 			"routeKey":  req.Operation + " " + resourcePath,
 			"stage":     stage,
-			"requestId": generateRequestID(),
+			"requestId": ids.UUID(),
 			"apiId":     apiID,
 			"http": map[string]interface{}{
 				"method": req.Operation,

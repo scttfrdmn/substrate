@@ -70,7 +70,7 @@ func (p *OrganizationsPlugin) tagOperation(op string) (orgHandler, bool) {
 // landed, and a retry of the same request would then behave differently from the
 // first attempt.
 func (p *OrganizationsPlugin) tagResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ResourceID string        `json:"ResourceId"`
 		Tags       []orgTagInput `json:"Tags"`
@@ -121,7 +121,7 @@ func (p *OrganizationsPlugin) tagResource(reqCtx *orgCaller, req *AWSRequest) (*
 // tags with the specified keys", so the operation is idempotent, and a cleanup
 // path that runs twice must not fail the second time.
 func (p *OrganizationsPlugin) untagResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ResourceID string   `json:"ResourceId"`
 		TagKeys    []string `json:"TagKeys"`
@@ -178,7 +178,7 @@ func (p *OrganizationsPlugin) untagResource(reqCtx *orgCaller, req *AWSRequest) 
 // below the 50-tag limit, so a heavily tagged resource really does page, and a
 // consumer that reads only the first page is caught here rather than against AWS.
 func (p *OrganizationsPlugin) listTagsForResource(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ResourceID string `json:"ResourceId"`
 		NextToken  string `json:"NextToken"`

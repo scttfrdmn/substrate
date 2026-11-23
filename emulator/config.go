@@ -66,6 +66,9 @@ type Config struct {
 
 	// EC2 controls EC2 plugin behavior.
 	EC2 EC2Cfg `mapstructure:"ec2"`
+
+	// Run controls deterministic-run mode: seeded request IDs and a pinned clock.
+	Run RunCfg `mapstructure:"run"`
 }
 
 // MetricsCfg controls Prometheus metrics exposure.
@@ -664,6 +667,39 @@ type EC2Cfg struct {
 	DefaultVPC bool `mapstructure:"default_vpc"`
 }
 
+// RunCfg controls deterministic-run mode (#1598): what makes two fresh servers given the
+// same calls answer the same bodies.
+//
+// Every identifier a request mints is derived from its request ID, so seeding the request
+// IDs makes the identifiers repeat, and pinning the clock makes every timestamp repeat.
+// The two are independent: a seed alone gives repeatable identifiers on a running clock.
+// See [RequestIDSource] for the ID format and for what stays nondeterministic.
+type RunCfg struct {
+	// Seed seeds the request IDs the server assigns. Default 0, which leaves them
+	// wall-clock and random as they have always been (SUBSTRATE_RUN_SEED, or
+	// `substrate server --seed`).
+	Seed int64 `mapstructure:"seed"`
+
+	// Epoch, when set, is an RFC 3339 instant the simulated clock is frozen at when the
+	// server starts and returned to on every POST /v1/state/reset. Default empty, which
+	// leaves the clock running from the wall clock (SUBSTRATE_RUN_EPOCH, or
+	// `substrate server --epoch`). The clock still moves by POST /v1/control/time, which
+	// is how a pinned run drives a time-dependent path.
+	Epoch string `mapstructure:"epoch"`
+}
+
+// ParseEpoch returns the instant Epoch names and whether one is set.
+func (c RunCfg) ParseEpoch() (time.Time, bool, error) {
+	if c.Epoch == "" {
+		return time.Time{}, false, nil
+	}
+	t, err := time.Parse(time.RFC3339Nano, c.Epoch)
+	if err != nil {
+		return time.Time{}, false, fmt.Errorf("run.epoch %q is not an RFC 3339 time: %w", c.Epoch, err)
+	}
+	return t, true, nil
+}
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
@@ -773,6 +809,9 @@ func DefaultConfig() *Config {
 		EC2: EC2Cfg{
 			DefaultVPC: true,
 		},
+		// Unseeded and unpinned, so a server configured with nothing behaves as it did
+		// before deterministic-run mode existed (#1598).
+		Run: RunCfg{},
 	}
 }
 
@@ -834,6 +873,10 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
 	v.SetDefault("rds.engine", defaults.RDS.Engine)
 	v.SetDefault("ec2.default_vpc", defaults.EC2.DefaultVPC)
+	// Registered so SUBSTRATE_RUN_SEED and SUBSTRATE_RUN_EPOCH reach Unmarshal: viper's
+	// AutomaticEnv only binds a key it already knows.
+	v.SetDefault("run.seed", defaults.Run.Seed)
+	v.SetDefault("run.epoch", defaults.Run.Epoch)
 
 	// Environment variable overrides.
 	v.SetEnvPrefix("SUBSTRATE")
@@ -897,6 +940,10 @@ func Validate(cfg *Config) error {
 	// persistence and was decoration.
 	if cfg.State.Path != "" {
 		return fmt.Errorf("state.path %q is set but no state backend reads it; the memory backend keeps no files", cfg.State.Path)
+	}
+
+	if _, _, err := cfg.Run.ParseEpoch(); err != nil {
+		return err
 	}
 
 	if cfg.Replay.SpeedMultiplier < 0 {

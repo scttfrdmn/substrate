@@ -44,7 +44,7 @@ const orgMaxConcurrentClosures = 3
 // reproducible outcome. The concurrent-closure limit has no window: it is a count
 // of accounts currently in PENDING_CLOSURE, so it is exact.
 func (p *OrganizationsPlugin) closeAccount(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		AccountID string `json:"AccountId"`
 	}

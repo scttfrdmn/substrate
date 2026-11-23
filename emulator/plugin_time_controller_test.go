@@ -329,14 +329,19 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 			want: pluginClockQuoted(fmt.Sprintf("msg-%d-1", pluginClockFrozen.UnixNano())),
 		},
 		{
-			name: "firehose PutRecord reports a RecordId minted from the clock",
+			// The RecordId this case read until #1600 is minted now, not rendered from the
+			// clock, so the stream's creation time is the witness instead.
+			name: "firehose DescribeDeliveryStream reports CreateTimestamp",
 			observe: func(t *testing.T, ts *emulator.TestServer) string {
 				t.Helper()
-				got := pluginClockTarget(t, ts, "firehose.us-east-1.amazonaws.com", "firehose",
-					"Firehose_20150804.PutRecord", `{}`)
-				return pluginClockJSONField(t, got, "", "RecordId")
+				const host = "firehose.us-east-1.amazonaws.com"
+				pluginClockTarget(t, ts, host, "firehose",
+					"Firehose_20150804.CreateDeliveryStream", `{"DeliveryStreamName":"clock"}`)
+				got := pluginClockTarget(t, ts, host, "firehose",
+					"Firehose_20150804.DescribeDeliveryStream", `{"DeliveryStreamName":"clock"}`)
+				return pluginClockJSONField(t, got, "DeliveryStreamDescription", "CreateTimestamp")
 			},
-			want: pluginClockQuoted(fmt.Sprintf("rec-%d", pluginClockFrozen.UnixNano())),
+			want: strconv.FormatFloat(float64(pluginClockFrozen.UnixNano())/1e9, 'f', 3, 64),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

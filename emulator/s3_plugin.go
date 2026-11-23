@@ -1945,7 +1945,7 @@ func (p *S3Plugin) listObjectsV2(_ *RequestContext, req *AWSRequest, bucket stri
 }
 
 // createMultipartUpload handles POST /<bucket>/<key>?uploads.
-func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
+func (p *S3Plugin) createMultipartUpload(reqCtx *RequestContext, req *AWSRequest, bucket, key string) (*AWSResponse, error) {
 	ctx := context.Background()
 
 	bucketData, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
@@ -1991,7 +1991,7 @@ func (p *S3Plugin) createMultipartUpload(_ *RequestContext, req *AWSRequest, buc
 		return denied, nil
 	}
 
-	uploadID := generateUploadID()
+	uploadID := generateUploadID(reqCtx.IDs)
 
 	// Resolved case-insensitively, like every other header this function reads
 	// (cf. resolveStorageClass, resolveUploadChecksum): an AWSRequest reaching a
@@ -3278,9 +3278,16 @@ func validateBucketName(name string) bool {
 	return true
 }
 
-// generateUploadID produces a unique multipart upload identifier.
-func generateUploadID() string {
-	return fmt.Sprintf("mpu-%d", time.Now().UnixNano())
+// generateUploadID mints a multipart upload identifier from the request's mint.
+//
+// It was "mpu-" plus the wall clock's nanoseconds until #1600, which a replay could not
+// reproduce: the replayed CreateMultipartUpload minted a different ID from the one the
+// recorded UploadPart named, so the part answered NoSuchUpload where the live run had
+// answered 200. The ID is opaque on the wire, so the prefix is substrate's own and is
+// kept so the ID is recognizable. ListMultipartUploads orders uploads sharing a key and an
+// initiation instant by this ID, which stays a total order.
+func generateUploadID(ids *IDMint) string {
+	return "mpu-" + ids.Hex(16)
 }
 
 // s3XMLResponse serializes v as XML and wraps it in an [AWSResponse] with the

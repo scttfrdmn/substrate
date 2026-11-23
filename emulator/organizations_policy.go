@@ -70,7 +70,7 @@ func (p *OrganizationsPlugin) policyOperation(op string) (orgHandler, bool) {
 // --- CreatePolicy ---
 
 func (p *OrganizationsPlugin) createPolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		Content     string        `json:"Content"`
 		Description *string       `json:"Description"`
@@ -158,7 +158,7 @@ func (p *OrganizationsPlugin) createPolicy(reqCtx *orgCaller, req *AWSRequest) (
 		return nil, orgErr("DuplicatePolicyException", "A policy with the same name already exists")
 	}
 
-	policyID := "p-" + randomLowerAlphanum(orgPolicyIDSuffixLen)
+	policyID := "p-" + reqCtx.IDs.Chars(orgPolicyIDSuffixLen, orgLowerAlphanum)
 	pol := OrgPolicy{
 		PolicySummary: OrgPolicySummary{
 			ID:          policyID,
@@ -186,7 +186,7 @@ func (p *OrganizationsPlugin) createPolicy(reqCtx *orgCaller, req *AWSRequest) (
 // --- UpdatePolicy ---
 
 func (p *OrganizationsPlugin) updatePolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	// Name, Description and Content are pointers because UpdatePolicy is a partial
 	// update: an omitted member leaves the stored value alone, while an empty string
 	// is a value the caller asked for. Collapsing the two would silently blank a
@@ -257,7 +257,7 @@ func (p *OrganizationsPlugin) updatePolicy(reqCtx *orgCaller, req *AWSRequest) (
 // --- DeletePolicy ---
 
 func (p *OrganizationsPlugin) deletePolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		PolicyID string `json:"PolicyId"`
 	}
@@ -318,7 +318,7 @@ func (p *OrganizationsPlugin) deletePolicyRecord(ctx context.Context, acct, poli
 // --- DescribePolicy ---
 
 func (p *OrganizationsPlugin) describePolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		PolicyID string `json:"PolicyId"`
 	}
@@ -345,7 +345,7 @@ func (p *OrganizationsPlugin) describePolicy(reqCtx *orgCaller, req *AWSRequest)
 // --- ListPolicies ---
 
 func (p *OrganizationsPlugin) listPolicies(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		Filter     string `json:"Filter"`
 		NextToken  string `json:"NextToken"`
@@ -433,7 +433,7 @@ func (p *OrganizationsPlugin) policySummaries(ctx context.Context, ids []string)
 // --- AttachPolicy ---
 
 func (p *OrganizationsPlugin) attachPolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		PolicyID string `json:"PolicyId"`
 		TargetID string `json:"TargetId"`
@@ -493,7 +493,7 @@ func (p *OrganizationsPlugin) attachPolicy(reqCtx *orgCaller, req *AWSRequest) (
 // --- DetachPolicy ---
 
 func (p *OrganizationsPlugin) detachPolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		PolicyID string `json:"PolicyId"`
 		TargetID string `json:"TargetId"`
@@ -577,7 +577,7 @@ func (p *OrganizationsPlugin) resolveAttachment(ctx context.Context, acct, polic
 // --- ListPoliciesForTarget ---
 
 func (p *OrganizationsPlugin) listPoliciesForTarget(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		TargetID   string `json:"TargetId"`
 		Filter     string `json:"Filter"`
@@ -645,7 +645,7 @@ func (p *OrganizationsPlugin) listPoliciesForTarget(reqCtx *orgCaller, req *AWSR
 // --- ListTargetsForPolicy ---
 
 func (p *OrganizationsPlugin) listTargetsForPolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		PolicyID   string `json:"PolicyId"`
 		NextToken  string `json:"NextToken"`
@@ -734,7 +734,7 @@ func (p *OrganizationsPlugin) policyTargetSummary(ctx context.Context, acct, tar
 // --- EnablePolicyType ---
 
 func (p *OrganizationsPlugin) enablePolicyType(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	input, root, err := p.policyTypeRequest(goCtx, reqCtx, req)
 	if err != nil {
 		return nil, err
@@ -783,7 +783,7 @@ func (p *OrganizationsPlugin) enablePolicyType(reqCtx *orgCaller, req *AWSReques
 // --- DisablePolicyType ---
 
 func (p *OrganizationsPlugin) disablePolicyType(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	input, root, err := p.policyTypeRequest(goCtx, reqCtx, req)
 	if err != nil {
 		return nil, err

@@ -395,7 +395,9 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 	if err != nil {
 		return nil, err
 	}
-	orgID := "o-" + randomLowerAlphanum(10)
+	// Both identifiers come from the request's mint (#1600); see [orgCaller.context].
+	ids := orgMintFrom(ctx)
+	orgID := "o-" + ids.Chars(10, orgLowerAlphanum)
 	org = Organization{
 		ID:                 orgID,
 		Arn:                fmt.Sprintf("arn:aws:organizations::%s:organization/%s", acct, orgID),
@@ -411,7 +413,7 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 	// The root is created once, with the organization, and persisted. Minting it
 	// per request left it with no stable identity, so nothing could reference it
 	// (#577).
-	rootID := "r-" + randomLowerHex(4)
+	rootID := "r-" + ids.Hex(2)
 	root := OrgRoot{
 		ID:   rootID,
 		Arn:  fmt.Sprintf("arn:aws:organizations::%s:root/%s/%s", acct, orgID, rootID),

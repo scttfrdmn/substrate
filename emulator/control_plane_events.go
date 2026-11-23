@@ -88,9 +88,9 @@ func isControlPlaneEvent(event *Event) bool {
 // a bucket named `v1` from a control-plane write.
 //
 // Endpoints deliberately left outside the group are the ones a replay must *not*
-// re-issue: `/v1/state/reset` (the replay owns the reset), `/v1/control/time` and
-// `/v1/control/scale` (replayEvent owns the clock, and re-applying a recorded SetTime
-// would fight it), `/v1/fault/rules` (rules live on the [FaultController], which
+// re-issue: `/v1/state/reset` (the replay owns the reset), `/v1/control/time`,
+// `/v1/control/scale` and `/v1/control/run` (replayEvent owns the clock and the request
+// IDs, and re-applying a recorded SetTime or reseed would fight it), `/v1/fault/rules` (rules live on the [FaultController], which
 // survives resetState and is rewound rather than cleared, so re-arming them would double
 // them), and the ones that write nothing a replayed AWS observation reads: `/v1/s3/presign`
 // mints a URL, `/v1/pricing/refresh` reloads a price table, and the pricing discount and
@@ -152,7 +152,9 @@ func (s *Server) recordControlPlaneWrites(next http.Handler) http.Handler {
 			Body:       body,
 		}
 		reqCtx := &RequestContext{
-			RequestID: generateRequestID(),
+			// From the server's source, so a seeded run assigns a seed write the same ID
+			// on every run, in the sequence the AWS requests around it draw from (#1598).
+			RequestID: s.ids.Next(),
 			AccountID: s.config.Account.Default,
 			Timestamp: s.tc.Now(),
 		}

@@ -364,6 +364,8 @@ func replayStateSummary(cfg substrate.ReplayConfig, results *substrate.ReplayRes
 func newServerCmd() *cobra.Command {
 	var configPath string
 	var address string
+	var seed int64
+	var epoch string
 
 	cmd := &cobra.Command{
 		Use:   "server",
@@ -380,13 +382,24 @@ configured address will have their requests emulated and recorded.`,
 			if cmd.Flags().Changed("address") {
 				cfg.Server.Address = address
 			}
+			if cmd.Flags().Changed("seed") {
+				cfg.Run.Seed = seed
+			}
+			if cmd.Flags().Changed("epoch") {
+				cfg.Run.Epoch = epoch
+			}
 
 			logLevel := slog.LevelInfo
 			jsonLog := cfg.Log.Format == "json"
 			logger := substrate.NewDefaultLogger(logLevel, jsonLog)
 
 			registry := substrate.NewPluginRegistry()
-			tc := substrate.NewTimeController(time.Now())
+			// Frozen at run.epoch when one is set, before any plugin is registered
+			// against it (#1598). The flag was not validated with the config file.
+			tc, err := cfg.Run.NewTimeController()
+			if err != nil {
+				return err
+			}
 			// The logger is what makes an automatic flush failure visible: the store
 			// records the event either way and does not fail the caller's request, so
 			// without it a persistence problem would be silent (#599).
@@ -443,7 +456,7 @@ configured address will have their requests emulated and recorded.`,
 				pricingProvider = substrate.NewStaticPricingProvider()
 			}
 			costCtrl := substrate.NewCostController(cfg.Costs.ToCostConfig(),
-				substrate.WithPricingProvider(pricingProvider))
+				substrate.WithPricingProvider(pricingProvider), substrate.WithCostTimeController(tc))
 
 			faultCtrl := newFaultController(cfg.Fault)
 
@@ -510,6 +523,10 @@ configured address will have their requests emulated and recorded.`,
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
 	cmd.Flags().StringVar(&address, "address", ":4566", "TCP address to listen on")
+	cmd.Flags().Int64Var(&seed, "seed", 0,
+		"seed request IDs so identical calls mint identical identifiers (run.seed; 0 is unseeded)")
+	cmd.Flags().StringVar(&epoch, "epoch", "",
+		"freeze the simulated clock at this RFC 3339 time (run.epoch)")
 
 	return cmd
 }

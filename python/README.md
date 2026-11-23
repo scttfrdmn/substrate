@@ -52,3 +52,20 @@ Resets state and configures env vars. Yields the `SubstrateServer` instance.
 Set `SUBSTRATE_BINARY` to override the binary path. Otherwise, the plugin looks for:
 1. `~/src/substrate/bin/substrate`
 2. `substrate` on `PATH`
+
+## Deterministic runs
+
+Every server the plugin launches gets `SUBSTRATE_RUN_SEED=1`, so request IDs, and the
+identifiers substrate mints from them, are the same on every run. The per-test reset
+rewinds the sequence. To pin the simulated clock as well, mark the test:
+
+```python
+@pytest.mark.substrate(deterministic=True)  # clock frozen at 2026-01-01T00:00:00Z
+def test_stable(substrate_isolated):
+    ...
+```
+
+The marker also takes `epoch=` (a datetime or an RFC 3339 string) and `seed=` (0 for
+unseeded IDs). On the shared `substrate` fixture it applies to that test alone. Configure
+the session server with the ini options `substrate_seed`, `substrate_epoch` and
+`substrate_deterministic`.

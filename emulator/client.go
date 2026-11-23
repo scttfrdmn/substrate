@@ -126,6 +126,20 @@ type Client struct {
 	logger   Logger
 	costs    *CostController
 	intent   Intent
+	// requestIDs seeds each deployment's mint; nil draws an unseeded request ID.
+	requestIDs *RequestIDSource
+}
+
+// ClientOption configures a [Client] built by [NewClient].
+type ClientOption func(*Client)
+
+// WithClientRequestIDs makes the client seed each deployment from src, so a seeded source
+// gives a deployment the same identifiers on every run (#1598). Pass [Server.RequestIDs]
+// to draw from the sequence of a server sharing the client's registry.
+//
+// Without it a deployment's seed is an unseeded request ID, wall-clock and random.
+func WithClientRequestIDs(src *RequestIDSource) ClientOption {
+	return func(c *Client) { c.requestIDs = src }
 }
 
 // NewClient creates a Client wired to the provided dependencies.
@@ -135,8 +149,9 @@ func NewClient(
 	state StateManager,
 	tc *TimeController,
 	logger Logger,
+	opts ...ClientOption,
 ) *Client {
-	return &Client{
+	c := &Client{
 		registry: registry,
 		store:    store,
 		state:    state,
@@ -144,6 +159,10 @@ func NewClient(
 		logger:   logger,
 		costs:    NewCostController(CostConfig{Enabled: true}),
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 // Deploy parses cfn (JSON or YAML CloudFormation template), creates all described
@@ -165,12 +184,14 @@ func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*Deploy
 	//
 	// The mint is seeded from a fresh request id rather than left nil, so the
 	// deployment's resource identifiers are derived from one seed instead of drawn
-	// one at a time (#856). The seed is random because an in-process Deploy is not a
-	// recorded AWS request — there is no outer event for a replay to re-run — and
-	// that is enough: each dispatched request records the derived id it used, and a
-	// replay of *those* events reuses it.
+	// one at a time (#856). An in-process Deploy is not a recorded AWS request —
+	// there is no outer event for a replay to re-run — and that is enough for replay:
+	// each dispatched request records the derived id it used, and a replay of *those*
+	// events reuses it. The id comes from the client's [RequestIDSource], so a seeded
+	// one reproduces the deployment's identifiers across runs too (#1598); without one
+	// it is unseeded, wall-clock and random.
 	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs,
-		WithDeployerMint(NewIDMint(generateRequestID())))
+		WithDeployerMint(NewIDMint(b.requestIDs.Next())))
 
 	streamID := fmt.Sprintf("deploy-%d", b.tc.Now().UnixNano())
 	result, err := deployer.Deploy(ctx, cfn, streamID, nil)

@@ -194,6 +194,12 @@ jobs:
       - name: Check no state write has its error discarded
         run: make discarded-state-check
 
+      # Lexical for the same reason: a linter cannot tell a handler's clock read from a
+      # latency measurement, so every legitimate time.Now() and rand import is named in
+      # the script's allowlist (#1600).
+      - name: Check no handler reads the wall clock or a random source
+        run: make nondeterminism-check
+
   python:
     name: Python ${{ matrix.python-version }} (pytest-substrate)
     runs-on: ubuntu-latest

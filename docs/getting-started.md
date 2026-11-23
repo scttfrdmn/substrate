@@ -270,6 +270,25 @@ The plugin locates the binary via `SUBSTRATE_BINARY`, `~/src/substrate/bin/subst
 or `substrate` on `PATH`. Use the `substrate_isolated` fixture instead for a fresh
 server per test.
 
+The server the plugin launches has seeded request IDs, so the identifiers a test sees
+repeat from run to run; mark a test `@pytest.mark.substrate(deterministic=True)` to pin
+the clock as well.
+
+## Deterministic runs
+
+Run the same calls against two fresh servers and you get the same answers, byte for
+byte, when the request IDs are seeded and the clock is pinned:
+
+```bash
+substrate server --seed 42 --epoch 2026-01-01T00:00:00Z
+# or: SUBSTRATE_RUN_SEED=42 SUBSTRATE_RUN_EPOCH=2026-01-01T00:00:00Z substrate server
+```
+
+`StartTestServer` seeds request IDs by default; add
+`substrate.WithDeterministicRun(epoch)` to pin its clock. The
+[Testing Guide](testing-guide.md#deterministic-runs) covers the config keys, the
+`/v1/control/run` endpoint, and what stays nondeterministic.
+
 ## Reusing a server across subtests
 
 Create one `TestServer` and call `ts.ResetState(t)` between subtests to avoid

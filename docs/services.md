@@ -2287,9 +2287,10 @@ occasionally what a test wants: an unseeded replay is the sharpest check that a 
 what an *observation* reports and was never written back into the resource record.
 
 A few control-plane endpoints are deliberately **not** recorded. `/v1/state/reset`,
-`/v1/control/time` and `/v1/control/scale` are the replay's own business — it resets the state
-manager and freezes the clock at each recorded timestamp itself, so re-applying a recorded reset or
-time set would fight it. `/v1/fault/rules` writes to the fault controller, which the replay rewinds
+`/v1/control/time`, `/v1/control/scale` and `/v1/control/run` are the replay's own business — it
+resets the state manager, freezes the clock at each recorded timestamp and dispatches each event
+under its recorded request ID itself, so re-applying a recorded reset, time set or reseed would
+fight it. `/v1/fault/rules` writes to the fault controller, which the replay rewinds
 to the configuration it was armed with, so re-arming would double every rule. The rest write
 nothing a replayed AWS observation can read: `/v1/s3/presign` mints a URL, `/v1/pricing/refresh`
 reloads a price table, and the pricing discount and credit endpoints write to the cost tracker

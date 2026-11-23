@@ -64,8 +64,24 @@
 // makes, and its event's timestamp, are one instant. Before #1396 the event was
 // stamped after the handler ran, and on a running clock a millisecond-precision date
 // replayed late. The guarantee is for requests that do not overlap; see
-// [TimeController.Hold]. Use [TestServer.FreezeTimeAt] for a *live* run whose
-// instants must also be identical across runs, not only between a run and its replay.
+// [TimeController.Hold].
+//
+// # Deterministic runs
+//
+// A replay reproduces its recording because it restores the recorded request IDs, from
+// which every identifier is derived ([IDMint]). Two *fresh* runs agree only when their
+// request IDs agree too, which is what deterministic-run mode arranges (#1598): a seeded
+// [RequestIDSource] assigns `req-<prefix>-<n>` in arrival order (run.seed, `--seed`,
+// SUBSTRATE_RUN_SEED), and a pinned epoch freezes the clock (run.epoch, `--epoch`,
+// SUBSTRATE_RUN_EPOCH), so the same calls answer byte-identical bodies. POST
+// /v1/state/reset rewinds the sequence and re-pins the clock. [StartTestServer] seeds
+// request IDs by default; [WithDeterministicRun] pins its clock as well.
+//
+// What stays nondeterministic is documented rather than hidden: requests a client sends
+// concurrently draw their IDs in scheduling order, the Date header is the wall clock,
+// substrate's bookkeeping IDs (events, snapshots, replay sessions) are not derived, and a
+// plugin path whose output order comes from an unaudited map iteration can differ.
+// `make nondeterminism-check` refuses a new time.Now() or rand draw in emulator code.
 //
 // # Seeding: determinism without sacrificing coverage
 //

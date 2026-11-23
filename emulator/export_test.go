@@ -250,12 +250,21 @@ func (p *LambdaPlugin) LoadReplayForTest(functionARN string, payload []byte) ([]
 
 // BuildV1ProxyEventForTest wraps buildV1ProxyEvent for external tests.
 func BuildV1ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
-	return buildV1ProxyEvent(req, apiID, stage, resourcePath)
+	return buildV1ProxyEvent(nil, req, apiID, stage, resourcePath)
 }
 
 // BuildV2ProxyEventForTest wraps buildV2ProxyEvent for external tests.
 func BuildV2ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
-	return buildV2ProxyEvent(req, apiID, stage, resourcePath)
+	return buildV2ProxyEvent(nil, req, apiID, stage, resourcePath)
+}
+
+// BuildProxyEventFromRequestIDForTest builds a v1 or v2 proxy event with a mint over
+// requestID, the way the integration builds one for the request that reached it (#1600).
+func BuildProxyEventFromRequestIDForTest(requestID string, v2 bool, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+	if v2 {
+		return buildV2ProxyEvent(NewIDMint(requestID), req, apiID, stage, resourcePath)
+	}
+	return buildV1ProxyEvent(NewIDMint(requestID), req, apiID, stage, resourcePath)
 }
 
 // DefaultCostTableForTest returns a copy of the built-in cost table, so a test can assert every key

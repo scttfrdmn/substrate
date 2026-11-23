@@ -63,7 +63,7 @@ func (p *OrganizationsPlugin) resourcePolicyOperation(op string) (orgHandler, bo
 // organization has exactly one, there is nothing the new ID could distinguish it
 // from.
 func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	if reqCtx.isMember() {
 		return nil, orgResourcePolicyAccessDenied("PutResourcePolicy")
 	}
@@ -118,7 +118,7 @@ func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *orgCaller, req *AWSReque
 	if found {
 		policy.ResourcePolicySummary = existing.ResourcePolicySummary
 	} else {
-		id := "rp-" + randomLowerAlphanum(8)
+		id := "rp-" + reqCtx.IDs.Chars(8, orgLowerAlphanum)
 		policy.ResourcePolicySummary = OrgResourcePolicySummary{
 			ID:  id,
 			Arn: fmt.Sprintf("arn:aws:organizations::%s:resourcepolicy/%s/%s", reqCtx.AccountID, org.ID, id),
@@ -158,7 +158,7 @@ func (p *OrganizationsPlugin) putResourcePolicy(reqCtx *orgCaller, req *AWSReque
 //
 // The operation takes no input, so req.Body is not read.
 func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("describeResourcePolicy ensure org: %w", err)
 	}
@@ -190,7 +190,7 @@ func (p *OrganizationsPlugin) describeResourcePolicy(reqCtx *orgCaller, _ *AWSRe
 //
 // The operation takes no input and the model gives it no output shape.
 func (p *OrganizationsPlugin) deleteResourcePolicy(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	if reqCtx.isMember() {
 		return nil, orgResourcePolicyAccessDenied("DeleteResourcePolicy")
 	}

@@ -62,8 +62,9 @@ func NewAuthController(state StateManager, logger Logger, opts ...AuthController
 //
 // The instant is read once per request rather than once per resource, so a request
 // naming several resources is evaluated at one time. reqCtx.Timestamp is deliberately
-// not the source: it is time.Now() on the HTTP path, so a condition sourced from it
-// would be unreplayable for every real SDK request.
+// not the source: the server sets it from the same held clock (#1600), but a
+// hand-built or in-process context carries whatever its builder put there, and the
+// controller's own clock is the one a replay freezes.
 func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, ok bool) {
 	if !ok {
 		return
