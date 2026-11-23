@@ -244,7 +244,7 @@ func TestCWAlarm_SetAlarmStateInvalidValue(t *testing.T) {
 	srv := newCWAlarmTestServer(t)
 	cwRequest(t, srv, map[string]string{
 		"Action": "PutMetricAlarm", "AlarmName": "a1",
-		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GT",
+		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GreaterThanThreshold",
 		"Threshold": "1", "EvaluationPeriods": "1", "Period": "60",
 	})
 	resp := cwRequest(t, srv, map[string]string{
@@ -260,7 +260,7 @@ func TestCWAlarm_PutPreservesState(t *testing.T) {
 	srv := newCWAlarmTestServer(t)
 	cwRequest(t, srv, map[string]string{
 		"Action": "PutMetricAlarm", "AlarmName": "preserve",
-		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GT",
+		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GreaterThanThreshold",
 		"Threshold": "1", "EvaluationPeriods": "1", "Period": "60",
 	})
 	cwRequest(t, srv, map[string]string{
@@ -270,7 +270,7 @@ func TestCWAlarm_PutPreservesState(t *testing.T) {
 	// Re-put the alarm (update).
 	cwRequest(t, srv, map[string]string{
 		"Action": "PutMetricAlarm", "AlarmName": "preserve",
-		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GT",
+		"MetricName": "M", "Namespace": "N", "ComparisonOperator": "GreaterThanThreshold",
 		"Threshold": "2", "EvaluationPeriods": "1", "Period": "60",
 	})
 	// State should be preserved.

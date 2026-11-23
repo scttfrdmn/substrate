@@ -51,7 +51,7 @@ import (
 //
 // # Unit outputs
 //
-// Six of CloudWatch's eleven operations are modeled with a smithy.api#Unit output, and the
+// Eight of the fourteen CloudWatch operations substrate routes are modeled with a smithy.api#Unit output, and the
 // RPC v2 CBOR protocol tests are explicit that such a response carries no body and
 // MUST NOT set Content-Type (`no_output` in
 // smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy lists Content-Type in
@@ -101,6 +101,13 @@ type cwMember struct {
 // No CloudWatch list is smithy.api#xmlFlattened — verified across the whole model, not
 // assumed — so the Query rendering always wraps elements in <member> elements.
 type cwList []any
+
+// cwMap is a CloudWatch map shape — DatapointValueMap, the one map an output carries — as an
+// ordered list of entries, ordered for the reason [cwDoc] is. JSON and CBOR render it as an object
+// and a map, exactly as a structure; the query protocol renders it as a non-flattened map,
+// <Name><entry><key>k</key><value>v</value></entry></Name>, which is how awsQuery serializes a
+// map without the xmlFlattened trait.
+type cwMap []cwMember
 
 // with returns doc with a member appended. It is a value method returning a new slice
 // so that a handler can build a document in one expression.
@@ -181,8 +188,8 @@ func cwRespond(req *AWSRequest, operation, requestID string, result cwDoc) (*AWS
 }
 
 // cwUnitResponse answers an operation whose modeled output is smithy.api#Unit:
-// PutMetricAlarm, DeleteAlarms, SetAlarmState, EnableAlarmActions, DisableAlarmActions
-// and PutMetricData.
+// PutMetricAlarm, DeleteAlarms, SetAlarmState, EnableAlarmActions, DisableAlarmActions,
+// PutMetricData, TagResource and UntagResource.
 func cwUnitResponse(req *AWSRequest, operation, requestID string) (*AWSResponse, error) {
 	return cwRespond(req, operation, requestID, nil)
 }
@@ -244,6 +251,18 @@ func cwWriteXMLValue(b *bytes.Buffer, name string, v any, depth int) error {
 			if err := cwWriteXMLValue(b, "member", elem, depth+1); err != nil {
 				return fmt.Errorf("element %d: %w", i+1, err)
 			}
+		}
+	case cwMap:
+		for _, entry := range t {
+			b.WriteString("<entry><key>")
+			if err := xml.EscapeText(b, []byte(entry.Name)); err != nil {
+				return fmt.Errorf("escape map key: %w", err)
+			}
+			b.WriteString("</key>")
+			if err := cwWriteXMLValue(b, "value", entry.Value, depth+1); err != nil {
+				return fmt.Errorf("map entry %q: %w", entry.Name, err)
+			}
+			b.WriteString("</entry>")
 		}
 	default:
 		text, err := cwXMLText(v)
@@ -331,6 +350,8 @@ func cwWriteJSONValue(b *bytes.Buffer, v any, depth int) error {
 	switch t := v.(type) {
 	case cwDoc:
 		return cwWriteJSONDoc(b, t, depth)
+	case cwMap:
+		return cwWriteJSONDoc(b, cwDoc(t), depth)
 	case cwList:
 		if depth > cwMaxDepth {
 			return fmt.Errorf("cloudwatch: response nests deeper than %d levels", cwMaxDepth)
@@ -380,6 +401,8 @@ func cwRenderCBOR(result cwDoc) ([]byte, error) {
 // seconds.
 func cwToCBOR(v any) any {
 	switch t := v.(type) {
+	case cwMap:
+		return cwToCBOR(cwDoc(t))
 	case cwDoc:
 		out := make(cborMap, 0, len(t))
 		for _, m := range t {

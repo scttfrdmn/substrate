@@ -59,7 +59,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 38 | KMS | `kms` | JSON | 25 |
 | 39 | Lambda | `lambda` | REST/JSON | 29 |
 | 40 | CloudWatch Logs | `logs` | JSON | 14 |
-| 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 11 |
+| 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 14 |
 | 42 | MSK | `msk` | REST/JSON | 9 |
 | 43 | HealthOmics | `omics` | REST/JSON | 5 |
 | 44 | OpenSearch | `opensearch` | REST/JSON | 0 |
@@ -14108,7 +14108,7 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans forty resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans forty-one resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances and Elastic IP addresses (`elastic-ip`, as of #1191), EC2
 security groups, launch templates and EBS volumes (`security-group`, `launch-template` and
 `volume`, as of #1523), IAM users, roles and instance profiles (`instance-profile`, as of #1523),
@@ -14117,9 +14117,14 @@ APIs, API Gateway v2 HTTP and WebSocket APIs, Step Functions state machines and 
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
 clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
-distributions, CloudWatch Logs log groups, KMS keys, SNS topics, Secrets Manager
-secrets, Systems Manager parameters, and ELBv2 load balancers, target groups,
-listeners and listener rules.
+distributions, CloudWatch Logs log groups, CloudWatch alarms (`cloudwatch:alarm`, as of #1618),
+KMS keys, SNS topics, Secrets Manager secrets, Systems Manager parameters, and ELBv2 load
+balancers, target groups, listeners and listener rules.
+
+A CloudWatch alarm is reported under `arn:aws:cloudwatch:{region}:{account}:alarm:{name}`, the
+ARN CloudWatch's own `TagResource` takes, and `TagResources` and `UntagResources` write through
+to it under CloudWatch's 50-tag quota. Like a log group, its previously-tagged state is a
+side-car key rather than a member of its record; see [Alarm tags](#alarm-tags).
 
 An API Gateway HTTP or WebSocket API (`/apis/{id}`) is the newest (#1378), reached by the
 same `apigateway` type filter as a REST API. A log group (#1282) and a v2 API are the two
@@ -18156,13 +18161,38 @@ recorded event, so the same occurrences come due at the same request and mint th
 recorded copies of the dispatches are skipped rather than executed twice, as for an event-source
 mapping's polls.
 
+#### CloudWatch metrics
+
+Each invocation counts toward the `AWS/Scheduler` metrics the user guide's *Monitoring* page
+publishes ([#1513](https://github.com/scttfrdmn/substrate/issues/1513)). They are reported both
+with a `ScheduleGroup` dimension and as account metrics with no dimensions, which sum every group.
+`GetMetricData`, `GetMetricStatistics` and `ListMetrics` answer them.
+
+| Metric | Counted |
+|---|---|
+| `InvocationAttemptCount` | Every attempt, the first and each retry |
+| `TargetErrorCount` | Every failed attempt: a target's error, a seeded failure, a denial of the role, or an input substrate could not build |
+| `TargetErrorThrottledCount` | A failed attempt that is a throttle: HTTP 429, or a code naming a throttle |
+| `InvocationDroppedCount` | Every invocation that fails for good, whether or not a dead-letter queue then receives it |
+| `InvocationsSentToDeadLetterCount` | Every dead-letter event the queue accepts |
+| `InvocationsFailedToBeSentToDeadLetterCount`, and the same name suffixed `_<error_code>` | Every dead-letter event the queue refuses; the suffix is the refusal's code |
+
+Each event counts in the minute its attempt was due, even when the clock reaches that minute in
+one jump. Each event is one sample of value 1 with unit `Count`, so a period's `Sum` and
+`SampleCount` are the event count, and its `Average`, `Minimum` and `Maximum` are 1.
+
+Nothing is sent from the Scheduler to CloudWatch. The Scheduler keeps a counter per metric per
+minute per group beside its timers, and CloudWatch reads those counters when it is asked, as it
+derives [EC2 vCPU usage](#ec2-vcpu-usage-in-aws-usage) from EC2's instances. So no extra event is
+recorded, and a replay rebuilds the same counters. A group's counters keep the last 10,080
+minutes that saw an invocation.
+
+Two metrics are never counted. `InvocationThrottleCount` would need a Scheduler invocation quota
+to exceed, and substrate models none. `InvocationsSentToDeadLetterCount_Truncated_MessageSizeExceeded`
+would need a truncated dead-letter payload, and substrate truncates none.
+
 #### What is not modelled
 
-- **CloudWatch metrics.** Scheduler publishes `InvocationAttemptCount`, `TargetErrorCount`,
-  `InvocationDroppedCount`, `InvocationsSentToDeadLetterCount` and others in `AWS/Scheduler`.
-  Substrate's CloudWatch records only metric names, so a metric would carry no value a test could
-  assert on, and none is emitted. The invocation is observable through its target's effect and the
-  dead-letter queue ([#1513](https://github.com/scttfrdmn/substrate/issues/1513)).
 - The REST universal-target bindings noted above
   ([#1511](https://github.com/scttfrdmn/substrate/issues/1511)), and the templated targets recorded as
   intent ([#1512](https://github.com/scttfrdmn/substrate/issues/1512)).
@@ -18274,8 +18304,9 @@ closing tag was the operation's — not well-formed XML at all. `MetricAlarms` a
 omitted.
 
 **An operation with a `smithy.api#Unit` output answers with no body and no
-`Content-Type`.** Six of the eleven do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
-`EnableAlarmActions`, `DisableAlarmActions` and `PutMetricData`. On the CBOR path they
+`Content-Type`.** Eight of the fourteen do: `PutMetricAlarm`, `DeleteAlarms`, `SetAlarmState`,
+`EnableAlarmActions`, `DisableAlarmActions`, `PutMetricData`, `TagResource` and
+`UntagResource`. On the CBOR path they
 return HTTP 200 carrying only `Smithy-Protocol: rpc-v2-cbor` — the rule comes from the
 `no_output` protocol test in `smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy`,
 which lists `Content-Type` in its `forbidHeaders`, rather than from the protocol spec page.
@@ -18286,17 +18317,125 @@ the JSON path the same operations answer `{}`, because `awsJson1_0` has no equiv
 and botocore reads a zero-length JSON body as a parse failure. On the Query path they answer
 a response wrapper with no result element.
 
-**Absent and present-but-empty are different answers.** A member substrate does not model
-is omitted, so a typed client reads it as nil and can tell it was never set: a `MetricAlarm`
-carries no timestamps, `Unit`, `ExtendedStatistic`, `DatapointsToAlarm` or
-`TreatMissingData`, and an alarm created without OK actions omits `OKActions` rather than
-returning an empty list. A member substrate models as empty is present: `DescribeAlarms`
-always returns `MetricAlarms`, a metric published without dimensions returns an empty
-`Dimensions`, and a `GetMetricData` result for a published metric has empty `Timestamps`
-and `Values` because substrate records a metric's identity but not its time series (running
-the workload behind the API is outside what substrate models). The one exception is the
-EC2 vCPU usage metrics below, whose value is API-observable state rather than workload
-output.
+**Absent and present-but-empty are different answers.** A member that was never set is
+omitted, so a typed client reads it as nil and can tell it was never set: an alarm created
+without OK actions omits `OKActions` rather than returning an empty list, and one created
+without `TreatMissingData` omits it rather than reporting the default. A member substrate
+models as empty is present: `DescribeAlarms` always returns `MetricAlarms`, a metric
+published without dimensions returns an empty `Dimensions`, and a `GetMetricData` result
+whose window holds no datapoint has empty `Timestamps` and `Values`.
+
+### Stored datapoints
+
+`PutMetricData` stores every datapoint it is given, and `GetMetricData` and
+`GetMetricStatistics` compute their statistics from the stored points
+([#1595](https://github.com/scttfrdmn/substrate/issues/1595)). Earlier releases kept only a
+metric's name and discarded its values, on the reading that datapoints are workload output.
+That reading was wrong for this operation. The caller supplies the values through an API
+call, so reading them back is an API observation. What stays out of scope is a workload that
+produces metrics on its own, such as an instance's `CPUUtilization`, because substrate runs no
+workload. Two derived exceptions report values that are facts about API-observable state:
+[EC2 vCPU usage](#ec2-vcpu-usage-in-aws-usage) and the
+[`AWS/Scheduler` invocation metrics](#cloudwatch-metrics).
+
+- **What a series is.** A metric's identity is its namespace, name and whole dimension set.
+  Dimension order does not matter. Each point keeps its `Value`, its `Values`/`Counts` pair or
+  its `StatisticValues` set, with its `Unit` and `StorageResolution`. A datum that omits
+  `Timestamp` is stamped with the simulated clock.
+- **How a window is cut.** `StartTime` is rounded down as CloudWatch rounds it: to the minute,
+  or to 5 minutes or an hour for a start 15 or 63 days back. A `Period` under 60 seconds rounds
+  the start to that period instead. Periods are laid end to end from there, and `EndTime` is
+  exclusive. A regular-resolution point counts at the start of its minute, and a point
+  published with `StorageResolution` 1 counts at its own second. A period with no point
+  reports no datapoint.
+- **Which statistics.** `SampleCount`, `Sum`, `Average`, `Minimum` and `Maximum` come from every
+  point. A `Values` element counts its `Counts` entry, or 1 when `Counts` is omitted. A
+  `StatisticValues` set contributes its own four members. A percentile `pNN` (`p0` to `p100`)
+  is computed by **nearest rank**: the values are ordered, each weighted by its count, and the
+  answer is the smallest value whose cumulative weight reaches NN percent. AWS does not publish
+  its method, so this one is substrate's, chosen because it always answers a value that was
+  published. A `StatisticValues` set joins a percentile only in the two cases `PutMetricData`
+  names. Other extended statistics (trimmed and winsorized means, `IQM`, `PR`, `TC`, `TS`)
+  are not computed, and a query naming one gets no datapoint.
+- **Units.** A query naming a `Unit` reads only the points published with it. A datum that
+  named none was published with `None`. A `GetMetricStatistics` datapoint reports the unit its
+  points share, or `None` when they differ. AWS aggregates different units separately, and
+  substrate does not.
+- **Order and paging.** `GetMetricData` orders values by `ScanBy`, `TimestampDescending` when
+  omitted. Paging counts datapoints across the returned results in query order. A page carries
+  at most `MaxDatapoints` of them (default 100,800). A result with datapoints beyond the page
+  reports `StatusCode` `PartialData`, and `NextToken` is an offset token for the next page.
+  `GetMetricStatistics` answers its datapoints in ascending order.
+- **Expressions.** `GetMetricData` evaluates the arithmetic core of metric math: numbers, the
+  `Id`s of the request's other queries, `+ - * /`, unary minus and parentheses. Two series
+  combine at the timestamps both carry, and a point divided by zero is dropped. Anything else
+  is not evaluated: functions such as `SUM(METRICS())`, `SEARCH`, Metrics Insights `SELECT`,
+  a constant, an unknown `Id` or a cycle. Such a result carries no values and a `Messages`
+  entry with `Code` `Unsupported`. That code and its text are substrate's own.
+- **Retention.** Each series keeps at most 10,080 points, a week at one-minute resolution, and
+  drops its oldest when a write takes it past that. `cloudwatch.max_datapoints_per_series` in
+  `substrate.yaml` (or `SUBSTRATE_CLOUDWATCH_MAX_DATAPOINTS_PER_SERIES`) sets another cap.
+  CloudWatch's age-based roll-up to coarser periods is not modelled: a point reads back at full
+  resolution for as long as it is kept.
+- **Validation.** `PutMetricData` stores nothing from a request that fails any of these checks.
+  It refuses a missing `Namespace` or `MetricName`. It refuses a value outside -2^360 to 2^360,
+  or a `NaN` or infinity. It refuses more than 30 dimensions, a dimension outside its published
+  lengths, or a dimension named twice. It refuses more than 150 `Values`, a `Counts` array of a
+  different length, or `Counts` without `Values`. It refuses `Value` with `Values` or with
+  `StatisticValues`, and a `StatisticValues` set missing a member. It refuses a `Timestamp` more
+  than two weeks before the simulated clock or more than two hours after it. It refuses a `Unit`
+  outside its valid values, a `StorageResolution` other than 1 or 60, and more than 1,000 metrics
+  in one request. The codes are the operation's published `MissingParameter`,
+  `InvalidParameterValue` and `InvalidParameterCombination`; the messages are substrate's own.
+  `EntityMetricData` datums are stored like `MetricData` ones, and the entity is not.
+
+### What `DescribeAlarms` renders
+
+`DescribeAlarms` and `DescribeAlarmsForMetric` render every `PutMetricAlarm` member the alarm
+was put with ([#1620](https://github.com/scttfrdmn/substrate/issues/1620)): `Dimensions`,
+`ExtendedStatistic`, `Unit`, `DatapointsToAlarm`, `TreatMissingData`,
+`EvaluateLowSampleCountPercentile`, `ThresholdMetricId` and the `Metrics` of a metric-math
+alarm, beside the members earlier releases rendered. They also render the three timestamps
+CloudWatch keeps. `AlarmConfigurationUpdatedTimestamp` is the last `PutMetricAlarm`.
+`StateUpdatedTimestamp` is the last state write, and `StateTransitionedTimestamp` is the last
+change of `StateValue`. A metric-math alarm omits `MetricName`, `Namespace` and `Period`, and an
+anomaly-detection alarm omits `Threshold`. `ActionConfiguration`, `EvaluationCriteria`,
+`EvaluationInterval`, `EvaluationWindow` and `WarmUpConfiguration` are accepted and not
+rendered.
+
+An update keeps the alarm's state and its tags and replaces the rest of the configuration, as
+the reference says: "the update completely overwrites the previous configuration of the alarm."
+`PutMetricAlarm` refuses what its page publishes as invalid. That covers a `Statistic`,
+`ComparisonOperator`, `TreatMissingData`, `EvaluateLowSampleCountPercentile` or `Unit` outside
+its valid values, and `Statistic` with `ExtendedStatistic`. It covers `Metrics` with any of
+`Namespace`, `MetricName`, `Dimensions`, `Period`, `Unit`, `Statistic` or `ExtendedStatistic`. It
+covers a `Period` other than 10, 20, 30 or a multiple of 60, and an evaluation window longer than
+a week, or longer than a day for a period under an hour. It also covers more than five actions in
+a list and more than 30 dimensions. The messages are substrate's own.
+
+Storing the configuration is not evaluating it. An alarm's `StateValue` moves only by
+`SetAlarmState`, and evaluating alarms against stored datapoints is
+[#1637](https://github.com/scttfrdmn/substrate/issues/1637).
+
+### Alarm tags
+
+`TagResource`, `UntagResource` and `ListTagsForResource` take an alarm ARN,
+`arn:aws:cloudwatch:{region}:{account}:alarm:{name}`
+([#1618](https://github.com/scttfrdmn/substrate/issues/1618),
+[#1607](https://github.com/scttfrdmn/substrate/issues/1607)). `PutMetricAlarm`'s `Tags` are set
+when it creates an alarm. An update ignores them, as the reference says: "any tags you specify in
+this parameter are ignored." The account and Region come from the ARN, never from the caller.
+
+- An alarm holds at most 50 tags, counted over the merged set. A tag `Key` is 1 to 128
+  characters and a `Value` at most 256. The pages publish no code for exceeding the quota, so
+  the refusal is the common `InvalidParameterValue`, with substrate's own message.
+- A well-formed dashboard, metric-stream or Contributor Insights rule ARN names a type AWS tags
+  and substrate does not model. It answers `ResourceNotFoundException` (404). Any other ARN is
+  `InvalidParameterValue`.
+- `ListTagsForResource` always returns `Tags`, in key order, and empty for an alarm with none.
+- The [tagging API](#resource-groups-tagging) reports alarms and writes through to them.
+  `DeleteAlarms` removes an alarm's tag history with it, so an alarm re-created under the name
+  starts never-tagged.
 
 ### EC2 vCPU usage in `AWS/Usage`
 
@@ -18381,17 +18520,20 @@ is a documented divergence from the reference writer's output and conformant eit
 
 | Operation | Notes |
 |-----------|-------|
-| PutMetricData | Records each datum's name and namespace for ListMetrics; values are discarded |
-| ListMetrics | Filters on `Namespace`, `MetricName` and `Dimensions`; a published metric's `Dimensions` is empty; also lists the [EC2 vCPU usage metrics](#ec2-vcpu-usage-in-aws-usage) the account has used |
-| GetMetricData | One result per query; `ReturnData=false` gets only `Id` and `StatusCode`; no data points except for an [EC2 vCPU usage metric](#ec2-vcpu-usage-in-aws-usage); expressions are not evaluated; any `NextToken` is `InvalidNextToken` |
-| GetMetricStatistics | Validates required members, `Statistics` against `ExtendedStatistics`, `Period` and the 1,440-datapoint ceiling; empty `Datapoints` except for an [EC2 vCPU usage metric](#ec2-vcpu-usage-in-aws-usage); `ExtendedStatistics` values are not reported |
-| PutMetricAlarm | Preserves an existing alarm's state on re-put |
+| PutMetricData | Stores every datapoint — see [Stored datapoints](#stored-datapoints); validates the published limits and stores nothing from a refused request |
+| ListMetrics | Filters on `Namespace`, `MetricName`, `Dimensions` and `RecentlyActive`; returns each metric's dimensions; pages 500 at a time; also lists the [`AWS/Scheduler` metrics](#cloudwatch-metrics) and the [EC2 vCPU usage metrics](#ec2-vcpu-usage-in-aws-usage) the account has used |
+| GetMetricData | Computes each `MetricStat` query from the stored datapoints; `ReturnData=false` gets only `Id` and `StatusCode`; evaluates arithmetic expressions only; pages on `MaxDatapoints`/`NextToken`; orders by `ScanBy` |
+| GetMetricStatistics | Validates required members, `Statistics` against `ExtendedStatistics`, `Period` and the 1,440-datapoint ceiling; computes `Statistics` and percentile `ExtendedStatistics` from the stored datapoints |
+| PutMetricAlarm | Stores every member — see [What DescribeAlarms renders](#what-describealarms-renders); preserves an existing alarm's state and tags on re-put; `Tags` set on create |
 | DescribeAlarms | Filters on `AlarmNames` and `StateValue`; paginates on `MaxRecords`/`NextToken`; refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
-| DescribeAlarmsForMetric | Filters on `MetricName` and `Namespace`; does not paginate |
-| DeleteAlarms | |
-| SetAlarmState | `ResourceNotFoundException` for an unknown alarm |
+| DescribeAlarmsForMetric | Filters on `MetricName`, `Namespace`, `Dimensions` (as a set), `Statistic`, `ExtendedStatistic`, `Period` and `Unit`; does not paginate |
+| DeleteAlarms | Removes the alarm's tag history with it |
+| SetAlarmState | `ResourceNotFoundException` for an unknown alarm; moves the state timestamps |
 | EnableAlarmActions | |
 | DisableAlarmActions | |
+| TagResource | Alarm ARNs; 50-tag quota over the merged set — see [Alarm tags](#alarm-tags) |
+| UntagResource | Alarm ARNs; a key the alarm does not carry is not an error |
+| ListTagsForResource | Alarm ARNs; `Tags` always present, in key order |
 
 ### CloudFormation resource types
 

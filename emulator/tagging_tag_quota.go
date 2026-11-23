@@ -143,6 +143,18 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 			return nil
 		}
 		return taggingQuotaRefusal(taggingCWLQuotaRefusal(raw, addTags, removeKeys))
+	case monitoringNamespace:
+		// A CloudWatch alarm's 50-tag quota (#1618), refused with CloudWatch's own answer.
+		var alarm struct {
+			Tags map[string]string `json:"Tags"`
+		}
+		if !strings.HasPrefix(key, cwAlarmKeyPrefix) || !taggingDecodeForQuota(raw, &alarm) {
+			return nil
+		}
+		if refusal := cwCheckTags(mergeStringMap(alarm.Tags, addTags, removeKeys)); refusal != nil {
+			return taggingQuotaRefusal(refusal)
+		}
+		return nil
 	default:
 		return nil
 	}

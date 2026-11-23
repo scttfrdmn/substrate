@@ -381,6 +381,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "acm", scan: p.scanACMCertificates},
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
 		{typePrefix: "logs", scan: p.scanCloudWatchLogGroups},
+		{typePrefix: "cloudwatch", scan: p.scanCloudWatchAlarms},
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
@@ -1459,6 +1460,40 @@ func (p *TaggingPlugin) scanCloudWatchLogGroups(_ context.Context, reqCtx *Reque
 	return out, nil
 }
 
+// scanCloudWatchAlarms reports the caller's CloudWatch alarms (#1618), under the ARN the alarm
+// record carries — arn:aws:cloudwatch:{region}:{acct}:alarm:{name}, the form CloudWatch's own
+// TagResource takes. Whether an alarm is reported follows #938's rule through the tag-history
+// side-car; see cloudwatch_tags.go. A store fault reading either is returned, which
+// [TaggingPlugin.scanAllResources] logs and skips.
+func (p *TaggingPlugin) scanCloudWatchAlarms(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := p.state.List(goCtx, monitoringNamespace, taggingScanPrefix(cwAlarmKeyPrefix, reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list cloudwatch alarms: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := p.state.Get(goCtx, monitoringNamespace, k)
+		if err != nil {
+			return nil, fmt.Errorf("get cloudwatch alarm %s: %w", k, err)
+		}
+		var alarm CWAlarm
+		if raw == nil || json.Unmarshal(raw, &alarm) != nil {
+			continue
+		}
+		everTagged, err := cwAlarmEverTagged(goCtx, p.state, k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: alarm.AlarmARN,
+			Tags:        mapToTaggingTags(alarm.Tags),
+			everTagged:  everTagged,
+		})
+	}
+	return out, nil
+}
+
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -1837,6 +1872,17 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 			acct = callerAccount
 		}
 		return apigatewayNamespace, apigwAPIKey(acct, parts[3], apiID), nil
+
+	case "cloudwatch":
+		// arn:aws:cloudwatch:{region}:{acct}:alarm:{name} — through [cwParseAlarmTagARN], which
+		// CloudWatch's own three tagging operations parse through (#1618). A dashboard, metric
+		// stream or Contributor Insights rule is taggable at AWS and unmodeled here, and is the
+		// unsupported-type answer like any ARN this arm cannot key.
+		key, arnErr := cwParseAlarmTagARN(arn)
+		if arnErr != nil {
+			return "", "", unsupportedTagResource("CloudWatch %q is not an alarm ARN: %s", resource, arnErr.Code)
+		}
+		return monitoringNamespace, key, nil
 
 	case "logs":
 		// arn:aws:logs:{region}:{acct}:log-group:{name} — through [cwlParseLogGroupTagARN], which is
@@ -2351,6 +2397,31 @@ func mergeResourceTags(
 			return fmt.Errorf("put V2ApiState: %w", err)
 		}
 		return apigwv2StampEverTagged(goCtx, state, key, tagsBefore, len(addTags))
+
+	case monitoringNamespace:
+		// A CloudWatch alarm (#1618), decoded as [CWAlarm] because CloudWatch's own TagResource
+		// round-trips the same struct, and with its tag history in the side-car CloudWatch's own
+		// writers stamp; see cloudwatch_tags.go.
+		if !strings.HasPrefix(key, cwAlarmKeyPrefix) {
+			return fmt.Errorf("unsupported CloudWatch resource key: %s", key)
+		}
+		var alarm CWAlarm
+		if err := json.Unmarshal(raw, &alarm); err != nil {
+			return fmt.Errorf("unmarshal CWAlarm: %w", err)
+		}
+		tagsBefore := len(alarm.Tags)
+		alarm.Tags = mergeStringMap(alarm.Tags, addTags, removeKeys)
+		if len(alarm.Tags) == 0 {
+			alarm.Tags = nil
+		}
+		updated, err := json.Marshal(alarm)
+		if err != nil {
+			return fmt.Errorf("marshal CWAlarm: %w", err)
+		}
+		if err := state.Put(goCtx, ns, key, updated); err != nil {
+			return fmt.Errorf("put CWAlarm: %w", err)
+		}
+		return cwStampAlarmEverTagged(goCtx, state, key, tagsBefore, len(addTags))
 
 	case cloudwatchLogsNamespace:
 		// Behind a kind guard, because the namespace also holds log streams, event blobs, two name

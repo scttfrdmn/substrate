@@ -183,6 +183,13 @@ func RegisterDefaultPlugins(
 		schedulerOpts["auth_controller"] = settings.auth
 	}
 
+	// CloudWatch keeps a configurable number of datapoints per metric series (#1595); with no
+	// config the plugin's own default applies.
+	cloudwatchOpts := map[string]any{}
+	if cfg != nil && cfg.CloudWatch.MaxDatapointsPerSeries > 0 {
+		cloudwatchOpts[cwMaxDatapointsOption] = cfg.CloudWatch.MaxDatapointsPerSeries
+	}
+
 	rdsOpts := map[string]any{}
 	if rdsExec != nil {
 		rdsOpts["rds_executor"] = rdsExec
@@ -218,7 +225,7 @@ func RegisterDefaultPlugins(
 		{&AccountPlugin{}, "account", nil},
 		{&ConfigServicePlugin{}, "config", nil},
 		{&SchedulerPlugin{}, "scheduler", schedulerOpts},
-		{&CloudWatchPlugin{}, "cloudwatch", nil},
+		{&CloudWatchPlugin{}, "cloudwatch", cloudwatchOpts},
 		{&ACMPlugin{}, "acm", nil},
 		{&APIGatewayPlugin{}, "apigateway", nil},
 		{&APIGatewayV2Plugin{}, "apigatewayv2", nil},

@@ -98,6 +98,10 @@ func (r *cwRecorder) find(operation string) (cwExchange, bool) {
 //     round-trips against itself and still fails against a generated deserializer.
 func TestJourney_CloudWatchProtocols(t *testing.T) {
 	ts := emulator.StartTestServer(t)
+	// A frozen clock, so the datapoint below is inside PutMetricData's two-week window and the
+	// GetMetricData window that reads it back is fixed (#1595).
+	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)
+	ts.FreezeTimeAt(now)
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {
@@ -120,7 +124,7 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 			Unit:       cwtypes.StandardUnitCount,
 			// A timestamp exercises tag 1 on the request side: the SDK writes epoch
 			// seconds, and the plugin has to read it back without a @timestampFormat.
-			Timestamp: aws.Time(time.Unix(1_700_000_000, 0)),
+			Timestamp: aws.Time(now.Add(-time.Minute)),
 		}},
 	}); err != nil {
 		t.Fatalf("PutMetricData: %v — a CBOR request body the plugin cannot read is #785 exactly", err)
@@ -185,6 +189,10 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 		EvaluationPeriods: aws.Int32(2),
 		Period:            aws.Int32(300),
 		AlarmActions:      []string{"arn:aws:sns:us-east-1:123456789012:journey"},
+		// Members DescribeAlarms used to drop (#1620), and tags it never stored (#1618).
+		TreatMissingData:  aws.String("breaching"),
+		DatapointsToAlarm: aws.Int32(2),
+		Tags:              []cwtypes.Tag{{Key: aws.String("aegc:managed"), Value: aws.String("true")}},
 	}); err != nil {
 		t.Fatalf("PutMetricAlarm: %v", err)
 	}
@@ -218,6 +226,41 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 	// actions were configured" from "an empty list was configured".
 	if alarm.OKActions != nil {
 		t.Errorf("OKActions reads %v; none were set, so the member is absent", alarm.OKActions)
+	}
+	if v := aws.ToString(alarm.TreatMissingData); v != "breaching" {
+		t.Errorf("TreatMissingData reads %q, want breaching", v)
+	}
+	if n := aws.ToInt32(alarm.DatapointsToAlarm); n != 2 {
+		t.Errorf("DatapointsToAlarm reads %d, want 2", n)
+	}
+	if ts := aws.ToTime(alarm.AlarmConfigurationUpdatedTimestamp); !ts.Equal(now) {
+		t.Errorf("AlarmConfigurationUpdatedTimestamp reads %v, want the simulated clock %v", ts, now)
+	}
+
+	// --- tags on the alarm ARN, over CBOR (#1618, #1607) ---
+	if _, err := cw.TagResource(ctx, &cloudwatch.TagResourceInput{
+		ResourceARN: alarm.AlarmArn,
+		Tags:        []cwtypes.Tag{{Key: aws.String("team"), Value: aws.String("journey")}},
+	}); err != nil {
+		t.Fatalf("TagResource: %v", err)
+	}
+	if _, err := cw.UntagResource(ctx, &cloudwatch.UntagResourceInput{
+		ResourceARN: alarm.AlarmArn, TagKeys: []string{"team"},
+	}); err != nil {
+		t.Fatalf("UntagResource: %v", err)
+	}
+	tags, err := cw.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{ResourceARN: alarm.AlarmArn})
+	if err != nil {
+		t.Fatalf("ListTagsForResource: %v", err)
+	}
+	if len(tags.Tags) != 1 || aws.ToString(tags.Tags[0].Key) != "aegc:managed" || aws.ToString(tags.Tags[0].Value) != "true" {
+		t.Errorf("ListTagsForResource = %+v, want the one tag PutMetricAlarm set", tags.Tags)
+	}
+	var tagNotFound *cwtypes.ResourceNotFoundException
+	if _, err := cw.ListTagsForResource(ctx, &cloudwatch.ListTagsForResourceInput{
+		ResourceARN: aws.String("arn:aws:cloudwatch:us-east-1:123456789012:alarm:no-such-alarm"),
+	}); !errors.As(err, &tagNotFound) {
+		t.Errorf("ListTagsForResource(no-such-alarm) = %v, want ResourceNotFoundException", err)
 	}
 
 	// --- state, including StateReasonData, which was stored but never rendered ---
@@ -279,17 +322,15 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 			len(none.MetricAlarms))
 	}
 
-	// --- GetMetricData: no data points, and that is a modeled answer ---
+	// --- GetMetricData: the published datapoint reads back ---
 	//
-	// Substrate records a metric's identity, not its time series — running the workload
-	// behind the API is out of scope — so the query gets a result with no data points, and
-	// a caller must be able to tell that from "the operation returned nothing". The result
-	// is present, one per query as CloudWatch answers, with present-and-empty Timestamps and
-	// Values (#1498); before #785 this was a hardcoded one-byte CBOR map that said nothing
-	// about either member.
+	// The caller published the value through PutMetricData, so reading it back is an API
+	// observation (#1595). The window opens ten minutes back, so its one 5-minute period that
+	// holds the datapoint starts at 11:55. Before #785 this was a hardcoded one-byte CBOR map;
+	// before #1595 the result was present with empty Timestamps and Values.
 	data, err := cw.GetMetricData(ctx, &cloudwatch.GetMetricDataInput{
-		StartTime: aws.Time(time.Unix(1_700_000_000, 0)),
-		EndTime:   aws.Time(time.Unix(1_700_003_600, 0)),
+		StartTime: aws.Time(now.Add(-10 * time.Minute)),
+		EndTime:   aws.Time(now),
 		MetricDataQueries: []cwtypes.MetricDataQuery{{
 			Id: aws.String("journey0"),
 			MetricStat: &cwtypes.MetricStat{
@@ -308,9 +349,10 @@ func TestJourney_CloudWatchProtocols(t *testing.T) {
 	if len(data.MetricDataResults) != 1 {
 		t.Fatalf("GetMetricData returned %d results, want one per query", len(data.MetricDataResults))
 	}
-	if r := data.MetricDataResults[0]; aws.ToString(r.Id) != "journey0" || len(r.Values) != 0 ||
-		len(r.Timestamps) != 0 || r.StatusCode != cwtypes.StatusCodeComplete {
-		t.Errorf("GetMetricData result = %+v; want journey0, Complete, no data points", r)
+	if r := data.MetricDataResults[0]; aws.ToString(r.Id) != "journey0" || len(r.Values) != 1 || r.Values[0] != 3 ||
+		len(r.Timestamps) != 1 || !r.Timestamps[0].Equal(now.Add(-5*time.Minute)) ||
+		r.StatusCode != cwtypes.StatusCodeComplete {
+		t.Errorf("GetMetricData result = %+v; want journey0, Complete, the value 3 at 11:55", r)
 	}
 	if data.Messages == nil {
 		t.Error("GetMetricData omitted Messages; it is present and empty")

@@ -539,7 +539,9 @@ func (r *schedRun) retry(ctx context.Context, pend schedPending) (schedPending, 
 	for !pend.NextAttempt.After(r.now) && r.steps < schedMaxStepsPerRun {
 		r.steps++
 		pend.Attempts++
+		attemptAt := pend.NextAttempt
 		failure := r.attempt(ctx, pend)
+		r.count(ctx, attemptAt, schedAttemptMetrics(failure)...)
 		if failure == nil {
 			return schedPending{}, false
 		}
@@ -559,7 +561,7 @@ func (r *schedRun) retry(ctx context.Context, pend schedPending) (schedPending, 
 				continue
 			}
 		}
-		r.deadLetter(ctx, pend, failure, condition)
+		r.deadLetter(ctx, pend, failure, condition, attemptAt)
 		return schedPending{}, false
 	}
 	return pend, true
@@ -634,8 +636,32 @@ func (r *schedRun) attempt(ctx context.Context, pend schedPending) *schedFailure
 	return r.send(r.reqCtx(pend, "target", call.accountID, call.region), call.req)
 }
 
+// schedAttemptMetrics are the AWS/Scheduler metrics one attempt counts; see scheduler_metrics.go.
+func schedAttemptMetrics(failure *schedFailure) []string {
+	metrics := []string{schedMetricAttempt}
+	if failure == nil {
+		return metrics
+	}
+	metrics = append(metrics, schedMetricTargetError)
+	if failure.throttled() {
+		metrics = append(metrics, schedMetricTargetThrottled)
+	}
+	return metrics
+}
+
+// count adds one event to each named AWS/Scheduler metric, in the minute holding at. A counter
+// that cannot be written is logged rather than failing the invocation it describes: what the
+// invocation did does not depend on whether it was counted.
+func (r *schedRun) count(ctx context.Context, at time.Time, metrics ...string) {
+	if err := r.p.countMetrics(ctx, r.rec, at, metrics...); err != nil {
+		r.p.logger.Warn("scheduler: invocation metrics not counted", "schedule", r.rec.ARN, "err", err)
+	}
+}
+
 // deadLetter sends a failed invocation's dead-letter event to the schedule's queue, or drops it.
-func (r *schedRun) deadLetter(_ context.Context, pend schedPending, failure *schedFailure, condition string) {
+// at is when the last attempt was due, the minute its metrics count in.
+func (r *schedRun) deadLetter(ctx context.Context, pend schedPending, failure *schedFailure, condition string, at time.Time) {
+	r.count(ctx, at, schedMetricDropped)
 	dlq := r.rec.Target.DeadLetterConfig
 	if dlq == nil || dlq.ARN == "" {
 		r.p.logger.Info("scheduler: invocation dropped", "schedule", r.rec.ARN, "code", failure.Code)
@@ -644,6 +670,7 @@ func (r *schedRun) deadLetter(_ context.Context, pend schedPending, failure *sch
 	parts := strings.Split(dlq.ARN, ":")
 	if len(parts) != 6 {
 		r.p.logger.Warn("scheduler: dead-letter queue ARN is not an SQS ARN", "arn", dlq.ARN)
+		r.count(ctx, at, schedMetricFailedToSendDLQ)
 		return
 	}
 	region, account, queue := parts[3], parts[4], parts[5]
@@ -676,5 +703,12 @@ func (r *schedRun) deadLetter(_ context.Context, pend schedPending, failure *sch
 	if f := r.send(r.reqCtx(pend, "dead-letter", account, region), req); f != nil {
 		r.p.logger.Warn("scheduler: dead-letter event not delivered", "schedule", r.rec.ARN,
 			"queue", dlq.ARN, "code", f.Code, "status", http.StatusText(f.Status))
+		metrics := []string{schedMetricFailedToSendDLQ}
+		if f.Code != "" {
+			metrics = append(metrics, schedMetricFailedCodePrefix+f.Code)
+		}
+		r.count(ctx, at, metrics...)
+		return
 	}
+	r.count(ctx, at, schedMetricSentToDLQ)
 }

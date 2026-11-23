@@ -6,14 +6,15 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
 )
 
 // CloudWatchPlugin emulates the Amazon CloudWatch Alarms and Metrics API. It
 // handles PutMetricAlarm, DeleteAlarms, DescribeAlarms, DescribeAlarmsForMetric,
 // SetAlarmState, EnableAlarmActions, DisableAlarmActions, PutMetricData,
-// ListMetrics, GetMetricData and GetMetricStatistics.
+// ListMetrics, GetMetricData, GetMetricStatistics, TagResource, UntagResource and
+// ListTagsForResource.
 //
 // All three wire protocols CloudWatch's service shape declares are served —
 // aws.protocols#awsQuery, aws.protocols#awsJson1_0 and
@@ -26,7 +27,19 @@ type CloudWatchPlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// maxPoints is the number of datapoints a metric series keeps; see
+	// cloudwatch_metric_store.go.
+	maxPoints int
+
+	// mu serializes the read-modify-write of a series or an alarm, so two concurrent writes to
+	// one record cannot lose either.
+	mu sync.Mutex
 }
+
+// cwMaxDatapointsOption is the plugin option that sets the per-series datapoint cap; see
+// [CloudWatchCfg].
+const cwMaxDatapointsOption = "max_datapoints_per_series"
 
 // Name returns the service name "monitoring".
 func (p *CloudWatchPlugin) Name() string { return "monitoring" }
@@ -39,6 +52,10 @@ func (p *CloudWatchPlugin) Initialize(_ context.Context, cfg PluginConfig) error
 		p.tc = tc
 	} else {
 		p.tc = NewTimeController(time.Now())
+	}
+	p.maxPoints = cwDefaultMaxDatapointsPerSeries
+	if n, ok := cfg.Options[cwMaxDatapointsOption].(int); ok && n > 0 {
+		p.maxPoints = n
 	}
 	return nil
 }
@@ -77,6 +94,12 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.putMetricData(ctx, req)
 	case "ListMetrics":
 		return p.listMetrics(ctx, req)
+	case "TagResource":
+		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -84,60 +107,87 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 
 // --- Alarm CRUD operations --------------------------------------------------
 
+// putMetricAlarm creates or updates an alarm; see cloudwatch_alarms.go for what it stores and
+// the update rule.
 func (p *CloudWatchPlugin) putMetricAlarm(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["AlarmName"]
 	if name == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "AlarmName is required", HTTPStatus: http.StatusBadRequest}
 	}
-
-	threshold, _ := strconv.ParseFloat(req.Params["Threshold"], 64)
-	evalPeriods, _ := strconv.Atoi(req.Params["EvaluationPeriods"])
-	period, _ := strconv.Atoi(req.Params["Period"])
-
-	alarm := CWAlarm{
-		AlarmName:               name,
-		AlarmARN:                cwAlarmARN(ctx.Region, ctx.AccountID, name),
-		AlarmDescription:        req.Params["AlarmDescription"],
-		MetricName:              req.Params["MetricName"],
-		Namespace:               req.Params["Namespace"],
-		Statistic:               req.Params["Statistic"],
-		ComparisonOperator:      req.Params["ComparisonOperator"],
-		Threshold:               threshold,
-		EvaluationPeriods:       evalPeriods,
-		Period:                  period,
-		StateValue:              "INSUFFICIENT_DATA",
-		ActionsEnabled:          req.Params["ActionsEnabled"] != "false",
-		AlarmActions:            parseMemberList(req.Params, "AlarmActions"),
-		OKActions:               parseMemberList(req.Params, "OKActions"),
-		InsufficientDataActions: parseMemberList(req.Params, "InsufficientDataActions"),
+	alarm, awsErr := cwParseAlarm(req.Params)
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	requestTags, _ := cwParseTagList(req.Params, "Tags")
+	if awsErr := cwCheckTags(requestTags); awsErr != nil {
+		return nil, awsErr
 	}
 
-	// Preserve existing state if the alarm already exists.
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	now := p.tc.Now().UTC()
+	alarm.AlarmARN = cwAlarmARN(ctx.Region, ctx.AccountID, name)
+	alarm.AlarmConfigurationUpdatedTimestamp = now
+
 	goCtx := context.Background()
-	existingData, _ := p.state.Get(goCtx, monitoringNamespace, cwAlarmStateKey(ctx.AccountID, ctx.Region, name))
-	if existingData != nil {
-		var existing CWAlarm
-		if json.Unmarshal(existingData, &existing) == nil {
-			alarm.StateValue = existing.StateValue
-			alarm.StateReason = existing.StateReason
-			alarm.StateReasonData = existing.StateReasonData
-		}
-	}
-
-	data, err := json.Marshal(alarm)
+	stateKey := cwAlarmStateKey(ctx.AccountID, ctx.Region, name)
+	existing, found, err := p.loadAlarm(goCtx, stateKey)
 	if err != nil {
-		return nil, fmt.Errorf("cloudwatch putMetricAlarm marshal: %w", err)
+		return nil, err
 	}
-	if err := p.state.Put(goCtx, monitoringNamespace, cwAlarmStateKey(ctx.AccountID, ctx.Region, name), data); err != nil {
-		return nil, fmt.Errorf("cloudwatch putMetricAlarm state.Put: %w", err)
+	if found {
+		// An update leaves the state, and the tags, as they were.
+		alarm.StateValue = existing.StateValue
+		alarm.StateReason = existing.StateReason
+		alarm.StateReasonData = existing.StateReasonData
+		alarm.StateUpdatedTimestamp = existing.StateUpdatedTimestamp
+		alarm.StateTransitionedTimestamp = existing.StateTransitionedTimestamp
+		alarm.Tags = existing.Tags
+	} else {
+		// "When this operation creates an alarm, the alarm state is immediately set to
+		// INSUFFICIENT_DATA."
+		alarm.StateValue = "INSUFFICIENT_DATA"
+		alarm.StateUpdatedTimestamp = now
+		alarm.StateTransitionedTimestamp = now
+		alarm.Tags = requestTags
 	}
 
+	if err := p.storeAlarm(goCtx, stateKey, alarm); err != nil {
+		return nil, err
+	}
 	idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
 	if err := updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
 		return nil, fmt.Errorf("cloudwatch putMetricAlarm index: %w", err)
 	}
-
 	return cwUnitResponse(req, "PutMetricAlarm", ctx.RequestID)
+}
+
+// loadAlarm reads the alarm stored at stateKey, reporting false when there is none.
+func (p *CloudWatchPlugin) loadAlarm(ctx context.Context, stateKey string) (CWAlarm, bool, error) {
+	data, err := p.state.Get(ctx, monitoringNamespace, stateKey)
+	if err != nil {
+		return CWAlarm{}, false, fmt.Errorf("cloudwatch load alarm: %w", err)
+	}
+	if data == nil {
+		return CWAlarm{}, false, nil
+	}
+	var alarm CWAlarm
+	if err := json.Unmarshal(data, &alarm); err != nil {
+		return CWAlarm{}, false, fmt.Errorf("cloudwatch decode alarm: %w", err)
+	}
+	return alarm, true, nil
+}
+
+// storeAlarm writes alarm at stateKey.
+func (p *CloudWatchPlugin) storeAlarm(ctx context.Context, stateKey string, alarm CWAlarm) error {
+	data, err := json.Marshal(alarm)
+	if err != nil {
+		return fmt.Errorf("cloudwatch marshal alarm: %w", err)
+	}
+	if err := p.state.Put(ctx, monitoringNamespace, stateKey, data); err != nil {
+		return fmt.Errorf("cloudwatch store alarm: %w", err)
+	}
+	return nil
 }
 
 func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
@@ -145,7 +195,15 @@ func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*
 
 	goCtx := context.Background()
 	for _, name := range names {
-		_ = p.state.Delete(goCtx, monitoringNamespace, cwAlarmStateKey(ctx.AccountID, ctx.Region, name))
+		stateKey := cwAlarmStateKey(ctx.AccountID, ctx.Region, name)
+		if err := p.state.Delete(goCtx, monitoringNamespace, stateKey); err != nil {
+			return nil, fmt.Errorf("cloudwatch deleteAlarms: %w", err)
+		}
+		// The tag history goes with the alarm, so an alarm re-created under the name starts
+		// never-tagged, as a new resource does.
+		if err := p.state.Delete(goCtx, monitoringNamespace, cwAlarmTaggedKey(stateKey)); err != nil {
+			return nil, fmt.Errorf("cloudwatch deleteAlarms tag history: %w", err)
+		}
 		idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
 		if err := removeFromStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
 			return nil, fmt.Errorf("cloudwatch deleteAlarms index: %w", err)
@@ -227,9 +285,6 @@ func (p *CloudWatchPlugin) describeAlarms(ctx *RequestContext, req *AWSRequest) 
 }
 
 func (p *CloudWatchPlugin) describeAlarmsForMetric(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	metricName := req.Params["MetricName"]
-	namespace := req.Params["Namespace"]
-
 	goCtx := context.Background()
 	idxKey := cwAlarmNamesKey(ctx.AccountID, ctx.Region)
 	allNames, err := loadStringIndex(goCtx, p.state, monitoringNamespace, idxKey)
@@ -247,10 +302,7 @@ func (p *CloudWatchPlugin) describeAlarmsForMetric(ctx *RequestContext, req *AWS
 		if unmarshalErr := json.Unmarshal(data, &alarm); unmarshalErr != nil {
 			continue
 		}
-		if metricName != "" && alarm.MetricName != metricName {
-			continue
-		}
-		if namespace != "" && alarm.Namespace != namespace {
+		if !cwAlarmMatchesMetric(alarm, req.Params) {
 			continue
 		}
 		alarms = append(alarms, alarm)
@@ -292,6 +344,11 @@ func (p *CloudWatchPlugin) setAlarmState(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("cloudwatch setAlarmState unmarshal: %w", err)
 	}
 
+	now := p.tc.Now().UTC()
+	if alarm.StateValue != stateValue {
+		alarm.StateTransitionedTimestamp = now
+	}
+	alarm.StateUpdatedTimestamp = now
 	alarm.StateValue = stateValue
 	alarm.StateReason = stateReason
 	alarm.StateReasonData = stateReasonData
@@ -361,38 +418,6 @@ func cwAlarmList(alarms []CWAlarm) cwList {
 	return list
 }
 
-// cwAlarmDoc renders one alarm as a MetricAlarm structure.
-//
-// Member order is the order substrate's XML struct used, not the model's, so that the
-// Query responses substrate already served are byte-for-byte unchanged; see the note in
-// cloudwatch_render.go on why order is free to be either.
-//
-// The members present are the ones [CWAlarm] stores. Modeled members substrate does not
-// track — the three timestamps, Dimensions, Unit, ExtendedStatistic, DatapointsToAlarm,
-// TreatMissingData and the rest — are absent rather than zero, which is the honest
-// answer: a typed client reads them as nil and can tell they were never set.
-func cwAlarmDoc(a CWAlarm) cwDoc {
-	doc := cwDoc{}.
-		with("AlarmName", a.AlarmName).
-		with("AlarmArn", a.AlarmARN).
-		withNonEmpty("AlarmDescription", a.AlarmDescription).
-		with("MetricName", a.MetricName).
-		with("Namespace", a.Namespace).
-		withNonEmpty("Statistic", a.Statistic).
-		with("ComparisonOperator", a.ComparisonOperator).
-		with("Threshold", a.Threshold).
-		with("EvaluationPeriods", a.EvaluationPeriods).
-		with("Period", a.Period).
-		with("StateValue", a.StateValue).
-		withNonEmpty("StateReason", a.StateReason).
-		withNonEmpty("StateReasonData", a.StateReasonData).
-		with("ActionsEnabled", a.ActionsEnabled)
-	return doc.
-		withStrings("AlarmActions", a.AlarmActions).
-		withStrings("OKActions", a.OKActions).
-		withStrings("InsufficientDataActions", a.InsufficientDataActions)
-}
-
 // --- State key helpers -------------------------------------------------------
 
 func cwAlarmStateKey(accountID, region, alarmName string) string {
@@ -416,102 +441,4 @@ func parseMemberList(params map[string]string, prefix string) []string {
 		result = append(result, val)
 	}
 	return result
-}
-
-// --- PutMetricData -----------------------------------------------------------
-
-// cwMetricNamesKey returns the state key for the metric name index.
-func cwMetricNamesKey(accountID, region, namespace string) string {
-	return "metric_names:" + accountID + "/" + region + "/" + namespace
-}
-
-// putMetricData handles the PutMetricData operation. Substrate records the
-// metric name and namespace so that ListMetrics can return them; actual
-// data-point values are discarded (GetMetricData returns empty results).
-// Closes #221.
-func (p *CloudWatchPlugin) putMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	namespace := req.Params["Namespace"]
-
-	for i := 1; ; i++ {
-		prefix := "MetricData.member." + strconv.Itoa(i) + "."
-		name := req.Params[prefix+"MetricName"]
-		if name == "" {
-			break
-		}
-		idxKey := cwMetricNamesKey(ctx.AccountID, ctx.Region, namespace)
-		if err := updateStringIndex(goCtx, p.state, monitoringNamespace, idxKey, name); err != nil {
-			return nil, fmt.Errorf("cloudwatch putMetricData index: %w", err)
-		}
-	}
-
-	return cwUnitResponse(req, "PutMetricData", ctx.RequestID)
-}
-
-// --- ListMetrics -------------------------------------------------------------
-
-// listMetrics handles the ListMetrics operation. It returns the metric names
-// that were previously published via PutMetricData for the given namespace
-// (#221), followed by the EC2 vCPU usage metrics in AWS/Usage that the caller's
-// instances have counted against (#1498; see cloudwatch_usage.go).
-//
-// A Dimensions filter is honored for both: a metric is listed only when it has
-// every named dimension, with the named value when one is given. A metric
-// published through PutMetricData is recorded without dimensions, so any
-// dimension filter excludes it.
-func (p *CloudWatchPlugin) listMetrics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
-	namespace := req.Params["Namespace"]
-	filterName := req.Params["MetricName"]
-	dimensionFilters := cwParseDimensions(req.Params, "Dimensions")
-
-	metrics := cwList{}
-
-	var namespaces []string
-	if namespace != "" {
-		namespaces = []string{namespace}
-	} else {
-		prefix := "metric_names:" + ctx.AccountID + "/" + ctx.Region + "/"
-		all, err := p.state.List(goCtx, monitoringNamespace, prefix)
-		if err == nil {
-			for _, k := range all {
-				ns := strings.TrimPrefix(k, prefix)
-				if ns != "" {
-					namespaces = append(namespaces, ns)
-				}
-			}
-		}
-	}
-
-	for _, ns := range namespaces {
-		idxKey := cwMetricNamesKey(ctx.AccountID, ctx.Region, ns)
-		names, err := loadStringIndex(goCtx, p.state, monitoringNamespace, idxKey)
-		if err != nil {
-			continue
-		}
-		for _, name := range names {
-			if filterName != "" && name != filterName {
-				continue
-			}
-			if !cwDimensionFiltersMatch(dimensionFilters, nil) {
-				continue
-			}
-			// Dimensions is present and empty rather than absent: substrate records a
-			// metric by name and namespace only, and an empty dimension list is what
-			// CloudWatch reports for a metric published without any.
-			metrics = append(metrics, cwDoc{}.
-				with("MetricName", name).
-				with("Namespace", ns).
-				with("Dimensions", cwList{}))
-		}
-	}
-
-	usageMetrics, err := p.usageMetrics(ctx, namespace, filterName, dimensionFilters)
-	if err != nil {
-		return nil, err
-	}
-	metrics = append(metrics, usageMetrics...)
-
-	result := cwDoc{}.with("Metrics", metrics)
-	return cwRespond(req, "ListMetrics", ctx.RequestID, result)
 }

@@ -3,8 +3,6 @@ package emulator
 import (
 	"context"
 	"fmt"
-	"net/http"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -12,14 +10,17 @@ import (
 
 // AWS/Usage EC2 vCPU metrics, derived on read (#1498).
 //
-// Substrate records no time series: PutMetricData keeps a metric's identity and discards its
-// values, because producing data points is what the workload behind an API does. The EC2
-// vCPU usage metrics are the exception, and the reason is that their value is not produced
-// by a workload at all. "ResourceCount — The number of the specified resources running in
-// your account" is a fact about EC2's API-observable state, the same fact DescribeInstances
-// reports, so CloudWatch can answer it by reading that state at request time. Nothing is
-// stored on the CloudWatch side, nothing runs between requests, and a replay that rebuilds
-// the same EC2 state and clock reads back the same values.
+// Substrate produces no metric a workload would: an instance's CPUUtilization, a function's
+// Duration, are what the software behind an API does, and nothing in substrate runs it. What
+// a caller publishes through PutMetricData is stored and read back (#1595,
+// cloudwatch_metric_store.go), because the caller handed CloudWatch those values through an
+// API call. The EC2 vCPU usage metrics are a third case: their value is not produced by a
+// workload and not published by a caller. "ResourceCount — The number of the specified
+// resources running in your account" is a fact about EC2's API-observable state, the same fact
+// DescribeInstances reports, so CloudWatch can answer it by reading that state at request time.
+// Nothing is stored on the CloudWatch side, nothing runs between requests, and a replay that
+// rebuilds the same EC2 state and clock reads back the same values. The AWS/Scheduler
+// invocation metrics (scheduler_metrics.go) follow the same precedent.
 //
 // # Which datapoint is reported
 //
@@ -55,10 +56,10 @@ import (
 // cwDimension is one CloudWatch metric dimension.
 type cwDimension struct {
 	// Name is the dimension's name.
-	Name string
+	Name string `json:"Name"`
 
 	// Value is the dimension's value.
-	Value string
+	Value string `json:"Value"`
 }
 
 // cwUsageUnit is the unit EC2 vCPU usage is reported in.
@@ -241,209 +242,6 @@ func (p *CloudWatchPlugin) usagePoint(r *cwUsageReader, namespace, metricName st
 		return cwUsagePoint{}, false, nil
 	}
 	return cwUsagePoint{At: at, VCPUs: usage.VCPUs[class], Period: period}, true, nil
-}
-
-// --- GetMetricData -----------------------------------------------------------
-
-// getMetricData handles the GetMetricData operation.
-//
-// Every query gets a MetricDataResult, as CloudWatch answers: one whose ReturnData is false
-// carries only its Id and StatusCode, as the reference's examples show, and every other
-// carries its Label, Timestamps, Values and StatusCode Complete. The Timestamps and Values
-// are empty for every metric except an EC2 vCPU usage metric (see the file comment), because
-// substrate records a metric's name and namespace but not its time series — running the
-// workload that produces data points is outside what an API observation can be. A metric
-// math or Metrics Insights Expression is not evaluated, so it too reports no values.
-//
-// A Label the query omits defaults to the metric's name, or to the query's Id for an
-// expression; the reference says only that "CloudWatch generates a default", so this choice
-// is substrate's. No result is ever paginated, so a NextToken is one substrate did not issue
-// and is refused with InvalidNextToken, the one error the reference declares.
-//
-// Before #785 this was where substrate's only CBOR lived: a hardcoded one-byte 0xa0 for
-// any caller whose Content-Type mentioned CBOR, with the request body never parsed.
-func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	if req.Params["NextToken"] != "" {
-		return nil, cwInvalidNextToken()
-	}
-	start, startOK := cwParseTimestamp(req.Params["StartTime"])
-	end, endOK := cwParseTimestamp(req.Params["EndTime"])
-	reader := p.newUsageReader(ctx)
-
-	results := cwList{}
-	for i := 1; ; i++ {
-		prefix := "MetricDataQueries.member." + strconv.Itoa(i) + "."
-		id, ok := req.Params[prefix+"Id"]
-		if !ok || id == "" {
-			break
-		}
-		if req.Params[prefix+"ReturnData"] == "false" {
-			results = append(results, cwDoc{}.with("Id", id).with("StatusCode", "Complete"))
-			continue
-		}
-
-		stat := prefix + "MetricStat."
-		namespace := req.Params[stat+"Metric.Namespace"]
-		metricName := req.Params[stat+"Metric.MetricName"]
-		label := req.Params[prefix+"Label"]
-		if label == "" {
-			label = metricName
-		}
-		if label == "" {
-			label = id
-		}
-
-		timestamps, values := cwList{}, cwList{}
-		periodSecs, _ := strconv.Atoi(req.Params[stat+"Period"])
-		if startOK && endOK && metricName != "" && periodSecs > 0 {
-			period := time.Duration(periodSecs) * time.Second
-			point, ok, err := p.usagePoint(reader, namespace, metricName,
-				cwParseDimensions(req.Params, stat+"Metric.Dimensions"), req.Params[stat+"Unit"], start, end, period)
-			if err != nil {
-				return nil, err
-			}
-			if ok {
-				if v, computed := cwUsageStatistic(req.Params[stat+"Stat"], point.VCPUs, period); computed {
-					timestamps = append(timestamps, point.At)
-					values = append(values, v)
-				}
-			}
-		}
-		results = append(results, cwDoc{}.
-			with("Id", id).
-			with("Label", label).
-			with("Timestamps", timestamps).
-			with("Values", values).
-			with("StatusCode", "Complete"))
-	}
-
-	result := cwDoc{}.
-		with("MetricDataResults", results).
-		with("Messages", cwList{})
-	return cwRespond(req, "GetMetricData", ctx.RequestID, result)
-}
-
-// --- GetMetricStatistics -----------------------------------------------------
-
-// cwStatisticNames are GetMetricStatistics' Statistics valid values, in the order a
-// Datapoint reports them.
-var cwStatisticNames = []string{"SampleCount", "Average", "Sum", "Minimum", "Maximum"}
-
-// getMetricStatistics handles the GetMetricStatistics operation.
-//
-// Its input is validated as the reference specifies: Namespace, MetricName, StartTime,
-// EndTime and Period are required (MissingParameter); Statistics and ExtendedStatistics are
-// exclusive — "you must specify either Statistics or ExtendedStatistics, but not both" —
-// (InvalidParameterCombination for both, MissingParameter for neither); a Statistics value
-// must be one of the five; Period must be at least 1 and, as for every metric, one of 1, 5,
-// 10, 20, 30 or a multiple of 60; StartTime must precede EndTime; and a window holding more
-// than 1,440 periods is refused with InvalidParameterCombination.
-//
-// The answer is the metric name as Label and a Datapoints list that is present and empty for
-// every metric but an EC2 vCPU usage metric, which reports the one datapoint the file comment
-// describes. Each Datapoint carries the requested Statistics and Unit None. Percentiles
-// requested through ExtendedStatistics are not reported, because a Datapoint carries them as
-// a string-to-double map and substrate's renderer has no map shape for the query protocol;
-// a query naming only ExtendedStatistics therefore gets no datapoint.
-func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	namespace, metricName := req.Params["Namespace"], req.Params["MetricName"]
-	for _, member := range []string{"Namespace", "MetricName", "StartTime", "EndTime", "Period"} {
-		if req.Params[member] == "" {
-			return nil, cwMissingParameter(member)
-		}
-	}
-	start, ok := cwParseTimestamp(req.Params["StartTime"])
-	if !ok {
-		return nil, cwInvalidParameterValue("StartTime is not a valid timestamp")
-	}
-	end, ok := cwParseTimestamp(req.Params["EndTime"])
-	if !ok {
-		return nil, cwInvalidParameterValue("EndTime is not a valid timestamp")
-	}
-	if !start.Before(end) {
-		return nil, cwInvalidParameterValue("The parameter StartTime must be less than the parameter EndTime.")
-	}
-	periodSecs, err := strconv.Atoi(req.Params["Period"])
-	if err != nil || periodSecs < 1 {
-		return nil, cwInvalidParameterValue("The parameter Period must be a positive integer.")
-	}
-	switch {
-	case periodSecs%60 == 0:
-	case periodSecs == 1, periodSecs == 5, periodSecs == 10, periodSecs == 20, periodSecs == 30:
-	default:
-		return nil, cwInvalidParameterValue("The parameter Period must be 1, 5, 10, 20, 30, or a multiple of 60.")
-	}
-	period := time.Duration(periodSecs) * time.Second
-
-	statistics := parseMemberList(req.Params, "Statistics")
-	extended := parseMemberList(req.Params, "ExtendedStatistics")
-	switch {
-	case len(statistics) > 0 && len(extended) > 0:
-		return nil, &AWSError{
-			Code:       "InvalidParameterCombination",
-			Message:    "Specify either Statistics or ExtendedStatistics, but not both.",
-			HTTPStatus: http.StatusBadRequest,
-		}
-	case len(statistics) == 0 && len(extended) == 0:
-		return nil, cwMissingParameter("Statistics or ExtendedStatistics")
-	case len(statistics) > len(cwStatisticNames):
-		return nil, cwInvalidParameterValue("Statistics may name at most 5 statistics.")
-	}
-	wanted := make(map[string]bool, len(statistics))
-	for _, s := range statistics {
-		if !slices.Contains(cwStatisticNames, s) {
-			return nil, cwInvalidParameterValue(fmt.Sprintf(
-				"The value %s for parameter Statistics is not valid; it must be one of %s.",
-				s, strings.Join(cwStatisticNames, ", ")))
-		}
-		wanted[s] = true
-	}
-	if n := cwPeriodCount(cwRoundStart(start, p.tc.Now().UTC()), end, period); n > cwMaxStatisticsDatapoints {
-		return nil, &AWSError{
-			Code: "InvalidParameterCombination",
-			Message: fmt.Sprintf("You have requested up to %d datapoints, which exceeds the limit of %d.",
-				n, cwMaxStatisticsDatapoints),
-			HTTPStatus: http.StatusBadRequest,
-		}
-	}
-
-	datapoints := cwList{}
-	if len(wanted) > 0 {
-		point, found, err := p.usagePoint(p.newUsageReader(ctx), namespace, metricName,
-			cwParseDimensions(req.Params, "Dimensions"), req.Params["Unit"], start, end, period)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			dp := cwDoc{}.with("Timestamp", point.At)
-			for _, s := range cwStatisticNames {
-				if wanted[s] {
-					v, _ := cwUsageStatistic(s, point.VCPUs, period)
-					dp = dp.with(s, v)
-				}
-			}
-			datapoints = append(datapoints, dp.with("Unit", cwUsageUnit))
-		}
-	}
-
-	result := cwDoc{}.with("Label", metricName).with("Datapoints", datapoints)
-	return cwRespond(req, "GetMetricStatistics", ctx.RequestID, result)
-}
-
-// cwMissingParameter is the refusal for an absent required member. MissingParameter is one
-// of the four errors GetMetricStatistics declares, at HTTP 400.
-func cwMissingParameter(member string) *AWSError {
-	return &AWSError{
-		Code:       "MissingParameter",
-		Message:    "The parameter " + member + " is required.",
-		HTTPStatus: http.StatusBadRequest,
-	}
-}
-
-// cwInvalidParameterValue is the refusal for "The value of an input parameter is bad or
-// out-of-range", at HTTP 400.
-func cwInvalidParameterValue(message string) *AWSError {
-	return &AWSError{Code: "InvalidParameterValue", Message: message, HTTPStatus: http.StatusBadRequest}
 }
 
 // --- ListMetrics -------------------------------------------------------------
