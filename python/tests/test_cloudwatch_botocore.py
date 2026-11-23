@@ -15,7 +15,7 @@ fails here rather than being noticed by a downstream consumer.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -168,13 +168,14 @@ def test_get_metric_data_reports_no_results_rather_than_nothing(cloudwatch) -> N
     assert out["Messages"] == []
 
 
-def test_published_datapoints_read_back(cloudwatch) -> None:  # type: ignore[no-untyped-def]
+def test_published_datapoints_read_back(cloudwatch, substrate_isolated) -> None:  # type: ignore[no-untyped-def]
     """PutMetricData's values come back through GetMetricData and GetMetricStatistics (#1595).
 
-    The timestamps are relative to now because PutMetricData refuses one more than two weeks
-    before the server's clock, and the server here runs on the wall clock.
+    PutMetricData refuses a timestamp more than two weeks before the server's clock, so the
+    test freezes the simulated clock at a fixed instant and stamps the datapoints from it,
+    rather than reading the wall clock.
     """
-    now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
+    now = substrate_isolated.freeze_time(datetime(2026, 1, 15, 12, 0, tzinfo=UTC))
     dims = [{"Name": "Pool", "Value": "gpu"}]
     cloudwatch.put_metric_data(
         Namespace=NAMESPACE,
