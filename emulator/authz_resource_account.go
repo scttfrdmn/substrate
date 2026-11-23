@@ -26,16 +26,26 @@ import (
 // otherwise the requesting account, which is where substrate keeps every resource a request can
 // reach without naming another account. AWS documents aws:ResourceAccount as "the resource owner's
 // AWS account ID" and includes it "in the request context for most service actions".
+//
+// An SSM public parameter is the exception, and answers "" so the key is left unset. Its ARN names
+// no account (see [ssmAuthzResourceARN]): it is AWS-owned, AWS publishes no account ID for it, and
+// the key's own page warns that "some AWS services require access to AWS owned resources that are
+// hosted in another AWS account" which an aws:ResourceAccount condition may block. Reporting the
+// caller's account would claim the caller owns AWS's parameters; leaving the key unset is
+// substrate's reading of an answer AWS does not publish.
 func (a *AuthController) authzResourceAccount(reqCtx *RequestContext, resourceARN string) string {
 	parts := strings.SplitN(resourceARN, ":", 6)
 	if len(parts) == 6 && parts[0] == "arn" {
 		if acct := parts[4]; acct != "" && !strings.ContainsAny(acct, "*?") {
 			return acct
 		}
-		if parts[2] == "s3" && parts[4] == "" {
+		switch {
+		case parts[2] == "s3" && parts[4] == "":
 			if owner := a.s3BucketOwner(parts[5]); owner != "" {
 				return owner
 			}
+		case parts[2] == "ssm" && parts[4] == "":
+			return ""
 		}
 	}
 	return reqCtx.AccountID
@@ -85,6 +95,13 @@ func (a *AuthController) authzResourceAccountContext(condCtx map[string]string, 
 // request naming none. A parameter ARN is "arn:aws:ssm:region:account:parameter/name"; a
 // hierarchical name already begins with "/", which the ARN does not double. A Name that is
 // itself an ARN is used as given.
+//
+// A name under "/aws/" is a public parameter AWS owns — the prefix is reserved ("Parameter names
+// can't be prefixed with aws or ssm (case-insensitive)", the SSM parameter naming rules) — and its
+// ARN carries an empty account, as AWS's own policies write it: the AWSPremiumSupport-
+// TroubleshootEKSCluster runbook reference grants ssm:GetParameter on
+// "arn:aws:ssm:::parameter/aws/service/eks/optimized-ami/...". Building it with the caller's
+// account matched no such statement.
 func ssmAuthzResourceARN(req *AWSRequest, region, acct string) string {
 	name := req.Params["Name"]
 	if name == "" && len(req.Body) > 0 {
@@ -100,6 +117,8 @@ func ssmAuthzResourceARN(req *AWSRequest, region, acct string) string {
 		return "*"
 	case strings.HasPrefix(name, "arn:"):
 		return name
+	case strings.HasPrefix(strings.ToLower(name), "/aws/"):
+		return "arn:aws:ssm:" + region + "::parameter" + name
 	case strings.HasPrefix(name, "/"):
 		return "arn:aws:ssm:" + region + ":" + acct + ":parameter" + name
 	}

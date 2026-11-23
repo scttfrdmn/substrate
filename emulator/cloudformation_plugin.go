@@ -198,12 +198,7 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	if name == "" {
 		return nil, cfnMissingParameter("StackName")
 	}
-	// TemplateBody, or the object TemplateURL names in substrate's S3 (#1606).
-	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
-	if templateErr != nil {
-		return nil, templateErr
-	}
-	if body == "" {
+	if req.Params["TemplateBody"] == "" && req.Params["TemplateURL"] == "" {
 		return nil, cfnMissingParameter("TemplateBody")
 	}
 
@@ -248,6 +243,13 @@ func (p *CloudFormationPlugin) createStack(reqCtx *RequestContext, req *AWSReque
 	// resolves the same identity — see [cfnAttribution].
 	if roleErr := cfnValidateRoleARN(req.Params["RoleARN"]); roleErr != nil {
 		return nil, roleErr
+	}
+	// TemplateBody, or the object TemplateURL names in substrate's S3 (#1606). Read last, after
+	// every check that needs no template, so a request refused for its name or its role makes no
+	// GetObject on the caller's behalf.
+	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
+	if templateErr != nil {
+		return nil, templateErr
 	}
 	att := cfnAttribution{roleARN: req.Params["RoleARN"], creator: reqCtx.Principal}
 	// "Key-value pairs to associate with this stack. CloudFormation also propagates
@@ -294,6 +296,9 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 		return nil, cfnStackNotFound(name)
 	}
 
+	if roleErr := cfnValidateRoleARN(req.Params["RoleARN"]); roleErr != nil {
+		return nil, roleErr
+	}
 	body, templateErr := p.cfnTemplateFromRequest(reqCtx, req)
 	if templateErr != nil {
 		return nil, templateErr
@@ -309,9 +314,7 @@ func (p *CloudFormationPlugin) updateStack(reqCtx *RequestContext, req *AWSReque
 	// creator is not reassigned: an update does not change who created the stack.
 	att := stack.attribution()
 	if roleARN := req.Params["RoleARN"]; roleARN != "" {
-		if roleErr := cfnValidateRoleARN(roleARN); roleErr != nil {
-			return nil, roleErr
-		}
+		// Validated above, before the template is read.
 		att.roleARN = roleARN
 	}
 	// An omitted Tags preserves the stack's own tags and an empty one clears them, which

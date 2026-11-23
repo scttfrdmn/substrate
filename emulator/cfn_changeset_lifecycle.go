@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"maps"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -128,6 +129,8 @@ func (o CFNChangeSetOptions) validate() error {
 		return cfnErrf(ErrCFNChangeSetTypeUnsupported,
 			"ChangeSetType IMPORT is not emulated: substrate does not import existing resources into a stack")
 	default:
+		// Substrate's own message, written in the form of the service's model-validation errors
+		// (the GetTemplate TemplateStage refusal is the same form); AWS publishes no text for it.
 		return cfnErrf(ErrCFNChangeSetTypeUnsupported,
 			"1 validation error detected: Value '%s' at 'changeSetType' failed to satisfy constraint: "+
 				"Member must satisfy enum value set: [CREATE, UPDATE, IMPORT]", o.Type)
@@ -219,17 +222,61 @@ func cfnSettleChangeSet(cs *CFNChangeSet, stack *CFNStackState, oldTmpl, newTmpl
 	cs.ExecutionStatus = cfnChangeSetUnavailable
 }
 
-// cfnDropInactiveAdds removes the Add of a resource whose Condition is false: executing the change
-// set does not create it, so the change set does not list it. The CDK bootstrap template is the
-// case that showed it — its customer-managed KMS key and permissions boundary are conditional, and
-// a change set listing them told the CDK to expect fifteen resources where twelve deploy.
-func cfnDropInactiveAdds(changes []CFNResourceChange, active map[string]cfnResource) []CFNResourceChange {
-	out := changes[:0]
+// cfnReconcileActivity makes a change set's changes agree with which resources each template's
+// conditions make active, since only an active resource is deployed. [diffCFNResources] compares
+// declarations and so cannot see a Condition turning on or off.
+//
+//   - An Add of a resource whose Condition is false is dropped: executing the change set does not
+//     create it. The CDK bootstrap template is the case that showed it — its customer-managed KMS
+//     key and permissions boundary are conditional, and a change set listing them told the CDK to
+//     expect fifteen resources where twelve deploy.
+//   - A Remove or Modify of a resource that was not active is dropped, and so is a Modify of one that
+//     is no longer active: neither describes a deployed resource.
+//   - A resource declared in both templates whose activity flips is an Add (now active) or a Remove
+//     (no longer active, with its physical ID), which is what executing the change set does to it.
+//     Without this, an update whose only effect was a Condition flipping read as empty and FAILED.
+func cfnReconcileActivity(changes []CFNResourceChange, oldTmpl, newTmpl *cfnTemplate,
+	oldActive, newActive map[string]cfnResource, physical map[string]string,
+) []CFNResourceChange {
+	out := make([]CFNResourceChange, 0, len(changes))
+	listed := map[string]bool{}
 	for _, c := range changes {
-		if _, ok := active[c.LogicalID]; c.Action == "Add" && !ok {
-			continue
+		_, wasActive := oldActive[c.LogicalID]
+		_, isActive := newActive[c.LogicalID]
+		switch c.Action {
+		case "Add":
+			if !isActive {
+				continue
+			}
+		case "Remove":
+			if !wasActive {
+				continue
+			}
+		default:
+			if !wasActive || !isActive {
+				continue
+			}
 		}
+		listed[c.Action+"/"+c.LogicalID] = true
 		out = append(out, c)
+	}
+	ids := make([]string, 0, len(newTmpl.Resources))
+	for id := range newTmpl.Resources {
+		if _, both := oldTmpl.Resources[id]; both {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		_, wasActive := oldActive[id]
+		_, isActive := newActive[id]
+		switch {
+		case isActive && !wasActive && !listed["Add/"+id]:
+			out = append(out, CFNResourceChange{Action: "Add", LogicalID: id, ResourceType: newTmpl.Resources[id].Type})
+		case wasActive && !isActive && !listed["Remove/"+id]:
+			out = append(out, CFNResourceChange{Action: "Remove", LogicalID: id,
+				ResourceType: oldTmpl.Resources[id].Type, PhysicalID: physical[id]})
+		}
 	}
 	return out
 }
@@ -335,27 +382,10 @@ func (d *StackDeployer) executeCreateChangeSet(ctx context.Context, cs *CFNChang
 		return nil, err
 	}
 	deployOpts.Tags = cs.Tags
-	result, err := d.DeployWithOptions(ctx, cs.TemplateBody, cs.StackName, cs.Parameters, deployOpts)
-	if err != nil {
-		return nil, err
-	}
-	// The deploy wrote a fresh record; the stack's REVIEW_IN_PROGRESS start is carried onto it, so
-	// its CreationTime and its first event stay where the change set put them. A create that failed
-	// under DELETE left no record to carry it onto.
-	return result, d.carryReviewTime(ctx, cs.StackName, review.ReviewedAt)
-}
-
-// carryReviewTime writes reviewedAt onto a stack's current record, if it still has one.
-func (d *StackDeployer) carryReviewTime(ctx context.Context, stackName string, reviewedAt time.Time) error {
-	stack, err := d.loadStack(ctx, stackName)
-	if err != nil || stack == nil || reviewedAt.IsZero() {
-		return err
-	}
-	stack.ReviewedAt = reviewedAt
-	if err := d.persistStack(ctx, *stack); err != nil {
-		return fmt.Errorf("cfn ExecuteChangeSet: %w", err)
-	}
-	return nil
+	// The deploy carries the stack's REVIEW_IN_PROGRESS start onto the record it writes
+	// ([cfnCarriedCreation]), so its CreationTime and its first event stay where the change set
+	// put them, on success and on a failed create alike.
+	return d.DeployWithOptions(ctx, cs.TemplateBody, cs.StackName, cs.Parameters, deployOpts)
 }
 
 // settleExecution records how an executed change set ended and deletes the stack's other change
@@ -398,6 +428,20 @@ func (d *StackDeployer) deleteStackChangeSets(ctx context.Context, stackName, ke
 		}
 	}
 	return nil
+}
+
+// cfnCarriedCreation returns the CreatedAt and ReviewedAt a deployment's record carries: the
+// previous record's, so an update does not move them, except that a stack still in
+// REVIEW_IN_PROGRESS is created by this deployment, at start.
+func cfnCarriedCreation(prev *CFNStackState, start time.Time) (createdAt, reviewedAt time.Time) {
+	if prev == nil {
+		return start, time.Time{}
+	}
+	createdAt = prev.CreatedAt
+	if prev.Status == cfnStackReviewInProgress || createdAt.IsZero() {
+		createdAt = start
+	}
+	return createdAt, prev.ReviewedAt
 }
 
 // creationTime is the stack's CreationTime: when a CREATE change set created it in

@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -43,6 +44,12 @@ func TestCFNTemplateURL_ReadsSubstratesS3(t *testing.T) {
 		{name: "the request's own endpoint", bucket: "tmpl-h",
 			url: "http://cloudformation.us-east-1.amazonaws.com/tmpl-h/stacks/app.json"},
 		{name: "an escaped key", bucket: "tmpl-i", url: "https://s3.amazonaws.com/tmpl-i/stacks%2Fapp.json"},
+		{name: "dual-stack", bucket: "tmpl-j", url: "https://s3.dualstack.us-east-1.amazonaws.com/tmpl-j/stacks/app.json"},
+		{name: "FIPS", bucket: "tmpl-k", url: "https://s3-fips.us-gov-west-1.amazonaws.com/tmpl-k/stacks/app.json"},
+		{name: "FIPS dual-stack virtual-hosted", bucket: "tmpl-l",
+			url: "https://tmpl-l.s3-fips.dualstack.us-east-1.amazonaws.com/stacks/app.json"},
+		{name: "a presigned URL", bucket: "tmpl-m",
+			url: "https://s3.amazonaws.com/tmpl-m/stacks/app.json?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900&X-Amz-Signature=abc"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -98,7 +105,17 @@ func TestCFNTemplateURL_Refusals(t *testing.T) {
 			wantMsg: "TemplateURL must be a supported URL."},
 		{name: "a virtual-hosted bucket with no key", params: map[string]string{"TemplateURL": "https://tmpl.s3.amazonaws.com/"},
 			wantMsg: "TemplateURL must be a supported URL."},
-		{name: "a dualstack endpoint", params: map[string]string{"TemplateURL": "https://s3.dualstack.us-east-1.amazonaws.com/tmpl/app.json"},
+		{name: "a website endpoint", params: map[string]string{"TemplateURL": "https://tmpl.s3-website-us-east-1.amazonaws.com/app.json"},
+			wantMsg: "TemplateURL must be a supported URL."},
+		{name: "a dotted website endpoint", params: map[string]string{"TemplateURL": "https://tmpl.s3-website.eu-west-1.amazonaws.com/app.json"},
+			wantMsg: "TemplateURL must be a supported URL."},
+		{name: "the accelerate endpoint", params: map[string]string{"TemplateURL": "https://tmpl.s3-accelerate.amazonaws.com/app.json"},
+			wantMsg: "TemplateURL must be a supported URL."},
+		{name: "a label that is no Region", params: map[string]string{"TemplateURL": "https://s3-anything.amazonaws.com/tmpl/app.json"},
+			wantMsg: "TemplateURL must be a supported URL."},
+		{name: "an unknown query parameter", params: map[string]string{"TemplateURL": "https://s3.amazonaws.com/tmpl/app.json?partNumber=1"},
+			wantMsg: "TemplateURL must be a supported URL."},
+		{name: "an empty versionId", params: map[string]string{"TemplateURL": "https://s3.amazonaws.com/tmpl/app.json?versionId="},
 			wantMsg: "TemplateURL must be a supported URL."},
 		{name: "not a URL", params: map[string]string{"TemplateURL": "::"},
 			wantMsg: "TemplateURL must be a supported URL."},
@@ -133,4 +150,37 @@ func TestCFNTemplateURL_Refusals(t *testing.T) {
 			s.cfnRefused(t, "DescribeStacks", map[string]string{"StackName": "refused"}, http.StatusBadRequest, "ValidationError")
 		})
 	}
+}
+
+// TestCFNTemplateURL_VersionID pins that a TemplateURL's versionId reads that version of the object
+// rather than the current one, and that a version the bucket does not hold is S3's own refusal.
+func TestCFNTemplateURL_VersionID(t *testing.T) {
+	s := newCFNFullServer(t)
+	code, out := s.s3(t, http.MethodPut, "/tmpl-v", "")
+	require.Equal(t, http.StatusOK, code, out)
+	code, out = s.s3(t, http.MethodPut, "/tmpl-v?versioning",
+		"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>")
+	require.Equal(t, http.StatusOK, code, out)
+	put := func(body string) string {
+		t.Helper()
+		r := httptest.NewRequest(http.MethodPut, "http://s3.amazonaws.com/tmpl-v/app.json", strings.NewReader(body))
+		r.Host = "s3.amazonaws.com"
+		w := httptest.NewRecorder()
+		s.h.ServeHTTP(w, r)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		v := w.Header().Get("x-amz-version-id")
+		require.NotEmpty(t, v)
+		return v
+	}
+	first := put(cfnURLTemplate)
+	put(strings.Replace(cfnURLTemplate, "from-url", "from-url-latest", 1))
+
+	s.cfnOK(t, "CreateStack", map[string]string{"StackName": "versioned",
+		"TemplateURL": "https://s3.amazonaws.com/tmpl-v/app.json?versionId=" + first})
+	assert.Equal(t, "from-url", cfnOutput(s.cfnOK(t, "DescribeStacks", map[string]string{"StackName": "versioned"}), "Queue"),
+		"the named version, not the current one")
+
+	msg := s.cfnRefused(t, "CreateStack", map[string]string{"StackName": "unversioned",
+		"TemplateURL": "https://s3.amazonaws.com/tmpl-v/app.json?versionId=nope"}, http.StatusBadRequest, "ValidationError")
+	assert.True(t, strings.HasPrefix(msg, "S3 error: "), msg)
 }

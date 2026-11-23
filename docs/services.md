@@ -2554,6 +2554,12 @@ caller, routed and recorded like a stack's resource calls, so a caller who canno
 cannot deploy it. The URL forms are S3's HTTPS addressing styles: path-style on
 `s3.amazonaws.com`, `s3.{region}.amazonaws.com` and the legacy `s3-{region}.amazonaws.com`, and
 virtual-hosted `{bucket}.s3[.{region}|-{region}].amazonaws.com`, a bucket name with dots included.
+Each regional form's dual-stack and FIPS endpoints (`s3.dualstack.{region}`, `s3-fips.{region}`,
+`s3-fips.dualstack.{region}`) are accepted too, since the page excludes only S3 static websites. A
+`versionId` query parameter reads that version, a presigned URL's `X-Amz-*` parameters are ignored
+(the read is made as the caller anyway), and any other query parameter is refused rather than dropped.
+The read happens after every check that needs no template, so a request refused for its stack name
+or its `RoleARN` makes no `GetObject`.
 The parameter's page requires `https://`. A path-style URL on the host the CloudFormation request was
 itself sent to is substrate's own endpoint and is read over `http` or `https`: that is the URL the
 CDK builds when it is pointed at an emulator, `${endpoint}/${bucket}/${key}`. Everything else is
@@ -2561,7 +2567,7 @@ refused with `ValidationError`:
 
 | TemplateURL | Message |
 |-------------|---------|
-| Not an S3 URL — another host, `http://` on an AWS host, `s3://`, a dual-stack endpoint, no key | `TemplateURL must be a supported URL.` |
+| Not an S3 URL — another host, `http://` on an AWS host, `s3://`, a website (`s3-website-…`) or Transfer Acceleration endpoint (substrate's reading), a label that is no Region, an unsupported query parameter, no key | `TemplateURL must be a supported URL.` |
 | An object S3 cannot serve | `S3 error: ` followed by S3's own message, e.g. `The specified key does not exist.` |
 | An empty object, or one over the page's 1 MB maximum | substrate's own message |
 | Both `TemplateBody` and `TemplateURL` | substrate's own message; the pages say *"You must specify only one"* |
@@ -3986,13 +3992,14 @@ synchronous, so no change set is observed in `CREATE_PENDING`, `CREATE_IN_PROGRE
   until you execute the change set."* `DescribeStacks` and `ListStacks` report the stack,
   `DescribeStackEvents` reports its one `REVIEW_IN_PROGRESS` event (*User Initiated*), and
   `DeleteStack` removes it with its change sets. Every change is an `Add`, diffed against an empty
-  template, and a resource whose `Condition` is false is not listed. A second `CREATE` on a stack
+  template, and a resource whose `Condition` is false is not listed. For an `UPDATE` too, a resource
+  whose `Condition` turns on is an `Add`, and one whose `Condition` turns off is a `Remove`. A second `CREATE` on a stack
   still in review is accepted; one on any other existing stack is refused with `ValidationError`
   *"Stack [{name}] already exists and cannot be created again with the changeSet [{changeSet}]."* —
   observed wording, quoted by `aws/copilot-cli#1376` and SAM CLI reports. Executing it runs the
   create path, so a failed create rolls back, does nothing or deletes the stack as `OnStackFailure`
   or `DisableRollback` say; the stack's `CreationTime` stays when the change set made it, and its
-  `REVIEW_IN_PROGRESS` event stays the oldest.
+  `REVIEW_IN_PROGRESS` event stays the oldest, through every later update.
 - **`UPDATE`**, the default, diffs against the stack's template. A stack in `REVIEW_IN_PROGRESS`, like
   one in `ROLLBACK_COMPLETE`, cannot be updated.
 - **`IMPORT`** is refused with `ValidationError`; the message is substrate's own. Importing brings

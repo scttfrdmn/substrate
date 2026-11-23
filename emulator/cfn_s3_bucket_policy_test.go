@@ -93,6 +93,10 @@ func TestCFN_S3BucketPolicyRefusals(t *testing.T) {
 	}{
 		{name: "no such bucket", template: `{"Resources":{"P":{"Type":"AWS::S3::BucketPolicy","Properties":{
 			"Bucket":"never-created","PolicyDocument":{"Version":"2012-10-17","Statement":[]}}}}}`, want: "NoSuchBucket"},
+		{name: "a bucket named with capitals", template: `{"Resources":{
+			"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"cased-bucket"}},
+			"P":{"Type":"AWS::S3::BucketPolicy","DependsOn":"B","Properties":{"Bucket":"Cased-Bucket",
+				"PolicyDocument":{"Version":"2012-10-17","Statement":[]}}}}}`, want: "NoSuchBucket"},
 		{name: "a public policy under BlockPublicPolicy", template: `{"Resources":{
 			"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"blocked-bucket",
 				"PublicAccessBlockConfiguration":{"BlockPublicPolicy":true}}},

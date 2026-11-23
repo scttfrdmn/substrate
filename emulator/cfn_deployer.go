@@ -1586,6 +1586,11 @@ func (d *StackDeployer) deploy(
 	if base == nil {
 		base = prev
 	}
+	// The stack's creation outlives every later deployment of it (#1606): its CreationTime is when
+	// it was first created, and a stack a CREATE change set made keeps the REVIEW_IN_PROGRESS start
+	// its first event reports. A stack still in review has not been deployed, so the deploy that
+	// executes its change set is its creation.
+	createdAt, reviewedAt := cfnCarriedCreation(prev, start)
 	baseline := d.newCFNBaseline(base, cctx.exports, force)
 	outcome := &cfnDeployOutcome{templateBody: cfn, params: cctx.params,
 		dispatched: map[string]bool{}}
@@ -1715,6 +1720,8 @@ func (d *StackDeployer) deploy(
 			streamID:     streamID,
 			totalCost:    totalCost,
 			start:        start,
+			createdAt:    createdAt,
+			reviewedAt:   reviewedAt,
 			onFailure:    opts.resolve(),
 			tagFailures:  tagFailures,
 		})
@@ -1762,7 +1769,8 @@ func (d *StackDeployer) deploy(
 			Region:       d.identity.region,
 			Status:       cfnStackCreateComplete,
 			OnFailure:    opts.resolve(),
-			CreatedAt:    start,
+			CreatedAt:    createdAt,
+			ReviewedAt:   reviewedAt,
 			UpdatedAt:    d.tc.Now(),
 		}
 		state.ResourceDeletions = result.ResourceDeletions
@@ -2336,8 +2344,10 @@ func (d *StackDeployer) CreateChangeSetWithOptions(ctx context.Context, stackNam
 	for _, r := range stack.Resources {
 		physical[r.LogicalID] = r.PhysicalID
 	}
-	changes := cfnDropInactiveAdds(diffCFNResources(oldTmpl, newTmpl, stack.Parameters, params, physical),
-		cfnActiveResources(newTmpl, newCtx))
+	oldCtx := buildCFNContext(oldTmpl, stack.Parameters, d.identity.region, d.identity.accountID, stackName)
+	evaluateConditions(oldTmpl, oldCtx)
+	changes := cfnReconcileActivity(diffCFNResources(oldTmpl, newTmpl, stack.Parameters, params, physical),
+		oldTmpl, newTmpl, cfnActiveResources(oldTmpl, oldCtx), cfnActiveResources(newTmpl, newCtx), physical)
 
 	cs := &CFNChangeSet{
 		ChangeSetName:  changeSetName,

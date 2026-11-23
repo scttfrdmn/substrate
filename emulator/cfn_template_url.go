@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 )
 
@@ -36,9 +37,26 @@ const cfnTemplateURLUnsupportedMessage = "TemplateURL must be a supported URL."
 
 // cfnS3TemplateLocation is the bucket and key a TemplateURL names.
 type cfnS3TemplateLocation struct {
-	bucket string
-	key    string
+	bucket    string
+	key       string
+	versionID string // the URL's versionId, "" for the current version
 }
+
+// cfnTemplateURLIgnoredQuery are the query parameters a TemplateURL may carry that the read does
+// not use: a presigned URL's SigV4 parameters (the S3 "Authenticating Requests: Using Query
+// Parameters" page). Substrate reads the object as the requesting caller, so a presigned grant has
+// nothing to add. Any other query parameter but versionId makes the URL unsupported rather than
+// being dropped silently — a URL naming something the read would not honor is refused, not
+// answered with a different object.
+var cfnTemplateURLIgnoredQuery = map[string]bool{
+	"x-amz-algorithm": true, "x-amz-credential": true, "x-amz-date": true, "x-amz-expires": true,
+	"x-amz-signedheaders": true, "x-amz-signature": true, "x-amz-security-token": true,
+	"x-amz-checksum-mode": true,
+}
+
+// cfnS3RegionPattern is a Region name: "us-east-1", "eu-central-2", "us-gov-west-1",
+// "cn-northwest-1", "ap-southeast-7".
+var cfnS3RegionPattern = regexp.MustCompile(`^[a-z]{2}(-[a-z]+)+-[0-9]+$`)
 
 // cfnParseTemplateURL reads the S3 object a TemplateURL names, or reports false for a URL that
 // names none.
@@ -51,7 +69,15 @@ type cfnS3TemplateLocation struct {
 //   - path-style on a regional endpoint, https://s3.region.amazonaws.com/bucket/key, and the legacy
 //     dash form https://s3-region.amazonaws.com/bucket/key;
 //   - virtual-hosted, https://bucket.s3.amazonaws.com/key, https://bucket.s3.region.amazonaws.com/key
-//     and https://bucket.s3-region.amazonaws.com/key.
+//     and https://bucket.s3-region.amazonaws.com/key;
+//   - each regional form's dual-stack and FIPS endpoints (s3.dualstack.region, s3-fips.region,
+//     s3-fips.dualstack.region), which are S3 REST endpoints like the rest — the parameter's page
+//     excludes only S3 static websites.
+//
+// Refused: a website endpoint (s3-website-region, s3-website.region), because "URLs from S3 static
+// websites are not supported"; the Transfer Acceleration endpoint, which is substrate's reading —
+// the page names only website endpoints, and an accelerated URL is not one a stack is written with;
+// and any label whose Region is not a Region name. A versionId query parameter reads that version.
 //
 // Each must be https, as the parameter's page requires. s3:// is not accepted: the page says the
 // location "must start with https://", and CloudFormation's own API takes no other S3 form.
@@ -68,7 +94,33 @@ func cfnParseTemplateURL(raw, ownHost string) (cfnS3TemplateLocation, bool) {
 	}
 	host := strings.ToLower(u.Hostname())
 	path := strings.TrimPrefix(u.Path, "/")
+	versionID, queryOK := cfnTemplateURLVersion(u.Query())
+	if !queryOK {
+		return cfnS3TemplateLocation{}, false
+	}
+	loc, ok := cfnTemplateURLObject(u, host, path, ownHost)
+	loc.versionID = versionID
+	return loc, ok
+}
 
+// cfnTemplateURLVersion returns a TemplateURL's versionId, and false for a query parameter the read
+// can neither use nor ignore.
+func cfnTemplateURLVersion(query url.Values) (string, bool) {
+	var versionID string
+	for name, values := range query {
+		switch {
+		case name == "versionId" && len(values) == 1 && values[0] != "":
+			versionID = values[0]
+		case cfnTemplateURLIgnoredQuery[strings.ToLower(name)]:
+		default:
+			return "", false
+		}
+	}
+	return versionID, true
+}
+
+// cfnTemplateURLObject reads the bucket and key out of a TemplateURL's host and path.
+func cfnTemplateURLObject(u *url.URL, host, path, ownHost string) (cfnS3TemplateLocation, bool) {
 	if ownHost != "" && strings.EqualFold(u.Host, ownHost) && (u.Scheme == "http" || u.Scheme == "https") {
 		return cfnPathStyleLocation(path)
 	}
@@ -92,15 +144,20 @@ func cfnParseTemplateURL(raw, ownHost string) (cfnS3TemplateLocation, bool) {
 	return cfnS3TemplateLocation{}, false
 }
 
-// cfnS3EndpointLabel reports whether label — a host with ".amazonaws.com" removed — is an S3
-// endpoint: "s3", "s3.region" or "s3-region".
+// cfnS3EndpointLabel reports whether label — a host with ".amazonaws.com" removed — is an S3 REST
+// endpoint a template can be read from: "s3", or one of the regional forms, each ending in a Region
+// name. See [cfnParseTemplateURL] for what is accepted and refused, and why.
 func cfnS3EndpointLabel(label string) bool {
 	if label == "s3" {
 		return true
 	}
-	for _, prefix := range []string{"s3.", "s3-"} {
+	if strings.HasPrefix(label, "s3-website") || strings.HasPrefix(label, "s3-accelerate") {
+		return false
+	}
+	// Longest prefix first, so "s3.dualstack." is not read as "s3." with a Region of "dualstack.…".
+	for _, prefix := range []string{"s3-fips.dualstack.", "s3.dualstack.", "s3-fips.", "s3.", "s3-"} {
 		if region, ok := strings.CutPrefix(label, prefix); ok {
-			return region != "" && !strings.Contains(region, ".")
+			return cfnS3RegionPattern.MatchString(region)
 		}
 	}
 	return false
@@ -156,13 +213,17 @@ func (p *CloudFormationPlugin) fetchTemplateURL(reqCtx *RequestContext, template
 		return "", &AWSError{Code: "ValidationError", Message: cfnTemplateURLUnsupportedMessage,
 			HTTPStatus: http.StatusBadRequest}
 	}
+	params := map[string]string{}
+	if loc.versionID != "" {
+		params["versionId"] = loc.versionID
+	}
 	d := p.deployerFor(reqCtx, cfnAttribution{creator: reqCtx.Principal})
 	resp, _, err := d.dispatch(context.Background(), &AWSRequest{
 		Service:   "s3",
 		Operation: "GET",
 		Path:      "/" + loc.bucket + "/" + loc.key,
 		Headers:   map[string]string{},
-		Params:    map[string]string{},
+		Params:    params,
 	}, reqCtx.RequestID)
 	if err != nil {
 		msg := err.Error()

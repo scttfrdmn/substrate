@@ -2,7 +2,6 @@ package emulator
 
 import (
 	"context"
-	"strings"
 )
 
 // cfn_s3_bucket_policy.go models AWS::S3::BucketPolicy (#1606), which fell through to the generic
@@ -33,7 +32,7 @@ func (d *StackDeployer) deployS3BucketPolicy(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	bucket := strings.ToLower(resolveStringProp(props, "Bucket", "", cctx))
+	bucket := resolveStringProp(props, "Bucket", "", cctx)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::S3::BucketPolicy", PhysicalID: bucket}
 	var cost float64
 	if err := d.putS3BucketPolicy(ctx, bucket, props, streamID, cctx, &cost); err != nil {

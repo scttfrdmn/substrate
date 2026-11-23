@@ -493,3 +493,82 @@ func TestCFNChangeSet_InProcess(t *testing.T) {
 	_, err = d.ExecuteChangeSetWithOptions(ctx, "inproc", "noop", emulator.CFNExecuteOptions{})
 	require.ErrorIs(t, err, emulator.ErrCFNChangeSetNotExecutable)
 }
+
+// TestCFNChangeSet_ConditionFlip pins that an update whose only effect is a Condition turning a
+// resource on or off is a change: an Add when it turns on, a Remove when it turns off, and
+// executing it creates or deletes the resource. Comparing declarations alone read it as empty.
+func TestCFNChangeSet_ConditionFlip(t *testing.T) {
+	const tmpl = `{"Parameters":{"Want":{"Type":"String","Default":"no"}},
+		"Conditions":{"CreateQueue":{"Fn::Equals":[{"Ref":"Want"},"yes"]}},
+		"Resources":{"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"flip-bucket"}},
+			"Q":{"Type":"AWS::SQS::Queue","Condition":"CreateQueue","Properties":{"QueueName":"flip-queue"}}}}`
+	s := newCFNFullServer(t)
+	s.cfnOK(t, "CreateStack", map[string]string{"StackName": "flip", "TemplateBody": tmpl})
+	queueURL := func() int {
+		code, _ := s.do(t, http.MethodPost, "http://sqs.us-east-1.amazonaws.com/", map[string]string{
+			"Content-Type": "application/x-www-form-urlencoded"}, "Action=GetQueueUrl&QueueName=flip-queue")
+		return code
+	}
+	require.NotEqual(t, http.StatusOK, queueURL(), "the queue's condition is false")
+
+	for _, step := range []struct{ want, action string }{{"yes", "Add"}, {"no", "Remove"}} {
+		name := "flip-" + step.want
+		s.cfnOK(t, "CreateChangeSet", map[string]string{"StackName": "flip", "ChangeSetName": name,
+			"UsePreviousTemplate": "true", "Parameters.member.1.ParameterKey": "Want",
+			"Parameters.member.1.ParameterValue": step.want})
+		cs := s.cfnOK(t, "DescribeChangeSet", map[string]string{"StackName": "flip", "ChangeSetName": name})
+		require.Equal(t, "AVAILABLE", xmlField(cs, "ExecutionStatus"), cs)
+		assert.Equal(t, []string{step.action}, xmlFields(cs, "Action"))
+		assert.Equal(t, []string{"Q"}, xmlFields(cs, "LogicalResourceId"))
+		s.cfnOK(t, "ExecuteChangeSet", map[string]string{"StackName": "flip", "ChangeSetName": name})
+		if step.want == "yes" {
+			assert.Equal(t, http.StatusOK, queueURL(), "executing the Add creates the queue")
+			assert.Contains(t, cs, "<ResourceType>AWS::SQS::Queue</ResourceType>")
+		} else {
+			assert.NotEqual(t, http.StatusOK, queueURL(), "executing the Remove deletes the queue")
+			assert.Contains(t, cs, "<PhysicalResourceId>flip-queue</PhysicalResourceId>")
+		}
+	}
+}
+
+// TestCFNChangeSet_CreationSurvivesUpdates pins that a stack a CREATE change set made keeps its
+// CreationTime and its REVIEW_IN_PROGRESS event through a later update, a failed one included.
+func TestCFNChangeSet_CreationSurvivesUpdates(t *testing.T) {
+	s := newCFNFullServer(t)
+	s.cfnOK(t, "CreateChangeSet", map[string]string{"StackName": "kept", "ChangeSetName": "create",
+		"ChangeSetType": "CREATE", "TemplateBody": cfnCreateCSTemplate})
+	created := xmlField(s.cfnOK(t, "DescribeStacks", map[string]string{"StackName": "kept"}), "CreationTime")
+	s.cfnOK(t, "ExecuteChangeSet", map[string]string{"StackName": "kept", "ChangeSetName": "create"})
+
+	updated := strings.Replace(cfnCreateCSTemplate, `"Outputs":{`, `"Outputs":{"Two":{"Value":"2"},`, 1)
+	failing := strings.Replace(cfnCreateCSTemplate, `"Resources":{`,
+		`"Resources":{"Bad":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"no"}},`, 1)
+	for i, body := range []string{updated, failing} {
+		name := []string{"update", "fail"}[i]
+		s.cfnOK(t, "CreateChangeSet", map[string]string{"StackName": "kept", "ChangeSetName": name, "TemplateBody": body})
+		s.cfnOK(t, "ExecuteChangeSet", map[string]string{"StackName": "kept", "ChangeSetName": name})
+		described := s.cfnOK(t, "DescribeStacks", map[string]string{"StackName": "kept"})
+		assert.Equal(t, []string{"UPDATE_COMPLETE", "UPDATE_ROLLBACK_COMPLETE"}[i], xmlField(described, "StackStatus"))
+		assert.Equal(t, created, xmlField(described, "CreationTime"), name)
+		statuses := xmlFields(s.cfnOK(t, "DescribeStackEvents", map[string]string{"StackName": "kept"}), "ResourceStatus")
+		require.NotEmpty(t, statuses)
+		assert.Equal(t, "REVIEW_IN_PROGRESS", statuses[len(statuses)-1], "%s: the review stays the oldest event", name)
+	}
+}
+
+// TestCFNTemplateURL_ReadAfterTheCheapRefusals pins that CreateStack refuses an existing name or a
+// malformed role before it reads the template: the URL names no object, and the answer is still the
+// refusal the request earned, not the S3 error a read would have produced.
+func TestCFNTemplateURL_ReadAfterTheCheapRefusals(t *testing.T) {
+	s := newCFNFullServer(t)
+	s.cfnOK(t, "CreateStack", map[string]string{"StackName": "taken", "TemplateBody": cfnCreateCSTemplate})
+	const missing = "https://s3.amazonaws.com/no-such-tmpl/app.json"
+	s.cfnRefused(t, "CreateStack", map[string]string{"StackName": "taken", "TemplateURL": missing},
+		http.StatusBadRequest, "AlreadyExists")
+	msg := s.cfnRefused(t, "CreateStack", map[string]string{"StackName": "fresh", "TemplateURL": missing,
+		"RoleARN": "arn:short"}, http.StatusBadRequest, "ValidationError")
+	assert.Contains(t, msg, "roleARN")
+	msg = s.cfnRefused(t, "UpdateStack", map[string]string{"StackName": "taken", "TemplateURL": missing,
+		"RoleARN": "arn:short"}, http.StatusBadRequest, "ValidationError")
+	assert.Contains(t, msg, "roleARN")
+}
