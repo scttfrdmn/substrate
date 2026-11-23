@@ -1,0 +1,24 @@
+{
+  "name": "substrate-cdk-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A CDK app deployed against substrate: an S3 bucket, an SQS queue and a DynamoDB table.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "cdk": "cdk"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.278.0",
+    "constructs": "10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "aws-cdk": "2.1149.0",
+    "typescript": "5.9.3"
+  }
+}

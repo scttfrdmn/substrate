@@ -27,6 +27,10 @@ type CWLogGroup struct {
 	// map and is omitted from the record rather than stored as an empty object; the read projects
 	// it back to `{}`, which is the shape the response publishes.
 	Tags map[string]string `json:"Tags,omitempty"`
+
+	// KmsKeyID is the ARN of the KMS key CreateLogGroup or AssociateKmsKey named, empty when
+	// the group has none. Recorded intent: substrate encrypts nothing (cloudwatchlogs_kms.go).
+	KmsKeyID string `json:"KmsKeyId,omitempty"`
 }
 
 // CWLogStream represents an emulated Amazon CloudWatch Logs log stream.
@@ -93,8 +97,9 @@ type cwLogGroupOut struct {
 	// out a policy resource the real service rejects.
 	ARN string `json:"arn,omitempty"`
 
-	CreationTime    int64 `json:"creationTime"`
-	RetentionInDays int   `json:"retentionInDays,omitempty"`
+	CreationTime    int64  `json:"creationTime"`
+	RetentionInDays int    `json:"retentionInDays,omitempty"`
+	KmsKeyID        string `json:"kmsKeyId,omitempty"`
 }
 
 // cwLogStreamOut is the wire encoding of a log stream, per the API's LogStream
@@ -124,6 +129,7 @@ func cwLogGroupWire(lg CWLogGroup) cwLogGroupOut {
 		ARN:             cwLogGroupPolicyARN(lg.ARN),
 		CreationTime:    lg.CreationTime,
 		RetentionInDays: lg.RetentionInDays,
+		KmsKeyID:        lg.KmsKeyID,
 	}
 }
 

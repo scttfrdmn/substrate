@@ -20,7 +20,12 @@ import (
 // the provider to parse. The SDK tier proves the shapes deserialize — PITR's timestamps are epoch
 // numbers on the wire, which only a generated deserializer checks.
 func TestJourney_TerraformRefreshReads(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyTerraformRefreshReads)
+}
+
+// journeyTerraformRefreshReads is TestJourney_TerraformRefreshReads's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyTerraformRefreshReads(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

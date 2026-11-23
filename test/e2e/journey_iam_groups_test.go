@@ -17,7 +17,12 @@ import (
 // handler directly never finds out. That was #636, and every one of these
 // operations is new routing.
 func TestJourney_IAMGroupMembership(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyIAMGroupMembership)
+}
+
+// journeyIAMGroupMembership is TestJourney_IAMGroupMembership's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyIAMGroupMembership(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

@@ -30,6 +30,33 @@ updates:
       npm-minor-patch:
         update-types: [minor, patch]
 
+  # IaC journeys' Go module (#1519, #1520).
+  - package-ecosystem: gomod
+    directory: /test/iac
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go-minor-patch:
+        update-types: [minor, patch]
+
+  # The CDK app the IaC journey deploys (npm), including the CDK CLI its lockfile pins.
+  - package-ecosystem: npm
+    directory: /examples/cdk
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      npm-minor-patch:
+        update-types: [minor, patch]
+
+  # The AWS provider examples/terraform pins.
+  - package-ecosystem: terraform
+    directory: /examples/terraform
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+
   # pytest-substrate Python package.
   - package-ecosystem: pip
     directory: /python

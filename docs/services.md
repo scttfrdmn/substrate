@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1122 operations**. This
+Substrate ships **68 built-in service plugins** routing **1128 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -41,7 +41,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 20 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 21 | Config | `config` | JSON | 25 |
 | 22 | DynamoDB | `dynamodb` | JSON | 28 |
-| 23 | EC2 / VPC | `ec2` | Query | 99 |
+| 23 | EC2 / VPC | `ec2` | Query | 100 |
 | 24 | ECR | `ecr` | JSON | 26 |
 | 25 | ECS | `ecs` | JSON | 21 |
 | 26 | EFS | `efs` | REST/JSON | 13 |
@@ -54,11 +54,11 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 33 | FSx | `fsx` | JSON | 3 |
 | 34 | Glue | `glue` | JSON | 33 |
 | 35 | Health | `health` | JSON | 4 |
-| 36 | IAM | `iam` | Query | 78 |
+| 36 | IAM | `iam` | Query | 79 |
 | 37 | Kinesis Data Streams | `kinesis` | JSON | 18 |
 | 38 | KMS | `kms` | JSON | 25 |
-| 39 | Lambda | `lambda` | REST/JSON | 29 |
-| 40 | CloudWatch Logs | `logs` | JSON | 14 |
+| 39 | Lambda | `lambda` | REST/JSON | 31 |
+| 40 | CloudWatch Logs | `logs` | JSON | 16 |
 | 41 | CloudWatch | `monitoring` | CBOR / JSON / Query | 14 |
 | 42 | MSK | `msk` | REST/JSON | 9 |
 | 43 | HealthOmics | `omics` | REST/JSON | 5 |
@@ -4306,6 +4306,7 @@ by their own plugins, so a stack's cost shows up under S3, EC2 and so on.
 | DeleteInstanceProfile | |
 | AddRoleToInstanceProfile | |
 | RemoveRoleFromInstanceProfile | |
+| ListInstanceProfilesForRole | The profiles holding the role, paged by `MaxItems`/`Marker`; an absent role is `NoSuchEntity` (#1519) |
 | ListInstanceProfiles | Lists the account's profiles, narrowed by `PathPrefix` and paged by `MaxItems`/`Marker`; `PathPrefix` is applied before the page is cut — see below |
 | TagInstanceProfile | |
 | UntagInstanceProfile | |
@@ -7276,12 +7277,14 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package |
-| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image) |
+| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent |
+| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`. Every configuration reports `Version: $LATEST` and `TracingConfig.Mode` (#1519) |
 | UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
-| UpdateFunctionConfiguration | [Drops the function's warm container](#which-operations-drop-a-warm-container) when `Handler`, `Runtime` or `Environment` changes |
+| UpdateFunctionConfiguration | [Drops the function's warm container](#which-operations-drop-a-warm-container) when `Handler`, `Runtime` or `Environment` changes; also updates `TracingConfig.Mode` |
 | DeleteFunction | |
 | ListFunctions | |
+| ListVersionsByFunction | `$LATEST` alone, with the qualified `FunctionArn`, since substrate publishes no versions; `MaxItems` is checked against 1–10000 and any `Marker` is refused, since none is ever issued (#1519) |
+| GetFunctionCodeSigningConfig | An empty `CodeSigningConfigArn`, since substrate models no code-signing configurations. Published under `2020-06-30` (#1519) |
 | Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
 | AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` makes the statement's `Resource` the qualified ARN; aliases are not modeled, so it is not looked up (#1605) |
@@ -7370,6 +7373,7 @@ substrate routes, each read from that operation's own published Request Syntax:
 | `2015-03-31` | the function CRUD, `Invoke`, the resource policy, the event source mappings |
 | `2017-03-31` | `TagResource`, `UntagResource`, `ListTags` |
 | `2019-09-25` | `PutFunctionEventInvokeConfig` |
+| `2020-06-30` | `GetFunctionCodeSigningConfig` |
 
 Until #1142 substrate routed one of the four. The parser reached its arms by trimming the
 literal prefix `/2015-03-31`, so a path under any other date kept its version segment,
@@ -8369,9 +8373,10 @@ generated — so a new `case` in the switch has to be given a row by hand.
 | DescribeInstanceAttribute | Five attributes, scalars `<value>`-wrapped — see [Instance attributes](#instance-attributes) |
 | ModifyInstanceAttribute | `InstanceType.Value`, `UserData.Value`, `DisableApiTermination.Value`; the first two [require a stopped instance](#instance-attributes) |
 | ModifyInstanceMetadataOptions | Each of the five options named replaces the instance's and the rest are kept, validated against the published values (`InvalidParameterValue`). The response's `instanceMetadataOptions` reports `pending` and every later `DescribeInstances` `applied`. A `terminated` instance is `IncorrectInstanceState`. See [Instance metadata options](#instance-metadata-options) |
-| CreateVpc | Renders the same VPC `DescribeVpcs` does, `ownerId` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents) |
+| CreateVpc | Stores `TagSpecification.N` scoped to `vpc` and `InstanceTenancy` (`default` or `dedicated`; anything else, `host` included, is `InvalidParameterValue`, since API_CreateVpc says host "cannot be used with this parameter"), both dropped before #1519. Renders the same VPC `DescribeVpcs` does, `ownerId`, `instanceTenancy` and `tagSet` included — see [Twelve describes gained filters](#twelve-describes-gained-filters). Creates the VPC's main route table and, as of [#1492](https://github.com/scttfrdmn/substrate/issues/1492), its security group named `default` — the self-referencing all-traffic ingress rule and the all-traffic egress rule to `0.0.0.0/0` — see [A VPC's dependents](#a-vpc-s-dependents) |
 | CreateDefaultVpc | Creates the [default VPC](#the-default-vpc) and everything AWS creates with one; `DefaultVpcAlreadyExists` when the Region has one. Clears the tombstone a deleted default VPC leaves |
 | CreateDefaultSubnet | A `/20` default subnet in the named zone of the [default VPC](#the-default-vpc), by `AvailabilityZone` or `AvailabilityZoneId`; refuses with `DefaultVpcDoesNotExist`, `DefaultSubnetAlreadyExistsInAvailabilityZone` or `InvalidAvailabilityZone`. `Ipv6Native` is unread |
+| DescribeNetworkInterfaces | The interfaces live instances recorded from `NetworkInterface.N` at launch; substrate mints none for an instance launched without one, or for a Lambda function or load balancer. [Explicit resource IDs](#explicit-resource-ids) (`InvalidNetworkInterfaceID.NotFound`/`.Malformed`); sixteen filters evaluated and the rest inert, with [filter names checked](#one-rule-for-an-unrecognized-filter-name); paginates on `MaxResults`/`NextToken` over 5–1000 (#1519) |
 | DescribeVpcs | [Explicit resource IDs](#explicit-resource-ids); six of fifteen filters, and [filter names are checked](#one-rule-for-an-unrecognized-filter-name); reports `state`, `ownerId` and `tagSet`. Paginates on `MaxResults`/`NextToken`, over the published 5–1000 range — see [One offset paginator, shared](#one-offset-paginator-shared) |
 | ModifyVpcAttribute | `VpcId` is required and checked ([Explicit resource IDs](#explicit-resource-ids)). `EnableDnsSupport.Value`, `EnableDnsHostnames.Value` and `EnableNetworkAddressUsageMetrics.Value` are read under the spellings the page publishes, and each is readable back through `DescribeVpcAttribute` ([#1151](https://github.com/scttfrdmn/substrate/issues/1151); until then the first two were read as `EnableDNSSupport.Value`/`EnableDNSHostnames.Value`, which no SDK sends, and every modify was discarded). One attribute per request, and hostnames only where DNS support is enabled ([#1554](https://github.com/scttfrdmn/substrate/issues/1554)) — see [VPC attributes and internet gateways](#vpc-attributes-and-internet-gateways) |
 | DescribeVpcAttribute | `VpcId` and `Attribute` are required; `Attribute` is one of `enableDnsSupport`, `enableDnsHostnames` and `enableNetworkAddressUsageMetrics` (`InvalidParameterValue` otherwise), and the response carries `vpcId` and that one attribute as `value` — the shape of the page's samples. A new VPC answers DNS support on and hostnames off; the [default VPC](#the-default-vpc) has both on. Network Address Usage metrics is a recorded flag: no metric is produced |
@@ -17690,9 +17695,9 @@ KMS API requests: $0.03 per 10,000 requests.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateLogGroup | |
+| CreateLogGroup | Records `kmsKeyId`, which `DescribeLogGroups` reports back; nothing is encrypted (#1519) |
 | DeleteLogGroup | Also removes the group's streams and their events |
-| DescribeLogGroups | Reports both ARN forms — see below; refuses a `nextToken` it did not issue |
+| DescribeLogGroups | Reports both ARN forms — see below, and `kmsKeyId` when the group has one; refuses a `nextToken` it did not issue |
 | PutRetentionPolicy | `retentionInDays` must be one of the API's 22 enumerated values |
 | DeleteRetentionPolicy | The documented way to make a group's events never expire |
 | CreateLogStream | |
@@ -17703,6 +17708,8 @@ KMS API requests: $0.03 per 10,000 requests.
 | FilterLogEvents | Evaluates `filterPattern` as [a filter pattern](#filter-patterns); reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
 | TagResource | Takes the **unsuffixed** log-group ARN — see below; refuses the 51st tag |
 | UntagResource | Same ARN rule; an absent key and an empty `tagKeys` are both no-ops |
+| AssociateKmsKey | Replaces the group's `kmsKeyId` by `logGroupName`; the key is recorded intent and is not resolved against KMS. The `resourceIdentifier` form is not modelled |
+| DisassociateKmsKey | Clears the group's `kmsKeyId` by `logGroupName` |
 | ListTagsForResource | Same ARN rule; an untagged group answers `{"tags":{}}` |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.

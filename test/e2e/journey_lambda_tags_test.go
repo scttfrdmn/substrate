@@ -30,7 +30,12 @@ import (
 // The journey drives the whole sequence #1142's reporter could not: create, tag, read the tags back,
 // untag, and the two other families the sweep found on the wrong date.
 func TestJourney_LambdaTags(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyLambdaTags)
+}
+
+// journeyLambdaTags is TestJourney_LambdaTags's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyLambdaTags(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

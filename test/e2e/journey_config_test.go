@@ -25,7 +25,12 @@ import (
 // unreachable from every SDK. That is exactly what #561, #610 and #636 were: a unit
 // test driving a hand-built request never touches the alias.
 func TestJourney_ConfigDetectiveControls(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyConfigDetectiveControls)
+}
+
+// journeyConfigDetectiveControls is TestJourney_ConfigDetectiveControls's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyConfigDetectiveControls(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

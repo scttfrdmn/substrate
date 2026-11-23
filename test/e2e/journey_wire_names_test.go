@@ -25,7 +25,12 @@ import (
 // The e2e module had no DynamoDB client at all before this, which is precisely why every
 // release up to v0.108.0 shipped the defect green.
 func TestJourney_DynamoDBTableArnDecodes(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyDynamoDBTableArnDecodes)
+}
+
+// journeyDynamoDBTableArnDecodes is TestJourney_DynamoDBTableArnDecodes's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyDynamoDBTableArnDecodes(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

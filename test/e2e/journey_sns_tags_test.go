@@ -34,7 +34,12 @@ import (
 //     deserializer that does not look for an element does not mind one — so that half is pinned in
 //     `emulator/sns_result_envelope_test.go`, which asserts the response root's children exactly.
 func TestJourney_SNSTags(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeySNSTags)
+}
+
+// journeySNSTags is TestJourney_SNSTags's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeySNSTags(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

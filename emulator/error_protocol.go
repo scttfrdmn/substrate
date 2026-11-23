@@ -487,7 +487,7 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 		// disagree about which error this is.
 		hdrs := map[string]string{"x-amzn-ErrorType": shape.ShapeID()}
 		if wire.QueryMode {
-			hdrs[headerQueryError] = queryErrorHeader(e.Code, shape.ServerFault)
+			hdrs[headerQueryError] = queryErrorHeader(queryErrorCodeFor(wire.Service, e.Code), shape.ServerFault)
 		}
 		return payload, ct, hdrs
 
@@ -502,7 +502,7 @@ func marshalAWSError(e *AWSError, wire errorWireContext) (body []byte, contentTy
 		}
 		hdrs := map[string]string{headerSmithyProtocol: smithyProtocolRPCV2CBOR}
 		if wire.QueryMode {
-			hdrs[headerQueryError] = queryErrorHeader(e.Code, shape.ServerFault)
+			hdrs[headerQueryError] = queryErrorHeader(queryErrorCodeFor(wire.Service, e.Code), shape.ServerFault)
 		}
 		return payload, contentTypeCBOR, hdrs
 

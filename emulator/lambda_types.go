@@ -58,6 +58,9 @@ type LambdaFunction struct {
 	// Tags are key-value pairs applied to the function.
 	Tags map[string]string `json:"Tags,omitempty"`
 
+	// TracingMode is TracingConfig.Mode, Active or PassThrough; empty is PassThrough.
+	TracingMode string `json:"TracingMode,omitempty"`
+
 	// LastModified is the date the function was last updated in ISO-8601 format.
 	LastModified time.Time `json:"LastModified"`
 

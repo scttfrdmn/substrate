@@ -28,7 +28,12 @@ import (
 // substrate emits, which is exactly how the unit tests stayed green across every release that shipped
 // the defect. The e2e module had no Cognito client at all before this.
 func TestJourney_CognitoUserPoolShapeDecodes(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyCognitoUserPoolShapeDecodes)
+}
+
+// journeyCognitoUserPoolShapeDecodes is TestJourney_CognitoUserPoolShapeDecodes's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyCognitoUserPoolShapeDecodes(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

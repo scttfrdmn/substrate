@@ -31,7 +31,12 @@ import (
 // unconditionally produces the same output as a working one for the denial half
 // alone.
 func TestJourney_AssumeRoleHonoursTheTrustPolicy(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyAssumeRoleHonoursTheTrustPolicy)
+}
+
+// journeyAssumeRoleHonoursTheTrustPolicy is TestJourney_AssumeRoleHonoursTheTrustPolicy's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyAssumeRoleHonoursTheTrustPolicy(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

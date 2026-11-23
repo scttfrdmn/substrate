@@ -46,6 +46,7 @@ func TestLambdaWire_FunctionResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{op: "GetFunction", call: func() []byte { return call(http.MethodGet, fnPath, nil) }, anchor: `"FunctionName":"wire-fn"`},
 		{op: "ListFunctions", call: func() []byte { return call(http.MethodGet, "/2015-03-31/functions", nil) }, anchor: `"FunctionName":"wire-fn"`},
 		{op: "ListTags", call: func() []byte { return call(http.MethodGet, tagsPath, nil) }, anchor: `"team"`},
+		{op: "ListVersionsByFunction", call: func() []byte { return call(http.MethodGet, fnPath+"/versions", nil) }, anchor: `"Version":"$LATEST"`},
 		{op: "UpdateFunctionConfiguration", call: func() []byte {
 			return call(http.MethodPut, fnPath+"/configuration", map[string]any{"Description": "wire"})
 		}, anchor: `"FunctionName":"wire-fn"`},

@@ -27,7 +27,8 @@ import "strings"
 //   - `2015-03-31` — the function CRUD, `Invoke`, the resource policy, and event source mappings;
 //   - `2017-03-31` — `TagResource`, `UntagResource` and `ListTags`;
 //   - `2018-10-31` — the nine layer operations (#1272), dated in lambda_layers.go;
-//   - `2019-09-25` — `PutFunctionEventInvokeConfig`.
+//   - `2019-09-25` — `PutFunctionEventInvokeConfig`;
+//   - `2020-06-30` — `GetFunctionCodeSigningConfig` (#1519).
 //
 // `aws-sdk-go-v2/service/lambda`'s serializer is the mechanical check on that list: its
 // `httpbinding.SplitURI` calls enumerate every Lambda URI, and the 50 distinct ones carry 17
@@ -74,6 +75,9 @@ const (
 
 	// lambdaEventInvokeAPIVersion dates PutFunctionEventInvokeConfig.
 	lambdaEventInvokeAPIVersion = "2019-09-25"
+
+	// lambdaCodeSigningAPIVersion dates GetFunctionCodeSigningConfig.
+	lambdaCodeSigningAPIVersion = "2020-06-30"
 )
 
 // lambdaUnknownOperation is what the parser reports for a path no routed operation publishes. The
@@ -208,6 +212,11 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 			return lambdaUnknownOperation, "", ""
 		}
 		return "PutFunctionEventInvokeConfig", fn, ""
+	case sub == "code-signing-config" && method == "GET":
+		if version != lambdaCodeSigningAPIVersion {
+			return lambdaUnknownOperation, "", ""
+		}
+		return "GetFunctionCodeSigningConfig", fn, ""
 	}
 
 	if version != lambdaFunctionsAPIVersion {
@@ -220,6 +229,8 @@ func lambdaFunctionOperation(version, method, p string) (op, name, subResource s
 		return "UpdateFunctionConfiguration", fn, ""
 	case sub == "invocations" && method == "POST":
 		return "Invoke", fn, ""
+	case sub == "versions" && method == "GET":
+		return "ListVersionsByFunction", fn, ""
 	case strings.HasPrefix(sub, "policy"):
 		// POST /policy → AddPermission
 		// GET /policy → GetPolicy
@@ -254,7 +265,7 @@ func lambdaNameFromPath(path string) string {
 		return ""
 	}
 	switch version {
-	case lambdaFunctionsAPIVersion, lambdaInvokeAsyncAPIVersion, lambdaEventInvokeAPIVersion:
+	case lambdaFunctionsAPIVersion, lambdaInvokeAsyncAPIVersion, lambdaEventInvokeAPIVersion, lambdaCodeSigningAPIVersion:
 	default:
 		return ""
 	}

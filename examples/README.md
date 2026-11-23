@@ -11,6 +11,15 @@ Runnable examples demonstrating Substrate.
 
 Run either with, e.g., `go run ./examples/custom_plugin`.
 
+## Infrastructure as code
+
+| Example | What it shows |
+|---------|---------------|
+| [`terraform`](terraform) | Fourteen common resources applied with the Terraform AWS provider pointed at substrate, read back by a second plan that must be empty, and destroyed. |
+| [`cdk`](cdk) | A TypeScript CDK app (a bucket, a queue and a table) bootstrapped, deployed and destroyed with the CDK CLI. |
+
+`test/iac` runs both in CI with the real tools; see [Terraform and CDK](../docs/iac-journeys.md).
+
 ## Journey tests (differentiator walk-throughs)
 
 The [`test/e2e`](../test/e2e) module contains runnable, CI-exercised "journey"

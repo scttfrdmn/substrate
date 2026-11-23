@@ -276,6 +276,9 @@ type EC2VPC struct {
 	// produced.
 	EnableNetworkAddressUsageMetrics bool `json:"enable_network_address_usage_metrics,omitempty"`
 
+	// InstanceTenancy is the tenancy CreateVpc was given, empty for the default.
+	InstanceTenancy string `json:"instance_tenancy,omitempty"`
+
 	// Tags holds key-value metadata tags.
 	Tags []EC2Tag `json:"tags,omitempty"`
 
