@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1117 operations**. This
+Substrate ships **68 built-in service plugins** routing **1120 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -14108,7 +14108,7 @@ Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHosted
 | TagResources | Applies tags to existing resources by ARN |
 | UntagResources | Removes tag keys from resources by ARN |
 
-`GetResources` scans forty-one resource types: S3 buckets, Lambda functions, SQS
+`GetResources` scans forty-two resource types: S3 buckets, Lambda functions, SQS
 queues, DynamoDB tables, EC2 instances and Elastic IP addresses (`elastic-ip`, as of #1191), EC2
 security groups, launch templates and EBS volumes (`security-group`, `launch-template` and
 `volume`, as of #1523), IAM users, roles and instance profiles (`instance-profile`, as of #1523),
@@ -14117,7 +14117,7 @@ APIs, API Gateway v2 HTTP and WebSocket APIs, Step Functions state machines and 
 clusters, services, tasks and task definitions, Cognito user pools, Kinesis
 streams, RDS DB instances, DB clusters and DB subnet groups, ElastiCache cache
 clusters, EFS file systems, Glue databases, ACM certificates, CloudFront
-distributions, CloudWatch Logs log groups, CloudWatch alarms (`cloudwatch:alarm`, as of #1618),
+distributions, CloudWatch Logs log groups, CloudWatch alarms (`cloudwatch:alarm`, as of #1618), EventBridge rules (`events:rule`, as of #1607),
 KMS keys, SNS topics, Secrets Manager secrets, Systems Manager parameters, and ELBv2 load
 balancers, target groups, listeners and listener rules.
 
