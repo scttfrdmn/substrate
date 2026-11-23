@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pytest-substrate's CloudWatch read-back test no longer reads the wall clock (#1595).** It freezes the server's simulated clock at a fixed instant and stamps its datapoints from it, and uses `datetime.UTC`, which the Python 3.12 ruff lint requires.
+
 - **Block Public Access ignored the condition operator (#1641).** A wildcard-principal `Allow` narrowed by `StringNotEquals aws:SourceVpc` was judged non-public, as if the operator were `StringEquals`. The same definition now decides Secrets Manager's `BlockPublicPolicy`.
 - **EventBridge `PutTargets` and `RemoveTargets` hold the rule lock (#1641).** A concurrent `DeleteRule` could remove the rule between their existence check and their write, leaving an orphan target list.
 
