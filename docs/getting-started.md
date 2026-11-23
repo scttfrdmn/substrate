@@ -333,40 +333,24 @@ func TestS3Operations(t *testing.T) {
 
 ## Recording and replaying
 
-Use `ReplayEngine` to record a test session and replay it later for
-deterministic CI reproduction:
+A test server records every request it serves, bodies included, in the stream
+`"default"`. Replay that stream and fail the test if the replay does not reproduce
+the session:
 
 ```go
 func TestWithRecording(t *testing.T) {
 	ts := substrate.StartTestServer(t)
 
-	// Wire up a ReplayEngine against the same store the server uses.
-	engine := substrate.NewReplayEngine(
-		ts.Store(),           // EventStore
-		ts.StateManager(),    // StateManager
-		ts.TimeController(),  // TimeController
-		ts.Registry(),        // PluginRegistry
-		substrate.ReplayConfig{RandomSeed: 42},
-		substrate.NewDefaultLogger(slog.LevelError, false),
-	)
-
-	ctx := context.Background()
-	session, _ := engine.StartRecording(ctx, "my-test")
-
 	// ... run your test against ts.URL ...
 
-	eventCount, _ := engine.StopRecording(ctx, session)
-	t.Logf("recorded %d events in stream %s", eventCount, session.StreamID)
-
-	// Replay deterministically.
-	results, _ := engine.Replay(ctx, session.StreamID)
-	if results.FailedEvents > 0 {
-		t.Errorf("replay had %d failures", results.FailedEvents)
-	}
+	// Replays the recorded session into a fresh emulator and fails the test on any
+	// difference from the recording. ts.Replay(t) returns the results without failing.
+	ts.AssertReplay(t)
 }
 ```
 
-<!-- TODO(#178): expand recording/replay section with full working example -->
+See [Recording and Replay](/testing-guide#recording-and-replay) for time-travel
+debugging and exporting a session as a regression test.
 
 ## Cost inspection
 

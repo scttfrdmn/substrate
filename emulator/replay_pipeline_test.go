@@ -8,11 +8,6 @@ package emulator_test
 // request the recording refused with a 403 or an injected 500 was re-executed on
 // replay and *succeeded*, applying a state change the recorded run never made.
 //
-// The half of the contract that already existed makes the gap unmistakable:
-// QuotaController.CheckQuota and ConsistencyController.CheckRead each open with an
-// isReplaying guard, and replayEvent has always set the flag those guards read — the
-// two ends were written and never joined.
-//
 // Every test here records over the wire through a [emulator.TestServer] and replays
 // that stream, because the defect is in the relationship between what the server
 // refuses and what the replay re-decides. Two of them assert on *state* after the
@@ -20,10 +15,8 @@ package emulator_test
 // bucket readable afterwards can only have been created by the replay, and a bucket
 // the recording's refusal prevented must still be absent.
 //
-// The gates the replay path is *expected to exempt* are asserted through
-// [emulator.CheckReplayGatesForTest] instead. A replay that reproduced a stream
-// without a quota refusal could be exempting the request or never reaching the
-// controller at all, and those are the two states this issue found indistinguishable.
+// Quota and consistency are also asserted through [emulator.CheckReplayGatesForTest],
+// which shows the gate's own decision for a replaying request.
 
 import (
 	"bytes"
@@ -351,20 +344,12 @@ func TestReplayPipeline_RewindRestoresTheArmedFiredCounts(t *testing.T) {
 		"the rewind returns each rule to the count it was armed with, not to zero")
 }
 
-// TestReplayPipeline_QuotaAndConsistencyAreConsultedAndExempt asserts the two gates
-// whose correct answer on replay is "allowed", which is why they need asserting
-// through the gate rather than through a replay.
-//
-// Both controllers have carried an isReplaying guard since they were written, and
-// replayEvent has always set the flag — but a replay never called either one, so the
-// guards were unreachable from the only path that sets the flag. A replay that
-// reproduces such a stream cannot tell the two apart: an exempted request and a
-// request that never reached the controller both look like success. The gate can.
-//
-// Consistency is exempt for a stronger reason than quota's: RecordWrite is guarded on
-// the same flag, so no propagation window ever opens during a replay, and a CheckRead
-// that enforced would be refusing against a window that does not exist.
-func TestReplayPipeline_QuotaAndConsistencyAreConsultedAndExempt(t *testing.T) {
+// TestReplayPipeline_QuotaAndConsistencyAreReDecided asserts that a replayed request
+// passes the quota and consistency gates as a live one does (#1601). Both used to exempt
+// a replay, so a recorded throttle or InconsistentStateException replayed as a success
+// and applied a change the recording never made. A replay now rewinds both controllers
+// at its start and re-decides each request at its recorded clock reading.
+func TestReplayPipeline_QuotaAndConsistencyAreReDecided(t *testing.T) {
 	tc := emulator.NewTimeController(time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC))
 
 	quota := emulator.NewQuotaController(emulator.QuotaConfig{
@@ -414,16 +399,14 @@ func TestReplayPipeline_QuotaAndConsistencyAreConsultedAndExempt(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Live first, which is what makes the exemption below non-vacuous: a
-			// controller that allowed everything would satisfy the replay assertion.
 			step, _, err := emulator.CheckReplayGatesForTest(tt.pipeline, live, read)
 			require.Error(t, err, "the controller must refuse a live request, or it is not configured to refuse")
 			assert.Equal(t, tt.wantStep, step)
 			assert.Contains(t, err.Error(), tt.wantCode)
 
 			step, _, err = emulator.CheckReplayGatesForTest(tt.pipeline, replaying, read)
-			assert.NoError(t, err, "a replayed request is exempt from %s", tt.name)
-			assert.Empty(t, step, "no gate refused")
+			require.Error(t, err, "a replayed request is refused by %s as a live one is", tt.name)
+			assert.Equal(t, tt.wantStep, step)
 		})
 	}
 }

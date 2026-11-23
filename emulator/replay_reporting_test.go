@@ -162,7 +162,7 @@ func replayDifferencesOn(results *emulator.ReplayResults, field string) []*emula
 // test/e2e/journey_replay_test.go assert FailedEvents == 0 and pass having
 // executed nothing.
 func TestReplayReporting_ASkippedEventIsNotCountedAsASuccess(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	ts := emulator.StartTestServer(t, emulator.WithoutRecordedBodies())
 
 	replayPutBucket(t, ts, "skip-accounting")
 	replayPutObject(t, ts, "skip-accounting", "a.txt", "one")
@@ -172,7 +172,9 @@ func TestReplayReporting_ASkippedEventIsNotCountedAsASuccess(t *testing.T) {
 
 	require.GreaterOrEqual(t, results.TotalEvents, 2, "both calls should be recorded")
 	assert.Equal(t, results.TotalEvents, results.SkippedEvents,
-		"no event carries a request without WithRecordedBodies, so all of them are skipped")
+		"no event carries a request under WithoutRecordedBodies, so all of them are skipped")
+	assert.Equal(t, map[emulator.ReplaySkipReason]int{emulator.SkipNoRequest: results.TotalEvents},
+		results.SkipReasons, "each skip names its reason")
 	assert.Zero(t, results.SuccessEvents,
 		"a skipped event was never executed and must not be reported as a successful replay")
 	assert.Zero(t, results.FailedEvents)

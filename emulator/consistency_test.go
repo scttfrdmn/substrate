@@ -148,7 +148,10 @@ func TestConsistencyController_ResourceKeyIsolation(t *testing.T) {
 	require.NoError(t, ctrl.CheckRead(reqCtx, readBob))
 }
 
-func TestConsistencyController_ReplayingContext_NoOp(t *testing.T) {
+// TestConsistencyController_ReplayingContext_IsEnforcedToo pins that a replay re-decides
+// consistency (#1601): a replayed write opens a window and a replayed read inside it is
+// refused, as the recorded run's was.
+func TestConsistencyController_ReplayingContext_IsEnforcedToo(t *testing.T) {
 	start := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	tc := emulator.NewTimeController(start)
 	ctrl := newConsistencyCtrl(t, true, 2*time.Second, []string{"iam"}, tc)
@@ -170,11 +173,8 @@ func TestConsistencyController_ReplayingContext_NoOp(t *testing.T) {
 		Params: map[string]string{"UserName": "alice"},
 	}
 
-	// RecordWrite during replay should be a no-op.
 	ctrl.RecordWrite(replayCtx, writeReq)
-
-	// CheckRead during replay should always pass.
-	require.NoError(t, ctrl.CheckRead(replayCtx, readReq))
+	require.Error(t, ctrl.CheckRead(replayCtx, readReq), "the replayed write opened a window")
 }
 
 func TestConsistencyController_InvalidConfig_Error(t *testing.T) {

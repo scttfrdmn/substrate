@@ -205,7 +205,7 @@ func (r *ReplayEngine) replayControlPlaneEvent(
 	replay *ActiveReplay,
 ) (bool, error) {
 	if r.controlPlane == nil {
-		replay.Results.SkippedEvents++
+		replay.skip(SkipNoControlPlane)
 		return false, nil
 	}
 

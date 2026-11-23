@@ -26,18 +26,14 @@ const (
 // prePluginGates holds the four controllers a request passes through between parsing
 // and plugin dispatch. Any of them may be nil, in which case that step is skipped.
 //
-// It exists so that the live path and the replay path cannot answer differently. Both
-// halves of that contract were written and never joined: [QuotaController.CheckQuota]
-// and [ConsistencyController.CheckRead] each open with an [isReplaying] guard, and
-// [ReplayEngine.replayEvent] dutifully sets the flag those guards read — but a replay
-// called [PluginRegistry.RouteRequest] directly, so the guards were unreachable from
-// the only path that sets the flag, and a request the recording refused with a 403, a
-// 429 or an injected fault was re-executed on replay and *succeeded* (#833).
+// It exists so that the live path and the replay path cannot answer differently: a
+// replay called [PluginRegistry.RouteRequest] directly, so a request the recording
+// refused with a 403, a 429 or an injected fault was re-executed on replay and
+// *succeeded* (#833). All four gates re-decide a replayed request (quota and
+// consistency since #1601), each from a controller the replay rewinds first.
 //
-// The two other dispatch paths, [StackDeployer.dispatch] and
-// [Server.stateAtSequence], keep their own narrower subsets of the pipeline. Bringing
-// those under this type as well is a larger change than #833 needs and is not
-// attempted here.
+// [StackDeployer.dispatch] keeps its own narrower subset of the pipeline (authorization
+// only), and a replay of its recorded dispatches passes only authorization and faults.
 type prePluginGates struct {
 	auth        *AuthController
 	quota       *QuotaController

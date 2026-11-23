@@ -74,9 +74,22 @@ type EventStoreConfig struct {
 	// backends.
 	PersistPath string
 
-	// IncludeBodies instructs the store to capture raw request and response
-	// bodies inside each event. Disable to reduce storage when bodies are large.
+	// IncludeBodies instructs the store to capture the request and response inside
+	// each event, which is what [ReplayEngine] re-executes. An event recorded without
+	// them is skipped on replay. [DefaultConfig] turns it on; the zero value of this
+	// struct leaves it off.
+	//
+	// Credential headers are never recorded: see [redactRecordedHeaders].
 	IncludeBodies bool
+
+	// MaxBodyBytes caps the size of a request or response body stored on one event.
+	// A body over the cap is replaced by its length and SHA-256 (see [BodyDigest]):
+	// an event whose request body was dropped cannot be replayed and is skipped, and
+	// a response body that was dropped is compared by digest. A digest compares bytes,
+	// so the member-order and whitespace normalisation [ReplayDifferences] applies is
+	// not applied to it. Zero means the default, [DefaultMaxBodyBytes]; a negative
+	// value means no cap.
+	MaxBodyBytes int
 
 	// IncludeStateHashes enables before/after state hashing on each event,
 	// which [ReplayEngine] uses to validate determinism.
@@ -148,6 +161,12 @@ type Event struct {
 	// what a replay does with that.
 	RequestID string `json:"request_id,omitempty"`
 
+	// ParentRequestID is the request id of the request this one was dispatched on behalf
+	// of, for a CloudFormation deployer dispatch. A replay that re-runs the parent skips
+	// this event, because the re-run dispatches it again. Empty for a request that
+	// arrived from outside, and on a stream recorded before #1601.
+	ParentRequestID string `json:"parent_request_id,omitempty"`
+
 	// Sequence is the monotonically increasing position in the global log.
 	Sequence int64 `json:"sequence"`
 
@@ -172,11 +191,22 @@ type Event struct {
 	// Operation is the AWS API operation name.
 	Operation string `json:"operation"`
 
-	// Request is the raw AWS request, populated only when [EventStoreConfig.IncludeBodies] is true.
+	// Request is the AWS request, populated only when [EventStoreConfig.IncludeBodies]
+	// is true. It is a copy with credential headers removed; see [redactRecordedHeaders].
 	Request *AWSRequest `json:"request,omitempty"`
 
-	// Response is the raw AWS response, populated only when [EventStoreConfig.IncludeBodies] is true.
+	// Response is the AWS response, populated only when [EventStoreConfig.IncludeBodies] is true.
 	Response *AWSResponse `json:"response,omitempty"`
+
+	// RequestBodyOmitted describes a request body that was over
+	// [EventStoreConfig.MaxBodyBytes] and was not stored. Such an event is skipped on
+	// replay with [SkipBodyOverCap].
+	RequestBodyOmitted *BodyDigest `json:"request_body_omitted,omitempty"`
+
+	// ResponseBodyOmitted describes a response body that was over
+	// [EventStoreConfig.MaxBodyBytes] and was not stored. A replay compares the
+	// replayed body against this digest.
+	ResponseBodyOmitted *BodyDigest `json:"response_body_omitted,omitempty"`
 
 	// StateHashBefore is a SHA-256 hash of service state before this request.
 	StateHashBefore string `json:"state_hash_before,omitempty"`
@@ -187,7 +217,7 @@ type Event struct {
 	// StatusCode is the HTTP status the caller was answered with, recorded whether or
 	// not bodies are.
 	//
-	// It was readable only through Response before #1237, so in the default
+	// It was readable only through Response before #1237, so in what was then the default
 	// configuration — `include_bodies` off — a refused request and an accepted one were
 	// the same entry in the request log, and an out-of-process consumer asking "did
 	// anything try to write?" could not tell an attempt that was refused from no attempt
@@ -460,10 +490,13 @@ func (e *EventStore) RecordRequest(
 	if reqCtx.Principal != nil {
 		event.Principal = reqCtx.Principal.ARN
 	}
+	if parent, ok := reqCtx.Metadata[parentRequestIDKey].(string); ok {
+		event.ParentRequestID = parent
+	}
 
 	if e.config.IncludeBodies {
-		event.Request = req
-		event.Response = resp
+		event.Request, event.RequestBodyOmitted = e.recordedRequest(req)
+		event.Response, event.ResponseBodyOmitted = e.recordedResponse(resp)
 	}
 
 	if e.config.IncludeStateHashes {
@@ -997,6 +1030,16 @@ func serviceFromRequest(req *AWSRequest) string {
 	return "unknown"
 }
 
+// parentRequestIDKey is the RequestContext.Metadata key an internal dispatch names its
+// parent request under; see [Event.ParentRequestID].
+const parentRequestIDKey = "parent_request_id"
+
+// DefaultStreamID is the stream every request that arrives over HTTP is recorded in.
+// Nothing on the wire selects a stream. Only an in-process dispatch that sets
+// RequestContext.Metadata["stream_id"] records elsewhere, as the CloudFormation
+// deployer does with the stack name.
+const DefaultStreamID = "default"
+
 // streamIDFromContext extracts the stream_id from the request context metadata.
 func streamIDFromContext(ctx *RequestContext) string {
 	if ctx.Metadata != nil {
@@ -1004,7 +1047,7 @@ func streamIDFromContext(ctx *RequestContext) string {
 			return id
 		}
 	}
-	return "default"
+	return DefaultStreamID
 }
 
 // matchesFilter reports whether event satisfies all constraints in filter.

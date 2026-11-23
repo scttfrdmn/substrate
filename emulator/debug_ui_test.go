@@ -181,7 +181,7 @@ func TestDebugStateDiff(t *testing.T) {
 
 	// Record a base event (seq 0) without body.
 	if err := store.RecordEvent(ctx, &emulator.Event{
-		Service: "s3", Operation: "ListBuckets",
+		Service: "s3", Operation: "ListBuckets", StreamID: emulator.DefaultStreamID,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -278,8 +278,8 @@ func TestDebugExport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(src), "http.NewRequest") {
-		t.Errorf("generated source does not contain http.NewRequest:\n%s", src)
+	if !strings.Contains(string(src), "ts.ReplayEvents(t, events)") {
+		t.Errorf("generated source does not replay the recorded events:\n%s", src)
 	}
 }
 

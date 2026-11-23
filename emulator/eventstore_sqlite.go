@@ -90,8 +90,10 @@ func (sb *sqliteBackend) flush(ctx context.Context, events []*Event, snapshots m
 		if serErr != nil {
 			return fmt.Errorf("serialize event %s: %w", ev.ID, serErr)
 		}
-		statusCode := 0
-		if ev.Response != nil {
+		// The event's own status, which is recorded whether or not bodies are; the
+		// response is the fallback for a stream recorded before Event.StatusCode existed.
+		statusCode := ev.StatusCode
+		if statusCode == 0 && ev.Response != nil {
 			statusCode = ev.Response.StatusCode
 		}
 		_, execErr := tx.ExecContext(ctx,

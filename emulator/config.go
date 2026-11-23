@@ -178,8 +178,13 @@ type EventStoreCfg struct {
 	// PersistPath is the filesystem path used by non-memory backends.
 	PersistPath string `mapstructure:"persist_path"`
 
-	// IncludeBodies instructs the store to capture raw request/response bodies.
+	// IncludeBodies instructs the store to capture each request and response, which
+	// replay re-executes. Default true; credential headers are never recorded.
 	IncludeBodies bool `mapstructure:"include_bodies"`
+
+	// MaxBodyBytes caps one recorded body; see [EventStoreConfig.MaxBodyBytes].
+	// Default 1 MiB.
+	MaxBodyBytes int `mapstructure:"max_body_bytes"`
 
 	// IncludeStateHashes enables before/after state hashing on each event.
 	IncludeStateHashes bool `mapstructure:"include_state_hashes"`
@@ -203,6 +208,7 @@ func (c EventStoreCfg) ToEventStoreConfig() EventStoreConfig {
 		MaxEventsInMemory:  c.MaxInMemory,
 		PersistPath:        c.PersistPath,
 		IncludeBodies:      c.IncludeBodies,
+		MaxBodyBytes:       c.MaxBodyBytes,
 		IncludeStateHashes: c.IncludeStateHashes,
 		MaxFileSizeMB:      c.MaxFileSizeMB,
 		DSN:                c.DSN,
@@ -716,7 +722,8 @@ func DefaultConfig() *Config {
 			Backend:            "memory",
 			SnapshotInterval:   100,
 			MaxInMemory:        0,
-			IncludeBodies:      false,
+			IncludeBodies:      true,
+			MaxBodyBytes:       DefaultMaxBodyBytes,
 			IncludeStateHashes: false,
 			MaxFileSizeMB:      0,
 			DSN:                "substrate.db",
@@ -836,6 +843,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("event_store.max_in_memory", defaults.EventStore.MaxInMemory)
 	v.SetDefault("event_store.persist_path", defaults.EventStore.PersistPath)
 	v.SetDefault("event_store.include_bodies", defaults.EventStore.IncludeBodies)
+	v.SetDefault("event_store.max_body_bytes", defaults.EventStore.MaxBodyBytes)
 	v.SetDefault("event_store.include_state_hashes", defaults.EventStore.IncludeStateHashes)
 	v.SetDefault("event_store.max_file_size_mb", defaults.EventStore.MaxFileSizeMB)
 	v.SetDefault("event_store.dsn", defaults.EventStore.DSN)

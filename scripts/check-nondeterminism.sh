@@ -83,7 +83,9 @@ ALLOWED=(
   "emulator/replay.go:generateReplayID"
   "emulator/replay.go:StartRecording"
   "emulator/replay.go:StopRecording"
-  "emulator/replay.go:Replay"
+  "emulator/replay.go:begin=StartTime:       time.Now(),"
+  "emulator/replay.go:run=start := time.Now()"
+  "emulator/replay.go:run=replay.Results.Duration = time.Since(start)"
 
   # Fallback for a plugin or store built without a time controller — a hand-built
   # PluginConfig in a unit test. The registry always injects one, so on a server these

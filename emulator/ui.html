@@ -92,11 +92,13 @@
     <!-- State panel -->
     <div class="panel" id="panel-state">
       <div class="controls">
-        <span style="color:#8b949e">State at sequence:</span>
+        <span style="color:#8b949e">State before sequence:</span>
         <input type="number" id="stateSeq" min="0" value="0" placeholder="seq">
+        <span style="color:#8b949e">in stream:</span>
+        <input type="text" id="stateStream" value="default" placeholder="stream">
         <button onclick="loadState()">Load</button>
       </div>
-      <pre id="stateJson">Click an event row to load state at that point.</pre>
+      <pre id="stateJson">Click an event row to load the state after that event.</pre>
     </div>
 
     <!-- Diff panel -->
@@ -188,9 +190,10 @@
           '<td>' + esc(ev.stream_id || '') + '</td>';
         tr.title = ev.error || '';
         tr.addEventListener('click', function() {
-          document.getElementById('stateSeq').value = ev.seq;
+          document.getElementById('stateSeq').value = ev.seq + 1;
+          document.getElementById('stateStream').value = ev.stream_id || 'default';
           switchToPanel('state');
-          loadStateAt(ev.seq);
+          loadStateAt(ev.seq + 1, ev.stream_id);
         });
         tbody.appendChild(tr);
       });
@@ -233,12 +236,12 @@
 
   function loadState() {
     var seq = parseInt(document.getElementById('stateSeq').value, 10);
-    loadStateAt(seq);
+    loadStateAt(seq, document.getElementById('stateStream').value);
   }
 
-  function loadStateAt(seq) {
+  function loadStateAt(seq, stream) {
     document.getElementById('stateJson').textContent = 'Loading…';
-    fetch('/v1/debug/events/' + seq + '/state')
+    fetch('/v1/debug/events/' + seq + '/state' + (stream ? '?stream=' + encodeURIComponent(stream) : ''))
       .then(function(r) { return r.json(); })
       .then(function(data) {
         document.getElementById('stateJson').textContent = JSON.stringify(data, null, 2);
@@ -251,7 +254,8 @@
   function loadDiff() {
     var from = document.getElementById('diffFrom').value;
     var to = document.getElementById('diffTo').value;
-    fetch('/v1/debug/state/diff?from=' + from + '&to=' + to)
+    var stream = document.getElementById('stateStream').value;
+    fetch('/v1/debug/state/diff?from=' + from + '&to=' + to + (stream ? '&stream=' + encodeURIComponent(stream) : ''))
       .then(function(r) { return r.json(); })
       .then(function(data) {
         var html = '';

@@ -392,6 +392,8 @@ func TestReplayEngine_JumpToEvent_OutOfRange(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// TestReplayEngine_StepBackward_NoSnapshot pins that stepping back needs no snapshot:
+// it replays from the start to the previous position (#1601).
 func TestReplayEngine_StepBackward_NoSnapshot(t *testing.T) {
 	engine, streamID := newEngineWithEvents(t, 3)
 	ctx := context.Background()
@@ -401,9 +403,12 @@ func TestReplayEngine_StepBackward_NoSnapshot(t *testing.T) {
 
 	require.NoError(t, engine.JumpToEvent(ctx, 2))
 
-	// No state snapshots populated yet — must return an error.
-	_, err = engine.StepBackward(ctx)
-	assert.Error(t, err)
+	ev, err := engine.StepBackward(ctx)
+	require.NoError(t, err)
+	current, err := engine.GetCurrentEvent()
+	require.NoError(t, err)
+	assert.Equal(t, ev, current, "the stepped-back-over event is next")
+	assert.EqualValues(t, 1, current.Sequence)
 }
 
 func TestReplayEngine_StepBackward_AtBeginning(t *testing.T) {

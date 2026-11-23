@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -814,7 +815,9 @@ func newDebugCmd() *cobra.Command {
 		Use:   "debug <stream>",
 		Short: "Inspect events in a recorded stream",
 		Long: `List events recorded in a stream and print their details.
-Full interactive time-travel debugging will be available in a later release.`,
+
+Use "substrate debug state-at <seq>" to print the state the stream had before
+the event with that sequence ran.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			streamID := args[0]
@@ -869,6 +872,66 @@ Full interactive time-travel debugging will be available in a later release.`,
 	}
 
 	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
+	cmd.AddCommand(newDebugStateAtCmd())
+
+	return cmd
+}
+
+// newDebugStateAtCmd builds `substrate debug state-at <seq>`, which prints the state a
+// recorded stream had before the event with sequence seq ran.
+//
+// It is the path GET /v1/debug/events/{seq}/state takes: the stream is replayed into a
+// substrate.ReplaySandbox with the recorded request IDs, clock and principals, and the
+// output is the same JSON, differences included.
+func newDebugStateAtCmd() *cobra.Command {
+	var configPath, streamID string
+
+	cmd := &cobra.Command{
+		Use:   "state-at <seq>",
+		Short: "Print the state a stream had before an event",
+		Long: `Replay a recorded stream into a fresh emulator up to, and not including, the
+event with sequence <seq>, and print the state there as JSON. Sequence 0 is the
+state before any event; a sequence past the last event is the final state.
+"differences" lists where the replay diverged from the recording.`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(_ *cobra.Command, args []string) error {
+			seq, err := strconv.ParseInt(args[0], 10, 64)
+			if err != nil {
+				return fmt.Errorf("sequence %q is not a number", args[0])
+			}
+			cfg, err := substrate.LoadConfig(configPath)
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+			logger := substrate.NewDefaultLogger(slog.LevelError, cfg.Log.Format == "json")
+			ctx := context.Background()
+
+			store, err := newLoadedEventStore(ctx, cfg, substrate.NewTimeController(time.Now()), logger)
+			if err != nil {
+				return err
+			}
+			defer store.Close() //nolint:errcheck
+
+			sandbox, err := substrate.NewReplaySandbox(ctx, cfg, store, logger)
+			if err != nil {
+				return err
+			}
+			at, err := sandbox.StateAt(ctx, streamID, seq)
+			if err != nil {
+				return fmt.Errorf("state at %d in stream %q (event store %s): %w",
+					seq, streamID, eventStoreLocation(cfg.EventStore), err)
+			}
+			out, err := json.MarshalIndent(at, "", "  ")
+			if err != nil {
+				return fmt.Errorf("encode state: %w", err)
+			}
+			fmt.Println(string(out))
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&configPath, "config", "c", "", "path to substrate.yaml config file")
+	cmd.Flags().StringVar(&streamID, "stream", substrate.DefaultStreamID, "stream to replay")
 
 	return cmd
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -33,7 +34,7 @@ func (s *Server) handleDebugUI(w http.ResponseWriter, _ *http.Request) {
 //
 // Method and path are deliberately not members: they live on the recorded request, which
 // `event_store.include_bodies` governs because a body is what makes an event large, so a
-// `path` member would be empty in the configuration a consumer runs by default. Service
+// `path` member would be empty whenever it is off. Service
 // plus operation identifies an operation in every configuration.
 type debugEventSummary struct {
 	Sequence   int64   `json:"seq"`
@@ -155,28 +156,38 @@ func (s *Server) handleDebugEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSONDebug(w, s.logger, result)
 }
 
-// handleDebugStateAt returns the emulator state snapshot at sequence number {seq}.
+// handleDebugStateAt returns the state stream ?stream= (default "default") had before
+// the event with sequence {seq} ran, as a [StateAt]. Sequence 0 is the state before any
+// event; a sequence past the last event is the final state.
+//
+// The state is rebuilt by replaying the stream into a [ReplaySandbox], with each event's
+// recorded request ID, clock and principal, so it names the identifiers the live run
+// minted. Where the replay diverged, the response lists it in `differences`. A stream
+// with no events is a 404.
 func (s *Server) handleDebugStateAt(w http.ResponseWriter, r *http.Request) {
-	seqStr := chi.URLParam(r, "seq")
-	seq, err := strconv.ParseInt(seqStr, 10, 64)
+	seq, err := strconv.ParseInt(chi.URLParam(r, "seq"), 10, 64)
 	if err != nil {
 		http.Error(w, `{"error":"invalid sequence"}`, http.StatusBadRequest)
 		return
 	}
-
-	stateJSON, err := s.stateAtSequence(r.Context(), seq)
+	sandbox, err := s.replaySandbox(r.Context())
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONErrorDebug(w, http.StatusInternalServerError, "%s", err.Error())
 		return
 	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(stateJSON) // nosemgrep
+	at, err := s.stateAt(r.Context(), sandbox, debugStream(r), seq)
+	if err != nil {
+		writeJSONErrorDebug(w, stateAtErrorStatus(err), "%s", err.Error())
+		return
+	}
+	writeJSONDebug(w, s.logger, at)
 }
 
-// handleDebugStateDiff returns a JSON diff of state between two sequence points.
-// Query params: ?from=, ?to= (sequence numbers).
+// handleDebugStateDiff returns the state keys that were added, removed and changed
+// between two sequence points of stream ?stream= (default "default"). Query params:
+// ?from=, ?to= (sequence numbers, with the meaning [Server.handleDebugStateAt] gives
+// them). A key is "namespace/key"; a value is the base64 of the stored bytes. The
+// differences each replay found are returned beside the diff.
 func (s *Server) handleDebugStateDiff(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 
@@ -191,68 +202,122 @@ func (s *Server) handleDebugStateDiff(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fromJSON, err := s.stateAtSequence(r.Context(), fromSeq)
+	ctx := r.Context()
+	stream := debugStream(r)
+	sandbox, err := s.replaySandbox(ctx)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONErrorDebug(w, http.StatusInternalServerError, "%s", err.Error())
 		return
 	}
-	toJSON, err := s.stateAtSequence(r.Context(), toSeq)
+	from, err := s.stateAt(ctx, sandbox, stream, fromSeq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONErrorDebug(w, stateAtErrorStatus(err), "%s", err.Error())
+		return
+	}
+	to, err := s.stateAt(ctx, sandbox, stream, toSeq)
+	if err != nil {
+		writeJSONErrorDebug(w, stateAtErrorStatus(err), "%s", err.Error())
 		return
 	}
 
-	var fromState, toState map[string]interface{}
-	if err := json.Unmarshal(fromJSON, &fromState); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+	fromState, err := flattenStateSnapshot(from.State)
+	if err != nil {
+		writeJSONErrorDebug(w, http.StatusInternalServerError, "%s", err.Error())
 		return
 	}
-	if err := json.Unmarshal(toJSON, &toState); err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+	toState, err := flattenStateSnapshot(to.State)
+	if err != nil {
+		writeJSONErrorDebug(w, http.StatusInternalServerError, "%s", err.Error())
 		return
 	}
 
-	added := make(map[string]interface{})
-	removed := make(map[string]interface{})
-	changed := make(map[string]interface{})
-
-	// Keys in toState not in fromState → added.
+	added := make(map[string]string)
+	removed := make(map[string]string)
+	changed := make(map[string]map[string]string)
 	for k, v := range toState {
 		if _, ok := fromState[k]; !ok {
 			added[k] = v
 		}
 	}
-	// Keys in fromState not in toState → removed; differing values → changed.
 	for k, fv := range fromState {
 		tv, ok := toState[k]
-		if !ok {
+		switch {
+		case !ok:
 			removed[k] = fv
-			continue
-		}
-		fJSON, err := json.Marshal(fv)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		tJSON, err := json.Marshal(tv)
-		if err != nil {
-			http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
-			return
-		}
-		if string(fJSON) != string(tJSON) {
-			changed[k] = map[string]interface{}{
-				"before": fv,
-				"after":  tv,
-			}
+		case tv != fv:
+			changed[k] = map[string]string{"before": fv, "after": tv}
 		}
 	}
 
-	result := map[string]interface{}{
-		"added":   added,
-		"removed": removed,
-		"changed": changed,
+	differences := from.Differences
+	for _, d := range to.Differences {
+		if d.Sequence >= fromSeq {
+			differences = append(differences, d)
+		}
 	}
-	writeJSONDebug(w, s.logger, result)
+	writeJSONDebug(w, s.logger, map[string]interface{}{
+		"stream":      stream,
+		"added":       added,
+		"removed":     removed,
+		"changed":     changed,
+		"differences": differences,
+	})
+}
+
+// debugStream returns the ?stream= parameter, or [DefaultStreamID].
+func debugStream(r *http.Request) string {
+	if stream := r.URL.Query().Get("stream"); stream != "" {
+		return stream
+	}
+	return DefaultStreamID
+}
+
+// errNoStreamEvents reports a state-at request for a stream with no events.
+var errNoStreamEvents = errors.New("no events in stream")
+
+// stateAtErrorStatus maps a [Server.stateAt] error to an HTTP status.
+func stateAtErrorStatus(err error) int {
+	if errors.Is(err, errNoStreamEvents) {
+		return http.StatusNotFound
+	}
+	return http.StatusInternalServerError
+}
+
+// replaySandbox builds a sandbox for this server's configuration and armed fault rules.
+func (s *Server) replaySandbox(ctx context.Context) (*ReplaySandbox, error) {
+	sandbox, err := NewReplaySandbox(ctx, &s.config, s.store, s.logger, withSandboxGatesOf(s.opts))
+	if err != nil {
+		return nil, fmt.Errorf("build replay sandbox: %w", err)
+	}
+	return sandbox, nil
+}
+
+// stateAt is [ReplaySandbox.StateAt] with an empty stream reported as errNoStreamEvents.
+func (s *Server) stateAt(ctx context.Context, sandbox *ReplaySandbox, stream string, seq int64) (*StateAt, error) {
+	events, err := s.store.GetStream(ctx, stream)
+	if err != nil {
+		return nil, fmt.Errorf("get stream %q: %w", stream, err)
+	}
+	if len(events) == 0 {
+		return nil, fmt.Errorf("%w %q", errNoStreamEvents, stream)
+	}
+	return sandbox.StateAt(ctx, stream, seq)
+}
+
+// flattenStateSnapshot turns a [MemoryStateManager] snapshot into one map keyed by
+// "namespace/key", with each value base64-encoded as the snapshot stores it.
+func flattenStateSnapshot(raw []byte) (map[string]string, error) {
+	var nested map[string]map[string]string
+	if err := json.Unmarshal(raw, &nested); err != nil {
+		return nil, fmt.Errorf("decode state snapshot: %w", err)
+	}
+	out := make(map[string]string)
+	for ns, keys := range nested {
+		for k, v := range keys {
+			out[ns+"/"+k] = v
+		}
+	}
+	return out, nil
 }
 
 // handleDebugCosts returns aggregated cost information.
@@ -330,47 +395,31 @@ func (s *Server) handleDebugExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	src, err := GenerateTestFixture(events, packageName, testName)
+	// A stream with an unreplayable event, or a package or test name that is not a Go
+	// identifier, is refused as unprocessable rather than exported as a fixture that
+	// cannot pass.
+	//
+	// A fixture replays into a default StartTestServer, which arms no fault rule, so a
+	// stream recorded under armed rules would replay its injected failures as
+	// successes. A default-VPC switch has a test-server option, and is carried.
+	if s.opts.Fault.hasArmedRules() {
+		writeJSONErrorDebug(w, http.StatusUnprocessableEntity,
+			"the server has fault rules armed, which a fixture's test server does not reproduce; clear them with DELETE /v1/fault/rules and record again")
+		return
+	}
+	var serverOptions []string
+	if !s.config.EC2.DefaultVPC {
+		serverOptions = append(serverOptions, "emulator.WithoutDefaultVPC()")
+	}
+	src, err := generateTestFixture(events, packageName, testName, serverOptions)
 	if err != nil {
-		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
+		writeJSONErrorDebug(w, http.StatusUnprocessableEntity, "%s", err.Error())
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(src)) // nosemgrep
-}
-
-// stateAtSequence replays all events up to and including upToSeq into a fresh
-// in-memory state and returns the resulting state snapshot as JSON.
-// Events without request bodies are silently skipped.
-func (s *Server) stateAtSequence(ctx context.Context, upToSeq int64) ([]byte, error) {
-	freshState := NewMemoryStateManager()
-	freshRegistry := NewPluginRegistry()
-	freshTC := NewTimeController(time.Time{})
-	// The EC2 section of the server's own config is passed through so a time-travel replay
-	// seeds a default VPC exactly when the live server did (#1464). Only that section: the
-	// rest — Docker-backed Lambda and RDS above all — would start containers for a read.
-	pluginCfg := DefaultConfig()
-	pluginCfg.EC2 = s.config.EC2
-	if err := RegisterDefaultPlugins(ctx, freshRegistry, freshState, freshTC, s.logger, nil, pluginCfg); err != nil {
-		return nil, fmt.Errorf("stateAtSequence register plugins: %w", err)
-	}
-
-	events, err := s.store.GetEvents(ctx, EventFilter{MaxSequence: upToSeq})
-	if err != nil {
-		return nil, fmt.Errorf("stateAtSequence get events: %w", err)
-	}
-
-	for _, ev := range events {
-		if ev.Request == nil {
-			continue
-		}
-		reqCtx := &RequestContext{AccountID: ev.AccountID, Region: ev.Region}
-		_, _ = freshRegistry.RouteRequest(reqCtx, ev.Request)
-	}
-
-	return freshState.Snapshot(ctx)
 }
 
 // timeControlResponse is the JSON shape returned by /v1/control/time.

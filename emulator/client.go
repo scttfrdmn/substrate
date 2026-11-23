@@ -238,11 +238,7 @@ func (b *Client) Validate(ctx context.Context, streamID string) (*ValidationRepo
 // NewDebugSession returns a DebugSession initialized for time-travel inspection
 // of the recorded stream identified by streamID.
 func (b *Client) NewDebugSession(streamID string) *DebugSession {
-	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)
-	return &DebugSession{
-		engine:   engine,
-		streamID: streamID,
-	}
+	return &DebugSession{client: b, streamID: streamID}
 }
 
 // BettyClient is the former name of [Client].

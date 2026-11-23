@@ -1901,7 +1901,7 @@ func apigwInternalRequestID(m *IDMint) string {
 	if !m.Derived() {
 		return generateRequestID()
 	}
-	return "req-apigw-" + m.Hex(12)
+	return apigwInternalRequestIDPrefix + m.Hex(12)
 }
 
 // buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload. Its
