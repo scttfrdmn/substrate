@@ -1,0 +1,12 @@
+# Trivy ignore rules. Each entry is scoped to the paths it applies to, and says why.
+# The Security Scan workflow and `make scan-iac` both pass this file (TRIVY_IGNOREFILE /
+# --ignorefile); Trivy reads the YAML form only from a file whose name ends in .yaml.
+misconfigurations:
+  # The AWS CDK bootstrap template, vendored unmodified from aws-cdk as a test fixture (#1606):
+  # emulator tests deploy it to prove `cdk bootstrap` works against substrate. Its
+  # ContainerAssetsRepository declares no ImageScanningConfiguration because upstream's does not,
+  # and editing the fixture would stop it being the template the CDK actually deploys. It is never
+  # deployed to AWS from this repository.
+  - id: AWS-0030
+    paths:
+      - "emulator/testdata/cfn/cdk_bootstrap_template.yaml"

@@ -42,16 +42,17 @@ type cfnS3TemplateLocation struct {
 	versionID string // the URL's versionId, "" for the current version
 }
 
-// cfnTemplateURLIgnoredQuery are the query parameters a TemplateURL may carry that the read does
-// not use: a presigned URL's SigV4 parameters (the S3 "Authenticating Requests: Using Query
-// Parameters" page). Substrate reads the object as the requesting caller, so a presigned grant has
-// nothing to add. Any other query parameter but versionId makes the URL unsupported rather than
-// being dropped silently — a URL naming something the read would not honor is refused, not
-// answered with a different object.
-var cfnTemplateURLIgnoredQuery = map[string]bool{
-	"x-amz-algorithm": true, "x-amz-credential": true, "x-amz-date": true, "x-amz-expires": true,
-	"x-amz-signedheaders": true, "x-amz-signature": true, "x-amz-security-token": true,
-	"x-amz-checksum-mode": true,
+// cfnTemplateURLIgnoredQuery reports whether a TemplateURL query parameter is one the read does not
+// use, compared case-insensitively: every x-amz-* parameter — a presigned URL's SigV4 parameters
+// (the S3 "Authenticating Requests: Using Query Parameters" page) and the others an SDK presigns,
+// such as x-amz-checksum-mode — and x-id, which the AWS SDK for JavaScript v3 adds to every
+// presigned URL ("x-id=GetObject"). Substrate reads the object as the requesting caller, so a
+// presigned grant has nothing to add. Any other query parameter but versionId makes the URL
+// unsupported rather than being dropped silently — a URL naming something the read would not honor
+// is refused, not answered with a different object.
+func cfnTemplateURLIgnoredQuery(name string) bool {
+	lower := strings.ToLower(name)
+	return lower == "x-id" || strings.HasPrefix(lower, "x-amz-")
 }
 
 // cfnS3RegionPattern is a Region name: "us-east-1", "eu-central-2", "us-gov-west-1",
@@ -111,7 +112,7 @@ func cfnTemplateURLVersion(query url.Values) (string, bool) {
 		switch {
 		case name == "versionId" && len(values) == 1 && values[0] != "":
 			versionID = values[0]
-		case cfnTemplateURLIgnoredQuery[strings.ToLower(name)]:
+		case cfnTemplateURLIgnoredQuery(name):
 		default:
 			return "", false
 		}
@@ -148,7 +149,8 @@ func cfnTemplateURLObject(u *url.URL, host, path, ownHost string) (cfnS3Template
 // endpoint a template can be read from: "s3", or one of the regional forms, each ending in a Region
 // name. See [cfnParseTemplateURL] for what is accepted and refused, and why.
 func cfnS3EndpointLabel(label string) bool {
-	if label == "s3" {
+	// "s3-external-1" is the legacy name of the us-east-1 endpoint, still served.
+	if label == "s3" || label == "s3-external-1" {
 		return true
 	}
 	if strings.HasPrefix(label, "s3-website") || strings.HasPrefix(label, "s3-accelerate") {

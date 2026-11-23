@@ -2553,10 +2553,12 @@ by `CreateStack`, `UpdateStack` and `CreateChangeSet`. It is a `GetObject` made 
 caller, routed and recorded like a stack's resource calls, so a caller who cannot read the object
 cannot deploy it. The URL forms are S3's HTTPS addressing styles: path-style on
 `s3.amazonaws.com`, `s3.{region}.amazonaws.com` and the legacy `s3-{region}.amazonaws.com`, and
-virtual-hosted `{bucket}.s3[.{region}|-{region}].amazonaws.com`, a bucket name with dots included.
+virtual-hosted `{bucket}.s3[.{region}|-{region}].amazonaws.com`, a bucket name with dots included, and
+the legacy `s3-external-1.amazonaws.com`.
 Each regional form's dual-stack and FIPS endpoints (`s3.dualstack.{region}`, `s3-fips.{region}`,
 `s3-fips.dualstack.{region}`) are accepted too, since the page excludes only S3 static websites. A
-`versionId` query parameter reads that version, a presigned URL's `X-Amz-*` parameters are ignored
+`versionId` query parameter reads that version, a presigned URL's `x-amz-*` parameters (any case) and
+the JavaScript SDK's `x-id` are ignored
 (the read is made as the caller anyway), and any other query parameter is refused rather than dropped.
 The read happens after every check that needs no template, so a request refused for its stack name
 or its `RoleARN` makes no `GetObject`.
@@ -15923,7 +15925,7 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 
 | Operation | Notes |
 |-----------|-------|
-| PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/` |
+| PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/`. A name prefixed with `aws` or `ssm`, in any case and with or without the slash, is `ValidationException`: *"A parameter name can't be prefixed with "aws" or "ssm" (case-insensitive)"* (#1606) |
 | GetParameter | Supports WithDecryption; reports the parameter's ARN |
 | GetParameters | Batch get |
 | GetParametersByPath | Recursive path traversal; paginates on `MaxResults`/`NextToken` (`MaxResults` 1–10, default 10, refused outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range)) and refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |

@@ -96,12 +96,15 @@ func (a *AuthController) authzResourceAccountContext(condCtx map[string]string, 
 // hierarchical name already begins with "/", which the ARN does not double. A Name that is
 // itself an ARN is used as given.
 //
-// A name under "/aws/" is a public parameter AWS owns — the prefix is reserved ("Parameter names
-// can't be prefixed with aws or ssm (case-insensitive)", the SSM parameter naming rules) — and its
-// ARN carries an empty account, as AWS's own policies write it: the AWSPremiumSupport-
+// A public parameter AWS manages — one in the set the plugin answers without a stored record,
+// [resolveManagedParameter]'s — has an ARN with an empty account, as AWS's own policies write it: the AWSPremiumSupport-
 // TroubleshootEKSCluster runbook reference grants ssm:GetParameter on
 // "arn:aws:ssm:::parameter/aws/service/eks/optimized-ami/...". Building it with the caller's
-// account matched no such statement.
+// account matched no such statement. The form is chosen from that managed set and never from the
+// name's prefix alone: a stored parameter is the caller's whatever its name, and a name-only test
+// would let a caller-created parameter shed its account — and every account-scoped Deny with it.
+// PutParameter also refuses the reserved "aws" and "ssm" prefixes, as AWS does
+// ([ssmReservedParameterName]).
 func ssmAuthzResourceARN(req *AWSRequest, region, acct string) string {
 	name := req.Params["Name"]
 	if name == "" && len(req.Body) > 0 {
@@ -117,10 +120,14 @@ func ssmAuthzResourceARN(req *AWSRequest, region, acct string) string {
 		return "*"
 	case strings.HasPrefix(name, "arn:"):
 		return name
-	case strings.HasPrefix(strings.ToLower(name), "/aws/"):
-		return "arn:aws:ssm:" + region + "::parameter" + name
-	case strings.HasPrefix(name, "/"):
-		return "arn:aws:ssm:" + region + ":" + acct + ":parameter" + name
 	}
-	return "arn:aws:ssm:" + region + ":" + acct + ":parameter/" + name
+	// Normalized as the plugin normalizes it before storing or reading, so "flat" and "/flat" name
+	// one parameter and one ARN.
+	if !strings.HasPrefix(name, "/") {
+		name = "/" + name
+	}
+	if _, managed := bundledImageForParameter(name); managed {
+		return "arn:aws:ssm:" + region + "::parameter" + name
+	}
+	return "arn:aws:ssm:" + region + ":" + acct + ":parameter" + name
 }

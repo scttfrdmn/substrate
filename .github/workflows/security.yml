@@ -46,6 +46,11 @@ jobs:
 
       - name: Trivy IaC scan
         uses: aquasecurity/trivy-action@v0.36.0
+        # The YAML ignore file holds path-scoped exceptions, each with its reason. trivy-action's
+        # `trivyignores` input concatenates files into the flat .trivyignore form, which cannot
+        # scope an ID to a path, so the file is passed to Trivy directly.
+        env:
+          TRIVY_IGNOREFILE: .trivyignore.yaml
         with:
           scan-type: config
           scan-ref: .

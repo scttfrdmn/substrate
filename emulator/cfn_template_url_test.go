@@ -48,6 +48,15 @@ func TestCFNTemplateURL_ReadsSubstratesS3(t *testing.T) {
 		{name: "FIPS", bucket: "tmpl-k", url: "https://s3-fips.us-gov-west-1.amazonaws.com/tmpl-k/stacks/app.json"},
 		{name: "FIPS dual-stack virtual-hosted", bucket: "tmpl-l",
 			url: "https://tmpl-l.s3-fips.dualstack.us-east-1.amazonaws.com/stacks/app.json"},
+		{name: "the legacy s3-external-1 endpoint", bucket: "tmpl-n",
+			url: "https://s3-external-1.amazonaws.com/tmpl-n/stacks/app.json"},
+		{name: "a JS SDK v3 presigned URL", bucket: "tmpl-o",
+			url: "https://tmpl-o.s3.us-east-1.amazonaws.com/stacks/app.json?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+				"&X-Amz-Content-Sha256=UNSIGNED-PAYLOAD" +
+				"&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20261123%2Fus-east-1%2Fs3%2Faws4_request" +
+				"&X-Amz-Date=20261123T120000Z&X-Amz-Expires=900" +
+				"&X-Amz-Signature=fe5f80f77d5fa3beca038a248ff027d0445342fe2855ddc963176630326f1024" +
+				"&X-Amz-SignedHeaders=host&x-amz-checksum-mode=ENABLED&x-id=GetObject"},
 		{name: "a presigned URL", bucket: "tmpl-m",
 			url: "https://s3.amazonaws.com/tmpl-m/stacks/app.json?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Expires=900&X-Amz-Signature=abc"},
 	}

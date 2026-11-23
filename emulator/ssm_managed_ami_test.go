@@ -45,16 +45,50 @@ func TestSSMPlugin_ManagedAMIParameter(t *testing.T) {
 	param2, _ := body2["Parameter"].(map[string]interface{})
 	assert.Equal(t, val, param2["Value"], "managed AMI resolution should be stable across calls")
 
-	// A user-created param still wins over the synthetic resolver.
-	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+	// A caller cannot create a parameter under AWS's namespace: "A parameter name can't be
+	// prefixed with "aws" or "ssm" (case-insensitive)" (#1606). A seeded one — TestServer's
+	// SeedSSMParameter, standing in for AWS — still wins over the synthetic resolver.
+	resp3 := ssmRequest(t, srv, "PutParameter", map[string]interface{}{
 		"Name": "/aws/service/custom-override", "Value": "explicit", "Type": "String",
 	})
-	resp3 := ssmRequest(t, srv, "GetParameter", map[string]interface{}{"Name": "/aws/service/custom-override"})
-	body3 := readSSMBody(t, resp3)
-	param3, _ := body3["Parameter"].(map[string]interface{})
-	assert.Equal(t, "explicit", param3["Value"])
+	assert.Equal(t, http.StatusBadRequest, resp3.StatusCode)
 
 	// A non-managed, non-existent param still 404s.
 	resp4 := ssmRequest(t, srv, "GetParameter", map[string]interface{}{"Name": "/not/aws/service/missing"})
 	assert.Equal(t, http.StatusNotFound, resp4.StatusCode)
+}
+
+// TestSSM_PutParameterRefusesReservedPrefixes pins PutParameter's naming constraint, "A parameter
+// name can't be prefixed with "aws" or "ssm" (case-insensitive)" (#1606): a caller cannot create a
+// parameter in AWS's namespace, with or without the leading slash and in any case, while a name
+// that merely contains the letters elsewhere is accepted.
+func TestSSM_PutParameterRefusesReservedPrefixes(t *testing.T) {
+	srv := newSSMTestServer(t)
+	for _, tc := range []struct {
+		name    string
+		refused bool
+	}{
+		{"/aws/secret", true},
+		{"aws/secret", true},
+		{"/AWS/Secret", true},
+		{"/awsome", true},
+		{"ssm-config", true},
+		{"/Ssm/x", true},
+		{"/app/aws/secret", false},
+		{"/team-ssm", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+				"Name": tc.name, "Value": "v", "Type": "String",
+			})
+			if !tc.refused {
+				assert.Equal(t, http.StatusOK, resp.StatusCode)
+				return
+			}
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+			body := readSSMBody(t, resp)
+			assert.Contains(t, body["__type"], "ValidationException")
+			assert.Equal(t, `Parameter name: can't be prefixed with "aws" or "ssm" (case-insensitive).`, body["message"])
+		})
+	}
 }
