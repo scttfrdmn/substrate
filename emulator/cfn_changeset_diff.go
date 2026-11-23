@@ -77,6 +77,16 @@ var cfnChangeAttributes = []string{
 var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::S3::Bucket":       {"BucketName": "Always", "BucketNamePrefix": "Always", "BucketNamespace": "Always"},
 	"AWS::S3::BucketPolicy": {"Bucket": "Always"},
+	// #1605's CDK types, each from its own page's "Update requires" lines. A route's table and
+	// destination identify it; every other route property is No interruption (ReplaceRoute). An
+	// association's RouteTableId is No interruption (ReplaceRouteTableAssociation). Every
+	// Lambda::Permission property is Replacement. QueuePolicy's two are No interruption.
+	"AWS::EC2::Route": {"RouteTableId": "Always", "DestinationCidrBlock": "Always",
+		"DestinationIpv6CidrBlock": "Always", "DestinationPrefixListId": "Always"},
+	"AWS::EC2::SubnetRouteTableAssociation": {"SubnetId": "Always"},
+	"AWS::Lambda::Permission": {"Action": "Always", "EventSourceToken": "Always", "FunctionName": "Always",
+		"FunctionUrlAuthType": "Always", "InvokedViaFunctionUrl": "Always", "Principal": "Always",
+		"PrincipalOrgID": "Always", "SourceAccount": "Always", "SourceArn": "Always"},
 	"AWS::SQS::Queue":       {"FifoQueue": "Always", "QueueName": "Always"},
 	"AWS::SNS::Topic":       {"FifoTopic": "Always", "TopicName": "Always"},
 	"AWS::DynamoDB::Table":  {"ImportSourceSpecification": "Always", "TableName": "Always"},

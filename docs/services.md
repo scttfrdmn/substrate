@@ -2644,6 +2644,23 @@ of:
 - `emulator.WithDeployerLenient(true)` on `NewStackDeployer`, or
   `emulator.WithClientLenientCloudFormation()` on `NewClient`.
 
+**What ordinary CDK apps emit.** Synthesized with CDK 2.1149.0 and the flags `cdk init` sets, a
+default `ec2.Vpc`, a Lambda function with an SQS event source, a `LambdaRestApi`, an SNS-to-SQS
+subscription and an ECS Fargate service deploy and delete in strict mode;
+`emulator/testdata/cfn/cdk` holds the templates and `TestCFN_OrdinaryCDKAppsDeployInStrictMode`
+pins them. Strict mode refuses these common constructs, because substrate cannot deploy what they
+emit:
+
+| Type | Emitted by |
+|------|------------|
+| `AWS::ApplicationAutoScaling::ScalableTarget`, `::ScalingPolicy` | `autoScaleReadCapacity` / `autoScaleWriteCapacity` on a DynamoDB table, ECS service autoscaling — substrate has no Application Auto Scaling plugin |
+| `AWS::Lambda::Url` | `addFunctionUrl` — the Lambda plugin routes no function-URL operations |
+| `AWS::ApiGateway::Account` | a `RestApi` with `cloudWatchRole` on, the default without the `@aws-cdk/aws-apigateway:disableCloudWatchRole` flag — the API Gateway plugin routes no account settings |
+| `Custom::S3AutoDeleteObjects` | `autoDeleteObjects: true` on a bucket |
+| `Custom::S3BucketNotifications` | `addEventNotification` on a bucket |
+| `Custom::*` generally | any construct backed by a custom-resource provider; substrate runs none |
+| `AWS::Serverless::*` | a SAM template — substrate runs no transform |
+
 An unrecognized type and an extraneous property are refused in both modes, because
 CloudFormation refuses them.
 
@@ -7475,6 +7492,7 @@ top-level request that already ran them.
 |------|-----|-------|
 | AWS::Lambda::Function | FunctionName | `Code` is deployed in every form; [inline `ZipFile` is zipped](#an-inline-zipfile-is-zipped-into-a-package). `Fn::GetAtt Arn` answers; `SnapStartResponse` and its members are refused with the reason, because SnapStart is not modeled ([#1591](https://github.com/scttfrdmn/substrate/issues/1591)) |
 | AWS::Lambda::EventSourceMapping | — | |
+| AWS::Lambda::Permission | statement ID | `AddPermission` on the function `FunctionName` names (a name or an ARN); the statement ID is generated per stack, as CloudFormation generates it, and every property is Replacement, so a replacement adds a statement with a new ID before the old one is removed. `Fn::GetAtt Id` answers. Deleted through `RemovePermission` (#1605) |
 
 ### A function name is unique per account per Region
 
@@ -8166,6 +8184,7 @@ preceded it.
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::SQS::Queue | QueueUrl | FifoQueue attribute supported |
+| AWS::SQS::QueuePolicy | generated ID | `SetQueueAttributes` `Policy` on each queue in `Queues`; a change updates in place, and a queue the update drops has its policy cleared. Deleted by clearing the policy on each queue (#1605) |
 
 ### The tag bookkeeping a queue carries reaches no response
 
@@ -13187,6 +13206,8 @@ catalog AMI, because a catalog entry is not a record the account wrote.
 | AWS::EC2::SecurityGroupEgress | GroupId | Standalone rule; supports `DestinationSecurityGroupId` |
 | AWS::EC2::Instance | InstanceId | Passes through `IamInstanceProfile`, `KeyName`, and `SecurityGroupIds` |
 | AWS::EC2::InternetGateway | InternetGatewayId | |
+| AWS::EC2::Route | `{RouteTableId}\|{destination}` | `CreateRoute` with the destination and the one target property; a changed target is `ReplaceRoute` in place, and a changed table or destination replaces the route. `Fn::GetAtt CidrBlock` answers the destination. Deleted through `DeleteRoute`. `CoreNetworkArn` and `OdbNetworkArn` targets are not routed (#1605) |
+| AWS::EC2::SubnetRouteTableAssociation | association ID | `AssociateRouteTable`; a changed `RouteTableId` is `ReplaceRouteTableAssociation`, which answers a new association ID, and a changed `SubnetId` replaces the association. `Fn::GetAtt Id` answers. Deleted through `DisassociateRouteTable` (#1605) |
 | AWS::EC2::LaunchTemplate | LaunchTemplateId | Ref is the real `lt-…` ID, usable by `CreateFleet`. `LaunchTemplateData` forwards `ImageId`, `InstanceType`, `KeyName`, `UserData`, `SecurityGroupIds`, `DisableApiTermination` and the five `MetadataOptions` members — `HttpTokens`, `HttpPutResponseHopLimit`, `HttpEndpoint`, `HttpProtocolIpv6`, `InstanceMetadataTags` — with intrinsics resolved and the hop limit sent as an integer; a value EC2 refuses fails the resource with EC2's code ([#1508](https://github.com/scttfrdmn/substrate/issues/1508)). `Fn::GetAtt` answers `LaunchTemplateId`, `DefaultVersionNumber` and `LatestVersionNumber`. On `UpdateStack` a changed `LaunchTemplateData` adds a version through `CreateLaunchTemplateVersion`: the ID stays, `LatestVersionNumber` follows the new version, and `DefaultVersionNumber` stays, since "the default version of a launch template cannot be specified in AWS CloudFormation". A changed `LaunchTemplateName` replaces the template; a change to `TagSpecifications` or `VersionDescription` alone makes no call |
 
 ### Cost

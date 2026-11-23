@@ -88,6 +88,10 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::IAM::Group":         (*StackDeployer).updateIAMGroup,
 	"AWS::IAM::Policy":        (*StackDeployer).updateIAMPolicy,
 	"AWS::IAM::ManagedPolicy": (*StackDeployer).updateIAMManagedPolicy,
+	// The CDK's routing and queue-policy types (#1605; cfn_resources_v131.go).
+	"AWS::EC2::Route":                       (*StackDeployer).updateEC2Route,
+	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).updateEC2SubnetRouteTableAssociation,
+	"AWS::SQS::QueuePolicy":                 (*StackDeployer).updateQueuePolicy,
 }
 
 // cfnUpdateUnmodelled maps a type to why a change to one of its updatable properties cannot be

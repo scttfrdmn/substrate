@@ -168,8 +168,14 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::EC2::SecurityGroupIngress": (*StackDeployer).deployEC2SecurityGroupIngress,
 	"AWS::EC2::SecurityGroupEgress":  (*StackDeployer).deployEC2SecurityGroupEgress,
 	"AWS::EC2::VPCGatewayAttachment": (*StackDeployer).deployEC2VPCGatewayAttachment,
-	// v0.131.0 — the record the CDK adds to every synthesized stack (#1605).
-	cfnCDKMetadataType: (*StackDeployer).deployCDKMetadata,
+	// v0.131.0 — the record the CDK adds to every synthesized stack (#1605), and the four types
+	// every ordinary CDK app emits that had no helper, so strict mode would have refused the app
+	// (cfn_resources_v131.go).
+	cfnCDKMetadataType:                      (*StackDeployer).deployCDKMetadata,
+	"AWS::EC2::Route":                       (*StackDeployer).deployEC2Route,
+	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).deployEC2SubnetRouteTableAssociation,
+	"AWS::Lambda::Permission":               (*StackDeployer).deployLambdaPermission,
+	"AWS::SQS::QueuePolicy":                 (*StackDeployer).deployQueuePolicy,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.

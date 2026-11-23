@@ -1,0 +1,181 @@
+{
+ "Parameters": {
+  "BootstrapVersion": {
+   "Default": "/cdk-bootstrap/hnb659fds/version",
+   "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+   "Type": "AWS::SSM::Parameter::Value<String>"
+  }
+ },
+ "Resources": {
+  "CDKMetadata": {
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/CDKMetadata/Default"
+   },
+   "Properties": {
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/12OwQ6CMBBEv4V7WQUT9ar+gAHuZmkrKZSWtFsNIfy7RYIHT7P7MpmZHPLTGfYJvn3KRZdqVcNUEvKORfSYxGiwtyLCCmst2e1pvsfMcBi04kjKGgxkPUetTAPTFb0s47O4LkRO1YEk20iFrpG0xPyRVSoXm2NMuabdbawYN/cPzDMrpLfB8bjDWCGh9btXfoTsAFnSeqVSFwypXkKx6gfS27cU5wAAAA=="
+   },
+   "Type": "AWS::CDK::Metadata"
+  },
+  "TD925BC7E": {
+   "DeletionPolicy": "Retain",
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/T/Resource"
+   },
+   "Properties": {
+    "AttributeDefinitions": [
+     {
+      "AttributeName": "pk",
+      "AttributeType": "S"
+     }
+    ],
+    "KeySchema": [
+     {
+      "AttributeName": "pk",
+      "KeyType": "HASH"
+     }
+    ],
+    "ProvisionedThroughput": {
+     "ReadCapacityUnits": 5,
+     "WriteCapacityUnits": 5
+    }
+   },
+   "Type": "AWS::DynamoDB::Table",
+   "UpdateReplacePolicy": "Retain"
+  },
+  "TReadScalingTarget4D7818D4": {
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/T/ReadScaling/Target/Resource"
+   },
+   "Properties": {
+    "MaxCapacity": 10,
+    "MinCapacity": 1,
+    "ResourceId": {
+     "Fn::Join": [
+      "",
+      [
+       "table/",
+       {
+        "Ref": "TD925BC7E"
+       }
+      ]
+     ]
+    },
+    "RoleARN": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":iam::123456789012:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable"
+      ]
+     ]
+    },
+    "ScalableDimension": "dynamodb:table:ReadCapacityUnits",
+    "ServiceNamespace": "dynamodb"
+   },
+   "Type": "AWS::ApplicationAutoScaling::ScalableTarget"
+  },
+  "TReadScalingTargetTracking798DE121": {
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/T/ReadScaling/Target/Tracking/Resource"
+   },
+   "Properties": {
+    "PolicyName": "DdbAppTReadScalingTargetTrackingB00BAB89",
+    "PolicyType": "TargetTrackingScaling",
+    "ScalingTargetId": {
+     "Ref": "TReadScalingTarget4D7818D4"
+    },
+    "TargetTrackingScalingPolicyConfiguration": {
+     "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "DynamoDBReadCapacityUtilization"
+     },
+     "TargetValue": 70
+    }
+   },
+   "Type": "AWS::ApplicationAutoScaling::ScalingPolicy"
+  },
+  "TWriteScalingTargetCBF88FEB": {
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/T/WriteScaling/Target/Resource"
+   },
+   "Properties": {
+    "MaxCapacity": 10,
+    "MinCapacity": 1,
+    "ResourceId": {
+     "Fn::Join": [
+      "",
+      [
+       "table/",
+       {
+        "Ref": "TD925BC7E"
+       }
+      ]
+     ]
+    },
+    "RoleARN": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":iam::123456789012:role/aws-service-role/dynamodb.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_DynamoDBTable"
+      ]
+     ]
+    },
+    "ScalableDimension": "dynamodb:table:WriteCapacityUnits",
+    "ServiceNamespace": "dynamodb"
+   },
+   "Type": "AWS::ApplicationAutoScaling::ScalableTarget"
+  },
+  "TWriteScalingTargetTracking655FD6F8": {
+   "Metadata": {
+    "aws:cdk:path": "DdbApp/T/WriteScaling/Target/Tracking/Resource"
+   },
+   "Properties": {
+    "PolicyName": "DdbAppTWriteScalingTargetTrackingEC279595",
+    "PolicyType": "TargetTrackingScaling",
+    "ScalingTargetId": {
+     "Ref": "TWriteScalingTargetCBF88FEB"
+    },
+    "TargetTrackingScalingPolicyConfiguration": {
+     "PredefinedMetricSpecification": {
+      "PredefinedMetricType": "DynamoDBWriteCapacityUtilization"
+     },
+     "TargetValue": 70
+    }
+   },
+   "Type": "AWS::ApplicationAutoScaling::ScalingPolicy"
+  }
+ },
+ "Rules": {
+  "CheckBootstrapVersion": {
+   "Assertions": [
+    {
+     "Assert": {
+      "Fn::Not": [
+       {
+        "Fn::Contains": [
+         [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+         ],
+         {
+          "Ref": "BootstrapVersion"
+         }
+        ]
+       }
+      ]
+     },
+     "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+    }
+   ]
+  }
+ }
+}

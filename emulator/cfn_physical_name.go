@@ -120,6 +120,12 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	"AWS::ElastiCache::ParameterGroup": {maxLen: 255, lower: true},
 	"AWS::EFS::FileSystem":             {maxLen: 64},
 
+	// A Lambda permission's statement ID is 1–100 of [a-zA-Z0-9-_] (AddPermission), and the type
+	// declares no StatementId, so CloudFormation generates it; a queue policy's ID likewise
+	// (#1605). The bound for the queue policy is substrate's: AWS publishes none.
+	"AWS::Lambda::Permission": {maxLen: 100},
+	"AWS::SQS::QueuePolicy":   {maxLen: 255},
+
 	// A bare Lambda function name "is limited to 64 characters in length"
 	// (CreateFunction).
 	"AWS::Lambda::Function": {maxLen: 64, nameProp: "FunctionName"},

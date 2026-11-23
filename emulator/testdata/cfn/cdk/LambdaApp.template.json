@@ -1,0 +1,164 @@
+{
+ "Parameters": {
+  "BootstrapVersion": {
+   "Default": "/cdk-bootstrap/hnb659fds/version",
+   "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+   "Type": "AWS::SSM::Parameter::Value<String>"
+  }
+ },
+ "Resources": {
+  "CDKMetadata": {
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/CDKMetadata/Default"
+   },
+   "Properties": {
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/2WKQQ6CMBREz8K+fAUTdW90Z6JwAFPaaj6UX6QtxjS9u1ISN67mzZspodztYZ3xl82F7HKNDYTacdGxr7oFzftGcggnT8KhIXa404+PkyJXGz8KdebDgPSY538bGfIeQmW0mg8pL0ajeM91ocjs00K4euXTKUGMkZGRClq7msotFBsostYi5qMnh72CaskPkNb9q8cAAAA="
+   },
+   "Type": "AWS::CDK::Metadata"
+  },
+  "Fn9270CBC0": {
+   "DependsOn": [
+    "FnServiceRoleDefaultPolicyC6A839BF",
+    "FnServiceRoleB9001A96"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/Fn/Resource"
+   },
+   "Properties": {
+    "Code": {
+     "ZipFile": "def handler(e, c):\n  return 1"
+    },
+    "Handler": "index.handler",
+    "Role": {
+     "Fn::GetAtt": [
+      "FnServiceRoleB9001A96",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.12"
+   },
+   "Type": "AWS::Lambda::Function"
+  },
+  "FnServiceRoleB9001A96": {
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/Fn/ServiceRole/Resource"
+   },
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Type": "AWS::IAM::Role"
+  },
+  "FnServiceRoleDefaultPolicyC6A839BF": {
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/Fn/ServiceRole/DefaultPolicy/Resource"
+   },
+   "Properties": {
+    "PolicyDocument": {
+     "Statement": [
+      {
+       "Action": [
+        "sqs:ReceiveMessage",
+        "sqs:ChangeMessageVisibility",
+        "sqs:GetQueueUrl",
+        "sqs:DeleteMessage",
+        "sqs:GetQueueAttributes"
+       ],
+       "Effect": "Allow",
+       "Resource": {
+        "Fn::GetAtt": [
+         "Q63C6E3AB",
+         "Arn"
+        ]
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "PolicyName": "FnServiceRoleDefaultPolicyC6A839BF",
+    "Roles": [
+     {
+      "Ref": "FnServiceRoleB9001A96"
+     }
+    ]
+   },
+   "Type": "AWS::IAM::Policy"
+  },
+  "FnSqsEventSourceLambdaAppQ53059B3EF3A68C70": {
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/Fn/SqsEventSource:LambdaAppQ53059B3E/Resource"
+   },
+   "Properties": {
+    "EventSourceArn": {
+     "Fn::GetAtt": [
+      "Q63C6E3AB",
+      "Arn"
+     ]
+    },
+    "FunctionName": {
+     "Ref": "Fn9270CBC0"
+    }
+   },
+   "Type": "AWS::Lambda::EventSourceMapping"
+  },
+  "Q63C6E3AB": {
+   "DeletionPolicy": "Delete",
+   "Metadata": {
+    "aws:cdk:path": "LambdaApp/Q/Resource"
+   },
+   "Type": "AWS::SQS::Queue",
+   "UpdateReplacePolicy": "Delete"
+  }
+ },
+ "Rules": {
+  "CheckBootstrapVersion": {
+   "Assertions": [
+    {
+     "Assert": {
+      "Fn::Not": [
+       {
+        "Fn::Contains": [
+         [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+         ],
+         {
+          "Ref": "BootstrapVersion"
+         }
+        ]
+       }
+      ]
+     },
+     "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+    }
+   ]
+  }
+ }
+}

@@ -225,9 +225,11 @@ func cfnRefuseUnemulated(tmpl *cfnTemplate, cctx *cfnContext) error {
 	}
 	return cfnErrf(ErrCFNUnemulatedType,
 		"Template declares resource types substrate does not emulate: [%s]. Substrate refuses them "+
-			"rather than report a stub that creates nothing as CREATE_COMPLETE; to deploy them as stubs, "+
-			"set cloudformation.strict: false (SUBSTRATE_CLOUDFORMATION_STRICT=false) or start the test "+
-			"server with WithLenientCloudFormation()", strings.Join(types, "; "))
+			"rather than report a stub that creates nothing as CREATE_COMPLETE. To deploy them as stubs, "+
+			"turn strict mode off: cloudformation.lenient: true (SUBSTRATE_CLOUDFORMATION_LENIENT=true) "+
+			"on the server, WithLenientCloudFormation() on StartTestServer, WithDeployerLenient(true) on "+
+			"NewStackDeployer, or WithClientLenientCloudFormation() on NewClient; see \"Strict mode and "+
+			"template validation\" in docs/services.md", strings.Join(types, "; "))
 }
 
 // cfnValidateTemplate makes every request-level check a template is held to before CreateStack,

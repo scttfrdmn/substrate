@@ -2129,6 +2129,9 @@ func CFNGetAttValueForTest(dr DeployedResource, attr, region string) (string, []
 	return v, cctx.takeFailures()
 }
 
+// CFNRecognizedTypeForTest wraps cfnRecognizedType.
+func CFNRecognizedTypeForTest(typ string) bool { return cfnRecognizedType(typ) }
+
 // CFNELBHostedZoneIDForTest wraps cfnELBHostedZoneID.
 func CFNELBHostedZoneIDForTest(region, lbType string) string {
 	return cfnELBHostedZoneID(region, lbType)

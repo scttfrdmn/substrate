@@ -154,10 +154,31 @@ func TestCFNStrict_RegistryAndModuleTypes(t *testing.T) {
 	requireNoResourceErrors(t, result)
 
 	_, err = newStrictDeployer(t, emulator.WithDeployerLenient(true)).Deploy(context.Background(),
-		`{"Resources":{"X":{"Type":"AWS::Nope::Thing"},"Y":{"Type":"AWS::Lambda::Function::MODULE"}}}`, "aws", nil)
+		`{"Resources":{"X":{"Type":"AWS::Nope::Thing"},"Y":{"Type":"Aws::S3::Bucket"}}}`, "aws", nil)
 	require.Error(t, err)
-	assert.Equal(t, "Template format error: Unrecognized resource types: [AWS::Nope::Thing]", err.Error(),
-		"an AWS module is recognized; an unlisted AWS type is not")
+	assert.Equal(t, "Template format error: Unrecognized resource types: [AWS::Nope::Thing, Aws::S3::Bucket]", err.Error(),
+		"a misspelled AWS namespace is refused even in lenient mode")
+}
+
+// TestCFNStrict_RecognizedTypeShapes pins which names count as another publisher's type: the
+// Organization::Service::Resource shape, or that shape and ::MODULE, outside AWS's namespace.
+func TestCFNStrict_RecognizedTypeShapes(t *testing.T) {
+	for typ, want := range map[string]bool{
+		// Listed by the specification, or special.
+		"AWS::S3::Bucket": true, "Alexa::ASK::Skill": true, "AWS::CDK::Metadata": true,
+		"Custom::Anything": true, "AWS::CloudFormation::CustomResource": true,
+		// Third-party, private-registry and module types.
+		"Datadog::Monitors::Monitor": true, "MongoDB::Atlas::Cluster": true, "MyOrg::Service::Thing": true,
+		"MyOrg::Network::Vpc::MODULE": true,
+		// Misspelled AWS names: a colon short, the wrong case, or an unlisted AWS type.
+		"AWS:EC2::VPC": false, "Aws::S3::Bucket": false, "aws::sqs::Queue": false, "ALEXA::ASK::Skill": false,
+		"AWS::S3::Bukcet": false, "AWS::Lambda::Function::MODULE": false,
+		// Not the shape at all.
+		"MyOrg::Thing": false, "MyOrg::Service::Thing::Extra": false, "MyOrg::::Thing": false,
+		"MyOrg::Service:::Thing": false, "MyOrg::Service::Thing::module": false, "Widget": false,
+	} {
+		assert.Equal(t, want, emulator.CFNRecognizedTypeForTest(typ), typ)
+	}
 }
 
 // TestCFNStrict_RollbackIsNotHeldToPropertyValidation pins that the rollback of a failed update

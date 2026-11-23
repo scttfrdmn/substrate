@@ -77,8 +77,10 @@ func TestCFNStrict_RequestLevelRefusals(t *testing.T) {
 				`"Raw":{"Type":"AWS::CloudFormation::CustomResource","Properties":{"ServiceToken":"arn:aws:sns:us-east-1:123456789012:t"}}}}`,
 			want: "Template declares resource types substrate does not emulate: [AWS::CloudFormation::CustomResource (Raw); " +
 				"AWS::EKS::Cluster (Cluster); Custom::Hook (Hook)]. Substrate refuses them rather than report a stub that " +
-				"creates nothing as CREATE_COMPLETE; to deploy them as stubs, set cloudformation.strict: false " +
-				"(SUBSTRATE_CLOUDFORMATION_STRICT=false) or start the test server with WithLenientCloudFormation()",
+				"creates nothing as CREATE_COMPLETE. To deploy them as stubs, turn strict mode off: cloudformation.lenient: " +
+				"true (SUBSTRATE_CLOUDFORMATION_LENIENT=true) on the server, WithLenientCloudFormation() on StartTestServer, " +
+				"WithDeployerLenient(true) on NewStackDeployer, or WithClientLenientCloudFormation() on NewClient; see " +
+				"\"Strict mode and template validation\" in docs/services.md",
 			validateAccepts: true,
 		},
 		{

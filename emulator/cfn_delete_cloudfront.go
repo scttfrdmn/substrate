@@ -22,6 +22,8 @@ var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, Depl
 	"AWS::IAM::Group":         cfnDeleteIAMEntityFor("Group"),
 	"AWS::IAM::Policy":        cfnDeleteIAMPolicy,
 	"AWS::IAM::ManagedPolicy": cfnDeleteIAMManagedPolicy,
+	// One SetQueueAttributes per queue the policy was applied to (cfn_resources_v131.go).
+	"AWS::SQS::QueuePolicy": cfnDeleteQueuePolicy,
 }
 
 // cfnDeleteCloudFrontDistribution deletes a distribution the way CloudFormation does and

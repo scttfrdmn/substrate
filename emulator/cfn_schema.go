@@ -89,8 +89,8 @@ func cfnCustomResourceType(typ string) bool {
 }
 
 // cfnRecognizedType reports whether CloudFormation recognizes a resource type: one the
-// specification lists, a custom resource, AWS::CDK::Metadata, or a type outside the AWS:: and
-// Alexa:: namespaces or ending ::MODULE.
+// specification lists, a custom resource, AWS::CDK::Metadata, or a third-party, private-registry
+// or module type ([cfnThirdPartyType]).
 //
 // AWS::CDK::Metadata is the record the CDK adds to every stack it synthesizes, and
 // CloudFormation accepts it, but the specification does not list it — it is not a resource
@@ -100,17 +100,37 @@ func cfnCustomResourceType(typ string) bool {
 // MyOrg::Service::Thing) and a module (Org::Service::Name::MODULE) are recognized by an account
 // that has activated or registered them, which substrate cannot know, so they are not refused
 // as unrecognized: strict mode refuses them as unemulated, and lenient mode stubs them. The
-// specification lists only AWS's own types, so only those namespaces are checked against it.
+// specification lists only AWS's own types, so every other name is checked against it — which is
+// what refuses a misspelled AWS name such as AWS:EC2::VPC or Aws::S3::Bucket.
 func cfnRecognizedType(typ string) bool {
-	if typ == cfnCDKMetadataType || cfnCustomResourceType(typ) {
-		return true
-	}
-	if strings.HasSuffix(typ, "::MODULE") ||
-		(!strings.HasPrefix(typ, "AWS::") && !strings.HasPrefix(typ, "Alexa::")) {
+	if typ == cfnCDKMetadataType || cfnCustomResourceType(typ) || cfnThirdPartyType(typ) {
 		return true
 	}
 	_, ok := cfnSchemaLookup(typ)
 	return ok
+}
+
+// cfnThirdPartyType reports whether typ has the shape of a type another publisher or the account
+// itself registers: Organization::Service::Resource — exactly three non-empty "::"-separated
+// segments with no stray colon — or Organization::Service::Resource::MODULE, as the registry's
+// type-name rule writes them, under an organization that is not AWS's. A first segment that is AWS
+// or Alexa in any case is AWS's namespace, reserved to it, so a name there is AWS's to recognize:
+// Aws::S3::Bucket is a misspelling, not a third-party type.
+func cfnThirdPartyType(typ string) bool {
+	segs := strings.Split(typ, "::")
+	switch {
+	case len(segs) == 3:
+	case len(segs) == 4 && segs[3] == "MODULE":
+	default:
+		return false
+	}
+	for _, s := range segs {
+		if s == "" || strings.Contains(s, ":") {
+			return false
+		}
+	}
+	org := strings.ToLower(segs[0])
+	return org != "aws" && org != "alexa"
 }
 
 // cfnAttributeIsList reports whether the specification declares a type's attribute as a
