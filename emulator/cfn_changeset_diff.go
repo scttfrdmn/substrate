@@ -76,6 +76,7 @@ var cfnChangeAttributes = []string{
 // Never; see the file comment for why that is the limit of the claim.
 var cfnRecreationProperties = map[string]map[string]string{
 	"AWS::S3::Bucket":       {"BucketName": "Always", "BucketNamePrefix": "Always", "BucketNamespace": "Always"},
+	"AWS::S3::BucketPolicy": {"Bucket": "Always"},
 	"AWS::SQS::Queue":       {"FifoQueue": "Always", "QueueName": "Always"},
 	"AWS::SNS::Topic":       {"FifoTopic": "Always", "TopicName": "Always"},
 	"AWS::DynamoDB::Table":  {"ImportSourceSpecification": "Always", "TableName": "Always"},

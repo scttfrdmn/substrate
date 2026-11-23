@@ -162,6 +162,17 @@ func (p *SSMPlugin) putParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 	if input.Type == "" {
 		input.Type = "String"
 	}
+	if ssmReservedParameterName(input.Name) {
+		// "A parameter name can't be prefixed with "aws" or "ssm" (case-insensitive)." — the Name
+		// member's naming constraints in API_PutParameter. The message is that constraint's
+		// wording; the page publishes no error text for it, and the code is the ValidationException
+		// the same constraints name for a name with spaces.
+		return nil, &AWSError{
+			Code:       "ValidationException",
+			Message:    `Parameter name: can't be prefixed with "aws" or "ssm" (case-insensitive).`,
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 	// Ensure name starts with /.
 	if !strings.HasPrefix(input.Name, "/") {
 		input.Name = "/" + input.Name
@@ -279,6 +290,14 @@ func (p *SSMPlugin) getParameter(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		},
 	}
 	return ssmJSONResponse(http.StatusOK, out)
+}
+
+// ssmReservedParameterName reports whether a parameter name begins with one of the prefixes
+// PutParameter refuses, "aws" or "ssm" in any case, with or without the leading slash (#1606). The
+// names under them are AWS's own — the public parameters — so a caller cannot create one.
+func ssmReservedParameterName(name string) bool {
+	first := strings.ToLower(strings.TrimPrefix(name, "/"))
+	return strings.HasPrefix(first, "aws") || strings.HasPrefix(first, "ssm")
 }
 
 // resolveManagedParameter returns a synthetic value for AWS-managed public

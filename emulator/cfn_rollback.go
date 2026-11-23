@@ -271,6 +271,8 @@ type cfnFailedCreate struct {
 	streamID     string
 	totalCost    float64
 	start        time.Time
+	createdAt    time.Time // the stack's creation time, carried from its previous record
+	reviewedAt   time.Time // its REVIEW_IN_PROGRESS start, carried the same way
 	onFailure    string
 	tagFailures  []CFNTagPropagationFailure
 }
@@ -309,8 +311,12 @@ func (d *StackDeployer) handleFailedCreate(ctx context.Context, fc cfnFailedCrea
 		AccountID:    d.identity.accountID,
 		Region:       d.identity.region,
 		OnFailure:    fc.onFailure,
-		CreatedAt:    fc.start,
+		CreatedAt:    fc.createdAt,
+		ReviewedAt:   fc.reviewedAt,
 		UpdatedAt:    d.tc.Now(),
+	}
+	if state.CreatedAt.IsZero() {
+		state.CreatedAt = fc.start
 	}
 	// A stack that failed to create still records who created it. Its rollback's
 	// deletes are dispatched by this same deployer, so they already run as the right

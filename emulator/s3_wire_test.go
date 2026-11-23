@@ -83,8 +83,8 @@ func TestS3Wire_BucketResponsesCarryNoBookkeepingMember(t *testing.T) {
 		{op: "PutBucketTagging", held: tagged},
 		{op: "HeadBucket", method: http.MethodHead, path: "/" + bucket},
 		{op: "ListBuckets", method: http.MethodGet, path: "/", anchor: "<Name>" + bucket + "</Name>"},
-		// GetBucketLocation would answer the bucket too, and is not driven: substrate does not route
-		// ?location, which is refused as NotImplemented rather than answered (#1349).
+		// GetBucketLocation answers from the bucket record too, routed since #1606.
+		{op: "GetBucketLocation", method: http.MethodGet, path: "/" + bucket + "?location", anchor: "<LocationConstraint"},
 		{op: "GetBucketTagging", method: http.MethodGet, path: "/" + bucket + "?tagging", anchor: "<Key>team</Key>"},
 		{op: "DeleteBucketTagging", method: http.MethodDelete, path: "/" + bucket + "?tagging"},
 		// Last: it removes the record every case above reads.

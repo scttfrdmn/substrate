@@ -97,7 +97,6 @@ func TestS3Subresource_UnroutedRequestsAreRefused(t *testing.T) {
 	for _, tc := range []struct {
 		op, method, path string
 	}{
-		{"GetBucketLocation", http.MethodGet, "/" + bucket + "?location"},
 		{"ListBucketInventoryConfigurations", http.MethodGet, "/" + bucket + "?inventory"},
 		{"GetBucketInventoryConfiguration", http.MethodGet, "/" + bucket + "?inventory&id=one"},
 		{"CreateSession", http.MethodGet, "/" + bucket + "?session"},
@@ -128,11 +127,13 @@ func TestS3Subresource_ResolvesTheRealOperationName(t *testing.T) {
 	}{
 		// Unrouted: named for what they are.
 		{http.MethodDelete, "/b?website", "DeleteBucketWebsite"},
-		{http.MethodGet, "/b?location", "GetBucketLocation"},
 		{http.MethodGet, "/b?metrics", "ListBucketMetricsConfigurations"},
 		{http.MethodGet, "/b?metrics&id=m1", "GetBucketMetricsConfiguration"},
 		{http.MethodPut, "/b/k?retention", "PutObjectRetention"},
 		{http.MethodPost, "/b/k?restore", "RestoreObject"},
+		// Routed. ?location is routed since #1606.
+		{http.MethodGet, "/b?location", "GetBucketLocation"},
+		{http.MethodGet, "/b?location=", "GetBucketLocation"},
 		// Routed: unchanged. ?cors is routed since #1278, and an SDK's "?cors=" resolves the same.
 		{http.MethodDelete, "/b?cors=", "DeleteBucketCors"},
 		{http.MethodGet, "/b?cors", "GetBucketCors"},

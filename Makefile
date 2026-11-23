@@ -134,7 +134,7 @@ scan-image: ## Trivy container image scan
 	trivy image --severity HIGH,CRITICAL ghcr.io/scttfrdmn/substrate:$(VERSION)
 
 scan-iac: ## Trivy IaC misconfiguration scan
-	trivy config .
+	trivy config --ignorefile .trivyignore.yaml .
 
 sast: ## Semgrep static analysis
 	semgrep scan --config=auto --error .

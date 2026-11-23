@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1120 operations**. This
+Substrate ships **68 built-in service plugins** routing **1121 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -71,7 +71,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 50 | Redshift | `redshift` | Query | 10 |
 | 51 | Redshift Data API | `redshift-data` | JSON | 3 |
 | 52 | Route 53 | `route53` | REST/XML | 6 |
-| 53 | S3 | `s3` | REST/XML | 53 |
+| 53 | S3 | `s3` | REST/XML | 54 |
 | 54 | SageMaker | `sagemaker` | JSON | 10 |
 | 55 | EventBridge Scheduler | `scheduler` | REST/JSON | 12 |
 | 56 | Secrets Manager | `secretsmanager` | JSON | 16 |
@@ -2528,19 +2528,19 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 
 | Operation | Notes |
 |-----------|-------|
-| CreateStack | Deploys every resource in `TemplateBody` and returns the stack ARN; honours `RoleARN` |
-| UpdateStack | Re-deploys the template; an omitted `TemplateBody` re-uses the stored one, and an omitted `RoleARN` the stored role |
+| CreateStack | Deploys every resource in `TemplateBody`, or in the object `TemplateURL` names in substrate's S3 (see below), and returns the stack ARN; honours `RoleARN` |
+| UpdateStack | Re-deploys the template; an omitted `TemplateBody` and `TemplateURL` re-use the stored one, and an omitted `RoleARN` the stored role. A stack in `REVIEW_IN_PROGRESS` is refused, as it has no template to update |
 | DeleteStack | Sweeps the resources the stack deployed, then removes the stack record (see below); deleting an absent stack succeeds; `RoleARN` applies to this operation only |
-| DescribeStacks | One stack by `StackName`, or every stack when omitted; reports `RoleARN` when the stack has one |
+| DescribeStacks | One stack by `StackName`, or every stack when omitted; reports `RoleARN` when the stack has one. A stack a `CREATE` change set made reports `REVIEW_IN_PROGRESS` until it is executed, and its `CreationTime` is when the change set made it. An unknown stack's `ValidationError` names the identifier the caller sent, name or ARN |
 | ListStacks | Summary shape; honours `StackStatusFilter.member.N` |
 | DescribeStackResources | By `StackName` + optional `LogicalResourceId`, or by `PhysicalResourceId` |
 | ListStackResources | `StackResourceSummary` per resource, from the same derivation as `DescribeStackResources`; pages 100 on `NextToken` (the page publishes only a 1 MB bound, so the size is substrate's), an unissued token is `ValidationError`; a deleted stack is not found (#1446) |
 | DescribeStackEvents | Derived from the stack record rather than stored, so it cannot disagree with `DescribeStackResources` about whether a resource failed — the two are renderings of one fact. Pages 100 events on `NextToken`, the only paging parameter the operation publishes; a stack small enough for one page gets no token |
 | GetTemplate | Returns the stored `TemplateBody` byte-for-byte; `TemplateStage` is [validated and honoured](#change-set-detail-template-stages-and-filtered-drift) |
-| CreateChangeSet | `ChangeSetType=UPDATE` only; records `Tags`; see below |
-| DescribeChangeSet | Accepts a bare change-set name or its ARN; each `ResourceChange` carries [`Scope`, `Details` and `PhysicalResourceId`](#change-set-detail-template-stages-and-filtered-drift) |
-| ExecuteChangeSet | Applies the change and its tags, and consumes the set |
-| ListChangeSets | Pending change sets for a stack |
+| CreateChangeSet | `ChangeSetType` `UPDATE` (the default) or `CREATE`, which creates the stack in `REVIEW_IN_PROGRESS`; `IMPORT` is refused. Takes `TemplateBody`, `TemplateURL` or `UsePreviousTemplate`, and records `Tags`, `RoleARN`, `Capabilities`, `Description` and `OnStackFailure`. An `UPDATE` that changes nothing is `FAILED` with AWS's reason; see [Change sets](#change-sets-create-update-and-the-empty-change-set) |
+| DescribeChangeSet | Accepts a bare change-set name or its ARN; reports `Status`, `StatusReason`, `ExecutionStatus`, `Description`, `Capabilities` and `OnStackFailure`; each `ResourceChange` carries [`Scope`, `Details` and `PhysicalResourceId`](#change-set-detail-template-stages-and-filtered-drift) |
+| ExecuteChangeSet | Applies the change and its tags — a `CREATE` change set through the create path, honouring `DisableRollback` and `OnStackFailure` — then reports `EXECUTE_COMPLETE` or `EXECUTE_FAILED` and deletes the stack's other change sets. A change set that is not `AVAILABLE` is `InvalidChangeSetStatus` |
+| ListChangeSets | A stack's change sets, with `Status`, `StatusReason`, `ExecutionStatus` and `Description` |
 | DeleteChangeSet | Discards a pending set; deleting an absent set succeeds |
 | DetectStackDrift | Returns a `StackDriftDetectionId` — UUID-shaped within the published maximum length of 36, [derived from the request ID](#an-identifier-a-replay-mints-is-the-one-it-recorded) (#856). It used to be substrate's internal `req-…` string, a shape no AWS reference describes. Honours [`LogicalResourceIds.member.N`](#change-set-detail-template-stages-and-filtered-drift) |
 | DescribeStackDriftDetectionStatus | Resolves that ID to a completed detection |
@@ -2548,9 +2548,36 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 | ListExports | Every exported output value in the caller's account and Region, in one page |
 | ListImports | Stack **names** importing an `ExportName`; an export nothing imports is an empty list |
 
-`TemplateURL` is refused with `ValidationError` rather than ignored: fetching a
-template is a network read substrate does not perform, and silently accepting the
-parameter deployed a stack with no resources in it.
+**`TemplateURL` is read from substrate's own S3** ([#1606](https://github.com/scttfrdmn/substrate/issues/1606)),
+by `CreateStack`, `UpdateStack` and `CreateChangeSet`. It is a `GetObject` made as the requesting
+caller, routed and recorded like a stack's resource calls, so a caller who cannot read the object
+cannot deploy it. The URL forms are S3's HTTPS addressing styles: path-style on
+`s3.amazonaws.com`, `s3.{region}.amazonaws.com` and the legacy `s3-{region}.amazonaws.com`, and
+virtual-hosted `{bucket}.s3[.{region}|-{region}].amazonaws.com`, a bucket name with dots included, and
+the legacy `s3-external-1.amazonaws.com`.
+Each regional form's dual-stack and FIPS endpoints (`s3.dualstack.{region}`, `s3-fips.{region}`,
+`s3-fips.dualstack.{region}`) are accepted too, since the page excludes only S3 static websites. A
+`versionId` query parameter reads that version, a presigned URL's `x-amz-*` parameters (any case) and
+the JavaScript SDK's `x-id` are ignored
+(the read is made as the caller anyway), and any other query parameter is refused rather than dropped.
+The read happens after every check that needs no template, so a request refused for its stack name
+or its `RoleARN` makes no `GetObject`.
+The parameter's page requires `https://`. A path-style URL on the host the CloudFormation request was
+itself sent to is substrate's own endpoint and is read over `http` or `https`: that is the URL the
+CDK builds when it is pointed at an emulator, `${endpoint}/${bucket}/${key}`. Everything else is
+refused with `ValidationError`:
+
+| TemplateURL | Message |
+|-------------|---------|
+| Not an S3 URL — another host, `http://` on an AWS host, `s3://`, a website (`s3-website-…`) or Transfer Acceleration endpoint (substrate's reading), a label that is no Region, an unsupported query parameter, no key | `TemplateURL must be a supported URL.` |
+| An object S3 cannot serve | `S3 error: ` followed by S3's own message, e.g. `The specified key does not exist.` |
+| An empty object, or one over the page's 1 MB maximum | substrate's own message |
+| Both `TemplateBody` and `TemplateURL` | substrate's own message; the pages say *"You must specify only one"* |
+
+The first two wordings are observed rather than published: an AWS re:Post question and
+`aws-cloudformation/cloudformation-coverage-roadmap#1212` quote the first, and
+`aws-quickstart/quickstart-boomi-atom#24` the `S3 error:` prefix. A Systems Manager document URL is
+not modelled.
 
 A request that names something absent — a stack, a change set, a drift detection —
 is a `ValidationError` at 400, and a template body that cannot be decoded is a
@@ -3114,7 +3141,8 @@ a new ID, and the first stayed behind.
   | `AWS::DynamoDB::Table` | `UpdateTable`, `UpdateTimeToLive` | `BillingMode`, `ProvisionedThroughput`; `TimeToLiveSpecification` |
   | `AWS::SQS::Queue` | `SetQueueAttributes` | `VisibilityTimeout`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds`, `MaximumMessageSize` |
   | `AWS::SNS::Topic` | `SetTopicAttributes` | `DisplayName` |
-  | `AWS::S3::Bucket` | `PUT ?versioning`, `PUT`/`DELETE ?encryption`, `PUT`/`DELETE ?cors` | `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration` |
+  | `AWS::S3::Bucket` | `PUT ?versioning`, `PUT`/`DELETE ?encryption`, `PUT`/`DELETE ?cors`, `PUT`/`DELETE ?lifecycle`, `PUT`/`DELETE ?publicAccessBlock` | `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration`, `LifecycleConfiguration`, `PublicAccessBlockConfiguration` |
+  | `AWS::S3::BucketPolicy` | `PutBucketPolicy` | `PolicyDocument`; a changed `Bucket` is Replacement |
   | `AWS::KMS::Key` | `UpdateKeyDescription`, `PutKeyPolicy`, `EnableKeyRotation`/`DisableKeyRotation`, `EnableKey`/`DisableKey` | `Description`, `KeyPolicy`, `EnableKeyRotation`, `RotationPeriodInDays`, `Enabled` |
   | `AWS::EC2::SecurityGroup` | `RevokeSecurityGroupIngress`/`Egress`, then `AuthorizeSecurityGroupIngress`/`Egress` | `SecurityGroupIngress`, `SecurityGroupEgress` |
   | `AWS::ECS::Service` | `UpdateService` | `TaskDefinition`, `DesiredCount` |
@@ -3127,8 +3155,11 @@ a new ID, and the first stayed behind.
   The properties applied are the ones the type's create forwards, so a create and an
   update of one declaration agree; a property the create does not forward either — most
   types' `Tags` ([#1572](https://github.com/scttfrdmn/substrate/issues/1572)), a bucket's
-  `LifecycleConfiguration` ([#1573](https://github.com/scttfrdmn/substrate/issues/1573)), a
-  function's `VpcConfig`, a queue's `RedrivePolicy` — makes no call. The
+  `OwnershipControls` or `NotificationConfiguration` ([#1573](https://github.com/scttfrdmn/substrate/issues/1573)), a
+  function's `VpcConfig`, a queue's `RedrivePolicy` — makes no call. A bucket's
+  `LifecycleConfiguration` and `PublicAccessBlockConfiguration` joined the applied set in
+  v0.131.0 ([#1606](https://github.com/scttfrdmn/substrate/issues/1606)), and like encryption and
+  CORS are deleted when the template drops them. The
   creates gained three of these with the change: a function's `Environment`, a bucket's
   `BucketEncryption` and `CorsConfiguration`, and a key's `KeyPolicy`, `Enabled` and
   `EnableKeyRotation` (which used to be sent to `CreateKey`, which has no such member).
@@ -3733,7 +3764,10 @@ template's mistake.
 event pattern is resolved at every depth and then marshalled, so an `Fn::GetAtt` in
 a statement's `Resource` stores the ARN rather than `{"Fn::GetAtt":[…]}`. The
 string form, a JSON document written as a string, is passed through as the document
-rather than quoted a second time. This covers:
+rather than quoted a second time. An `Fn::If` that chooses a structure — a whole `Condition`
+block, or one statement of a `Statement` list, the way the CDK bootstrap template writes its optional
+grants — is that structure, resolved in turn; until #1606 it was marshalled into a JSON string, which
+IAM refused as `MalformedPolicyDocument`. This covers:
 
 | Resource type | Property |
 |---|---|
@@ -3742,6 +3776,7 @@ rather than quoted a second time. This covers:
 | `AWS::IAM::ManagedPolicy` | `PolicyDocument` |
 | `AWS::IAM::Role`, `AWS::IAM::User`, `AWS::IAM::Group` | each `Policies` member's `PolicyDocument` |
 | `AWS::SNS::TopicPolicy` | `PolicyDocument` |
+| `AWS::S3::BucketPolicy` | `PolicyDocument` (#1606) |
 | `AWS::Events::Rule` | `EventPattern` |
 | `AWS::ECR::Repository` lifecycle | `LifecyclePolicyText` |
 | `AWS::StepFunctions::StateMachine` | `Definition` (#1074) |
@@ -3946,16 +3981,47 @@ Two things worth knowing if you assert on this:
   `AddTagsToStream`, with its published `LimitExceededException` at 400. The
   divergence is about one door, not about the limit.
 
-### Change sets describe, they do not stage
+### Change sets: CREATE, UPDATE and the empty change set
 
 A change set records the template that would be applied and reports the
-resource-level changes it implies. `ExecuteChangeSet` applies it and deletes the
-set, so `DescribeChangeSet` afterwards reports `ChangeSetNotFound` (404 — unlike
-the stack family, which reports `ValidationError` at 400).
+resource-level changes it implies
+([#1606](https://github.com/scttfrdmn/substrate/issues/1606)). Creation and execution are
+synchronous, so no change set is observed in `CREATE_PENDING`, `CREATE_IN_PROGRESS` or
+`EXECUTE_IN_PROGRESS`.
 
-`ChangeSetType=CREATE` is refused: it would have to produce a stack in
-`REVIEW_IN_PROGRESS`, a state the stack model has no representation for. Create
-the stack, then change-set the update.
+- **`CREATE`.** *"If you create a change set for a new stack, CloudFormation creates a stack with a
+  unique stack ID, but no template or resources. The stack will be in the `REVIEW_IN_PROGRESS` state
+  until you execute the change set."* `DescribeStacks` and `ListStacks` report the stack,
+  `DescribeStackEvents` reports its one `REVIEW_IN_PROGRESS` event (*User Initiated*), and
+  `DeleteStack` removes it with its change sets. Every change is an `Add`, diffed against an empty
+  template, and a resource whose `Condition` is false is not listed. For an `UPDATE` too, a resource
+  whose `Condition` turns on is an `Add`, and one whose `Condition` turns off is a `Remove`. A second `CREATE` on a stack
+  still in review is accepted; one on any other existing stack is refused with `ValidationError`
+  *"Stack [{name}] already exists and cannot be created again with the changeSet [{changeSet}]."* —
+  observed wording, quoted by `aws/copilot-cli#1376` and SAM CLI reports. Executing it runs the
+  create path, so a failed create rolls back, does nothing or deletes the stack as `OnStackFailure`
+  or `DisableRollback` say; the stack's `CreationTime` stays when the change set made it, and its
+  `REVIEW_IN_PROGRESS` event stays the oldest, through every later update.
+- **`UPDATE`**, the default, diffs against the stack's template. A stack in `REVIEW_IN_PROGRESS`, like
+  one in `ROLLBACK_COMPLETE`, cannot be updated.
+- **`IMPORT`** is refused with `ValidationError`; the message is substrate's own. Importing brings
+  existing resources under a stack, which needs a resource-identifier model substrate does not have.
+- **An `UPDATE` that changes nothing is `FAILED`**, `ExecutionStatus` `UNAVAILABLE`, with
+  `StatusReason` *"The submitted information didn't contain changes. Submit different information
+  to create a change set."* — AWS's text, quoted by the AWS Cloud Operations Blog. Nothing to change
+  means no resource change, no changed `Outputs`, and a `Tags` parameter that is absent or equal to
+  the stack's. The CDK reads this reason as a no-op deploy.
+- **Execution.** `ExecuteChangeSet` refuses a change set that is not `AVAILABLE` with
+  `InvalidChangeSetStatus` (400; the message is substrate's own). An executed change set remains,
+  reporting `EXECUTE_COMPLETE`, or `EXECUTE_FAILED` when the stack ended failed or rolled back, and
+  *"CloudFormation deletes all other change sets associated with the stack"*. Before #1606 the
+  executed set was deleted too. The change set's `RoleARN` is the role the execution runs as and the
+  stack's afterwards. `DisableRollback` applies to a `CREATE` change set; an `UPDATE` that fails rolls
+  back, as `UpdateStack` does.
+- **Recorded, not enforced.** `Capabilities` is reported back, and `InsufficientCapabilities` is not
+  answered. `NotificationARNs`, `RollbackConfiguration`, `IncludeNestedStacks`,
+  `ImportExistingResources`, `DeploymentMode`, `DeploymentConfig` and the two client tokens are
+  accepted and not read.
 
 #### What a change set does with tags
 
@@ -5741,6 +5807,7 @@ STS operations are free.
 | PutBucketLifecycleConfiguration | `PUT /{bucket}?lifecycle`; the configuration round-trips verbatim (an `aws-chunked` body is decoded first — see [Content-Encoding and aws-chunked](#content-encoding-and-aws-chunked)), and an empty body stores an empty `<LifecycleConfiguration/>`. No rule is ever applied: nothing expires, transitions storage class or aborts an upload on a schedule, because that is resource-internal rather than an API observation |
 | GetBucketLifecycleConfiguration | `GET /{bucket}?lifecycle`; replies with the stored bytes unchanged, so what a caller reads back is what it wrote. A bucket with no configuration — including one that does not exist — is `404 NoSuchLifecycleConfiguration` |
 | DeleteBucketLifecycle | `DELETE /{bucket}?lifecycle`; `204`, and idempotent: removing a configuration that is not there still succeeds |
+| GetBucketLocation | `GET /{bucket}?location`; answers the Region the bucket was created in, which is the Region the creating request was sent to, as `LocationConstraint`. A `us-east-1` bucket answers an empty element, AWS's *"LocationConstraint of null"*. `404 NoSuchBucket` for a bucket that does not exist. Routed since [#1606](https://github.com/scttfrdmn/substrate/issues/1606), because the CDK's asset publisher asks for it before every upload |
 | PutBucketCors | `PUT /{bucket}?cors`; records the `CORSConfiguration`, replacing any existing one; `400 MalformedXML` for a body that does not parse, has no `CORSRule`, or has a rule without `AllowedMethod` or `AllowedOrigin` — see [CORS configuration](#cors-configuration) |
 | GetBucketCors | `GET /{bucket}?cors`; answers the recorded rules, every `CORSRule` member round-tripping; `404 NoSuchCORSConfiguration` when none is set, which is not an empty configuration — see [CORS configuration](#cors-configuration) |
 | DeleteBucketCors | `DELETE /{bucket}?cors`; `204`, idempotent, and removes only the configuration, never the bucket — see [CORS configuration](#cors-configuration) |
@@ -6868,13 +6935,14 @@ therefore warns earlier than the gate would refuse.
 
 Every published S3 sub-resource that substrate does not implement is named for the operation it is,
 and refused with `NotImplemented`/501. That is the code S3 publishes for functionality a server does
-not implement. It covers `?website`, `?location`, `?logging`,
+not implement. It covers `?website`, `?logging`,
 `?replication`, the four id-keyed configuration families (analytics, inventory,
 metrics, intelligent-tiering), object lock, the metadata-table configurations and `CreateSession` at
 bucket level. At object level it covers `?retention`, `?legal-hold`, `?attributes`, `?torrent` and
 `?restore`. The tables are in `emulator/s3_subresources.go`. `?cors` left them with #1278 and
-`?encryption` with [#493](https://github.com/scttfrdmn/substrate/issues/493), and `?ownershipControls`
-with [#1445](https://github.com/scttfrdmn/substrate/issues/1445).
+`?encryption` with [#493](https://github.com/scttfrdmn/substrate/issues/493), `?ownershipControls`
+with [#1445](https://github.com/scttfrdmn/substrate/issues/1445), and `?location` with
+[#1606](https://github.com/scttfrdmn/substrate/issues/1606).
 
 Until [#1349](https://github.com/scttfrdmn/substrate/issues/1349), the router reached each method's
 default by *absence*, so an unrouted sub-resource became a different, routed operation:
@@ -7096,14 +7164,15 @@ so neither collides.
 `TestS3Wire_BucketResponsesCarryNoBookkeepingMember` in `emulator/s3_wire_test.go` drives the
 operations that answer the bucket record: `CreateBucket`, `HeadBucket`, `ListBuckets` and
 `DeleteBucket`, plus the three tagging operations. It tags the bucket and reads `ever_tagged` back
-first ([#756](https://github.com/scttfrdmn/substrate/issues/756), #938). `GetBucketLocation` is not
-driven because `?location` is not routed: it is refused, as the next section describes.
+first ([#756](https://github.com/scttfrdmn/substrate/issues/756), #938), and `GetBucketLocation`,
+routed since [#1606](https://github.com/scttfrdmn/substrate/issues/1606).
 
 ### CloudFormation resource types
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::S3::Bucket | BucketName | |
+| AWS::S3::Bucket | BucketName | Applies `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration`, `LifecycleConfiguration` and `PublicAccessBlockConfiguration` on create and in place on update, and deletes the last four when the template drops them. A property whose `Fn::If` chooses `AWS::NoValue` is not declared. `LifecycleConfiguration` is translated to the API's shape: `ExpirationInDays` becomes `Expiration/Days`, `Transitions[].TransitionInDays` becomes `Transition/Days`, and `Prefix`, `TagFilters` and the size bounds become the rule's `Filter` (#1606, part of [#1573](https://github.com/scttfrdmn/substrate/issues/1573)). `OwnershipControls`, `NotificationConfiguration`, `WebsiteConfiguration`, `LoggingConfiguration`, `ReplicationConfiguration`, `ObjectLockConfiguration`, `AccelerateConfiguration`, `AnalyticsConfigurations`, `InventoryConfigurations`, `MetricsConfigurations`, `IntelligentTieringConfigurations` and `Tags` are not applied yet; #1573 tracks them |
+| AWS::S3::BucketPolicy | the bucket's name | `PutBucketPolicy` on create; a changed `PolicyDocument` is applied in place, and a changed `Bucket` replaces it, removing the policy from the old bucket. A stack delete removes the policy with `DeleteBucketPolicy` unless its `DeletionPolicy` is `Retain`. S3's own refusals fail the resource: `NoSuchBucket`, `MalformedPolicy`, and `AccessDenied` for a public policy under `BlockPublicPolicy` (#1606) |
 
 ### Cost
 
@@ -15856,7 +15925,7 @@ Secrets Manager API calls: $0.05 per 10,000 API calls.
 
 | Operation | Notes |
 |-----------|-------|
-| PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/` |
+| PutParameter | Supports String, StringList, SecureString types; normalizes `Name` to a leading `/`. A name prefixed with `aws` or `ssm`, in any case and with or without the slash, is `ValidationException`: *"A parameter name can't be prefixed with "aws" or "ssm" (case-insensitive)"* (#1606) |
 | GetParameter | Supports WithDecryption; reports the parameter's ARN |
 | GetParameters | Batch get |
 | GetParametersByPath | Recursive path traversal; paginates on `MaxResults`/`NextToken` (`MaxResults` 1–10, default 10, refused outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range)) and refuses a `NextToken` substrate did not issue with `InvalidNextToken` — see [A pagination token substrate never issued](#a-pagination-token-substrate-never-issued-is-refused-not-answered-with-page-one) |
