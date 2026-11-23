@@ -67,6 +67,9 @@ type Config struct {
 	// EC2 controls EC2 plugin behavior.
 	EC2 EC2Cfg `mapstructure:"ec2"`
 
+	// CloudWatch controls CloudWatch plugin behavior.
+	CloudWatch CloudWatchCfg `mapstructure:"cloudwatch"`
+
 	// Run controls deterministic-run mode: seeded request IDs and a pinned clock.
 	Run RunCfg `mapstructure:"run"`
 }
@@ -673,6 +676,14 @@ type EC2Cfg struct {
 	DefaultVPC bool `mapstructure:"default_vpc"`
 }
 
+// CloudWatchCfg controls CloudWatch plugin behavior.
+type CloudWatchCfg struct {
+	// MaxDatapointsPerSeries is the number of PutMetricData datapoints one metric series keeps;
+	// a write past it drops the series' oldest (#1595). Default 10,080, a week at one-minute
+	// resolution (SUBSTRATE_CLOUDWATCH_MAX_DATAPOINTS_PER_SERIES).
+	MaxDatapointsPerSeries int `mapstructure:"max_datapoints_per_series"`
+}
+
 // RunCfg controls deterministic-run mode (#1598): what makes two fresh servers given the
 // same calls answer the same bodies.
 //
@@ -816,6 +827,9 @@ func DefaultConfig() *Config {
 		EC2: EC2Cfg{
 			DefaultVPC: true,
 		},
+		CloudWatch: CloudWatchCfg{
+			MaxDatapointsPerSeries: cwDefaultMaxDatapointsPerSeries,
+		},
 		// Unseeded and unpinned, so a server configured with nothing behaves as it did
 		// before deterministic-run mode existed (#1598).
 		Run: RunCfg{},
@@ -881,6 +895,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("lambda.warm_pool_ttl", defaults.Lambda.WarmPoolTTL)
 	v.SetDefault("rds.engine", defaults.RDS.Engine)
 	v.SetDefault("ec2.default_vpc", defaults.EC2.DefaultVPC)
+	v.SetDefault("cloudwatch.max_datapoints_per_series", defaults.CloudWatch.MaxDatapointsPerSeries)
 	// Registered so SUBSTRATE_RUN_SEED and SUBSTRATE_RUN_EPOCH reach Unmarshal: viper's
 	// AutomaticEnv only binds a key it already knows.
 	v.SetDefault("run.seed", defaults.Run.Seed)
@@ -948,6 +963,11 @@ func Validate(cfg *Config) error {
 	// persistence and was decoration.
 	if cfg.State.Path != "" {
 		return fmt.Errorf("state.path %q is set but no state backend reads it; the memory backend keeps no files", cfg.State.Path)
+	}
+
+	if cfg.CloudWatch.MaxDatapointsPerSeries < 0 {
+		return fmt.Errorf("cloudwatch.max_datapoints_per_series %d is out of range; must be >= 1, or 0 for the default",
+			cfg.CloudWatch.MaxDatapointsPerSeries)
 	}
 
 	if _, _, err := cfg.Run.ParseEpoch(); err != nil {

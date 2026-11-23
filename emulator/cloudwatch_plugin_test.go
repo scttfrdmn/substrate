@@ -294,8 +294,8 @@ func TestCW_GetMetricData_SmithyRPCV2CBOR(t *testing.T) {
 	require.NoError(t, err)
 	doc, ok := decoded.(map[string]any)
 	require.True(t, ok, "a Smithy structure encodes as a CBOR map, got %T", decoded)
-	// Both lists are present and empty: substrate records a metric's identity but not
-	// its time series, so there are no results rather than no answer.
+	// Both lists are present and empty: the request named no query, so there are no
+	// results, rather than no answer.
 	assert.Equal(t, []any{}, doc["MetricDataResults"])
 	assert.Equal(t, []any{}, doc["Messages"])
 }

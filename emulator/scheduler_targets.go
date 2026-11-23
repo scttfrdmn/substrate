@@ -549,6 +549,14 @@ func (f *schedFailure) retryable() bool {
 		f.Code == "TooManyRequestsException" || f.Code == "ServiceUnavailable"
 }
 
+// throttled reports whether the failure is the target throttling the call — HTTP 429, or a code
+// naming a throttle — which is what TargetErrorThrottledCount counts. It reads the code and status
+// alone, so a seed's retryable override does not make a validation error a throttle.
+func (f *schedFailure) throttled() bool {
+	return f.Status == http.StatusTooManyRequests || strings.Contains(f.Code, "Throttl") ||
+		f.Code == "RequestLimitExceeded" || f.Code == "TooManyRequestsException"
+}
+
 // schedTargetFailure reads the failure a dispatched target answered, nil when it succeeded.
 //
 // Plugins report a client error either as an *AWSError or as a 4xx/5xx response with the error in
