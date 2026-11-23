@@ -48,7 +48,7 @@ const orgMaxOUNameChars = 128
 // among the parent's children, ConstraintViolation for the depth and count
 // quotas, and InvalidInput for a malformed request.
 func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ParentID string        `json:"ParentId"`
 		Name     string        `json:"Name"`
@@ -121,7 +121,7 @@ func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *orgCaller, req *A
 
 	// The middle segment of an OU ID is the containing root's suffix, whatever the
 	// OU's immediate parent is — nesting does not extend the ID.
-	ouID := fmt.Sprintf("ou-%s-%s", root.ID[2:], randomLowerAlphanum(8))
+	ouID := fmt.Sprintf("ou-%s-%s", root.ID[2:], reqCtx.IDs.Chars(8, orgLowerAlphanum))
 	ou := OrgOrganizationalUnit{
 		ID:   ouID,
 		Arn:  fmt.Sprintf("arn:aws:organizations::%s:ou/%s/%s", reqCtx.AccountID, org.ID, ouID),
@@ -146,7 +146,7 @@ func (p *OrganizationsPlugin) createOrganizationalUnit(reqCtx *orgCaller, req *A
 }
 
 func (p *OrganizationsPlugin) describeOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		OrganizationalUnitID string `json:"OrganizationalUnitId"`
 	}
@@ -164,7 +164,7 @@ func (p *OrganizationsPlugin) describeOrganizationalUnit(reqCtx *orgCaller, req 
 // OU in place: the ID, the ARN, the children, and the attached policies all
 // survive it, so a caller holding any of those keeps a valid handle.
 func (p *OrganizationsPlugin) updateOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	// Name is optional in the model, and an omitted name is not the same request as
 	// an empty one: the first leaves the OU alone, the second asks for a name the
 	// model's minimum length forbids.
@@ -219,7 +219,7 @@ func (p *OrganizationsPlugin) updateOrganizationalUnit(reqCtx *orgCaller, req *A
 // bug visible: deleting an OU that still holds accounts would otherwise orphan
 // them somewhere no listing reaches.
 func (p *OrganizationsPlugin) deleteOrganizationalUnit(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		OrganizationalUnitID string `json:"OrganizationalUnitId"`
 	}
@@ -252,7 +252,7 @@ func (p *OrganizationsPlugin) deleteOrganizationalUnit(reqCtx *orgCaller, req *A
 }
 
 func (p *OrganizationsPlugin) listOrganizationalUnitsForParent(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ParentID   string `json:"ParentId"`
 		NextToken  string `json:"NextToken"`
@@ -304,7 +304,7 @@ func (p *OrganizationsPlugin) listOrganizationalUnitsForParent(reqCtx *orgCaller
 // current API, so the list has one entry — but it is still a list, and it is the
 // step a caller walks upward with until it reaches the root ListRoots reports.
 func (p *OrganizationsPlugin) listParents(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ChildID    string `json:"ChildId"`
 		NextToken  string `json:"NextToken"`
@@ -366,7 +366,7 @@ func (p *OrganizationsPlugin) listParents(reqCtx *orgCaller, req *AWSRequest) (*
 // the operation never mixes accounts and OUs in one answer — a caller walking the
 // tree downward asks twice.
 func (p *OrganizationsPlugin) listChildren(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ParentID   string `json:"ParentId"`
 		ChildType  string `json:"ChildType"`
@@ -414,7 +414,7 @@ func (p *OrganizationsPlugin) listChildren(reqCtx *orgCaller, req *AWSRequest) (
 }
 
 func (p *OrganizationsPlugin) listAccountsForParent(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		ParentID   string `json:"ParentId"`
 		NextToken  string `json:"NextToken"`

@@ -81,6 +81,36 @@ type CostController struct {
 	provider  PricingProvider
 	discounts DiscountConfig
 	credits   []*Credit
+	// tc is the clock credit expiry is judged against; nil means the wall clock.
+	tc *TimeController
+	// creditSeq numbers the credits [CostController.AddCredit] names itself.
+	creditSeq uint64
+}
+
+// WithCostTimeController makes credit expiry follow the simulated clock, so a credit that
+// expires at a simulated instant stops applying when the test moves the clock past it,
+// and a pinned run applies it identically every time (#1600). Without it expiry is
+// judged against the wall clock.
+func WithCostTimeController(tc *TimeController) CostControllerOption {
+	return func(c *CostController) { c.tc = tc }
+}
+
+// creditIDTakenLocked reports whether a credit already carries id. Caller holds c.mu.
+func (c *CostController) creditIDTakenLocked(id string) bool {
+	for _, existing := range c.credits {
+		if existing.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+// now is the instant credit expiry is judged at.
+func (c *CostController) now() time.Time {
+	if c.tc != nil {
+		return c.tc.Now()
+	}
+	return time.Now()
 }
 
 // NewCostController creates a CostController from cfg. When cfg.Enabled is
@@ -206,7 +236,7 @@ func (c *CostController) applyCreditsLocked(price float64, service string) float
 	if len(c.credits) == 0 || price <= 0 {
 		return price
 	}
-	now := time.Now()
+	now := c.now()
 	remaining := price
 
 	// Service-scoped credits first, then global, each sorted by earliest expiry.
@@ -303,7 +333,14 @@ func (c *CostController) AddCredit(cr Credit) string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if cr.ID == "" {
-		cr.ID = fmt.Sprintf("credit-%d", time.Now().UnixNano())
+		// Numbered rather than stamped with the wall clock, so two runs that add the same
+		// credits name them the same (#1600).
+		// A caller may have named one of its own credits in the same shape, so skip any
+		// number already taken.
+		for cr.ID == "" || c.creditIDTakenLocked(cr.ID) {
+			c.creditSeq++
+			cr.ID = fmt.Sprintf("credit-%d", c.creditSeq)
+		}
 	}
 	if cr.Remaining == 0 {
 		cr.Remaining = cr.Amount

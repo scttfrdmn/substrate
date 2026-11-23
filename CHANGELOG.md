@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Deterministic-run mode (#1598).** A seeded server assigns request IDs `req-<8 hex>-<n>` in arrival order, so two fresh runs of the same calls mint the same identifiers; a pinned epoch freezes the clock, so they answer byte-identical bodies. Set it with `run.seed`/`run.epoch` (`SUBSTRATE_RUN_SEED`/`SUBSTRATE_RUN_EPOCH`), `substrate server --seed --epoch`, or `GET`/`POST /v1/control/run`. `POST /v1/state/reset` rewinds the sequence and re-pins the clock. Concurrent requests, the `Date` header, bookkeeping IDs and unaudited map-order paths stay nondeterministic, and a seeded stream replays faithfully only between resets, as the testing guide documents.
+- **`StartTestServer` seeds request IDs by default (#1598).** `WithDeterministicRun(epoch)` also pins the clock; `WithoutSeededIDs()` opts out. `TestServer.RequestIDs`, `Server.RequestIDs` and `WithClientRequestIDs` expose the sequence.
+- **pytest-substrate launches a seeded server and pins on request (#1598).** `@pytest.mark.substrate(deterministic=True)` (or `epoch=`, `seed=`), an indirect parameter, or the ini options `substrate_seed`, `substrate_epoch` and `substrate_deterministic`. `SubstrateServer` gains `seed`/`epoch` arguments, `run_settings`, `set_run`, `freeze_time` and `unfreeze_time`.
+- **`POST /v1/control/time` accepts `"frozen"` (#1598).** `true` freezes the clock, at `"time"` exactly when one is given; `false` resumes it and unpins a pinned clock. `GET` reports `frozen`.
+- **`make nondeterminism-check`, run in CI (#1600).** Outside a reviewed `file:function` allowlist, it refuses wall-clock reads (`time.Now`, `Since`, `After` and relatives), `math/rand` and `crypto/rand` imports, and unseeded IDs (`generateRequestID`, `NewIDMint("")`) in emulator code. It ignores comments and string literals, reports allowlist entries that match nothing, and has a `--self-test`.
+
+### Changed
+
+- **Compatibility (#1598, #1600):** test-server request IDs now have a deterministic format, `req-<8 hex>-<n>`, and repeat across test servers; pass `WithoutSeededIDs()` for the old wall-clock IDs. Organizations IDs and S3 `UploadId`s now derive from the request ID (`UploadId` is `mpu-` plus 32 hex characters). A CLI server with no `run.seed` keeps unseeded IDs.
+
+### Fixed
+
+- **A recorded multipart upload replays with zero differences (#1600).** The S3 `UploadId` came from the wall clock, so a replayed `UploadPart` answered `NoSuchUpload`. It is now minted from the request ID.
+- **Organizations IDs are minted from the request ID (#1600).** The organization, root, OU, policy, resource-policy, `CreateAccount` request and vended account IDs came from the auto-seeded `math/rand`. They keep their published formats.
+- **Firehose `RecordId`s no longer collide on a frozen clock (#1600).** They were the clock's nanoseconds; they are minted now.
+- **An API Gateway proxy event's `requestContext.requestId` is derived from the request (#1600).** It was a fresh wall-clock ID, so the invocation's recorded payload differed on replay. It is a UUID minted from the request's mint.
+- **`RequestContext.Timestamp`, snapshot timestamps and cost-credit expiry use the simulated clock (#1600).** Cost credits are numbered rather than stamped with the wall clock.
+- **`Client.Deploy` names its stream from the deployment's request ID (#1600).** It was `deploy-<nanoseconds>`, so two deployments on a frozen clock shared a stream.
+- **A CloudFormation-dispatched event's `Duration` is its wall latency (#1600).** It subtracted a simulated start from the wall clock, so a pinned or moved clock recorded the distance between the two.
+
 ## [v0.129.0] - 2026-11-15
 
 ### Added

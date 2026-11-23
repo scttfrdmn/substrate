@@ -87,6 +87,9 @@ type testServerConfig struct {
 	recordBodies      bool
 	recordStateHashes bool
 	noDefaultVPC      bool
+	// unseededIDs and epoch are the deterministic-run options; see [WithDeterministicRun].
+	unseededIDs bool
+	epoch       *time.Time
 }
 
 // WithAccounts makes the server callable as each of the given accounts, in
@@ -134,10 +137,10 @@ func WithRecordedBodies() TestServerOption {
 // Off by default, matching [EventStoreConfig.IncludeStateHashes], because it takes
 // a full state snapshot twice per request.
 //
-// A stream that contains a create will report a `state_hash_after` difference on
-// replay, and that is the honest answer rather than a defect: substrate mints most
-// identifiers from crypto/rand, so the minted value differs between the recording
-// and the replay and lands in the state it hashes (#856).
+// A stream that contains a create replays to the state it recorded: every identifier a
+// request mints is derived from the request ID the event records (#856), so the replay
+// mints the value the recording did. A `state_hash_after` difference therefore names
+// state a replay did not reproduce, rather than an identifier drawn at random.
 func WithRecordedStateHashes() TestServerOption {
 	return func(c *testServerConfig) { c.recordStateHashes = true }
 }
@@ -153,6 +156,32 @@ func WithoutDefaultVPC() TestServerOption {
 	return func(c *testServerConfig) { c.noDefaultVPC = true }
 }
 
+// testServerSeed is the request-ID seed every test server gets unless
+// [WithoutSeededIDs] is passed, so a test's request IDs, and the identifiers minted from
+// them, are the same on every run (#1598).
+const testServerSeed int64 = 1
+
+// WithDeterministicRun pins the test server's clock at epoch, so every timestamp it
+// renders is epoch until the test moves the clock, and [TestServer.ResetState] returns
+// the clock there.
+//
+// Request IDs are already seeded on every test server, so with this option two servers
+// given the same calls in the same order answer byte-identical bodies — the documented
+// exceptions aside: requests a client sends concurrently, the Date header, substrate's own
+// bookkeeping IDs (event, snapshot and replay IDs), and any plugin answer whose order
+// comes from an unaudited map iteration (#1598). Move the clock with
+// [TestServer.AdvanceTime] or [TestServer.SetTime]; it stays frozen.
+func WithDeterministicRun(epoch time.Time) TestServerOption {
+	return func(c *testServerConfig) { c.epoch = &epoch }
+}
+
+// WithoutSeededIDs gives the test server unseeded request IDs — wall-clock and random,
+// unique across servers and runs — instead of the seeded sequence a test server assigns by
+// default. A test that starts two servers and needs their identifiers to differ wants it.
+func WithoutSeededIDs() TestServerOption {
+	return func(c *testServerConfig) { c.unseededIDs = true }
+}
+
 // StartTestServer starts an in-process Substrate server on a random port,
 // registers all default plugins, and schedules t.Cleanup to shut it down.
 // The returned [TestServer] is ready to accept requests when this function
@@ -164,6 +193,9 @@ func WithoutDefaultVPC() TestServerOption {
 // credential's account; every other key, and an unsigned request, resolves to
 // 123456789012. Name further accounts with [WithAccounts] or
 // [TestServer.RegisterAccount].
+//
+// Request IDs are seeded, so a test sees the same request IDs and minted identifiers on
+// every run; [WithoutSeededIDs] opts out, and [WithDeterministicRun] pins the clock too.
 func StartTestServer(t testing.TB, opts ...TestServerOption) *TestServer {
 	t.Helper()
 
@@ -275,7 +307,11 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	cfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
 
 	state := NewMemoryStateManager()
-	tc := NewTimeController(time.Now())
+	run := testServerRun(tsCfg)
+	tc, err := run.NewTimeController()
+	if err != nil {
+		t.Fatalf("StartTestServer: %v", err)
+	}
 	registry := NewPluginRegistry()
 	logger := NewDefaultLogger(slog.LevelError, false)
 
@@ -321,7 +357,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 
 	// Wire a CostController so recorded events carry cost data and
 	// ts.Store().GetCostSummary returns non-zero costs out of the box.
-	costs := NewCostController(CostConfig{Enabled: true})
+	costs := NewCostController(CostConfig{Enabled: true}, WithCostTimeController(tc))
 
 	// A registry is wired unconditionally so RegisterAccount has somewhere to put
 	// an entry, which is what lets one test server serve both the single- and the
@@ -331,6 +367,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	// principal — see step 1.5 in [Server.handleAWSRequest].
 	creds := NewCredentialRegistry()
 
+	cfg.Run = run
 	srv := NewServer(*cfg, registry, store, state, tc, logger, ServerOptions{
 		Fault: fault, Costs: costs, Auth: auth,
 		Credentials:      creds,
@@ -373,6 +410,22 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	}
 	return ts
 }
+
+// testServerRun is the deterministic-run configuration the options ask for.
+func testServerRun(c testServerConfig) RunCfg {
+	run := RunCfg{Seed: testServerSeed}
+	if c.unseededIDs {
+		run.Seed = 0
+	}
+	if c.epoch != nil {
+		run.Epoch = c.epoch.Format(time.RFC3339Nano)
+	}
+	return run
+}
+
+// RequestIDs returns the source the server assigns request IDs from; see
+// [Server.RequestIDs].
+func (ts *TestServer) RequestIDs() *RequestIDSource { return ts.srv.RequestIDs() }
 
 // RegisterAccount mints a signing credential for an account and returns it, so a
 // test can call as an account whose ID it did not know at startup — an account
@@ -421,6 +474,9 @@ func (ts *TestServer) CredentialsFor(accountID string) (CredentialEntry, bool) {
 // previous case started (#903). A server built by [StartTestServer] has nothing left
 // over afterwards; the only thing a reset does not clear is a filesystem an
 // in-process embedder injected into the S3 plugin, which substrate does not own.
+//
+// It also rewinds the request IDs, and returns a clock pinned by [WithDeterministicRun] to
+// its epoch, so a case answers what it would on a fresh server (#1598).
 //
 // The parameter is [testing.TB], not *testing.T, so a benchmark can reset
 // between iterations — the last of the harness entry points to widen (#605).
@@ -483,9 +539,10 @@ func (ts *TestServer) FreezeTimeAt(t time.Time) {
 	ts.tc.SetTime(t)
 }
 
-// UnfreezeTime resumes the simulated clock from the instant it was frozen at.
+// UnfreezeTime resumes the simulated clock from the instant it was frozen at. It also unpins
+// a clock [WithDeterministicRun] pinned, so a later [TestServer.ResetState] leaves it running.
 func (ts *TestServer) UnfreezeTime() {
-	ts.tc.Unfreeze()
+	ts.srv.unpinClock()
 }
 
 // TimeFrozen reports whether the simulated clock is stopped.

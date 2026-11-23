@@ -37,8 +37,9 @@ import (
 //
 // Two identical creates still differ. Two CreateAccessKey calls for one user must produce
 // two distinct keys, which is what rules out hashing the request: the requests are byte
-// identical. The request *id* is not, because a live one is minted from the wall clock
-// deliberately (see generateRequestID, and #866 for why it is not derived).
+// identical. The request *id* is not: a live one is either the next in a seeded
+// [RequestIDSource]'s sequence or, on an unseeded server, minted from the wall clock (see
+// generateRequestID, and #866 for why a replay records it rather than re-deriving it).
 //
 // Concurrency-safe by construction, because a mint belongs to one request. A shared source
 // would hand two requests in flight whichever values they won a mutex for, so a replay of
@@ -53,8 +54,10 @@ import (
 //
 // # What is deliberately still random
 //
-// The request id itself, which is the seed (#866 settled that it is wall-clock and recorded
-// rather than derived). Substrate's own bookkeeping ids — an event id, a snapshot id, a
+// The request id itself on an unseeded server, which is the seed (#866 settled that it is
+// recorded rather than derived). A server given run.seed assigns it from a seeded
+// [RequestIDSource] instead, which is what makes two fresh runs of the same calls mint the
+// same identifiers (#1598). Substrate's own bookkeeping ids — an event id, a snapshot id, a
 // replay id — which no AWS call observes. And everything already derived from its inputs: a
 // public IP from its instance id, a secret's ARN from its name, CloudFormation's stack UUIDs
 // from account and region.
@@ -64,13 +67,15 @@ import (
 // constructed from mint-derived bytes (#1296; see ec2_key_material.go), because the Go
 // toolchain's key generators ignore a caller-supplied reader.
 //
-// No plugin draw site remains. randomHex, the shared helper the migration was arranged
-// around, is deleted: its last caller minted an EC2 instance profile's AIPA… id inside a
-// *describe*, which #1291 resolved out of IAM state instead. [IDMint.bytes]'s own seedless
-// fallback is the only crypto/rand read left in the tree, and it stays: a nil or seedless
-// mint is what a hand-built RequestContext has, which is how every plugin unit test —
-// substrate's and a consumer's — constructs one, and generateRequestID draws through it
-// because the request id is the seed and is deliberately random.
+// No plugin draw site remains, and `make nondeterminism-check` keeps it that way: it refuses
+// a time.Now() or a math/rand or crypto/rand import in emulator code outside a reviewed
+// allowlist. The last sites it found were all #1600's — the S3 multipart UploadId from the
+// wall clock, every Organizations ID from the auto-seeded math/rand, Firehose RecordIds from
+// the clock's nanoseconds and the API Gateway proxy event's requestId — and each now mints
+// here. [IDMint.bytes]'s own seedless fallback is the only crypto/rand read left in the tree,
+// and it stays: a nil or seedless mint is what a hand-built RequestContext has, which is how
+// every plugin unit test — substrate's and a consumer's — constructs one, and
+// generateRequestID draws through it for an unseeded server's request ids.
 
 // IDMint mints the identifiers one request publishes, derived from that request's own id so
 // that replaying the request mints the same ones.

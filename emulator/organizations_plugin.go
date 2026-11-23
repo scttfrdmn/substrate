@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand" // nosemgrep
 	"net/http"
 	"time"
 )
@@ -144,7 +143,7 @@ func (p *OrganizationsPlugin) coreOperation(op string) (orgHandler, bool) {
 // --- operations ---
 
 func (p *OrganizationsPlugin) describeOrganization(reqCtx *orgCaller, _ *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	org, err := p.ensureOrganization(goCtx, reqCtx.AccountID)
 	if err != nil {
 		return nil, fmt.Errorf("describeOrganization: %w", err)
@@ -163,7 +162,7 @@ func (p *OrganizationsPlugin) describeOrganization(reqCtx *orgCaller, _ *AWSRequ
 }
 
 func (p *OrganizationsPlugin) listAccounts(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	// Ensure org exists so the management account is always present.
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("listAccounts ensure org: %w", err)
@@ -209,7 +208,7 @@ func (p *OrganizationsPlugin) listAccounts(reqCtx *orgCaller, req *AWSRequest) (
 }
 
 func (p *OrganizationsPlugin) describeAccount(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("describeAccount ensure org: %w", err)
 	}
@@ -236,7 +235,7 @@ func (p *OrganizationsPlugin) describeAccount(reqCtx *orgCaller, req *AWSRequest
 }
 
 func (p *OrganizationsPlugin) listRoots(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {
-	goCtx := context.Background()
+	goCtx := reqCtx.context()
 	var input struct {
 		NextToken  string `json:"NextToken"`
 		MaxResults int    `json:"MaxResults"`
@@ -278,32 +277,40 @@ func orgEmptyResponse() *AWSResponse {
 
 // --- ID generation helpers ---
 
-// randomLowerAlphanum returns n random lowercase alphanumeric characters.
-func randomLowerAlphanum(n int) string {
-	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))] //nolint:gosec
-	}
-	return string(b)
+// orgLowerAlphanum is the alphabet of the random part of every Organizations
+// identifier except the root's: the API reference's patterns for an organization
+// (^o-[a-z0-9]{10,32}$), an OU, a policy, a resource policy and a CreateAccount
+// request all admit lowercase letters and digits.
+const orgLowerAlphanum = "abcdefghijklmnopqrstuvwxyz0123456789"
+
+// generateOrganizationAccountID mints the 12-digit ID of a vended account.
+//
+// Minted from the request's mint rather than the auto-seeded math/rand it was drawn
+// from until #1600, so a replay of the CreateAccount vends the account it vended
+// live, and two deterministic runs vend the same one.
+func generateOrganizationAccountID(ids *IDMint) string {
+	return ids.Digits(12)
 }
 
-// randomLowerHex returns n random lowercase hex characters.
-func randomLowerHex(n int) string {
-	const chars = "0123456789abcdef"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))] //nolint:gosec
-	}
-	return string(b)
+// orgMintKey is the [context.Context] key under which an Organizations handler
+// carries its request's [IDMint].
+type orgMintKey struct{}
+
+// context returns the context an Organizations handler threads through its
+// helpers, carrying the request's mint.
+//
+// The organization and its root are created on first observation by
+// [OrganizationsPlugin.ensureOrganization], which is reached from every handler and
+// from helpers several calls deep (loadRoot, resolveOrgTarget, requireOU), none of
+// which otherwise sees the request. Carrying the mint on the context reaches all of
+// them without widening a dozen signatures; a direct caller with a bare context gets
+// a nil mint, which draws from crypto/rand as every hand-built RequestContext does.
+func (c *orgCaller) context() context.Context {
+	return context.WithValue(context.Background(), orgMintKey{}, c.IDs)
 }
 
-// generateOrganizationAccountID generates a 12-digit numeric AWS account ID.
-func generateOrganizationAccountID() string {
-	const digits = "0123456789"
-	b := make([]byte, 12)
-	for i := range b {
-		b[i] = digits[rand.Intn(len(digits))] //nolint:gosec
-	}
-	return string(b)
+// orgMintFrom returns the mint [orgCaller.context] put on ctx, or nil.
+func orgMintFrom(ctx context.Context) *IDMint {
+	m, _ := ctx.Value(orgMintKey{}).(*IDMint)
+	return m
 }

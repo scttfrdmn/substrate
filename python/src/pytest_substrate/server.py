@@ -22,6 +22,29 @@ _SEED_QUERY_FIELD: dict[str, str] = {"timestream-query": "queryString"}
 # Service names accepted as aliases for a seeding endpoint's path segment.
 _SEED_SERVICE_ALIASES: dict[str, str] = {"timestream": "timestream-query"}
 
+#: The request-ID seed a server this package launches gets unless told otherwise, so a test's
+#: request IDs — and every identifier substrate mints from them — are the same on every run.
+#: Pass ``seed=0`` for the unseeded, wall-clock IDs substrate assigns by default (#1598).
+DEFAULT_SEED = 1
+
+#: The instant ``deterministic=True`` pins the simulated clock at.
+DEFAULT_EPOCH = "2026-01-01T00:00:00Z"
+
+# Distinguishes "not passed" from None in :meth:`SubstrateServer.set_run`.
+_UNSET: object = object()
+
+
+def _rfc3339(when: datetime.datetime | str) -> str:
+    """Render ``when`` as the RFC 3339 string substrate's control endpoints accept.
+
+    A naive datetime is read as UTC; a string is passed through for substrate to validate.
+    """
+    if isinstance(when, str):
+        return when
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=datetime.UTC)
+    return when.astimezone(datetime.UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
 
 def _seed_endpoint(service: str) -> tuple[str, str]:
     """Return the ``/v1/{segment}/results`` path segment and the query field for ``service``."""
@@ -38,11 +61,19 @@ class SubstrateServer:
         server.start()          # launches process, waits for /health
         server.reset_state()    # wipe all recorded state
         server.stop()           # terminate the process
+
+    The server is launched with ``SUBSTRATE_RUN_SEED`` set to ``seed`` (default
+    :data:`DEFAULT_SEED`), so its request IDs and the identifiers minted from them repeat from
+    run to run; ``seed=0`` leaves them unseeded. ``epoch`` additionally freezes the simulated
+    clock at that instant (``SUBSTRATE_RUN_EPOCH``), and :meth:`reset_state` returns it there,
+    so two runs of the same calls answer byte-identical bodies (#1598).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: int = DEFAULT_SEED, epoch: datetime.datetime | str | None = None) -> None:
         self.port: int = self._free_port()
         self.url: str = f"http://localhost:{self.port}"
+        self.seed: int = seed
+        self.epoch: str | None = _rfc3339(epoch) if epoch is not None else None
         self._process: subprocess.Popen[bytes] | None = None
 
     # ------------------------------------------------------------------
@@ -56,8 +87,17 @@ class SubstrateServer:
             [binary, "server", "--address", f"localhost:{self.port}"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=self._env(),
         )
         self._wait_healthy()
+
+    def _env(self) -> dict[str, str]:
+        """Return the environment the server process is launched with: this one, plus the run settings."""
+        env = dict(os.environ)
+        env["SUBSTRATE_RUN_SEED"] = str(self.seed)
+        if self.epoch is not None:
+            env["SUBSTRATE_RUN_EPOCH"] = self.epoch
+        return env
 
     def stop(self) -> None:
         """Terminate the substrate server process."""
@@ -70,7 +110,11 @@ class SubstrateServer:
             self._process = None
 
     def reset_state(self) -> None:
-        """Reset all substrate state (equivalent to a fresh start)."""
+        """Reset all substrate state (equivalent to a fresh start).
+
+        The reset also rewinds the request-ID sequence and returns a pinned clock to its epoch, so the
+        next test sees the identifiers and timestamps a freshly started server would give it.
+        """
         req = urllib.request.Request(
             f"{self.url}/v1/state/reset",
             method="POST",
@@ -112,6 +156,60 @@ class SubstrateServer:
         except urllib.error.HTTPError as exc:
             raise RuntimeError(f"substrate set_time failed: {exc.code} {exc.read().decode(errors='replace')}") from exc
         return _parse_rfc3339(reported["simulated_time"])
+
+    def freeze_time(self, when: datetime.datetime | str | None = None) -> datetime.datetime:
+        """Stop substrate's simulated clock — at ``when`` exactly, if given — and return the clock it reports.
+
+        Every timestamp substrate renders is then that one instant until :meth:`unfreeze_time`;
+        :meth:`set_time` and :meth:`advance_time` still move it, and it stays frozen.
+        """
+        body: dict[str, object] = {"frozen": True}
+        if when is not None:
+            body["time"] = _rfc3339(when)
+        return _parse_rfc3339(self._post_json("/v1/control/time", body, "freeze_time")["simulated_time"])
+
+    def unfreeze_time(self) -> datetime.datetime:
+        """Resume substrate's simulated clock from where it was frozen, and return the clock it reports."""
+        return _parse_rfc3339(self._post_json("/v1/control/time", {"frozen": False}, "unfreeze_time")["simulated_time"])
+
+    def run_settings(self) -> dict:
+        """Return the deterministic-run settings (``GET /v1/control/run``).
+
+        The dict carries ``seed`` (0 when unseeded), ``epoch`` (present only while the clock is
+        pinned) and ``drawn``, the number of request IDs assigned since the seed was set or the
+        state last reset.
+        """
+        with urllib.request.urlopen(f"{self.url}/v1/control/run", timeout=5) as resp:  # nosemgrep
+            return json.loads(resp.read())
+
+    def set_run(self, seed: object = _UNSET, epoch: object = _UNSET) -> dict:
+        """Change the deterministic-run settings of the running server (``POST /v1/control/run``).
+
+        ``seed`` reseeds the request IDs and restarts their sequence; 0 unseeds them. ``epoch``
+        pins the simulated clock at an instant (a datetime or an RFC 3339 string) and makes
+        :meth:`reset_state` return it there; ``None`` unpins it. An argument not passed is left
+        as it is. Returns the settings the server reports afterwards.
+        """
+        body: dict[str, object] = {}
+        if seed is not _UNSET:
+            body["seed"] = seed
+        if epoch is not _UNSET:
+            body["epoch"] = "" if epoch is None else _rfc3339(epoch)  # type: ignore[arg-type]
+        return self._post_json("/v1/control/run", body, "set_run")
+
+    def _post_json(self, path: str, body: dict, what: str) -> dict:
+        """POST ``body`` as JSON to ``path`` and return the decoded reply, raising on an HTTP error."""
+        req = urllib.request.Request(
+            f"{self.url}{path}",
+            data=json.dumps(body).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as resp:  # nosemgrep
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(f"substrate {what} failed: {exc.code} {exc.read().decode(errors='replace')}") from exc
 
     def advance_time(self, delta: datetime.timedelta | None = None, **kwargs: float) -> datetime.datetime:
         """Move substrate's simulated clock forward and return the clock it reports.

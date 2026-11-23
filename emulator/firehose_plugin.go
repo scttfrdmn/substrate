@@ -190,15 +190,25 @@ func (p *FirehosePlugin) listDeliveryStreams(reqCtx *RequestContext, req *AWSReq
 	})
 }
 
-func (p *FirehosePlugin) putRecord(_ *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
-	recordID := fmt.Sprintf("rec-%d", p.tc.Now().UnixNano())
+// firehoseRecordID mints one record's RecordId. It is opaque on the wire, so the
+// "rec-" prefix is substrate's own.
+//
+// Minted rather than rendered from the clock (#1600): a nanosecond timestamp collided
+// for every record put while the clock was frozen or held, and a batch put within one
+// request shared its instant, distinguished only by index.
+func firehoseRecordID(ids *IDMint) string {
+	return "rec-" + ids.Hex(16)
+}
+
+func (p *FirehosePlugin) putRecord(reqCtx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+	recordID := firehoseRecordID(reqCtx.IDs)
 	return firehoseJSONResponse(http.StatusOK, map[string]interface{}{
 		"RecordId":  recordID,
 		"Encrypted": false,
 	})
 }
 
-func (p *FirehosePlugin) putRecordBatch(_ *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+func (p *FirehosePlugin) putRecordBatch(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		Records []interface{} `json:"Records"`
 	}
@@ -208,11 +218,10 @@ func (p *FirehosePlugin) putRecordBatch(_ *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
-	nano := p.tc.Now().UnixNano()
 	responses := make([]map[string]string, len(input.Records))
 	for i := range input.Records {
 		responses[i] = map[string]string{
-			"RecordId": fmt.Sprintf("rec-%d-%d", i, nano),
+			"RecordId": firehoseRecordID(reqCtx.IDs),
 		}
 	}
 	if len(responses) == 0 {

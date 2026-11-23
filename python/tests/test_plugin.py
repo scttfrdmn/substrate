@@ -73,16 +73,21 @@ def test_substrate_isolated_fixture_starts_and_stops_server(monkeypatch: pytest.
     mock_server = MagicMock(spec=SubstrateServer)
     mock_server.url = "http://localhost:19999"
 
-    with patch("pytest_substrate.plugin.SubstrateServer", return_value=mock_server):
-        # Consume the generator manually.
-        gen = substrate_isolated.__wrapped__(monkeypatch) if hasattr(substrate_isolated, "__wrapped__") else None
-        if gen is None:
-            # Call the raw function (not the fixture-wrapped version).
-            from pytest_substrate import server as _srv_mod
-            with patch.object(_srv_mod, "SubstrateServer", return_value=mock_server):
-                pass  # can't easily call fixture outside pytest — test via mock
+    # A request carrying the marker a test would write, so the fixture body is driven exactly
+    # as pytest drives it, and the run settings it resolves reach the server it builds (#1598).
+    node = MagicMock()
+    node.get_closest_marker.return_value = MagicMock(kwargs={"deterministic": True})
+    request = MagicMock(node=node, param=None)
 
-        mock_server.start.assert_not_called()  # no real process launched in this unit test
+    with patch("pytest_substrate.plugin.SubstrateServer", return_value=mock_server) as build:
+        gen = substrate_isolated.__wrapped__(request, monkeypatch)
+        assert next(gen) is mock_server
+        mock_server.start.assert_called_once()
+        assert os.environ["AWS_ENDPOINT_URL"] == "http://localhost:19999"
+        with pytest.raises(StopIteration):
+            next(gen)
+    mock_server.stop.assert_called_once()
+    assert build.call_args.kwargs["epoch"] == "2026-01-01T00:00:00Z"
 
 
 def test_substrate_isolated_sets_env_vars(monkeypatch: pytest.MonkeyPatch) -> None:

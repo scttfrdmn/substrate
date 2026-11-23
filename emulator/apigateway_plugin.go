@@ -1644,11 +1644,14 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 	arnParts := strings.Split(lambdaARN, ":")
 	fnName := arnParts[len(arnParts)-1]
 
+	// Both IDs come from the request's mint, in the order apigwProxyRequestIDs fixes.
+	invokeRequestID, eventRequestID := apigwProxyRequestIDs(reqCtx.IDs)
+
 	var eventJSON []byte
 	if isV2 {
-		eventJSON, err = buildV2ProxyEvent(req, apiID, stageName, resourcePath)
+		eventJSON, err = buildV2ProxyEvent(eventRequestID, req, apiID, stageName, resourcePath)
 	} else {
-		eventJSON, err = buildV1ProxyEvent(req, apiID, stageName, resourcePath)
+		eventJSON, err = buildV1ProxyEvent(eventRequestID, req, apiID, stageName, resourcePath)
 	}
 	if err != nil {
 		return proxyError(http.StatusInternalServerError, "build proxy event: "+err.Error())
@@ -1667,7 +1670,6 @@ func (p *APIGatewayProxyPlugin) HandleRequest(reqCtx *RequestContext, req *AWSRe
 	// one of the tree's internal dispatch paths: the context is built here rather than
 	// parsed off the wire, so nothing gave it a mint and every identifier the invoked
 	// function's plugin published fell back to crypto/rand.
-	invokeRequestID := apigwInternalRequestID(reqCtx.IDs)
 	invokeCtx := &RequestContext{
 		RequestID: invokeRequestID,
 		AccountID: reqCtx.AccountID,
@@ -1829,7 +1831,12 @@ func extractLambdaARNFromURI(uri string) string {
 }
 
 // buildV1ProxyEvent constructs a v1 (REST API) proxy event JSON payload.
-func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+//
+// requestContext.requestId is requestID, minted by [apigwProxyRequestIDs] from the request
+// that reached the integration, in the UUID shape the API Gateway developer guide's example
+// REST proxy event shows. It was a fresh wall-clock request id until #1600, so the
+// invocation's recorded payload differed between a run and its replay.
+func buildV1ProxyEvent(requestID string, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
 	qs := make(map[string]string)
 	for k, v := range req.Params {
 		qs[k] = v
@@ -1857,13 +1864,28 @@ func buildV1ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]by
 		}(),
 		"requestContext": map[string]interface{}{
 			"stage":        stage,
-			"requestId":    generateRequestID(),
+			"requestId":    requestID,
 			"httpMethod":   req.Operation,
 			"resourcePath": resourcePath,
 			"apiId":        apiID,
 		},
 	}
 	return json.Marshal(event)
+}
+
+// apigwProxyRequestIDs draws the two identifiers a proxy integration mints, in a fixed
+// order: the Lambda invocation's request id first, then the proxy event's
+// requestContext.requestId.
+//
+// The order is load-bearing. The invocation id was the mint's first draw before the event's
+// requestId was minted at all (it was a wall-clock id until #1600), and a recording made then
+// replays the invocation under the id that first draw yields. Drawing the event's requestId
+// first would move the invocation id to the second draw, and every recording made before
+// #1600 would replay with a different one.
+func apigwProxyRequestIDs(m *IDMint) (invokeRequestID, eventRequestID string) {
+	invokeRequestID = apigwInternalRequestID(m)
+	eventRequestID = m.UUID()
+	return invokeRequestID, eventRequestID
 }
 
 // apigwInternalRequestID returns the request id for the Lambda invocation a proxy
@@ -1882,8 +1904,9 @@ func apigwInternalRequestID(m *IDMint) string {
 	return "req-apigw-" + m.Hex(12)
 }
 
-// buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload.
-func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
+// buildV2ProxyEvent constructs a v2 (HTTP API) proxy event JSON payload. Its
+// requestContext.requestId is requestID, for the reason [buildV1ProxyEvent] gives.
+func buildV2ProxyEvent(requestID string, req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
 	rawQS := apigwV2RawQueryString(req)
 	event := map[string]interface{}{
 		"version":         "2.0",
@@ -1901,7 +1924,7 @@ func buildV2ProxyEvent(req *AWSRequest, apiID, stage, resourcePath string) ([]by
 		"requestContext": map[string]interface{}{
 			"routeKey":  req.Operation + " " + resourcePath,
 			"stage":     stage,
-			"requestId": generateRequestID(),
+			"requestId": requestID,
 			"apiId":     apiID,
 			"http": map[string]interface{}{
 				"method": req.Operation,

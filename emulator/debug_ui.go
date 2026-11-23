@@ -377,6 +377,8 @@ func (s *Server) stateAtSequence(ctx context.Context, upToSeq int64) ([]byte, er
 type timeControlResponse struct {
 	SimulatedTime string  `json:"simulated_time"`
 	Scale         float64 `json:"scale"`
+	// Frozen reports whether the clock is stopped; see [TimeController.Freeze].
+	Frozen bool `json:"frozen"`
 }
 
 // handleGetTime returns the current simulated time and scale factor.
@@ -388,33 +390,62 @@ func (s *Server) handleGetTime(w http.ResponseWriter, _ *http.Request) {
 	writeJSONDebug(w, s.logger, timeControlResponse{
 		SimulatedTime: s.tc.Now().UTC().Format(time.RFC3339Nano),
 		Scale:         s.tc.Scale(),
+		Frozen:        s.tc.Frozen(),
 	})
 }
 
-// handleSetTime sets the simulated clock to the time specified in the JSON body.
-// The request body must be {"time": "<RFC3339>"}.  Responds with the same shape
-// as GET /v1/control/time.
+// handleSetTime sets the simulated clock from the JSON body
+// {"time": "<RFC3339>", "frozen": <bool>}, and responds with the same shape as
+// GET /v1/control/time.
+//
+// Either field may be omitted, but not both. "frozen": true stops the clock — at "time"
+// exactly when one is given, freezing before setting for the reason [TimeController.Freeze]
+// gives — and "frozen": false resumes it, which is the HTTP form of
+// [TestServer.FreezeTimeAt] and [TestServer.UnfreezeTime] (#1598). With "frozen" omitted the
+// frozen state is left as it is, so a frozen clock moved by "time" alone stays frozen.
+//
+// "frozen": false also unpins a clock POST /v1/control/run pinned, so GET /v1/control/run
+// never reports an epoch for a running clock and a later reset does not freeze it again.
+// "frozen": true freezes without pinning: it names no instant for a reset to return to. Moving
+// a pinned clock with "time" alone leaves it pinned, and a reset returns it to the epoch.
 func (s *Server) handleSetTime(w http.ResponseWriter, r *http.Request) {
 	if s.tc == nil {
 		http.Error(w, `{"error":"time controller not configured"}`, http.StatusNotImplemented)
 		return
 	}
 	var body struct {
-		Time string `json:"time"`
+		Time   string `json:"time"`
+		Frozen *bool  `json:"frozen"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, `{"error":"invalid JSON body"}`, http.StatusBadRequest)
 		return
 	}
-	t, err := time.Parse(time.RFC3339Nano, body.Time)
-	if err != nil {
-		t, err = time.Parse(time.RFC3339, body.Time)
-	}
-	if err != nil {
-		http.Error(w, `{"error":"time must be RFC3339 format"}`, http.StatusBadRequest)
+	if body.Time == "" && body.Frozen == nil {
+		http.Error(w, `{"error":"time or frozen is required"}`, http.StatusBadRequest)
 		return
 	}
-	s.tc.SetTime(t)
+	var t time.Time
+	if body.Time != "" {
+		var err error
+		t, err = time.Parse(time.RFC3339Nano, body.Time)
+		if err != nil {
+			t, err = time.Parse(time.RFC3339, body.Time)
+		}
+		if err != nil {
+			http.Error(w, `{"error":"time must be RFC3339 format"}`, http.StatusBadRequest)
+			return
+		}
+	}
+	if body.Frozen != nil && *body.Frozen {
+		s.tc.Freeze()
+	}
+	if body.Time != "" {
+		s.tc.SetTime(t)
+	}
+	if body.Frozen != nil && !*body.Frozen {
+		s.unpinClock()
+	}
 	s.handleGetTime(w, r)
 }
 

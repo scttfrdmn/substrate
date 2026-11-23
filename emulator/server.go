@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -105,6 +106,18 @@ type Server struct {
 	logger   Logger
 	opts     ServerOptions
 	httpSrv  *http.Server
+
+	// ids assigns every request ID the server mints for itself; see [RequestIDSource].
+	ids *RequestIDSource
+
+	// runMu guards the pinned epoch, and is held across every change to it *and* the
+	// clock call that goes with it, so "pinned" and "the clock is frozen at the epoch"
+	// change together: POST /v1/control/run, POST /v1/control/time and POST
+	// /v1/state/reset can all run while requests are in flight.
+	runMu sync.Mutex
+	// epoch is the instant the clock is pinned at, when pinned is set; see [RunCfg.Epoch].
+	epoch  time.Time
+	pinned bool
 }
 
 // NewServer creates a Server wired to the provided dependencies. Start must be
@@ -139,8 +152,69 @@ func NewServer(
 				"signature verification is off")
 		}
 	}
+	s.ids = NewRequestIDSource(cfg.Run.Seed)
+	if epoch, ok, err := cfg.Run.ParseEpoch(); err != nil {
+		// [Validate] refuses this for a loaded config, so only a hand-built Config reaches
+		// here. Say so rather than fail: NewServer has no error to return.
+		if s.logger != nil {
+			s.logger.Warn("run.epoch is not usable; the clock is not pinned", "err", err)
+		}
+	} else if ok {
+		s.pinClock(epoch)
+	}
 	s.router = s.buildRouter()
 	return s
+}
+
+// RequestIDs returns the source the server assigns request IDs from, so an in-process
+// caller that dispatches on the server's behalf — a [Client] built over the same registry,
+// for one — can draw from the same sequence ([WithClientRequestIDs]).
+func (s *Server) RequestIDs() *RequestIDSource { return s.ids }
+
+// pinClock freezes the clock at epoch and records it as the instant a reset returns to.
+func (s *Server) pinClock(epoch time.Time) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	s.pinClockLocked(epoch)
+}
+
+// pinClockLocked is pinClock for a caller holding runMu. Freeze before SetTime, for the
+// reason [TimeController.Freeze] gives.
+func (s *Server) pinClockLocked(epoch time.Time) {
+	s.epoch, s.pinned = epoch, true
+	if s.tc != nil {
+		s.tc.Freeze()
+		s.tc.SetTime(epoch)
+	}
+}
+
+// unpinClock forgets the pinned epoch and resumes the clock from where it stands.
+func (s *Server) unpinClock() {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	s.epoch, s.pinned = time.Time{}, false
+	if s.tc != nil {
+		s.tc.Unfreeze()
+	}
+}
+
+// repinClock returns a pinned clock to its epoch, and leaves an unpinned one alone. The read
+// of the epoch and the re-pin are one step, so a concurrent unpin cannot land between them
+// and leave the clock frozen at an epoch nothing reports.
+func (s *Server) repinClock() {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if s.pinned {
+		s.pinClockLocked(s.epoch)
+	}
+}
+
+// runState returns the pinned epoch, whether there is one, and whether the clock is frozen,
+// read together.
+func (s *Server) runState() (epoch time.Time, pinned, frozen bool) {
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	return s.epoch, s.pinned, s.tc != nil && s.tc.Frozen()
 }
 
 // Start binds the listener and begins accepting requests. It blocks until ctx
@@ -361,6 +435,11 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Get("/v1/control/time", s.handleGetTime)
 	r.Post("/v1/control/time", s.handleSetTime)
 	r.Post("/v1/control/scale", s.handleSetScale)
+	// Outside the recorded group below, like the clock endpoints beside it: the seed and
+	// the epoch live on the server rather than in the StateManager, so a replay's reset
+	// does not wipe them and must not re-apply them (#1598).
+	r.Get("/v1/control/run", s.handleGetRun)
+	r.Post("/v1/control/run", s.handleSetRun)
 
 	// Seed endpoints, grouped so that every write through one is recorded as an event
 	// and replayed in position (#1140). Membership is not a taste question: an endpoint
@@ -677,6 +756,11 @@ func (s *Server) handleStateReset(w http.ResponseWriter, r *http.Request) {
 	if s.opts.Fault != nil {
 		s.opts.Fault.UpdateConfig(FaultConfig{Enabled: false})
 	}
+	// Rewind the request IDs, and return a pinned clock to its epoch, so a test case that
+	// shares a server answers what it would answer on a fresh one (#1598). An unpinned
+	// clock is left where it stands: nothing configured an instant to return it to.
+	s.ids.Rewind()
+	s.repinClock()
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"status":"ok"}`))
@@ -832,12 +916,23 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 		r.Body = io.NopCloser(bytes.NewReader(rawBody))
 	}
 
+	// Drawn before the parse can fail, so every top-level request takes one ID in arrival
+	// order, a refused one included, and the IDs a later request is assigned do not depend
+	// on whether an earlier one parsed (#1598).
+	requestID := s.ids.Next()
 	req, reqCtx, parseErr := ParseAWSRequest(r)
 	if parseErr != nil {
 		s.logger.Error("failed to parse AWS request", "err", parseErr)
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
+	// [ParseAWSRequest] has neither the server's ID source nor its clock, so the request ID
+	// it fills in and the wall-clock timestamp are placeholders the server's answers
+	// replace, as with the account below. Every identifier the request mints derives from
+	// this ID, and the timestamp is the instant the hold above took.
+	reqCtx.RequestID = requestID
+	reqCtx.IDs = NewIDMint(requestID)
+	reqCtx.Timestamp = s.tc.Now()
 
 	// Step 1.1: refuse a request that declares RPC v2 CBOR and also carries a target
 	// header. The specification requires a server to reject it, and substrate has a

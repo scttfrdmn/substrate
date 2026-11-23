@@ -32,8 +32,8 @@ description of it.
 ## Quick Start
 
 `StartTestServer` is the entry point for all Go integration tests. It starts
-an in-process Substrate server on a random port, registers all 63 service
-plugins, and schedules `t.Cleanup` to shut the server down automatically.
+an in-process Substrate server on a random port, registers every service
+plugin, and schedules `t.Cleanup` to shut the server down automatically.
 
 ```go
 func TestMyService(t *testing.T) {
@@ -85,6 +85,7 @@ func (ts *TestServer) Store() *EventStore               // for cost summaries an
 func (ts *TestServer) StateManager() StateManager
 func (ts *TestServer) TimeController() *TimeController
 func (ts *TestServer) Registry() *PluginRegistry
+func (ts *TestServer) RequestIDs() *RequestIDSource     // the seeded request-ID sequence
 ```
 
 `StartTestServer` returns when the `/health` endpoint responds — the server is
@@ -101,6 +102,85 @@ test takes, and `AdvanceTime` still moves it by a known interval. Prefer
 `FreezeTimeAt(t)` over `SetTime(t)` followed by `FreezeTime()` — the latter stops
 the clock a few tens of nanoseconds after `t`, which is enough to cross a second
 boundary if `t` sits near one.
+
+## Deterministic Runs
+
+Every identifier a request mints — a VPC ID, an instance ID, a KMS key ID, an IAM user
+ID, an S3 `UploadId`, an Organizations account ID — is derived from that request's ID. A
+replay restores the recorded request IDs, so a replay mints what the recording minted.
+**Deterministic-run mode** makes two *fresh* runs agree as well: it seeds the request IDs
+and pins the clock, so the same calls in the same order answer byte-identical bodies
+(#1598).
+
+- **Seeded request IDs.** A seeded server assigns `req-<8 hex>-<n>`: the prefix is derived
+  from the seed and `n` counts the requests the server has served. Every top-level
+  request draws one, in arrival order, a refused one included.
+- **A pinned clock.** The clock is frozen at an epoch, so every timestamp a response
+  renders is that instant until the test moves it.
+- **Reset.** `POST /v1/state/reset` (and `ts.ResetState`) rewinds the sequence and returns
+  a pinned clock to its epoch, so each test case sharing a server sees what a fresh
+  server would give it.
+
+`StartTestServer` seeds request IDs by default, so identifiers already repeat from run to
+run. The options:
+
+```go
+ts := substrate.StartTestServer(t,
+    substrate.WithDeterministicRun(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)))
+// Request IDs seeded, clock frozen at 2026-01-01T00:00:00Z.
+
+ts := substrate.StartTestServer(t, substrate.WithoutSeededIDs())
+// Wall-clock, random request IDs — unique across servers.
+```
+
+The same settings for the `substrate` binary:
+
+| Setting | Config key | Environment | Flag |
+|---------|-----------|-------------|------|
+| Request-ID seed (0 is unseeded, the default) | `run.seed` | `SUBSTRATE_RUN_SEED` | `--seed` |
+| Pinned epoch (RFC 3339; empty leaves the clock running) | `run.epoch` | `SUBSTRATE_RUN_EPOCH` | `--epoch` |
+
+```yaml
+run:
+  seed: 42
+  epoch: "2026-01-01T00:00:00Z"
+```
+
+Over HTTP, `GET /v1/control/run` reports `seed`, `epoch`, `frozen` and `drawn`. `epoch` is
+present only while the clock is pinned, and it is the instant a reset returns the clock to.
+`drawn` is the number of request IDs assigned since the seed was set or the state last reset.
+`POST /v1/control/run` with `{"seed": 42}` reseeds and restarts the sequence (0 unseeds);
+`{"epoch": "2026-01-01T00:00:00Z"}` pins the clock and `{"epoch": ""}` unpins it. A field
+left out is left as it is. `POST /v1/control/time` accepts `"frozen": true` or `false`
+beside `"time"`, which is the HTTP form of `FreezeTimeAt` and `UnfreezeTime`. `"frozen": false`
+(and `UnfreezeTime`) also unpins the clock, so a later reset leaves it running;
+`"frozen": true` freezes without pinning. Neither endpoint is recorded as an event, so a
+replay does not re-apply them.
+
+An in-process `Client` draws from a server's sequence when built with
+`substrate.WithClientRequestIDs(ts.RequestIDs())`.
+
+**What stays nondeterministic.** These are documented limits rather than defects:
+
+- **Concurrent requests.** Requests a client sends at once draw their IDs in whichever
+  order the scheduler runs them, so the identifiers minted from them can swap between
+  runs. Requests that do not overlap are assigned in the order they arrive.
+- **The `Date` response header**, which the HTTP server writes from the wall clock.
+- **Substrate's bookkeeping IDs**: event IDs, snapshot IDs, and replay and recording
+  session IDs. No AWS call observes them.
+- **Request IDs repeat after a reset.** The reset rewinds the sequence, so a server's event
+  log can hold the same request ID twice: once before a reset and once after it. A replay
+  of that stream re-runs both halves against one state, so a seeded stream replays
+  faithfully only between resets (#1631 tracks recording the reset itself).
+- **Unaudited map iteration.** A response whose order comes from iterating a Go map, in a
+  plugin path nobody has checked, can differ between runs. The acceptance test covers EC2,
+  KMS, IAM, S3 multipart uploads, Organizations and Firehose; report any other path you
+  find.
+
+`make nondeterminism-check` keeps plugin code honest. Outside a reviewed allowlist, it
+refuses in emulator code: a read of the wall clock (`time.Now`, `time.Since`, `time.After`
+and their relatives), a `math/rand` or `crypto/rand` import, and an unseeded identifier
+(`generateRequestID`, `NewIDMint("")`).
 
 ### Benchmarks
 
@@ -1040,6 +1120,29 @@ client that reaches the emulator.
 Both set `AWS_ENDPOINT_URL`, `AWS_DEFAULT_REGION` and test credentials, so `boto3.client("s3")`
 reaches the emulator with no arguments, and both yield a `SubstrateServer` whose `url` is the
 server's address.
+
+**Deterministic runs.** Every server the plugin launches gets `SUBSTRATE_RUN_SEED=1`, so request
+IDs and the identifiers minted from them repeat from run to run, and the per-test reset rewinds the
+sequence. To pin the clock too, mark the test; `substrate_isolated` starts its server pinned, and
+`substrate` pins the shared server for that test alone:
+
+```python
+import pytest
+
+@pytest.mark.substrate(deterministic=True)       # clock frozen at 2026-01-01T00:00:00Z
+def test_report_is_stable(substrate_isolated):
+    ...
+
+@pytest.mark.substrate(epoch="2026-06-01T12:00:00Z", seed=7)
+def test_at_noon(substrate):
+    ...
+```
+
+Indirect parametrization takes the same keys (`{"deterministic": True}`), and the session server
+reads the ini options `substrate_seed`, `substrate_epoch` and `substrate_deterministic`.
+`SubstrateServer(seed=..., epoch=...)`, `set_run`, `run_settings`, `freeze_time` and
+`unfreeze_time` are the same controls by hand; see [Deterministic Runs](#deterministic-runs) for
+what each setting does and what stays nondeterministic.
 
 **Seed an outcome** through the control plane before the call that observes it. Substrate runs no
 workload, so a failed command, a terminal job state or a capacity error is something a test sets

@@ -135,9 +135,9 @@ type Event struct {
 	// (see generateEventID), while a request id is minted by the parser before the
 	// store sees the request at all.
 	//
-	// It is recorded because a replay cannot re-derive it. generateRequestID
-	// (parser.go) is "req-" + time.Now().UnixNano(), and 66 success bodies render
-	// it, so a recorded run could not be reproduced even in principle while the
+	// It is recorded because a replay cannot re-derive it. On an unseeded server
+	// generateRequestID (parser.go) builds it from the wall clock, and 66 success bodies
+	// render it, so a recorded run could not be reproduced even in principle while the
 	// event did not carry the value — replay used ID instead, which is a third
 	// shape, neither the recorded id nor a freshly minted one. That is the same rule
 	// substrateRequestID (error_protocol.go) already states for the error path:
@@ -663,7 +663,7 @@ func (e *EventStore) CreateSnapshot(ctx context.Context, streamID string, state 
 
 	snapshot := &Snapshot{
 		ID:        generateSnapshotID(),
-		Timestamp: time.Now(),
+		Timestamp: e.now(),
 		Sequence:  int64(len(e.events)),
 		StreamID:  streamID,
 		State:     stateBytes,
