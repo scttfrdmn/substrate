@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.131.0] - 2026-11-23
+
 ### Added
 
 - **Terraform and CDK journeys in CI (#1519, #1520).** `examples/terraform` applies the fourteen resource kinds the roadmap review used, plus a bucket public-access block and default encryption, with the AWS provider pinned to 6.55.0 and locked for four platforms. `examples/cdk` is a TypeScript app (a bucket, a queue and a table) with a lockfile that pins `aws-cdk-lib` and the CLI. Node 24 runs it directly. A new `test/iac` module drives both with the real tools against `StartTestServer`. Terraform runs `init` offline, installing the provider from `TF_PLUGIN_CACHE_DIR` as a filesystem mirror, then `apply -parallelism=1`, a second `plan -detailed-exitcode` that must be empty, and `destroy`, and checks that no state is left. The CDK journey runs `bootstrap`, `deploy`, checks the stack's outputs and resources, and runs `destroy`. The journeys skip unless `SUBSTRATE_IAC=1` is set. `make iac-e2e-setup` fetches the provider and the npm packages, and is the only step that uses the network. `make iac-e2e` runs the journeys, and a new `iac-e2e` CI job runs both targets on every PR. The new docs page "Terraform and CDK" covers the setup. Dependabot now watches `examples/cdk`, `examples/terraform` and `test/iac`.
@@ -30,8 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`AWS::S3::Bucket` applies `LifecycleConfiguration` and `PublicAccessBlockConfiguration` (part of #1573).** Each is applied on create, in place on update, and deleted when the template drops it. The lifecycle rules are translated to the API's shape.
 - **S3 `GetBucketLocation` (#1606).** It answers the bucket's Region, or an empty element for `us-east-1`. The CDK's asset publisher asks for it before every upload.
 - **`StackDeployer.CreateChangeSetWithOptions` and `ExecuteChangeSetWithOptions`, with `CFNChangeSetOptions` and `CFNExecuteOptions` (#1606).** `ErrCFNChangeSetTypeUnsupported`, `ErrCFNStackAlreadyExists` and `ErrCFNChangeSetNotExecutable` classify the new refusals.
-- The routed-operation catalog grows from 1,110 to 1,121.
-- **CloudFormation `ValidateTemplate` (#1605).** It makes the checks below without deploying, and answers `Parameters` (`ParameterKey`, `DefaultValue`, `NoEcho`, `Description`), `Description`, `Capabilities` (`CAPABILITY_IAM`, or `CAPABILITY_NAMED_IAM` when an IAM resource sets its name property, per CreateStack's `Capabilities` documentation), `CapabilitiesReason` and `DeclaredTransforms`. Strict mode is not consulted. `TemplateBody` wins when both are given; a `TemplateURL` alone is read from substrate's S3 through the resolver `CreateStack` uses. The routed-operation catalog grows from 1,121 to 1,122.
+- The routed-operation catalog grows from 1,105 to 1,128 across this release.
+- **CloudFormation `ValidateTemplate` (#1605).** It makes the checks below without deploying, and answers `Parameters` (`ParameterKey`, `DefaultValue`, `NoEcho`, `Description`), `Description`, `Capabilities` (`CAPABILITY_IAM`, or `CAPABILITY_NAMED_IAM` when an IAM resource sets its name property, per CreateStack's `Capabilities` documentation), `CapabilitiesReason` and `DeclaredTransforms`. Strict mode is not consulted. `TemplateBody` wins when both are given; a `TemplateURL` alone is read from substrate's S3 through the resolver `CreateStack` uses.
 - **The CloudFormation resource specification, vendored (#1605).** `cmd/gen-cfn-schema` strips the us-east-1 specification (version 273.0.0, 2,129 resource types) to each type's property names, required flags and value kinds and its `Fn::GetAtt` attribute names. It vendors that, gzipped (118 KB), under `emulator/cfnschema`, and generates `emulator/cfn_schema_gen.go`. `make cfn-schema` regenerates offline, `make cfn-schema-check` runs in CI's Service Reference Drift job, and `make cfn-schema-fetch` refreshes the snapshot over the network by hand.
 - **Template checks at the request (#1605, #1548).** `CreateStack`, `UpdateStack`, `CreateChangeSet`, `ValidateTemplate` and `Client.Deploy` refuse, with `ValidationError` and AWS's wording:
   - a type the specification does not list: `Template format error: Unrecognized resource types: [X]` (aws-cli #8032, the re:Post template-validation article);
@@ -21784,7 +21786,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.130.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.131.0...HEAD
+[v0.131.0]: https://github.com/scttfrdmn/substrate/compare/v0.130.0...v0.131.0
 [v0.130.0]: https://github.com/scttfrdmn/substrate/compare/v0.129.0...v0.130.0
 [v0.129.0]: https://github.com/scttfrdmn/substrate/compare/v0.128.0...v0.129.0
 [v0.128.0]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...v0.128.0
