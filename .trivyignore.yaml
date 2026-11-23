@@ -10,3 +10,36 @@ misconfigurations:
   - id: AWS-0030
     paths:
       - "emulator/testdata/cfn/cdk_bootstrap_template.yaml"
+  # `cdk synth` output from aws-cdk-lib (CDK 2.1149.0), vendored unmodified as test fixtures for
+  # strict mode (#1605): TestCFN_OrdinaryCDKAppsDeployInStrictMode deploys them into substrate to
+  # prove ordinary CDK apps are not refused. They are the CDK's default constructs — a VPC with
+  # public subnets and default security groups, unencrypted queues and topics, a bucket without
+  # logging — and hardening them would stop them being what the CDK emits. They are never deployed
+  # to AWS from this repository.
+  - id: AWS-0086
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0087
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0091
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0093
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0095
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0096
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0104
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0132
+    paths:
+      - "emulator/testdata/cfn/cdk/**"
+  - id: AWS-0164
+    paths:
+      - "emulator/testdata/cfn/cdk/**"

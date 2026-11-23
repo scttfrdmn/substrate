@@ -57,7 +57,7 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::S3::BucketPolicy": cfnS3BucketPolicyDeleter,
 	// The CDK's routing and permission types (#1605; cfn_resources_v131.go).
 	"AWS::EC2::Route":                       cfnEC2RouteDeleter,
-	"AWS::EC2::SubnetRouteTableAssociation": queryDeleter("ec2", "DisassociateRouteTable", "AssociationId"),
+	"AWS::EC2::SubnetRouteTableAssociation": cfnSubnetRouteTableAssociationDeleter,
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
 	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
 	"AWS::Kinesis::Stream":                  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),

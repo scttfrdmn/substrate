@@ -117,8 +117,9 @@ func TestCFN_RoutesAndAssociations(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "UPDATE_COMPLETE", result.Status, result.StatusReason)
 	assert.Equal(t, route.PhysicalID, findResource(t, result, "Default").PhysicalID, "a target change is in place")
-	moved := findResource(t, result, "Assoc").PhysicalID
-	assert.NotEqual(t, assoc, moved)
+	assert.Equal(t, assoc, findResource(t, result, "Assoc").PhysicalID, "the move is in place: the physical ID stays")
+	moved := result.Outputs["AssocId"]
+	assert.NotEqual(t, assoc, moved, "Fn::GetAtt Id answers the live association")
 	assert.True(t, strings.HasPrefix(moved, "rtbassoc-"), moved)
 
 	// A new destination replaces the route.

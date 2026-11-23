@@ -72,6 +72,14 @@ func cfnRefValue(dr DeployedResource, cctx *cfnContext) (string, bool) {
 
 	// ----- Ref is a value recorded at deploy time --------------------------------------
 
+	case "AWS::EC2::SubnetRouteTableAssociation":
+		// The live association ID, which an in-place move to another table changes while the
+		// physical ID stays (#1605; see deployEC2SubnetRouteTableAssociation).
+		if v := cfnRefMetadata(dr, "AssociationId"); v != "" {
+			return v, true
+		}
+		return dr.PhysicalID, true
+
 	case "AWS::KMS::Key", "AWS::KMS::ReplicaKey":
 		// "Ref returns the key ID". substrate stores the key ARN as the physical ID, which is
 		// what its own KMS operations accept, so the ID is read from where deployKMSKey

@@ -83,8 +83,10 @@ type LambdaPermissionStatement struct {
 	// Effect is either "Allow" or "Deny".
 	Effect string `json:"Effect"`
 
-	// Principal maps principal type to principal value.
-	Principal map[string]string `json:"Principal"`
+	// Principal is the principal the statement grants: {"Service": …} for a service,
+	// {"AWS": …} for an account or an IAM ARN, or the string "*" for everyone — the forms
+	// AddPermission's output takes (see lambdaPermissionPrincipal).
+	Principal interface{} `json:"Principal"`
 
 	// Action is the Lambda API action the statement applies to.
 	Action string `json:"Action"`
