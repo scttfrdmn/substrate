@@ -197,6 +197,7 @@ drifting silently.
 | `ResettablePlugin` list (only if you implement it) | `emulator/replay_plugin_reset_test.go` | the test asserts the exact set |
 | Costs (optional) | `defaultCostTable` in `emulator/costs.go` | unknown operations cost 0 |
 | Authz reference (optional) | `cmd/gen-authz-reference` + `emulator/authzref/*.json` | `make authz-reference-check` (offline) |
+| CloudFormation resource type (only for a new CFN type) | a row in `cfnResourceDeployers` (`emulator/cfn_resource_table.go`), the one list strict mode reads | `TestCFNStrict_EmulatedTypesAreRecognized` (the type must be in the vendored specification, `emulator/cfnschema`, checked by `make cfn-schema-check`) |
 
 Adding an operation to an existing plugin needs the catalog, totals, service-section
 row and coverage-matrix steps.
@@ -282,7 +283,7 @@ Two CI jobs exist only to catch bookkeeping drift. Run their targets before push
 
 | CI job | Targets | Regenerate after a deliberate change |
 |--------|---------|--------------------------------------|
-| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check` | `make operation-catalog docs-reference operation-docs-write` |
+| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check cfn-schema-check` | `make operation-catalog docs-reference operation-docs-write` (and `make cfn-schema` after a `make cfn-schema-fetch`) |
 | Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check` | `make wire-bookkeeping-write` |
 
 The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded

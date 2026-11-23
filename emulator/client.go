@@ -140,6 +140,8 @@ type Client struct {
 	costs    *CostController
 	// requestIDs seeds each deployment's mint; nil draws an unseeded request ID.
 	requestIDs *RequestIDSource
+	// lenientCFN turns CloudFormation strict mode off; see WithClientLenientCloudFormation.
+	lenientCFN bool
 }
 
 // ClientOption configures a [Client] built by [NewClient].
@@ -152,6 +154,13 @@ type ClientOption func(*Client)
 // Without it a deployment's seed is an unseeded request ID, wall-clock and random.
 func WithClientRequestIDs(src *RequestIDSource) ClientOption {
 	return func(c *Client) { c.requestIDs = src }
+}
+
+// WithClientLenientCloudFormation turns CloudFormation's strict mode off for [Client.Deploy]:
+// a resource type substrate does not emulate deploys as a stub instead of refusing the
+// template. See [WithDeployerLenient].
+func WithClientLenientCloudFormation() ClientOption {
+	return func(c *Client) { c.lenientCFN = true }
 }
 
 // NewClient creates a Client wired to the provided dependencies.
@@ -206,7 +215,7 @@ func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*Deploy
 	// it is unseeded, wall-clock and random.
 	deployRequestID := b.requestIDs.Next()
 	deployer := NewStackDeployer(b.registry, b.store, b.state, b.tc, b.logger, b.costs,
-		WithDeployerMint(NewIDMint(deployRequestID)))
+		WithDeployerMint(NewIDMint(deployRequestID)), WithDeployerLenient(b.lenientCFN))
 
 	// Named from the same request ID rather than the clock's nanoseconds, which two
 	// deployments on a frozen clock shared, so they recorded into one stream.

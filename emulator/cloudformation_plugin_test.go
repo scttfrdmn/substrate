@@ -140,7 +140,9 @@ func cfnErrorCode(t *testing.T, body string) string {
 
 // The templates below are the smallest ones that exercise each path.
 const (
-	cfnEmptyTemplate  = `{"Resources":{}}`
+	// cfnEmptyTemplate declares one AWS::CDK::Metadata, which creates nothing: a template must
+	// declare at least one resource (#1605).
+	cfnEmptyTemplate  = `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`
 	cfnBucketTemplate = `{"Resources":{"Data":{"Type":"AWS::S3::Bucket",` +
 		`"Properties":{"BucketName":"cfn-wire-bucket"}}},` +
 		`"Outputs":{"BucketName":{"Value":{"Ref":"Data"}}}}`
@@ -958,10 +960,12 @@ func TestCFNPlugin_ChangeSetFlow(t *testing.T) {
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
+	// The empty template's metadata record is kept, so the bucket is the one change.
 	code, body = cfnAction(t, ts, "CreateChangeSet", map[string]string{
 		"StackName":     "staged",
 		"ChangeSetName": "add-bucket",
-		"TemplateBody":  cfnBucketTemplate,
+		"TemplateBody": strings.Replace(cfnBucketTemplate, `{"Resources":{`,
+			`{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"},`, 1),
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 	var created struct {
@@ -1288,15 +1292,17 @@ func TestCFNPlugin_DescribeStackEvents(t *testing.T) {
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
 	events := cfnStackEvents(t, body)
-	// An empty template still brackets itself: the deploy started and finished,
-	// both recorded on the stack. Newest first, as the API documents.
-	require.Len(t, events, 2, "body was %s", body)
+	// The stack brackets its one resource: the deploy started, the metadata record
+	// completed, and the deploy finished, all recorded on the stack. Newest first, as the
+	// API documents.
+	require.Len(t, events, 3, "body was %s", body)
 	assert.Equal(t, "CREATE_COMPLETE", events[0].ResourceStatus)
-	assert.Equal(t, "CREATE_IN_PROGRESS", events[1].ResourceStatus)
+	assert.Equal(t, "AWS::CDK::Metadata", events[1].ResourceType)
+	assert.Equal(t, "CREATE_IN_PROGRESS", events[2].ResourceStatus)
 	assert.Equal(t, "eventful", events[0].StackName)
 	assert.Equal(t, "AWS::CloudFormation::Stack", events[0].ResourceType)
 	assert.NotEmpty(t, events[0].EventID, "EventId is a required member")
-	assert.Empty(t, cfnNextToken(t, body), "two events do not fill a page")
+	assert.Empty(t, cfnNextToken(t, body), "three events do not fill a page")
 
 	t.Run("the stack ID is accepted in place of the name", func(t *testing.T) {
 		// Every stack-scoped operation documents both forms, and DescribeStackEvents
@@ -1307,7 +1313,7 @@ func TestCFNPlugin_DescribeStackEvents(t *testing.T) {
 
 		code, byIDBody := cfnAction(t, ts, "DescribeStackEvents", map[string]string{"StackName": stackID})
 		require.Equal(t, http.StatusOK, code, "body was %s", byIDBody)
-		assert.Len(t, cfnStackEvents(t, byIDBody), 2)
+		assert.Len(t, cfnStackEvents(t, byIDBody), 3)
 	})
 
 	t.Run("an unknown stack is a ValidationError", func(t *testing.T) {

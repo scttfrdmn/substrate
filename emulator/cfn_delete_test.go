@@ -290,12 +290,13 @@ func TestCFN_AnUnmodeledTypeIsReportedAsSkipped(t *testing.T) {
 	d, _, _, _ := newSweepDeployer(t)
 	ctx := context.Background()
 
-	// AWS::ECR::LifecyclePolicy is in the table's inert set: ECR routes no
-	// DeleteLifecyclePolicy, so there is nothing to dispatch.
+	// AWS::SecretsManager::RotationSchedule is in the table's inert set: Secrets Manager's
+	// CancelRotateSecret is not routed, so there is nothing to dispatch.
 	tmpl := `{"Resources":{` +
-		`"Repo":{"Type":"AWS::ECR::Repository","Properties":{"RepositoryName":"sweep-repo"}},` +
-		`"Policy":{"Type":"AWS::ECR::LifecyclePolicy","Properties":{` +
-		`"RepositoryName":"sweep-repo","LifecyclePolicyText":"{}"}}}}`
+		`"Repo":{"Type":"AWS::SecretsManager::Secret","Properties":{"Name":"sweep-secret"}},` +
+		`"Policy":{"Type":"AWS::SecretsManager::RotationSchedule","Properties":{` +
+		`"SecretId":{"Ref":"Repo"},"RotationLambdaARN":"arn:aws:lambda:us-east-1:123456789012:function:rotate",` +
+		`"RotationRules":{"AutomaticallyAfterDays":30}}}}}`
 	_, err := d.Deploy(ctx, tmpl, "gapped", nil)
 	require.NoError(t, err)
 
@@ -307,10 +308,10 @@ func TestCFN_AnUnmodeledTypeIsReportedAsSkipped(t *testing.T) {
 	require.Contains(t, byID, "Policy")
 	assert.Equal(t, "DELETE_SKIPPED", byID["Policy"].Status,
 		"a type with no modeled delete is skipped, not silently completed")
-	assert.Contains(t, byID["Policy"].Reason, "DeleteLifecyclePolicy",
+	assert.Contains(t, byID["Policy"].Reason, "CancelRotateSecret",
 		"and the reason names what is missing")
 	assert.Equal(t, "DELETE_COMPLETE", byID["Repo"].Status,
-		"the repository next to it still deletes")
+		"the secret next to it still deletes")
 
 	// A skip is not a failure, so the record still goes.
 	require.NoError(t, d.DeleteStack(ctx, "gapped"))

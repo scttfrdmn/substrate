@@ -194,7 +194,7 @@ func TestCFNGlueJob_CommandIsReadFromTheTemplate(t *testing.T) {
 					"Job": {
 						"Type": "AWS::Glue::Job",
 						"Properties": {
-							"JobName": "nightly",
+							"Name": "nightly",
 							"Role": "arn:aws:iam::123456789012:role/glue",
 							` + tt.command + `
 							"Description": "unused"
@@ -231,7 +231,7 @@ func TestCFNGlueJob_CommandResolvesAnIntrinsic(t *testing.T) {
 			"Job": {
 				"Type": "AWS::Glue::Job",
 				"Properties": {
-					"JobName": "nightly",
+					"Name": "nightly",
 					"Role": "arn:aws:iam::123456789012:role/glue",
 					"Command": {
 						"Name": "pythonshell",

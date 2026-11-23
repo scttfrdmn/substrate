@@ -62,23 +62,55 @@ func (d *StackDeployer) deployECRRepository(
 			}
 		}
 	}
+	if dr.Error == "" {
+		if lp, ok := props["LifecyclePolicy"].(map[string]interface{}); ok {
+			lpCost, lpErr := d.putECRLifecyclePolicy(ctx, name, lp, streamID, cctx)
+			cost += lpCost
+			if lpErr != nil {
+				// The repository exists, but a failed resource is not one a rollback deletes, so it
+				// is deleted here; otherwise a rolled-back stack would leave it behind, and a retry
+				// would be refused with RepositoryAlreadyExistsException.
+				dr.Error = lpErr.Error()
+				if delErr := d.deleteECRRepository(ctx, name, streamID); delErr != nil {
+					dr.Error += " (and the repository could not be deleted: " + delErr.Error() + ")"
+				}
+			}
+		}
+	}
 	return dr, cost, nil
 }
 
-// deployECRLifecyclePolicy attaches a lifecycle policy to an ECR repository.
-func (d *StackDeployer) deployECRLifecyclePolicy(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	streamID string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	repoName := resolveStringProp(props, "RepositoryName", "", cctx)
+// deleteECRRepository deletes a repository this deploy created, with its images.
+func (d *StackDeployer) deleteECRRepository(ctx context.Context, name, streamID string) error {
+	body, err := json.Marshal(map[string]interface{}{"repositoryName": name, "force": true})
+	if err != nil {
+		return fmt.Errorf("cfn deleteECRRepository marshal: %w", err)
+	}
+	_, _, routeErr := d.dispatch(ctx, &AWSRequest{
+		Service:   "ecr",
+		Operation: "DeleteRepository",
+		Body:      body,
+		Headers:   map[string]string{"x-amz-target": "AmazonEC2ContainerRegistry_V1_1_0.DeleteRepository"},
+		Params:    map[string]string{},
+	}, streamID)
+	return routeErr
+}
+
+// putECRLifecyclePolicy applies a repository's LifecyclePolicy property — "Creates or updates a
+// lifecycle policy" — through PutLifecyclePolicy.
+//
+// This used to be the deploy helper of an AWS::ECR::LifecyclePolicy type, which CloudFormation
+// does not have: the resource specification lists no such type, so a template declaring one is
+// refused as unrecognized (#1605). The policy is the repository's own property, and only
+// LifecyclePolicyText is applied; RegistryId names the account, which is the stack's.
+func (d *StackDeployer) putECRLifecyclePolicy(
+	ctx context.Context, repoName string, lp map[string]interface{}, streamID string, cctx *cfnContext,
+) (float64, error) {
 	// LifecyclePolicyText is published as a String; cfnJSONDocument passes that
 	// form through unquoted and still accepts an object (#1153).
-	policy := cfnJSONDocument(props["LifecyclePolicyText"], cctx)
+	policy := cfnJSONDocument(lp["LifecyclePolicyText"], cctx)
 	if policy == "" {
-		policy = "{}"
+		return 0, nil
 	}
 
 	body := map[string]interface{}{
@@ -87,7 +119,7 @@ func (d *StackDeployer) deployECRLifecyclePolicy(
 	}
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("cfn deployECRLifecyclePolicy marshal: %w", err)
+		return 0, fmt.Errorf("cfn putECRLifecyclePolicy marshal: %w", err)
 	}
 
 	req := &AWSRequest{
@@ -99,11 +131,7 @@ func (d *StackDeployer) deployECRLifecyclePolicy(
 	}
 
 	_, cost, routeErr := d.dispatch(ctx, req, streamID)
-	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ECR::LifecyclePolicy", PhysicalID: repoName}
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-	}
-	return dr, cost, nil
+	return cost, routeErr
 }
 
 // ----- v0.21.0 — ECS -------------------------------------------------------

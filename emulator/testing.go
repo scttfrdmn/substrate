@@ -87,6 +87,7 @@ type testServerConfig struct {
 	noBodies          bool
 	recordStateHashes bool
 	noDefaultVPC      bool
+	lenientCFN        bool
 	// unseededIDs and epoch are the deterministic-run options; see [WithDeterministicRun].
 	unseededIDs bool
 	epoch       *time.Time
@@ -155,6 +156,19 @@ func WithRecordedStateHashes() TestServerOption {
 // VPCIdNotSpecified, and CreateDefaultVpc creates one.
 func WithoutDefaultVPC() TestServerOption {
 	return func(c *testServerConfig) { c.noDefaultVPC = true }
+}
+
+// WithLenientCloudFormation starts the server with CloudFormation's strict mode off — the
+// test-server form of cloudformation.strict=false (#1605).
+//
+// By default a template declaring a resource type substrate does not emulate, or a custom
+// resource, is refused at CreateStack, UpdateStack and CreateChangeSet with a ValidationError
+// naming the type. With this option such a resource deploys as a stub that records its
+// properties and creates nothing, as every template's did before strict mode existed. A
+// resource type CloudFormation does not recognize, and a property its type does not
+// declare, are refused either way, because CloudFormation refuses them.
+func WithLenientCloudFormation() TestServerOption {
+	return func(c *testServerConfig) { c.lenientCFN = true }
 }
 
 // testServerSeed is the request-ID seed every test server gets unless
@@ -305,6 +319,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	// The server keeps its own copy of the config, which time travel registers its replay
 	// plugins from, so the default-VPC switch has to be on both.
 	cfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
+	cfg.CloudFormation.Lenient = tsCfg.lenientCFN
 
 	state := NewMemoryStateManager()
 	run := testServerRun(tsCfg)
@@ -333,9 +348,10 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	// nil unless an option needs a plugin setting, so a default test server registers its
 	// plugins exactly as it always has.
 	var pluginCfg *Config
-	if tsCfg.noDefaultVPC {
+	if tsCfg.noDefaultVPC || tsCfg.lenientCFN {
 		pluginCfg = DefaultConfig()
-		pluginCfg.EC2.DefaultVPC = false
+		pluginCfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
+		pluginCfg.CloudFormation.Lenient = tsCfg.lenientCFN
 	}
 	if err := RegisterDefaultPlugins(ctx, registry, state, tc, logger, store, pluginCfg,
 		WithPluginAuth(auth)); err != nil {

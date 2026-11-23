@@ -583,6 +583,7 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // RecordSet per child, so its delete removes those record sets; see its entry in
 // cfnResourceDeleters.
 var cfnStubDeleteTypes = map[string]bool{
+	cfnCDKMetadataType:               true,
 	"AWS::Athena::WorkGroup":         true,
 	"AWS::CloudTrail::Trail":         true,
 	"AWS::CodeBuild::Project":        true,
@@ -609,8 +610,6 @@ var cfnDeleteInertTypes = map[string]string{
 	"AWS::ECS::CapacityProvider":                  "the deploy records no state to remove",
 	"AWS::SSM::Association":                       "the deploy records no state to remove",
 	"AWS::SecretsManager::SecretTargetAttachment": "the deploy records no state to remove",
-	"AWS::ECR::LifecyclePolicy": "ECR's DeleteLifecyclePolicy is not routed; deleting " +
-		"the repository removes its lifecycle policy with it",
 	"AWS::ApiGateway::UsagePlanKey": "API Gateway's DeleteUsagePlanKey is not routed, " +
 		"so the key stays attached until its usage plan is deleted",
 	"AWS::Cognito::IdentityPoolRoleAttachment": "Cognito models no " +

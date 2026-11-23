@@ -17,11 +17,12 @@ import (
 // resource reaches CREATE_COMPLETE. A stack recorded before these were added has no such entries,
 // and its attributes resolve to "" as they did until the resource is next updated.
 //
-// Not answered (#1591): a VPC's DefaultNetworkAcl, CidrBlockAssociations, Ipv6CidrBlocks and
-// VpcEncryptionControl.*, a subnet's Ipv6CidrBlocks, NetworkAclAssociationId and OutpostArn, and a
-// NAT gateway's EniId, AutoProvisionZones and AutoScalingIps — network ACLs, IPv6 blocks,
-// encryption control and regional NAT gateways are not modeled, and the two list-valued attributes
-// need list support in Fn::GetAtt.
+// Refused rather than answered (#1591), each listed in cfnGetAttUnmodelled or
+// cfnGetAttUnmodelledPrefixes with its reason: a VPC's DefaultNetworkAcl, CidrBlockAssociations,
+// Ipv6CidrBlocks and VpcEncryptionControl.*, a subnet's Ipv6CidrBlocks, NetworkAclAssociationId,
+// OutpostArn and BlockPublicAccessStates.*, and a NAT gateway's EniId, RouteTableId,
+// AutoProvisionZones and AutoScalingIps — network ACLs, IPv6 blocks, CIDR associations, encryption
+// control, Outposts, Block Public Access and regional NAT gateways are not modeled.
 
 // cfnEC2IDAttribute names, by type, the attribute whose value is the resource's EC2 ID.
 var cfnEC2IDAttribute = map[string]string{

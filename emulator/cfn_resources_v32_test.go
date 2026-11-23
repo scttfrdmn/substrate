@@ -4,20 +4,23 @@ import (
 	"context"
 	"testing"
 
+	"github.com/scttfrdmn/substrate/emulator"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestCFN_GenericFallback verifies that truly unknown resource types produce a
 // synthetic ARN rather than an error or empty PhysicalID.
+//
+// Only in lenient mode (#1605): strict mode refuses a type substrate does not emulate.
 func TestCFN_GenericFallback(t *testing.T) {
-	d := newTestDeployer(t)
+	d := newTestDeployer(t, emulator.WithDeployerLenient(true))
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
 			"MyWidget": {
-				"Type": "AWS::SomeNewService::Widget",
-				"Properties": { "Name": "my-widget" }
+				"Type": "AWS::IoT::Thing",
+				"Properties": { "ThingName": "my-widget" }
 			}
 		}
 	}`
@@ -25,10 +28,10 @@ func TestCFN_GenericFallback(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, result.Resources, 1)
 	r := result.Resources[0]
-	assert.Equal(t, "AWS::SomeNewService::Widget", r.Type)
+	assert.Equal(t, "AWS::IoT::Thing", r.Type)
 	assert.Empty(t, r.Error)
 	assert.NotEmpty(t, r.ARN)
-	assert.Contains(t, r.ARN, "somenewservice")
+	assert.Contains(t, r.ARN, "arn:aws:iot:")
 	assert.Equal(t, "MyWidget", r.PhysicalID)
 }
 

@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -57,6 +57,15 @@ authz-reference-check: ## Fail if authz_reference_gen.go is out of date with emu
 
 authz-reference-fetch: ## Refresh emulator/authzref/*.json from AWS (REQUIRES NETWORK; run by hand, never in CI)
 	go run ./cmd/gen-authz-reference -fetch
+
+cfn-schema: ## Regenerate emulator/cfn_schema_gen.go from the vendored CloudFormation resource specification
+	go run ./cmd/gen-cfn-schema
+
+cfn-schema-check: ## Fail if cfn_schema_gen.go is out of date with emulator/cfnschema (offline)
+	go run ./cmd/gen-cfn-schema -check
+
+cfn-schema-fetch: ## Refresh emulator/cfnschema from AWS (REQUIRES NETWORK; run by hand, never in CI)
+	go run ./cmd/gen-cfn-schema -fetch
 
 scheduler-query-model: ## Regenerate emulator/scheduler_query_model_gen.go from the AWS CLI v2's botocore models (needs `aws` on PATH)
 	go run ./cmd/gen-scheduler-query-model

@@ -496,6 +496,27 @@ var cfnGetAttUnmodelled = map[string]map[string]string{
 	"AWS::FSx::FileSystem": {
 		"RootVolumeId": "OpenZFS volumes are not modeled",
 	},
+	// #1591: every published attribute of these types is either answered or listed here (or, for a
+	// family of attributes, in cfnGetAttUnmodelledPrefixes), as TestCFN_GetAttCoverage asserts.
+	"AWS::EC2::VPC": {
+		"CidrBlockAssociations": "EC2 records no CIDR block association IDs for a VPC",
+		"DefaultNetworkAcl":     "network ACLs are not modeled",
+		"Ipv6CidrBlocks":        "EC2 models no IPv6 CIDR blocks",
+	},
+	"AWS::EC2::Subnet": {
+		"Ipv6CidrBlocks":          "EC2 models no IPv6 CIDR blocks",
+		"NetworkAclAssociationId": "network ACLs are not modeled",
+		"OutpostArn":              "Outposts are not modeled",
+	},
+	"AWS::EC2::NatGateway": {
+		"EniId":              "substrate creates no network interface for a NAT gateway",
+		"AutoProvisionZones": "regional NAT gateways are not modeled",
+		"AutoScalingIps":     "regional NAT gateways are not modeled",
+		"RouteTableId":       "regional NAT gateways are not modeled",
+	},
+	"AWS::ElasticLoadBalancingV2::TargetGroup": {
+		"LoadBalancerArns": "a target group's record holds no association to a load balancer; the listener holds it",
+	},
 }
 
 // cfnGetAttRefuseUnmodelled records a resolution failure when attr is one of dr's published
@@ -504,7 +525,7 @@ func cfnGetAttRefuseUnmodelled(dr DeployedResource, attr string, cctx *cfnContex
 	if cctx == nil || dr.Error != "" {
 		return
 	}
-	if reason, ok := cfnGetAttUnmodelled[dr.Type][attr]; ok {
+	if reason, ok := cfnUnmodelledAttribute(dr.Type, attr); ok {
 		cctx.fail("Fn::GetAtt: %s.%s (%s) has no value in substrate: %s", dr.LogicalID, attr, dr.Type, reason)
 	}
 }
@@ -549,7 +570,7 @@ func (d *StackDeployer) cfnValidateOutputAttributes(tmpl *cfnTemplate, cctx *cfn
 			if !ok {
 				continue
 			}
-			reason, unmodelled := cfnGetAttUnmodelled[res.Type][attr]
+			reason, unmodelled := cfnUnmodelledAttribute(res.Type, attr)
 			if !unmodelled {
 				continue
 			}

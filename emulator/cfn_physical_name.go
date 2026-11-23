@@ -111,6 +111,15 @@ var cfnGeneratedNameTypes = map[string]cfnNameConstraint{
 	// characters (CreateLogGroup).
 	"AWS::Logs::LogGroup": {maxLen: 512, nameProp: "LogGroupName"},
 
+	// Neither declares a name property, so CloudFormation always generates one (#1605). A cache
+	// parameter group name is 1–255 letters, digits and hyphens, beginning with a letter, and
+	// ElastiCache stores it lowercase (CreateCacheParameterGroup); an EFS creation token is 1–64
+	// characters (CreateFileSystem). Named from the logical ID alone, two stacks declaring the
+	// same logical ID shared one group or one file system, and deleting either stack deleted the
+	// other's.
+	"AWS::ElastiCache::ParameterGroup": {maxLen: 255, lower: true},
+	"AWS::EFS::FileSystem":             {maxLen: 64},
+
 	// A bare Lambda function name "is limited to 64 characters in length"
 	// (CreateFunction).
 	"AWS::Lambda::Function": {maxLen: 64, nameProp: "FunctionName"},

@@ -532,11 +532,11 @@ const cfnGroup3aTemplate = `{
 		"Cluster": {"Type": "AWS::ECS::Cluster", "Properties": {
 			"ClusterName": "group3a-cluster"}},
 		"Fs": {"Type": "AWS::EFS::FileSystem", "Properties": {
-			"CreationToken": "group3a-fs"}},
+			"PerformanceMode": "generalPurpose"}},
 		"Ap": {"Type": "AWS::EFS::AccessPoint", "Properties": {
 			"FileSystemId": {"Ref": "Fs"}}},
 		"Cache": {"Type": "AWS::ElastiCache::CacheCluster", "Properties": {
-			"ClusterId": "group3a-cache", "Engine": "redis",
+			"ClusterName": "group3a-cache", "Engine": "redis",
 			"CacheNodeType": "cache.t3.micro", "NumCacheNodes": "1"}},
 		"Db": {"Type": "AWS::RDS::DBInstance", "Properties": {
 			"DBInstanceIdentifier": "group3a-db", "Engine": "mysql",

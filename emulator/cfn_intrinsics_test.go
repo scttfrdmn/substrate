@@ -607,8 +607,9 @@ func TestCFNGetAtt_UnresolvableAttributeIsEmpty(t *testing.T) {
 	assert.Empty(t, result.Outputs["TableStream"])
 	assert.NotEmpty(t, result.Outputs["TableArn"], "the table's own ARN still resolves")
 
-	// A load balancer's hosted zone ID is a value substrate models nowhere. Empty says so.
-	assert.Empty(t, result.Outputs["LBZone"])
+	// A load balancer's hosted zone ID is AWS's static per-Region, per-type value since #1591:
+	// us-east-1's Application Load Balancer zone, from the ELB endpoints table.
+	assert.Equal(t, "Z35SXDOTRQ7X7K", result.Outputs["LBZone"])
 
 	// A dotted attribute names a *member's* ARN, not the resource's, so the ARN rule does not
 	// apply to it however it is spelled.

@@ -200,6 +200,29 @@ type cfnReferences struct {
 	// `Fn::GetAtt: [Logical, {Ref: P}]`, whose attribute is only known once P resolves; the
 	// dependency on Logical is known regardless, and the deploy order keys on it (#1420).
 	attrTargets map[string]bool
+
+	// unknown names every Ref, and every name in an Fn::Sub template string, that is neither a
+	// declared parameter, a declared resource nor a pseudo-parameter — the names CloudFormation
+	// refuses as "Unresolved resource dependencies" (#1548). A dotted Fn::Sub `${Logical.Attr}`
+	// whose Logical is undeclared is recorded here by its logical ID.
+	unknown map[string]bool
+
+	// unknownAttrTargets names every Fn::GetAtt target that is not a declared resource, which
+	// CloudFormation refuses with "instance of Fn::GetAtt references undefined resource" (#1548).
+	unknownAttrTargets map[string]bool
+}
+
+// cfnPseudoParameters are the names a Ref or an Fn::Sub may use without declaring them: the
+// pseudo-parameters the Template Reference's "Pseudo parameters reference" page lists.
+var cfnPseudoParameters = map[string]bool{
+	"AWS::AccountId":        true,
+	"AWS::NotificationARNs": true,
+	"AWS::NoValue":          true,
+	"AWS::Partition":        true,
+	"AWS::Region":           true,
+	"AWS::StackId":          true,
+	"AWS::StackName":        true,
+	"AWS::URLSuffix":        true,
 }
 
 // cfnCollectReferences walks v and records every Ref, Fn::GetAtt and Fn::Sub reference, sorting
@@ -209,18 +232,30 @@ type cfnReferences struct {
 // a reference to a parameter or resource of the same name — the Fn::Sub page defines the map's
 // keys as the names of variables the string uses. Such names are skipped in the template string,
 // and the map's values are walked as ordinary property values.
+//
+// A name the template does not declare is recorded in unknown or unknownAttrTargets. The walk is
+// condition-blind: it does not evaluate Fn::If, so a name inside an untaken branch is collected
+// like any other. That is the right reading for an undeclared name, which CloudFormation's own
+// template check refuses wherever it appears, and it is why a declared resource skipped by a
+// false Condition is not reported here — whether a reference to one is reached depends on which
+// branch is taken.
 func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources map[string]cfnResource) cfnReferences {
 	refs := cfnReferences{params: map[string]bool{}, resources: map[string]bool{}, attrs: map[string]bool{},
-		attrTargets: map[string]bool{}}
+		attrTargets: map[string]bool{}, unknown: map[string]bool{}, unknownAttrTargets: map[string]bool{}}
 	addRef := func(name string) {
 		if _, ok := params[name]; ok {
 			refs.params[name] = true
 		} else if _, ok := resources[name]; ok {
 			refs.resources[name] = true
+		} else if !cfnPseudoParameters[name] {
+			refs.unknown[name] = true
 		}
 	}
 	addAttr := func(logical, attr string) {
 		if _, ok := resources[logical]; !ok {
+			if logical != "" {
+				refs.unknownAttrTargets[logical] = true
+			}
 			return
 		}
 		refs.attrTargets[logical] = true
@@ -247,6 +282,12 @@ func cfnCollectReferences(v interface{}, params map[string]cfnParam, resources m
 				continue // a variable of the two-argument form, not a reference.
 			}
 			if logical, attr, dotted := strings.Cut(expr, "."); dotted {
+				if _, declared := resources[logical]; !declared {
+					// Reported as an unresolved name rather than an undefined Fn::GetAtt
+					// target: the template wrote no Fn::GetAtt.
+					refs.unknown[logical] = true
+					continue
+				}
 				addAttr(logical, attr)
 			} else {
 				addRef(expr)

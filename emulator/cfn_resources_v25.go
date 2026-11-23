@@ -179,7 +179,9 @@ func (d *StackDeployer) deployElastiCacheParameterGroup(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "CacheParameterGroupName", logicalID, cctx)
+	// The type declares no name property, so CloudFormation names the group, as
+	// cfnGeneratedName does: {stack}-{logical}-{suffix} (#1605).
+	name := cfnGeneratedName(cctx, "AWS::ElastiCache::ParameterGroup", logicalID)
 	family := resolveStringProp(props, "CacheParameterGroupFamily", "redis7", cctx)
 
 	req := &AWSRequest{
@@ -214,7 +216,8 @@ func (d *StackDeployer) deployElastiCacheCacheCluster(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	id := resolveStringProp(props, "ClusterId", logicalID, cctx)
+	// "ClusterName": the type declares no ClusterId (#1605).
+	id := resolveStringProp(props, "ClusterName", logicalID, cctx)
 	engine := resolveStringProp(props, "Engine", "redis", cctx)
 
 	params := map[string]string{
