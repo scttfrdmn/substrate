@@ -28,9 +28,11 @@ cannot.
   This is how most consumers use it.
 - **As a Go test harness** — `import ".../emulator"`, spin up an in-process server
   or deploy a CloudFormation template directly, no HTTP needed.
-- **As a pytest plugin** — `pip install` the `pytest-substrate` package (in
-  [`python/`](python/)) for a session-scoped server fixture with per-test state
-  reset and boto3 wired to the emulator automatically.
+- **As a pytest plugin** — the `pytest-substrate` package (in [`python/`](python/))
+  gives a session-scoped server fixture with per-test state reset and boto3 wired to
+  the emulator automatically. It is installed from source until it is published to
+  PyPI ([#1616](https://github.com/scttfrdmn/substrate/issues/1616)):
+  `pip install "git+https://github.com/scttfrdmn/substrate.git#subdirectory=python"`, or `pip install ./python` from a checkout.
 
 ## The Problem
 
@@ -55,10 +57,13 @@ A generate-and-verify loop has needs a human-paced workflow doesn't:
 - **Free, fast, offline, so you can run it on every generation.** No real account,
   no provisioning latency, no spend, no blast radius. Suitable for tight inner
   loops and CI on every candidate the model produces.
-- **Cost visibility as a machine-gradeable guardrail.** An AI has no instinct for
-  bill shock. Substrate prices each operation, so you get a projected dollar figure
-  *before* deploy — and can gate on it: `client.Deploy(ctx, tmpl, Intent{MaxCost: 1.0})`
-  fails the run if generated infra would blow a budget.
+- **API-call cost metering as a machine-gradeable guardrail.** An AI has no
+  instinct for bill shock. Substrate prices each API call a run makes, and can gate
+  on the sum: `client.Deploy(ctx, tmpl, Intent{MaxCost: 1.0})` returns
+  `ErrCostBudgetExceeded` when the deploy's metered cost exceeds the budget. It
+  meters calls, not resource time — a running instance's hourly rate is not counted;
+  a resource-time cost model is tracked in
+  [#1615](https://github.com/scttfrdmn/substrate/issues/1615).
 - **Seedable failure paths, to verify the error handling the code claims to have.**
   Generated code is full of retry/poll/wait logic for capacity errors, throttling,
   and terminal states. Substrate lets you seed exactly those outcomes on demand, so
@@ -67,26 +72,46 @@ A generate-and-verify loop has needs a human-paced workflow doesn't:
 AI generation is the *motivating* use case, not a prerequisite: Substrate is
 equally useful for human-written Terraform, CDK, CloudFormation, SDK, and CLI
 integration tests that want the same determinism, offline speed, and cost
-visibility.
+metering.
 
 ## How it compares
 
 Substrate is a **different tier** from container emulators and real accounts, not a
-drop-in replacement. It trades workload-execution fidelity for determinism,
-replayability, and cost insight — the fast inner-loop tier.
+drop-in replacement. It trades workload-execution fidelity and breadth for
+determinism, replayability, and API-call cost metering — the fast inner-loop tier.
 
-_Comparison reflects these projects as of early 2026; LocalStack and moto evolve —
-treat it as positioning, not a current feature-by-feature audit._
+_As of 2026-11. A cell with a number cites that project's own documentation, listed
+under **Sources**; the rest come from the comparison recorded in
+[#1597](https://github.com/scttfrdmn/substrate/issues/1597). "Not documented" means
+the project's documentation says nothing either way. These projects evolve; treat
+this as positioning, not a current audit._
 
-| | **Substrate** | LocalStack | moto | Real AWS |
-|---|:---:|:---:|:---:|:---:|
-| Deterministic replay | ✅ | ❌ | partial | ❌ |
-| Time-travel debugging | ✅ | ❌ | ❌ | ❌ |
-| Cost visibility before deploy | ✅ | ❌ | ❌ | after the bill |
-| Seedable failure / capacity / timing paths | ✅ | partial | partial | ❌ |
-| Runs your actual workload code | ❌ *(by design)* | ✅ | ❌ | ✅ |
-| Language-agnostic (any SDK/CLI over HTTP) | ✅ | ✅ | Python-first | ✅ |
-| No account · offline · free | ✅ | ✅ | ✅ | ❌ |
+| | **Substrate** | LocalStack | moto | AWS Emulator | Real AWS |
+|---|---|---|---|---|---|
+| Access | Free, open source, no account | Auth token required; the free Hobby plan is non-commercial [1] | Free, open source | Free, open source, no account [4] | Account and spend |
+| Any SDK/CLI over HTTP | ✅ (also in-process in Go) | ✅ | ✅ server mode [3] | ✅ (also embedded in the Rust SDK) [4] | ✅ |
+| Replay of a recorded run | ✅ under the recorded request IDs and clock | ❌ | Partial: the Recorder re-sends requests; no responses are kept or compared [3] | Not documented | ❌ |
+| Same identifiers on a fresh run | In progress ([#1598](https://github.com/scttfrdmn/substrate/issues/1598)) | Not documented | ✅ `/moto-api/seed` [3] | Not documented | ❌ |
+| Simulated, controllable clock | ✅ | Not documented | ❌ wall clock | Not documented | ❌ |
+| Time-travel state inspection | Partial ([#1601](https://github.com/scttfrdmn/substrate/issues/1601)) | ❌ | ❌ | Not documented | ❌ |
+| Seeded failure outcomes | ✅ seed endpoints and deterministic fault rules | Chaos API on the Enterprise plan; each rule fires with a set probability [2] | Partial | Not documented | ❌ |
+| IAM policy evaluation | ✅ | Base plan and up | Partial | ❌, and one account only [4] | ✅ |
+| API-call cost metering | ✅ per call; resource time is [#1615](https://github.com/scttfrdmn/substrate/issues/1615) | ❌ | ❌ | Not documented | After the bill |
+| Runs your workload code | ❌ *(by design)* | ✅ | ❌ | Not documented | ✅ |
+
+LocalStack and moto cover more of AWS than Substrate does, and AWS Emulator is
+generated from AWS's own Smithy models and answers an operation it does not
+implement with HTTP 501 [4]; Substrate does not compete on breadth. Two newer
+emulators, [Floci](https://github.com/floci-io/floci) and
+[kumo](https://github.com/sivchari/kumo) (Go, and usable in-process from a Go
+test), are not assessed here.
+
+**Sources**
+
+- [1] LocalStack's [repository](https://github.com/localstack/localstack), archived by its owner on 2026-03-23, and its [pricing page](https://www.localstack.cloud/pricing), where Hobby is "for hobbyists & other non-commercial usage".
+- [2] LocalStack's [Chaos API](https://docs.localstack.cloud/aws/capabilities/chaos-engineering/chaos-api/) documentation.
+- [3] moto's [server mode](https://docs.getmoto.org/en/latest/docs/server_mode.html) and [Recorder and deterministic identifiers](https://docs.getmoto.org/en/latest/docs/configuration/recorder/index.html) documentation.
+- [4] The AWS News Blog's [launch post](https://aws.amazon.com/blogs/aws/test-your-applications-against-aws-locally-with-aws-emulator/), 2026-11-11.
 
 The one ❌ is deliberate: Substrate models **what is observable through an AWS API
 call**, not what software inside a resource does (see
@@ -126,18 +151,23 @@ engine.StepBackward(ctx)                      // step back
 state, _ := engine.InspectState(ctx, "iam")   // see what broke
 ```
 
-### 3. Cost visibility before deploy
+### 3. API-call cost metering
 
-Real AWS pricing tracked per operation. Know your monthly bill before it arrives.
+Each emulated request is priced from a per-operation table (with overrides,
+discounts, and credits), recorded on its event, and summed per service and
+operation. `Intent{MaxCost}` turns the sum into a gate:
 
+```go
+result, err := client.Deploy(ctx, tmpl, emulator.Intent{MaxCost: 1.0})
+if errors.Is(err, emulator.ErrCostBudgetExceeded) {
+    // The stack was deployed (result is set); its metered cost exceeded $1.
+}
 ```
-Total: $1,247.50/month
 
-  S3 PUT:   $875.00  (175M ops @ $0.005/1K)
-  Lambda:   $267.50  (10M invocations)
-
-WARNING: High S3 PUT rate — consider batching (save ~99%)
-```
+This is API-call metering, not a monthly bill: a stack's cost is what its API calls
+are priced at, so a large EC2 instance contributes its `RunInstances` call, not its
+hourly rate. A resource-time cost model is tracked in
+[#1615](https://github.com/scttfrdmn/substrate/issues/1615).
 
 ### 4. Seedable outcomes (API-surface scope)
 
@@ -270,7 +300,8 @@ registry := emulator.NewPluginRegistry()
 
 client := emulator.NewClient(registry, store, state, tc, logger)
 
-result, _ := client.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
+// err wraps emulator.ErrCostBudgetExceeded if the metered cost exceeds MaxCost.
+result, err := client.Deploy(ctx, cfnTemplate, emulator.Intent{MaxCost: 1.0})
 
 session, _ := client.StartRecording(ctx, "my-test")
 // ... run operations against the emulator ...
@@ -286,8 +317,10 @@ complete runnable example.
 
 ## Supported services
 
-Substrate ships **63 built-in service plugins** spanning compute, storage,
-networking, databases, messaging, analytics, ML, security, and management:
+Substrate's built-in service plugins span compute, storage, networking, databases,
+messaging, analytics, ML, security, and management. The
+[coverage matrix](docs/services.md#coverage-matrix) lists every plugin and how many
+operations it routes; it is generated from the plugin registry, so it cannot drift.
 
 - **Compute & containers** — EC2, Lambda, ECS, ECR, Batch, EKS-adjacent
 - **Storage & data** — S3, EFS, FSx, DynamoDB, RDS, Redshift, ElastiCache, Timestream
@@ -298,9 +331,8 @@ networking, databases, messaging, analytics, ML, security, and management:
 - **Management & cost** — CloudWatch (+ Logs), CloudTrail, Organizations, Budgets, Cost Explorer, Service Quotas, SSM, Health, the CodeSuite, Step Functions, Backup, Transfer
 
 Many are also reachable through CloudFormation deployment. See the
-[Service Reference](docs/services.md) for per-operation detail. The live plugin
-count is always available from the `/ready` endpoint
-(`curl http://localhost:4566/ready`).
+[Service Reference](docs/services.md) for per-operation detail. A running server
+reports its plugins from the `/ready` endpoint (`curl http://localhost:4566/ready`).
 
 ### Known limitations
 
@@ -323,7 +355,7 @@ for the current version and [CHANGELOG.md](CHANGELOG.md) for full history.
 📖 **Full documentation: [scttfrdmn.github.io/substrate](https://scttfrdmn.github.io/substrate/)**
 
 - **[Getting Started](docs/getting-started.md)** — install, first test, 15-minute tutorial
-- **[Service Reference](docs/services.md)** — all 63 plugins with operation lists
+- **[Service Reference](docs/services.md)** — every plugin with its operation list
 - **[Testing Guide](docs/testing-guide.md)** — `StartTestServer`, recording/replay, cost assertions
 - **[Endpoint Configuration](docs/endpoint-configuration.md)** — SDK and tool configuration
 

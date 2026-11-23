@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`ReplaySandbox`, `TestServer.ReplaySandbox(t)`, `JumpToSequence`, `ReplayEvents` and `substrate debug state-at <seq> [--stream S]` (#1601).** These replay a stream into a separate emulator. The sandbox carries each event's recorded request ID, clock and principal, re-applies seeds, and re-decides authorization, quota, consistency and faults as the recording server did.
 - **`Event.ParentRequestID` (#1601).** A CloudFormation deployer dispatch names the request it ran for. A replay skips it only when that request is replayed too.
 - **`ReplayDifferences` and `TestServer.ReplayEvents` (#1602).** They are the exported body comparison and the in-process replay that generated fixtures call.
+- **`make docs-counts-check` (#1604).** `scripts/check-doc-counts.sh` refuses a plugin, service or operation count in the README, `python/README.md` or `docs/` prose; only the generated coverage matrix in `docs/services.md` may state one. It runs in CI's `docs-reference` job.
 
 ### Changed
 
@@ -31,6 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A replay re-decides quota and consistency (#1601).** Both exempted a replay, so a recorded throttle or `InconsistentStateException` replayed as a success and applied its change. Each replay rewinds both controllers and re-decides at the recorded clock. An event a replay skips is still charged to both, as it was live. CloudFormation and API Gateway internal dispatches pass authorization only, as they do live.
 - **Exported fixtures embed the recorded events and replay them in process (#1602).** That keeps headers, method, query, recorded IDs and clock. They fail on any difference outside the fixture's allowlist. Exporting a stream with an unreplayable event, or from a server with fault rules armed, is a 422. A server without a default VPC exports a fixture started with `WithoutDefaultVPC()`.
 - **Compatibility (#1599, #1601, #1602):** bodies are now recorded by default, with credential headers stripped. A body over 1 MiB is stored as a digest, so a large `PutObject` replays as skipped unless `max_body_bytes` is raised. A replay now reproduces a recorded throttle where it reported a difference, given the recording's `quotas:` and `consistency:` configuration; that is exact only for serialized traffic, since overlapping requests can swap outcomes on replay. `JumpToEvent` takes an `int` position, and the state-at endpoint's sequence means "before" and its body is a `StateAt` object. Regenerate exported fixtures in the new format. An old one still runs, but it re-sends requests without their headers and checks only status codes.
+- **`Client.Deploy` fails when the cost exceeds `Intent.MaxCost` (#1603).** It returns the `DeployResult` and an error wrapping the new `ErrCostBudgetExceeded`; it only logged a warning before. The resources are deployed and not rolled back.
+- **The docs describe cost as API-call metering (#1603, #1604).** README, `docs/index.md`, `docs/scope.md`, `doc.go` and the validation example no longer promise a monthly bill. A resource-time cost model is #1615.
+- **Compatibility (#1603):** `Deploy` can now return `ErrCostBudgetExceeded` where it returned nil; check it with `errors.Is`. A `ValidationReport` with a `MaxCost` violation is now `fail`.
 
 ### Fixed
 
@@ -43,6 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A CloudFormation-dispatched event's `Duration` is its wall latency (#1600).** It subtracted a simulated start from the wall clock, so a pinned or moved clock recorded the distance between the two.
 - **The sqlite backend's `status_code` column records the event's status, which bodies no longer decide (#1599).**
 - **Time-travel state no longer re-runs events without their recorded IDs or clock, or applies a stack's dispatches on top of its `CreateStack` (#1601).** `/events/0/state` returned the final state.
+- **A `MaxCost` violation fails `ValidateRecording` (#1603).** It was listed in `Violations` but left `PassFail` at `pass`.
+- **Docs claims (#1604).** Pinned plugin counts (63; there are 68) are replaced by links to the coverage matrix and `/ready`. `pip install pytest-substrate` is replaced by a source install until the package is on PyPI (#1616). The comparison table is dated 2026-11, adds AWS Emulator, LocalStack's auth token and non-commercial Hobby plan, and moto's server mode, seed and Recorder, and cites its sources. The README's "WARNING: High S3 PUT rate" output, which no code prints, is removed.
 
 ## [v0.129.0] - 2026-11-15
 

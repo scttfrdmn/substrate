@@ -2,14 +2,26 @@ package emulator
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 )
 
+// ErrCostBudgetExceeded is returned, wrapped, by [Client.Deploy] when the deploy's
+// metered cost is greater than [Intent.MaxCost]. Check it with errors.Is.
+//
+// The resources were already deployed when it is returned: Deploy does not roll
+// them back, and returns the [DeployResult] alongside the error.
+var ErrCostBudgetExceeded = errors.New("cost budget exceeded")
+
 // Intent expresses constraints that Client checks during validation.
 type Intent struct {
 	// MaxCost is the maximum allowed total cost in USD. Zero means unchecked.
+	//
+	// The cost it is compared against is API-call metering: the sum of the per-request
+	// prices of the calls the deploy or recording made. It is not a resource-time
+	// (hourly or monthly) bill; that model is tracked in #1615.
 	MaxCost float64
 }
 
@@ -169,6 +181,10 @@ func NewClient(
 // Deploy parses cfn (JSON or YAML CloudFormation template), creates all described
 // resources in order, records events under a generated stream, and validates the
 // result against intent.
+//
+// When intent.MaxCost is set and the deploy's TotalCost exceeds it, Deploy returns
+// the DeployResult together with an error wrapping [ErrCostBudgetExceeded]. The
+// resources have been deployed by then and are not rolled back.
 func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*DeployResult, error) {
 	b.intent = intent
 
@@ -204,10 +220,8 @@ func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*Deploy
 	}
 
 	if intent.MaxCost > 0 && result.TotalCost > intent.MaxCost {
-		b.logger.Warn("deploy cost exceeds intent MaxCost",
-			"total_cost", result.TotalCost,
-			"max_cost", intent.MaxCost,
-		)
+		return result, fmt.Errorf("deploy cost $%.6f exceeds intent MaxCost $%.6f: %w",
+			result.TotalCost, intent.MaxCost, ErrCostBudgetExceeded)
 	}
 
 	return result, nil

@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -97,10 +98,16 @@ func main() {
 		}
 	}`
 
+	// MaxCost gates the deploy's metered API-call cost: Deploy returns an error
+	// wrapping ErrCostBudgetExceeded when the sum exceeds $1. The resources are
+	// already deployed at that point, so the result is still returned.
 	deployResult, err := client.Deploy(ctx, cfnTemplate, substrate.Intent{
-		MaxCost: 1.0, // warn if deploy cost exceeds $1
+		MaxCost: 1.0,
 	})
-	if err != nil {
+	switch {
+	case errors.Is(err, substrate.ErrCostBudgetExceeded):
+		fmt.Printf("[FAIL] %v\n", err)
+	case err != nil:
 		log.Fatalf("Deploy: %v", err)
 	}
 	fmt.Printf("Deployed stack %q: %d resources, cost=$%.6f, duration=%s\n",

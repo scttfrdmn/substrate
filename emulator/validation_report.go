@@ -112,13 +112,14 @@ type ValidationReport struct {
 	// Suggestions lists actionable recommendations.
 	Suggestions []Suggestion `json:"suggestions"`
 
-	// Violations lists MaxCost or other intent violations.
+	// Violations lists MaxCost or other intent violations. Any violation sets
+	// PassFail to ValidationFailed.
 	Violations []string `json:"violations,omitempty"`
 }
 
 // ValidateRecording analyses the event stream identified by streamID and
 // returns a ValidationReport. The intent parameter is applied for constraint
-// checking such as MaxCost violations.
+// checking such as MaxCost violations; a violation fails the report.
 func ValidateRecording(ctx context.Context, store *EventStore, streamID string, intent Intent) (*ValidationReport, error) {
 	events, err := store.GetStream(ctx, streamID)
 	if err != nil {
@@ -289,7 +290,7 @@ func ValidateRecording(ctx context.Context, store *EventStore, streamID string, 
 			}
 		}
 	}
-	if report.FailedEvents > 0 {
+	if report.FailedEvents > 0 || len(report.Violations) > 0 {
 		report.PassFail = ValidationFailed
 	}
 
