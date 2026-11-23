@@ -42,8 +42,6 @@ func TestCFN_FnSubResourceAttribute(t *testing.T) {
 		"ElbOwnerSub": {"Value": {"Fn::Sub": "${Elb.SourceSecurityGroup.OwnerAlias}"}},
 		"ElbOwnerGetAtt": {"Value": {"Fn::GetAtt": ["Elb", "SourceSecurityGroup.OwnerAlias"]}},
 		"MapKeyWins": {"Value": {"Fn::Sub": ["${Queue.QueueName}", {"Queue.QueueName": "from-the-map"}]}},
-		"Undeclared": {"Value": {"Fn::Sub": "${Missing.Arn}"}},
-		"UndeclaredGetAtt": {"Value": {"Fn::GetAtt": ["Missing", "Arn"]}},
 		"Escaped": {"Value": {"Fn::Sub": "${!Queue.QueueName}"}}
 	}}`
 
@@ -72,10 +70,8 @@ func TestCFN_FnSubResourceAttribute(t *testing.T) {
 		// Fn::GetAtt's page publishes exactly this attribute as its dotted-name example.
 		{name: "Fn::GetAtt's published SourceSecurityGroup.OwnerAlias", sub: "ElbOwnerSub",
 			getAtt: "ElbOwnerGetAtt", unmodelled: true},
-		// resolveFnGetAtt answers "<logicalID>.<attr>" for an undeclared resource on purpose,
-		// because it names the template's mistake; the ${} spelling agrees with it.
-		{name: "an undeclared resource names the mistake", sub: "Undeclared",
-			getAtt: "UndeclaredGetAtt", want: "Missing.Arn"},
+		// An undeclared resource no longer reaches resolution: the template is refused at the
+		// request (#1548; see TestCFN_UndeclaredReferencesAreRefused).
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

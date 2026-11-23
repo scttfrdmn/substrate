@@ -167,6 +167,12 @@ jobs:
       - name: Check the authorization reference table is in sync with its snapshots
         run: make authz-reference-check
 
+      # The CloudFormation resource specification decides which resource types a template may
+      # declare and which properties each takes (#1605). Offline, like the authz check: the
+      # snapshot is vendored and only `make cfn-schema-fetch`, run by hand, touches the network.
+      - name: Check the CloudFormation schema table is in sync with its snapshot
+        run: make cfn-schema-check
+
   # Pure bash and awk, so no toolchain: the check is lexical by construction (see
   # scripts/check-wire-bookkeeping.sh for why it cannot be a reachability check).
   # It runs here rather than only in `make` because a baseline that nothing

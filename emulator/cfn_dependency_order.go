@@ -141,8 +141,16 @@ type cfnOrdering struct {
 	// ErrCFNInvalidDependency name resources downstream of the cycle as well as on it.
 	stuck []string
 
-	// unresolved names, sorted, the DependsOn targets that do not deploy.
+	// unresolved names, sorted, the DependsOn targets that do not deploy, and — since #1548 — the
+	// names a resource's Ref or Fn::Sub uses that the template does not declare at all.
 	unresolved []string
+
+	// unresolvedOutputs names, sorted, the undeclared names an Output's Ref or Fn::Sub uses.
+	unresolvedOutputs []string
+
+	// undefinedGetAtt names, sorted, the Fn::GetAtt targets, in a resource or an Output, that
+	// the template does not declare.
+	undefinedGetAtt []string
 }
 
 // cfnReadyQueue is the set of resources whose dependencies have all been placed, as a min-heap on
@@ -237,13 +245,35 @@ func (o cfnOrdering) all() []string {
 	return append(append([]string(nil), o.order...), o.stuck...)
 }
 
-// err is the request-level refusal for an ordering, or nil: an unresolved DependsOn first, as the
-// template format error it is, and then a cycle.
+// err is the request-level refusal for an ordering, or nil: an unresolved name in Resources first,
+// as the template format error it is, then one in Outputs, then an undefined Fn::GetAtt target,
+// and then a cycle.
+//
+// The Outputs message carries no "Template format error:" prefix. That is how the CLI reports it
+// from CreateChangeSet ("An error occurred (ValidationError) when calling the CreateChangeSet
+// operation: Unresolved resource dependencies [Bucket] in the Outputs block of the template", in
+// Teri Radichel's Bugs That Bite write-up, and the same text in a Server Fault question), so it is
+// observed behavior rather than a published rule. The Fn::GetAtt message — "Template error:
+// instance of Fn::GetAtt references undefined resource X" — is likewise observed: it is the
+// ValidationError the CLI reports from ValidateTemplate in Stack Overflow question 41855596 and
+// from a CDK deploy in aws-cdk issue #22046. Which names a message lists when several are
+// undefined is substrate's choice: every unresolved name, sorted, and the first undefined
+// Fn::GetAtt target in sorted order, since that message names one resource.
 func (o cfnOrdering) err() error {
 	if len(o.unresolved) > 0 {
 		return cfnErrf(ErrCFNInvalidDependency,
 			"Template format error: Unresolved resource dependencies [%s] in the Resources block of the template",
 			strings.Join(o.unresolved, ", "))
+	}
+	if len(o.unresolvedOutputs) > 0 {
+		return cfnErrf(ErrCFNInvalidDependency,
+			"Unresolved resource dependencies [%s] in the Outputs block of the template",
+			strings.Join(o.unresolvedOutputs, ", "))
+	}
+	if len(o.undefinedGetAtt) > 0 {
+		return cfnErrf(ErrCFNInvalidDependency,
+			"Template error: instance of Fn::GetAtt references undefined resource %s",
+			o.undefinedGetAtt[0])
 	}
 	if len(o.stuck) > 0 {
 		names := append([]string(nil), o.stuck...)
@@ -308,15 +338,77 @@ func cfnDeleteOrder(tmpl *cfnTemplate, resources []DeployedResource) []DeployedR
 	return out
 }
 
-// cfnValidateDependencies refuses a template whose deployable resources cannot be ordered, the
-// check CreateStack, UpdateStack and CreateChangeSet make before anything else, and otherwise
-// answers the deploy order.
+// cfnValidateDependencies refuses a template whose deployable resources cannot be ordered, or
+// one whose resources or Outputs name something the template does not declare (#1548), and
+// otherwise answers the deploy order.
 func cfnValidateDependencies(tmpl *cfnTemplate, cctx *cfnContext) ([]string, error) {
 	ordering := cfnOrderResources(tmpl, cfnActiveResources(tmpl, cctx))
+	ordering.addUndeclaredReferences(tmpl)
 	if err := ordering.err(); err != nil {
 		return nil, err
 	}
 	return ordering.order, nil
+}
+
+// cfnValidateAllDependencies is [cfnValidateDependencies] over every resource the template
+// declares, whatever its Condition, for ValidateTemplate: it is given no parameter values, so it
+// evaluates no condition, and a DependsOn naming a resource under a condition is resolved
+// (#1605).
+func cfnValidateAllDependencies(tmpl *cfnTemplate) error {
+	ordering := cfnOrderResources(tmpl, tmpl.Resources)
+	ordering.addUndeclaredReferences(tmpl)
+	return ordering.err()
+}
+
+// addUndeclaredReferences records, on o, every name a resource's properties or an Output's Value
+// or Export name references that the template does not declare (#1548): a Ref or an Fn::Sub name
+// that is neither a parameter, a resource nor a pseudo-parameter, and an Fn::GetAtt target that
+// is not a resource.
+//
+// Every resource and every Output is walked, whatever its Condition, and the walk does not
+// evaluate Fn::If (see [cfnCollectReferences]): an undeclared name is a template format error,
+// which CloudFormation makes before it evaluates anything. A reference to a declared resource
+// skipped by a false Condition is therefore not refused here; it resolves as it did.
+//
+// A template that declares a Transform is not checked: its macro may generate the names it
+// references — the SAM transform's ServerlessRestApi, or a function's implicit <Function>Role —
+// and substrate runs no macro, so it cannot tell such a name from a typo. The unrecognized-type
+// check makes the same exception (see [cfnValidateTemplateFormat]).
+func (o *cfnOrdering) addUndeclaredReferences(tmpl *cfnTemplate) {
+	if len(cfnDeclaredTransforms(tmpl)) > 0 {
+		return
+	}
+	resUnknown, outUnknown, getAtt := map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for _, res := range tmpl.Resources {
+		refs := cfnCollectReferences(res.Properties, tmpl.Parameters, tmpl.Resources)
+		for name := range refs.unknown {
+			resUnknown[name] = true
+		}
+		for name := range refs.unknownAttrTargets {
+			getAtt[name] = true
+		}
+	}
+	for _, out := range tmpl.Outputs {
+		var export interface{}
+		if out.Export != nil {
+			export = out.Export.Name
+		}
+		refs := cfnCollectReferences([]interface{}{out.Value, export}, tmpl.Parameters, tmpl.Resources)
+		for name := range refs.unknown {
+			outUnknown[name] = true
+		}
+		for name := range refs.unknownAttrTargets {
+			getAtt[name] = true
+		}
+	}
+	if len(resUnknown) > 0 {
+		for _, name := range o.unresolved {
+			resUnknown[name] = true
+		}
+		o.unresolved = cfnSortedNames(resUnknown)
+	}
+	o.unresolvedOutputs = cfnSortedNames(outUnknown)
+	o.undefinedGetAtt = cfnSortedNames(getAtt)
 }
 
 // cfnTolerantDeployOrder is the deploy order without the refusals, for a deploy that must proceed

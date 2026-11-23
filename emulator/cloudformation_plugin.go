@@ -58,6 +58,10 @@ type CloudFormationPlugin struct {
 	// dependency, unlike the per-request identity and per-stack attribution beside
 	// it in deployerFor.
 	auth *AuthController
+
+	// lenient is strict mode off: Options["strict"] set to false, which
+	// [RegisterDefaultPlugins] fills from cloudformation.strict (#1605).
+	lenient bool
 }
 
 // deployerFor returns a [StackDeployer] that deploys into the requesting
@@ -77,7 +81,8 @@ func (p *CloudFormationPlugin) deployerFor(reqCtx *RequestContext, att cfnAttrib
 		WithDeployerIdentity(reqCtx.AccountID, reqCtx.Region),
 		WithDeployerAttribution(att.roleARN, att.creator),
 		WithDeployerAuth(p.auth),
-		WithDeployerMint(reqCtx.IDs))
+		WithDeployerMint(reqCtx.IDs),
+		WithDeployerLenient(p.lenient))
 }
 
 // Name returns the service name "cloudformation".
@@ -95,6 +100,8 @@ func (p *CloudFormationPlugin) Name() string { return "cloudformation" }
 // substituted with disabled instances when absent, never left nil:
 // [StackDeployer.dispatch] dereferences both on every resource it deploys, and
 // callers of [RegisterDefaultPlugins] are permitted to pass a nil *EventStore.
+//
+// Options["strict"] set to false turns strict mode off; see [WithDeployerLenient].
 //
 // Options["auth_controller"] is optional and, unlike those two, is left nil when
 // absent: a nil controller authorizes nothing, which is what every caller that does
@@ -130,7 +137,13 @@ func (p *CloudFormationPlugin) Initialize(_ context.Context, cfg PluginConfig) e
 	p.store = store
 	p.costs = costs
 	p.auth = auth
-	p.deployer = NewStackDeployer(registry, store, cfg.State, p.tc, cfg.Logger, costs)
+	// Strict unless the option says otherwise, so a plugin registered without a config is
+	// strict, as a configured one is by default (#1605).
+	if strict, ok := cfg.Options["strict"].(bool); ok {
+		p.lenient = !strict
+	}
+	p.deployer = NewStackDeployer(registry, store, cfg.State, p.tc, cfg.Logger, costs,
+		WithDeployerLenient(p.lenient))
 	return nil
 }
 
@@ -183,6 +196,8 @@ func (p *CloudFormationPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.describeStackDriftDetectionStatus(ctx, req)
 	case "DescribeStackEvents":
 		return p.describeStackEvents(ctx, req)
+	case "ValidateTemplate":
+		return p.validateTemplate(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}
@@ -1718,10 +1733,12 @@ func cfnMapDeployerError(err error) *AWSError {
 		return &AWSError{Code: "InvalidChangeSetStatus", Message: msg, HTTPStatus: http.StatusBadRequest}
 	case errors.Is(err, ErrCFNInvalidDependency), errors.Is(err, ErrCFNStackNotUpdatable),
 		errors.Is(err, ErrCFNUnsupportedAttribute), errors.Is(err, ErrCFNStackAlreadyExists),
-		errors.Is(err, ErrCFNChangeSetTypeUnsupported):
+		errors.Is(err, ErrCFNChangeSetTypeUnsupported), errors.Is(err, ErrCFNTemplateFormat),
+		errors.Is(err, ErrCFNUnemulatedType):
 		// AWS's own wording, answered without the "update stack …" context a caller's wrap
-		// adds — see [ErrCFNInvalidDependency], [ErrCFNStackNotUpdatable] and
-		// [ErrCFNUnsupportedAttribute] for the sources.
+		// adds — see [ErrCFNInvalidDependency], [ErrCFNStackNotUpdatable],
+		// [ErrCFNUnsupportedAttribute], [ErrCFNTemplateFormat] and [ErrCFNUnemulatedType] for the
+		// sources.
 		var classified *cfnClassifiedError
 		if errors.As(err, &classified) {
 			msg = classified.msg

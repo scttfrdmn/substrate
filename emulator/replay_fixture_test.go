@@ -138,6 +138,15 @@ func TestFixture_ExportCarriesWhatItCanAndRefusesWhatItCannot(t *testing.T) {
 		assert.Contains(t, src, "no fault rules armed")
 		parseFixture(t, src)
 	})
+	t.Run("with CloudFormation's strict mode off", func(t *testing.T) {
+		ts := emulator.StartTestServer(t, emulator.WithLenientCloudFormation())
+		ts.FreezeTimeAt(replayClockStart)
+		ec2ReplayCall(t, ts, "DescribeVpcs", url.Values{})
+		status, src := exportFixture(t, ts)
+		require.Equal(t, http.StatusOK, status, src)
+		assert.Contains(t, src, "emulator.StartTestServer(t, emulator.WithLenientCloudFormation())")
+		parseFixture(t, src)
+	})
 	t.Run("fault rules armed", func(t *testing.T) {
 		ts := emulator.StartTestServer(t)
 		replayPutBucket(t, ts, "armed")

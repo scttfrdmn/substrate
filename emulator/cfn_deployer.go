@@ -61,6 +61,24 @@ type cfnParam struct {
 	// all. Treating the two alike left the parameter undeclared, and Ref then
 	// echoed the parameter's own name back, inverting the condition.
 	Default *string `json:"Default" yaml:"Default"`
+
+	// Description and NoEcho are reported by ValidateTemplate's TemplateParameter (#1605).
+	// NoEcho is decoded loosely because templates write it both as a boolean and as the
+	// string "true"; see [cfnParam.noEcho].
+	Description string      `json:"Description,omitempty" yaml:"Description,omitempty"`
+	NoEcho      interface{} `json:"NoEcho,omitempty"      yaml:"NoEcho,omitempty"`
+}
+
+// noEcho reports whether the parameter is declared NoEcho, as a boolean or as the string
+// "true" in any case.
+func (p cfnParam) noEcho() bool {
+	switch v := p.NoEcho.(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(v, "true")
+	}
+	return false
 }
 
 // cfnOutput is a CloudFormation template output declaration.
@@ -566,6 +584,10 @@ func (s *CFNStackState) deployedResource(logicalID string) (DeployedResource, bo
 
 // cfnContext holds per-deployment resolution context for intrinsic functions.
 type cfnContext struct {
+	// skipPropertyValidation is set for the rollback of a failed update, which re-deploys a
+	// template that may predate property validation and must converge on it regardless (#1605).
+	skipPropertyValidation bool
+
 	params     map[string]string           // caller-supplied + defaults
 	conditions map[string]bool             // evaluated condition results
 	resources  map[string]DeployedResource // logicalID → result for Ref/GetAtt
@@ -1202,7 +1224,6 @@ var typePriority = map[string]int{
 	"AWS::StepFunctions::StateMachine": 4,
 	// v0.21.0 — ECS and ECR.
 	"AWS::ECR::Repository":       2,
-	"AWS::ECR::LifecyclePolicy":  3,
 	"AWS::ECS::Cluster":          2,
 	"AWS::ECS::CapacityProvider": 3,
 	"AWS::ECS::TaskDefinition":   3,
@@ -1327,6 +1348,11 @@ type StackDeployer struct {
 	// means the deployment's internal request ids are drawn from the wall clock,
 	// which is what they all were before #856's tier 8. See WithDeployerMint.
 	mint *IDMint
+
+	// lenient deploys a resource type substrate does not emulate as a stub instead of
+	// refusing the template. False — strict — is the default (#1605). See
+	// WithDeployerLenient.
+	lenient bool
 }
 
 // StackDeployerOption configures optional behavior of a [StackDeployer].
@@ -1445,6 +1471,20 @@ func WithDeployerAuth(auth *AuthController) StackDeployerOption {
 	}
 }
 
+// WithDeployerLenient turns strict mode off: a template declaring a resource type substrate
+// does not emulate, or a custom resource, deploys that resource as a stub that records its
+// properties and creates nothing, instead of being refused with [ErrCFNUnemulatedType].
+//
+// Strict is the default because a stub reports CREATE_COMPLETE for a resource nothing
+// created, so a test passes against infrastructure that does not exist (#1605). The two
+// refusals CloudFormation itself makes — an unrecognized type, an extraneous property —
+// apply in both modes.
+func WithDeployerLenient(lenient bool) StackDeployerOption {
+	return func(d *StackDeployer) {
+		d.lenient = lenient
+	}
+}
+
 // NewStackDeployer creates a StackDeployer wired to the provided dependencies.
 //
 // The deployer deploys into substrate's default account and region unless
@@ -1552,15 +1592,12 @@ func (d *StackDeployer) deploy(
 	// stack had, so nothing it does is a removal, and a resource the failed update dropped is
 	// still the stack's (#1547).
 	rollback := base != nil
+	// The previous template may predate property validation (#1605), and a rollback has to
+	// converge on it, so its resources are not held to it.
+	cctx.skipPropertyValidation = rollback
 	var order []string
 	if base == nil {
-		if order, err = cfnValidateDependencies(tmpl, cctx); err != nil {
-			return nil, nil, err
-		}
-		if err := cfnValidateUpdateReplacePolicies(tmpl); err != nil {
-			return nil, nil, err
-		}
-		if err := d.cfnValidateOutputAttributes(tmpl, cctx); err != nil {
+		if order, err = d.cfnValidateTemplate(tmpl, cctx); err != nil {
 			return nil, nil, err
 		}
 	} else {
@@ -2328,13 +2365,7 @@ func (d *StackDeployer) CreateChangeSetWithOptions(ctx context.Context, stackNam
 	// refuses it, rather than recorded as a change set that could never execute (#1420).
 	newCtx := buildCFNContext(newTmpl, params, d.identity.region, d.identity.accountID, stackName)
 	evaluateConditions(newTmpl, newCtx)
-	if _, err := cfnValidateDependencies(newTmpl, newCtx); err != nil {
-		return nil, err
-	}
-	if err := cfnValidateUpdateReplacePolicies(newTmpl); err != nil {
-		return nil, err
-	}
-	if err := d.cfnValidateOutputAttributes(newTmpl, newCtx); err != nil {
+	if _, err := d.cfnValidateTemplate(newTmpl, newCtx); err != nil {
 		return nil, err
 	}
 
@@ -3075,10 +3106,18 @@ func (d *StackDeployer) deployResource(
 		cost float64
 		err  error
 	)
+	extraneous := ""
+	if !cctx.skipPropertyValidation {
+		extraneous = cfnExtraneousProperties(logicalID, res, cctx)
+	}
 	switch {
 	case plan.refusal != "":
 		// A change substrate cannot apply in place, refused without a call (#1427).
 		dr = DeployedResource{LogicalID: logicalID, Type: res.Type, Error: plan.refusal}
+	case extraneous != "":
+		// A property the type does not declare fails the resource at provisioning, without a
+		// call, as CloudFormation's property validation does (#1605).
+		dr = DeployedResource{LogicalID: logicalID, Type: res.Type, Error: extraneous}
 	case plan.update != nil:
 		dr, cost, err = plan.update(d, ctx, logicalID, plan.prior, res.Properties, plan.changed, streamID, cctx)
 	default:
@@ -3088,6 +3127,7 @@ func (d *StackDeployer) deployResource(
 		// The attributes only the service's record holds, read once it exists, so Fn::GetAtt
 		// on a later resource or an Output answers them.
 		d.recordEC2Attributes(ctx, &dr)
+		d.recordELBAttributes(ctx, &dr)
 	}
 	failures := cctx.takeFailures()
 	if err != nil || len(failures) == 0 {
@@ -3283,7 +3323,11 @@ func (d *StackDeployer) warnStampFailed(dr DeployedResource, err error) {
 		"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
 }
 
-// dispatchResource routes a CFN resource type to its deploy helper.
+// dispatchResource routes a CFN resource type to its deploy helper in [cfnResourceDeployers].
+//
+// A type with no helper reaches the generic stub only in lenient mode, or on the rollback of a
+// stack deployed before strict mode existed: strict mode refuses such a template at the request
+// ([cfnUnemulatedTypes], #1605).
 func (d *StackDeployer) dispatchResource(
 	ctx context.Context,
 	logicalID string,
@@ -3291,271 +3335,18 @@ func (d *StackDeployer) dispatchResource(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	switch res.Type {
-	case "AWS::IAM::Policy":
-		return d.deployIAMPolicy(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::IAM::Role":
-		return d.deployIAMRole(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::IAM::ManagedPolicy":
-		return d.deployIAMManagedPolicy(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::IAM::User":
-		return d.deployIAMUser(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::IAM::Group":
-		return d.deployIAMGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::S3::Bucket":
-		return d.deployS3Bucket(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::S3::BucketPolicy":
-		return d.deployS3BucketPolicy(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Lambda::Function":
-		return d.deployLambdaFunction(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SQS::Queue":
-		return d.deploySQSQueue(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::DynamoDB::Table":
-		return d.deployDynamoDBTable(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::VPC":
-		return d.deployEC2VPC(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::Subnet":
-		return d.deployEC2Subnet(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::SecurityGroup":
-		return d.deployEC2SecurityGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::InternetGateway":
-		return d.deployEC2InternetGateway(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::RouteTable":
-		return d.deployEC2RouteTable(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::Instance":
-		return d.deployEC2Instance(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElasticLoadBalancing::LoadBalancer":
-		return d.deployELBClassicLoadBalancer(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElasticLoadBalancingV2::TargetGroup":
-		return d.deployELBTargetGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElasticLoadBalancingV2::LoadBalancer":
-		return d.deployELBLoadBalancer(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElasticLoadBalancingV2::Listener":
-		return d.deployELBListener(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElasticLoadBalancingV2::ListenerRule":
-		return d.deployELBListenerRule(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Route53::HostedZone":
-		return d.deployRoute53HostedZone(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Route53::RecordSet":
-		return d.deployRoute53RecordSet(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Route53::RecordSetGroup":
-		return d.deployRoute53RecordSetGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::KMS::Key":
-		return d.deployKMSKey(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::KMS::Alias":
-		return d.deployKMSAlias(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::KMS::ReplicaKey":
-		return d.deployKMSReplicaKey(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SecretsManager::Secret":
-		return d.deploySecret(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SecretsManager::RotationSchedule":
-		return d.deploySecretRotationSchedule(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SecretsManager::SecretTargetAttachment":
-		return d.deploySecretTargetAttachment(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SSM::Parameter":
-		return d.deploySSMParameter(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SSM::Association":
-		return d.deploySSMAssociation(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SNS::Topic":
-		return d.deploySNSTopic(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SNS::Subscription":
-		return d.deploySNSSubscription(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::SNS::TopicPolicy":
-		return d.deploySNSTopicPolicy(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Logs::LogGroup":
-		return d.deployLogsLogGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Logs::LogStream":
-		return d.deployLogsLogStream(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Events::Rule":
-		return d.deployEventsRule(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CloudWatch::Alarm":
-		return d.deployCloudWatchAlarm(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.19.0 — API Gateway and ACM.
-	case "AWS::CertificateManager::Certificate":
-		return d.deployACMCertificate(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::RestApi":
-		return d.deployAPIGatewayRestAPI(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::Authorizer":
-		return d.deployAPIGatewayAuthorizer(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::Resource":
-		return d.deployAPIGatewayResource(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::Method":
-		return d.deployAPIGatewayMethod(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::Deployment":
-		return d.deployAPIGatewayDeployment(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::Stage":
-		return d.deployAPIGatewayStage(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::ApiKey":
-		return d.deployAPIGatewayAPIKey(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::UsagePlan":
-		return d.deployAPIGatewayUsagePlan(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGateway::UsagePlanKey":
-		return d.deployAPIGatewayUsagePlanKey(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGatewayV2::Api":
-		return d.deployAPIGatewayV2Api(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGatewayV2::Route":
-		return d.deployAPIGatewayV2Route(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGatewayV2::Integration":
-		return d.deployAPIGatewayV2Integration(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGatewayV2::Stage":
-		return d.deployAPIGatewayV2Stage(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ApiGatewayV2::Authorizer":
-		return d.deployAPIGatewayV2Authorizer(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.20.0 — Step Functions.
-	case "AWS::StepFunctions::StateMachine":
-		return d.deployStepFunctionsStateMachine(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::StepFunctions::Activity":
-		return d.deployStepFunctionsActivity(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.21.0 — ECS and ECR.
-	case "AWS::ECR::Repository":
-		return d.deployECRRepository(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ECR::LifecyclePolicy":
-		return d.deployECRLifecyclePolicy(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ECS::Cluster":
-		return d.deployECSCluster(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ECS::TaskDefinition":
-		return d.deployECSTaskDefinition(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ECS::Service":
-		return d.deployECSService(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ECS::CapacityProvider":
-		return d.deployECSCapacityProvider(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.22.0 — Cognito.
-	case "AWS::Cognito::UserPool":
-		return d.deployCognitoUserPool(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Cognito::UserPoolClient":
-		return d.deployCognitoUserPoolClient(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Cognito::UserPoolGroup":
-		return d.deployCognitoUserPoolGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Cognito::UserPoolDomain":
-		return d.deployCognitoUserPoolDomain(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Cognito::IdentityPool":
-		return d.deployCognitoIdentityPool(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Cognito::IdentityPoolRoleAttachment":
-		return d.deployCognitoIdentityPoolRoleAttachment(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.23.0 — Kinesis and CloudFront.
-	case "AWS::Kinesis::Stream":
-		return d.deployKinesisStream(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CloudFront::Distribution":
-		return d.deployCloudFrontDistribution(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CloudFront::CloudFrontOriginAccessIdentity":
-		return d.deployCloudFrontOAI(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.25.0 — RDS and ElastiCache.
-	case "AWS::RDS::DBSubnetGroup":
-		return d.deployRDSDBSubnetGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::RDS::DBParameterGroup":
-		return d.deployRDSDBParameterGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::RDS::DBCluster":
-		return d.deployRDSDBCluster(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::RDS::DBInstance":
-		return d.deployRDSDBInstance(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElastiCache::SubnetGroup":
-		return d.deployElastiCacheSubnetGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElastiCache::ParameterGroup":
-		return d.deployElastiCacheParameterGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElastiCache::CacheCluster":
-		return d.deployElastiCacheCacheCluster(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::ElastiCache::ReplicationGroup":
-		return d.deployElastiCacheReplicationGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.26.0 — EFS and Glue.
-	case "AWS::EFS::FileSystem":
-		return d.deployEFSFileSystem(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EFS::AccessPoint":
-		return d.deployEFSAccessPoint(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EFS::MountTarget":
-		return d.deployEFSMountTarget(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Glue::Database":
-		return d.deployGlueDatabase(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Glue::Connection":
-		return d.deployGlueConnection(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Glue::Table":
-		return d.deployGlueTable(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Glue::Crawler":
-		return d.deployGlueCrawler(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Glue::Job":
-		return d.deployGlueJob(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.27.0 — Budgets.
-	case "AWS::Budgets::Budget":
-		return d.deployBudgetsBudget(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.28.0 — SES v2 and Firehose.
-	case "AWS::SES::EmailIdentity":
-		return d.deploySESv2EmailIdentity(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::KinesisFirehose::DeliveryStream":
-		return d.deployFirehoseDeliveryStream(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.41.0 — Elastic IPs and NAT Gateways.
-	case "AWS::EC2::EIP":
-		return d.deployEC2EIP(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::NatGateway":
-		return d.deployEC2NatGateway(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.30.0 — Lambda ESM.
-	case "AWS::Lambda::EventSourceMapping":
-		return d.deployLambdaEventSourceMapping(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.31.0 — AppSync.
-	case "AWS::AppSync::GraphQLApi":
-		return d.deployAppSyncGraphQLApi(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::AppSync::DataSource":
-		return d.deployAppSyncDataSource(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::AppSync::Resolver":
-		return d.deployAppSyncResolver(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::AppSync::FunctionConfiguration":
-		return d.deployAppSyncFunction(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.43.0 — FSx.
-	case "AWS::FSx::FileSystem":
-		return d.deployFSxFileSystem(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.34.0 — RDS Aurora cluster and MSK.
-	case "AWS::MSK::Cluster":
-		return d.deployMSKCluster(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.32.0 — extended CFN stubs.
-	case "AWS::OpenSearchService::Domain", "AWS::Elasticsearch::Domain":
-		return d.deployOpenSearchDomain(ctx, res.Type, logicalID, res.Properties, cctx)
-	case "AWS::WAFv2::WebACL":
-		return d.deployWAFv2WebACL(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Backup::BackupPlan":
-		return d.deployBackupBackupPlan(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Backup::BackupSelection":
-		return d.deployBackupBackupSelection(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CodeBuild::Project":
-		return d.deployCodeBuildProject(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CodePipeline::Pipeline":
-		return d.deployCodePipelinePipeline(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CodeDeploy::Application":
-		return d.deployCodeDeployApplication(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CodeDeploy::DeploymentGroup":
-		return d.deployCodeDeployDeploymentGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::CloudTrail::Trail":
-		return d.deployCloudTrailTrail(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Config::ConfigRule":
-		return d.deployConfigConfigRule(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Config::ConfigurationRecorder":
-		return d.deployConfigConfigurationRecorder(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Config::DeliveryChannel":
-		return d.deployConfigDeliveryChannel(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Transfer::Server":
-		return d.deployTransferServer(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::Athena::WorkGroup":
-		return d.deployAthenaWorkGroup(ctx, logicalID, res.Properties, streamID, cctx)
-	// v0.77.0 — resource types whose API handlers already existed but which fell
-	// through to the generic stub (#388).
-	case "AWS::EC2::LaunchTemplate":
-		return d.deployEC2LaunchTemplate(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::IAM::InstanceProfile":
-		return d.deployIAMInstanceProfile(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::SecurityGroupIngress":
-		return d.deployEC2SecurityGroupIngress(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::SecurityGroupEgress":
-		return d.deployEC2SecurityGroupEgress(ctx, logicalID, res.Properties, streamID, cctx)
-	case "AWS::EC2::VPCGatewayAttachment":
-		return d.deployEC2VPCGatewayAttachment(ctx, logicalID, res.Properties, streamID, cctx)
-	default:
-		d.logger.Warn("unknown CloudFormation resource type; using generic stub",
-			"logical_id", logicalID,
-			"type", res.Type,
-			// A loaded plugin means the API handler may exist and the type merely
-			// needs wiring, which is a different problem from an unsupported
-			// service (#388).
-			"service_plugin_loaded", d.servicePluginLoaded(res.Type),
-		)
-		return d.deployGenericStub(ctx, logicalID, res.Type, res.Properties, cctx)
+	if deploy, ok := cfnResourceDeployers[res.Type]; ok {
+		return deploy(d, ctx, logicalID, res.Properties, streamID, cctx)
 	}
+	d.logger.Warn("unknown CloudFormation resource type; using generic stub",
+		"logical_id", logicalID,
+		"type", res.Type,
+		// A loaded plugin means the API handler may exist and the type merely
+		// needs wiring, which is a different problem from an unsupported
+		// service (#388).
+		"service_plugin_loaded", d.servicePluginLoaded(res.Type),
+	)
+	return d.deployGenericStub(ctx, logicalID, res.Type, res.Properties, cctx)
 }
 
 // deployS3Bucket creates an S3 bucket for the given CFN resource.
@@ -4243,6 +4034,13 @@ func (d *StackDeployer) deployELBLoadBalancer(
 			"Scheme": resolveStringProp(props, "Scheme", "internet-facing", cctx),
 		},
 		Headers: map[string]string{},
+	}
+	// The load balancer's own subnets and security groups, which the template declared and the
+	// request used to drop: SecurityGroups is also what Fn::GetAtt SecurityGroups answers (#1591).
+	for _, list := range []string{"Subnets", "SecurityGroups"} {
+		for i, v := range resolveValueList(props[list], cctx) {
+			req.Params[fmt.Sprintf("%s.member.%d", list, i+1)] = v
+		}
 	}
 	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
 	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::ElasticLoadBalancingV2::LoadBalancer", PhysicalID: name}
@@ -5821,6 +5619,8 @@ func resolveValueList(v interface{}, cctx *cfnContext) []string {
 					return resolveValueList(arr[2], cctx)
 				case "Fn::GetAZs":
 					return resolveFnGetAZs(args, cctx)
+				case "Fn::GetAtt":
+					return resolveFnGetAttList(args, cctx)
 				case "Fn::Cidr":
 					return resolveFnCidr(args, cctx)
 				case "Fn::FindInMap":
@@ -6314,7 +6114,10 @@ func resolveFnJoin(args interface{}, cctx *cfnContext) string {
 	}
 	items, ok := arr[1].([]interface{})
 	if !ok {
-		return ""
+		// An intrinsic yielding the list — a list-valued Fn::GetAtt (#1591), a list parameter's
+		// Ref, Fn::GetAZs, Fn::Split — is resolved in a list context, which is what the Fn::Join
+		// page permits there. It used to resolve to the empty string.
+		return strings.Join(resolveValueList(arr[1], cctx), sep)
 	}
 	parts := make([]string, 0, len(items))
 	for _, item := range items {

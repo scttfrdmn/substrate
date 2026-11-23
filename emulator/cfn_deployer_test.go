@@ -45,7 +45,7 @@ func requireDeployedCleanly(t *testing.T, result *emulator.DeployResult, wantRes
 }
 
 // newTestDeployer creates a StackDeployer with a full plugin set for CFN tests.
-func newTestDeployer(t *testing.T) *emulator.StackDeployer {
+func newTestDeployer(t *testing.T, opts ...emulator.StackDeployerOption) *emulator.StackDeployer {
 	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
@@ -104,7 +104,7 @@ func newTestDeployer(t *testing.T) *emulator.StackDeployer {
 	}))
 	registry.Register(appSyncPlugin)
 
-	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs)
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs, opts...)
 }
 
 func TestCFN_Parameters(t *testing.T) {
@@ -422,8 +422,11 @@ func TestCFN_StackOutputsJSON(t *testing.T) {
 
 // TestCFN_UnknownResourceType verifies that unknown resource types are skipped
 // without causing an error.
+//
+// AWS::Custom::Thing is not a type CloudFormation recognizes — a custom resource is spelled
+// Custom::Thing — so since #1605 the template is refused at the request in either mode, as
+// CloudFormation refuses it, rather than deployed as a stub.
 func TestCFN_UnknownResourceType(t *testing.T) {
-	d := newTestDeployer(t)
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
@@ -431,15 +434,12 @@ func TestCFN_UnknownResourceType(t *testing.T) {
 			"Unknown": {"Type": "AWS::Custom::Thing", "Properties": {}}
 		}
 	}`
-
-	result, err := d.Deploy(context.Background(), tmpl, "unknown-type-stack", nil)
-	require.NoError(t, err)
-	// Both are returned (unknown type as zero-error resource).
-	assert.Len(t, result.Resources, 2)
-	for _, r := range result.Resources {
-		if r.Type == "AWS::S3::Bucket" {
-			assert.Empty(t, r.Error)
-		}
+	for _, lenient := range []bool{false, true} {
+		_, err := newTestDeployer(t, emulator.WithDeployerLenient(lenient)).
+			Deploy(context.Background(), tmpl, "unknown-type-stack", nil)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, emulator.ErrCFNTemplateFormat)
+		assert.Equal(t, "Template format error: Unrecognized resource types: [AWS::Custom::Thing]", err.Error())
 	}
 }
 
@@ -1262,20 +1262,16 @@ func TestCFN_ECRRepository(t *testing.T) {
 		"Resources": {
 			"MyRepo": {
 				"Type": "AWS::ECR::Repository",
-				"Properties": {"RepositoryName": "cfn-test-repo"}
-			},
-			"MyLifecycle": {
-				"Type": "AWS::ECR::LifecyclePolicy",
 				"Properties": {
-					"RepositoryName": {"Ref": "MyRepo"},
-					"LifecyclePolicyText": "{\"rules\":[]}"
+					"RepositoryName": "cfn-test-repo",
+					"LifecyclePolicy": {"LifecyclePolicyText": "{\"rules\":[]}"}
 				}
 			}
 		}
 	}`
 	result, err := d.Deploy(context.Background(), tmpl, "ecr-repo-stack", nil)
 	require.NoError(t, err)
-	assert.Len(t, result.Resources, 2)
+	assert.Len(t, result.Resources, 1)
 	for _, r := range result.Resources {
 		assert.Empty(t, r.Error, "resource %s: %s", r.LogicalID, r.Error)
 	}
@@ -1714,7 +1710,6 @@ func TestCFN_ElastiCacheCacheCluster(t *testing.T) {
 			"MyParamGroup": {
 				"Type": "AWS::ElastiCache::ParameterGroup",
 				"Properties": {
-					"CacheParameterGroupName": "cfn-ec-pg",
 					"CacheParameterGroupFamily": "redis7",
 					"Description": "CFN test param group"
 				}
@@ -1722,7 +1717,7 @@ func TestCFN_ElastiCacheCacheCluster(t *testing.T) {
 			"MyCluster": {
 				"Type": "AWS::ElastiCache::CacheCluster",
 				"Properties": {
-					"ClusterId": "cfn-ec-cluster",
+					"ClusterName": "cfn-ec-cluster",
 					"Engine": "redis",
 					"CacheNodeType": "cache.t3.micro",
 					"NumCacheNodes": "1"
@@ -1840,7 +1835,7 @@ func TestCFN_GlueDatabase(t *testing.T) {
 				"Type": "AWS::Glue::Database",
 				"Properties": {
 					"DatabaseName": "cfn-glue-db",
-					"Description": "CFN test Glue database"
+					"DatabaseInput": {"Description": "CFN test Glue database"}
 				}
 			}
 		}
@@ -1869,7 +1864,7 @@ func TestCFN_GlueJob(t *testing.T) {
 			"MyCrawler": {
 				"Type": "AWS::Glue::Crawler",
 				"Properties": {
-					"CrawlerName": "cfn-glue-crawler",
+					"Name": "cfn-glue-crawler",
 					"Role": "arn:aws:iam::123456789012:role/GlueRole",
 					"DatabaseName": {"Ref": "MyDB"}
 				}
@@ -1877,7 +1872,7 @@ func TestCFN_GlueJob(t *testing.T) {
 			"MyJob": {
 				"Type": "AWS::Glue::Job",
 				"Properties": {
-					"JobName": "cfn-glue-job",
+					"Name": "cfn-glue-job",
 					"Role": "arn:aws:iam::123456789012:role/GlueRole"
 				}
 			}
@@ -1944,14 +1939,13 @@ func TestCFN_GlueTableAndConnection(t *testing.T) {
 				"Type": "AWS::Glue::Table",
 				"Properties": {
 					"DatabaseName": {"Ref": "MyDB"},
-					"TableName": "cfn-glue-table"
+					"TableInput": {"Name": "cfn-glue-table"}
 				}
 			},
 			"MyConn": {
 				"Type": "AWS::Glue::Connection",
 				"Properties": {
-					"ConnectionName": "cfn-glue-conn",
-					"ConnectionType": "JDBC"
+					"ConnectionInput": {"Name": "cfn-glue-conn", "ConnectionType": "JDBC"}
 				}
 			}
 		}

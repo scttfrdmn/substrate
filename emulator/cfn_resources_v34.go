@@ -83,7 +83,9 @@ func (d *StackDeployer) deployMSKCluster(
 	kafkaVersion := resolveStringProp(props, "KafkaVersion", "3.5.1", cctx)
 
 	brokerInfo := map[string]interface{}{
-		"InstanceType":  resolveStringProp(props, "InstanceType", "kafka.m5.large", cctx),
+		// The instance type is BrokerNodeGroupInfo's member; the type declares no top-level
+		// InstanceType (#1605).
+		"InstanceType":  "kafka.m5.large",
 		"ClientSubnets": []string{},
 	}
 	if bi, ok := props["BrokerNodeGroupInfo"].(map[string]interface{}); ok {

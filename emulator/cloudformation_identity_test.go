@@ -600,7 +600,7 @@ func TestCFNIdentity_ExecuteChangeSetUsesTheExecutingCaller(t *testing.T) {
 	// instance.
 	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
-		"StackName": "cs", "TemplateBody": `{"Resources":{}}`,
+		"StackName": "cs", "TemplateBody": `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 
@@ -644,7 +644,7 @@ func TestCFNIdentity_UpdateStackUsesTheUpdatingCaller(t *testing.T) {
 
 	code, body := cfnIdentityRequest(t, ts, "cloudformation", "us-east-1", cfnOtherAccount, map[string]string{
 		"Action": "CreateStack", "Version": "2010-05-15",
-		"StackName": "upd", "TemplateBody": `{"Resources":{}}`,
+		"StackName": "upd", "TemplateBody": `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`,
 	})
 	require.Equal(t, http.StatusOK, code, "body was %s", body)
 

@@ -720,6 +720,56 @@ func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {
 	}, nil
 }
 
+// lambdaPermissionPrincipal renders AddPermission's Principal the way its output does: an account
+// ID as {"AWS": "arn:aws:iam::{account}:root"} ("Principal":{"AWS":"arn:aws:iam::111122223333:root"}
+// is the Lambda developer guide's add-permission output for --principal 111122223333), an ARN as
+// {"AWS": arn}, "*" as the string "*" (the guide's function-URL policy), and anything else — a
+// service principal such as sns.amazonaws.com — as {"Service": p}.
+func lambdaPermissionPrincipal(p string) interface{} {
+	switch {
+	case p == "*":
+		return "*"
+	case strings.HasPrefix(p, "arn:"):
+		return map[string]string{"AWS": p}
+	case len(p) == 12 && strings.Trim(p, "0123456789") == "":
+		return map[string]string{"AWS": "arn:aws:iam::" + p + ":root"}
+	}
+	return map[string]string{"Service": p}
+}
+
+// lambdaPermissionConditions renders AddPermission's scoping parameters as the statement's
+// Condition, each with the operator and key the Lambda developer guide's resource-based policy
+// examples use: SourceArn as ArnLike AWS:SourceArn, SourceAccount as StringEquals
+// AWS:SourceAccount, PrincipalOrgID as StringEquals aws:PrincipalOrgID, EventSourceToken as
+// StringEquals lambda:EventSourceToken, FunctionUrlAuthType as StringEquals
+// lambda:FunctionUrlAuthType, and InvokedViaFunctionUrl as Bool lambda:InvokedViaFunctionUrl. The
+// two AWS: keys keep the capitalization add-permission's output has always used here. Nil when
+// none is given.
+func lambdaPermissionConditions(sourceArn, sourceAccount, orgID, token, urlAuthType string, viaURL bool) map[string]map[string]string {
+	out := map[string]map[string]string{}
+	set := func(op, key, value string) {
+		if value == "" {
+			return
+		}
+		if out[op] == nil {
+			out[op] = map[string]string{}
+		}
+		out[op][key] = value
+	}
+	set("ArnLike", "AWS:SourceArn", sourceArn)
+	set("StringEquals", "AWS:SourceAccount", sourceAccount)
+	set("StringEquals", "aws:PrincipalOrgID", orgID)
+	set("StringEquals", "lambda:EventSourceToken", token)
+	set("StringEquals", "lambda:FunctionUrlAuthType", urlAuthType)
+	if viaURL {
+		set("Bool", "lambda:InvokedViaFunctionUrl", "true")
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // addPermission adds a statement to a function's resource policy.
 //
 // The body is parsed and its required member checked **before** the function is looked up (#1006).
@@ -742,6 +792,10 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		SourceAccount    string `json:"SourceAccount"`
 		PrincipalOrgID   string `json:"PrincipalOrgID"`
 		EventSourceToken string `json:"EventSourceToken"`
+		// FunctionUrlAuthType and InvokedViaFunctionUrl scope a statement to function-URL
+		// calls; each becomes a condition (lambdaPermissionConditions).
+		FunctionURLAuthType   string `json:"FunctionUrlAuthType"`
+		InvokedViaFunctionURL bool   `json:"InvokedViaFunctionUrl"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
@@ -771,17 +825,21 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		}
 	}
 
+	// "Qualifier — Specify a version or alias to add permissions to a published version of the
+	// function": the statement's Resource is the qualified ARN. Substrate models no aliases, so the
+	// qualifier is not looked up.
+	resource := fn.FunctionArn
+	if q := req.Params["Qualifier"]; q != "" {
+		resource += ":" + q
+	}
 	stmt := LambdaPermissionStatement{
 		Sid:       body.StatementID,
 		Effect:    "Allow",
-		Principal: map[string]string{"Service": body.Principal},
+		Principal: lambdaPermissionPrincipal(body.Principal),
 		Action:    body.Action,
-		Resource:  fn.FunctionArn,
-	}
-	if body.SourceArn != "" {
-		stmt.Condition = map[string]map[string]string{
-			"ArnLike": {"AWS:SourceArn": body.SourceArn},
-		}
+		Resource:  resource,
+		Condition: lambdaPermissionConditions(body.SourceArn, body.SourceAccount, body.PrincipalOrgID,
+			body.EventSourceToken, body.FunctionURLAuthType, body.InvokedViaFunctionURL),
 	}
 	policy.Statement = append(policy.Statement, stmt)
 

@@ -22,7 +22,9 @@ func (d *StackDeployer) deployEFSFileSystem(
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
 	body := map[string]interface{}{
-		"CreationToken":   resolveStringProp(props, "CreationToken", logicalID, cctx),
+		// CloudFormation supplies the creation token itself, the type declaring no CreationToken
+		// property, so it is generated per stack as a name is (#1605).
+		"CreationToken":   cfnGeneratedName(cctx, "AWS::EFS::FileSystem", logicalID),
 		"PerformanceMode": resolveStringProp(props, "PerformanceMode", "generalPurpose", cctx),
 		"ThroughputMode":  resolveStringProp(props, "ThroughputMode", "bursting", cctx),
 	}
@@ -171,12 +173,16 @@ func (d *StackDeployer) deployGlueDatabase(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "DatabaseName", logicalID, cctx)
+	// The type's own properties are CatalogId, DatabaseInput and DatabaseName; the name and
+	// description are members of DatabaseInput. Description was read as a top-level property,
+	// which the type does not declare (#1605).
+	name := resolveStringProp(props, "DatabaseName",
+		resolveNestedStringProp(props, "DatabaseInput", "Name", logicalID, cctx), cctx)
 
 	body := map[string]interface{}{
 		"DatabaseInput": map[string]interface{}{
 			"Name":        name,
-			"Description": resolveStringProp(props, "Description", "", cctx),
+			"Description": resolveNestedStringProp(props, "DatabaseInput", "Description", "", cctx),
 		},
 	}
 	bodyBytes, err := json.Marshal(body)
@@ -212,8 +218,11 @@ func (d *StackDeployer) deployGlueConnection(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "ConnectionName", logicalID, cctx)
-	connType := resolveStringProp(props, "ConnectionType", "JDBC", cctx)
+	// The connection's name and type are members of ConnectionInput, the type's one required
+	// property; ConnectionName and ConnectionType were read as top-level properties, which the
+	// type does not declare (#1605).
+	name := resolveNestedStringProp(props, "ConnectionInput", "Name", logicalID, cctx)
+	connType := resolveNestedStringProp(props, "ConnectionInput", "ConnectionType", "JDBC", cctx)
 
 	body := map[string]interface{}{
 		"ConnectionInput": map[string]interface{}{
@@ -254,7 +263,9 @@ func (d *StackDeployer) deployGlueTable(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	tableName := resolveStringProp(props, "TableName", logicalID, cctx)
+	// The table's name is TableInput's Name member; TableName is not a property of the type
+	// (#1605).
+	tableName := resolveNestedStringProp(props, "TableInput", "Name", logicalID, cctx)
 	dbName := resolveStringProp(props, "DatabaseName", "", cctx)
 
 	body := map[string]interface{}{
@@ -296,7 +307,8 @@ func (d *StackDeployer) deployGlueCrawler(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "CrawlerName", logicalID, cctx)
+	// "Name": the type declares no CrawlerName (#1605).
+	name := resolveStringProp(props, "Name", logicalID, cctx)
 
 	body := map[string]interface{}{
 		"Name":         name,
@@ -336,7 +348,8 @@ func (d *StackDeployer) deployGlueJob(
 	streamID string,
 	cctx *cfnContext,
 ) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "JobName", logicalID, cctx)
+	// "Name": the type declares no JobName (#1605).
+	name := resolveStringProp(props, "Name", logicalID, cctx)
 
 	body := map[string]interface{}{
 		"Name": name,

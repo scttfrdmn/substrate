@@ -648,7 +648,7 @@ func TestCFNPlugin_FindInMapFailureReachesTheWire(t *testing.T) {
 func TestCFNPlugin_StackIDPseudoParameterMatchesCreateStack(t *testing.T) {
 	ts := newCFNTestServer(t)
 
-	const template = `{"Resources":{},"Outputs":{` +
+	const template = `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}},"Outputs":{` +
 		`"SelfID":{"Value":{"Ref":"AWS::StackId"}},` +
 		`"Partition":{"Value":{"Ref":"AWS::Partition"}},` +
 		`"Suffix":{"Value":{"Ref":"AWS::URLSuffix"}}}}`

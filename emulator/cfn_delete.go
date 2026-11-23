@@ -55,8 +55,12 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	},
 	// The policy, not the bucket: DeleteBucketPolicy on the bucket it was applied to (#1606).
 	"AWS::S3::BucketPolicy": cfnS3BucketPolicyDeleter,
-	"AWS::DynamoDB::Table":  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
-	"AWS::Kinesis::Stream":  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
+	// The CDK's routing and permission types (#1605; cfn_resources_v131.go).
+	"AWS::EC2::Route":                       cfnEC2RouteDeleter,
+	"AWS::EC2::SubnetRouteTableAssociation": cfnSubnetRouteTableAssociationDeleter,
+	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
+	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
+	"AWS::Kinesis::Stream":                  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),
@@ -583,6 +587,7 @@ var cfnDeletePreSteps = map[string]cfnDeletePreStepFunc{
 // RecordSet per child, so its delete removes those record sets; see its entry in
 // cfnResourceDeleters.
 var cfnStubDeleteTypes = map[string]bool{
+	cfnCDKMetadataType:               true,
 	"AWS::Athena::WorkGroup":         true,
 	"AWS::CloudTrail::Trail":         true,
 	"AWS::CodeBuild::Project":        true,
@@ -609,8 +614,6 @@ var cfnDeleteInertTypes = map[string]string{
 	"AWS::ECS::CapacityProvider":                  "the deploy records no state to remove",
 	"AWS::SSM::Association":                       "the deploy records no state to remove",
 	"AWS::SecretsManager::SecretTargetAttachment": "the deploy records no state to remove",
-	"AWS::ECR::LifecyclePolicy": "ECR's DeleteLifecyclePolicy is not routed; deleting " +
-		"the repository removes its lifecycle policy with it",
 	"AWS::ApiGateway::UsagePlanKey": "API Gateway's DeleteUsagePlanKey is not routed, " +
 		"so the key stays attached until its usage plan is deleted",
 	"AWS::Cognito::IdentityPoolRoleAttachment": "Cognito models no " +

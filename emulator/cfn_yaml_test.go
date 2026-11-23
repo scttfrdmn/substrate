@@ -411,9 +411,21 @@ Resources:
 // an attribute — so the expander leaves it for the resolver to reject rather than
 // inventing an empty attribute name, which would turn a template error into a
 // silently empty property.
+//
+// Since #1548 the template is refused at the request: the name it reads is not a declared
+// resource, so it never reaches the resolver at all.
 func TestCFN_YAMLShortForm_GetAttWithoutAPeriod(t *testing.T) {
-	assert.Empty(t, resolveExpr(t, "!GetAtt NoPeriodHere"),
-		"a !GetAtt with no attribute must not resolve to anything")
+	tmpl := `
+Resources:
+  B:
+    Type: AWS::S3::Bucket
+Outputs:
+  V:
+    Value: !GetAtt NoPeriodHere
+`
+	_, err := newTestDeployer(t).Deploy(context.Background(), tmpl, "expr", nil)
+	require.Error(t, err, "a !GetAtt with no attribute must not resolve to anything")
+	assert.ErrorIs(t, err, emulator.ErrCFNInvalidDependency)
 }
 
 // TestCFN_MalformedYAMLIsRefused pins that a template which is neither valid JSON

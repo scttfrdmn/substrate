@@ -175,6 +175,11 @@ func RegisterDefaultPlugins(
 	if settings.auth != nil {
 		cfnOpts["auth_controller"] = settings.auth
 	}
+	if cfg != nil {
+		// Absent from the options when there is no config, so the plugin's own default —
+		// strict — applies (#1605).
+		cfnOpts["strict"] = !cfg.CloudFormation.Lenient
+	}
 
 	// Scheduler invokes its schedules' targets on the simulated clock as each target's RoleArn, so it
 	// authorizes those calls itself, as CloudFormation does for a stack's resource calls (#1501).

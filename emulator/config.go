@@ -69,6 +69,8 @@ type Config struct {
 
 	// CloudWatch controls CloudWatch plugin behavior.
 	CloudWatch CloudWatchCfg `mapstructure:"cloudwatch"`
+	// CloudFormation controls how strictly CloudFormation templates are checked.
+	CloudFormation CloudFormationCfg `mapstructure:"cloudformation"`
 
 	// Run controls deterministic-run mode: seeded request IDs and a pinned clock.
 	Run RunCfg `mapstructure:"run"`
@@ -684,6 +686,21 @@ type CloudWatchCfg struct {
 	MaxDatapointsPerSeries int `mapstructure:"max_datapoints_per_series"`
 }
 
+// CloudFormationCfg controls CloudFormation template validation (#1605).
+type CloudFormationCfg struct {
+	// Lenient turns strict mode off. Strict mode — the default, and the zero value — refuses
+	// at the request a template declaring a resource type CloudFormation recognizes but
+	// substrate does not emulate (one with no deploy helper), or a custom resource. Lenient
+	// deploys such a resource as a stub that records its properties and creates nothing, which
+	// is what every template got before #1605. An unrecognized type and an extraneous property
+	// are refused either way, because CloudFormation refuses them.
+	//
+	// Set by cloudformation.lenient: true (SUBSTRATE_CLOUDFORMATION_LENIENT=true), or by its
+	// inverse, cloudformation.strict: false (SUBSTRATE_CLOUDFORMATION_STRICT=false); see
+	// [LoadConfig].
+	Lenient bool `mapstructure:"lenient"`
+}
+
 // RunCfg controls deterministic-run mode (#1598): what makes two fresh servers given the
 // same calls answer the same bodies.
 //
@@ -896,6 +913,9 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("rds.engine", defaults.RDS.Engine)
 	v.SetDefault("ec2.default_vpc", defaults.EC2.DefaultVPC)
 	v.SetDefault("cloudwatch.max_datapoints_per_series", defaults.CloudWatch.MaxDatapointsPerSeries)
+	v.SetDefault("cloudformation.lenient", defaults.CloudFormation.Lenient)
+	// cloudformation.strict is the inverse spelling of the same switch, read after Unmarshal.
+	v.SetDefault("cloudformation.strict", true)
 	// Registered so SUBSTRATE_RUN_SEED and SUBSTRATE_RUN_EPOCH reach Unmarshal: viper's
 	// AutomaticEnv only binds a key it already knows.
 	v.SetDefault("run.seed", defaults.Run.Seed)
@@ -924,6 +944,11 @@ func LoadConfig(path string) (*Config, error) {
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+	// Either spelling turns strict mode off: cloudformation.lenient: true, or
+	// cloudformation.strict: false (#1605).
+	if !v.GetBool("cloudformation.strict") {
+		cfg.CloudFormation.Lenient = true
 	}
 
 	if err := Validate(&cfg); err != nil {

@@ -411,6 +411,9 @@ func (s *Server) handleDebugExport(w http.ResponseWriter, r *http.Request) {
 	if !s.config.EC2.DefaultVPC {
 		serverOptions = append(serverOptions, "emulator.WithoutDefaultVPC()")
 	}
+	if s.config.CloudFormation.Lenient {
+		serverOptions = append(serverOptions, "emulator.WithLenientCloudFormation()")
+	}
 	src, err := generateTestFixture(events, packageName, testName, serverOptions)
 	if err != nil {
 		writeJSONErrorDebug(w, http.StatusUnprocessableEntity, "%s", err.Error())

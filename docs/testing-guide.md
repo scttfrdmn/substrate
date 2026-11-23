@@ -893,7 +893,8 @@ go test -run TestCheckout ./...
 ```
 
 The fixture's test server is started with `WithoutDefaultVPC()` when the recording
-server ran without a default VPC, and with no other option. It arms no fault rule and
+server ran without a default VPC, with `WithLenientCloudFormation()` when it ran with
+CloudFormation's strict mode off, and with no other option. It arms no fault rule and
 enforces no quota or consistency, so a stream recorded under armed fault rules is refused
 with a 422; a recorded throttle or `InconsistentStateException` replays as a difference.
 The generated file declares an empty allowlist (`<test>Allow`) of `path.Match`
@@ -1228,6 +1229,44 @@ one and as the creating principal otherwise. A refused resource call rolls the s
 back and names the denial in `DescribeStackResources`' `ResourceStatusReason` — not
 as a `StackEvent`. See the CloudFormation section of
 [the service reference](services.md) for the `RoleARN` semantics.
+
+## CloudFormation Strict Mode
+
+A test server checks every template the way CloudFormation does before anything
+deploys, and by default goes one step further: a resource type substrate does not
+emulate is **refused**, rather than deployed as a stub that reports `CREATE_COMPLETE`
+for a resource nothing created. A green test therefore means the template deployed
+real resources a later API call can find.
+
+```go
+ts := emulator.StartTestServer(t)
+// AWS::EKS::Cluster has no deploy helper, so CreateStack answers ValidationError:
+// "Template declares resource types substrate does not emulate: [AWS::EKS::Cluster (Cluster)]. …"
+```
+
+What is refused in every mode, because CloudFormation refuses it: a type the
+CloudFormation resource specification does not list (`AWS::S3::Bukcet` is
+`Template format error: Unrecognized resource types: [AWS::S3::Bukcet]`), a `Ref`,
+`Fn::GetAtt` or `Fn::Sub` naming something the template does not declare, and a
+parameter with no `Type` or an unrecognized one. A property the resource's type does not
+declare (`VisibilityTimeoutt`) fails that resource with `CREATE_FAILED`, and the stack
+rolls back. `ValidateTemplate` makes the same checks without deploying anything.
+
+A template that genuinely needs a type substrate does not emulate — or a custom resource,
+which substrate cannot run — can opt out:
+
+```go
+ts := emulator.StartTestServer(t, emulator.WithLenientCloudFormation())
+```
+
+The server-side equivalent is `cloudformation.lenient: true` (or `cloudformation.strict:
+false`) in `substrate.yaml`, or `SUBSTRATE_CLOUDFORMATION_LENIENT=true`
+(`SUBSTRATE_CLOUDFORMATION_STRICT=false`). In process, pass `emulator.WithDeployerLenient(true)`
+to `NewStackDeployer` or `emulator.WithClientLenientCloudFormation()` to `NewClient`. In
+lenient mode an unemulated type records its properties and creates nothing, as every
+template's did before strict mode existed; the checks CloudFormation itself makes still
+apply. See [Strict mode and template validation](services.md#strict-mode-and-template-validation)
+for every check and where its wording comes from.
 
 ## Multi-Region
 

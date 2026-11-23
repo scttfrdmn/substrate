@@ -115,7 +115,10 @@ func newFullServerOn(t *testing.T, state emulator.StateManager) *emulator.Server
 	registry := emulator.NewPluginRegistry()
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig(), emulator.WithTimeController(tc))
-	require.NoError(t, emulator.RegisterDefaultPlugins(context.Background(), registry, state, tc, logger, store, nil))
+	// Lenient, so the CloudFormation case below reaches deployGenericStub's write (#1605).
+	pluginCfg := emulator.DefaultConfig()
+	pluginCfg.CloudFormation.Lenient = true
+	require.NoError(t, emulator.RegisterDefaultPlugins(context.Background(), registry, state, tc, logger, store, pluginCfg))
 	return emulator.NewServer(*cfg, registry, store, state, tc, logger)
 }
 

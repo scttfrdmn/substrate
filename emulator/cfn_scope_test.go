@@ -20,10 +20,11 @@ import (
 // (#1366). A stack name is unique per account per Region, and before the scope two accounts, or two
 // Regions of one account, that each created `app` addressed one record.
 
-// cfnScopeTemplate is a resourceless template whose Description names the scope that created it, so
-// a read can tell which stack it was handed.
+// cfnScopeTemplate is a template of one AWS::CDK::Metadata — a resource that creates nothing, since
+// a template must declare at least one — whose Description names the scope that created it, so a
+// read can tell which stack it was handed.
 func cfnScopeTemplate(scope string) string {
-	return `{"Description":"` + scope + `","Resources":{}}`
+	return `{"Description":"` + scope + `","Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`
 }
 
 func TestCFNScope_OneStackNameExistsOncePerAccountAndRegion(t *testing.T) {
@@ -168,7 +169,7 @@ func TestCFNScope_TheFirstWriteMigratesALegacyStack(t *testing.T) {
 	cfnScopeSeedLegacy(t, state)
 	d := newCFNScopeDeployer(state, "123456789012", "us-east-1")
 
-	_, err := d.CreateChangeSet(ctx, "legacy", "new-cs", `{"Resources":{}}`, nil, nil)
+	_, err := d.CreateChangeSet(ctx, "legacy", "new-cs", `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`, nil, nil)
 	require.NoError(t, err, "a write to a legacy stack")
 
 	const scope = "123456789012/us-east-1/"
@@ -239,7 +240,7 @@ func TestCFNScope_AStoreFaultIsAnError(t *testing.T) {
 			}},
 		{"migration, legacy change set delete", func(m *cfFaultStateManager) { m.failDelete = "changeset:legacy/" },
 			func(ctx context.Context, d *emulator.StackDeployer) error {
-				_, err := d.CreateChangeSet(ctx, "legacy", "new-cs", `{"Resources":{}}`, nil, nil)
+				_, err := d.CreateChangeSet(ctx, "legacy", "new-cs", `{"Resources":{"Meta":{"Type":"AWS::CDK::Metadata"}}}`, nil, nil)
 				return err
 			}},
 		{"migration, drift detection write", func(m *cfFaultStateManager) { m.failPut = "drift_detection:123456789012/" },

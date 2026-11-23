@@ -1,0 +1,404 @@
+{
+ "Outputs": {
+  "ApiEndpoint4F160690": {
+   "Value": {
+    "Fn::Join": [
+     "",
+     [
+      "https://",
+      {
+       "Ref": "ApiF70053CD"
+      },
+      ".execute-api.us-east-1.",
+      {
+       "Ref": "AWS::URLSuffix"
+      },
+      "/",
+      {
+       "Ref": "ApiDeploymentStageprod3EB9684E"
+      },
+      "/"
+     ]
+    ]
+   }
+  }
+ },
+ "Parameters": {
+  "BootstrapVersion": {
+   "Default": "/cdk-bootstrap/hnb659fds/version",
+   "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
+   "Type": "AWS::SSM::Parameter::Value<String>"
+  }
+ },
+ "Resources": {
+  "ApiANY40671C4F": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/ANY/Resource"
+   },
+   "Properties": {
+    "AuthorizationType": "NONE",
+    "HttpMethod": "ANY",
+    "Integration": {
+     "IntegrationHttpMethod": "POST",
+     "Type": "AWS_PROXY",
+     "Uri": {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":apigateway:us-east-1:lambda:path/2015-03-31/functions/",
+        {
+         "Fn::GetAtt": [
+          "ApiFnE0725F78",
+          "Arn"
+         ]
+        },
+        "/invocations"
+       ]
+      ]
+     }
+    },
+    "ResourceId": {
+     "Fn::GetAtt": [
+      "ApiF70053CD",
+      "RootResourceId"
+     ]
+    },
+    "RestApiId": {
+     "Ref": "ApiF70053CD"
+    }
+   },
+   "Type": "AWS::ApiGateway::Method"
+  },
+  "ApiANYApiPermissionApiAppApi9A613CA9ANYF614E50E": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/ANY/ApiPermission.ApiAppApi9A613CA9.ANY.."
+   },
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFnE0725F78",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:us-east-1:123456789012:",
+       {
+        "Ref": "ApiF70053CD"
+       },
+       "/",
+       {
+        "Ref": "ApiDeploymentStageprod3EB9684E"
+       },
+       "/*/"
+      ]
+     ]
+    }
+   },
+   "Type": "AWS::Lambda::Permission"
+  },
+  "ApiANYApiPermissionTestApiAppApi9A613CA9ANYAECB82BC": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/ANY/ApiPermission.Test.ApiAppApi9A613CA9.ANY.."
+   },
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFnE0725F78",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:us-east-1:123456789012:",
+       {
+        "Ref": "ApiF70053CD"
+       },
+       "/test-invoke-stage/*/"
+      ]
+     ]
+    }
+   },
+   "Type": "AWS::Lambda::Permission"
+  },
+  "ApiDeploymentB17BE62D2a1995ddf9aa4c14cac1c5720489f62e": {
+   "DependsOn": [
+    "ApiproxyANY4946669B",
+    "Apiproxy05443892",
+    "ApiANY40671C4F"
+   ],
+   "Metadata": {
+    "aws:cdk:do-not-refactor": true,
+    "aws:cdk:path": "ApiApp/Api/Deployment/Resource"
+   },
+   "Properties": {
+    "Description": "Automatically created by the RestApi construct",
+    "RestApiId": {
+     "Ref": "ApiF70053CD"
+    }
+   },
+   "Type": "AWS::ApiGateway::Deployment"
+  },
+  "ApiDeploymentStageprod3EB9684E": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/DeploymentStage.prod/Resource"
+   },
+   "Properties": {
+    "DeploymentId": {
+     "Ref": "ApiDeploymentB17BE62D2a1995ddf9aa4c14cac1c5720489f62e"
+    },
+    "RestApiId": {
+     "Ref": "ApiF70053CD"
+    },
+    "StageName": "prod"
+   },
+   "Type": "AWS::ApiGateway::Stage"
+  },
+  "ApiF70053CD": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Resource"
+   },
+   "Properties": {
+    "Name": "Api"
+   },
+   "Type": "AWS::ApiGateway::RestApi"
+  },
+  "ApiFnE0725F78": {
+   "DependsOn": [
+    "ApiFnServiceRoleD18AAE0E"
+   ],
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/ApiFn/Resource"
+   },
+   "Properties": {
+    "Code": {
+     "ZipFile": "def handler(e, c):\n  return 1"
+    },
+    "Handler": "index.handler",
+    "Role": {
+     "Fn::GetAtt": [
+      "ApiFnServiceRoleD18AAE0E",
+      "Arn"
+     ]
+    },
+    "Runtime": "python3.12"
+   },
+   "Type": "AWS::Lambda::Function"
+  },
+  "ApiFnServiceRoleD18AAE0E": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/ApiFn/ServiceRole/Resource"
+   },
+   "Properties": {
+    "AssumeRolePolicyDocument": {
+     "Statement": [
+      {
+       "Action": "sts:AssumeRole",
+       "Effect": "Allow",
+       "Principal": {
+        "Service": "lambda.amazonaws.com"
+       }
+      }
+     ],
+     "Version": "2012-10-17"
+    },
+    "ManagedPolicyArns": [
+     {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+       ]
+      ]
+     }
+    ]
+   },
+   "Type": "AWS::IAM::Role"
+  },
+  "Apiproxy05443892": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/{proxy+}/Resource"
+   },
+   "Properties": {
+    "ParentId": {
+     "Fn::GetAtt": [
+      "ApiF70053CD",
+      "RootResourceId"
+     ]
+    },
+    "PathPart": "{proxy+}",
+    "RestApiId": {
+     "Ref": "ApiF70053CD"
+    }
+   },
+   "Type": "AWS::ApiGateway::Resource"
+  },
+  "ApiproxyANY4946669B": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/{proxy+}/ANY/Resource"
+   },
+   "Properties": {
+    "AuthorizationType": "NONE",
+    "HttpMethod": "ANY",
+    "Integration": {
+     "IntegrationHttpMethod": "POST",
+     "Type": "AWS_PROXY",
+     "Uri": {
+      "Fn::Join": [
+       "",
+       [
+        "arn:",
+        {
+         "Ref": "AWS::Partition"
+        },
+        ":apigateway:us-east-1:lambda:path/2015-03-31/functions/",
+        {
+         "Fn::GetAtt": [
+          "ApiFnE0725F78",
+          "Arn"
+         ]
+        },
+        "/invocations"
+       ]
+      ]
+     }
+    },
+    "ResourceId": {
+     "Ref": "Apiproxy05443892"
+    },
+    "RestApiId": {
+     "Ref": "ApiF70053CD"
+    }
+   },
+   "Type": "AWS::ApiGateway::Method"
+  },
+  "ApiproxyANYApiPermissionApiAppApi9A613CA9ANYproxy684BC3D9": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/{proxy+}/ANY/ApiPermission.ApiAppApi9A613CA9.ANY..{proxy+}"
+   },
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFnE0725F78",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:us-east-1:123456789012:",
+       {
+        "Ref": "ApiF70053CD"
+       },
+       "/",
+       {
+        "Ref": "ApiDeploymentStageprod3EB9684E"
+       },
+       "/*/*"
+      ]
+     ]
+    }
+   },
+   "Type": "AWS::Lambda::Permission"
+  },
+  "ApiproxyANYApiPermissionTestApiAppApi9A613CA9ANYproxyD4425BF9": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/Api/Default/{proxy+}/ANY/ApiPermission.Test.ApiAppApi9A613CA9.ANY..{proxy+}"
+   },
+   "Properties": {
+    "Action": "lambda:InvokeFunction",
+    "FunctionName": {
+     "Fn::GetAtt": [
+      "ApiFnE0725F78",
+      "Arn"
+     ]
+    },
+    "Principal": "apigateway.amazonaws.com",
+    "SourceArn": {
+     "Fn::Join": [
+      "",
+      [
+       "arn:",
+       {
+        "Ref": "AWS::Partition"
+       },
+       ":execute-api:us-east-1:123456789012:",
+       {
+        "Ref": "ApiF70053CD"
+       },
+       "/test-invoke-stage/*/*"
+      ]
+     ]
+    }
+   },
+   "Type": "AWS::Lambda::Permission"
+  },
+  "CDKMetadata": {
+   "Metadata": {
+    "aws:cdk:path": "ApiApp/CDKMetadata/Default"
+   },
+   "Properties": {
+    "Analytics": "v2:deflate64:H4sIAAAAAAAA/02OwW7CMBBEv4W7s0CQoFfaihMIFD4ALcmWLsR2FK+ByPK/N06oxGnezI5Gm0O++oDZBB8uK6tbVvMZwlGwvKk+OoUa9blCCBtvSmFr1NePeecDtZqd611UjBpCYWtKh6RRYcMXFHpgB2E7TBXkZN3wUHnhNzW17TQZSemb6/+4DGMj9H3r25I+0ZE6tPbZ/SevtZF3JL+2StFIMSbee2m8RGVsRXB103u+hPkC5pOrY85ab4Q1QTHqHznVfNEWAQAA"
+   },
+   "Type": "AWS::CDK::Metadata"
+  }
+ },
+ "Rules": {
+  "CheckBootstrapVersion": {
+   "Assertions": [
+    {
+     "Assert": {
+      "Fn::Not": [
+       {
+        "Fn::Contains": [
+         [
+          "1",
+          "2",
+          "3",
+          "4",
+          "5"
+         ],
+         {
+          "Ref": "BootstrapVersion"
+         }
+        ]
+       }
+      ]
+     },
+     "AssertDescription": "CDK bootstrap stack version 6 required. Please run 'cdk bootstrap' with a recent version of the CDK CLI."
+    }
+   ]
+  }
+ }
+}

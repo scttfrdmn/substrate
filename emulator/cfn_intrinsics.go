@@ -72,6 +72,14 @@ func cfnRefValue(dr DeployedResource, cctx *cfnContext) (string, bool) {
 
 	// ----- Ref is a value recorded at deploy time --------------------------------------
 
+	case "AWS::EC2::SubnetRouteTableAssociation":
+		// The live association ID, which an in-place move to another table changes while the
+		// physical ID stays (#1605; see deployEC2SubnetRouteTableAssociation).
+		if v := cfnRefMetadata(dr, "AssociationId"); v != "" {
+			return v, true
+		}
+		return dr.PhysicalID, true
+
 	case "AWS::KMS::Key", "AWS::KMS::ReplicaKey":
 		// "Ref returns the key ID". substrate stores the key ARN as the physical ID, which is
 		// what its own KMS operations accept, so the ID is read from where deployKMSKey
@@ -191,6 +199,11 @@ func cfnGetAttMetadata(dr DeployedResource, key string) string {
 	if s, ok := v.(string); ok {
 		return strings.TrimSpace(s)
 	}
+	if list, ok := cfnMetadataList(dr, key); ok {
+		// A list-valued attribute in a scalar context is rejoined on commas, as Fn::GetAZs and
+		// Fn::Split are; resolveFnGetAttList is the list context that keeps it (#1591).
+		return strings.Join(list, ",")
+	}
 	return fmt.Sprintf("%v", v)
 }
 
@@ -246,6 +259,24 @@ func cfnGetAttPerType(dr DeployedResource, attr string, cctx *cfnContext) (strin
 
 	case "AWS::ElasticLoadBalancingV2::LoadBalancer":
 		switch attr {
+		case "CanonicalHostedZoneID":
+			// Recorded at deploy from the load balancer's type (recordELBAttributes). A load balancer
+			// recorded before that has no entry, and its type is read from its ARN instead. A Region
+			// or a type the published table does not cover has none, and the read is refused rather
+			// than answered empty (#1591).
+			if v := cfnGetAttMetadata(dr, attr); v != "" {
+				return v, true
+			}
+			if cctx != nil {
+				if v := cfnELBHostedZoneID(cctx.region, cfnELBTypeFromARN(dr.ARN)); v != "" {
+					return v, true
+				}
+			}
+			if cctx != nil && dr.Error == "" {
+				cctx.fail("Fn::GetAtt: %s.%s (%s) has no value in substrate: the published hosted zone table has no entry for this Region and load balancer type",
+					dr.LogicalID, attr, dr.Type)
+			}
+			return "", true
 		case "LoadBalancerName":
 			return dr.PhysicalID, true
 		case "LoadBalancerFullName":

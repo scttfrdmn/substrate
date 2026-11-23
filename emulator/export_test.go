@@ -2051,3 +2051,88 @@ func PolicyDocumentsEqualForTest(a, b PolicyDocument) bool { return policyDocume
 func ParseRoute53OperationForTest(method, path string) (op, zoneID string) {
 	return parseRoute53Operation(method, path)
 }
+
+// CFNEmulatedTypesForTest lists, sorted, the resource types cfnResourceDeployers emulates (#1605).
+func CFNEmulatedTypesForTest() []string { return cfnSortedKeys(cfnResourceDeployers) }
+
+// CFNSchemaHasTypeForTest reports whether the vendored specification lists a resource type.
+func CFNSchemaHasTypeForTest(typ string) bool {
+	_, ok := cfnSchemaLookup(typ)
+	return ok
+}
+
+// CFNSchemaAttributesForTest lists the Fn::GetAtt attributes the vendored specification
+// publishes for a resource type, sorted.
+func CFNSchemaAttributesForTest(typ string) []string {
+	t, ok := cfnSchemaLookup(typ)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(t.Attributes))
+	for _, a := range t.Attributes {
+		out = append(out, a.Name)
+	}
+	return out
+}
+
+// CFNSchemaPropertyForTest reports whether the specification declares a top-level property of
+// a type, and whether it is required.
+func CFNSchemaPropertyForTest(typ, prop string) (declared, required bool) {
+	t, ok := cfnSchemaLookup(typ)
+	if !ok {
+		return false, false
+	}
+	p, ok := t.property(prop)
+	return ok, p.Required
+}
+
+// CFNAttributeIsListForTest wraps cfnAttributeIsList.
+func CFNAttributeIsListForTest(typ, attr string) bool { return cfnAttributeIsList(typ, attr) }
+
+// CFNSchemaVersionForTest is the specification version the table was generated from.
+const CFNSchemaVersionForTest = cfnSchemaVersion
+
+// CFNUnmodelledAttributeForTest reports whether substrate refuses a published attribute as one it
+// holds no value for (#1591).
+func CFNUnmodelledAttributeForTest(typ, attr string) bool {
+	_, ok := cfnUnmodelledAttribute(typ, attr)
+	return ok
+}
+
+// CFNParameterTypeRecognizedForTest wraps cfnParameterTypeRecognized.
+func CFNParameterTypeRecognizedForTest(t string) bool { return cfnParameterTypeRecognized(t) }
+
+// RewriteStackTemplateForTest replaces the template a stack's record holds, the way a record
+// written before a template check existed would hold one that check now refuses (#1605).
+func (d *StackDeployer) RewriteStackTemplateForTest(ctx context.Context, name, body string) error {
+	data, err := d.state.Get(ctx, cfnNamespace, d.stackKey(name))
+	if err != nil || data == nil {
+		return fmt.Errorf("read stack %s: %v", name, err)
+	}
+	var st CFNStackState
+	if err := json.Unmarshal(data, &st); err != nil {
+		return err
+	}
+	st.TemplateBody = body
+	out, err := json.Marshal(st)
+	if err != nil {
+		return err
+	}
+	return d.state.Put(ctx, cfnNamespace, d.stackKey(name), out)
+}
+
+// CFNGetAttValueForTest resolves Fn::GetAtt attr of dr in region, returning the value and the
+// resolution failures it recorded.
+func CFNGetAttValueForTest(dr DeployedResource, attr, region string) (string, []string) {
+	cctx := &cfnContext{region: region, resources: map[string]DeployedResource{}}
+	v := cfnGetAttValue(dr, attr, cctx)
+	return v, cctx.takeFailures()
+}
+
+// CFNRecognizedTypeForTest wraps cfnRecognizedType.
+func CFNRecognizedTypeForTest(typ string) bool { return cfnRecognizedType(typ) }
+
+// CFNELBHostedZoneIDForTest wraps cfnELBHostedZoneID.
+func CFNELBHostedZoneIDForTest(region, lbType string) string {
+	return cfnELBHostedZoneID(region, lbType)
+}

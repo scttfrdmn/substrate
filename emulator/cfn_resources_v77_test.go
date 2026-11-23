@@ -17,7 +17,7 @@ import (
 // newEC2IAMTestDeployer creates a StackDeployer with the EC2 and IAM plugins and
 // returns the registry, so a test can observe deployed resources through the
 // same API a consumer would call.
-func newEC2IAMTestDeployer(t *testing.T) (*emulator.StackDeployer, *emulator.PluginRegistry) {
+func newEC2IAMTestDeployer(t *testing.T, opts ...emulator.StackDeployerOption) (*emulator.StackDeployer, *emulator.PluginRegistry) {
 	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
@@ -42,7 +42,7 @@ func newEC2IAMTestDeployer(t *testing.T) (*emulator.StackDeployer, *emulator.Plu
 	}))
 	registry.Register(iamPlugin)
 
-	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs), registry
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs, opts...), registry
 }
 
 // routeQuery sends a request through the registry and returns the XML response
@@ -447,9 +447,10 @@ func TestCFN_LaunchTemplateFeedsCreateFleet(t *testing.T) {
 }
 
 // TestCFN_GenericStubReportsPluginLoaded verifies an unhandled type whose service
-// plugin is loaded is distinguishable from an unmodelled service (#388).
+// plugin is loaded is distinguishable from an unmodelled service (#388). Both reach the stub
+// only in lenient mode (#1605).
 func TestCFN_GenericStubReportsPluginLoaded(t *testing.T) {
-	d, _ := newEC2IAMTestDeployer(t)
+	d, _ := newEC2IAMTestDeployer(t, emulator.WithDeployerLenient(true))
 	tmpl := `{
 		"AWSTemplateFormatVersion": "2010-09-09",
 		"Resources": {
@@ -458,8 +459,8 @@ func TestCFN_GenericStubReportsPluginLoaded(t *testing.T) {
 				"Properties": {"SubnetId": "subnet-01234567"}
 			},
 			"Widget": {
-				"Type": "AWS::SomeNewService::Widget",
-				"Properties": {"Name": "w"}
+				"Type": "AWS::IoT::Thing",
+				"Properties": {"ThingName": "w"}
 			}
 		}
 	}`
@@ -473,5 +474,5 @@ func TestCFN_GenericStubReportsPluginLoaded(t *testing.T) {
 	assert.Contains(t, eni.ARN, "arn:aws:ec2:")
 	widget := findResource(t, result, "Widget")
 	assert.Equal(t, "Widget", widget.PhysicalID)
-	assert.Contains(t, widget.ARN, "somenewservice")
+	assert.Contains(t, widget.ARN, "arn:aws:iot:")
 }

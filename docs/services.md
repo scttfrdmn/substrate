@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1121 operations**. This
+Substrate ships **68 built-in service plugins** routing **1122 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -31,7 +31,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 10 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
 | 11 | Budgets | `budgets` | JSON | 5 |
 | 12 | Cost Explorer | `ce` | JSON | 3 |
-| 13 | CloudFormation | `cloudformation` | Query | 19 |
+| 13 | CloudFormation | `cloudformation` | Query | 20 |
 | 14 | CloudFront | `cloudfront` | REST/XML | 17 |
 | 15 | CloudTrail | `cloudtrail` | JSON | 8 |
 | 16 | CodeBuild | `codebuild` | JSON | 7 |
@@ -2547,6 +2547,7 @@ the most recent one deletes. A replay of either call reproduces the handle that 
 | DescribeStackResourceDrifts | Per-resource drift; honours `StackResourceDriftStatusFilters.member.N` |
 | ListExports | Every exported output value in the caller's account and Region, in one page |
 | ListImports | Stack **names** importing an `ExportName`; an export nothing imports is an empty list |
+| ValidateTemplate | Makes the [template checks](#strict-mode-and-template-validation) CloudFormation makes — syntax, `Parameters`, unrecognized resource types, undeclared and circular references — and answers `Parameters` (`ParameterKey`, `DefaultValue`, `NoEcho`, `Description`), `Description`, `Capabilities` (`CAPABILITY_IAM`, or `CAPABILITY_NAMED_IAM` when an IAM resource sets its name property), `CapabilitiesReason` and `DeclaredTransforms`. Strict mode is not consulted, so a type substrate does not emulate is a valid template. `TemplateBody` wins over `TemplateURL`, as the reference says; a `TemplateURL` alone is read from substrate's S3, as `CreateStack` reads one (#1605) |
 
 **`TemplateURL` is read from substrate's own S3** ([#1606](https://github.com/scttfrdmn/substrate/issues/1606)),
 by `CreateStack`, `UpdateStack` and `CreateChangeSet`. It is a `GetObject` made as the requesting
@@ -2586,6 +2587,92 @@ to deploy after the template parsed is an `InternalFailure` at 500, because the
 request was well-formed and the failure is substrate's. That distinction is drawn
 from the classification the stack model attaches to a failure, not from its
 message, so a message may be reworded without moving any consumer's error code.
+
+### Strict mode and template validation
+
+A template is checked before anything deploys, by `CreateStack`, `UpdateStack`,
+`CreateChangeSet`, `ValidateTemplate` and the in-process `Client.Deploy` alike
+([#1605](https://github.com/scttfrdmn/substrate/issues/1605),
+[#1548](https://github.com/scttfrdmn/substrate/issues/1548)). Every refusal below is a
+`ValidationError` at 400, and a refused create leaves no stack.
+
+The resource types CloudFormation recognizes, and the properties each declares, come from
+the CloudFormation resource specification for us-east-1, vendored under
+`emulator/cfnschema` and generated into `emulator/cfn_schema_gen.go` by
+`cmd/gen-cfn-schema` (`make cfn-schema`; `make cfn-schema-fetch` refreshes the snapshot
+over the network and is never run in CI).
+
+| Check | Message | Where the wording comes from |
+|-------|---------|------------------------------|
+| A parameter with no `Type` | `Template format error: Every Parameters object must contain a Type member.` | CLI reports (Stack Overflow 55412786) |
+| An unrecognized parameter type | `Template format error: Unrecognized parameter type: X` | CLI and CDK reports (aws-cdk #6786). `List<String>` is accepted |
+| No resources, or a resource with no `Type` | `Template format error: At least one Resources member must be defined.` / `…Every Resources object must contain a Type member.` | CLI reports (Stack Overflow 41667181) |
+| A type the specification does not list | `Template format error: Unrecognized resource types: [X, Y]` | aws-cli #8032 and the re:Post template-validation article |
+| A `Ref` or `Fn::Sub` name that is not a parameter, a resource or a pseudo-parameter | `Template format error: Unresolved resource dependencies [X] in the Resources block of the template` | the re:Post template-validation article |
+| The same in `Outputs` (`Value` or `Export.Name`) | `Unresolved resource dependencies [X] in the Outputs block of the template` | observed: CLI output quoted in the Bugs That Bite write-up and on Server Fault, with no prefix |
+| An `Fn::GetAtt` to an undeclared resource | `Template error: instance of Fn::GetAtt references undefined resource X` | observed: Stack Overflow 41855596, aws-cdk #22046 |
+| A type CloudFormation recognizes but substrate does not emulate (**strict mode**) | `Template declares resource types substrate does not emulate: [AWS::EKS::Cluster (Cluster)]. …` naming the opt-out | substrate's own |
+
+The reference walk is **condition-blind**: it does not evaluate `Fn::If`, so an undeclared
+name inside an untaken branch is refused, as CloudFormation's template check refuses it. A
+reference to a *declared* resource skipped by a false `Condition` is not refused by this
+walk. Several names are listed sorted; the GetAtt message names the first.
+
+**Strict mode is on by default.** A resource type with no deploy helper in
+`cfnResourceDeployers` (`emulator/cfn_resource_table.go`, the one list) is refused rather
+than deployed as a stub that reports `CREATE_COMPLETE` for a resource nothing created.
+Custom resources (`Custom::*` and `AWS::CloudFormation::CustomResource`) are refused too:
+substrate runs no provider. A resource under a false `Condition` is not refused, because it
+does not deploy. `AWS::CDK::Metadata` — which the CDK adds to every stack — is a modeled
+no-op. A template that declares a `Transform` may use types only its macro defines (the
+`AWS::Serverless::*` types) and names only its macro declares (`ServerlessRestApi`, a
+function's implicit `<Function>Role`), so neither the unrecognized-type check nor the
+undeclared-name check applies to it: an unknown type is left to strict mode, which refuses
+it as unemulated. A type outside the `AWS::` and `Alexa::` namespaces — a third-party or
+private registry type such as `Datadog::Monitors::Monitor` — or one ending `::MODULE` is one
+an account may have activated, which substrate cannot know, so it too is treated as
+recognized but not emulated: refused in strict mode, stubbed in lenient mode.
+`ValidateTemplate` is given no parameter values, so it evaluates no condition and orders every
+declared resource.
+
+To deploy unemulated types as stubs, as every template did before strict mode existed, opt out with any
+of:
+
+- `cloudformation.lenient: true` in `substrate.yaml` (or its inverse, `cloudformation.strict: false`), or
+  `SUBSTRATE_CLOUDFORMATION_LENIENT=true` (`SUBSTRATE_CLOUDFORMATION_STRICT=false`);
+- `emulator.WithLenientCloudFormation()` on `StartTestServer`;
+- `emulator.WithDeployerLenient(true)` on `NewStackDeployer`, or
+  `emulator.WithClientLenientCloudFormation()` on `NewClient`.
+
+**What ordinary CDK apps emit.** Synthesized with CDK 2.1149.0 and the flags `cdk init` sets, a
+default `ec2.Vpc`, a Lambda function with an SQS event source, a `LambdaRestApi`, an SNS-to-SQS
+subscription and an ECS Fargate service deploy and delete in strict mode;
+`emulator/testdata/cfn/cdk` holds the templates and `TestCFN_OrdinaryCDKAppsDeployInStrictMode`
+pins them. Strict mode refuses these common constructs, because substrate cannot deploy what they
+emit:
+
+| Type | Emitted by |
+|------|------------|
+| `AWS::ApplicationAutoScaling::ScalableTarget`, `::ScalingPolicy` | `autoScaleReadCapacity` / `autoScaleWriteCapacity` on a DynamoDB table, ECS service autoscaling — substrate has no Application Auto Scaling plugin |
+| `AWS::Lambda::Url` | `addFunctionUrl` — the Lambda plugin routes no function-URL operations |
+| `AWS::ApiGateway::Account` | a `RestApi` with `cloudWatchRole` on, the default without the `@aws-cdk/aws-apigateway:disableCloudWatchRole` flag — the API Gateway plugin routes no account settings |
+| `Custom::S3AutoDeleteObjects` | `autoDeleteObjects: true` on a bucket |
+| `Custom::S3BucketNotifications` | `addEventNotification` on a bucket |
+| `Custom::*` generally | any construct backed by a custom-resource provider; substrate runs none |
+| `AWS::Serverless::*` | a SAM template — substrate runs no transform |
+
+An unrecognized type and an extraneous property are refused in both modes, because
+CloudFormation refuses them.
+
+**An extraneous property fails the resource, not the request.** A top-level key the
+resource's type does not declare fails that resource with `CREATE_FAILED` (`UPDATE_FAILED` on
+an update) and the stack rolls back, as CloudFormation's property validation does:
+`Properties validation failed for resource Q with message: #: extraneous key
+[VisibilityTimeoutt] is not permitted` (several keys are joined with a space). The wording is
+observed behavior, quoted on re:Post and in aws-cdk #25409 and #28984. Only top-level keys are
+checked; a nested property type's members, value types and required keys are not. A key whose
+value is `AWS::NoValue` is not extraneous, and a property the specification declares but
+substrate ignores stays accepted. Custom resources and `AWS::CDK::Metadata` are not checked.
 
 ### Change-set detail, template stages, and filtered drift
 
@@ -2999,10 +3086,10 @@ A pre-step failure fails that resource: a delete dispatched after a failed detac
 would be refused anyway, and reporting the detach's own error names what went wrong.
 A profile declaring no roles dispatches only its own delete.
 
-Coverage is stated rather than implied. Of the 114 resource types the deployer
-dispatches, 99 have a delete request and 7 are state-only types whose stub record
-is removed. The remaining 8 sweep to a no-op and are reported as `DELETE_SKIPPED`
-naming the reason:
+Coverage is stated rather than implied. Every resource type the deployer
+dispatches has a delete request, or is a state-only type whose stub record is
+removed (`AWS::CDK::Metadata` among them), or sweeps to a no-op reported as
+`DELETE_SKIPPED` naming the reason:
 
 | Type | Why the sweep is a no-op |
 |---|---|
@@ -3010,7 +3097,6 @@ naming the reason:
 | `AWS::ECS::CapacityProvider` | the deploy records no state to remove |
 | `AWS::SSM::Association` | the deploy records no state to remove |
 | `AWS::SecretsManager::SecretTargetAttachment` | the deploy records no state to remove |
-| `AWS::ECR::LifecyclePolicy` | `DeleteLifecyclePolicy` is not routed; deleting the repository removes the policy |
 | `AWS::ApiGateway::UsagePlanKey` | `DeleteUsagePlanKey` is not routed; the key goes with its usage plan |
 | `AWS::Cognito::IdentityPoolRoleAttachment` | Cognito models no `DeleteIdentityPoolRoles` |
 | `AWS::SecretsManager::RotationSchedule` | `CancelRotateSecret` is not routed; the schedule goes with the secret |
@@ -3778,7 +3864,7 @@ IAM refused as `MalformedPolicyDocument`. This covers:
 | `AWS::SNS::TopicPolicy` | `PolicyDocument` |
 | `AWS::S3::BucketPolicy` | `PolicyDocument` (#1606) |
 | `AWS::Events::Rule` | `EventPattern` |
-| `AWS::ECR::Repository` lifecycle | `LifecyclePolicyText` |
+| `AWS::ECR::Repository` | `LifecyclePolicy.LifecyclePolicyText` |
 | `AWS::StepFunctions::StateMachine` | `Definition` (#1074) |
 
 A resource can only resolve an attribute of a resource deployed before it. Deploy
@@ -7198,7 +7284,7 @@ $0.005 per 1,000. GET/SELECT operations are $0.0004 per 1,000.
 | ListFunctions | |
 | Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
-| AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up) |
+| AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` makes the statement's `Resource` the qualified ARN; aliases are not modeled, so it is not looked up (#1605) |
 | RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
 | GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
 | PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
@@ -7404,8 +7490,9 @@ top-level request that already ran them.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::Lambda::Function | FunctionName | `Code` is deployed in every form; [inline `ZipFile` is zipped](#an-inline-zipfile-is-zipped-into-a-package) |
+| AWS::Lambda::Function | FunctionName | `Code` is deployed in every form; [inline `ZipFile` is zipped](#an-inline-zipfile-is-zipped-into-a-package). `Fn::GetAtt Arn` answers; `SnapStartResponse` and its members are refused with the reason, because SnapStart is not modeled ([#1591](https://github.com/scttfrdmn/substrate/issues/1591)) |
 | AWS::Lambda::EventSourceMapping | — | |
+| AWS::Lambda::Permission | statement ID | `AddPermission` on the function `FunctionName` names (a name or an ARN, with a version or alias qualifier sent as `Qualifier`); the statement ID is generated per stack, as CloudFormation generates it, and every property is Replacement, so a replacement adds a statement with a new ID before the old one is removed. `Fn::GetAtt Id` answers. Deleted through `RemovePermission`, with the same `Qualifier` (#1605) |
 
 ### A function name is unique per account per Region
 
@@ -8097,6 +8184,7 @@ preceded it.
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::SQS::Queue | QueueUrl | FifoQueue attribute supported |
+| AWS::SQS::QueuePolicy | generated ID | `SetQueueAttributes` `Policy` on each queue in `Queues`; a change updates in place, and a queue the update drops has its policy cleared. Each queue records which QueuePolicy set its policy, and a delete — or a dropped queue — clears the policy only when this resource set it and the queue's live policy is still the one it applied, so a renamed CDK construct (the new policy is set before the old is deleted) and a caller's own later policy survive. A create that fails partway clears what it set, and an update that fails partway records every queue it touched (#1605) |
 
 ### The tag bookkeeping a queue carries reaches no response
 
@@ -13110,13 +13198,16 @@ catalog AMI, because a catalog entry is not a record the account wrote.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::EC2::VPC | VpcId | |
-| AWS::EC2::Subnet | SubnetId | |
+| AWS::EC2::VPC | VpcId | `Fn::GetAtt` answers `VpcId`, `CidrBlock` and `DefaultSecurityGroup`. `CidrBlockAssociations`, `DefaultNetworkAcl`, `Ipv6CidrBlocks` and every `VpcEncryptionControl.*` member are refused with the reason — EC2 records no CIDR association IDs, network ACLs, IPv6 blocks or encryption control ([#1591](https://github.com/scttfrdmn/substrate/issues/1591)) |
+| AWS::EC2::Subnet | SubnetId | `Fn::GetAtt` answers `SubnetId`, `VpcId`, `CidrBlock`, `AvailabilityZone` and `AvailabilityZoneId`. `Ipv6CidrBlocks`, `NetworkAclAssociationId`, `OutpostArn` and `BlockPublicAccessStates.*` are refused with the reason (#1591) |
+| AWS::EC2::NatGateway | NatGatewayId | `Fn::GetAtt NatGatewayId` answers; `EniId` (no network interface is created) and the regional-NAT attributes `RouteTableId`, `AutoProvisionZones` and `AutoScalingIps` are refused with the reason (#1591) |
 | AWS::EC2::SecurityGroup | GroupId | Inline `SecurityGroupIngress`/`SecurityGroupEgress` rules are authorized |
 | AWS::EC2::SecurityGroupIngress | GroupId | Standalone rule; resolves `SourceSecurityGroupId` through `Ref`/`GetAtt`, so self- and mutually-referencing groups work |
 | AWS::EC2::SecurityGroupEgress | GroupId | Standalone rule; supports `DestinationSecurityGroupId` |
 | AWS::EC2::Instance | InstanceId | Passes through `IamInstanceProfile`, `KeyName`, and `SecurityGroupIds` |
 | AWS::EC2::InternetGateway | InternetGatewayId | |
+| AWS::EC2::Route | `{RouteTableId}\|{destination}` | `CreateRoute` with the destination and the one target property — every target `CreateRoute` takes, `CoreNetworkArn` and `OdbNetworkArn` included; a changed target is `ReplaceRoute` in place, and a changed table or destination replaces the route. `Fn::GetAtt CidrBlock` answers the destination. Deleted through `DeleteRoute` (#1605) |
+| AWS::EC2::SubnetRouteTableAssociation | the first association ID | `AssociateRouteTable`; a changed `RouteTableId` is `ReplaceRouteTableAssociation` on the subnet's live association, and a changed `SubnetId` replaces the association. The physical ID stays the association the create made, so a failed update rolls the subnet back onto its table in place; `Ref` and `Fn::GetAtt Id` answer the live association ID. Deleted through `DisassociateRouteTable` (#1605) |
 | AWS::EC2::LaunchTemplate | LaunchTemplateId | Ref is the real `lt-…` ID, usable by `CreateFleet`. `LaunchTemplateData` forwards `ImageId`, `InstanceType`, `KeyName`, `UserData`, `SecurityGroupIds`, `DisableApiTermination` and the five `MetadataOptions` members — `HttpTokens`, `HttpPutResponseHopLimit`, `HttpEndpoint`, `HttpProtocolIpv6`, `InstanceMetadataTags` — with intrinsics resolved and the hop limit sent as an integer; a value EC2 refuses fails the resource with EC2's code ([#1508](https://github.com/scttfrdmn/substrate/issues/1508)). `Fn::GetAtt` answers `LaunchTemplateId`, `DefaultVersionNumber` and `LatestVersionNumber`. On `UpdateStack` a changed `LaunchTemplateData` adds a version through `CreateLaunchTemplateVersion`: the ID stays, `LatestVersionNumber` follows the new version, and `DefaultVersionNumber` stays, since "the default version of a launch template cannot be specified in AWS CloudFormation". A changed `LaunchTemplateName` replaces the template; a change to `TagSpecifications` or `VersionDescription` alone makes no call |
 
 ### Cost
@@ -13789,8 +13880,8 @@ whether it has ever been tagged, in **both** generations.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::ElasticLoadBalancingV2::LoadBalancer | LoadBalancerArn | |
-| AWS::ElasticLoadBalancingV2::TargetGroup | TargetGroupArn | |
+| AWS::ElasticLoadBalancingV2::LoadBalancer | LoadBalancerArn | `Subnets` and `SecurityGroups` are sent. `Fn::GetAtt` answers every published attribute: `DNSName`, `LoadBalancerName`, `LoadBalancerFullName`, `LoadBalancerArn`; `SecurityGroups` as a list, so `Fn::Select`, `Fn::Join` and a list property see its members; and `CanonicalHostedZoneID`, AWS's static per-Region value for the load balancer's type from the ELB endpoints table (a gateway load balancer, which the table does not cover, is refused) ([#1591](https://github.com/scttfrdmn/substrate/issues/1591)) |
+| AWS::ElasticLoadBalancingV2::TargetGroup | TargetGroupArn | `LoadBalancerArns` is refused with the reason: the target group's record holds no association to a load balancer (#1591) |
 | AWS::ElasticLoadBalancingV2::Listener | ListenerArn | |
 | AWS::ElasticLoadBalancingV2::ListenerRule | RuleArn | |
 | AWS::ElasticLoadBalancing::LoadBalancer | the load balancer **name** | classic; see below |
@@ -20317,7 +20408,7 @@ assert every response's raw members against its own page.
 
 | Type | Ref | Notes |
 |------|-----|-------|
-| AWS::ECR::Repository | RepositoryName | |
+| AWS::ECR::Repository | RepositoryName | `LifecyclePolicy.LifecyclePolicyText` is applied through `PutLifecyclePolicy`. There is no `AWS::ECR::LifecyclePolicy` type: CloudFormation does not have one, so since #1605 a template declaring it is refused as unrecognized rather than deployed |
 
 ### Cost
 
@@ -24478,7 +24569,8 @@ driven by `TestSageMakerWire_AppResponsesCarryNoBookkeepingMember` and its train
 
 ### CloudFormation resource types
 
-None are handled specifically. A `AWS::SageMaker::*` resource in a template falls to the generic stub,
+None are handled specifically. A `AWS::SageMaker::*` resource in a template is refused in
+[strict mode](#strict-mode-and-template-validation); in lenient mode it falls to the generic stub,
 whose `Ref` is the logical ID, and is invisible to the SageMaker plugin.
 
 ### Cost
@@ -25957,8 +26049,9 @@ so none has a site.
 | AWS::CodeDeploy::DeploymentGroup | DeploymentGroupName | Deployed through `CreateDeploymentGroup`, so `GetDeploymentGroup` answers the group a stack created. Deleted through `DeleteDeploymentGroup`. Every property is renamed from PascalCase to the API's lowerCamel at every depth. `Ec2TagSet` and `OnPremisesTagSet` are also reshaped from `{…TagGroup: [filter…]}` objects to the API's filter lists. Two properties are dropped. `Deployment` would be a `CreateDeployment`, which a stack does not issue. `Tags` is not read by the plugin. No `Fn::GetAtt` attribute is published ([#1203](https://github.com/scttfrdmn/substrate/issues/1203)) |
 
 AWS publishes three types in the namespace. `AWS::CodeDeploy::DeploymentConfig` is declined: the
-plugin routes no `CreateDeploymentConfig`, so the type falls through to the generic stub, whose `Ref`
-is the logical ID. A deployment group naming it deploys, because the plugin does not look configurations up.
+plugin routes no `CreateDeploymentConfig`, so the type is refused in
+[strict mode](#strict-mode-and-template-validation) and in lenient mode falls through to the generic
+stub, whose `Ref` is the logical ID. A deployment group naming it deploys, because the plugin does not look configurations up.
 
 ### Cost
 
@@ -27189,10 +27282,11 @@ merely unimplemented.
 Substrate has no Redshift provisioner. `AWS::Redshift::Cluster` appears only in
 `cfnSnapshotCapableTypes` (`emulator/cfn_deployer.go:182`), which records that the
 reference lists the type as supporting the `Snapshot` deletion policy; nothing
-dispatches it. A template declaring one falls to `dispatchResource`'s default arm
-(`:2957`), which logs "unknown CloudFormation resource type; using generic stub"
-and deploys a generic stub, so the stack reaches `CREATE_COMPLETE` and no cluster
-exists for `DescribeClusters` to find. No `AWS::Timestream::*` or other Redshift
+dispatches it. A template declaring one is refused in
+[strict mode](#strict-mode-and-template-validation). In lenient mode it falls to
+`dispatchResource`'s generic stub, which logs "unknown CloudFormation resource type;
+using generic stub", so the stack reaches `CREATE_COMPLETE` and no cluster exists for
+`DescribeClusters` to find. No `AWS::Timestream::*` or other Redshift
 type is dispatched.
 
 ### Cost
@@ -27872,7 +27966,8 @@ unemitted: `ExpiredTokenException` (403), `IncompleteSignature` (403), `Internal
 | AWS::Transfer::Server | server ARN | Deployed through `CreateServer`, whose minted ID is the physical ID. Deleted through `DeleteServer`. No property is dropped. `Fn::GetAtt Arn` and `ServerId` resolve. `State` resolves to `ONLINE`, the state `CreateServer`'s record moves to; a seeded start progression is observed through `DescribeServer`, and this is substrate's reading. `As2ServiceManagedEgressIpAddresses` is refused, failing the resource that reads it, because no AS2 egress addresses are assigned |
 
 `AWS::Transfer::User` is not deployed, so a template that creates a server and its
-users gets the server and a generic stub for each user.
+users is refused in [strict mode](#strict-mode-and-template-validation), and in lenient
+mode gets the server and a generic stub for each user.
 
 ### Cost
 
