@@ -33,6 +33,16 @@ event_store:
   # dsn: "substrate.db"
   # Maximum NDJSON file size in MB before rotation (0 = no rotation, file backend only).
   # max_file_size_mb: 100
+  # Record each request and response so the stream can be replayed. Default true.
+  # Authorization, X-Amz-Security-Token, X-Amz-Date and the presigned-URL signature
+  # parameters are never recorded. A memory store keeps every event for the life of
+  # the process, so a long-running server holds every recorded body.
+  # include_bodies: true
+  # Largest body stored on one event, in bytes. A larger body is replaced by its
+  # length and SHA-256: a request over the cap is skipped on replay, and a response
+  # over it is compared by digest, byte for byte. Default 1048576 (1 MiB); a negative
+  # value means no cap.
+  # max_body_bytes: 1048576
 
 # The state manager behind every plugin's resources, for the server and for
 # `substrate replay` alike — both build it from here through one constructor, so they
@@ -49,8 +59,8 @@ state:
 
 # How `substrate replay <stream>` re-executes a recorded stream.
 # Replay needs a persistent event_store backend (memory holds nothing from a previous
-# process) and include_bodies, since an event recorded without its request cannot be
-# re-executed and is counted as skipped.
+# process) and include_bodies, which is on by default, since an event recorded without
+# its request cannot be re-executed and is counted as skipped.
 replay:
   # Scales the recorded delay between events. 0 replays instantly and is the only
   # value independent of the wall clock; 1.0 replays at the original pace.

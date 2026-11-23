@@ -14,10 +14,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **pytest-substrate launches a seeded server and pins on request (#1598).** `@pytest.mark.substrate(deterministic=True)` (or `epoch=`, `seed=`), an indirect parameter, or the ini options `substrate_seed`, `substrate_epoch` and `substrate_deterministic`. `SubstrateServer` gains `seed`/`epoch` arguments, `run_settings`, `set_run`, `freeze_time` and `unfreeze_time`.
 - **`POST /v1/control/time` accepts `"frozen"` (#1598).** `true` freezes the clock, at `"time"` exactly when one is given; `false` resumes it and unpins a pinned clock. `GET` reports `frozen`.
 - **`make nondeterminism-check`, run in CI (#1600).** Outside a reviewed `file:function` allowlist, it refuses wall-clock reads (`time.Now`, `Since`, `After` and relatives), `math/rand` and `crypto/rand` imports, and unseeded IDs (`generateRequestID`, `NewIDMint("")`) in emulator code. It ignores comments and string literals, reports allowlist entries that match nothing, and has a `--self-test`.
+- **`TestServer.Replay(t)`, `TestServer.AssertReplay(t, allow...)` and `AssertReplayMatches` (#1599).** They replay the `default` stream into a fresh `ReplaySandbox` and fail on any difference or unverified skip. `ReplayResults.SkipReasons` says why each skipped event was skipped.
+- **`event_store.max_body_bytes` (#1599).** It defaults to 1 MiB. A body over the cap is stored as its length and SHA-256. A request over it is skipped on replay with a reason, and a response over it is compared by digest.
+- **`ReplaySandbox`, `TestServer.ReplaySandbox(t)`, `JumpToSequence`, `ReplayEvents` and `substrate debug state-at <seq> [--stream S]` (#1601).** These replay a stream into a separate emulator. The sandbox carries each event's recorded request ID, clock and principal, re-applies seeds, and re-decides authorization, quota, consistency and faults as the recording server did.
+- **`Event.ParentRequestID` (#1601).** A CloudFormation deployer dispatch names the request it ran for. A replay skips it only when that request is replayed too.
+- **`ReplayDifferences` and `TestServer.ReplayEvents` (#1602).** They are the exported body comparison and the in-process replay that generated fixtures call.
 
 ### Changed
 
 - **Compatibility (#1598, #1600):** test-server request IDs now have a deterministic format, `req-<8 hex>-<n>`, and repeat across test servers; pass `WithoutSeededIDs()` for the old wall-clock IDs. Organizations IDs and S3 `UploadId`s now derive from the request ID (`UploadId` is `mpu-` plus 32 hex characters). A CLI server with no `run.seed` keeps unseeded IDs.
+- **Request and response bodies are recorded by default (#1599).** `Authorization`, `X-Amz-Security-Token`, `X-Amz-Date`, the presigned-URL signature parameters and a SigV2 request's signing parameters are never recorded, in parameters or in a form body. `WithRecordedBodies()` no longer has an effect; `WithoutRecordedBodies()` turns recording off.
+- **`GET /v1/debug/events/{seq}/state` returns the state before event `seq`, from one stream (#1601).** The stream is `?stream=`, `default` unless named. The answer carries `differences`, `failed_events` and `skipped`, and an empty stream is a 404. `/v1/debug/state/diff` takes `?stream=` and diffs per key.
+- **`JumpToEvent(ctx, position int)` takes a stream position (#1601).** `StepBackward` replays to the previous position, restoring the nearest snapshot, which the engine now takes every `snapshot_interval` events. `StepForward` advances past an event that errors. `InspectState` returns read errors.
+- **`DebugSession` navigates a sandbox and never resets the client's state (#1601).**
+- **`replay.use_snapshots` resets before it restores the stored snapshot, at the start of a replay and on a backward jump (#1601).** A stored snapshot that cannot be restored is now an error rather than a warning; a stream with none still starts from empty state.
+- **A replay re-decides quota and consistency (#1601).** Both exempted a replay, so a recorded throttle or `InconsistentStateException` replayed as a success and applied its change. Each replay rewinds both controllers and re-decides at the recorded clock. An event a replay skips is still charged to both, as it was live. CloudFormation and API Gateway internal dispatches pass authorization only, as they do live.
+- **Exported fixtures embed the recorded events and replay them in process (#1602).** That keeps headers, method, query, recorded IDs and clock. They fail on any difference outside the fixture's allowlist. Exporting a stream with an unreplayable event, or from a server with fault rules armed, is a 422. A server without a default VPC exports a fixture started with `WithoutDefaultVPC()`.
+- **Compatibility (#1599, #1601, #1602):** bodies are now recorded by default, with credential headers stripped. A body over 1 MiB is stored as a digest, so a large `PutObject` replays as skipped unless `max_body_bytes` is raised. A replay now reproduces a recorded throttle where it reported a difference, given the recording's `quotas:` and `consistency:` configuration; that is exact only for serialized traffic, since overlapping requests can swap outcomes on replay. `JumpToEvent` takes an `int` position, and the state-at endpoint's sequence means "before" and its body is a `StateAt` object. Regenerate exported fixtures in the new format. An old one still runs, but it re-sends requests without their headers and checks only status codes.
 
 ### Fixed
 
@@ -28,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`RequestContext.Timestamp`, snapshot timestamps and cost-credit expiry use the simulated clock (#1600).** Cost credits are numbered rather than stamped with the wall clock.
 - **`Client.Deploy` names its stream from the deployment's request ID (#1600).** It was `deploy-<nanoseconds>`, so two deployments on a frozen clock shared a stream.
 - **A CloudFormation-dispatched event's `Duration` is its wall latency (#1600).** It subtracted a simulated start from the wall clock, so a pinned or moved clock recorded the distance between the two.
+- **The sqlite backend's `status_code` column records the event's status, which bodies no longer decide (#1599).**
+- **Time-travel state no longer re-runs events without their recorded IDs or clock, or applies a stack's dispatches on top of its `CreateStack` (#1601).** `/events/0/state` returned the final state.
 
 ## [v0.129.0] - 2026-11-15
 

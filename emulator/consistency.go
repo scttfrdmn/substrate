@@ -29,7 +29,12 @@ type ConsistencyConfig struct {
 // same resource key within the configured [ConsistencyConfig.PropagationDelay]
 // return HTTP 409 InconsistentStateException.
 //
-// The controller is opt-in (disabled by default) and a no-op during replay.
+// The controller is opt-in (disabled by default). A replay re-decides it: replayed
+// writes open windows at their recorded instants and replayed reads are checked
+// against them, so a recorded refusal replays as the same refusal (#1601). The replay
+// rewinds the controller first; see [ConsistencyController.rewindForReplay]. As with
+// [QuotaController.CheckQuota], that is exact only for serialized traffic: overlapping
+// requests decide in lock order live and in sequence order on replay.
 type ConsistencyController struct {
 	mu       sync.RWMutex
 	writes   map[string]time.Time // resource key → write expiry time
@@ -76,13 +81,9 @@ func (c *ConsistencyController) UpdateConfig(cfg ConsistencyConfig) {
 // CheckRead returns an [*AWSError] with code InconsistentStateException (HTTP
 // 409) when the requested resource was recently mutated and the propagation
 // delay has not yet elapsed. It returns nil when simulation is disabled, the
-// service is not in the affected list, or the window has passed. Requests with
-// reqCtx.Metadata["replaying"]=true are always allowed.
-func (c *ConsistencyController) CheckRead(reqCtx *RequestContext, req *AWSRequest) error {
+// service is not in the affected list, or the window has passed.
+func (c *ConsistencyController) CheckRead(_ *RequestContext, req *AWSRequest) error {
 	if !c.cfg.Enabled {
-		return nil
-	}
-	if isReplaying(reqCtx) {
 		return nil
 	}
 	if isMutating(req.Operation) {
@@ -118,13 +119,10 @@ func (c *ConsistencyController) CheckRead(reqCtx *RequestContext, req *AWSReques
 }
 
 // RecordWrite records a mutating operation against the resource key derived
-// from req. It is a no-op when simulation is disabled, the service is not
-// affected, or during replay.
-func (c *ConsistencyController) RecordWrite(reqCtx *RequestContext, req *AWSRequest) {
+// from req. It is a no-op when simulation is disabled or the service is not
+// affected.
+func (c *ConsistencyController) RecordWrite(_ *RequestContext, req *AWSRequest) {
 	if !c.cfg.Enabled {
-		return
-	}
-	if isReplaying(reqCtx) {
 		return
 	}
 	if !c.affected[strings.ToLower(req.Service)] {
@@ -141,6 +139,27 @@ func (c *ConsistencyController) RecordWrite(reqCtx *RequestContext, req *AWSRequ
 	c.mu.Lock()
 	c.writes[key] = expiry
 	c.mu.Unlock()
+}
+
+// rewindForReplay forgets every open propagation window, which a run opens as it goes,
+// so a replay starts from the controller's start-of-run state.
+func (c *ConsistencyController) rewindForReplay() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.writes = make(map[string]time.Time)
+}
+
+// enabled reports whether the controller simulates anything. A nil controller does not.
+func (c *ConsistencyController) enabled() bool { return c.config().Enabled }
+
+// config returns the controller's configuration, or a disabled one for a nil controller.
+func (c *ConsistencyController) config() ConsistencyConfig {
+	if c == nil {
+		return ConsistencyConfig{}
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg
 }
 
 // isMutating reports whether operation is a state-mutating AWS API call using

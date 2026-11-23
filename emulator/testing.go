@@ -84,7 +84,7 @@ type TestServerOption func(*testServerConfig)
 type testServerConfig struct {
 	accounts          []string
 	verifySignatures  bool
-	recordBodies      bool
+	noBodies          bool
 	recordStateHashes bool
 	noDefaultVPC      bool
 	// unseededIDs and epoch are the deterministic-run options; see [WithDeterministicRun].
@@ -117,17 +117,18 @@ func WithSignatureVerification() TestServerOption {
 	return func(c *testServerConfig) { c.verifySignatures = true }
 }
 
-// WithRecordedBodies makes the event store capture each request and response body
-// on the events it records, so the stream can be replayed.
-//
-// Off by default, matching [EventStoreConfig.IncludeBodies], because a body is the
-// largest thing an event carries and most tests only count events or read costs
-// off them. But a recorded event with no request **cannot be re-executed**:
-// [ReplayEngine] skips it, and before #833 counted the skip as a successful
-// replay — so a test that records against a default test server and then replays
-// verifies nothing at all. Any test about replay needs this.
+// WithRecordedBodies has no effect: a test server records request and response bodies
+// by default (#1599), so its stream can be replayed. It is kept so existing callers
+// compile. Use [WithoutRecordedBodies] to turn recording off.
 func WithRecordedBodies() TestServerOption {
-	return func(c *testServerConfig) { c.recordBodies = true }
+	return func(*testServerConfig) {}
+}
+
+// WithoutRecordedBodies starts the server with [EventStoreConfig.IncludeBodies] off, so
+// its events carry no request or response. Such a stream cannot be replayed: every
+// event is skipped with [SkipNoRequest].
+func WithoutRecordedBodies() TestServerOption {
+	return func(c *testServerConfig) { c.noBodies = true }
 }
 
 // WithRecordedStateHashes makes the event store record a hash of emulator state
@@ -296,10 +297,9 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	// work against the server out of the box (see TestServer.Store).
 	cfg.EventStore.Enabled = true
 	cfg.EventStore.Backend = "memory"
-	// Both default to false and are opt-in per test: a body is the largest thing an
-	// event carries, and a state hash is a full snapshot taken twice per request.
-	// See [WithRecordedBodies] for why a replay test must set the first.
-	cfg.EventStore.IncludeBodies = tsCfg.recordBodies
+	// Bodies are recorded unless the test opts out, so the stream replays. State hashes
+	// are opt-in: each is a full snapshot taken twice per request.
+	cfg.EventStore.IncludeBodies = !tsCfg.noBodies
 	cfg.EventStore.IncludeStateHashes = tsCfg.recordStateHashes
 	cfg.Log.Level = "error"
 	// The server keeps its own copy of the config, which time travel registers its replay

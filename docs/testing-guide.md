@@ -264,15 +264,91 @@ curl -X POST http://localhost:4566/v1/state/reset
 ## Recording and Replay
 
 Recording captures every AWS request as an immutable event stream. Replay
-re-executes that stream through the same plugin registry for deterministic
-CI reproduction.
+re-executes that stream for deterministic CI reproduction.
 
-### Wire up the ReplayEngine
+### What is recorded
 
-`StartTestServer` enables the event store and exposes the server's components
-through accessors, so you build a `ReplayEngine` over the **same** store, state,
-time controller, and registry the server is using — otherwise the engine would
-record from a store the server never writes to:
+Every request and response is recorded with its body by default
+(`event_store.include_bodies: true`), so a stream can be replayed without any setup.
+Three rules apply to what an event stores:
+
+- **Credentials are never recorded.** The `Authorization`, `Proxy-Authorization`,
+  `X-Amz-Security-Token`, `X-Amz-Date`, `X-Amz-Signature` and `X-Amz-Credential`
+  headers are removed, and so are the `X-Amz-*` signature parameters of a presigned
+  URL. A Signature Version 2 request, which carries `AWSAccessKeyId`, also loses
+  `AWSAccessKeyId`, `Signature`, `SignatureMethod`, `SignatureVersion` and
+  `SecurityToken`, from its parameters, its repeated parameters and its form-encoded
+  body. Replay does not need them: it reads the parsed parameters, restores the caller
+  from the recorded principal ARN, and does not verify signatures.
+- **Bodies are capped.** A body larger than `event_store.max_body_bytes` (default
+  1 MiB) is replaced by its length and SHA-256. An event whose *request* body was
+  dropped cannot be re-executed, and replay counts it as skipped with the reason
+  `request body over max_body_bytes`. A *response* body that was dropped is compared
+  by digest, byte for byte: the JSON member-order and XML whitespace normalisation the
+  body comparison applies does not apply to a digest. A negative value removes the cap.
+- **Memory is not reclaimed.** A `memory` store keeps every event for the life of the
+  process, so a long-running `substrate server` holds every recorded body. Use the
+  `file` or `sqlite` backend to keep a stream across processes, which is also what
+  `substrate replay` and `substrate debug` read.
+
+`StartTestServer` records bodies too. `WithoutRecordedBodies()` turns that off, after
+which every event replays as skipped. `WithRecordedBodies()` is kept so older tests
+compile, and has no effect.
+
+### Streams
+
+Every request that arrives over HTTP is recorded in the stream named `"default"`
+(`substrate.DefaultStreamID`). Nothing on the wire selects another stream. The
+CloudFormation deployer records each stack's resource calls in a stream named after
+the stack, and `Client.Deploy` uses a `deploy-<n>` stream. `ReplayEngine.StartRecording`
+returns a new stream name, but no HTTP request is ever recorded in it ([#1630](https://github.com/scttfrdmn/substrate/issues/1630)), so replay
+`"default"` instead.
+
+A stack's resource calls are recorded in the stack's stream, and each names the request
+it ran for (`Event.ParentRequestID`). A replay that also re-runs that `CreateStack` skips
+them (reason `internal dispatch`), because the re-run dispatches them again. A replay of
+the stack's own stream, which does not hold the `CreateStack`, executes them. A dispatch
+recorded before parents were recorded, in a stream that holds a top-level request, is
+skipped with the unverified reason `internal dispatch with no recorded parent`.
+
+### Replay a test server's session
+
+```go
+func TestRecordAndReplay(t *testing.T) {
+    ts := substrate.StartTestServer(t)
+
+    // ... run the code under test against ts.URL ...
+
+    // Replays the "default" stream into a fresh emulator built from the server's
+    // configuration, and fails the test on any difference or unverified skip.
+    results := ts.AssertReplay(t)
+    t.Logf("replay: total=%d success=%d skipped=%d", results.TotalEvents,
+        results.SuccessEvents, results.SkippedEvents)
+}
+```
+
+`ts.Replay(t)` does the same without asserting, and returns the `*ReplayResults`.
+Both replay into a `ReplaySandbox` (`ts.ReplaySandbox(t)`), with a control plane so
+recorded seeds are re-applied, the quota, consistency and fault controllers the server
+ran with, and state-hash validation when the server records hashes. The server's own state is not touched, so a test can keep
+calling it afterwards. A `ts.ResetState(t)` call is not an event yet ([#1631](https://github.com/scttfrdmn/substrate/issues/1631)), so a stream that spans
+one replays as one continuous run.
+
+`substrate.AssertReplayMatches(t, results, allow...)` is the assertion on its own. It
+fails for every difference whose field matches none of the `allow` patterns
+(`path.Match` syntax, for example `"response_body/*/TableId"`), and for every event
+skipped for a reason that leaves it unchecked: no recorded request, a request body over
+the cap, a seed replayed without a control plane, or an internal dispatch with no
+recorded parent. A clock-driven or internal dispatch skip is not a failure, because the
+parent request reproduces it.
+`substrate.ReplayDifferences(recorded, replayed)` compares two `*AWSResponse` values
+the same way.
+
+### Wire up the ReplayEngine yourself
+
+To drive the engine directly against the server — replaying into the server's own
+state, which the replay resets first — build it over the **same** store, state, time
+controller, and registry the server is using:
 
 ```go
 import "log/slog"
@@ -301,20 +377,13 @@ func setupTestHarness(t *testing.T) (*substrate.TestServer, *substrate.ReplayEng
 }
 ```
 
-### Record a session
+### Replay through the engine
 
 ```go
-func TestRecordAndReplay(t *testing.T) {
+func TestReplayThroughTheEngine(t *testing.T) {
     ts, engine := setupTestHarness(t)
     ctx := context.Background()
 
-    // Start recording.
-    session, err := engine.StartRecording(ctx, "my-infra-test")
-    if err != nil {
-        t.Fatal(err)
-    }
-
-    // Run operations against the server.
     cfg, _ := config.LoadDefaultConfig(ctx,
         config.WithRegion("us-east-1"),
         config.WithBaseEndpoint(ts.URL),
@@ -325,33 +394,12 @@ func TestRecordAndReplay(t *testing.T) {
     s3Client := s3.NewFromConfig(cfg, func(o *s3.Options) { o.UsePathStyle = true })
     _, _ = s3Client.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String("my-bucket")})
 
-    // Stop recording.
-    eventCount, err := engine.StopRecording(ctx, session)
+    // HTTP requests are recorded in the "default" stream.
+    results, err := engine.Replay(ctx, substrate.DefaultStreamID)
     if err != nil {
         t.Fatal(err)
     }
-    t.Logf("recorded %d events in stream %s", eventCount, session.StreamID)
-
-    // Replay the session deterministically.
-    results, err := engine.Replay(ctx, session.StreamID)
-    if err != nil {
-        t.Fatal(err)
-    }
-    if results.FailedEvents > 0 {
-        t.Errorf("replay had %d failed events (expected 0)", results.FailedEvents)
-    }
-    t.Logf("replay: total=%d success=%d failed=%d duration=%s",
-        results.TotalEvents, results.SuccessEvents,
-        results.FailedEvents, results.Duration)
-}
-```
-
-`RecordingSession` has two fields:
-
-```go
-type RecordingSession struct {
-    StreamID  string        // event stream ID for later replay
-    StartTime time.Time     // when recording began
+    substrate.AssertReplayMatches(t, results)
 }
 ```
 
@@ -360,15 +408,19 @@ type RecordingSession struct {
 ```go
 type ReplayResults struct {
     TotalEvents   int
-    SuccessEvents int
-    FailedEvents  int
-    SkippedEvents int
+    SuccessEvents int                         // re-executed without an error
+    FailedEvents  int                         // returned an error
+    SkippedEvents int                         // not re-executed
+    SkipReasons   map[ReplaySkipReason]int    // SkippedEvents by reason
     Duration      time.Duration
-    Differences   []*EventDifference  // response divergences
+    Differences   []*EventDifference          // divergences from the recording
     StateValid    bool
     StateErrors   []string
 }
 ```
+
+`ReplayEngine.ReplayEvents(ctx, events)` replays a slice of events that is not in the
+engine's store, such as the ones a regression fixture embeds.
 
 ### What a replayed response reproduces
 
@@ -464,8 +516,8 @@ replaced — each for a reason about what the recording settled and what it did 
 | Step | On replay |
 |---|---|
 | Authorization (`AuthController.CheckAccess`) | **re-decided**, against the principal the event records |
-| Quota (`QuotaController.CheckQuota`) | **consulted, and exempts a replay** |
-| Consistency (`ConsistencyController.CheckRead`) | **consulted, and exempts a replay** |
+| Quota (`QuotaController.CheckQuota`) | **re-decided**, with the token buckets rewound and the clock at the recorded instant; exact for serialized traffic only |
+| Consistency (`ConsistencyController.CheckRead`) | **re-decided**: replayed writes open their windows and replayed reads are checked against them; exact for serialized traffic only |
 | Fault injection | **re-decided**, with the controller rewound to its armed state |
 | Credential resolution | replaced by principal restoration — the recorded access key resolves to nothing |
 | SigV4 verification | skipped: the canonical request cannot be rebuilt, and the signature was checked once already |
@@ -488,10 +540,26 @@ the same choice substrate makes live for a caller it has no ID for. A policy
 conditioning on it replays as though the key were unset. An event with no principal (an
 unsigned request, which is most of them) replays unenforced, exactly as it was served.
 
-Quota and consistency are consulted rather than skipped so that the exemption lives in
-the controllers, where it was always written. Consistency has the stronger reason:
-`RecordWrite` is exempt on replay too, so no propagation window ever opens and a
-`CheckRead` that enforced would be refusing against a window that does not exist.
+Quota and consistency are re-decided rather than exempted (#1601). An exempt replay
+re-executed a throttled or inconsistent request and applied a change the recording
+never made. Each replay rewinds both controllers, and the clock is frozen at each
+event's recorded instant, so token refills and propagation windows reach the recorded
+decisions. A replay reproduces them only when it is configured as the recording was: a
+`ReplaySandbox` built by the server or `TestServer` copies the controllers the server
+actually ran, and `substrate replay` and `substrate debug state-at` build them from the
+`quotas:` and `consistency:` sections. A CloudFormation or API Gateway internal dispatch
+passes authorization only, as it did live: neither the deployer nor the proxy consults
+quota, consistency or faults.
+
+**Quota and consistency replay exactly only for serialized traffic.** Live, overlapping
+requests reach the two gates in whatever order they take the controller's lock, and a
+replay decides them in recorded sequence order. Two requests that overlapped in time can
+therefore swap a throttle, or a window, between them on replay. This is the same
+exception deterministic-run mode documents for concurrent requests (#1598). A difference
+on an event whose recorded timestamp and duration overlap another's is likely this.
+An event a replay skips, recorded without its request or with a request body over the
+cap, is still charged to both gates (a quota token, and a window for a write that
+reached its plugin), so the decisions after it stay aligned.
 
 Fault injection needs one thing from the caller. A rule's `times` bound and its
 per-rule random stream are state a run *spends*, so the engine rewinds the controller to
@@ -632,15 +700,16 @@ enabled one — can see it.
 
 `substrate replay <stream>` replays a recorded stream outside a Go test. It needs a
 persistent event store — a `memory` backend holds nothing from a previous process —
-and `include_bodies`, because an event recorded without its request cannot be
-re-executed and is reported as skipped:
+and `include_bodies`, which is on by default, because an event recorded without its
+request cannot be re-executed and is reported as skipped:
 
 ```yaml
 event_store:
   enabled: true
   backend: "file"
   persist_path: "/var/lib/substrate"
-  include_bodies: true
+  include_bodies: true      # the default
+  max_body_bytes: 1048576   # the default
   # Needed only for replay.validate_state below. A hash is a full snapshot of
   # state, taken twice per request, so it is off by default.
   include_state_hashes: true
@@ -696,27 +765,46 @@ no implemented backend reads it.
 
 ## Time-Travel Debugging
 
-When a replay is in progress you can jump to any event, step backward, and
-inspect the full service state at that point.
+Time travel rebuilds the state a stream had at any point by replaying it into a
+`ReplaySandbox`: a fresh emulator built from the recording server's configuration,
+with its own state, clock and plugins, so the live emulator is never reset. Each event
+replays with its recorded request ID, clock reading and principal, so the state names
+the identifiers the live run minted, and recorded seeds are re-applied.
+
+A **position** is an index into one stream. The state at position `p` is the state
+before the stream's event `p` ran: position 0 is the start of the run and
+`len(stream)` is its end. A **sequence** (`Event.Sequence`) is numbered across the
+whole store, so the events of one stream do not have consecutive sequences. The
+engine takes positions and the HTTP and CLI surfaces take sequences.
 
 ```go
-// Start a replay and pause at event 10.
-results, err := engine.Replay(ctx, session.StreamID)
+ctx := context.Background()
+// Built as ts was: its configuration and its quota, consistency and fault controllers.
+// Outside a test, substrate.NewReplaySandbox(ctx, cfg, store, logger) builds one from
+// the configuration the recording server ran with.
+sandbox := ts.ReplaySandbox(t)
+engine := sandbox.Engine()
 
-// Jump to event at sequence 87 (requires StopOnError or manual pause).
-if err := engine.JumpToEvent(ctx, 87); err != nil {
-    t.Fatal(err)
-}
-
-// Step backward one event.
-prevEvent, err := engine.StepBackward(ctx)
+// Replay to the end, recording differences and snapshots.
+results, err := engine.Replay(ctx, substrate.DefaultStreamID)
 if err != nil {
     t.Fatal(err)
 }
-t.Logf("stepped back to event: %s %s/%s",
-    prevEvent.ID, prevEvent.Service, prevEvent.Operation)
+substrate.AssertReplayMatches(t, results)
 
-// Inspect all S3 state at the current position.
+// Move to just before the stream's fourth event.
+if err := engine.JumpToEvent(ctx, 3); err != nil {
+    t.Fatal(err)
+}
+
+// Step back over the third event. The returned event is the one now next to run.
+prev, err := engine.StepBackward(ctx)
+if err != nil {
+    t.Fatal(err)
+}
+t.Logf("before %s/%s", prev.Service, prev.Operation)
+
+// Read one namespace at this position.
 s3State, err := engine.InspectState(ctx, "s3")
 if err != nil {
     t.Fatal(err)
@@ -726,9 +814,85 @@ for key, val := range s3State {
 }
 ```
 
-`InspectState(ctx, namespace)` returns `map[string][]byte` — all key-value
-pairs under the given namespace at the current replay position. Common
-namespaces match service names: `"s3"`, `"dynamodb"`, `"lambda"`, `"iam"`, etc.
+The navigation methods:
+
+| Method | Does |
+|---|---|
+| `JumpToEvent(ctx, position int) error` | Moves to `position`, from 0 to `len(stream)`. |
+| `JumpToSequence(ctx, sequence int64) error` | Moves to just before the first event whose sequence is `sequence` or greater. |
+| `StepBackward(ctx) (*Event, error)` | Moves back one event and returns it. |
+| `StepForward(ctx) (*Event, error)` | Runs the next event and returns it with its replay error, if any. |
+| `InspectState(ctx, namespace) (map[string][]byte, error)` | Reads a namespace at the current position; a failed read is an error. |
+
+State cannot run backwards, so a backward move restores the nearest snapshot at or
+before the target and replays forward from there, or resets and replays from the start
+when there is none. Once a replay has moved backward, the engine takes a snapshot every
+`event_store.snapshot_interval` events it replays (default 100), of the state manager and
+of what plugins keep outside it, such as S3 object bytes. A replay that only moves
+forward takes none. Snapshots only shorten a jump: none is taken while fault rules are
+armed, or when a plugin's state cannot be captured, and a jump reaches the same state
+without one. An event re-run on the way to a target does not report its differences a
+second time, and an event's replay error does not stop a jump.
+
+`ReplaySandbox.StateAt(ctx, stream, sequence)` combines these: it returns the state
+before `sequence` as a `StateAt`, with the differences, failures and skips of the
+events that ran before it. `Client.NewDebugSession(stream)` wraps a sandbox as well,
+so its `JumpToEvent` and `StepBackward` never touch the client's own state.
+
+### Over HTTP and from the CLI
+
+The same path answers `GET /v1/debug/events/{seq}/state`, and the debug UI's state
+panel:
+
+```bash
+# The state before the event with sequence 12, in the default stream.
+curl -s 'http://localhost:4566/v1/debug/events/12/state'
+# {"stream":"default","sequence":12,"events_applied":7,"state":{…},
+#  "differences":[],"failed_events":0}
+
+# Another stream, and the change between two points.
+curl -s 'http://localhost:4566/v1/debug/events/40/state?stream=my-stack'
+curl -s 'http://localhost:4566/v1/debug/state/diff?from=0&to=40'
+```
+
+`differences` lists every place the replay diverged from the recording. An empty list
+means the state is the one the live emulator had. A stream with no events is a 404. The
+diff endpoint reports keys as `namespace/key`, with values base64-encoded.
+
+`substrate debug state-at <seq> [--stream S]` prints the same JSON from a persistent
+event store, without a running server:
+
+```bash
+substrate debug state-at 12 --config substrate.yaml
+substrate debug state-at 40 --stream my-stack --config substrate.yaml
+```
+
+## Regression Fixtures
+
+`GET /v1/debug/export?stream=S` (or `substrate.GenerateTestFixture(events, pkg, test)`)
+writes a Go test file that replays a recorded stream and fails on any difference. The
+file embeds the recorded events as JSON and replays them in process with
+`ts.ReplayEvents(t, events)` against a fresh `StartTestServer`, then asserts with
+`substrate.AssertReplayMatches`. Because nothing is re-sent over HTTP, a fixture keeps
+what an HTTP re-send loses: the recorded request IDs and every identifier minted from
+them, the recorded clock, the method, the query parameters, `X-Amz-Target` and the
+other recorded headers, and the parsed form of a Query-protocol request.
+
+```bash
+curl -s 'http://localhost:4566/v1/debug/export?stream=default&package=mypkg_test&test=TestCheckout' \
+  > checkout_replay_test.go
+go test -run TestCheckout ./...
+```
+
+The fixture's test server is started with `WithoutDefaultVPC()` when the recording
+server ran without a default VPC, and with no other option. It arms no fault rule and
+enforces no quota or consistency, so a stream recorded under armed fault rules is refused
+with a 422; a recorded throttle or `InconsistentStateException` replays as a difference.
+The generated file declares an empty allowlist (`<test>Allow`) of `path.Match`
+patterns for fields a fixture may let differ. A stream holding an event that cannot be
+replayed — recorded without bodies, or with a request body over the cap — is refused
+with a 422 rather than exported as a fixture that cannot pass. After a replay the test
+server holds the replayed state, so a fixture can carry on with assertions of its own.
 
 <!-- TODO(#178): document SetBreakpoint API once exposed -->
 
@@ -769,8 +933,8 @@ apart — it is recorded whether or not `event_store.include_bodies` is set, and
 `error_code`, which carries the refusal's own AWS code.
 
 Two members are **not** in an entry: `method` and `path`. They live on the recorded
-request, which `event_store.include_bodies` governs, so they would be empty in the
-default configuration; `service` plus `operation` identifies an operation in every
+request, which `event_store.include_bodies` governs, so they would be empty with it
+turned off; `service` plus `operation` identifies an operation in every
 configuration.
 
 From the CLI, `substrate inspect <service>` prints the most recent 100 events for one

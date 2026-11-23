@@ -5312,7 +5312,7 @@ func (d *StackDeployer) internalRequestID() string {
 	if !d.mint.Derived() {
 		return generateRequestID()
 	}
-	return "req-cfn-" + d.mint.Hex(12)
+	return cfnInternalRequestIDPrefix + d.mint.Hex(12)
 }
 
 // dispatch performs in-process request routing, records the event, and returns
@@ -5336,7 +5336,9 @@ func (d *StackDeployer) dispatch(
 		// state_hash mismatch for the create that was the right answer.
 		IDs:       NewIDMint(requestID),
 		Principal: d.attribution.resolve(),
-		Metadata:  map[string]interface{}{"stream_id": streamID},
+		// The parent names the request this deployment runs for, so a replay that also
+		// re-runs that request knows it reproduces this dispatch (#1601).
+		Metadata: map[string]interface{}{"stream_id": streamID, parentRequestIDKey: d.mint.seedRequestID()},
 	}
 
 	// A template's resource calls are built in this package rather than parsed off

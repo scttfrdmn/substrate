@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"math/rand/v2" // nosemgrep
 	"net/http"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -84,12 +86,153 @@ type ActiveReplay struct {
 	// Breakpoints maps event positions to true; replay pauses at each.
 	Breakpoints map[int]bool
 
-	// StateSnapshots maps event positions to serialized state, used by
-	// [ReplayEngine.StepBackward] and [ReplayEngine.JumpToEvent].
+	// StateSnapshots maps a stream position to the serialized [StateManager] contents
+	// before the event at that position ran. Once a replay has moved backward, the
+	// engine takes one every [EventStoreConfig.SnapshotInterval] events it replays, and
+	// [ReplayEngine.JumpToEvent] restores the nearest one at or before its target
+	// instead of replaying from the start.
+	// They are an optimisation only: a jump with no usable snapshot replays from the
+	// beginning and reaches the same state.
 	StateSnapshots map[int][]byte
 
 	// Results accumulates outcome metrics.
 	Results *ReplayResults
+
+	// pluginSnapshots holds, per position in StateSnapshots, the state plugins keep
+	// outside the StateManager (see [replaySnapshotter]). A position is restorable
+	// only when it has both.
+	pluginSnapshots map[int]map[string]any
+
+	// reached is one past the furthest position whose differences are in Results. An
+	// event re-run below it, by a jump or a step after one, is compared into a scratch
+	// result, so a difference is reported once however often the event is re-run.
+	reached int
+
+	// snapshotting is set by the first backward jump. A replay that only moves forward
+	// never restores a snapshot, and a snapshot copies every S3 payload, so none is
+	// taken before a caller has shown it navigates backward.
+	snapshotting bool
+
+	// parents holds the request ids of the stream's replayable top-level requests. An
+	// internal dispatch whose [Event.ParentRequestID] is among them is reproduced by
+	// re-running its parent and is skipped; see [isInternalDispatchEvent].
+	parents map[string]bool
+
+	// skipInternal is true when the stream holds a top-level request. It decides an
+	// internal dispatch recorded without a parent, before #1601.
+	skipInternal bool
+
+	// outcomes records, per position, how the event's first replay ended, so a partial
+	// replay can report its counts (see [ReplaySandbox.StateAt]).
+	outcomes []replayOutcome
+
+	// lastSkip is the reason the event being replayed was skipped, or empty.
+	lastSkip ReplaySkipReason
+}
+
+// replayOutcome is how one event's replay ended.
+type replayOutcome struct {
+	skipped ReplaySkipReason
+	failed  bool
+}
+
+// ReplaySkipReason says why a replay did not re-execute an event.
+type ReplaySkipReason string
+
+const (
+	// SkipNoRequest is an event recorded without its request, because
+	// event_store.include_bodies was off. Nothing about it was verified.
+	SkipNoRequest ReplaySkipReason = "no recorded request"
+
+	// SkipBodyOverCap is an event whose request body was over
+	// event_store.max_body_bytes and was not stored. Nothing about it was verified.
+	SkipBodyOverCap ReplaySkipReason = "request body over max_body_bytes"
+
+	// SkipNoControlPlane is a recorded control-plane write replayed by an engine built
+	// without [WithControlPlaneHandler]. The seed was not re-applied.
+	SkipNoControlPlane ReplaySkipReason = "control-plane write without a handler"
+
+	// SkipClockDriven is a recorded dispatch of clock-driven work. Replaying the request
+	// that triggered it runs the same work again.
+	SkipClockDriven ReplaySkipReason = "clock-driven dispatch"
+
+	// SkipInternalDispatch is a CloudFormation or API Gateway internal dispatch whose
+	// parent request is in the replayed events. Replaying the parent runs the same
+	// dispatch again.
+	SkipInternalDispatch ReplaySkipReason = "internal dispatch"
+
+	// SkipUnattributedDispatch is an internal dispatch recorded without its parent's
+	// request id, before #1601, in a stream that holds a top-level request. It is
+	// skipped because the parent is probably there and would apply it twice, but
+	// nothing shows that it is, so the skip is unverified.
+	SkipUnattributedDispatch ReplaySkipReason = "internal dispatch with no recorded parent"
+)
+
+// Unverified reports whether an event skipped for this reason leaves part of the
+// recording unchecked. The clock-driven and internal-dispatch skips do not: their
+// parent request reproduces them.
+func (r ReplaySkipReason) Unverified() bool {
+	return r == SkipNoRequest || r == SkipBodyOverCap || r == SkipNoControlPlane ||
+		r == SkipUnattributedDispatch
+}
+
+// skip counts event as skipped for reason.
+func (a *ActiveReplay) skip(reason ReplaySkipReason) {
+	a.lastSkip = reason
+	a.Results.SkippedEvents++
+	if a.Results.SkipReasons == nil {
+		a.Results.SkipReasons = make(map[ReplaySkipReason]int)
+	}
+	a.Results.SkipReasons[reason]++
+}
+
+// Request-ID prefixes of the internal dispatches a parent request makes in process.
+const (
+	cfnInternalRequestIDPrefix   = "req-cfn-"
+	apigwInternalRequestIDPrefix = "req-apigw-"
+)
+
+// isInternalDispatchEvent reports whether event records a request the CloudFormation
+// deployer or the API Gateway proxy dispatched on a parent request's behalf. Its
+// request ID is derived from the parent's, so re-running the parent re-runs it.
+func isInternalDispatchEvent(event *Event) bool {
+	return strings.HasPrefix(event.RequestID, cfnInternalRequestIDPrefix) ||
+		strings.HasPrefix(event.RequestID, apigwInternalRequestIDPrefix)
+}
+
+// isTopLevelEvent reports whether ev records a request that arrived from outside,
+// rather than a dispatch made in process or a control-plane write.
+func isTopLevelEvent(ev *Event) bool {
+	return !isInternalDispatchEvent(ev) && !isClockDrivenDispatchEvent(ev) && !isControlPlaneEvent(ev)
+}
+
+// replayableParents returns the request ids of the top-level requests in events that a
+// replay re-executes, which are the parents whose internal dispatches it reproduces. A
+// stream recorded by [Client.Deploy] holds none: its dispatches are replayed by
+// executing them. It also reports whether events holds any top-level request, which
+// decides a dispatch recorded without a parent.
+func replayableParents(events []*Event) (map[string]bool, bool) {
+	parents := make(map[string]bool)
+	topLevel := false
+	for _, ev := range events {
+		if !isTopLevelEvent(ev) {
+			continue
+		}
+		topLevel = true
+		if ev.Request != nil && ev.RequestBodyOmitted == nil && ev.RequestID != "" {
+			parents[ev.RequestID] = true
+		}
+	}
+	return parents, topLevel
+}
+
+// internalDispatchSkip returns why event, an internal dispatch, is not executed, or
+// false when it must be: its parent is not re-run, so nothing else reproduces it.
+func (a *ActiveReplay) internalDispatchSkip(event *Event) (ReplaySkipReason, bool) {
+	if event.ParentRequestID != "" {
+		return SkipInternalDispatch, a.parents[event.ParentRequestID]
+	}
+	return SkipUnattributedDispatch, a.skipInternal
 }
 
 // ReplayResults holds the outcome of a completed replay run.
@@ -100,7 +243,7 @@ type ActiveReplay struct {
 // SuccessEvents + FailedEvents + SkippedEvents == TotalEvents. That was not true
 // before #833: a skipped event incremented SkippedEvents *and* SuccessEvents,
 // because the skip returned no error and the driver read a nil error as a
-// success. So a stream recorded without bodies — the default, see
+// success. So a stream recorded without bodies — the default before #1599, see
 // [EventStoreConfig.IncludeBodies] — reported every one of its events as a
 // successful replay while executing none of them.
 //
@@ -119,11 +262,13 @@ type ReplayResults struct {
 	// FailedEvents is the number of events that produced an error during replay.
 	FailedEvents int
 
-	// SkippedEvents is the number of events that could not be re-executed
-	// because the recorded event carries no request. An event stream recorded
-	// without [EventStoreConfig.IncludeBodies] carries no request on any event,
-	// so every event is skipped and nothing is verified.
+	// SkippedEvents is the number of events that were not re-executed. SkipReasons
+	// says why; a reason whose [ReplaySkipReason.Unverified] is true means part of the
+	// recording was not checked.
 	SkippedEvents int
+
+	// SkipReasons counts SkippedEvents by reason.
+	SkipReasons map[ReplaySkipReason]int
 
 	// Duration is the wall-clock time taken for the replay run.
 	Duration time.Duration
@@ -145,10 +290,10 @@ type ReplayResults struct {
 // its replay counterpart.
 type EventDifference struct {
 	// EventID is the ID of the diverging event.
-	EventID string
+	EventID string `json:"event_id"`
 
 	// Sequence is the event's position in the stream.
-	Sequence int64
+	Sequence int64 `json:"sequence"`
 
 	// Operation is the AWS API operation the diverging event invoked.
 	//
@@ -157,21 +302,21 @@ type EventDifference struct {
 	// carries the operation too, but only as one field of a minted composite
 	// (see generateEventID), which is not something a report should be parsing
 	// (#817).
-	Operation string
+	Operation string `json:"operation"`
 
 	// Field names the response or state field that diverged. A body comparison
 	// reports "response_body" followed by the path within the body; see
 	// [bodyDifferenceField].
-	Field string
+	Field string `json:"field"`
 
 	// Expected is the value recorded in the original event.
-	Expected interface{}
+	Expected interface{} `json:"expected"`
 
 	// Actual is the value produced during replay.
-	Actual interface{}
+	Actual interface{} `json:"actual"`
 
 	// Significance is "minor", "major", or "critical".
-	Significance string
+	Significance string `json:"significance"`
 }
 
 // ReplayPipeline carries the pre-plugin controllers a replayed request passes
@@ -259,58 +404,101 @@ func NewReplayEngine(
 // Events are re-executed through the plugin registry; responses are compared
 // with the originals and differences are recorded in [ReplayResults].
 func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResults, error) {
-	r.mu.Lock()
-
 	events, err := r.eventStore.GetStream(ctx, streamID)
 	if err != nil {
-		r.mu.Unlock()
 		return nil, fmt.Errorf("get stream: %w", err)
 	}
-
 	if len(events) == 0 {
-		r.mu.Unlock()
 		return nil, fmt.Errorf("no events in stream: %s", streamID)
 	}
+	return r.ReplayEvents(ctx, events)
+}
 
-	replay := &ActiveReplay{
-		ID:             generateReplayID(),
-		StreamID:       streamID,
-		StartTime:      time.Now(),
-		Events:         events,
-		Position:       0,
-		Breakpoints:    make(map[int]bool),
-		StateSnapshots: make(map[int][]byte),
-		Results: &ReplayResults{
-			TotalEvents: len(events),
-			Differences: make([]*EventDifference, 0),
-			StateErrors: make([]string, 0),
-			StateValid:  true,
-		},
+// ReplayEvents replays events, in order, as one stream. It is [ReplayEngine.Replay]
+// for events that are not in the engine's store, such as the ones a generated
+// regression fixture embeds (see [GenerateTestFixture]).
+func (r *ReplayEngine) ReplayEvents(ctx context.Context, events []*Event) (*ReplayResults, error) {
+	if len(events) == 0 {
+		return nil, fmt.Errorf("no events to replay")
 	}
+	replay, err := r.begin(ctx, events)
+	if err != nil {
+		return nil, err
+	}
+	return r.run(ctx, replay), nil
+}
 
-	r.currentReplay = replay
-	r.mu.Unlock()
+// newReplayResults returns an empty result for a stream of total events.
+func newReplayResults(total int) *ReplayResults {
+	return &ReplayResults{
+		TotalEvents: total,
+		Differences: make([]*EventDifference, 0),
+		StateErrors: make([]string, 0),
+		StateValid:  true,
+	}
+}
+
+// begin makes events the engine's active replay, positioned before the first event,
+// and brings the state to the start of the run.
+func (r *ReplayEngine) begin(ctx context.Context, events []*Event) (*ActiveReplay, error) {
+	parents, topLevel := replayableParents(events)
+	replay := &ActiveReplay{
+		ID:              generateReplayID(),
+		StreamID:        events[0].StreamID,
+		StartTime:       time.Now(),
+		Events:          events,
+		Breakpoints:     make(map[int]bool),
+		StateSnapshots:  make(map[int][]byte),
+		pluginSnapshots: make(map[int]map[string]any),
+		Results:         newReplayResults(len(events)),
+		parents:         parents,
+		skipInternal:    topLevel,
+		outcomes:        make([]replayOutcome, len(events)),
+	}
 
 	r.logger.Info("starting replay",
 		"replay_id", replay.ID,
-		"stream_id", streamID,
+		"stream_id", replay.StreamID,
 		"events", len(events),
 	)
 
+	if err := r.startOfRun(ctx, replay); err != nil {
+		return nil, err
+	}
+	// Published only once the run can start, so a failed begin leaves no active replay
+	// that navigation could move.
+	r.mu.Lock()
+	r.currentReplay = replay
+	r.mu.Unlock()
+	return replay, nil
+}
+
+// startOfRun brings the emulator to the state a run starts from, and re-seeds the
+// engine's random source from [ReplayConfig.RandomSeed]. A replay begins here, and a
+// backward jump with no snapshot to restore returns here.
+//
+// The state is always reset first: the state manager, what plugins keep on themselves,
+// and the pre-plugin controllers. Under [ReplayConfig.UseSnapshots] the stream's stored
+// snapshot is then restored on top. A stream with no stored snapshot starts from the
+// reset state; a stored snapshot that cannot be restored is an error, because the replay
+// would otherwise run from a state that is neither the snapshot nor empty.
+func (r *ReplayEngine) startOfRun(ctx context.Context, replay *ActiveReplay) error {
+	if err := r.resetState(ctx); err != nil {
+		return fmt.Errorf("reset state: %w", err)
+	}
 	if r.config.UseSnapshots {
-		if err := r.loadFromSnapshot(ctx, streamID); err != nil {
-			r.logger.Warn("snapshot load failed, starting from empty state", "error", err)
-		}
-	} else {
-		if err := r.resetState(ctx); err != nil {
-			return nil, fmt.Errorf("reset state: %w", err)
+		if err := r.loadFromSnapshot(ctx, replay.StreamID); err != nil {
+			return fmt.Errorf("load stored snapshot for stream %s: %w", replay.StreamID, err)
 		}
 	}
-
 	if r.config.RandomSeed != 0 {
 		r.rng = rand.New(rand.NewPCG(uint64(r.config.RandomSeed), 0)) //nolint:gosec
 	}
+	return nil
+}
 
+// run replays replay from its position to the end and returns its results.
+func (r *ReplayEngine) run(ctx context.Context, replay *ActiveReplay) *ReplayResults {
 	start := time.Now()
 
 	for replay.Position < len(replay.Events) {
@@ -330,7 +518,7 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 		// executed is what distinguishes a success from a skip. Both return a nil
 		// error, so a driver that reads only the error counts a skipped event as a
 		// successful replay — which is what #833 fixed here.
-		executed, err := r.replayEvent(ctx, event, replay)
+		executed, err := r.advance(ctx, replay)
 		if err != nil {
 			r.logger.Error("event replay failed",
 				"event_id", event.ID,
@@ -368,7 +556,32 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 		"duration", replay.Results.Duration,
 	)
 
-	return replay.Results, nil
+	return replay.Results
+}
+
+// advance re-executes the event at the replay's position without moving the position,
+// taking a snapshot first when one is due.
+//
+// An event below [ActiveReplay.reached] has been compared already, so its comparison
+// goes to a scratch result and is dropped: re-running it on the way to a jump target
+// must not report its differences a second time.
+func (r *ReplayEngine) advance(ctx context.Context, replay *ActiveReplay) (bool, error) {
+	pos := replay.Position
+	r.maybeSnapshot(ctx, replay)
+	first := pos >= replay.reached
+	if first {
+		replay.reached = pos + 1
+	} else {
+		kept := replay.Results
+		replay.Results = newReplayResults(kept.TotalEvents)
+		defer func() { replay.Results = kept }()
+	}
+	replay.lastSkip = ""
+	executed, err := r.replayEvent(ctx, replay.Events[pos], replay)
+	if first {
+		replay.outcomes[pos] = replayOutcome{skipped: replay.lastSkip, failed: err != nil}
+	}
+	return executed, err
 }
 
 // replayEvent re-executes a single event through the pre-plugin pipeline and the
@@ -385,7 +598,8 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 // A refusal before plugin dispatch is part of what a recorded run means, so four of
 // [Server.handleAWSRequest]'s steps run here too, through the same [prePluginGates]
 // the live path uses. The other five read the live *http.Request or the replay's own
-// configuration and are skipped. Each decision, in pipeline order:
+// configuration and are skipped. An internal dispatch (see [isInternalDispatchEvent])
+// passes only step 2, as it did live. Each decision, in pipeline order:
 //
 //   - **Step 1.1, the rpc-v2-cbor/target conflict** — skipped. It is a property of the
 //     HTTP request's headers and path, and no event carries either.
@@ -405,13 +619,13 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 //     about the wall-clock moment a URL was signed, which the recording settled.
 //   - **Step 2, authorization** — re-decided, against the principal restored from
 //     [Event.Principal].
-//   - **Step 3, quota** — consulted, and exempt: [QuotaController.CheckQuota] returns
-//     early for a replaying request. Reaching that exemption through the pipeline is
-//     the point — the guard was written for this path and was unreachable from it.
-//   - **Step 4, consistency** — consulted, and exempt for a stronger reason than its
-//     guard: [ConsistencyController.RecordWrite] is guarded on the same flag, so no
-//     propagation window ever opens during a replay and a CheckRead that enforced
-//     would be refusing against a window that does not exist.
+//   - **Step 3, quota** — re-decided, from a controller rewound at the start of the
+//     replay, at the recorded clock reading, so a recorded throttle replays as the same
+//     throttle (#1601). It exempted a replay before #1601, which replayed a throttled
+//     write as a success.
+//   - **Step 4, consistency** — re-decided the same way. A replayed write opens its
+//     propagation window (step 7, which a replay runs too) and a replayed read inside one
+//     is refused.
 //   - **Step 4.5, fault injection** — re-decided from the armed rules, with the
 //     controller rewound at the start of the replay; see
 //     [FaultController.rewindForReplay]. A latency rule's delay is *not* slept: the
@@ -432,8 +646,14 @@ func (r *ReplayEngine) Replay(ctx context.Context, streamID string) (*ReplayResu
 // something any plugin can produce independently of the body or the status today,
 // and comparing them would report the Content-Length of a body already reported.
 func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) (bool, error) {
+	if event.RequestBodyOmitted != nil {
+		replay.skip(SkipBodyOverCap)
+		r.chargeSkippedGates(event)
+		return false, nil
+	}
 	if event.Request == nil {
-		replay.Results.SkippedEvents++
+		replay.skip(SkipNoRequest)
+		r.chargeSkippedGates(event)
 		return false, nil
 	}
 
@@ -441,8 +661,19 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	// triggered it, which runs the same work at the same clock reading. Executing the
 	// recorded copy as well would apply each dispatch twice (#1292).
 	if isClockDrivenDispatchEvent(event) {
-		replay.Results.SkippedEvents++
+		replay.skip(SkipClockDriven)
 		return false, nil
+	}
+
+	// The same holds for a CloudFormation or API Gateway internal dispatch whose parent
+	// request is replayed too: re-running the parent re-runs it, with the same derived
+	// request ID. One whose parent is not in the replayed events, such as a stack's own
+	// stream or a [Client.Deploy] stream, is executed.
+	if isInternalDispatchEvent(event) {
+		if reason, skip := replay.internalDispatchSkip(event); skip {
+			replay.skip(reason)
+			return false, nil
+		}
 	}
 
 	// The clock is frozen *and then* set, in that order, and restored when the event
@@ -521,7 +752,17 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	// stops here: the request must not reach the plugin, because the recorded run's
 	// plugin never saw it either and routing it would apply a state change the
 	// recording does not contain.
-	if gate := r.pipeline.gates().check(reqCtx, event.Request); gate.err != nil {
+	//
+	// An internal dispatch passes authorization only: live, [StackDeployer.dispatch]
+	// authorizes and the API Gateway proxy's Lambda invocation checks nothing, and
+	// neither consults quota, consistency or faults, so replaying them through those
+	// gates would refuse what the live run never asked.
+	gates := r.pipeline.gates()
+	internal := isInternalDispatchEvent(event)
+	if internal {
+		gates.quota, gates.consistency, gates.fault = nil, nil, nil
+	}
+	if gate := gates.check(reqCtx, event.Request); gate.err != nil {
 		r.recordErrorDifference(replay, event, gate.err)
 		return true, gate.err
 	}
@@ -538,6 +779,12 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	if err != nil {
 		r.recordErrorDifference(replay, event, err)
 		return true, err
+	}
+
+	// Step 7, as the live server runs it: a successful write opens the propagation window
+	// a later replayed read is checked against.
+	if !internal && r.pipeline.Consistency != nil && isMutating(event.Request.Operation) {
+		r.pipeline.Consistency.RecordWrite(reqCtx, event.Request)
 	}
 
 	// A recorded refusal that replays as a success. Nothing caught this before
@@ -575,7 +822,11 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 				Significance: "major",
 			})
 		}
-		r.recordBodyDifferences(replay, event, resp)
+		if event.ResponseBodyOmitted != nil {
+			r.recordDigestDifference(replay, event, resp)
+		} else {
+			r.recordBodyDifferences(replay, event, resp)
+		}
 	}
 
 	if r.config.ValidateState && event.StateHashAfter != "" {
@@ -664,6 +915,75 @@ func (r *ReplayEngine) recordBodyDifferences(replay *ActiveReplay, event *Event,
 	}
 }
 
+// chargeSkippedGates applies to the quota and consistency controllers what a top-level
+// event the replay cannot re-execute did to them live: it took a quota token and, as a
+// write that reached its plugin, opened a propagation window. Without it every gate
+// decision after a skipped event diverges from the recording.
+//
+// It is best effort. An event recorded without its request is charged under its
+// service and operation alone, so a rule or resource key that needs the path or the
+// parameters is not reached. An event refused for access was refused before the quota
+// gate and takes no token.
+func (r *ReplayEngine) chargeSkippedGates(event *Event) {
+	if !isTopLevelEvent(event) || (r.pipeline.Quota == nil && r.pipeline.Consistency == nil) {
+		return
+	}
+	req := event.Request
+	if req == nil {
+		req = &AWSRequest{Service: event.Service, Operation: event.Operation}
+	}
+	if r.timeController != nil {
+		wasFrozen := r.timeController.Frozen()
+		r.timeController.Freeze()
+		r.timeController.SetTime(event.Timestamp)
+		if !wasFrozen {
+			defer r.timeController.Unfreeze()
+		}
+	}
+	reqCtx := &RequestContext{
+		RequestID: replayRequestID(event),
+		AccountID: event.AccountID,
+		Region:    event.Region,
+		Timestamp: event.Timestamp,
+		Metadata:  map[string]interface{}{"stream_id": event.StreamID, "replaying": true},
+	}
+	if r.pipeline.Quota != nil && !isAccessRefusal(event.ErrorCode) {
+		// The token is what is being charged; whether it was granted is the recording's
+		// answer, and the event is not re-decided.
+		_ = r.pipeline.Quota.CheckQuota(reqCtx, req)
+	}
+	if r.pipeline.Consistency != nil && event.Error == "" && isMutating(req.Operation) {
+		r.pipeline.Consistency.RecordWrite(reqCtx, req)
+	}
+}
+
+// isAccessRefusal reports whether code is an authorization refusal, which the pipeline
+// answers before it reaches the quota gate.
+func isAccessRefusal(code string) bool {
+	return code == "AccessDenied" || code == "AccessDeniedException"
+}
+
+// recordDigestDifference compares a replayed body against the digest recorded in place
+// of a body that was over [EventStoreConfig.MaxBodyBytes]. Only byte equality can be
+// checked: the normalisation [responseBodyDifferences] applies (JSON member order, XML
+// whitespace) is not, so two bodies an SDK decodes identically can still differ here. A
+// mismatch is one whole-body difference.
+func (r *ReplayEngine) recordDigestDifference(replay *ActiveReplay, event *Event, resp *AWSResponse) {
+	got := newBodyDigest(resp.Body)
+	if *got == *event.ResponseBodyOmitted {
+		return
+	}
+	replay.Results.Differences = append(replay.Results.Differences, &EventDifference{
+		EventID:      event.ID,
+		Sequence:     event.Sequence,
+		Operation:    event.Operation,
+		Field:        bodyDifferenceField(""),
+		Expected:     fmt.Sprintf("%d bytes, sha256 %s", event.ResponseBodyOmitted.Length, event.ResponseBodyOmitted.SHA256),
+		Actual:       fmt.Sprintf("%d bytes, sha256 %s", got.Length, got.SHA256),
+		Significance: "major",
+	})
+}
+
 // replayPrincipal rebuilds the principal a recorded request was served for, or nil
 // when the event names none — an unsigned request, which most recorded requests are,
 // and which was unenforced live for the same reason it is unenforced here.
@@ -743,8 +1063,14 @@ func replayRequestID(event *Event) string {
 	return event.ID
 }
 
-// StepForward re-executes the next event and advances the position.
-// Returns the event that was replayed.
+// StepForward re-executes the event at the current position, advances the position
+// past it, and returns it.
+//
+// The error is the event's own replay error. The position advances either way, because
+// a recorded failure is part of the stream and stepping past it is how a session reaches
+// the events after it; whether the error matches the recording is in
+// [ReplayResults.Differences]. It returns a nil event only when there is no active replay
+// or the replay is at its end.
 //
 // It records differences but does not maintain [ReplayResults]' success and
 // failure counters, which belong to a whole-stream [ReplayEngine.Replay]; the
@@ -763,19 +1089,17 @@ func (r *ReplayEngine) StepForward(ctx context.Context) (*Event, error) {
 	}
 
 	event := r.currentReplay.Events[r.currentReplay.Position]
-
-	if _, err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
-		return nil, err
-	}
-
+	_, err := r.advance(ctx, r.currentReplay)
 	r.currentReplay.Position++
-
-	return event, nil
+	return event, err
 }
 
-// StepBackward restores state to the previous event position.
-// A stored [ActiveReplay.StateSnapshots] entry is required for the target
-// position; otherwise an error is returned.
+// StepBackward moves the replay back one event, so the event before the current
+// position is the next to run, and returns that event.
+//
+// It is [ReplayEngine.JumpToEvent] to the previous position. State cannot be run
+// backwards, so the engine restores the nearest snapshot at or before that position, or
+// resets, and replays forward to it.
 func (r *ReplayEngine) StepBackward(ctx context.Context) (*Event, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -788,63 +1112,82 @@ func (r *ReplayEngine) StepBackward(ctx context.Context) (*Event, error) {
 		return nil, fmt.Errorf("already at beginning of replay")
 	}
 
-	r.currentReplay.Position--
-
-	snapshot, ok := r.currentReplay.StateSnapshots[r.currentReplay.Position]
-	if !ok {
-		return nil, fmt.Errorf("no state snapshot at position %d; replay from beginning to build snapshots", r.currentReplay.Position)
+	target := r.currentReplay.Position - 1
+	if err := r.jump(ctx, r.currentReplay, target); err != nil {
+		return nil, err
 	}
-
-	if err := r.restoreState(ctx, snapshot); err != nil {
-		return nil, fmt.Errorf("restore state: %w", err)
-	}
-
-	return r.currentReplay.Events[r.currentReplay.Position], nil
+	return r.currentReplay.Events[target], nil
 }
 
-// JumpToEvent repositions the replay to sequence. If a snapshot exists before
-// sequence it is used to fast-forward; otherwise replay restarts from zero.
-func (r *ReplayEngine) JumpToEvent(ctx context.Context, sequence int64) error {
+// JumpToEvent moves the active replay to position, an index into the stream: the state
+// becomes the state before the event at that position ran, so 0 is the start of the run
+// and len(stream) is its end.
+//
+// A forward jump replays from the current position. A backward jump restores the
+// nearest snapshot at or before position (see [ActiveReplay.StateSnapshots]), or resets
+// the state when there is none, and replays forward from there. An event's replay error
+// does not stop the jump; it is compared with the recording like any other result, and
+// an event re-run by a jump does not report its differences again.
+//
+// Use [ReplayEngine.JumpToSequence] to name the target by [Event.Sequence] instead.
+func (r *ReplayEngine) JumpToEvent(ctx context.Context, position int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if r.currentReplay == nil {
 		return fmt.Errorf("no active replay")
 	}
+	return r.jump(ctx, r.currentReplay, position)
+}
 
-	targetPos := int(sequence)
-	if targetPos < 0 || targetPos >= len(r.currentReplay.Events) {
-		return fmt.Errorf("sequence %d out of range [0, %d)", sequence, len(r.currentReplay.Events))
+// JumpToSequence moves the active replay to just before the first event whose
+// [Event.Sequence] is sequence or greater. A sequence past the stream's last event moves
+// it to the end. Sequences are numbered across the whole store, which is why this is
+// separate from [ReplayEngine.JumpToEvent].
+func (r *ReplayEngine) JumpToSequence(ctx context.Context, sequence int64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if r.currentReplay == nil {
+		return fmt.Errorf("no active replay")
+	}
+	return r.jump(ctx, r.currentReplay, positionOfSequence(r.currentReplay.Events, sequence))
+}
+
+// positionOfSequence returns the index of the first event in events whose sequence is
+// at least sequence, or len(events) when there is none. events is in sequence order.
+func positionOfSequence(events []*Event, sequence int64) int {
+	return sort.Search(len(events), func(i int) bool { return events[i].Sequence >= sequence })
+}
+
+// jump implements [ReplayEngine.JumpToEvent]. The caller holds r.mu.
+func (r *ReplayEngine) jump(ctx context.Context, replay *ActiveReplay, target int) error {
+	if target < 0 || target > len(replay.Events) {
+		return fmt.Errorf("position %d out of range [0, %d]", target, len(replay.Events))
 	}
 
-	// Find the latest snapshot that precedes targetPos.
-	nearestSnapshot := -1
-	for pos := range r.currentReplay.StateSnapshots {
-		if pos <= targetPos && pos > nearestSnapshot {
-			nearestSnapshot = pos
+	if target < replay.Position {
+		replay.snapshotting = true
+		if pos, ok := r.nearestSnapshot(replay, target); ok {
+			if err := r.restoreSnapshot(ctx, replay, pos); err != nil {
+				return err
+			}
+			replay.Position = pos
+		} else {
+			if err := r.startOfRun(ctx, replay); err != nil {
+				return err
+			}
+			replay.Position = 0
 		}
 	}
 
-	if nearestSnapshot >= 0 {
-		if err := r.restoreState(ctx, r.currentReplay.StateSnapshots[nearestSnapshot]); err != nil {
-			return fmt.Errorf("restore state from snapshot: %w", err)
+	for replay.Position < target {
+		if _, err := r.advance(ctx, replay); err != nil {
+			r.logger.Debug("event replay returned an error during a jump",
+				"position", replay.Position, "error", err)
 		}
-		r.currentReplay.Position = nearestSnapshot
-	} else {
-		if err := r.resetState(ctx); err != nil {
-			return fmt.Errorf("reset state: %w", err)
-		}
-		r.currentReplay.Position = 0
+		replay.Position++
 	}
-
-	for r.currentReplay.Position < targetPos {
-		event := r.currentReplay.Events[r.currentReplay.Position]
-		if _, err := r.replayEvent(ctx, event, r.currentReplay); err != nil {
-			return fmt.Errorf("replay failed at position %d: %w", r.currentReplay.Position, err)
-		}
-		r.currentReplay.Position++
-	}
-
 	return nil
 }
 
@@ -890,19 +1233,24 @@ func (r *ReplayEngine) Resume() {
 }
 
 // InspectState returns all key-value pairs in namespace at the current replay
-// position.
+// position. A failed read is returned rather than leaving the key out, so a partial
+// map is never mistaken for the state.
 func (r *ReplayEngine) InspectState(ctx context.Context, namespace string) (map[string][]byte, error) {
+	if r.stateManager == nil {
+		return nil, fmt.Errorf("replay engine has no state manager")
+	}
 	keys, err := r.stateManager.List(ctx, namespace, "")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("list %s: %w", namespace, err)
 	}
 
 	state := make(map[string][]byte, len(keys))
 	for _, key := range keys {
 		val, err := r.stateManager.Get(ctx, namespace, key)
-		if err == nil {
-			state[key] = val
+		if err != nil {
+			return nil, fmt.Errorf("read %s/%s: %w", namespace, key, err)
 		}
+		state[key] = val
 	}
 
 	return state, nil
@@ -940,6 +1288,11 @@ type RecordingSession struct {
 // StartRecording begins a new recording session named name.
 // All events tagged with the returned [RecordingSession.StreamID] are
 // grouped together for later replay.
+//
+// Nothing tags a request that arrives over HTTP with this stream: every such request
+// is recorded in [DefaultStreamID]. Only an in-process dispatch that sets
+// RequestContext.Metadata["stream_id"] to the session's StreamID joins it. To replay a
+// test server's traffic, replay [DefaultStreamID] or call [TestServer.Replay].
 func (r *ReplayEngine) StartRecording(_ context.Context, name string) (*RecordingSession, error) {
 	streamID := fmt.Sprintf("recording-%s-%d", name, time.Now().UnixNano())
 
@@ -1022,6 +1375,13 @@ func (r *ReplayEngine) resetState(ctx context.Context) error {
 	if r.pipeline.Fault != nil {
 		r.pipeline.Fault.rewindForReplay()
 	}
+	// Token buckets and propagation windows are spent and opened the same way (#1601).
+	if r.pipeline.Quota != nil {
+		r.pipeline.Quota.rewindForReplay()
+	}
+	if r.pipeline.Consistency != nil {
+		r.pipeline.Consistency.rewindForReplay()
+	}
 	if r.registry == nil {
 		return nil
 	}
@@ -1032,10 +1392,14 @@ func (r *ReplayEngine) resetState(ctx context.Context) error {
 }
 
 // loadFromSnapshot restores state from the most recent snapshot for streamID.
+//
+// A stream with no stored snapshot is not an error: there is nothing to restore, and the
+// run starts from the state the caller reset.
 func (r *ReplayEngine) loadFromSnapshot(ctx context.Context, streamID string) error {
 	snapshot, err := r.eventStore.GetLatestSnapshot(ctx, streamID)
 	if err != nil {
-		return err
+		r.logger.Debug("no stored snapshot; starting from reset state", "stream_id", streamID)
+		return nil //nolint:nilerr // GetLatestSnapshot's only error is that none exists.
 	}
 	return r.restoreState(ctx, snapshot.State)
 }

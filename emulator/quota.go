@@ -87,8 +87,11 @@ func NewQuotaController(cfg QuotaConfig, tc *TimeController) *QuotaController {
 // It returns nil when the request is allowed or quota is disabled.
 // When throttled it returns an [*AWSError]: ThrottlingException and HTTP 429 for
 // every service but S3, and S3's own SlowDown and HTTP 503 for S3 (see
-// [s3SlowDownError]). Requests with reqCtx.Metadata["replaying"]=true are always
-// allowed.
+// [s3SlowDownError]). A replay re-decides it against the recorded clock, so a recorded
+// throttle replays as the same throttle (#1601); the replay rewinds the buckets first
+// (see [QuotaController.rewindForReplay]). That is exact only for serialized traffic:
+// live, overlapping requests take tokens in lock-acquisition order, and a replay takes
+// them in recorded sequence order, so two overlapping requests can swap outcomes.
 //
 // One rule can govern many token buckets. For nearly every rule the rule and the
 // bucket are one and the same, so a rule's rate is the rate of whatever it names.
@@ -100,9 +103,6 @@ func NewQuotaController(cfg QuotaConfig, tc *TimeController) *QuotaController {
 // single bucket like any other.
 func (q *QuotaController) CheckQuota(reqCtx *RequestContext, req *AWSRequest) error {
 	if !q.cfg.Enabled {
-		return nil
-	}
-	if isReplaying(reqCtx) {
 		return nil
 	}
 
@@ -242,15 +242,31 @@ func refusalErrorCode(err error) string {
 	return "InternalFailure"
 }
 
-// isReplaying reports whether the request context carries a replaying flag.
-func isReplaying(reqCtx *RequestContext) bool {
-	if reqCtx.Metadata == nil {
+// rewindForReplay empties every token bucket, which a run drains as it goes, so a replay
+// starts from the controller's start-of-run state: each bucket is refilled to its burst
+// on first use.
+func (q *QuotaController) rewindForReplay() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.buckets = make(map[string]*tokenBucket)
+}
+
+// enabled reports whether the controller enforces anything. A nil controller does not.
+func (q *QuotaController) enabled() bool {
+	if q == nil {
 		return false
 	}
-	v, ok := reqCtx.Metadata["replaying"]
-	if !ok {
-		return false
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.cfg.Enabled
+}
+
+// config returns the controller's configuration, or a disabled one for a nil controller.
+func (q *QuotaController) config() QuotaConfig {
+	if q == nil {
+		return QuotaConfig{}
 	}
-	b, _ := v.(bool)
-	return b
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.cfg
 }

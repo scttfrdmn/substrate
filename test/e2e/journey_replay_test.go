@@ -23,15 +23,15 @@ import (
 // recorded session through the plugin registry.
 //
 // Two things here are load-bearing, and this test asserted neither before #833.
-// [emulator.WithRecordedBodies] is required: [emulator.EventStoreConfig.IncludeBodies]
-// defaults to false, a recorded event with no request cannot be re-executed, and a
+// The bodies are recorded, which a test server does by default since #1599: a recorded
+// event with no request cannot be re-executed, and a
 // replay of such a stream used to report every event as a *success* while executing
 // none of them — so this test passed on total=2 success=2 failed=0 having replayed
 // nothing. And the proof of execution is the object read back afterwards, not a
 // counter: Replay wipes state before re-executing, so an object readable after the
 // replay can only have been written by the replay.
 func TestJourney_RecordAndReplay(t *testing.T) {
-	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
+	ts := emulator.StartTestServer(t)
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

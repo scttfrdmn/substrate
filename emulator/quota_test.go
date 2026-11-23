@@ -120,7 +120,10 @@ func TestQuotaController_OperationKeyTakesPrecedence(t *testing.T) {
 	}
 }
 
-func TestQuotaController_ReplayingContext_NeverThrottled(t *testing.T) {
+// TestQuotaController_ReplayingContext_IsThrottledToo pins that a replay re-decides quota
+// (#1601): a recorded throttle has to replay as a throttle, so the replaying flag
+// exempts nothing.
+func TestQuotaController_ReplayingContext_IsThrottledToo(t *testing.T) {
 	tc := emulator.NewTimeController(time.Now())
 	cfg := emulator.QuotaConfig{
 		Enabled: true,
@@ -139,10 +142,9 @@ func TestQuotaController_ReplayingContext_NeverThrottled(t *testing.T) {
 		Metadata:  map[string]interface{}{"replaying": true},
 	}
 
-	// Even beyond burst, replaying requests always pass.
-	for i := 0; i < 100; i++ {
-		require.NoError(t, ctrl.CheckQuota(reqCtx, req), "replaying request %d should never be throttled", i)
-	}
+	tc.Freeze()
+	require.NoError(t, ctrl.CheckQuota(reqCtx, req), "the burst allows one")
+	require.Error(t, ctrl.CheckQuota(reqCtx, req), "a replayed request beyond the burst is throttled")
 }
 
 func TestQuotaController_UnknownService_Allowed(t *testing.T) {

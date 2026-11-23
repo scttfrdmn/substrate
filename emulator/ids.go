@@ -112,6 +112,15 @@ func (m *IDMint) Derived() bool {
 	return m != nil && m.seed != ""
 }
 
+// seedRequestID returns the request id the mint derives from, or empty for a nil or
+// seedless mint.
+func (m *IDMint) seedRequestID() string {
+	if m == nil {
+		return ""
+	}
+	return m.seed
+}
+
 // bytes returns n bytes for one identifier, and advances the ordinal.
 //
 // The derived path is HMAC-SHA256 keyed by the seed over the ordinal, extended in counter

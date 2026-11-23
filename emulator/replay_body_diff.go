@@ -127,6 +127,35 @@ func bodyDifferenceField(path string) string {
 	return "response_body" + path
 }
 
+// ReplayDifferences compares two AWS responses the way a replay compares a replayed
+// response with its recording: the status code, then the body under the normalisation
+// policy this file documents. Each difference is returned as an [EventDifference] with
+// no event attached, its Field "status_code" or "response_body" followed by the path
+// within the body. Two equal responses return none. A nil response compares as an
+// empty 200.
+func ReplayDifferences(recorded, replayed *AWSResponse) []*EventDifference {
+	if recorded == nil {
+		recorded = &AWSResponse{StatusCode: 200}
+	}
+	if replayed == nil {
+		replayed = &AWSResponse{StatusCode: 200}
+	}
+	var out []*EventDifference
+	if recorded.StatusCode != replayed.StatusCode {
+		out = append(out, &EventDifference{
+			Field: "status_code", Expected: recorded.StatusCode, Actual: replayed.StatusCode,
+			Significance: "major",
+		})
+	}
+	for _, d := range responseBodyDifferences(recorded, replayed) {
+		out = append(out, &EventDifference{
+			Field: bodyDifferenceField(d.path), Expected: d.expected, Actual: d.actual,
+			Significance: "major",
+		})
+	}
+	return out
+}
+
 // responseBodyDifferences compares the recorded response body against the body a
 // replay produced.
 //
