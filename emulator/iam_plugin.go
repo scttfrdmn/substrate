@@ -234,6 +234,8 @@ func (p *IAMPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.removeRoleFromInstanceProfile(ctx, req)
 	case "ListInstanceProfiles":
 		return p.listInstanceProfiles(ctx, req)
+	case "ListInstanceProfilesForRole":
+		return p.listInstanceProfilesForRole(ctx, req)
 
 	case "SimulatePrincipalPolicy":
 		return p.simulatePrincipalPolicy(ctx, req)

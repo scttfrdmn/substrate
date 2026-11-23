@@ -23,7 +23,12 @@ import (
 // would deserialize to a zero value here while a hand-written XPath assertion in
 // emulator/ still passed. That is the failure mode #591 shipped for EC2 errors.
 func TestJourney_DescribeStackEvents(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyDescribeStackEvents)
+}
+
+// journeyDescribeStackEvents is TestJourney_DescribeStackEvents's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyDescribeStackEvents(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

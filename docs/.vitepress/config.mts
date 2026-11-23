@@ -79,6 +79,7 @@ export default defineConfig({
         collapsed: false,
         items: [
           { text: 'Testing Guide', link: '/testing-guide' },
+          { text: 'Terraform and CDK', link: '/iac-journeys' },
         ],
       },
       {

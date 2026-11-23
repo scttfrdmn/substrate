@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e iac-e2e iac-e2e-setup docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -122,6 +122,19 @@ bench: ## Run benchmarks
 
 e2e: ## Run end-to-end tests
 	cd test/e2e && go test -v -race ./...
+
+# The AWS provider the Terraform journey installs from. `iac-e2e-setup` fills it; the journey
+# reads it as a filesystem mirror, so the test itself never contacts the registry.
+TF_PLUGIN_CACHE_DIR ?= $(HOME)/.terraform.d/plugin-cache
+export TF_PLUGIN_CACHE_DIR
+
+iac-e2e-setup: ## Fetch what iac-e2e needs (REQUIRES NETWORK): the AWS provider into TF_PLUGIN_CACHE_DIR, and examples/cdk's node_modules
+	mkdir -p "$(TF_PLUGIN_CACHE_DIR)"
+	tfdata="$$(mktemp -d)" && TF_DATA_DIR="$$tfdata" terraform -chdir=examples/terraform init -backend=false -input=false && rm -rf "$$tfdata"
+	cd examples/cdk && npm ci --no-audit --no-fund
+
+iac-e2e: ## Run the Terraform and CDK journeys against substrate, each twice (offline; run iac-e2e-setup first)
+	cd test/iac && SUBSTRATE_IAC=1 go test -v -race -count=1 -timeout 45m ./...
 
 python-test: ## Run pytest-substrate unit tests and the worked example in python/examples
 	cd python && .venv/bin/pytest tests/ examples/ -v

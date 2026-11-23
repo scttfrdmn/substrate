@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -163,6 +164,10 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 		return p.listFunctions(ctx, req)
 	case "Invoke":
 		return p.invoke(ctx, req, name)
+	case "ListVersionsByFunction":
+		return p.listVersionsByFunction(ctx, req, name)
+	case "GetFunctionCodeSigningConfig":
+		return p.getFunctionCodeSigningConfig(ctx, name)
 	case "InvokeAsync":
 		return p.invokeAsync(name)
 	case "AddPermission":
@@ -226,12 +231,16 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		Environment struct {
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
+		TracingConfig lambdaTracingConfig `json:"TracingConfig"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
 	}
 	if body.FunctionName == "" {
 		return nil, lambdaInvalidParameterValue("FunctionName is required")
+	}
+	if awsErr := body.TracingConfig.validate(); awsErr != nil {
+		return nil, awsErr
 	}
 
 	// Check for existing function.
@@ -296,6 +305,7 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		Architectures: archs,
 		Tags:          body.Tags,
 		ImageURI:      imageURI,
+		TracingMode:   body.TracingConfig.Mode,
 		LastModified:  now,
 		CreateDate:    now,
 	}
@@ -356,9 +366,12 @@ func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSRespon
 		ImageURI         string `json:"ImageUri,omitempty"`
 		ResolvedImageURI string `json:"ResolvedImageUri,omitempty"`
 	}
+	// Tags is a member of GetFunctionResponse itself, beside Configuration; Terraform reads a
+	// function's tags from there and saw none until #1519.
 	type response struct {
-		Configuration interface{}  `json:"Configuration"`
-		Code          codeLocation `json:"Code"`
+		Configuration interface{}       `json:"Configuration"`
+		Code          codeLocation      `json:"Code"`
+		Tags          map[string]string `json:"Tags,omitempty"`
 	}
 	// FunctionCodeLocation reports "the service that's hosting the file", so an
 	// image-packaged function is hosted by ECR and reports ImageUri rather than a
@@ -380,6 +393,7 @@ func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSRespon
 	return lambdaJSONResponse(http.StatusOK, response{
 		Configuration: buildFunctionConfig(fn),
 		Code:          loc,
+		Tags:          fn.Tags,
 	})
 }
 
@@ -466,14 +480,21 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 		Environment struct {
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
+		TracingConfig lambdaTracingConfig `json:"TracingConfig"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
+	}
+	if awsErr := body.TracingConfig.validate(); awsErr != nil {
+		return nil, awsErr
 	}
 
 	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
 	if err != nil {
 		return nil, err
+	}
+	if body.TracingConfig.Mode != "" {
+		fn.TracingMode = body.TracingConfig.Mode
 	}
 	// A new Role is assumed as CreateFunction's is, so a seeded propagation window refuses it too.
 	if err := p.checkRolePropagated(context.Background(), body.Role); err != nil {
@@ -1108,6 +1129,12 @@ func buildFunctionConfig(fn LambdaFunction) map[string]interface{} {
 		"PackageType":   fn.PackageType,
 		"Architectures": fn.Architectures,
 		"LastModified":  fn.LastModified.Format(time.RFC3339),
+		// FunctionConfiguration's Version: substrate publishes no versions, so every
+		// configuration it answers is the unpublished one (lambda_versions.go).
+		"Version": lambdaLatestVersion,
+		// Recorded intent only: substrate sends no trace to X-Ray. PassThrough is the
+		// mode a function created without a TracingConfig has.
+		"TracingConfig": map[string]string{"Mode": cmp.Or(fn.TracingMode, lambdaTracingPassThrough)},
 	}
 	if len(fn.Environment) > 0 {
 		cfg["Environment"] = map[string]interface{}{

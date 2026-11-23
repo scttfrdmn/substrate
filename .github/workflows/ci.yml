@@ -117,6 +117,52 @@ jobs:
       - name: Run E2E tests
         run: cd test/e2e && go test -v -race ./...
 
+  # Real Terraform and the real CDK CLI against substrate (#1519, #1520), each journey run twice
+  # against fresh deterministic-run servers with every response body diffed (#1628). The tools
+  # and their plugins are fetched in the setup steps, which are the only ones that use the
+  # network: the journeys install the AWS provider from TF_PLUGIN_CACHE_DIR as a filesystem
+  # mirror and run the CDK CLI examples/cdk's lockfile pins.
+  iac-e2e:
+    name: IaC Journeys (Terraform, CDK)
+    runs-on: ubuntu-latest
+    # TODO(#1519): remove once the v0.131.0 substrate fixes the journeys need have merged.
+    continue-on-error: true
+    env:
+      TF_PLUGIN_CACHE_DIR: ${{ github.workspace }}/.terraform-plugin-cache
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.15.5
+          # The wrapper rewrites stdout and exit codes, and `plan -detailed-exitcode` is how
+          # the journey checks convergence.
+          terraform_wrapper: false
+
+      # Node 24 runs examples/cdk/bin/app.ts directly, stripping its types itself.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: examples/cdk/package-lock.json
+
+      - name: Cache the Terraform AWS provider
+        uses: actions/cache@v6
+        with:
+          path: ${{ env.TF_PLUGIN_CACHE_DIR }}
+          key: terraform-providers-${{ runner.os }}-${{ hashFiles('examples/terraform/.terraform.lock.hcl') }}
+
+      - name: Fetch the AWS provider and the CDK app's packages
+        run: make iac-e2e-setup
+
+      - name: Run the Terraform and CDK journeys
+        run: make iac-e2e
+
   docs-reference:
     name: Service Reference Drift
     runs-on: ubuntu-latest

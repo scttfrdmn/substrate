@@ -97,7 +97,12 @@ func (r *cwRecorder) find(operation string) (cwExchange, bool) {
 //     and Period 32-bit integers — because a codec that writes every number one way
 //     round-trips against itself and still fails against a generated deserializer.
 func TestJourney_CloudWatchProtocols(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyCloudWatchProtocols)
+}
+
+// journeyCloudWatchProtocols is TestJourney_CloudWatchProtocols's body. [emulator.RunTwice] runs it
+// against two fresh deterministic-run servers and diffs what they recorded (#1628).
+func journeyCloudWatchProtocols(t *testing.T, ts *emulator.TestServer) {
 	// A frozen clock, so the datapoint below is inside PutMetricData's two-week window and the
 	// GetMetricData window that reads it back is fixed (#1595).
 	now := time.Date(2026, 11, 20, 12, 0, 0, 0, time.UTC)

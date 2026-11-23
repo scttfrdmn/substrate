@@ -43,3 +43,13 @@ docs/.vitepress/cache/
 
 # Local Claude Code settings
 .claude/
+
+# IaC examples (examples/terraform, examples/cdk)
+examples/terraform/.terraform/
+examples/terraform/terraform.tfstate*
+examples/terraform/*.tfplan
+examples/cdk/node_modules/
+examples/cdk/cdk.out/
+examples/cdk/cdk.context.json
+# bin/ above ignores build output; the CDK app's entry point lives in one.
+!examples/cdk/bin/

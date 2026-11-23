@@ -22,7 +22,12 @@ import (
 // #688 every call below failed with InvalidAction, which the SDK surfaces as an API error
 // rather than an empty result: a consumer could not have written this loop at all.
 func TestJourney_EC2DescribeTags(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyEC2DescribeTags)
+}
+
+// journeyEC2DescribeTags is TestJourney_EC2DescribeTags's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyEC2DescribeTags(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

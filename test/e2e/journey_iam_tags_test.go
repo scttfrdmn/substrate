@@ -27,7 +27,12 @@ import (
 // The list is two-element on purpose. A decoder that reads only index 1 would
 // pass a single-tag assertion.
 func TestJourney_IAMTagsSurviveTheWire(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyIAMTagsSurviveTheWire)
+}
+
+// journeyIAMTagsSurviveTheWire is TestJourney_IAMTagsSurviveTheWire's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyIAMTagsSurviveTheWire(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

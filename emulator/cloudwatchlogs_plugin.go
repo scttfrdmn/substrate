@@ -70,6 +70,10 @@ func (p *CloudWatchLogsPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 		return p.tagResource(req)
 	case "UntagResource":
 		return p.untagResource(req)
+	case "AssociateKmsKey":
+		return p.associateKmsKey(ctx, req)
+	case "DisassociateKmsKey":
+		return p.disassociateKmsKey(ctx, req)
 	case "ListTagsForResource":
 		return p.listTagsForResource(req)
 	default:
@@ -84,6 +88,7 @@ func (p *CloudWatchLogsPlugin) createLogGroup(ctx *RequestContext, req *AWSReque
 		LogGroupName    string            `json:"logGroupName"`
 		RetentionInDays int               `json:"retentionInDays"`
 		Tags            map[string]string `json:"tags"`
+		KmsKeyID        string            `json:"kmsKeyId"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "invalid request body", HTTPStatus: http.StatusBadRequest}
@@ -111,6 +116,7 @@ func (p *CloudWatchLogsPlugin) createLogGroup(ctx *RequestContext, req *AWSReque
 		CreationTime:    p.tc.Now().UnixMilli(),
 		RetentionInDays: body.RetentionInDays,
 		Tags:            body.Tags,
+		KmsKeyID:        body.KmsKeyID,
 	}
 	data, err := json.Marshal(lg)
 	if err != nil {

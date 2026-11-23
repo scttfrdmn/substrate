@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1122 routed operations.
+// 68 plugins, 1128 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -467,6 +467,7 @@ var routedOperations = map[string][]string{
 		"DescribeLaunchTemplateVersions",
 		"DescribeLaunchTemplates",
 		"DescribeNatGateways",
+		"DescribeNetworkInterfaces",
 		"DescribePlacementGroups",
 		"DescribeRegions",
 		"DescribeRouteTables",
@@ -749,6 +750,7 @@ var routedOperations = map[string][]string{
 		"ListGroupsForUser",
 		"ListInstanceProfileTags",
 		"ListInstanceProfiles",
+		"ListInstanceProfilesForRole",
 		"ListPolicies",
 		"ListPolicyTags",
 		"ListPolicyVersions",
@@ -836,6 +838,7 @@ var routedOperations = map[string][]string{
 		"DeleteLayerVersion",
 		"GetEventSourceMapping",
 		"GetFunction",
+		"GetFunctionCodeSigningConfig",
 		"GetLayerVersion",
 		"GetLayerVersionByArn",
 		"GetLayerVersionPolicy",
@@ -847,6 +850,7 @@ var routedOperations = map[string][]string{
 		"ListLayerVersions",
 		"ListLayers",
 		"ListTags",
+		"ListVersionsByFunction",
 		"PublishLayerVersion",
 		"PutFunctionEventInvokeConfig",
 		"RemoveLayerVersionPermission",
@@ -858,6 +862,7 @@ var routedOperations = map[string][]string{
 		"UpdateFunctionConfiguration",
 	},
 	"logs": {
+		"AssociateKmsKey",
 		"CreateLogGroup",
 		"CreateLogStream",
 		"DeleteLogGroup",
@@ -865,6 +870,7 @@ var routedOperations = map[string][]string{
 		"DeleteRetentionPolicy",
 		"DescribeLogGroups",
 		"DescribeLogStreams",
+		"DisassociateKmsKey",
 		"FilterLogEvents",
 		"GetLogEvents",
 		"ListTagsForResource",

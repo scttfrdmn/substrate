@@ -208,7 +208,12 @@ func TestJourney_WAFv2CreateIPSetAcceptsAnEmptyAddressList(t *testing.T) {
 // — and an ARN is what IPSetReferenceStatement and AssociateWebACL take, so it is
 // an identifier another operation is expected to accept.
 func TestJourney_WAFv2CloudFrontARNNamesItsScope(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyWAFv2CloudFrontARNNamesItsScope)
+}
+
+// journeyWAFv2CloudFrontARNNamesItsScope is TestJourney_WAFv2CloudFrontARNNamesItsScope's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyWAFv2CloudFrontARNNamesItsScope(t *testing.T, ts *emulator.TestServer) {
 	cfg, err := journeyConfig(ts)
 	if err != nil {
 		t.Fatalf("config: %v", err)

@@ -182,8 +182,41 @@ simulated clock.
   faithfully only between resets (#1631 tracks recording the reset itself).
 - **Unaudited map iteration.** A response whose order comes from iterating a Go map, in a
   plugin path nobody has checked, can differ between runs. The acceptance test covers EC2,
-  KMS, IAM, S3 multipart uploads, Organizations and Firehose; report any other path you
-  find.
+  KMS, IAM, S3 multipart uploads, Organizations and Firehose. The CDK journey and sixteen
+  `test/e2e` journeys run under `RunTwice` (below), and the Terraform journey under
+  `RunThenReplay`, which extends that to what they call: EC2 VPCs, subnets, security groups, instances, volumes, snapshots and tags; IAM
+  users, roles, groups, policies and tags; S3 buckets; SQS; SNS; DynamoDB; KMS; Lambda;
+  CloudWatch and CloudWatch Logs; CloudFormation stacks and events; STS; Organizations;
+  Config; Cognito; and WAFv2. Report any other path you find.
+
+### Running a journey twice
+
+`emulator.RunTwice(t, epoch, journey)` is the check behind that coverage (#1628). It runs
+`journey` against two fresh servers started with `WithDeterministicRun(epoch)`, pairs the two
+servers' recorded events by sequence, and fails unless they agree. They must have the same
+count and the same operations, and the same request IDs, statuses, errors, headers other
+than `Date`, and response bodies. Bodies are compared as [replay](#what-a-replay-compares) compares
+them, with JSON member order ignored and collection order compared. Each run is a subtest,
+`first` and `second`.
+
+```go
+func TestCheckout(t *testing.T) {
+    emulator.RunTwice(t, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+        func(t *testing.T, ts *emulator.TestServer) {
+            // one request at a time against ts.URL
+        })
+}
+```
+
+The journey must not send requests concurrently, read the wall clock, or depend on a server
+another test shares. `emulator.CompareRecordedRuns(first, second)` makes the same comparison
+on two event logs you already hold.
+
+`emulator.RunThenReplay(t, epoch, journey)` is the form for a caller that does not send the same
+requests in the same order every time, such as Terraform, whose graph walk and wall-clock
+waiters vary between runs. It runs the journey once and replays the recorded requests, in
+recorded order, into a second fresh server, failing as `AssertReplayMatches` does. See [Terraform and CDK](/iac-journeys) for the IaC
+journeys.
 
 `make nondeterminism-check` keeps plugin code honest. Outside a reviewed allowlist, it
 refuses in emulator code: a read of the wall clock (`time.Now`, `time.Since`, `time.After`

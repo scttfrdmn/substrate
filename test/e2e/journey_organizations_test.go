@@ -32,7 +32,12 @@ import (
 // errors.As on the typed exception is the branch a consumer's error handling
 // actually takes.
 func TestJourney_OrganizationsAccountVending(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyOrganizationsAccountVending)
+}
+
+// journeyOrganizationsAccountVending is TestJourney_OrganizationsAccountVending's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyOrganizationsAccountVending(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

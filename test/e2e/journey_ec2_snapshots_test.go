@@ -22,7 +22,12 @@ import (
 // a restore from it produced an 8 GiB volume whatever the snapshot said. The HTTP-level
 // tests pin the wire; this pins that a client's own types carry the value through.
 func TestJourney_EC2SnapshotRestore(t *testing.T) {
-	ts := emulator.StartTestServer(t)
+	emulator.RunTwice(t, journeyEpoch, journeyEC2SnapshotRestore)
+}
+
+// journeyEC2SnapshotRestore is TestJourney_EC2SnapshotRestore's body. [emulator.RunTwice] runs it against two fresh
+// deterministic-run servers and diffs what they recorded (#1628).
+func journeyEC2SnapshotRestore(t *testing.T, ts *emulator.TestServer) {
 
 	cfg, err := journeyConfig(ts)
 	if err != nil {

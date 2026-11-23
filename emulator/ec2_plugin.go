@@ -132,6 +132,8 @@ func (p *EC2Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (resp *A
 		return p.createDefaultVpc(ctx, req)
 	case "CreateDefaultSubnet":
 		return p.createDefaultSubnet(ctx, req)
+	case "DescribeNetworkInterfaces":
+		return p.describeNetworkInterfaces(ctx, req)
 	case "DescribeVpcs":
 		return p.describeVPCs(ctx, req)
 	case "DeleteVpc":
@@ -1160,7 +1162,12 @@ type ec2NetworkInterfaceItem struct {
 
 // ec2NetworkAttachmentItem is an interface's attachment element, which is where AWS
 // reports the device index rather than on the interface itself.
+//
+// InstanceID and InstanceOwnerID are members of DescribeNetworkInterfaces' attachment only;
+// an instance's own networkInterfaceSet leaves them empty, so they are omitted there.
 type ec2NetworkAttachmentItem struct {
+	InstanceID          string `xml:"instanceId,omitempty"`
+	InstanceOwnerID     string `xml:"instanceOwnerId,omitempty"`
 	DeviceIndex         int    `xml:"deviceIndex"`
 	Status              string `xml:"status"`
 	DeleteOnTermination bool   `xml:"deleteOnTermination"`
@@ -1877,6 +1884,24 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	if cidr == "" {
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "CidrBlock is required", HTTPStatus: http.StatusBadRequest}
 	}
+	// TagSpecification.N and InstanceTenancy were dropped until #1519. Terraform tags a VPC at
+	// creation and reads instanceTenancy back, so both showed as changes on the plan after an
+	// apply, and a changed tenancy forces the VPC's replacement.
+	tags := ec2TagSpecificationTags(req.Params, "", "vpc")
+	if awsErr := ec2CheckTagRules(tags); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := ec2CheckTagLimit(nil, tags); awsErr != nil {
+		return nil, awsErr
+	}
+	tenancy := req.Params["InstanceTenancy"]
+	switch tenancy {
+	case "", ec2DefaultTenancy, "dedicated", "host":
+	default:
+		// The valid values are API_CreateVpc's; the message is substrate's own.
+		return nil, &AWSError{Code: "InvalidParameterValue",
+			Message: "Value (" + tenancy + ") for parameter InstanceTenancy is invalid", HTTPStatus: http.StatusBadRequest}
+	}
 	vpcID := generateVPCID(reqCtx.IDs)
 	vpc := EC2VPC{
 		VPCID:            vpcID,
@@ -1884,6 +1909,8 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 		IsDefault:        false,
 		State:            "available",
 		EnableDNSSupport: true,
+		InstanceTenancy:  tenancy,
+		Tags:             tags,
 		AccountID:        reqCtx.AccountID,
 		Region:           reqCtx.Region,
 	}
@@ -1934,9 +1961,10 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 // tag:<key> and tag-key filters do — a filter over a member the response never showed would
 // be unreadable even when it worked.
 //
-// Six members AWS's samples carry are deliberately absent: dhcpOptionsId,
-// instanceTenancy, ipv6CidrBlockAssociationSet, cidrBlockAssociationSet, isDefault's
-// blockPublicAccessStates sibling and encryptionControl. Nothing in [EC2VPC] backs them,
+// Five members AWS's samples carry are deliberately absent: dhcpOptionsId,
+// ipv6CidrBlockAssociationSet, cidrBlockAssociationSet, isDefault's
+// blockPublicAccessStates sibling and encryptionControl. instanceTenancy was a sixth until
+// #1519. Nothing in [EC2VPC] backs them,
 // which is exactly why [ec2VPCFilterSpec] leaves the CIDR-association and dhcp-options-id
 // filters inert.
 //
@@ -1958,6 +1986,9 @@ type ec2VPCItem struct {
 	// OwnerID is the account that owns the VPC.
 	OwnerID string `xml:"ownerId"`
 
+	// InstanceTenancy is the tenancy of instances launched into the VPC.
+	InstanceTenancy string `xml:"instanceTenancy"`
+
 	// IsDefault reports whether this is the account's default VPC for the region.
 	IsDefault bool `xml:"isDefault"`
 
@@ -1965,15 +1996,25 @@ type ec2VPCItem struct {
 	Tags *ec2TagSetXML `xml:"tagSet,omitempty"`
 }
 
+// ec2DefaultTenancy is the InstanceTenancy a VPC has when none is requested.
+const ec2DefaultTenancy = "default"
+
 // ec2VPCXML renders one stored VPC as its response element.
 func ec2VPCXML(vpc EC2VPC) ec2VPCItem {
+	tenancy := vpc.InstanceTenancy
+	if tenancy == "" {
+		// A VPC created without InstanceTenancy, and every default VPC, has the default
+		// tenancy, so an empty record renders "default" rather than nothing.
+		tenancy = ec2DefaultTenancy
+	}
 	return ec2VPCItem{
-		VpcID:     vpc.VPCID,
-		State:     vpc.State,
-		CIDRBlock: vpc.CIDRBlock,
-		OwnerID:   vpc.AccountID,
-		IsDefault: vpc.IsDefault,
-		Tags:      ec2TagSet(vpc.Tags),
+		VpcID:           vpc.VPCID,
+		State:           vpc.State,
+		CIDRBlock:       vpc.CIDRBlock,
+		OwnerID:         vpc.AccountID,
+		InstanceTenancy: tenancy,
+		IsDefault:       vpc.IsDefault,
+		Tags:            ec2TagSet(vpc.Tags),
 	}
 }
 
