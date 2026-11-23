@@ -72,3 +72,93 @@ func TestLambdaListVersionsByFunction(t *testing.T) {
 		})
 	}
 }
+
+// TestLambdaTracingTagsAndCodeSigning covers the other function reads Terraform's refresh makes
+// (#1519): TracingConfig stored and updated, Tags at the top of GetFunction, and the code-signing
+// configuration of a function that has none.
+func TestLambdaTracingTagsAndCodeSigning(t *testing.T) {
+	t.Parallel()
+	srv := newLambdaTestServer(t)
+	create := func(name string, extra map[string]any) *http.Response {
+		body := map[string]any{
+			"FunctionName": name, "Runtime": "nodejs22.x", "Handler": "index.handler",
+			"Role": "arn:aws:iam::123456789012:role/lambda-role",
+		}
+		for k, v := range extra {
+			body[k] = v
+		}
+		return lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", body)
+	}
+	tracingMode := func(t *testing.T, name string) string {
+		t.Helper()
+		resp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/functions/"+name, nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var out struct {
+			Configuration struct {
+				TracingConfig struct {
+					Mode string `json:"Mode"`
+				} `json:"TracingConfig"`
+			} `json:"Configuration"`
+			Tags map[string]string `json:"Tags"`
+		}
+		decodeLambdaJSON(t, resp, &out)
+		return out.Configuration.TracingConfig.Mode
+	}
+
+	require.Equal(t, http.StatusCreated, create("traced", map[string]any{
+		"TracingConfig": map[string]any{"Mode": "Active"},
+		"Tags":          map[string]string{"team": "iac"},
+	}).StatusCode)
+	require.Equal(t, http.StatusCreated, create("untraced", nil).StatusCode)
+
+	assert.Equal(t, "Active", tracingMode(t, "traced"))
+	assert.Equal(t, "PassThrough", tracingMode(t, "untraced"), "the mode a function created without one has")
+
+	resp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/functions/traced", nil)
+	var got struct {
+		Tags map[string]string `json:"Tags"`
+	}
+	decodeLambdaJSON(t, resp, &got)
+	assert.Equal(t, map[string]string{"team": "iac"}, got.Tags, "GetFunction reports Tags beside Configuration")
+
+	resp = lambdaRequest(t, srv, http.MethodPut, "/2015-03-31/functions/traced/configuration",
+		map[string]any{"TracingConfig": map[string]any{"Mode": "PassThrough"}})
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "PassThrough", tracingMode(t, "traced"))
+
+	refusals := []struct {
+		name   string
+		method string
+		path   string
+		body   map[string]any
+	}{
+		{"CreateFunction with an unknown mode", http.MethodPost, "/2015-03-31/functions", map[string]any{
+			"FunctionName": "bad", "Runtime": "nodejs22.x", "Handler": "index.handler",
+			"Role": "arn:aws:iam::123456789012:role/lambda-role", "TracingConfig": map[string]any{"Mode": "Sometimes"},
+		}},
+		{"UpdateFunctionConfiguration with an unknown mode", http.MethodPut, "/2015-03-31/functions/traced/configuration",
+			map[string]any{"TracingConfig": map[string]any{"Mode": "Sometimes"}}},
+	}
+	for _, tc := range refusals {
+		t.Run(tc.name, func(t *testing.T) {
+			resp := lambdaRequest(t, srv, tc.method, tc.path, tc.body)
+			body, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "%s", body)
+			assert.Contains(t, string(body), "InvalidParameterValueException")
+		})
+	}
+
+	t.Run("code signing", func(t *testing.T) {
+		resp := lambdaRequest(t, srv, http.MethodGet, "/2020-06-30/functions/traced/code-signing-config", nil)
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		var out map[string]any
+		decodeLambdaJSON(t, resp, &out)
+		assert.Equal(t, map[string]any{"CodeSigningConfigArn": "", "FunctionName": "traced"}, out)
+
+		resp = lambdaRequest(t, srv, http.MethodGet, "/2020-06-30/functions/missing/code-signing-config", nil)
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+		resp = lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/functions/traced/code-signing-config", nil)
+		assert.Equal(t, http.StatusNotFound, resp.StatusCode, "only the published date routes")
+	})
+}
