@@ -80,6 +80,7 @@ docs-versions: ## Fail if docs/README pin a stale version in prose
 	./scripts/check-doc-versions.sh
 
 docs-counts-check: ## Fail if docs/README pin a plugin, service or operation count outside the generated matrix
+	./scripts/check-doc-counts.sh --self-test
 	./scripts/check-doc-counts.sh
 
 discarded-unmarshal-check: ## Fail if a plugin decodes a request body and discards the error

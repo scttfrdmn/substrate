@@ -146,8 +146,10 @@ jobs:
       # The matrix is the one place a plugin or operation count can be stated, because it
       # is the one place a generator keeps it true. The README and docs/index.md said 63
       # plugins while the registry had 68 (#1604). It runs here rather than in docs-ci.yml
-      # because that workflow triggers only on docs changes, and the count goes stale when
-      # a plugin is added, not when the docs are edited.
+      # because that workflow's paths filter covers docs/** and README.md but neither
+      # python/README.md, which the check also scans, nor scripts/check-doc-counts.sh, so
+      # an edit to either would skip it there. This job runs on every PR, so no paths
+      # entry is needed to keep it from being skipped.
       - name: Check no prose outside the matrix pins a plugin or operation count
         run: make docs-counts-check
 

@@ -4,7 +4,7 @@ layout: home
 hero:
   name: Substrate
   text: The test harness for AI-generated infrastructure
-  tagline: An event-sourced AWS emulator for testing CloudFormation, CDK, Terraform, and any SDK or CLI call — deterministically, offline, and with cost visibility, before you deploy.
+  tagline: An event-sourced AWS emulator for testing CloudFormation, CDK, Terraform, and any SDK or CLI call — deterministically, offline, and with API-call cost metering, before you deploy.
   actions:
     - theme: brand
       text: Get Started
@@ -31,7 +31,7 @@ features:
 
 Substrate is an **event-sourced AWS emulator** for testing the infrastructure
 code that drives AWS — CloudFormation, CDK, Terraform, and any SDK or CLI call —
-**deterministically, offline, and with cost visibility**, before you deploy to a
+**deterministically, offline, and with API-call cost metering**, before you deploy to a
 real account.
 
 It models **what is observable through an AWS API call** — request/response

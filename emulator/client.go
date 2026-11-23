@@ -138,7 +138,6 @@ type Client struct {
 	tc       *TimeController
 	logger   Logger
 	costs    *CostController
-	intent   Intent
 	// requestIDs seeds each deployment's mint; nil draws an unseeded request ID.
 	requestIDs *RequestIDSource
 }
@@ -186,8 +185,6 @@ func NewClient(
 // the DeployResult together with an error wrapping [ErrCostBudgetExceeded]. The
 // resources have been deployed by then and are not rolled back.
 func (b *Client) Deploy(ctx context.Context, cfn string, intent Intent) (*DeployResult, error) {
-	b.intent = intent
-
 	// Built through the constructor rather than as a struct literal so there is one
 	// construction path and the deployer's defaults cannot drift away from it. A
 	// literal left the account and region empty, which was harmless until the
@@ -234,19 +231,36 @@ func (b *Client) StartRecording(ctx context.Context, name string) (*RecordingSes
 	return engine.StartRecording(ctx, name)
 }
 
-// StopRecording closes session and returns a ValidationReport for its stream.
+// StopRecording closes session and returns a ValidationReport for its stream. It
+// applies no Intent: the budget given to a [Client.Deploy] belongs to that deploy
+// and does not carry over to a recording. Use [Client.StopRecordingWithIntent] to
+// check a recording against a budget of its own.
 func (b *Client) StopRecording(ctx context.Context, session *RecordingSession) (*ValidationReport, error) {
+	return b.StopRecordingWithIntent(ctx, session, Intent{})
+}
+
+// StopRecordingWithIntent closes session and returns a ValidationReport for its
+// stream, checked against intent. A MaxCost violation fails the report.
+func (b *Client) StopRecordingWithIntent(ctx context.Context, session *RecordingSession, intent Intent) (*ValidationReport, error) {
 	engine := NewReplayEngine(b.store, b.state, b.tc, b.registry, ReplayConfig{}, b.logger)
 	if _, err := engine.StopRecording(ctx, session); err != nil {
 		return nil, fmt.Errorf("stop recording: %w", err)
 	}
-	return ValidateRecording(ctx, b.store, session.StreamID, b.intent)
+	return ValidateRecording(ctx, b.store, session.StreamID, intent)
 }
 
 // Validate analyses the event stream identified by streamID and returns a full
-// ValidationReport. The stored intent (from the most recent Deploy call) is applied.
+// ValidationReport. Like [Client.StopRecording] it applies no Intent; use
+// [Client.ValidateWithIntent] to check the stream against a budget.
 func (b *Client) Validate(ctx context.Context, streamID string) (*ValidationReport, error) {
-	return ValidateRecording(ctx, b.store, streamID, b.intent)
+	return b.ValidateWithIntent(ctx, streamID, Intent{})
+}
+
+// ValidateWithIntent analyses the event stream identified by streamID and returns
+// a full ValidationReport checked against intent. A MaxCost violation fails the
+// report.
+func (b *Client) ValidateWithIntent(ctx context.Context, streamID string, intent Intent) (*ValidationReport, error) {
+	return ValidateRecording(ctx, b.store, streamID, intent)
 }
 
 // NewDebugSession returns a DebugSession initialized for time-travel inspection

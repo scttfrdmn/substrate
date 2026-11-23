@@ -579,6 +579,61 @@ func TestClient_DeployMaxCost(t *testing.T) {
 	}
 }
 
+// TestClient_RecordingIntentIsItsOwn checks that a deploy's MaxCost does not carry
+// over to a later recording: StopRecording and Validate apply no budget, and only
+// the *WithIntent variants check one.
+func TestClient_RecordingIntentIsItsOwn(t *testing.T) {
+	ctx := context.Background()
+	registry, store, state, tc, logger := newClientTestDeps(t)
+	client := emulator.NewClient(registry, store, state, tc, logger)
+
+	// An under-budget deploy with a tight budget.
+	_, err := client.Deploy(ctx, `{"Resources":{"B":{"Type":"AWS::S3::Bucket","Properties":{"BucketName":"intent-own"}}}}`,
+		emulator.Intent{MaxCost: 0.01})
+	require.NoError(t, err)
+
+	record := func(t *testing.T, name string) *emulator.RecordingSession {
+		t.Helper()
+		session, err := client.StartRecording(ctx, name)
+		require.NoError(t, err)
+		require.NoError(t, store.RecordRequest(ctx,
+			&emulator.RequestContext{
+				RequestID: "req-" + name,
+				AccountID: "123456789012",
+				Region:    "us-east-1",
+				Timestamp: tc.Now(),
+				Metadata:  map[string]interface{}{"stream_id": session.StreamID},
+			},
+			&emulator.AWSRequest{Service: "s3", Operation: "PutObject"},
+			&emulator.AWSResponse{StatusCode: 200},
+			time.Millisecond,
+			0.50, // above the deploy's $0.01 budget
+			nil,
+		))
+		return session
+	}
+
+	plain := record(t, "plain")
+	report, err := client.StopRecording(ctx, plain)
+	require.NoError(t, err)
+	assert.Empty(t, report.Violations, "the deploy's MaxCost must not carry over")
+	assert.Equal(t, emulator.ValidationPassed, report.PassFail)
+
+	again, err := client.Validate(ctx, plain.StreamID)
+	require.NoError(t, err)
+	assert.Equal(t, emulator.ValidationPassed, again.PassFail)
+
+	checked, err := client.ValidateWithIntent(ctx, plain.StreamID, emulator.Intent{MaxCost: 0.10})
+	require.NoError(t, err)
+	assert.Equal(t, emulator.ValidationFailed, checked.PassFail)
+
+	budgeted := record(t, "budgeted")
+	report, err = client.StopRecordingWithIntent(ctx, budgeted, emulator.Intent{MaxCost: 0.10})
+	require.NoError(t, err)
+	assert.NotEmpty(t, report.Violations)
+	assert.Equal(t, emulator.ValidationFailed, report.PassFail)
+}
+
 func TestClient_StartStopRecording(t *testing.T) {
 	ctx := context.Background()
 	registry, store, state, tc, logger := newClientTestDeps(t)

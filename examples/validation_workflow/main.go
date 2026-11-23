@@ -100,14 +100,13 @@ func main() {
 
 	// MaxCost gates the deploy's metered API-call cost: Deploy returns an error
 	// wrapping ErrCostBudgetExceeded when the sum exceeds $1. The resources are
-	// already deployed at that point, so the result is still returned.
+	// already deployed at that point, so the result is still returned: the example
+	// reports what was deployed and then exits non-zero.
 	deployResult, err := client.Deploy(ctx, cfnTemplate, substrate.Intent{
 		MaxCost: 1.0,
 	})
-	switch {
-	case errors.Is(err, substrate.ErrCostBudgetExceeded):
-		fmt.Printf("[FAIL] %v\n", err)
-	case err != nil:
+	overBudget := errors.Is(err, substrate.ErrCostBudgetExceeded)
+	if err != nil && !overBudget {
 		log.Fatalf("Deploy: %v", err)
 	}
 	fmt.Printf("Deployed stack %q: %d resources, cost=$%.6f, duration=%s\n",
@@ -122,6 +121,10 @@ func main() {
 		} else {
 			fmt.Printf("  [OK]   %s (%s) → %s\n", r.LogicalID, r.Type, r.PhysicalID)
 		}
+	}
+	if overBudget {
+		fmt.Printf("[FAIL] %v\n", err)
+		os.Exit(1)
 	}
 
 	// --- 3. Record S3 operations -------------------------------------------

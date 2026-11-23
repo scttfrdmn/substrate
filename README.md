@@ -1,7 +1,7 @@
 # Substrate
 
 > **The test harness for AI-generated infrastructure.**
-> Deterministic. Time-travel debuggable. Cost-visible.
+> Deterministic. Time-travel debuggable. API-call cost metered.
 
 [![CI](https://github.com/scttfrdmn/substrate/actions/workflows/ci.yml/badge.svg)](https://github.com/scttfrdmn/substrate/actions/workflows/ci.yml)
 [![Go Report Card](https://goreportcard.com/badge/github.com/scttfrdmn/substrate)](https://goreportcard.com/report/github.com/scttfrdmn/substrate)
@@ -11,7 +11,7 @@
 
 Substrate is an **event-sourced AWS emulator** for testing the infrastructure
 code that drives AWS — CloudFormation, CDK, Terraform, and any SDK or CLI call —
-**deterministically, offline, and with cost visibility**, before you deploy to a
+**deterministically, offline, and with API-call cost metering**, before you deploy to a
 real account.
 
 It models **what is observable through an AWS API call** — request/response
