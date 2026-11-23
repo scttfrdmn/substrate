@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.130.0] - 2026-11-23
+
 ### Added
 
 - **Deterministic-run mode (#1598).** A seeded server assigns request IDs `req-<8 hex>-<n>` in arrival order, so two fresh runs of the same calls mint the same identifiers; a pinned epoch freezes the clock, so they answer byte-identical bodies. Set it with `run.seed`/`run.epoch` (`SUBSTRATE_RUN_SEED`/`SUBSTRATE_RUN_EPOCH`), `substrate server --seed --epoch`, or `GET`/`POST /v1/control/run`. `POST /v1/state/reset` rewinds the sequence and re-pins the clock. Concurrent requests, the `Date` header, bookkeeping IDs and unaudited map-order paths stay nondeterministic, and a seeded stream replays faithfully only between resets, as the testing guide documents.
@@ -21667,7 +21669,8 @@ all changes onto the v0.44.x line.
 [v0.58.2]: https://github.com/scttfrdmn/substrate/compare/v0.58.1...v0.58.2
 [v0.58.1]: https://github.com/scttfrdmn/substrate/compare/v0.58.0...v0.58.1
 [v0.58.0]: https://github.com/scttfrdmn/substrate/compare/v0.57.0...v0.58.0
-[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.129.0...HEAD
+[Unreleased]: https://github.com/scttfrdmn/substrate/compare/v0.130.0...HEAD
+[v0.130.0]: https://github.com/scttfrdmn/substrate/compare/v0.129.0...v0.130.0
 [v0.129.0]: https://github.com/scttfrdmn/substrate/compare/v0.128.0...v0.129.0
 [v0.128.0]: https://github.com/scttfrdmn/substrate/compare/v0.127.0...v0.128.0
 [v0.127.0]: https://github.com/scttfrdmn/substrate/compare/v0.126.0...v0.127.0
