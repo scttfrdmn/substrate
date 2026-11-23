@@ -39,8 +39,9 @@ package emulator
 // this reports nothing AWS would not: ArchivalSummary, DeletionProtectionEnabled,
 // GlobalTableSettingsReplicationMode, GlobalTableVersion, GlobalTableWitnesses,
 // LatestStreamLabel, MultiRegionConsistency, OnDemandThroughput, Replicas,
-// RestoreSummary, SSEDescription, TableClassSummary, TableId, VectorIndexes and
-// WarmThroughput.
+// RestoreSummary, SSEDescription, TableClassSummary, VectorIndexes and
+// WarmThroughput. TableId is reported when the record carries one, which every table
+// created since #1608 does.
 type tableDescriptionOut struct {
 	TableName              string                             `json:"TableName"`
 	TableARN               string                             `json:"TableArn"`
@@ -56,6 +57,7 @@ type tableDescriptionOut struct {
 	LatestStreamARN        string                             `json:"LatestStreamArn,omitempty"`
 	TableSizeBytes         int64                              `json:"TableSizeBytes"`
 	ItemCount              int64                              `json:"ItemCount"`
+	TableID                string                             `json:"TableId,omitempty"`
 }
 
 // dynamodbTableDescriptionWire projects a stored table onto the wire.
@@ -80,5 +82,6 @@ func dynamodbTableDescriptionWire(tbl DynamoDBTable) tableDescriptionOut {
 		LatestStreamARN:        tbl.LatestStreamARN,
 		TableSizeBytes:         tbl.TableSizeBytes,
 		ItemCount:              tbl.ItemCount,
+		TableID:                tbl.TableID,
 	}
 }

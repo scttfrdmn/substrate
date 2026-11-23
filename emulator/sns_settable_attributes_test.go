@@ -145,7 +145,7 @@ func TestSNSSetTopicAttributesRefusesTheReadOnlyNames(t *testing.T) {
 	}
 
 	keys := snsAttributeEntryKeys(t, snsGetTopicAttributesBody(t, ts, snsEastRegion, arn))
-	assert.Equal(t, []string{"Owner", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
+	assert.Equal(t, []string{"Owner", "Policy", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
 		"eight refused writes store nothing: the topic still reports only its derived members")
 
 	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
@@ -179,7 +179,7 @@ func TestSNSSetTopicAttributesRefusesAnUnpublishedName(t *testing.T) {
 	}
 
 	keys := snsAttributeEntryKeys(t, snsGetTopicAttributesBody(t, ts, snsEastRegion, arn))
-	assert.Equal(t, []string{"Owner", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
+	assert.Equal(t, []string{"Owner", "Policy", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
 		"an unpublished name is not stored, so GetTopicAttributes cannot report it back")
 }
 
@@ -202,7 +202,7 @@ func TestSNSSetTopicAttributesRequiresAnAttributeName(t *testing.T) {
 
 	keys := snsAttributeEntryKeys(t, snsGetTopicAttributesBody(t, ts, snsEastRegion, arn))
 	assert.NotContains(t, keys, "", "an absent AttributeName no longer stores an empty key")
-	assert.Equal(t, []string{"Owner", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys)
+	assert.Equal(t, []string{"Owner", "Policy", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys)
 }
 
 // TestSNSSetTopicAttributesAcceptsAnEmptyValue pins the half of the signature that is *not* required.
@@ -227,7 +227,9 @@ func TestSNSSetTopicAttributesAcceptsAnEmptyValue(t *testing.T) {
 
 	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
 	require.Empty(t, errCode)
-	assert.Equal(t, "", attrs["Policy"], "the cleared policy is stored as empty, not left at its old value")
+	assert.NotEqual(t, policy, attrs["Policy"], "the cleared policy is not left at its old value")
+	assert.Contains(t, attrs["Policy"], "__default_policy_ID",
+		"a cleared policy reports the default again, as a topic without one does (#1608)")
 }
 
 // TestSNSSetTopicAttributesWriteOnlyNamesAreReadBack records a divergence rather than a fix.

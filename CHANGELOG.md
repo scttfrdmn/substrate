@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CloudWatch Logs filter patterns (#1596).** `FilterLogEvents` now evaluates `filterPattern` with the grammar the user guide publishes. Unstructured patterns support terms, AND of several terms, `?` alternatives, `-` exclusion and quoted phrases. JSON patterns support `{ $.a.b op v }` with `= != < > <= >=`, `&&`, `||`, parentheses, `*` wildcards, `IS NULL`/`IS TRUE`/`IS FALSE`, `NOT EXISTS`, array indexes, wildcard selectors and bracket notation. It previously matched the whole pattern as one substring, so `{ $.task_uuid = "..." }` matched nothing. A pattern that does not parse is `InvalidParameterException`/400. Space-delimited and `%regex%` patterns are refused the same way until #1638. The refusal messages are substrate's own. Substrate has no metric or subscription filters, so this is the only place a pattern is evaluated.
+- **DynamoDB `DescribeContinuousBackups` and `UpdateContinuousBackups` (#1608).** Point-in-time recovery can be turned on and off. An enabled table reports `RecoveryPeriodInDays` (default 35) and a restorable window from the simulated clock: `LatestRestorableDateTime` is five minutes before now and `EarliestRestorableDateTime` is the start of the period, neither earlier than when recovery was enabled. An absent table is `TableNotFoundException`/400, using the exception's published description as the message. The validation messages are substrate's own. Terraform's `aws_dynamodb_table` reads these on every refresh.
+- **Auto Scaling `EnableMetricsCollection`, `DisableMetricsCollection` and `DescribeMetricCollectionTypes` (#1594).** The enabled set is stored on the group and reported as `DescribeAutoScalingGroups`' `EnabledMetrics`. An omitted `Metrics` means all twenty group metrics, and `Granularity` must be `1Minute`. An unknown metric or granularity is `ValidationError`/400 with substrate's own message. No metric is published to CloudWatch.
+
+### Changed
+
+- **DynamoDB `CreateTable` mints `TableId` (#1608).** It is a UUID derived from the request's IDs, so it replays identically, and every table description reports it. It was absent, which Terraform read as null.
+- **SNS reports a default topic `Policy` (#1608).** `GetTopicAttributes` reports SNS's default access policy for a topic with no stored policy. The document is the AWS CLI reference's `get-topic-attributes` example: `__default_policy_ID`, the eight topic actions for any principal, and `AWS:SourceOwner` set to the topic owner's account. This reverses the earlier reading that SNS mints no default policy. Terraform's `aws_sns_topic` failed with "parsing policy: unexpected end of JSON input" without it.
+- **Compatibility (#1608):** `GetTopicAttributes` now always includes `Policy`, which is the default document unless `CreateTopic` or `SetTopicAttributes` stored one. Clearing a stored policy with an empty `SetTopicAttributes` value reports the default again rather than an empty string. A test that asserts the exact attribute key set gains `Policy`. DynamoDB table descriptions gain `TableId` for tables created from now on. A recorded table without one omits it. A replay or exported fixture recorded earlier now differs at `response_body/*/TableId` for DynamoDB table operations and at the `Policy` entry for `GetTopicAttributes`. Regenerate it, or allowlist the field. The checked-in DynamoDB fixture is regenerated.
+- **Compatibility (#1596):** a `filterPattern` is now parsed. A pattern that worked as a literal substring may now match differently: `a b` requires both terms, `-x` excludes, and a leading `{` is JSON. One that does not parse, or is space-delimited or a regular expression, is refused with `InvalidParameterException` instead of matching literally.
+
 ## [v0.130.0] - 2026-11-23
 
 ### Added

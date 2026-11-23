@@ -107,6 +107,21 @@ type DynamoDBTable struct {
 
 	// EverTagged records that this table has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
+
+	// TableID is the table's TableId, a UUID minted from the CreateTable request's IDs so a replay mints
+	// the same one (#1608). A table recorded before #1608 has none, and its description omits the member.
+	TableID string `json:"TableId,omitempty"`
+
+	// PITREnabled is the table's point-in-time recovery status, set by UpdateContinuousBackups and read
+	// back by DescribeContinuousBackups (#1608). It is not a TableDescription member.
+	PITREnabled bool `json:"pitr_enabled,omitempty"`
+
+	// PITREnabledAt is when point-in-time recovery was last enabled, in Unix epoch seconds on the
+	// simulated clock: the earliest restorable time can be no earlier.
+	PITREnabledAt float64 `json:"pitr_enabled_at,omitempty"`
+
+	// PITRRecoveryPeriodInDays is the configured recovery period; 0 reads as the default of 35.
+	PITRRecoveryPeriodInDays int `json:"pitr_recovery_period_in_days,omitempty"`
 }
 
 // DynamoDBKeySchemaElement specifies a single attribute that forms the primary key.

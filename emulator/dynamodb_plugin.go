@@ -80,6 +80,11 @@ func (p *DynamoDBPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*A
 		return p.updateTimeToLive(ctx, req)
 	case "DescribeTimeToLive":
 		return p.describeTimeToLive(ctx, req)
+	// Point-in-time recovery.
+	case "DescribeContinuousBackups":
+		return p.describeContinuousBackups(ctx, req)
+	case "UpdateContinuousBackups":
+		return p.updateContinuousBackups(ctx, req)
 	// Streams.
 	case "ListStreams":
 		return p.listStreams(ctx, req)
@@ -419,6 +424,9 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		StreamSpecification:    input.StreamSpecification,
 		TableSizeBytes:         0,
 		ItemCount:              0,
+		// API_TableDescription: "Unique identifier for the table for which the backup was created."
+		// It is a UUID on the wire, and minting it from the request's IDs keeps a replay identical (#1608).
+		TableID: ctx.IDs.UUID(),
 	}
 
 	// Store any tags supplied at table creation time so they can be read back

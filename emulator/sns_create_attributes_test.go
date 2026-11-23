@@ -256,7 +256,8 @@ func TestSNSCreateTopicAttributesEndAtTheFirstAbsentIndex(t *testing.T) {
 	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
 	require.Empty(t, errCode)
 	assert.Equal(t, "First", attrs["DisplayName"])
-	assert.NotContains(t, attrs, "Policy", "index 2 is absent, so index 3 is not reached")
+	assert.NotEqual(t, "{}", attrs["Policy"], "index 2 is absent, so index 3 is not reached")
+	assert.Contains(t, attrs["Policy"], "__default_policy_ID", "the topic reports the default policy instead")
 }
 
 // TestSNSCreateTopicAttributesAcceptAnEmptyValue pins that a key present with an empty value is stored.

@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"encoding/json"
 	"encoding/xml"
 	"testing"
 
@@ -73,8 +74,8 @@ func TestSNSTopicAttributesReportsOnlyPublishedNames(t *testing.T) {
 	body := snsGetTopicAttributesBody(t, ts, snsEastRegion, arn)
 	keys := snsAttributeEntryKeys(t, body)
 
-	assert.Equal(t, []string{"Owner", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
-		"a topic with no stored attributes reports exactly the four derived members, once each")
+	assert.Equal(t, []string{"Owner", "Policy", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
+		"a topic with no stored attributes reports exactly the derived members, once each")
 	assert.NotContains(t, keys, "SubscriptionsCount",
 		"SubscriptionsCount appears nowhere on API_GetTopicAttributes")
 	assert.NotContains(t, keys, "SubscriptionsDeleted",
@@ -189,17 +190,16 @@ func TestSNSStoredAttributeCannotShadowADerivedOne(t *testing.T) {
 	assert.Equal(t, "0", attrs["SubscriptionsPending"], "a stored count does not shadow the derived one")
 
 	keys := snsAttributeEntryKeys(t, snsGetTopicAttributesBody(t, ts, snsEastRegion, arn))
-	assert.Equal(t, []string{"Owner", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
+	assert.Equal(t, []string{"Owner", "Policy", "SubscriptionsConfirmed", "SubscriptionsPending", "TopicArn"}, keys,
 		"overwriting a derived member does not duplicate its entry")
 }
 
 // TestSNSTopicAttributesPassesStoredMembersThrough asserts the other half of the split: an attribute
 // AWS publishes and substrate does not derive is reported as stored.
 //
-// Policy is the interesting one, and the reason it is the case here. The page publishes it and AWS's
-// sample carries a default policy document, but SNS has no operation that mints one, so substrate
-// reports a Policy only when something stored it — the same shape as KMS's #983, recorded as unmodelled
-// in docs/services.md rather than answered with an invented document.
+// Policy is the interesting one, and the reason it is the case here. A topic nobody set a policy on
+// reports SNS's default document (#1608), and a stored Policy replaces it rather than being shadowed the
+// way a stored derived member is.
 func TestSNSTopicAttributesPassesStoredMembersThrough(t *testing.T) {
 	t.Parallel()
 	ts := snsTagServer(t)
@@ -207,7 +207,7 @@ func TestSNSTopicAttributesPassesStoredMembersThrough(t *testing.T) {
 
 	before, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
 	require.Empty(t, errCode)
-	assert.NotContains(t, before, "Policy", "SNS mints no default topic policy")
+	assert.Contains(t, before["Policy"], "__default_policy_ID", "a new topic reports the default policy")
 	assert.NotContains(t, before, "DisplayName")
 
 	const policy = `{"Version":"2008-10-17","Statement":[]}`
@@ -229,4 +229,44 @@ func TestSNSTopicAttributesPassesStoredMembersThrough(t *testing.T) {
 	assert.Equal(t, policy, after["Policy"], "a stored Policy is reported verbatim")
 	assert.Equal(t, "attrs-display", after["DisplayName"])
 	assert.Equal(t, arn, after["TopicArn"], "the derived members survive a stored one arriving")
+}
+
+// TestSNSDefaultTopicPolicyIsTheDocumentedOne decodes the default Policy member by member against the
+// AWS CLI reference's get-topic-attributes example (#1608). Terraform's aws_sns_topic parses the
+// attribute on every read, so its absence failed `terraform apply`.
+func TestSNSDefaultTopicPolicyIsTheDocumentedOne(t *testing.T) {
+	t.Parallel()
+	ts := snsTagServer(t)
+	arn := snsCreateTopic(t, ts, "attrs-default-policy")
+
+	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
+	require.Empty(t, errCode)
+
+	var doc struct {
+		Version   string
+		ID        string `json:"Id"`
+		Statement []struct {
+			Sid       string
+			Effect    string
+			Principal map[string]string
+			Action    []string
+			Resource  string
+			Condition map[string]map[string]string
+		}
+	}
+	require.NoError(t, json.Unmarshal([]byte(attrs["Policy"]), &doc), "the Policy is a JSON document: %s", attrs["Policy"])
+	assert.Equal(t, "2008-10-17", doc.Version)
+	assert.Equal(t, "__default_policy_ID", doc.ID)
+	require.Len(t, doc.Statement, 1)
+	st := doc.Statement[0]
+	assert.Equal(t, "__default_statement_ID", st.Sid)
+	assert.Equal(t, "Allow", st.Effect)
+	assert.Equal(t, map[string]string{"AWS": "*"}, st.Principal)
+	assert.Equal(t, []string{
+		"SNS:Subscribe", "SNS:ListSubscriptionsByTopic", "SNS:DeleteTopic", "SNS:GetTopicAttributes",
+		"SNS:Publish", "SNS:RemovePermission", "SNS:AddPermission", "SNS:SetTopicAttributes",
+	}, st.Action)
+	assert.Equal(t, arn, st.Resource, "the statement names this topic")
+	assert.Equal(t, map[string]map[string]string{"StringEquals": {"AWS:SourceOwner": taggingTestAccount}}, st.Condition,
+		"the wildcard principal is confined to the owner's account")
 }

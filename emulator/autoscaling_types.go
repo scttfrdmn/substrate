@@ -219,6 +219,15 @@ type AutoScalingSuspendedProcess struct {
 	SuspensionReason string `json:"suspension_reason"`
 }
 
+// AutoScalingEnabledMetric is one group metric EnableMetricsCollection turned on (#1594).
+type AutoScalingEnabledMetric struct {
+	// Metric is the metric name, one of [asgMetricNames].
+	Metric string `json:"metric"`
+
+	// Granularity is the collection granularity; "1Minute" is the only published value.
+	Granularity string `json:"granularity"`
+}
+
 // AutoScalingInstance is one member instance of a group.
 type AutoScalingInstance struct {
 	// InstanceID is the EC2 instance ID.
@@ -340,6 +349,9 @@ type AutoScalingGroup struct {
 
 	// SuspendedProcesses are the processes currently suspended, sorted by name.
 	SuspendedProcesses []AutoScalingSuspendedProcess `json:"suspended_processes,omitempty"`
+
+	// EnabledMetrics are the group metrics collection is enabled for, in [asgMetricNames] order.
+	EnabledMetrics []AutoScalingEnabledMetric `json:"enabled_metrics,omitempty"`
 
 	// Instances are the member instances, in launch order.
 	Instances []AutoScalingInstance `json:"instances,omitempty"`

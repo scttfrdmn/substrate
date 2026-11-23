@@ -747,6 +747,14 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 		return nil, &AWSError{Code: "InvalidParameterException", Message: "logGroupName is required", HTTPStatus: http.StatusBadRequest}
 	}
 
+	// The pattern is compiled once, above every state read: an unparseable pattern is a property of the
+	// request alone, so its refusal must not depend on whether the group exists (#887's criterion), and
+	// compiling it per event would re-parse it for every message (#1596).
+	pattern, err := cwlParseFilterPattern(body.FilterPattern)
+	if err != nil {
+		return nil, err
+	}
+
 	goCtx := context.Background()
 
 	// Above the token decode, for the reason cloudwatchlogs_not_found.go states (#1224). Only the group
@@ -800,7 +808,7 @@ func (p *CloudWatchLogsPlugin) filterLogEvents(ctx *RequestContext, req *AWSRequ
 			if body.EndTime > 0 && ev.Timestamp >= body.EndTime {
 				continue
 			}
-			if body.FilterPattern != "" && !strings.Contains(ev.Message, body.FilterPattern) {
+			if !pattern.Match(ev.Message) {
 				continue
 			}
 			allEvents = append(allEvents, filteredEvent{
