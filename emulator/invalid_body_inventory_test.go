@@ -131,6 +131,9 @@ var invalidBodyServices = []invalidBodyService{
 			{op: "ListTargetsByRule", target: "AWSEvents.ListTargetsByRule"},
 			{op: "PutEvents", target: "AWSEvents.PutEvents"},
 			{op: "ListRules", target: "AWSEvents.ListRules"},
+			{op: "TagResource", target: "AWSEvents.TagResource"},
+			{op: "UntagResource", target: "AWSEvents.UntagResource"},
+			{op: "ListTagsForResource", target: "AWSEvents.ListTagsForResource"},
 		},
 	},
 	{
@@ -492,6 +495,10 @@ var invalidBodyServices = []invalidBodyService{
 		provenance: "every Secrets Manager operation page",
 		cases: []invalidBodyCase{
 			{op: "ListSecrets", target: "secretsmanager.ListSecrets"},
+			{op: "PutResourcePolicy", target: "secretsmanager.PutResourcePolicy"},
+			{op: "GetResourcePolicy", target: "secretsmanager.GetResourcePolicy"},
+			{op: "DeleteResourcePolicy", target: "secretsmanager.DeleteResourcePolicy"},
+			{op: "ValidateResourcePolicy", target: "secretsmanager.ValidateResourcePolicy"},
 		},
 	},
 	{
@@ -1227,6 +1234,9 @@ var memberComplaintServices = []memberService{
 			{name: "putTargets", target: "AWSEvents.PutTargets", body: "{}", wantMessage: "Rule is required"},
 			{name: "removeTargets", target: "AWSEvents.RemoveTargets", body: "{}", wantMessage: "Rule is required"},
 			{name: "listTargetsByRule", target: "AWSEvents.ListTargetsByRule", body: "{}", wantMessage: "Rule is required"},
+			{name: "tagResourceTags", target: "AWSEvents.TagResource", body: `{"ResourceARN":"arn:aws:events:us-east-1:123456789012:rule/r"}`, wantMessage: "Tags is required"},
+			{name: "untagResourceTagKeys", target: "AWSEvents.UntagResource", body: `{"ResourceARN":"arn:aws:events:us-east-1:123456789012:rule/r"}`, wantMessage: "TagKeys is required"},
+			{name: "listTagsForResourceARN", target: "AWSEvents.ListTagsForResource", body: "{}", wantMessage: "ResourceARN is required"},
 		},
 	},
 	{

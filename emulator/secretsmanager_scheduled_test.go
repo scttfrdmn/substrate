@@ -79,6 +79,11 @@ var smScheduledRefusers = []struct {
 			"RotationLambdaARN":  smRotationLambda,
 		}
 	}},
+	// The two resource-policy writers (#1623), whose pages publish the same first cause.
+	{"PutResourcePolicy", func(id string) map[string]any {
+		return map[string]any{"SecretId": id, "ResourcePolicy": smFixedPrincipalPolicy}
+	}},
+	{"DeleteResourcePolicy", func(id string) map[string]any { return map[string]any{"SecretId": id} }},
 }
 
 // smScheduleSecret creates a secret carrying a description and one tag, schedules its deletion, and

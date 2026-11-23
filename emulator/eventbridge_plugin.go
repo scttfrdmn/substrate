@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,11 +15,17 @@ const maxEBEventRingBuffer = 100
 
 // EventBridgePlugin emulates the Amazon EventBridge JSON-protocol API.
 // It handles PutRule, DeleteRule, ListRules, DescribeRule, PutTargets,
-// RemoveTargets, ListTargetsByRule, PutEvents, and ListEventBuses.
+// RemoveTargets, ListTargetsByRule, PutEvents, ListEventBuses, TagResource,
+// UntagResource, and ListTagsForResource.
 type EventBridgePlugin struct {
 	state  StateManager
 	logger Logger
 	tc     *TimeController
+
+	// ruleMu serializes the read-modify-write of a rule record — PutRule's update, which keeps the
+	// stored tags, TagResource and UntagResource, and DeleteRule — so two concurrent writers cannot
+	// each read the record before the other stores it and lose one write, or resurrect a deleted rule.
+	ruleMu sync.Mutex
 }
 
 // Name returns the service name "eventbridge".
@@ -61,6 +68,12 @@ func (p *EventBridgePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 		return p.putEvents(ctx, req)
 	case "ListEventBuses":
 		return p.listEventBuses(ctx)
+	case "TagResource":
+		return p.tagResource(req)
+	case "UntagResource":
+		return p.untagResource(req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -70,18 +83,23 @@ func (p *EventBridgePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 
 func (p *EventBridgePlugin) putRule(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
-		Name               string `json:"Name"`
-		EventPattern       string `json:"EventPattern"`
-		ScheduleExpression string `json:"ScheduleExpression"`
-		State              string `json:"State"`
-		Description        string `json:"Description"`
-		EventBusName       string `json:"EventBusName"`
+		Name               string  `json:"Name"`
+		EventPattern       string  `json:"EventPattern"`
+		ScheduleExpression string  `json:"ScheduleExpression"`
+		State              string  `json:"State"`
+		Description        string  `json:"Description"`
+		EventBusName       string  `json:"EventBusName"`
+		RoleArn            string  `json:"RoleArn"`
+		Tags               []EBTag `json:"Tags"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, ebInvalidBody()
 	}
 	if body.Name == "" {
 		return nil, ebValidationError("Name is required")
+	}
+	if tagErr := ebValidateTags(body.Tags); tagErr != nil {
+		return nil, tagErr
 	}
 
 	state := body.State
@@ -102,6 +120,32 @@ func (p *EventBridgePlugin) putRule(ctx *RequestContext, req *AWSRequest) (*AWSR
 		State:              state,
 		Description:        body.Description,
 		EventBusName:       busName,
+		RoleARN:            body.RoleArn,
+		CreatedBy:          ctx.AccountID,
+	}
+
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	existing, err := p.loadRule(goCtx, ctx.AccountID, ctx.Region, body.Name)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		// "If you are updating an existing rule, any tags you specify in the PutRule operation are
+		// ignored", so an update keeps the tags, their history and the creating account. Every other
+		// member is replaced: "If you omit arguments in PutRule, the old values for those arguments are
+		// not kept."
+		rule.Tags = existing.Tags
+		rule.EverTagged = existing.EverTagged
+		if existing.CreatedBy != "" {
+			rule.CreatedBy = existing.CreatedBy
+		}
+	} else if len(body.Tags) > 0 {
+		merged := ebMergeTags(nil, body.Tags, nil)
+		if quotaErr := ebCheckTagQuota(body.Name, len(merged)); quotaErr != nil {
+			return nil, quotaErr
+		}
+		rule.Tags = merged
 	}
 	data, err := json.Marshal(rule)
 	if err != nil {
@@ -135,13 +179,16 @@ func (p *EventBridgePlugin) deleteRule(ctx *RequestContext, req *AWSRequest) (*A
 	}
 
 	goCtx := context.Background()
+	// Held so a TagResource that loaded the rule cannot store it back after this deletes it.
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
 	ruleKey := ebRuleKey(ctx.AccountID, ctx.Region, body.Name)
 	existing, err := p.state.Get(goCtx, eventbridgeNamespace, ruleKey)
 	if err != nil {
 		return nil, fmt.Errorf("eventbridge deleteRule state.Get: %w", err)
 	}
 	if existing == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Rule not found: " + body.Name, HTTPStatus: http.StatusNotFound}
+		return nil, ebRuleNotFound(body.Name)
 	}
 
 	// Check if targets are still attached.
@@ -220,7 +267,7 @@ func (p *EventBridgePlugin) listRules(ctx *RequestContext, req *AWSRequest) (*AW
 	// preserves that order rather than rebuilding it.
 	page, nextToken := pageByOffsetToken(names, offset, limit)
 
-	rules := make([]EBRule, 0, len(page))
+	rules := make([]ebRuleWire, 0, len(page))
 	for _, name := range page {
 		data, getErr := p.state.Get(goCtx, eventbridgeNamespace, ebRuleKey(ctx.AccountID, ctx.Region, name))
 		if getErr != nil || data == nil {
@@ -230,12 +277,12 @@ func (p *EventBridgePlugin) listRules(ctx *RequestContext, req *AWSRequest) (*AW
 		if unmarshalErr := json.Unmarshal(data, &rule); unmarshalErr != nil {
 			continue
 		}
-		rules = append(rules, rule)
+		rules = append(rules, ebRuleToWire(rule))
 	}
 
 	type response struct {
-		Rules     []EBRule `json:"Rules"`
-		NextToken string   `json:"NextToken,omitempty"`
+		Rules     []ebRuleWire `json:"Rules"`
+		NextToken string       `json:"NextToken,omitempty"`
 	}
 	return ebJSONResponse(http.StatusOK, response{Rules: rules, NextToken: nextToken})
 }
@@ -258,14 +305,14 @@ func (p *EventBridgePlugin) describeRule(ctx *RequestContext, req *AWSRequest) (
 		return nil, fmt.Errorf("eventbridge describeRule state.Get: %w", err)
 	}
 	if data == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Rule not found: " + body.Name, HTTPStatus: http.StatusNotFound}
+		return nil, ebRuleNotFound(body.Name)
 	}
 
 	var rule EBRule
 	if err := json.Unmarshal(data, &rule); err != nil {
 		return nil, fmt.Errorf("eventbridge describeRule unmarshal: %w", err)
 	}
-	return ebJSONResponse(http.StatusOK, rule)
+	return ebJSONResponse(http.StatusOK, ebDescribeRuleWire{ebRuleWire: ebRuleToWire(rule), CreatedBy: rule.CreatedBy})
 }
 
 // --- Target operations ------------------------------------------------------
@@ -285,21 +332,15 @@ func (p *EventBridgePlugin) putTargets(ctx *RequestContext, req *AWSRequest) (*A
 
 	goCtx := context.Background()
 
-	// Verify the rule exists.
-	ruleData, err := p.state.Get(goCtx, eventbridgeNamespace, ebRuleKey(ctx.AccountID, ctx.Region, body.Rule))
+	// Held across the existence check and the write, so a concurrent DeleteRule cannot remove the
+	// rule between them and leave this write behind as an orphan target list.
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	existing, err := p.loadRuleTargets(goCtx, ctx, body.Rule)
 	if err != nil {
-		return nil, fmt.Errorf("eventbridge putTargets rule.Get: %w", err)
+		return nil, err
 	}
-	if ruleData == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Rule not found: " + body.Rule, HTTPStatus: http.StatusNotFound}
-	}
-
 	targetsKey := ebTargetsKey(ctx.AccountID, ctx.Region, body.Rule)
-	var existing []EBTarget
-	existingData, _ := p.state.Get(goCtx, eventbridgeNamespace, targetsKey)
-	if existingData != nil {
-		_ = json.Unmarshal(existingData, &existing)
-	}
 
 	// Merge targets: overwrite by ID.
 	idMap := make(map[string]int, len(existing))
@@ -344,12 +385,15 @@ func (p *EventBridgePlugin) removeTargets(ctx *RequestContext, req *AWSRequest) 
 	}
 
 	goCtx := context.Background()
-	targetsKey := ebTargetsKey(ctx.AccountID, ctx.Region, body.Rule)
-	existingData, _ := p.state.Get(goCtx, eventbridgeNamespace, targetsKey)
-	var existing []EBTarget
-	if existingData != nil {
-		_ = json.Unmarshal(existingData, &existing)
+	// RemoveTargets publishes ResourceNotFoundException; it answered 200 for an absent rule and wrote
+	// an empty target list under its name. Locked for the reason putTargets is.
+	p.ruleMu.Lock()
+	defer p.ruleMu.Unlock()
+	existing, err := p.loadRuleTargets(goCtx, ctx, body.Rule)
+	if err != nil {
+		return nil, err
 	}
+	targetsKey := ebTargetsKey(ctx.AccountID, ctx.Region, body.Rule)
 
 	removeIDs := make(map[string]bool, len(body.IDs))
 	for _, id := range body.IDs {
@@ -378,6 +422,28 @@ func (p *EventBridgePlugin) removeTargets(ctx *RequestContext, req *AWSRequest) 
 	return ebJSONResponse(http.StatusOK, response{FailedEntryCount: 0, FailedEntries: []interface{}{}})
 }
 
+// loadRuleTargets refuses an absent rule and returns its stored targets. The caller holds ruleMu.
+func (p *EventBridgePlugin) loadRuleTargets(goCtx context.Context, ctx *RequestContext, rule string) ([]EBTarget, error) {
+	ruleData, err := p.state.Get(goCtx, eventbridgeNamespace, ebRuleKey(ctx.AccountID, ctx.Region, rule))
+	if err != nil {
+		return nil, fmt.Errorf("eventbridge load rule %s: %w", rule, err)
+	}
+	if ruleData == nil {
+		return nil, ebRuleNotFound(rule)
+	}
+	data, err := p.state.Get(goCtx, eventbridgeNamespace, ebTargetsKey(ctx.AccountID, ctx.Region, rule))
+	if err != nil {
+		return nil, fmt.Errorf("eventbridge load targets of %s: %w", rule, err)
+	}
+	var targets []EBTarget
+	if data != nil {
+		if err := json.Unmarshal(data, &targets); err != nil {
+			return nil, fmt.Errorf("eventbridge decode targets of %s: %w", rule, err)
+		}
+	}
+	return targets, nil
+}
+
 func (p *EventBridgePlugin) listTargetsByRule(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		Rule         string `json:"Rule"`
@@ -400,7 +466,7 @@ func (p *EventBridgePlugin) listTargetsByRule(ctx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("eventbridge listTargetsByRule rule.Get: %w", err)
 	}
 	if ruleData == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Rule not found: " + body.Rule, HTTPStatus: http.StatusNotFound}
+		return nil, ebRuleNotFound(body.Rule)
 	}
 
 	targetsData, _ := p.state.Get(goCtx, eventbridgeNamespace, ebTargetsKey(ctx.AccountID, ctx.Region, body.Rule))
@@ -526,7 +592,7 @@ func (p *EventBridgePlugin) listEventBuses(reqCtx *RequestContext) (*AWSResponse
 // --- State key helpers -------------------------------------------------------
 
 func ebRuleKey(accountID, region, name string) string {
-	return "ebrule:" + accountID + "/" + region + "/" + name
+	return ebRuleKeyPrefix + accountID + "/" + region + "/" + name
 }
 
 func ebRuleNamesKey(accountID, region string) string {

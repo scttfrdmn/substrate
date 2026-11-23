@@ -253,6 +253,7 @@ emulator/emrserverless_plugin.go	EMRServerlessApp	AccountID	accountID
 emulator/emrserverless_plugin.go	EMRServerlessApp	Region	region
 emulator/emrserverless_plugin.go	EMRServerlessJobRun	AccountID	accountID
 emulator/emrserverless_plugin.go	EMRServerlessJobRun	Region	region
+emulator/eventbridge_types.go	EBRule	EverTagged	ever_tagged,omitempty
 emulator/eventstore.go	Event	AccountID	account_id
 emulator/eventstore.go	Event	Region	region
 emulator/firehose_types.go	FirehoseDeliveryStream	AccountID	AccountId

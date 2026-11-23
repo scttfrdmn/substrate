@@ -163,7 +163,7 @@ func TestEB_PutRuleMissingName(t *testing.T) {
 func TestEB_DeleteRuleNotFound(t *testing.T) {
 	srv := newEBTestServer(t)
 	resp := ebRequest(t, srv, "DeleteRule", map[string]string{"Name": "missing"})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestEB_PutTargetsMissingRule(t *testing.T) {
@@ -172,13 +172,13 @@ func TestEB_PutTargetsMissingRule(t *testing.T) {
 		"Rule":    "missing",
 		"Targets": []map[string]string{{"Id": "t1", "Arn": "arn:aws:sqs:us-east-1:123456789012:q"}},
 	})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestEB_ListTargetsMissingRule(t *testing.T) {
 	srv := newEBTestServer(t)
 	resp := ebRequest(t, srv, "ListTargetsByRule", map[string]string{"Rule": "missing"})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestEB_PutRuleUpdatesExisting(t *testing.T) {

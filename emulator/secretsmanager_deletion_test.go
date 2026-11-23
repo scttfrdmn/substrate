@@ -112,9 +112,12 @@ func TestSMDeletion_ADefaultDeleteSchedulesRatherThanRemoves(t *testing.T) {
 		"the default window is 30 days from the request")
 
 	// "At the end of the recovery window, Secrets Manager deletes the secret permanently" — so until
-	// then the secret exists, and both of these say so.
-	assert.Contains(t, smListSecretNames(t, ts, smTarget), "scheduled",
-		"ListSecrets still reports a secret inside its recovery window")
+	// then the secret exists, and both of these say so. ListSecrets reports it only when asked to:
+	// "By default, secrets scheduled for deletion aren't included" (#1622).
+	assert.NotContains(t, smListSecretNames(t, ts, smTarget), "scheduled",
+		"ListSecrets leaves a secret inside its recovery window out by default")
+	assert.Contains(t, smListEverySecretName(t, ts, smTarget), "scheduled",
+		"and reports it with IncludePlannedDeletion")
 	members := smDescribeMembers(t, ts, arn)
 	require.Contains(t, members, "DeletedDate",
 		"DescribeSecret reports DeletedDate while the window is open")
@@ -274,7 +277,7 @@ func TestSMDeletion_AForcedDeleteRemovesTheRecord(t *testing.T) {
 	describeStatus, _, describeCode := smRawCall(t, ts, smTarget, "DescribeSecret", map[string]any{"SecretId": arn})
 	assert.Equal(t, "ResourceNotFoundException", describeCode, "the record is gone, not scheduled")
 	assert.Equal(t, http.StatusBadRequest, describeStatus)
-	assert.NotContains(t, smListSecretNames(t, ts, smTarget), "forced",
+	assert.NotContains(t, smListEverySecretName(t, ts, smTarget), "forced",
 		"and the index entry with it")
 }
 
@@ -338,7 +341,7 @@ func TestSMDeletion_ASecondUnforcedDeleteIsRefusedButAForcedOneSucceeds(t *testi
 	})
 	require.Empty(t, forcedCode)
 	assert.Equal(t, http.StatusOK, forcedStatus)
-	assert.NotContains(t, smListSecretNames(t, ts, smTarget), "double")
+	assert.NotContains(t, smListEverySecretName(t, ts, smTarget), "double")
 }
 
 func TestSMDeletion_RestoreSecretRefusesAnAbsentSecretAndAcceptsAnUnscheduledOne(t *testing.T) {
@@ -387,7 +390,7 @@ func TestSMDeletion_ASecretIsStillReportedAfterItsWindowHasPassed(t *testing.T) 
 	// occur" — so substrate does not make the secret vanish at any simulated instant. A test asserting
 	// it had would assert something AWS explicitly declines to promise. What is modeled is the stamp
 	// and the refusals it causes, both of which still hold below.
-	assert.Contains(t, smListSecretNames(t, ts, smTarget), "expired-window",
+	assert.Contains(t, smListEverySecretName(t, ts, smTarget), "expired-window",
 		"a secret whose window has passed is still reported")
 	assert.Contains(t, smDescribeMembers(t, ts, arn), "DeletedDate",
 		"and still carries the stamp")
@@ -472,7 +475,7 @@ func TestSMDeletion_AForcedDeleteLeavesItsSiblingsAlone(t *testing.T) {
 	})
 	require.Empty(t, code)
 
-	names := smListSecretNames(t, ts, smTarget)
+	names := smListEverySecretName(t, ts, smTarget)
 	assert.NotContains(t, names, "doomed", "the forced delete removed its own index entry")
 	assert.Contains(t, names, "survivor", "and left the other one on the index")
 

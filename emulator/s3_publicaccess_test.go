@@ -530,6 +530,54 @@ func publicPolicyCases() []policyCase {
 				`{"StringEquals":{"s3:DataAccessPointArn":"arn:aws:s3:us-west-2:*:accesspoint/ap"}}`),
 			public: true,
 		},
+		// A qualifying key under an operator that does not grant "only to fixed values"
+		// pins nothing (#1641): each of these admits the anonymous request.
+		{
+			name:   "wildcard principal with a negated StringNotEquals on a fixed vpc",
+			policy: policyJSON("Allow", `"*"`, `{"StringNotEquals":{"aws:SourceVpc":"vpc-91237329"}}`),
+			public: true,
+		},
+		{
+			name:   "wildcard principal with StringEqualsIfExists on a fixed vpc",
+			policy: policyJSON("Allow", `"*"`, `{"StringEqualsIfExists":{"aws:SourceVpc":"vpc-91237329"}}`),
+			public: true,
+		},
+		{
+			name:   "wildcard principal with a Null test on a qualifying key",
+			policy: policyJSON("Allow", `"*"`, `{"Null":{"aws:SourceVpc":"false"}}`),
+			public: true,
+		},
+		{
+			name:   "wildcard principal with NotIpAddress",
+			policy: policyJSON("Allow", `"*"`, `{"NotIpAddress":{"aws:SourceIp":"10.0.0.0/8"}}`),
+			public: true,
+		},
+		{
+			// Vacuously true for a request with no value for the key.
+			name:   "wildcard principal with ForAllValues:StringEquals",
+			policy: policyJSON("Allow", `"*"`, `{"ForAllValues:StringEquals":{"aws:SourceVpc":"vpc-91237329"}}`),
+			public: true,
+		},
+		{
+			name:   "wildcard principal with ForAnyValue:StringEquals on a fixed vpc",
+			policy: policyJSON("Allow", `"*"`, `{"ForAnyValue:StringEquals":{"aws:SourceVpc":"vpc-91237329"}}`),
+			public: false,
+		},
+		{
+			name:   "wildcard principal with StringLike on a fixed value",
+			policy: policyJSON("Allow", `"*"`, `{"StringLike":{"aws:SourceVpc":"vpc-91237329"}}`),
+			public: false,
+		},
+		{
+			name:   "wildcard principal with ArnEquals on a fixed principal ARN",
+			policy: policyJSON("Allow", `"*"`, `{"ArnEquals":{"aws:PrincipalArn":"arn:aws:iam::123456789012:role/r"}}`),
+			public: false,
+		},
+		{
+			name:   "wildcard principal with IpAddress on a /24",
+			policy: policyJSON("Allow", `"*"`, `{"IpAddress":{"aws:SourceIp":"203.0.113.0/24"}}`),
+			public: false,
+		},
 		{
 			// A condition key is case-insensitive, so the qualifying-key lookup must
 			// be too.

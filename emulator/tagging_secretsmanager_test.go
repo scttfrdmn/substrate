@@ -168,8 +168,22 @@ func smUntagResource(t *testing.T, ts *emulator.TestServer, tgt signedRequestTar
 	return status, code
 }
 
-// smListSecretNames returns the names ListSecrets reports through one Region's endpoint.
+// smListSecretNames returns the names ListSecrets reports through one Region's endpoint, with its
+// defaults — which leave out a secret scheduled for deletion (#1622).
 func smListSecretNames(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget) []string {
+	t.Helper()
+	return smListSecretNamesWith(t, ts, tgt, map[string]any{})
+}
+
+// smListEverySecretName is [smListSecretNames] with IncludePlannedDeletion set, which is the listing
+// that shows whether a secret's index entry exists at all.
+func smListEverySecretName(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget) []string {
+	t.Helper()
+	return smListSecretNamesWith(t, ts, tgt, map[string]any{"IncludePlannedDeletion": true})
+}
+
+// smListSecretNamesWith returns the names one ListSecrets call with body reports.
+func smListSecretNamesWith(t *testing.T, ts *emulator.TestServer, tgt signedRequestTarget, body map[string]any) []string {
 	t.Helper()
 	var out struct {
 		SecretList []struct {
@@ -177,7 +191,7 @@ func smListSecretNames(t *testing.T, ts *emulator.TestServer, tgt signedRequestT
 		} `json:"SecretList"`
 	}
 	status, errCode := decodeAWSResponse(t,
-		signedRequest(t, ts, tgt, taggingTestAccount, "ListSecrets", map[string]any{}), &out)
+		signedRequest(t, ts, tgt, taggingTestAccount, "ListSecrets", body), &out)
 	require.Empty(t, errCode, "ListSecrets on %s", tgt.host)
 	require.Equal(t, http.StatusOK, status, "ListSecrets on %s", tgt.host)
 	names := make([]string, 0, len(out.SecretList))

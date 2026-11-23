@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1110 operations**. This
+Substrate ships **68 built-in service plugins** routing **1117 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -48,7 +48,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 27 | ElastiCache | `elasticache` | Query | 17 |
 | 28 | ELBv2 | `elasticloadbalancing` | Query | 24 |
 | 29 | EMR Serverless | `emrserverless` | REST/JSON | 7 |
-| 30 | EventBridge | `eventbridge` | JSON | 9 |
+| 30 | EventBridge | `eventbridge` | JSON | 12 |
 | 31 | API Gateway (execute-api) | `execute-api` | REST/JSON | 0 |
 | 32 | Kinesis Data Firehose | `firehose` | JSON | 6 |
 | 33 | FSx | `fsx` | JSON | 3 |
@@ -74,7 +74,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 53 | S3 | `s3` | REST/XML | 53 |
 | 54 | SageMaker | `sagemaker` | JSON | 10 |
 | 55 | EventBridge Scheduler | `scheduler` | REST/JSON | 12 |
-| 56 | Secrets Manager | `secretsmanager` | JSON | 12 |
+| 56 | Secrets Manager | `secretsmanager` | JSON | 16 |
 | 57 | Service Quotas | `servicequotas` | JSON | 9 |
 | 58 | SES v2 | `sesv2` | REST/JSON | 5 |
 | 59 | SNS | `sns` | Query | 18 |
@@ -6607,6 +6607,16 @@ variable — either through its `Principal` or through a `Condition` on one of
 `aws:SourceAccount`, `aws:userid`, `aws:PrincipalOrgID`, `aws:PrincipalArn`,
 `aws:PrincipalAccount`, `s3:DataAccessPointArn` or `s3:DataAccessPointAccount`.
 
+**Only a positive operator pins a key.** A `Condition` qualifies only under `StringEquals`,
+`StringEqualsIgnoreCase`, `StringLike`, `ArnEquals`, `ArnLike` or `IpAddress`, optionally
+qualified by `ForAnyValue:`. A negated operator (`StringNotEquals`, `NotIpAddress` and the
+rest) grants every value but the fixed ones, an `...IfExists` form and a `ForAllValues:`
+qualifier are satisfied by a request that carries no such key, and `Null` tests presence —
+so none of them grants access "only to fixed values", and a statement narrowed only by them is
+public. The guide names no operators, so the list is substrate's reading of that phrase. Until
+#1641 the operator was ignored, so `Principal: "*"` with `StringNotEquals
+aws:SourceVpc` was accepted under `BlockPublicPolicy`.
+
 The consequence, and AWS's own example:
 
 | Policy | Public? |
@@ -6614,6 +6624,8 @@ The consequence, and AWS's own example:
 | `Principal: "*"`, no condition | yes |
 | `Principal: "*"` + `StringLike aws:SourceVpc: "vpc-*"` | **yes** — the narrowing value is itself a wildcard |
 | `Principal: "*"` + `StringEquals aws:SourceVpc: "vpc-91237329"` | no |
+| `Principal: "*"` + `StringNotEquals aws:SourceVpc: "vpc-91237329"` | **yes** — a negated operator grants every other value |
+| `Principal: "*"` + `StringEqualsIfExists aws:SourceVpc: "vpc-91237329"` | **yes** — satisfied when the key is absent |
 | `Principal: {"AWS": "arn:aws:iam::123456789012:root"}` | no |
 | `Principal: {"AWS": "arn:aws:iam::123456789012:user/*"}` | yes |
 | `Principal: "*"` + `aws:SourceIp: "203.0.113.0/24"` | no |
@@ -12915,6 +12927,68 @@ whose stored state was `active` and answer every later `DescribeCapacityReservat
 seed is recorded as an event and re-applied before the recorded `CreateCapacityReservation` is
 re-executed — see [How a seed survives a replay](#how-a-seed-survives-a-replay).
 
+### `ListSecrets` filters, sorts and hides pending deletions
+
+Until [#1622](https://github.com/scttfrdmn/substrate/issues/1622) every entry was `ARN` and `Name`
+alone, `Filters` was ignored, and a secret scheduled for deletion was listed. An entry now carries
+what `DescribeSecret` reports for the secret, with the two differences `SecretListEntry` publishes:
+the version map is `SecretVersionsToStages` (only versions carrying a label, and absent for a
+secret with no version), and `RotationEnabled` appears only when rotation is configured, as the
+page's sample entries show.
+
+| Filter `Key` | Matches |
+|---|---|
+| `name`, `tag-key`, `tag-value` | A case-sensitive prefix of the name, of any tag key, or of any tag value |
+| `description` | Every word of the value begins some word of the description, ignoring case |
+| `all` | Any word of the value begins any word of the name, description, tag keys or tag values, ignoring case; words split where the "Find secrets" guide says (`credsDatabase#892` is `creds`, `database`, `892`) |
+| `primary-region`, `owning-service` | Nothing: substrate models neither replication nor service-managed secrets |
+
+A value beginning `!` is negated: it matches a secret none of whose strings for that key matches
+the rest of the value. The values of one filter are alternatives and separate filters are all
+required. The per-key rules are `API_Filter`'s; how values combine, how a negation treats a
+multi-valued attribute, and the word rule for `description` are substrate's reading, since no page
+states them. More than ten filters, an unknown key, a value list outside one to ten items, a value
+over 512 characters or outside the published pattern, and an unknown `SortBy` or `SortOrder` are
+`InvalidParameterException`/400, with messages that are substrate's own.
+
+Secrets are listed by `CreatedDate`, as the page says, ascending unless `SortOrder` is `desc` (the
+page publishes no default direction, so ascending is substrate's reading); `SortBy` may name
+`last-changed-date`, `name` or `last-accessed-date`, the last of which every secret ties on because
+`LastAccessedDate` is not modelled. Ties break by name. The list is filtered and sorted before it
+is cut into pages, and `NextToken` names the last entry served — its sort key and name — so the
+next page resumes strictly after it: a cleanup loop that deletes each page's secrets before
+fetching the next reaches every secret, where an offset would have skipped as many as it deleted.
+A token substrate did not issue is `InvalidNextTokenException`. A secret scheduled for deletion is listed only with `IncludePlannedDeletion`,
+and carries `DeletedDate` when it is.
+
+### A resource policy is stored, not enforced
+
+`PutResourcePolicy`, `GetResourcePolicy`, `DeleteResourcePolicy` and `ValidateResourcePolicy`
+([#1623](https://github.com/scttfrdmn/substrate/issues/1623)) store a policy on the secret and answer
+it back as the text the caller submitted. **The policy takes no part in authorization**: every
+operation, `GetSecretValue` included, is decided by the caller's identity policies alone. Evaluating
+resource policies is tracked as [#1636](https://github.com/scttfrdmn/substrate/issues/1636).
+
+| Request | Answer |
+|---|---|
+| A policy that is not JSON, not an object (`null` included), has no `Statement` or an empty one, or whose `Statement` is not a statement or a list of them | `MalformedPolicyDocumentException`/400 — the IAM policy grammar marks `<statement_block>` required |
+| No `ResourcePolicy`, or one over 20,480 characters | `InvalidParameterException`/400 |
+| `PolicyName` other than `default` on `PutResourcePolicy` or `DeleteResourcePolicy` | `InvalidParameterException`/400, as both pages state |
+| `PolicyName` other than `default` on `GetResourcePolicy` | `ResourceNotFoundException`/400, as that page states |
+| `BlockPublicPolicy` with a policy granting broad access | `PublicPolicyException`/400, nothing stored. An absent secret is `ResourceNotFoundException` and a scheduled one `InvalidRequestException` first, whatever the policy grants |
+| `ValidateResourcePolicy` with a policy granting broad access | `200`, `PolicyValidationPassed: false`, one `ValidationErrors` entry |
+| `ValidateResourcePolicy` with a policy that passes | `200`, `PolicyValidationPassed: true`, `ValidationErrors: []` |
+
+AWS decides "broad access" with Zelkova, whose rules are unpublished. Substrate uses the definition
+S3 Block Public Access publishes: an `Allow` statement is broad unless its principal names only
+fixed values or a condition pins a principal- or source-narrowing key (`aws:PrincipalArn`,
+`aws:PrincipalAccount`, `aws:SourceVpc` and the others) to fixed values under a positive operator —
+see [Block Public Access](#block-public-access); `StringNotEquals`, an `...IfExists` form or `Null`
+narrows nothing. S3's own `s3:DataAccessPoint*` keys do not qualify a secret's policy. A `Deny` is
+never broad, so a "deny everyone but this role" policy passes. That definition, the `CheckName` value
+(`BroadAccessCheck`) and the error messages are substrate's own. The third check
+`ValidateResourcePolicy` publishes, that the policy "does not lock out a caller", is not modelled.
+
 ### The account and Region a record carries reach no response
 
 Every EC2 record in `emulator/ec2_types.go`, `emulator/ec2_capacity_reservations.go` and
@@ -15372,12 +15446,16 @@ SNS publish: $0.0000005 per message.
 | UpdateSecret | Rewrites `Description` and `KmsKeyId`; a value creates a new version under the caller's `ClientRequestToken`, and a token already in use is `ResourceExistsException` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels). Answers `VersionId` only when it created a version. Refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | DeleteSecret | Opens a 7-to-30-day recovery window, defaulting to 30, rather than removing the secret; `ForceDeleteWithoutRecovery` removes it — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RestoreSecret | Clears the `DeletionDate` and answers `ARN` and `Name` only |
-| ListSecrets | Base64 offset pagination; `MaxResults` outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused; scoped to the caller's account and Region |
+| ListSecrets | Each entry carries the secret's metadata, including `Tags` and `SecretVersionsToStages`; honours `Filters`, `SortBy` and `SortOrder`, and leaves out secrets scheduled for deletion unless `IncludePlannedDeletion` is set — see [`ListSecrets` filters, sorts and hides pending deletions](#listsecrets-filters-sorts-and-hides-pending-deletions). `NextToken` is a cursor on the last entry served, so a secret deleted or created mid-walk costs no other secret its place; `MaxResults` outside [the published range](#eight-json-list-operations-refuse-a-page-size-outside-the-published-range) is refused; scoped to the caller's account and Region |
 | DescribeSecret | The read path for a secret's tags; reports only the members it has a value for, plus `DeletedDate` while a recovery window is open |
 | ListSecretVersionIds | Every version with its staging labels; deprecated versions only with `IncludeDeprecated`; pages by `MaxResults`/`NextToken` — see [A secret's versions carry staging labels](#a-secrets-versions-carry-staging-labels) |
 | TagResource | Appends to the existing list rather than replacing it; refuses a secret scheduled for deletion — see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | UntagResource | Idempotent — an absent key is not an error — but a secret scheduled for deletion is refused even then, see [A deleted secret is scheduled, not removed](#a-deleted-secret-is-scheduled-not-removed) |
 | RotateSecret | Records the rotation function and schedule and echoes `ClientRequestToken` as `VersionId`; no rotation function is executed, and a secret scheduled for deletion is refused — see [A rotation is configured, not run](#a-rotation-is-configured-not-run) |
+| PutResourcePolicy | Validates and stores the policy; `BlockPublicPolicy` refuses a broad grant with `PublicPolicyException`. Stored, not enforced — see [A resource policy is stored, not enforced](#a-resource-policy-is-stored-not-enforced) |
+| GetResourcePolicy | Answers the stored text verbatim, and no `ResourcePolicy` member for a secret without one |
+| DeleteResourcePolicy | Removes the policy; succeeds when none is attached |
+| ValidateResourcePolicy | `PolicyValidationPassed` and `ValidationErrors` from the syntax and broad-access checks; `SecretId` is optional |
 
 ### A version's identity is its `ClientRequestToken`
 
@@ -15581,7 +15659,7 @@ schedule-then-restore path is assertable with no dependence on wall-clock time.
 
 | Call | Answer |
 |------|--------|
-| `DeleteSecret` with neither parameter | `200`, `DeletionDate` 30 days out; the secret is still listed and still described |
+| `DeleteSecret` with neither parameter | `200`, `DeletionDate` 30 days out; the secret is still described, and listed when `ListSecrets` sets `IncludePlannedDeletion` |
 | `DeleteSecret` with `RecoveryWindowInDays` 7–30 | `200`, `DeletionDate` that many days out |
 | `DeleteSecret` with a window outside 7–30 | `InvalidParameterException`/`400`, nothing written |
 | `DeleteSecret` with both parameters present | `InvalidParameterException`/`400`, nothing written |
@@ -15594,8 +15672,9 @@ schedule-then-restore path is assertable with no dependence on wall-clock time.
 | `TagResource` on a scheduled secret | `InvalidRequestException`/`400`; the tag list is unchanged |
 | `UntagResource` on a scheduled secret | `InvalidRequestException`/`400`, **even when no named key is attached**; the tag list is unchanged |
 | `RotateSecret` on a scheduled secret | `InvalidRequestException`/`400`; no rotation function or schedule is recorded |
+| `PutResourcePolicy` or `DeleteResourcePolicy` on a scheduled secret | `InvalidRequestException`/`400`; the stored policy is unchanged |
 | `DescribeSecret` on a scheduled secret | `200` with `DeletedDate`; the member is absent otherwise |
-| `RestoreSecret` | `200` with `ARN` and `Name` only; the stamp is cleared and all seven refusals lift at once |
+| `RestoreSecret` | `200` with `ARN` and `Name` only; the stamp is cleared and all nine refusals lift at once |
 
 Four points where the reasoning is not simply AWS's prose:
 
@@ -15638,10 +15717,10 @@ only the three conditions shared across the service, none of which is "not sched
 there is no published code to refuse with — and inventing one would make an idempotent
 restore fail here and succeed against AWS.
 
-**Seven operations refuse the stamp, and one shared constructor builds all seven refusals.**
+**Nine operations refuse the stamp, and one shared constructor builds all nine refusals.**
 `GetSecretValue` and the unforced `DeleteSecret` came with the recovery window itself,
-`RotateSecret` with #952, and `PutSecretValue`, `UpdateSecret`, `TagResource` and
-`UntagResource` with #956 — each of whose pages publishes "The secret is scheduled for
+`RotateSecret` with #952, `PutSecretValue`, `UpdateSecret`, `TagResource` and
+`UntagResource` with #956, and `PutResourcePolicy` and `DeleteResourcePolicy` with #1623 — each of whose pages publishes "The secret is scheduled for
 deletion." as the first of `InvalidRequestException`'s three possible causes. Until then a
 secret inside its recovery window could take a new version, have its description, KMS key
 and value rewritten, and be retagged, so a consumer's "is this secret usable?" check got a
@@ -17696,14 +17775,17 @@ CloudWatch Logs ingestion: $0.50 per GB. Storage: $0.03 per GB-month.
 | Operation | Notes |
 |-----------|-------|
 | ListEventBuses | Returns the default bus only, with the calling account's and Region's ARN |
-| PutRule | |
-| DescribeRule | |
+| PutRule | Stores `RoleArn` and, when it creates the rule, `Tags`; an update replaces every member but keeps the tags, as the page states — see [Rules carry tags](#rules-carry-tags) |
+| DescribeRule | Reports `RoleArn` and `CreatedBy`; `ResourceNotFoundException`/400 for an absent rule |
 | DeleteRule | |
-| ListRules | |
+| ListRules | Reports `RoleArn` |
 | PutTargets | Merges by target `Id`; `ResourceNotFoundException` if the rule does not exist |
-| RemoveTargets | |
+| RemoveTargets | `ResourceNotFoundException` if the rule does not exist; it answered `200` and stored an empty target list until #1641 |
 | ListTargetsByRule | |
 | PutEvents | Stores last 100 events in ring buffer |
+| TagResource | Merges onto a rule's tags, up to 50 — see [Rules carry tags](#rules-carry-tags) |
+| UntagResource | Removes the named keys; an absent key is not an error |
+| ListTagsForResource | A rule's tags sorted by key, and `"Tags": []` for an untagged rule |
 
 **Not modelled: `CreateEventBus`, `DescribeEventBus`, `DeleteEventBus`.** This table listed
 all three until #1015, which is what the operation-docs check was written to catch — the
@@ -17712,6 +17794,26 @@ default bus and no other, so there is no custom bus for them to act on. A rule's
 `EventBusName` is recorded (defaulting to `default`) and echoed back, but it is not part of
 the rule's key, so two rules of one name on different buses are one rule here and not two.
 `PutTargets` and `RemoveTargets`, meanwhile, were routed all along and had no row.
+
+### Rules carry tags
+
+Since [#1607](https://github.com/scttfrdmn/substrate/issues/1607) a rule stores its tags, which
+Terraform's `aws_cloudwatch_event_rule` reads through `ListTagsForResource` on every refresh, and the
+Resource Groups Tagging API's `GetResources` reports a tagged or previously tagged rule.
+
+| Request | Answer |
+|---|---|
+| A rule ARN, `rule/{name}` or `rule/{bus}/{name}` | The rule in the ARN's own account and Region; a `{bus}` other than the rule's is `ResourceNotFoundException`/400 |
+| An event-bus ARN | `ResourceNotFoundException`/400: substrate stores no event-bus record to hold tags, so bus tags are not modelled |
+| Any other ARN | `ValidationError`/400 |
+| More than 50 tags after the merge, on `TagResource` or a creating `PutRule` | `LimitExceededException`/400 |
+| A key outside 1–128 characters or a value over 256 | `ValidationError`/400 |
+
+The 50-tag ceiling is published on `TagResource`'s page without a code; `LimitExceededException` is
+the code `PutRule` publishes for a service quota, so using it on `TagResource` is substrate's reading.
+The messages are substrate's own. `DescribeRule`, `DeleteRule`, `PutTargets` and `ListTargetsByRule`
+answered `ResourceNotFoundException` at 404 before #1607; every EventBridge page that publishes the
+code gives it 400.
 
 ### CloudFormation resource types
 
