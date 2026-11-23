@@ -456,10 +456,6 @@ func (r *ReplayEngine) begin(ctx context.Context, events []*Event) (*ActiveRepla
 		outcomes:        make([]replayOutcome, len(events)),
 	}
 
-	r.mu.Lock()
-	r.currentReplay = replay
-	r.mu.Unlock()
-
 	r.logger.Info("starting replay",
 		"replay_id", replay.ID,
 		"stream_id", replay.StreamID,
@@ -469,21 +465,30 @@ func (r *ReplayEngine) begin(ctx context.Context, events []*Event) (*ActiveRepla
 	if err := r.startOfRun(ctx, replay); err != nil {
 		return nil, err
 	}
+	// Published only once the run can start, so a failed begin leaves no active replay
+	// that navigation could move.
+	r.mu.Lock()
+	r.currentReplay = replay
+	r.mu.Unlock()
 	return replay, nil
 }
 
-// startOfRun brings the emulator to the state a run starts from: the stream's stored
-// snapshot under [ReplayConfig.UseSnapshots], an empty state otherwise, and the engine's
-// random source re-seeded from [ReplayConfig.RandomSeed]. A replay begins here, and a
+// startOfRun brings the emulator to the state a run starts from, and re-seeds the
+// engine's random source from [ReplayConfig.RandomSeed]. A replay begins here, and a
 // backward jump with no snapshot to restore returns here.
+//
+// The state is always reset first: the state manager, what plugins keep on themselves,
+// and the pre-plugin controllers. Under [ReplayConfig.UseSnapshots] the stream's stored
+// snapshot is then restored on top. A stream with no stored snapshot starts from the
+// reset state; a stored snapshot that cannot be restored is an error, because the replay
+// would otherwise run from a state that is neither the snapshot nor empty.
 func (r *ReplayEngine) startOfRun(ctx context.Context, replay *ActiveReplay) error {
+	if err := r.resetState(ctx); err != nil {
+		return fmt.Errorf("reset state: %w", err)
+	}
 	if r.config.UseSnapshots {
 		if err := r.loadFromSnapshot(ctx, replay.StreamID); err != nil {
-			r.logger.Warn("snapshot load failed, starting from empty state", "error", err)
-		}
-	} else {
-		if err := r.resetState(ctx); err != nil {
-			return fmt.Errorf("reset state: %w", err)
+			return fmt.Errorf("load stored snapshot for stream %s: %w", replay.StreamID, err)
 		}
 	}
 	if r.config.RandomSeed != 0 {
@@ -594,7 +599,7 @@ func (r *ReplayEngine) advance(ctx context.Context, replay *ActiveReplay) (bool,
 // [Server.handleAWSRequest]'s steps run here too, through the same [prePluginGates]
 // the live path uses. The other five read the live *http.Request or the replay's own
 // configuration and are skipped. An internal dispatch (see [isInternalDispatchEvent])
-// passes only steps 2 and 4.5, as it did live. Each decision, in pipeline order:
+// passes only step 2, as it did live. Each decision, in pipeline order:
 //
 //   - **Step 1.1, the rpc-v2-cbor/target conflict** — skipped. It is a property of the
 //     HTTP request's headers and path, and no event carries either.
@@ -643,10 +648,12 @@ func (r *ReplayEngine) advance(ctx context.Context, replay *ActiveReplay) (bool,
 func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *ActiveReplay) (bool, error) {
 	if event.RequestBodyOmitted != nil {
 		replay.skip(SkipBodyOverCap)
+		r.chargeSkippedGates(event)
 		return false, nil
 	}
 	if event.Request == nil {
 		replay.skip(SkipNoRequest)
+		r.chargeSkippedGates(event)
 		return false, nil
 	}
 
@@ -746,13 +753,14 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	// plugin never saw it either and routing it would apply a state change the
 	// recording does not contain.
 	//
-	// An internal dispatch passes only authorization and faults: live, the deployer and
-	// the proxy dispatch without quota or consistency checks, so replaying them through
-	// those gates would refuse what the live run never asked.
+	// An internal dispatch passes authorization only: live, [StackDeployer.dispatch]
+	// authorizes and the API Gateway proxy's Lambda invocation checks nothing, and
+	// neither consults quota, consistency or faults, so replaying them through those
+	// gates would refuse what the live run never asked.
 	gates := r.pipeline.gates()
 	internal := isInternalDispatchEvent(event)
 	if internal {
-		gates.quota, gates.consistency = nil, nil
+		gates.quota, gates.consistency, gates.fault = nil, nil, nil
 	}
 	if gate := gates.check(reqCtx, event.Request); gate.err != nil {
 		r.recordErrorDifference(replay, event, gate.err)
@@ -905,6 +913,54 @@ func (r *ReplayEngine) recordBodyDifferences(replay *ActiveReplay, event *Event,
 			Significance: "major",
 		})
 	}
+}
+
+// chargeSkippedGates applies to the quota and consistency controllers what a top-level
+// event the replay cannot re-execute did to them live: it took a quota token and, as a
+// write that reached its plugin, opened a propagation window. Without it every gate
+// decision after a skipped event diverges from the recording.
+//
+// It is best effort. An event recorded without its request is charged under its
+// service and operation alone, so a rule or resource key that needs the path or the
+// parameters is not reached. An event refused for access was refused before the quota
+// gate and takes no token.
+func (r *ReplayEngine) chargeSkippedGates(event *Event) {
+	if !isTopLevelEvent(event) || (r.pipeline.Quota == nil && r.pipeline.Consistency == nil) {
+		return
+	}
+	req := event.Request
+	if req == nil {
+		req = &AWSRequest{Service: event.Service, Operation: event.Operation}
+	}
+	if r.timeController != nil {
+		wasFrozen := r.timeController.Frozen()
+		r.timeController.Freeze()
+		r.timeController.SetTime(event.Timestamp)
+		if !wasFrozen {
+			defer r.timeController.Unfreeze()
+		}
+	}
+	reqCtx := &RequestContext{
+		RequestID: replayRequestID(event),
+		AccountID: event.AccountID,
+		Region:    event.Region,
+		Timestamp: event.Timestamp,
+		Metadata:  map[string]interface{}{"stream_id": event.StreamID, "replaying": true},
+	}
+	if r.pipeline.Quota != nil && !isAccessRefusal(event.ErrorCode) {
+		// The token is what is being charged; whether it was granted is the recording's
+		// answer, and the event is not re-decided.
+		_ = r.pipeline.Quota.CheckQuota(reqCtx, req)
+	}
+	if r.pipeline.Consistency != nil && event.Error == "" && isMutating(req.Operation) {
+		r.pipeline.Consistency.RecordWrite(reqCtx, req)
+	}
+}
+
+// isAccessRefusal reports whether code is an authorization refusal, which the pipeline
+// answers before it reaches the quota gate.
+func isAccessRefusal(code string) bool {
+	return code == "AccessDenied" || code == "AccessDeniedException"
 }
 
 // recordDigestDifference compares a replayed body against the digest recorded in place
@@ -1336,10 +1392,14 @@ func (r *ReplayEngine) resetState(ctx context.Context) error {
 }
 
 // loadFromSnapshot restores state from the most recent snapshot for streamID.
+//
+// A stream with no stored snapshot is not an error: there is nothing to restore, and the
+// run starts from the state the caller reset.
 func (r *ReplayEngine) loadFromSnapshot(ctx context.Context, streamID string) error {
 	snapshot, err := r.eventStore.GetLatestSnapshot(ctx, streamID)
 	if err != nil {
-		return err
+		r.logger.Debug("no stored snapshot; starting from reset state", "stream_id", streamID)
+		return nil //nolint:nilerr // GetLatestSnapshot's only error is that none exists.
 	}
 	return r.restoreState(ctx, snapshot.State)
 }

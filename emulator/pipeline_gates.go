@@ -33,7 +33,8 @@ const (
 // consistency since #1601), each from a controller the replay rewinds first.
 //
 // [StackDeployer.dispatch] keeps its own narrower subset of the pipeline (authorization
-// only), and a replay of its recorded dispatches passes only authorization and faults.
+// only), the API Gateway proxy checks nothing, and a replay of either's recorded
+// dispatches passes authorization only.
 type prePluginGates struct {
 	auth        *AuthController
 	quota       *QuotaController

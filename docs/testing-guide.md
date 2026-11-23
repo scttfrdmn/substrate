@@ -516,8 +516,8 @@ replaced — each for a reason about what the recording settled and what it did 
 | Step | On replay |
 |---|---|
 | Authorization (`AuthController.CheckAccess`) | **re-decided**, against the principal the event records |
-| Quota (`QuotaController.CheckQuota`) | **re-decided**, with the token buckets rewound and the clock at the recorded instant |
-| Consistency (`ConsistencyController.CheckRead`) | **re-decided**: replayed writes open their windows and replayed reads are checked against them |
+| Quota (`QuotaController.CheckQuota`) | **re-decided**, with the token buckets rewound and the clock at the recorded instant; exact for serialized traffic only |
+| Consistency (`ConsistencyController.CheckRead`) | **re-decided**: replayed writes open their windows and replayed reads are checked against them; exact for serialized traffic only |
 | Fault injection | **re-decided**, with the controller rewound to its armed state |
 | Credential resolution | replaced by principal restoration — the recorded access key resolves to nothing |
 | SigV4 verification | skipped: the canonical request cannot be rebuilt, and the signature was checked once already |
@@ -548,7 +548,18 @@ decisions. A replay reproduces them only when it is configured as the recording 
 `ReplaySandbox` built by the server or `TestServer` copies the controllers the server
 actually ran, and `substrate replay` and `substrate debug state-at` build them from the
 `quotas:` and `consistency:` sections. A CloudFormation or API Gateway internal dispatch
-passes only authorization and faults, as it did live.
+passes authorization only, as it did live: neither the deployer nor the proxy consults
+quota, consistency or faults.
+
+**Quota and consistency replay exactly only for serialized traffic.** Live, overlapping
+requests reach the two gates in whatever order they take the controller's lock, and a
+replay decides them in recorded sequence order. Two requests that overlapped in time can
+therefore swap a throttle, or a window, between them on replay. This is the same
+exception deterministic-run mode documents for concurrent requests (#1598). A difference
+on an event whose recorded timestamp and duration overlap another's is likely this.
+An event a replay skips, recorded without its request or with a request body over the
+cap, is still charged to both gates (a quota token, and a window for a write that
+reached its plugin), so the decisions after it stay aligned.
 
 Fault injection needs one thing from the caller. A rule's `times` bound and its
 per-rule random stream are state a run *spends*, so the engine rewinds the controller to

@@ -32,7 +32,9 @@ type ConsistencyConfig struct {
 // The controller is opt-in (disabled by default). A replay re-decides it: replayed
 // writes open windows at their recorded instants and replayed reads are checked
 // against them, so a recorded refusal replays as the same refusal (#1601). The replay
-// rewinds the controller first; see [ConsistencyController.rewindForReplay].
+// rewinds the controller first; see [ConsistencyController.rewindForReplay]. As with
+// [QuotaController.CheckQuota], that is exact only for serialized traffic: overlapping
+// requests decide in lock order live and in sequence order on replay.
 type ConsistencyController struct {
 	mu       sync.RWMutex
 	writes   map[string]time.Time // resource key → write expiry time

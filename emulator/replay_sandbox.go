@@ -251,20 +251,23 @@ func (s *ReplaySandbox) StateAt(ctx context.Context, streamID string, sequence i
 }
 
 // activate makes streamID the engine's active replay, loading it at its start unless it
-// is already active.
+// is already active and up to date. A stream that has gained events since it was loaded,
+// as a sandbox held across live traffic sees, is loaded again: the cached event list
+// would answer a later sequence with the state at its own last event.
 func (s *ReplaySandbox) activate(ctx context.Context, streamID string) (*ActiveReplay, error) {
-	s.engine.mu.RLock()
-	current := s.engine.currentReplay
-	s.engine.mu.RUnlock()
-	if current != nil && current.StreamID == streamID {
-		return current, nil
-	}
 	events, err := s.engine.eventStore.GetStream(ctx, streamID)
 	if err != nil {
 		return nil, fmt.Errorf("get stream %q: %w", streamID, err)
 	}
 	if len(events) == 0 {
 		return nil, fmt.Errorf("no events in stream %q", streamID)
+	}
+	s.engine.mu.RLock()
+	current := s.engine.currentReplay
+	s.engine.mu.RUnlock()
+	if current != nil && current.StreamID == streamID && len(current.Events) == len(events) &&
+		current.Events[len(current.Events)-1].Sequence == events[len(events)-1].Sequence {
+		return current, nil
 	}
 	return s.engine.begin(ctx, events)
 }

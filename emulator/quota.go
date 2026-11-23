@@ -89,7 +89,9 @@ func NewQuotaController(cfg QuotaConfig, tc *TimeController) *QuotaController {
 // every service but S3, and S3's own SlowDown and HTTP 503 for S3 (see
 // [s3SlowDownError]). A replay re-decides it against the recorded clock, so a recorded
 // throttle replays as the same throttle (#1601); the replay rewinds the buckets first
-// (see [QuotaController.rewindForReplay]).
+// (see [QuotaController.rewindForReplay]). That is exact only for serialized traffic:
+// live, overlapping requests take tokens in lock-acquisition order, and a replay takes
+// them in recorded sequence order, so two overlapping requests can swap outcomes.
 //
 // One rule can govern many token buckets. For nearly every rule the rule and the
 // bucket are one and the same, so a rule's rate is the rate of whatever it names.
