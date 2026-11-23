@@ -17,15 +17,16 @@ import (
 const cdkStack = "SubstrateCdkExample"
 
 // cdkBinary returns the CDK CLI to run: examples/cdk's own, pinned by its lockfile, when
-// `npm ci` has installed it, else `cdk` on PATH. It skips when the app's dependencies are not
-// installed, because the app cannot synthesize without aws-cdk-lib.
+// `npm ci` has installed it, else `cdk` on PATH. It fails when the app's dependencies are not
+// installed, because the app cannot synthesize without aws-cdk-lib, and a skip under
+// SUBSTRATE_IAC=1 would report a journey that never ran as passed.
 func cdkBinary(t *testing.T, app string) string {
 	t.Helper()
 	if _, err := os.Stat(filepath.Join(app, "node_modules", "aws-cdk-lib")); err != nil {
-		t.Skipf("examples/cdk has no node_modules; run `npm ci` there first (%v)", err)
+		t.Fatalf("SUBSTRATE_IAC=1 but examples/cdk has no node_modules; run `make iac-e2e-setup` first (%v)", err)
 	}
 	if _, err := exec.LookPath("node"); err != nil {
-		t.Skipf("node is not on PATH: %v", err)
+		t.Fatalf("SUBSTRATE_IAC=1 but node is not on PATH: %v", err)
 	}
 	local := filepath.Join(app, "node_modules", ".bin", "cdk")
 	if _, err := os.Stat(local); err == nil {
@@ -33,20 +34,22 @@ func cdkBinary(t *testing.T, app string) string {
 	}
 	path, err := exec.LookPath("cdk")
 	if err != nil {
-		t.Skipf("cdk is not on PATH and examples/cdk has no local CLI: %v", err)
+		t.Fatalf("SUBSTRATE_IAC=1 but cdk is not on PATH and examples/cdk has no local CLI: %v", err)
 	}
 	return path
 }
 
 // TestCDKJourney bootstraps the default CDK environment in substrate, deploys examples/cdk,
-// checks the stack's outputs and resources, and destroys it (#1520). It runs twice against fresh
-// deterministic-run servers and fails if the two runs' recorded responses differ (#1628).
+// checks the stack's outputs and resources, and destroys it (#1520). The recorded run is then
+// replayed into a second fresh deterministic-run server, and any response that differs fails
+// the test (#1628). It is replayed rather than run twice because the CLI's waiters and credential
+// lookups make a timing-dependent number of calls; see [emulator.RunThenReplay].
 func TestCDKJourney(t *testing.T) {
 	requireIAC(t)
 	app := filepath.Join(repoRoot(t), "examples", "cdk")
 	cdk := cdkBinary(t, app)
 
-	emulator.RunTwice(t, iacEpoch, func(t *testing.T, ts *emulator.TestServer) {
+	emulator.RunThenReplay(t, iacEpoch, func(t *testing.T, ts *emulator.TestServer) {
 		reportRefusals(t, ts)
 		out := t.TempDir()
 		env := toolEnv(t, ts,
@@ -56,9 +59,6 @@ func TestCDKJourney(t *testing.T) {
 			"CDK_DISABLE_CLI_TELEMETRY=true",
 			"CDK_DEFAULT_ACCOUNT="+iacAccount,
 			"CDK_DEFAULT_REGION="+iacRegion,
-			// The CLI's random change-set names and descriptions are pinned, so the two
-			// runs send the same requests; see testdata/deterministic-random.cjs.
-			`NODE_OPTIONS=--require "`+filepath.Join(repoRoot(t), "test", "iac", "testdata", "deterministic-random.cjs")+`"`,
 		)
 		run := func(args ...string) toolResult {
 			t.Helper()

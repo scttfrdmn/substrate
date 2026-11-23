@@ -135,6 +135,7 @@ func TestEC2CreateVpc_TagsAndTenancy(t *testing.T) {
 		params map[string]string
 	}{
 		{"an unknown tenancy", map[string]string{"InstanceTenancy": "shared"}},
+		{"host tenancy, which CreateVpc does not take", map[string]string{"InstanceTenancy": "host"}},
 		{"a reserved tag key", map[string]string{"TagSpecification.1.ResourceType": "vpc",
 			"TagSpecification.1.Tag.1.Key": "aws:reserved", "TagSpecification.1.Tag.1.Value": "x"}},
 	}

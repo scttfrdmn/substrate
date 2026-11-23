@@ -33,9 +33,11 @@ type RunDifference struct {
 	// difference about the runs as a whole.
 	Operation string
 
-	// Field is what differs: "count", "operation", "request_id",
-	// "parent_request_id", "status_code", "error", "header/" followed by the header
-	// name, or a "response_body" path as [ReplayDifferences] reports it.
+	// Field is what differs: "count"; "operation", "extra_event" or "missing_event" for
+	// the position where the runs stop lining up; "request_id", "parent_request_id",
+	// "status_code", "error", "timestamp", "cost", "state_hash_after",
+	// "response_body_omitted", "header/" followed by the header name, or a
+	// "response_body" path as [ReplayDifferences] reports it.
 	Field string
 
 	// Expected is the first run's value, Actual the second's.
@@ -58,23 +60,48 @@ var runTwiceIgnoredHeaders = map[string]bool{"date": true}
 // CompareRecordedRuns pairs two runs' recorded events by position and reports every
 // way they disagree: the number of events, and for each pair the service and
 // operation, the request ID and parent request ID, the status code, the error, the
-// response headers other than Date, and the response body under the normalisation
-// policy [ReplayDifferences] applies.
+// timestamp, the cost, the state hash after the request (when both runs recorded
+// one), the response headers other than Date, and the response body under the
+// normalisation policy [ReplayDifferences] applies.
 //
 // The events are paired by position in sequence order, so the comparison is only
 // meaningful for runs whose requests did not overlap: requests a client sends
 // concurrently draw their request IDs in scheduler order, which deterministic-run
 // mode documents as an exception.
+//
+// The comparison stops at the first position where the two runs stop issuing the same
+// operation, or where one run ends before the other, and reports that position once as an
+// "operation", "extra_event" or "missing_event" difference. A seeded request ID counts the
+// requests before it, so one extra call makes every later pair differ for that reason alone,
+// and the first divergence is the one that names the cause.
 func CompareRecordedRuns(first, second []*Event) []RunDifference {
 	first, second = sortedBySequence(first), sortedBySequence(second)
 	var out []RunDifference
 	if len(first) != len(second) {
 		out = append(out, RunDifference{Field: "count", Expected: len(first), Actual: len(second)})
 	}
-	for i := 0; i < min(len(first), len(second)); i++ {
+	for i := 0; i < max(len(first), len(second)); i++ {
+		switch {
+		case i >= len(second):
+			op := eventOperation(first[i])
+			return append(out, RunDifference{Sequence: i + 1, Operation: op,
+				Field: "missing_event", Expected: op, Actual: bodyMemberAbsent})
+		case i >= len(first):
+			op := eventOperation(second[i])
+			return append(out, RunDifference{Sequence: i + 1, Operation: op,
+				Field: "extra_event", Expected: bodyMemberAbsent, Actual: op})
+		case eventOperation(first[i]) != eventOperation(second[i]):
+			return append(out, RunDifference{Sequence: i + 1, Operation: eventOperation(first[i]),
+				Field: "operation", Expected: eventOperation(first[i]), Actual: eventOperation(second[i])})
+		}
 		out = append(out, compareRecordedEvents(i+1, first[i], second[i])...)
 	}
 	return out
+}
+
+// eventOperation names an event as "service.Operation".
+func eventOperation(e *Event) string {
+	return e.Service + "." + e.Operation
 }
 
 // sortedBySequence returns a copy of events in ascending sequence order.
@@ -86,18 +113,13 @@ func sortedBySequence(events []*Event) []*Event {
 }
 
 // compareRecordedEvents reports how one pair of events disagrees.
+//
+// The caller has already checked that the two name the same operation.
 func compareRecordedEvents(pos int, a, b *Event) []RunDifference {
-	op := a.Service + "." + a.Operation
+	op := eventOperation(a)
 	var out []RunDifference
 	add := func(field string, expected, actual interface{}) {
 		out = append(out, RunDifference{Sequence: pos, Operation: op, Field: field, Expected: expected, Actual: actual})
-	}
-	if other := b.Service + "." + b.Operation; other != op {
-		// Two different operations at one position: everything after this is the
-		// comparison of unrelated responses, so this is the only difference worth
-		// reporting for the pair.
-		add("operation", op, other)
-		return out
 	}
 	if a.RequestID != b.RequestID {
 		add("request_id", a.RequestID, b.RequestID)
@@ -110,6 +132,17 @@ func compareRecordedEvents(pos int, a, b *Event) []RunDifference {
 	}
 	if a.Error != b.Error {
 		add("error", a.Error, b.Error)
+	}
+	if !a.Timestamp.Equal(b.Timestamp) {
+		add("timestamp", a.Timestamp, b.Timestamp)
+	}
+	if a.Cost != b.Cost {
+		add("cost", a.Cost, b.Cost)
+	}
+	// A run recorded without state hashes has none to compare, so only a pair that both
+	// carry one is compared.
+	if a.StateHashAfter != "" && b.StateHashAfter != "" && a.StateHashAfter != b.StateHashAfter {
+		add("state_hash_after", a.StateHashAfter, b.StateHashAfter)
 	}
 	for _, name := range headerUnion(a.Response, b.Response) {
 		av, bv := responseHeader(a.Response, name), responseHeader(b.Response, name)
@@ -176,10 +209,14 @@ func responseHeader(resp *AWSResponse, canonical string) string {
 }
 
 // RunTwice runs journey against two fresh test servers, each started with
-// [WithDeterministicRun] at epoch and with opts, and fails t unless the two servers
-// recorded the same events: the same count, the same operations in the same order,
-// and identical request IDs, statuses, errors, headers other than Date, and response
-// bodies. See [CompareRecordedRuns] for the comparison.
+// [WithDeterministicRun] at epoch, [WithRecordedStateHashes] and opts, and fails t unless
+// the two servers recorded the same events: the same count, the same operations in the
+// same order, and identical request IDs, statuses, errors, timestamps, costs, state hashes,
+// headers other than Date, and response bodies. See [CompareRecordedRuns] for the
+// comparison.
+//
+// A run that recorded nothing, or recorded its events without their requests
+// ([WithoutRecordedBodies]), fails rather than passing a comparison with nothing in it.
 //
 // Each run is a subtest, "first" and "second", so a journey that fails says which
 // run it failed in; a failed first run skips the second and the comparison. The
@@ -188,7 +225,7 @@ func responseHeader(resp *AWSResponse, canonical string) string {
 // reproduce.
 func RunTwice(t *testing.T, epoch time.Time, journey func(t *testing.T, ts *TestServer), opts ...TestServerOption) {
 	t.Helper()
-	serverOpts := append([]TestServerOption{WithDeterministicRun(epoch)}, opts...)
+	serverOpts := append([]TestServerOption{WithDeterministicRun(epoch), WithRecordedStateHashes()}, opts...)
 	var runs [2][]*Event
 	for i, name := range []string{"first", "second"} {
 		ok := t.Run(name, func(t *testing.T) {
@@ -198,6 +235,7 @@ func RunTwice(t *testing.T, epoch time.Time, journey func(t *testing.T, ts *Test
 			if err != nil {
 				t.Fatalf("RunTwice: read the %s run's events: %v", name, err)
 			}
+			requireComparableRun(t, "RunTwice", name, events)
 			runs[i] = events
 		})
 		if !ok {
@@ -221,9 +259,11 @@ func RunTwice(t *testing.T, epoch time.Time, journey func(t *testing.T, ts *Test
 // difference the replay reports and on every event the replay could not check, as
 // [AssertReplayMatches] does.
 //
-// The Terraform journey needs it. Terraform walks independent resources in whichever order its
-// scheduler picks, even at -parallelism=1, and its waiters poll on the wall clock, so two runs of
-// one configuration issue the same calls in different orders and numbers. Deterministic-run mode
+// Use it for an external tool, and [RunTwice] for an in-process client that issues a fixed
+// sequence. Terraform walks independent resources in whichever order its scheduler picks, even at
+// -parallelism=1, and both Terraform and the CDK CLI poll on the wall clock and look credentials
+// up a timing-dependent number of times, so two runs of one configuration issue the same calls in
+// different orders and numbers. Deterministic-run mode
 // promises identical answers only to identical sequences, so [RunTwice] would report the tool's
 // scheduling. Replaying the first run gives the second server the identical sequence, which
 // isolates what the comparison is for: a response that differs because substrate, not the
@@ -239,6 +279,7 @@ func RunThenReplay(t *testing.T, epoch time.Time, journey func(t *testing.T, ts 
 		if err != nil {
 			t.Fatalf("RunThenReplay: read the run's events: %v", err)
 		}
+		requireComparableRun(t, "RunThenReplay", "recorded", recorded)
 		events = recorded
 	}) {
 		t.Fatalf("RunThenReplay: the run failed, so it was not replayed")
@@ -247,4 +288,20 @@ func RunThenReplay(t *testing.T, epoch time.Time, journey func(t *testing.T, ts 
 		ts := StartTestServer(t, serverOpts...)
 		AssertReplayMatches(t, ts.ReplayEvents(t, events))
 	})
+}
+
+// requireComparableRun fails t when a run gives a comparison nothing to compare: it recorded
+// no events, or recorded one without its request, as a server started with
+// [WithoutRecordedBodies] does.
+func requireComparableRun(t *testing.T, helper, name string, events []*Event) {
+	t.Helper()
+	if len(events) == 0 {
+		t.Fatalf("%s: the %s run recorded no events, so there is nothing to compare", helper, name)
+	}
+	for _, e := range events {
+		if e.Request == nil && e.RequestBodyOmitted == nil {
+			t.Fatalf("%s: the %s run recorded %s without its request; record bodies to compare runs",
+				helper, name, eventOperation(e))
+		}
+	}
 }

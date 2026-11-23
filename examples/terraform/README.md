@@ -36,7 +36,7 @@ provider. Rebuild it after editing the handler with
 
 ## In CI
 
-`test/iac` runs this configuration twice against fresh deterministic-run servers, checks that the
-second plan is empty and that destroy leaves no state, and diffs every response the two servers
-recorded. See [Terraform and CDK](../../docs/iac-journeys.md), or run it with
+`test/iac` applies this configuration against a deterministic-run server, checks that the
+second plan is empty and that destroy leaves no state, then replays the recording into a second
+fresh server and diffs every response. See [Terraform and CDK](../../docs/iac-journeys.md), or run it with
 `make iac-e2e-setup iac-e2e`.

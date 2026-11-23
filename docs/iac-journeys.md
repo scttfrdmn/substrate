@@ -86,7 +86,7 @@ make iac-e2e-setup   # once, with network: the AWS provider and examples/cdk's n
 make iac-e2e         # offline
 ```
 
-The journeys skip unless `SUBSTRATE_IAC=1` is set and the tool is installed; `make iac-e2e` sets
+The journeys skip unless `SUBSTRATE_IAC=1` is set, and fail if a tool is missing once it is; `make iac-e2e` sets
 it. Nothing inside a test uses the network: Terraform installs the provider from
 `TF_PLUGIN_CACHE_DIR` as a filesystem mirror and never contacts the registry, and the CDK CLI is
 the one `npm ci` installed. Each tool runs with a fresh `HOME`, so nothing in your own shell's
@@ -100,41 +100,42 @@ AWS configuration reaches it.
 | `SUBSTRATE_IAC_TIMEOUT` | The longest one tool invocation may take, as a Go duration; defaults to 10m |
 | `SUBSTRATE_IAC_VERBOSE=1` | Stream each tool's output, and log the calls substrate refused |
 | `SUBSTRATE_IAC_EVENTS` | A directory to write every recorded event to, as NDJSON, one file per run |
-| `SUBSTRATE_IAC_TF_PARALLELISM` | Terraform's `-parallelism`; anything above 1 collects every failure in one run but breaks the double-run comparison |
+| `SUBSTRATE_IAC_TF_PARALLELISM` | Terraform's `-parallelism`; anything above 1 collects every failure in one run, but overlapping requests can make the replay diverge |
 
 When a journey fails it logs each call substrate refused, once per operation and error, which
 names the API call to look at rather than the resource that failed.
 
-## Every journey runs twice
+## Every journey is checked twice
 
-The CDK journey, and a set of the SDK journeys in `test/e2e`, run under `emulator.RunTwice`. It
-starts two fresh servers in [deterministic-run mode](/testing-guide#deterministic-runs), runs the
-journey against each, pairs the two servers' recorded events by sequence, and fails unless they
-agree: the same count, the same operations, and the same request IDs, statuses, errors, headers
-other than `Date`, and response bodies. A body whose order came from iterating a Go map shows up
-as a difference between the runs. The CDK CLI names its change sets with fresh random values,
-so the journey preloads `test/iac/testdata/deterministic-random.cjs` into Node, which replaces
-every random source with one seeded stream. Without it the runs would differ in what the CLI
-sent rather than in what substrate answered.
+Deterministic-run mode promises that two fresh servers given the same calls in the same order
+answer byte-identical bodies. Two helpers check that, and which one a journey uses depends on its
+caller.
 
-The Terraform journey runs under `emulator.RunThenReplay` instead. Terraform walks independent
-resources in whichever order its scheduler picks, even at `-parallelism=1`, and its waiters
-poll on the wall clock, so two runs of one configuration issue the same calls in different
-orders. Deterministic-run mode promises identical answers only to identical sequences.
-`RunThenReplay` runs the journey once, replays the recorded requests in recorded order into a
-second fresh server, and fails on any difference the replay reports, so the second server gets
-the identical sequence and any difference is substrate's.
+- **`emulator.RunThenReplay`** is for an external tool, and both IaC journeys use it. It runs the
+  journey once against a fresh server in [deterministic-run mode](/testing-guide#deterministic-runs).
+  Then it replays the recorded requests, in recorded order, into a second fresh server, and fails
+  on any difference the replay reports. Neither tool issues a fixed sequence of calls. Terraform
+  walks independent resources in whichever order its scheduler picks, even at `-parallelism=1`.
+  Both Terraform and the CDK CLI poll their waiters on the wall clock and look credentials up a
+  timing-dependent number of times. So two runs of one configuration make different calls, and
+  comparing them would report the tool's timing. Replaying gives the second server the identical
+  sequence, so any difference is substrate's.
+- **`emulator.RunTwice`** is for an in-process client that issues a fixed sequence, such as the
+  Go SDK journeys in `test/e2e`. It runs the journey against two fresh servers, pairs their
+  recorded events by sequence, and fails unless they agree. They must have the same count and
+  operations, and the same request IDs, statuses, errors, headers other than `Date`, and response
+  bodies.
+
+Either way, a body whose order came from iterating a Go map shows up as a difference.
 
 ```go
 func TestMyStack(t *testing.T) {
-    emulator.RunTwice(t, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+    emulator.RunThenReplay(t, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
         func(t *testing.T, ts *emulator.TestServer) {
-            // drive your tool or SDK client at ts.URL, one request at a time
+            // run your tool against ts.URL
         })
 }
 ```
 
-`emulator.CompareRecordedRuns` is the comparison on its own, for two event logs obtained some
-other way. A `RunTwice` journey has to issue its requests one at a time and in the same order on
-every run: requests sent concurrently draw their request IDs in whichever order the scheduler
-runs them. Use `RunThenReplay` when the caller cannot promise the same order.
+`emulator.CompareRecordedRuns` is `RunTwice`'s comparison on its own, for two event logs obtained
+some other way.

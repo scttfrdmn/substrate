@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -82,16 +83,28 @@ func TestCompareRecordedRuns(t *testing.T) {
 			wantFields: []string{"response_body/QueueUrls/0", "response_body/QueueUrls/1"},
 		},
 		{
-			name:       "a different count",
+			name:       "the second run stops early",
 			first:      []*emulator.Event{ev(1, "ListQueues", 200, `{}`, ""), ev(2, "ListQueues", 200, `{}`, "")},
 			second:     []*emulator.Event{ev(1, "ListQueues", 200, `{}`, "")},
-			wantFields: []string{"count"},
+			wantFields: []string{"count", "missing_event"},
 		},
 		{
-			name:       "a different operation stops the pair's comparison",
-			first:      []*emulator.Event{ev(1, "ListQueues", 200, `{"a":1}`, "")},
-			second:     []*emulator.Event{ev(1, "GetQueueUrl", 400, `{"b":2}`, "")},
-			wantFields: []string{"operation"},
+			name:       "the second run makes an extra call",
+			first:      []*emulator.Event{ev(1, "ListQueues", 200, `{}`, "")},
+			second:     []*emulator.Event{ev(1, "ListQueues", 200, `{}`, ""), ev(2, "GetQueueUrl", 200, `{}`, "")},
+			wantFields: []string{"count", "extra_event"},
+		},
+		{
+			name: "the first misaligned operation is reported once and the walk stops",
+			first: []*emulator.Event{
+				ev(1, "ListQueues", 200, `{}`, ""), ev(2, "GetQueueUrl", 200, `{"a":1}`, ""),
+				ev(3, "ListQueues", 200, `{"a":1}`, ""),
+			},
+			second: []*emulator.Event{
+				ev(1, "ListQueues", 200, `{}`, ""), ev(2, "ListQueues", 200, `{"b":2}`, ""),
+				ev(3, "GetQueueUrl", 200, `{"b":2}`, ""), ev(4, "ListQueues", 200, `{"b":2}`, ""),
+			},
+			wantFields: []string{"count", "operation"},
 		},
 		{
 			name:       "a different status",
@@ -131,6 +144,24 @@ func TestCompareRecordedRuns(t *testing.T) {
 		}
 		assert.Equal(t, []string{"request_id", "parent_request_id", "error", "header/Content-Type"}, got)
 		assert.Equal(t, "#1 sqs.ListQueues request_id: req-1 != req-2", diffs[0].String())
+	})
+
+	t.Run("timestamps, costs and state hashes", func(t *testing.T) {
+		a := ev(1, "ListQueues", 200, `{}`, "")
+		b := ev(1, "ListQueues", 200, `{}`, "")
+		a.Timestamp, b.Timestamp = detEpoch, detEpoch.Add(time.Second)
+		a.Cost, b.Cost = 0.0004, 0.0008
+		a.StateHashAfter, b.StateHashAfter = "aaa", "bbb"
+		var got []string
+		for _, d := range emulator.CompareRecordedRuns([]*emulator.Event{a}, []*emulator.Event{b}) {
+			got = append(got, d.Field)
+		}
+		assert.Equal(t, []string{"timestamp", "cost", "state_hash_after"}, got)
+
+		b.StateHashAfter = ""
+		b.Timestamp, b.Cost = a.Timestamp, a.Cost
+		assert.Empty(t, emulator.CompareRecordedRuns([]*emulator.Event{a}, []*emulator.Event{b}),
+			"a run recorded without state hashes has none to compare")
 	})
 
 	t.Run("an omitted body compares by digest", func(t *testing.T) {

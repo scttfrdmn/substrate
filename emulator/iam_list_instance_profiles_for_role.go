@@ -16,7 +16,8 @@ import (
 // DeleteConflict check.
 //
 // The role must exist: the reference publishes NoSuchEntity for "a resource that doesn't exist",
-// and the message is the one GetRole uses. MaxItems and Marker page the profiles the way
+// and the message is the one GetRole uses. The ValidationError for a missing RoleName is worded
+// as substrate's other IAM operations word it, which is substrate's own text. MaxItems and Marker page the profiles the way
 // ListInstanceProfiles does, over the sorted state keys.
 func (p *IAMPlugin) listInstanceProfilesForRole(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var params struct {

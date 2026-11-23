@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -14,8 +15,24 @@ import (
 	emulator "github.com/scttfrdmn/substrate/emulator"
 )
 
-// tfProviderVersion is the AWS provider examples/terraform/versions.tf pins.
-const tfProviderVersion = "6.55.0"
+// tfLockedAWSVersion matches the AWS provider's version in a dependency lock file.
+var tfLockedAWSVersion = regexp.MustCompile(`(?s)provider "registry\.terraform\.io/hashicorp/aws" \{\s*version\s*=\s*"([^"]+)"`)
+
+// tfProviderVersion returns the AWS provider version examples/terraform/.terraform.lock.hcl
+// records. It is read rather than written here, so that a Dependabot bump of versions.tf and
+// the lock file is the whole change and the journey looks in the mirror for what it will use.
+func tfProviderVersion(t *testing.T, src string) string {
+	t.Helper()
+	lock, err := os.ReadFile(filepath.Join(src, ".terraform.lock.hcl"))
+	if err != nil {
+		t.Fatalf("read the provider lock file: %v", err)
+	}
+	m := tfLockedAWSVersion.FindSubmatch(lock)
+	if m == nil {
+		t.Fatalf("%s/.terraform.lock.hcl records no hashicorp/aws version", src)
+	}
+	return string(m[1])
+}
 
 // tfAddresses is every address `terraform state list` reports after the apply: the
 // fourteen kinds of resource the roadmap review applied (#1597), the bucket's public-access
@@ -45,7 +62,8 @@ var tfAddresses = []string{
 }
 
 // terraformBinary returns the Terraform CLI to run: SUBSTRATE_IAC_TERRAFORM if set
-// (OpenTofu's `tofu` works too), else `terraform` on PATH.
+// (OpenTofu's `tofu` works too), else `terraform` on PATH. A missing binary fails the test:
+// SUBSTRATE_IAC=1 asked for the journey, and skipping would report it as passed.
 func terraformBinary(t *testing.T) string {
 	t.Helper()
 	name := os.Getenv("SUBSTRATE_IAC_TERRAFORM")
@@ -54,7 +72,7 @@ func terraformBinary(t *testing.T) string {
 	}
 	path, err := exec.LookPath(name)
 	if err != nil {
-		t.Skipf("%s is not on PATH: %v", name, err)
+		t.Fatalf("SUBSTRATE_IAC=1 but %s is not on PATH: %v", name, err)
 	}
 	return path
 }
@@ -64,7 +82,7 @@ func terraformBinary(t *testing.T) string {
 // `terraform init` run outside the test, which is the step that needs the network.
 // The test reads it as a filesystem mirror, so init inside the test never contacts
 // the registry.
-func terraformMirror(t *testing.T) string {
+func terraformMirror(t *testing.T, version string) string {
 	t.Helper()
 	dir := os.Getenv("TF_PLUGIN_CACHE_DIR")
 	if dir == "" {
@@ -75,11 +93,11 @@ func terraformMirror(t *testing.T) string {
 		dir = filepath.Join(home, ".terraform.d", "plugin-cache")
 	}
 	platform := runtime.GOOS + "_" + runtime.GOARCH
-	provider := filepath.Join(dir, "registry.terraform.io", "hashicorp", "aws", tfProviderVersion, platform)
+	provider := filepath.Join(dir, "registry.terraform.io", "hashicorp", "aws", version, platform)
 	if _, err := os.Stat(provider); err != nil {
 		t.Fatalf("the AWS provider %s for %s is not in %s; populate it once, with network, by running\n"+
 			"  TF_PLUGIN_CACHE_DIR=%s terraform -chdir=examples/terraform init -backend=false\n(%v)",
-			tfProviderVersion, platform, dir, dir, err)
+			version, platform, dir, dir, err)
 	}
 	return dir
 }
@@ -113,8 +131,8 @@ provider_installation {
 func TestTerraformJourney(t *testing.T) {
 	requireIAC(t)
 	tf := terraformBinary(t)
-	mirror := terraformMirror(t)
 	src := filepath.Join(repoRoot(t), "examples", "terraform")
+	mirror := terraformMirror(t, tfProviderVersion(t, src))
 
 	emulator.RunThenReplay(t, iacEpoch, func(t *testing.T, ts *emulator.TestServer) {
 		reportRefusals(t, ts)
@@ -138,9 +156,11 @@ func TestTerraformJourney(t *testing.T) {
 			return mustRunTool(t, dir, env, tf, append(args, "-no-color")...)
 		}
 
-		// One operation at a time, so the two runs issue their calls in the same order
-		// and their event logs pair up. SUBSTRATE_IAC_TF_PARALLELISM raises it, which
-		// is useful for collecting every failure in one run and breaks the comparison.
+		// One operation at a time, so no two requests overlap and the recorded order is the
+		// order they ran in, which is the order the replay re-runs them. Overlapping
+		// requests can finish in either order, so a replay of them can diverge for that reason
+		// alone. SUBSTRATE_IAC_TF_PARALLELISM raises it, which is useful for collecting every
+		// failure in one run.
 		parallelism := "-parallelism=1"
 		if p := os.Getenv("SUBSTRATE_IAC_TF_PARALLELISM"); p != "" {
 			parallelism = "-parallelism=" + p

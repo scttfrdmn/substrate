@@ -1,8 +1,8 @@
 // Package iac_test drives real infrastructure-as-code tools, Terraform and the AWS
 // CDK, against an in-process substrate server (#1519, #1520).
 //
-// The journeys are opt-in. Each calls t.Skip unless SUBSTRATE_IAC=1 is set and its
-// tool is installed, because neither tool is part of the Go toolchain and both
+// The journeys are opt-in. Each calls t.Skip unless SUBSTRATE_IAC=1 is set, and fails if its
+// tool is missing once it is. Neither tool is part of the Go toolchain, and both
 // fetch plugins or packages from the network when first set up. That setup happens
 // outside the test: the Terraform journey installs the AWS provider from a local
 // mirror (TF_PLUGIN_CACHE_DIR), and the CDK journey runs the CLI from

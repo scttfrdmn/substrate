@@ -1896,7 +1896,13 @@ func (p *EC2Plugin) createVPC(reqCtx *RequestContext, req *AWSRequest) (*AWSResp
 	}
 	tenancy := req.Params["InstanceTenancy"]
 	switch tenancy {
-	case "", ec2DefaultTenancy, "dedicated", "host":
+	case "", ec2DefaultTenancy, "dedicated":
+	case "host":
+		// API_CreateVpc lists host among the Tenancy enum's values and then says of
+		// InstanceTenancy: "The host value cannot be used with this parameter." The code is
+		// the page's InvalidParameterValue; the message is substrate's own.
+		return nil, &AWSError{Code: "InvalidParameterValue",
+			Message: "The host value cannot be used with the InstanceTenancy parameter", HTTPStatus: http.StatusBadRequest}
 	default:
 		// The valid values are API_CreateVpc's; the message is substrate's own.
 		return nil, &AWSError{Code: "InvalidParameterValue",

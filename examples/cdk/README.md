@@ -33,7 +33,7 @@ at the repository root would otherwise try to build them.
 
 ## In CI
 
-`test/iac` bootstraps, deploys and destroys this app twice against fresh deterministic-run
-servers, checks the stack's outputs and resources, and diffs every response the two servers
-recorded. See [Terraform and CDK](../../docs/iac-journeys.md), or run it with
+`test/iac` bootstraps, deploys and destroys this app against a deterministic-run server and
+checks the stack's outputs and resources. It then replays the recording into a second fresh
+server and diffs every response. See [Terraform and CDK](../../docs/iac-journeys.md), or run it with
 `make iac-e2e-setup iac-e2e`.

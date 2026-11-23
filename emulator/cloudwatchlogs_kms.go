@@ -17,6 +17,9 @@ import (
 // KMS, and a group's events read back the same whichever key it names. Each operation's newer
 // `resourceIdentifier` form (a log group ARN, or a query-results scope) is not modeled; a request
 // naming no logGroupName is refused as one missing it is.
+//
+// The InvalidParameterException messages below are substrate's own, matching the wording the
+// plugin's other operations use; the API reference publishes the code and no text.
 
 // associateKmsKey records kmsKeyId on a log group, replacing any key it had.
 func (p *CloudWatchLogsPlugin) associateKmsKey(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
