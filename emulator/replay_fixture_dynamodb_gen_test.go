@@ -16,7 +16,7 @@ import (
 // testGeneratedFixtureDynamoDBEvents are the 5 recorded event(s) TestGeneratedFixture_DynamoDB replays.
 const testGeneratedFixtureDynamoDBEvents = `[
 	{
-		"id": "dynamodb-CreateTable-0-1795418846173557000",
+		"id": "dynamodb-CreateTable-0-1795461667973045000",
 		"request_id": "req-5444e147-1",
 		"sequence": 0,
 		"timestamp": "2026-03-01T09:00:00Z",
@@ -48,13 +48,13 @@ const testGeneratedFixtureDynamoDBEvents = `[
 			"Headers": {
 				"Content-Type": "application/x-amz-json-1.0"
 			},
-			"Body": "eyJUYWJsZURlc2NyaXB0aW9uIjp7IlRhYmxlTmFtZSI6Im9yZGVycyIsIlRhYmxlQXJuIjoiYXJuOmF3czpkeW5hbW9kYjp1cy1lYXN0LTE6MTIzNDU2Nzg5MDEyOnRhYmxlL29yZGVycyIsIlRhYmxlU3RhdHVzIjoiQUNUSVZFIiwiQ3JlYXRpb25EYXRlVGltZSI6MTc3MjM1NTYwMCwiS2V5U2NoZW1hIjpbeyJBdHRyaWJ1dGVOYW1lIjoiaWQiLCJLZXlUeXBlIjoiSEFTSCJ9XSwiQXR0cmlidXRlRGVmaW5pdGlvbnMiOlt7IkF0dHJpYnV0ZU5hbWUiOiJpZCIsIkF0dHJpYnV0ZVR5cGUiOiJTIn1dLCJCaWxsaW5nTW9kZVN1bW1hcnkiOnsiQmlsbGluZ01vZGUiOiJQQVlfUEVSX1JFUVVFU1QifSwiUHJvdmlzaW9uZWRUaHJvdWdocHV0Ijp7IlJlYWRDYXBhY2l0eVVuaXRzIjowLCJXcml0ZUNhcGFjaXR5VW5pdHMiOjAsIk51bWJlck9mRGVjcmVhc2VzVG9kYXkiOjB9LCJUYWJsZVNpemVCeXRlcyI6MCwiSXRlbUNvdW50IjowfX0="
+			"Body": "eyJUYWJsZURlc2NyaXB0aW9uIjp7IlRhYmxlTmFtZSI6Im9yZGVycyIsIlRhYmxlQXJuIjoiYXJuOmF3czpkeW5hbW9kYjp1cy1lYXN0LTE6MTIzNDU2Nzg5MDEyOnRhYmxlL29yZGVycyIsIlRhYmxlU3RhdHVzIjoiQUNUSVZFIiwiQ3JlYXRpb25EYXRlVGltZSI6MTc3MjM1NTYwMCwiS2V5U2NoZW1hIjpbeyJBdHRyaWJ1dGVOYW1lIjoiaWQiLCJLZXlUeXBlIjoiSEFTSCJ9XSwiQXR0cmlidXRlRGVmaW5pdGlvbnMiOlt7IkF0dHJpYnV0ZU5hbWUiOiJpZCIsIkF0dHJpYnV0ZVR5cGUiOiJTIn1dLCJCaWxsaW5nTW9kZVN1bW1hcnkiOnsiQmlsbGluZ01vZGUiOiJQQVlfUEVSX1JFUVVFU1QifSwiUHJvdmlzaW9uZWRUaHJvdWdocHV0Ijp7IlJlYWRDYXBhY2l0eVVuaXRzIjowLCJXcml0ZUNhcGFjaXR5VW5pdHMiOjAsIk51bWJlck9mRGVjcmVhc2VzVG9kYXkiOjB9LCJUYWJsZVNpemVCeXRlcyI6MCwiSXRlbUNvdW50IjowLCJUYWJsZUlkIjoiNTZiY2Y2MWUtOGVmNS00YjliLWI5OWQtMjM2YTQwNjgzYmJhIiwiV2FybVRocm91Z2hwdXQiOnsiUmVhZFVuaXRzUGVyU2Vjb25kIjoxMjAwMCwiV3JpdGVVbml0c1BlclNlY29uZCI6NDAwMCwiU3RhdHVzIjoiQUNUSVZFIn19fQ=="
 		},
 		"status_code": 200,
-		"duration": 381458
+		"duration": 1839458
 	},
 	{
-		"id": "dynamodb-PutItem-1-1795418846174198000",
+		"id": "dynamodb-PutItem-1-1795461667974262000",
 		"request_id": "req-5444e147-2",
 		"sequence": 1,
 		"timestamp": "2026-03-01T09:00:00Z",
@@ -89,11 +89,11 @@ const testGeneratedFixtureDynamoDBEvents = `[
 			"Body": "e30="
 		},
 		"status_code": 200,
-		"duration": 154917,
+		"duration": 292833,
 		"cost": 0.00000125
 	},
 	{
-		"id": "dynamodb-GetItem-2-1795418846174612000",
+		"id": "dynamodb-GetItem-2-1795461667975583000",
 		"request_id": "req-5444e147-3",
 		"sequence": 2,
 		"timestamp": "2026-03-01T09:00:00Z",
@@ -128,11 +128,11 @@ const testGeneratedFixtureDynamoDBEvents = `[
 			"Body": "eyJJdGVtIjp7ImlkIjp7IlMiOiJvLTEifSwidG90YWwiOnsiTiI6IjQyIn19fQ=="
 		},
 		"status_code": 200,
-		"duration": 37750,
+		"duration": 73584,
 		"cost": 2.5e-7
 	},
 	{
-		"id": "dynamodb-DescribeTable-3-1795418846174971000",
+		"id": "dynamodb-DescribeTable-3-1795461667977260000",
 		"request_id": "req-5444e147-4",
 		"sequence": 3,
 		"timestamp": "2026-03-01T09:00:00Z",
@@ -164,13 +164,13 @@ const testGeneratedFixtureDynamoDBEvents = `[
 			"Headers": {
 				"Content-Type": "application/x-amz-json-1.0"
 			},
-			"Body": "eyJUYWJsZSI6eyJUYWJsZU5hbWUiOiJvcmRlcnMiLCJUYWJsZUFybiI6ImFybjphd3M6ZHluYW1vZGI6dXMtZWFzdC0xOjEyMzQ1Njc4OTAxMjp0YWJsZS9vcmRlcnMiLCJUYWJsZVN0YXR1cyI6IkFDVElWRSIsIkNyZWF0aW9uRGF0ZVRpbWUiOjE3NzIzNTU2MDAsIktleVNjaGVtYSI6W3siQXR0cmlidXRlTmFtZSI6ImlkIiwiS2V5VHlwZSI6IkhBU0gifV0sIkF0dHJpYnV0ZURlZmluaXRpb25zIjpbeyJBdHRyaWJ1dGVOYW1lIjoiaWQiLCJBdHRyaWJ1dGVUeXBlIjoiUyJ9XSwiQmlsbGluZ01vZGVTdW1tYXJ5Ijp7IkJpbGxpbmdNb2RlIjoiUEFZX1BFUl9SRVFVRVNUIn0sIlByb3Zpc2lvbmVkVGhyb3VnaHB1dCI6eyJSZWFkQ2FwYWNpdHlVbml0cyI6MCwiV3JpdGVDYXBhY2l0eVVuaXRzIjowLCJOdW1iZXJPZkRlY3JlYXNlc1RvZGF5IjowfSwiVGFibGVTaXplQnl0ZXMiOjEwMCwiSXRlbUNvdW50IjoxfX0="
+			"Body": "eyJUYWJsZSI6eyJUYWJsZU5hbWUiOiJvcmRlcnMiLCJUYWJsZUFybiI6ImFybjphd3M6ZHluYW1vZGI6dXMtZWFzdC0xOjEyMzQ1Njc4OTAxMjp0YWJsZS9vcmRlcnMiLCJUYWJsZVN0YXR1cyI6IkFDVElWRSIsIkNyZWF0aW9uRGF0ZVRpbWUiOjE3NzIzNTU2MDAsIktleVNjaGVtYSI6W3siQXR0cmlidXRlTmFtZSI6ImlkIiwiS2V5VHlwZSI6IkhBU0gifV0sIkF0dHJpYnV0ZURlZmluaXRpb25zIjpbeyJBdHRyaWJ1dGVOYW1lIjoiaWQiLCJBdHRyaWJ1dGVUeXBlIjoiUyJ9XSwiQmlsbGluZ01vZGVTdW1tYXJ5Ijp7IkJpbGxpbmdNb2RlIjoiUEFZX1BFUl9SRVFVRVNUIn0sIlByb3Zpc2lvbmVkVGhyb3VnaHB1dCI6eyJSZWFkQ2FwYWNpdHlVbml0cyI6MCwiV3JpdGVDYXBhY2l0eVVuaXRzIjowLCJOdW1iZXJPZkRlY3JlYXNlc1RvZGF5IjowfSwiVGFibGVTaXplQnl0ZXMiOjEwMCwiSXRlbUNvdW50IjoxLCJUYWJsZUlkIjoiNTZiY2Y2MWUtOGVmNS00YjliLWI5OWQtMjM2YTQwNjgzYmJhIiwiV2FybVRocm91Z2hwdXQiOnsiUmVhZFVuaXRzUGVyU2Vjb25kIjoxMjAwMCwiV3JpdGVVbml0c1BlclNlY29uZCI6NDAwMCwiU3RhdHVzIjoiQUNUSVZFIn19fQ=="
 		},
 		"status_code": 200,
-		"duration": 40250
+		"duration": 106667
 	},
 	{
-		"id": "dynamodb-Scan-4-1795418846175362000",
+		"id": "dynamodb-Scan-4-1795461667978482000",
 		"request_id": "req-5444e147-5",
 		"sequence": 4,
 		"timestamp": "2026-03-01T09:00:00Z",
@@ -205,7 +205,7 @@ const testGeneratedFixtureDynamoDBEvents = `[
 			"Body": "eyJDb3VudCI6MSwiSXRlbXMiOlt7ImlkIjp7IlMiOiJvLTEifSwidG90YWwiOnsiTiI6IjQyIn19XSwiU2Nhbm5lZENvdW50IjoxfQ=="
 		},
 		"status_code": 200,
-		"duration": 70875,
+		"duration": 62708,
 		"cost": 2.5e-7
 	}
 ]`

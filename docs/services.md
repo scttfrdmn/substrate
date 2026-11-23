@@ -3,7 +3,7 @@
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1105 operations**. This
+Substrate ships **68 built-in service plugins** routing **1110 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -25,7 +25,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 4 | API Gateway (HTTP) | `apigatewayv2` | REST/JSON | 35 |
 | 5 | AppSync | `appsync` | REST/JSON | 24 |
 | 6 | Athena | `athena` | JSON | 9 |
-| 7 | EC2 Auto Scaling | `autoscaling` | Query | 14 |
+| 7 | EC2 Auto Scaling | `autoscaling` | Query | 17 |
 | 8 | Backup | `backup` | REST/JSON | 13 |
 | 9 | Batch | `batch` | REST/JSON | 16 |
 | 10 | Bedrock Runtime | `bedrock-runtime` | REST/JSON | 6 |
@@ -40,7 +40,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 19 | Cognito Identity | `cognito-identity` | JSON | 8 |
 | 20 | Cognito Identity Provider | `cognito-idp` | JSON | 34 |
 | 21 | Config | `config` | JSON | 25 |
-| 22 | DynamoDB | `dynamodb` | JSON | 26 |
+| 22 | DynamoDB | `dynamodb` | JSON | 28 |
 | 23 | EC2 / VPC | `ec2` | Query | 99 |
 | 24 | ECR | `ecr` | JSON | 26 |
 | 25 | ECS | `ecs` | JSON | 21 |
@@ -8038,11 +8038,11 @@ SQS requests: $0.0000004 per request.
 
 | Operation | Notes |
 |-----------|-------|
-| CreateTable | Supports GSI, LSI, billing mode; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
+| CreateTable | Supports GSI, LSI, billing mode; mints `TableId`, a UUID derived from the request's IDs; stores `SSESpecification` and `WarmThroughput` (table and GSI) — see [Warm throughput and encryption](#warm-throughput-and-encryption); [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | DescribeTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | DeleteTable | [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | ListTables | |
-| UpdateTable | Applies `BillingMode` and `ProvisionedThroughput`; every other member — `GlobalSecondaryIndexUpdates`, the stream and SSE specifications, `TableClass`, `DeletionProtectionEnabled` — is accepted and not applied; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
+| UpdateTable | Applies `BillingMode`, `ProvisionedThroughput`, `SSESpecification` and the table's `WarmThroughput` ([Warm throughput and encryption](#warm-throughput-and-encryption)); every other member — `GlobalSecondaryIndexUpdates`, the stream specification, `TableClass`, `DeletionProtectionEnabled` — is accepted and not applied; [reports only `TableDescription`'s own members](#a-table-description-reports-only-its-own-members) |
 | PutItem | Supports ConditionExpression; a key whose type differs from the table's `AttributeDefinitions` is `ValidationException`; conditional writes to one item [serialize](#conditional-writes-serialize-per-item) |
 | GetItem | Supports ProjectionExpression |
 | UpdateItem | Supports UpdateExpression (SET/REMOVE/ADD/DELETE) with `if_not_exists`, `list_append`, `+`/`-`, document paths (`a.b[0]`) and DynamoDB's `ValidationException` messages; every action reads the item as it was before the update. The ConditionExpression is evaluated against the stored item — none when the update creates it, so `attribute_not_exists(pk)` holds and `attribute_exists(pk)` does not. `ALL_OLD`/`UPDATED_OLD` return nothing for a created item; `UPDATED_*` return only the updated top-level attributes. Conditional writes to one item [serialize](#conditional-writes-serialize-per-item) |
@@ -8055,6 +8055,8 @@ SQS requests: $0.0000004 per request.
 | TransactWriteItems | Conditions are evaluated against the stored items (none for an absent item); every resulting item is computed before any is written, so an update expression that cannot be applied writes nothing; every touched item is locked for the transaction |
 | UpdateTimeToLive | |
 | DescribeTimeToLive | `ENABLED` with the attribute name once `UpdateTimeToLive` set one, `DISABLED` otherwise. No item ever expires — the sweep that deletes expired items is background service work, not an API observation |
+| DescribeContinuousBackups | `ContinuousBackupsStatus` is always `ENABLED`, as the page states for every table. `PointInTimeRecoveryStatus` is `DISABLED` until `UpdateContinuousBackups` enables it; an enabled table reports `RecoveryPeriodInDays` (default 35) and a restorable window from the simulated clock: `LatestRestorableDateTime` five minutes before now and `EarliestRestorableDateTime` the start of the recovery period, neither earlier than when recovery was enabled (that bound is substrate's reading). `TableName` may be the table's ARN. An absent table is `TableNotFoundException`/400. No restore is modelled |
+| UpdateContinuousBackups | `PointInTimeRecoverySpecification.PointInTimeRecoveryEnabled` turns recovery on or off; `RecoveryPeriodInDays` outside 1–35 is `ValidationException`/400, and an omitted one is the default 35, not the previous value. Re-enabling an enabled table keeps its window. The record is updated under the table's lock, as `TagResource`, `UntagResource`, `UpdateTable` and `UpdateTimeToLive` now update it too. Answers the same description as `DescribeContinuousBackups` |
 | TagResource | Merges into the table's tags by key. The table name comes from the ARN's `:table/` segment with any `/index/…` or `/stream/…` suffix dropped, but the ARN's account and Region are **not** read — the name is resolved in the caller's account and Region. An ARN with no `:table/` segment, and a name with no table behind it, are both `ResourceNotFoundException` at **400**, which is the status DynamoDB's JSON protocol uses throughout |
 | UntagResource | Deletes each key in `TagKeys`; a key that is not there is a no-op. Resolves its ARN exactly as `TagResource` does |
 | ListTagsOfResource | Reports `Tags` as the API's list of `{Key, Value}` sorted by key — see [A table description reports only its own members](#a-table-description-reports-only-its-own-members) for why this is the only place a table's tags are readable. `NextToken` is always `null`: every tag comes back in one page |
@@ -8134,7 +8136,30 @@ the twenty-ninth, which is why `AccountID` and `Region` were never at risk of ap
 
 Members substrate does not model are absent from the projection rather than present and empty,
 which is the honest-empty reading #827 established, applied to a shape: nothing reports
-`TableId`, `SSEDescription`, `Replicas` or the twelve others AWS publishes as optional.
+`Replicas` or the eleven others AWS publishes as optional. `TableId` is reported for every table
+created since #1608; a table recorded before it has none, and omits the member.
+
+### Warm throughput and encryption
+
+Every table description reports `WarmThroughput`, on the table and on each global secondary index,
+with `Status` `ACTIVE` ([#1608](https://github.com/scttfrdmn/substrate/issues/1608)). Terraform's
+provider waits for that status after every create. The value is the larger of three things:
+
+- the developer guide's on-demand default of 12,000 read and 4,000 write units per second;
+- the value `CreateTable` or `UpdateTable` requested;
+- the provisioned capacity, since the guide says warm throughput rises with it.
+
+The guide publishes no separate default for a provisioned table, so using the on-demand default
+there is substrate's reading. A lower request leaves the value unchanged, because "the values can't
+be decreased". A request below 1 is `ValidationException`/400 with substrate's own message.
+
+`SSESpecification` with `Enabled` true is KMS encryption. The table then reports `SSEDescription`
+with `Status` `ENABLED`, `SSEType` `KMS` and `KMSMasterKeyArn`. With `Enabled` false or absent, the
+table uses an AWS owned key and reports no `SSEDescription`. A key ID is reported as its key ARN in
+the caller's account and Region, and a key ARN verbatim. An alias is reported as its alias ARN,
+not resolved to its key as AWS would. Substrate mints no AWS managed key, so `Enabled` true with no
+`KMSMasterKeyId` reports no `KMSMasterKeyArn`. An unknown `SSEType` is `ValidationException`/400.
+`UpdateTable` with an `SSESpecification` replaces the encryption, and one without leaves it alone.
 
 ### A stream iterator carries its account and Region only inside the token
 
@@ -13723,6 +13748,9 @@ ELB charges $0.008 per LCU-hour (approximated as flat per-request rate).
 | DeleteTags | |
 | DescribeTags | `Filters` `auto-scaling-group`/`key`/`value`/`propagate-at-launch`. Pages on `NextToken`/`MaxRecords` (default 50, max 100) |
 | DescribeAutoScalingInstances | `InstanceIds.member.N` (unknown IDs ignored, as published). Pages on `NextToken`/`MaxRecords` (default and max 50). `HealthStatus` is `HEALTHY`, the spelling this operation's published sample uses. An observation |
+| EnableMetricsCollection | `Granularity` is required and must be `1Minute`, the only published value. `Metrics.member.N` names group metrics, and all twenty are enabled when it is omitted. An unknown metric or granularity is `ValidationError`/400 with substrate's own message. The enabled set is reported as `DescribeAutoScalingGroups`' `EnabledMetrics`, in the published order. No metric is published to CloudWatch ([#1594](https://github.com/scttfrdmn/substrate/issues/1594)) |
+| DisableMetricsCollection | Disables the named metrics, or all of them when `Metrics` is omitted |
+| DescribeMetricCollectionTypes | The published catalog: granularity `1Minute` and the twenty group metrics |
 
 **A group's instances are EC2's own.** Every launch runs EC2's RunInstances launch path and every
 termination EC2's termination path, so `DescribeInstances` reports a group's instances like
@@ -15018,8 +15046,8 @@ that does not exist, not a string that is not an ARN.
 ### Which attributes GetTopicAttributes reports
 
 `API_GetTopicAttributes` publishes seventeen attribute names, and substrate's answer
-splits in two: four are **derived** from state on every read, and the rest are
-reported only if `CreateTopic` or `SetTopicAttributes` stored them.
+splits in two: four are **derived** from state on every read, `Policy` is defaulted, and the
+rest are reported only if `CreateTopic` or `SetTopicAttributes` stored them.
 
 | Attribute | Substrate's answer |
 |-----------|--------------------|
@@ -15028,7 +15056,7 @@ reported only if `CreateTopic` or `SetTopicAttributes` stored them.
 | `SubscriptionsConfirmed` | Derived — the length of the per-topic subscription index |
 | `SubscriptionsPending` | Derived — always `0`; see below |
 | `SubscriptionsDeleted` | **Not reported**; see below |
-| `Policy` | Stored only; substrate mints no default topic policy |
+| `Policy` | The stored policy, or SNS's default topic policy when none is stored (`SetTopicAttributes` refuses an empty `Policy` with `InvalidParameter`, as AWS was observed to, and deleting an `AWS::SNS::TopicPolicy` writes the default back): the AWS CLI reference's `get-topic-attributes` example document, naming the topic and its owner's account (#1608) |
 | `DeliveryPolicy`, `EffectiveDeliveryPolicy`, `DisplayName`, `MaximumMessageSize`, `SignatureVersion`, `TracingConfig`, `KmsMasterKeyId` | Stored only |
 | `ArchivePolicy`, `BeginningArchiveTime`, `ContentBasedDeduplication`, `FifoTopic` | Stored only (FIFO) |
 
@@ -15125,9 +15153,11 @@ published value list; the page's only prose naming the code is about a
 `MaximumMessageSize` above 256 KiB on a topic that cannot carry it. The refusal
 *messages* are substrate's own, because the page publishes none. `AttributeName` is
 `Required: Yes`, so an absent one is the same code; `AttributeValue` is
-`Required: No`, so an empty value is accepted — CloudFormation's own
-`AWS::SNS::TopicPolicy` deletion depends on it, since there is no
-`DeleteTopicPolicy` and a policy is removed by setting it to the empty string.
+`Required: No`, so an empty value is accepted, except for `Policy`. AWS was observed
+refusing an empty `Policy` with `InvalidParameter` (go-to-k/cdkd#4610), since a topic
+always has one, and substrate refuses it too. There is no `DeleteTopicPolicy`, so
+deleting an `AWS::SNS::TopicPolicy` writes the topic's default policy back, as
+CloudFormation's own handler does (#1608).
 
 **Divergence: sixteen settable names are reported back where AWS would not report
 them.** Those sixteen — the fifteen delivery-status names and `FifoThroughputScope` —
@@ -17425,12 +17455,38 @@ KMS API requests: $0.03 per 10,000 requests.
 | DescribeLogStreams | Refuses a `nextToken` it did not issue |
 | PutLogEvents | Accepts up to 10,000 events per call |
 | GetLogEvents | Issues both `nextForwardToken` and `nextBackwardToken`; reads `startFromHead`; refuses a `nextToken` it did not issue |
-| FilterLogEvents | Substring match on `filterPattern`; reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
+| FilterLogEvents | Evaluates `filterPattern` as [a filter pattern](#filter-patterns); reports `searchedLogStreams`; refuses a `nextToken` it did not issue |
 | TagResource | Takes the **unsuffixed** log-group ARN — see below; refuses the 51st tag |
 | UntagResource | Same ARN rule; an absent key and an empty `tagKeys` are both no-ops |
 | ListTagsForResource | Same ARN rule; an untagged group answers `{"tags":{}}` |
 
 Lambda auto-creates `/aws/lambda/{name}` log groups.
+
+### Filter patterns
+
+`FilterLogEvents` evaluates `filterPattern` with the grammar the user guide's filter pattern syntax
+page publishes ([#1596](https://github.com/scttfrdmn/substrate/issues/1596)). Until then it was matched
+as one literal substring, so a JSON pattern matched nothing.
+
+- **Terms.** A term matches when the message contains it, case-sensitively. Several terms must all
+  match, `-term` excludes, and `?term` alternatives match any one of them. A `?` term mixed with any
+  other term is ignored, as the page states. A `"quoted phrase"` is one term, and `" "` matches every
+  event. A term matches as a substring, not a whole word, because the page does not say which.
+- **JSON.** `{ $.a.b op value }` with `=`, `!=`, `<`, `>`, `<=`, `>=`, combined with `&&` and `||`
+  (`&&` binds tighter) and parentheses. Selectors take array indexes (`$.a[0]`), one wildcard
+  (`$.a[*]`, `$.*`) and bracket notation for a key with a period (`$.['cluster.name']`). A value with
+  `*` is a glob. `IS NULL`, `IS TRUE`, `IS FALSE` and `NOT EXISTS` test a field. Two numbers compare
+  numerically (`1e+3` equals `1000`), and anything else compares as text. A numeric operator needs a
+  number. A field that is missing, an object, an array or null satisfies no comparison, `!=` included.
+  A message that is not JSON never matches.
+- **Refused.** Every refusal is `InvalidParameterException`/400 with substrate's own message. That
+  covers a pattern that does not parse, `IS NOT` and a bare `EXISTS` ("currently aren't supported",
+  per the page), and more than one wildcard in a selector or three in a pattern. It also covers
+  space-delimited patterns (`[ip, user, ...]`) and regular expressions (`%...%`), which are
+  [#1638](https://github.com/scttfrdmn/substrate/issues/1638).
+
+No metric filters or subscription filters exist in substrate yet, so `FilterLogEvents` is the only
+operation that evaluates a pattern.
 
 ### Response members are camelCase
 

@@ -23,7 +23,9 @@ const dynamodbLockStripes = 64
 //
 // The table stripes guard the per-table read-modify-write records every item write
 // touches — the item_keys list Scan and Query walk, and the stream-record ring — which
-// otherwise lose entries when two distinct items are written at once. They are a
+// otherwise lose entries when two distinct items are written at once. They also guard the
+// table record itself, which TagResource, UntagResource, UpdateTable, UpdateTimeToLive and
+// UpdateContinuousBackups each load, change and save (#1608). They are a
 // separate stripe set from the item stripes and are only ever taken innermost and
 // alone, so holding an item stripe while taking a table stripe cannot deadlock.
 //

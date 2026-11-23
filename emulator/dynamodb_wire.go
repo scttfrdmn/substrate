@@ -39,8 +39,9 @@ package emulator
 // this reports nothing AWS would not: ArchivalSummary, DeletionProtectionEnabled,
 // GlobalTableSettingsReplicationMode, GlobalTableVersion, GlobalTableWitnesses,
 // LatestStreamLabel, MultiRegionConsistency, OnDemandThroughput, Replicas,
-// RestoreSummary, SSEDescription, TableClassSummary, TableId, VectorIndexes and
-// WarmThroughput.
+// RestoreSummary, TableClassSummary and VectorIndexes. TableId is reported when the
+// record carries one, which every table created since #1608 does; WarmThroughput always,
+// and SSEDescription for a table encrypted with KMS (dynamodb_table_settings.go).
 type tableDescriptionOut struct {
 	TableName              string                             `json:"TableName"`
 	TableARN               string                             `json:"TableArn"`
@@ -56,6 +57,9 @@ type tableDescriptionOut struct {
 	LatestStreamARN        string                             `json:"LatestStreamArn,omitempty"`
 	TableSizeBytes         int64                              `json:"TableSizeBytes"`
 	ItemCount              int64                              `json:"ItemCount"`
+	TableID                string                             `json:"TableId,omitempty"`
+	SSEDescription         *DynamoDBSSEDescription            `json:"SSEDescription,omitempty"`
+	WarmThroughput         *DynamoDBWarmThroughput            `json:"WarmThroughput"`
 }
 
 // dynamodbTableDescriptionWire projects a stored table onto the wire.
@@ -65,6 +69,16 @@ type tableDescriptionOut struct {
 // compiling the moment the record gains one, which is the opposite of what is wanted
 // here — a new state field must be inert, not a build failure to be worked around.
 func dynamodbTableDescriptionWire(tbl DynamoDBTable) tableDescriptionOut {
+	// Each index reports its effective warm throughput rather than what was requested for it, so the
+	// slice is copied before the member is replaced: the record's own slice must not change.
+	var gsis []DynamoDBGlobalSecondaryIndexDesc
+	if tbl.GlobalSecondaryIndexes != nil {
+		gsis = make([]DynamoDBGlobalSecondaryIndexDesc, len(tbl.GlobalSecondaryIndexes))
+		for i, g := range tbl.GlobalSecondaryIndexes {
+			g.WarmThroughput = dynamodbWarmThroughputWire(g.WarmThroughput, g.ProvisionedThroughput)
+			gsis[i] = g
+		}
+	}
 	return tableDescriptionOut{
 		TableName:              tbl.TableName,
 		TableARN:               tbl.TableARN,
@@ -74,11 +88,14 @@ func dynamodbTableDescriptionWire(tbl DynamoDBTable) tableDescriptionOut {
 		AttributeDefinitions:   tbl.AttributeDefinitions,
 		BillingModeSummary:     tbl.BillingModeSummary,
 		ProvisionedThroughput:  tbl.ProvisionedThroughput,
-		GlobalSecondaryIndexes: tbl.GlobalSecondaryIndexes,
+		GlobalSecondaryIndexes: gsis,
 		LocalSecondaryIndexes:  tbl.LocalSecondaryIndexes,
 		StreamSpecification:    tbl.StreamSpecification,
 		LatestStreamARN:        tbl.LatestStreamARN,
 		TableSizeBytes:         tbl.TableSizeBytes,
 		ItemCount:              tbl.ItemCount,
+		TableID:                tbl.TableID,
+		SSEDescription:         tbl.SSEDescription,
+		WarmThroughput:         dynamodbWarmThroughputWire(tbl.WarmThroughput, tbl.ProvisionedThroughput),
 	}
 }

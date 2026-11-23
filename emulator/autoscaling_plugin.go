@@ -147,6 +147,12 @@ func (p *AutoScalingPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 		return p.describeTags(ctx, req)
 	case "DescribeAutoScalingInstances":
 		return p.describeAutoScalingInstances(ctx, req)
+	case "EnableMetricsCollection":
+		return p.enableMetricsCollection(ctx, req)
+	case "DisableMetricsCollection":
+		return p.disableMetricsCollection(ctx, req)
+	case "DescribeMetricCollectionTypes":
+		return p.describeMetricCollectionTypes(ctx)
 	default:
 		return nil, unknownActionError(p.Name(), action)
 	}

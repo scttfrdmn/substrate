@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"slices"
@@ -9,7 +10,9 @@ import (
 )
 
 // snsDerivedTopicAttributeNames are the GetTopicAttributes members substrate derives at read time
-// rather than reading out of the topic record's stored attribute map.
+// rather than reading out of the topic record's stored attribute map, and that a stored value cannot
+// shadow. Policy is derived too, but conditionally and the other way round: the default document is
+// reported only when no Policy is stored, and a stored one wins (#1608), so it is not listed here.
 //
 // It exists so the set is stated once and can be asserted against: [SNSPlugin.derivedTopicAttributes]
 // returns exactly these keys, and a test can name the members a stored attribute must not be able to
@@ -157,7 +160,8 @@ func snsCreateTopicAttributes(params map[string]string) (map[string]string, *AWS
 	return attrs, nil
 }
 
-// derivedTopicAttributes returns the four GetTopicAttributes members substrate computes from state.
+// derivedTopicAttributes returns the GetTopicAttributes members substrate computes from state: the four
+// in [snsDerivedTopicAttributeNames], and the default Policy when none is stored.
 //
 // API_GetTopicAttributes publishes seventeen attribute names, and substrate's answer splits in two: most
 // are whatever CreateTopic or SetTopicAttributes stored, and these four are facts about the topic that
@@ -191,9 +195,16 @@ func snsCreateTopicAttributes(params map[string]string) (map[string]string, *AWS
 // the record is keyed by, because requireTopic builds the state key from that segment. It matches the
 // Owner entry in the page's sample response.
 //
-// Policy is not derived. The page publishes it and substrate reports it only if SetTopicAttributes
-// stored one, because SNS has no operation that mints a default topic policy — the same shape as KMS's
-// #983, and recorded as unmodelled in docs/services.md rather than answered with an invented document.
+// Policy is the default topic policy whenever none is stored (#1608). Every topic has an access policy —
+// API_GetTopicAttributes' sample and the CLI reference's get-topic-attributes example both report one for
+// a topic nobody set a policy on — and Terraform's aws_sns_topic parses the attribute unconditionally, so
+// its absence failed `terraform apply` with "parsing policy: unexpected end of JSON input". This reverses
+// the reading recorded here before #1608, that SNS mints no default; that reading confused "no operation
+// creates one" with "none exists", which KMS's own default (#983, [kmsDefaultKeyPolicy]) had already
+// shown is the wrong way round. The document is [snsDefaultTopicPolicy]. It is derived rather than
+// stored, so a SetTopicAttributes Policy replaces it, and a topic recorded before #1608 — or one whose
+// Policy a pre-#1608 CloudFormation deleter cleared to the empty string — reports it too. Unlike the
+// four members above, a stored Policy wins.
 func (p *SNSPlugin) derivedTopicAttributes(
 	goCtx context.Context, ctx *RequestContext, t *SNSTopic, topicName string,
 ) (map[string]string, error) {
@@ -201,10 +212,63 @@ func (p *SNSPlugin) derivedTopicAttributes(
 	if err != nil {
 		return nil, err
 	}
-	return map[string]string{
+	derived := map[string]string{
 		"Owner":                  t.AccountID,
 		"SubscriptionsConfirmed": strconv.Itoa(len(subARNs)),
 		"SubscriptionsPending":   "0",
 		"TopicArn":               t.ARN,
-	}, nil
+	}
+	if t.Attributes["Policy"] == "" {
+		policy, err := snsDefaultTopicPolicy(t.ARN, t.AccountID)
+		if err != nil {
+			return nil, err
+		}
+		derived["Policy"] = policy
+	}
+	return derived, nil
+}
+
+// snsDefaultTopicPolicy renders the access policy SNS reports for a topic no caller set a policy on.
+//
+// Transcribed from the AWS CLI Command Reference's get-topic-attributes example output, which carries
+// the document in full: Version 2008-10-17, Id "__default_policy_ID", and one statement — Sid
+// "__default_statement_ID", Effect Allow, Principal {"AWS":"*"}, the eight topic actions in the order the
+// example lists them, Resource the topic's ARN, and Condition StringEquals AWS:SourceOwner. The example's
+// SourceOwner is "0123456789012", thirteen characters long and so a typo for its own account
+// 123456789012; the account substituted here is the topic owner's, since the condition is what confines
+// the wildcard principal to that account. API_GetTopicAttributes' older sample carries the same
+// statement under a Region/account-prefixed Id and Sid and an AWS:SourceArn condition; the CLI example
+// is the one current topics report, and is the one followed.
+//
+// The document is built and marshaled rather than fmt-composed, for the reason [kmsDefaultKeyPolicy]
+// gives: neither the ARN nor the account can escape the string it lands in.
+func snsDefaultTopicPolicy(topicARN, accountID string) (string, error) {
+	document := map[string]any{
+		"Version": "2008-10-17",
+		"Id":      "__default_policy_ID",
+		"Statement": []any{
+			map[string]any{
+				"Sid":       "__default_statement_ID",
+				"Effect":    "Allow",
+				"Principal": map[string]any{"AWS": "*"},
+				"Action": []string{
+					"SNS:Subscribe",
+					"SNS:ListSubscriptionsByTopic",
+					"SNS:DeleteTopic",
+					"SNS:GetTopicAttributes",
+					"SNS:Publish",
+					"SNS:RemovePermission",
+					"SNS:AddPermission",
+					"SNS:SetTopicAttributes",
+				},
+				"Resource":  topicARN,
+				"Condition": map[string]any{"StringEquals": map[string]any{"AWS:SourceOwner": accountID}},
+			},
+		},
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return "", fmt.Errorf("sns default topic policy marshal: %w", err)
+	}
+	return string(encoded), nil
 }

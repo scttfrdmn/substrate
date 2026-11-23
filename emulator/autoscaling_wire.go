@@ -214,6 +214,12 @@ type asgSuspendedProcessXML struct {
 	SuspensionReason string `xml:"SuspensionReason"`
 }
 
+// asgEnabledMetricXML is an EnabledMetric.
+type asgEnabledMetricXML struct {
+	Metric      string `xml:"Metric"`
+	Granularity string `xml:"Granularity"`
+}
+
 // asgGroupXML is an AutoScalingGroup.
 type asgGroupXML struct {
 	AutoScalingGroupName             string                          `xml:"AutoScalingGroupName"`
@@ -234,7 +240,7 @@ type asgGroupXML struct {
 	SuspendedProcesses               asgList[asgSuspendedProcessXML] `xml:"SuspendedProcesses"`
 	PlacementGroup                   string                          `xml:"PlacementGroup,omitempty"`
 	VPCZoneIdentifier                string                          `xml:"VPCZoneIdentifier,omitempty"`
-	EnabledMetrics                   asgList[struct{}]               `xml:"EnabledMetrics"`
+	EnabledMetrics                   asgList[asgEnabledMetricXML]    `xml:"EnabledMetrics"`
 	Tags                             asgList[asgTagXML]              `xml:"Tags"`
 	TerminationPolicies              asgList[string]                 `xml:"TerminationPolicies"`
 	NewInstancesProtectedFromScaleIn bool                            `xml:"NewInstancesProtectedFromScaleIn"`
@@ -281,6 +287,11 @@ func asgGroupToXML(g *AutoScalingGroup, includeInstances bool) asgGroupXML {
 		sps = append(sps, asgSuspendedProcessXML(sp))
 	}
 	out.SuspendedProcesses = asgListOf(sps)
+	ems := make([]asgEnabledMetricXML, 0, len(g.EnabledMetrics))
+	for _, em := range g.EnabledMetrics {
+		ems = append(ems, asgEnabledMetricXML(em))
+	}
+	out.EnabledMetrics = asgListOf(ems)
 	if includeInstances {
 		insts := make([]asgInstanceXML, 0, len(g.Instances))
 		for _, inst := range g.Instances {
