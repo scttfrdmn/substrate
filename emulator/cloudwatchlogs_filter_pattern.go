@@ -2,7 +2,9 @@ package emulator
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -132,12 +134,12 @@ func cwlParseTerms(s string) (*cwlTermPattern, string) {
 	out := &cwlTermPattern{}
 	i := 0
 	for i < len(s) {
-		if s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r' {
+		if cwlTermSpace(s[i]) {
 			i++
 			continue
 		}
 		prefix := byte(0)
-		if (s[i] == '?' || s[i] == '-') && i+1 < len(s) && s[i+1] != ' ' && s[i+1] != '\t' {
+		if (s[i] == '?' || s[i] == '-') && i+1 < len(s) && !cwlTermSpace(s[i+1]) {
 			prefix = s[i]
 			i++
 		}
@@ -150,7 +152,7 @@ func cwlParseTerms(s string) (*cwlTermPattern, string) {
 			term, i = text, next
 		} else {
 			start := i
-			for i < len(s) && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && s[i] != '\r' {
+			for i < len(s) && !cwlTermSpace(s[i]) {
 				if s[i] == '"' {
 					return nil, "a quotation mark may only open a quoted phrase"
 				}
@@ -171,6 +173,11 @@ func cwlParseTerms(s string) (*cwlTermPattern, string) {
 		}
 	}
 	return out, ""
+}
+
+// cwlTermSpace reports whether c separates terms in an unstructured pattern.
+func cwlTermSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // cwlReadQuoted reads the double-quoted string that opens at s[start], honoring backslash escapes of
@@ -281,7 +288,9 @@ func cwlDecodeJSONMessage(message string) (any, bool) {
 	if err := dec.Decode(&doc); err != nil {
 		return nil, false
 	}
-	if dec.More() {
+	// Anything after the value, a stray `]` or `}` included, makes the message not JSON. dec.More
+	// alone reports false for a closing delimiter, so the stream must be at its end.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, false
 	}
 	return doc, true

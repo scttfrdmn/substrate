@@ -40,6 +40,29 @@ func TestJourney_TerraformRefreshReads(t *testing.T) {
 	if aws.ToString(created.TableDescription.TableId) == "" {
 		t.Error("CreateTable reported no TableId")
 	}
+	// The provider's waitTableWarmThroughputActive polls for this status after every create.
+	if wt := created.TableDescription.WarmThroughput; wt == nil || wt.Status != ddbtypes.TableStatusActive {
+		t.Errorf("CreateTable reported no ACTIVE WarmThroughput: %+v", wt)
+	}
+
+	// With server_side_encryption { kms_key_arn }, the provider's SSE waiter polls SSEDescription.
+	const keyARN = "arn:aws:kms:us-east-1:123456789012:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+	encrypted, err := ddb.CreateTable(ctx, &dynamodb.CreateTableInput{
+		TableName:            aws.String("tf-refresh-sse"),
+		KeySchema:            []ddbtypes.KeySchemaElement{{AttributeName: aws.String("pk"), KeyType: ddbtypes.KeyTypeHash}},
+		AttributeDefinitions: []ddbtypes.AttributeDefinition{{AttributeName: aws.String("pk"), AttributeType: ddbtypes.ScalarAttributeTypeS}},
+		BillingMode:          ddbtypes.BillingModePayPerRequest,
+		SSESpecification: &ddbtypes.SSESpecification{
+			Enabled: aws.Bool(true), SSEType: ddbtypes.SSETypeKms, KMSMasterKeyId: aws.String(keyARN),
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateTable with SSE: %v", err)
+	}
+	if sse := encrypted.TableDescription.SSEDescription; sse == nil || sse.Status != ddbtypes.SSEStatusEnabled ||
+		aws.ToString(sse.KMSMasterKeyArn) != keyARN {
+		t.Errorf("CreateTable with SSE reported %+v", sse)
+	}
 
 	described, err := ddb.DescribeContinuousBackups(ctx, &dynamodb.DescribeContinuousBackupsInput{TableName: aws.String("tf-refresh")})
 	if err != nil {

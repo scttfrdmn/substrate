@@ -2,9 +2,11 @@ package emulator_test
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
@@ -107,6 +109,16 @@ func TestDynamoDB_ContinuousBackupsLifecycle(t *testing.T) {
 	assert.InDelta(t, now-7*86400, pitr["EarliestRestorableDateTime"], 0.001)
 	assert.InDelta(t, now-300, pitr["LatestRestorableDateTime"], 0.001)
 
+	// Re-enabling without a period asks for the default, not the previous seven days: Terraform sends
+	// no period when none is configured and would otherwise never converge.
+	pitr = ddbContinuousBackupsCall(t, srv, "UpdateContinuousBackups", map[string]any{
+		"TableName":                        "pitr",
+		"PointInTimeRecoverySpecification": map[string]any{"PointInTimeRecoveryEnabled": true},
+	}).ContinuousBackupsDescription.PointInTimeRecoveryDescription
+	assert.InDelta(t, 35, pitr["RecoveryPeriodInDays"], 0, "an omitted period is the default")
+	assert.InDelta(t, now-35*86400, pitr["EarliestRestorableDateTime"], 0.001,
+		"the window is not restarted: it reaches the full default period back")
+
 	got = ddbContinuousBackupsCall(t, srv, "UpdateContinuousBackups", map[string]any{
 		"TableName":                        "pitr",
 		"PointInTimeRecoverySpecification": map[string]any{"PointInTimeRecoveryEnabled": false},
@@ -177,4 +189,44 @@ func TestDynamoDB_TableIDIsMintedAndReported(t *testing.T) {
 	var described struct{ Table struct{ TableId string } }
 	decodeDynamoJSON(t, dynamodbRequest(t, srv, "DescribeTable", map[string]any{"TableName": "with-id"}), &described)
 	assert.Equal(t, created.TableDescription.TableId, described.Table.TableId, "the id is stored, not re-minted")
+}
+
+// UpdateContinuousBackups and TagResource each load, change and save the table record. Without the
+// table's stripe held across all three, one writer's save dropped the other's change.
+func TestDynamoDB_TableRecordWritersDoNotLoseUpdates(t *testing.T) {
+	t.Parallel()
+	srv, _ := newDynamoDBClockServer(t)
+	ddbCreatePITRTable(t, srv, "pitr-race")
+	const arn = "arn:aws:dynamodb:us-east-1:123456789012:table/pitr-race"
+	const n = 20
+
+	var wg sync.WaitGroup
+	for i := range n {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			resp := dynamodbRequest(t, srv, "TagResource", map[string]any{
+				"ResourceArn": arn, "Tags": []map[string]string{{"Key": fmt.Sprintf("k%02d", i), "Value": "v"}},
+			})
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.NoError(t, resp.Body.Close())
+		}()
+		go func() {
+			defer wg.Done()
+			resp := dynamodbRequest(t, srv, "UpdateContinuousBackups", map[string]any{
+				"TableName":                        "pitr-race",
+				"PointInTimeRecoverySpecification": map[string]any{"PointInTimeRecoveryEnabled": true},
+			})
+			assert.Equal(t, http.StatusOK, resp.StatusCode)
+			assert.NoError(t, resp.Body.Close())
+		}()
+	}
+	wg.Wait()
+
+	var tags struct{ Tags []struct{ Key string } }
+	decodeDynamoJSON(t, dynamodbRequest(t, srv, "ListTagsOfResource", map[string]any{"ResourceArn": arn}), &tags)
+	assert.Len(t, tags.Tags, n, "every tag survived the concurrent PITR writes")
+	pitr := ddbContinuousBackupsCall(t, srv, "DescribeContinuousBackups", map[string]any{"TableName": "pitr-race"}).
+		ContinuousBackupsDescription.PointInTimeRecoveryDescription
+	assert.Equal(t, "ENABLED", pitr["PointInTimeRecoveryStatus"], "PITR survived the concurrent tag writes")
 }

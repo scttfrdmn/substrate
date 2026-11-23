@@ -122,6 +122,13 @@ type DynamoDBTable struct {
 
 	// PITRRecoveryPeriodInDays is the configured recovery period; 0 reads as the default of 35.
 	PITRRecoveryPeriodInDays int `json:"pitr_recovery_period_in_days,omitempty"`
+
+	// WarmThroughput is the warm throughput CreateTable or UpdateTable requested, nil for none; the wire
+	// reports the effective value (#1608).
+	WarmThroughput *DynamoDBWarmThroughput `json:"WarmThroughput,omitempty"`
+
+	// SSEDescription is the table's KMS encryption, nil for an AWS owned key (#1608).
+	SSEDescription *DynamoDBSSEDescription `json:"SSEDescription,omitempty"`
 }
 
 // DynamoDBKeySchemaElement specifies a single attribute that forms the primary key.
@@ -185,6 +192,10 @@ type DynamoDBGlobalSecondaryIndexDesc struct {
 
 	// IndexARN is the Amazon Resource Name of the GSI. DynamoDB publishes it as IndexArn.
 	IndexARN string `json:"IndexArn,omitempty"`
+
+	// WarmThroughput is, stored, the warm throughput CreateTable requested for the index; the wire
+	// reports the effective value with Status (#1608).
+	WarmThroughput *DynamoDBWarmThroughput `json:"WarmThroughput,omitempty"`
 }
 
 // DynamoDBLocalSecondaryIndexDesc describes a local secondary index on a table.

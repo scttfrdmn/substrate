@@ -29,6 +29,7 @@ var cwlFilterMessages = []string{
 		`{"id":3,"email":"Jane.Doe@example.com"}],"actions":["GET","PUT","DELETE"],` +
 		`"coordinates":[[0,1,2],[4,5,6],[7,8,9]],"bandwidth":80,"number":[1e3],"code":"404"}`,
 	`{"task_uuid":"0b5f3f8e-6c1e-4c1a-9f0e-3c1d2b1a0f9e","status":"done","latency":12.5}`,
+	`{"status":"done"}]`, // a JSON value with a stray delimiter after it is not JSON
 }
 
 // cwlFilterPutAll seeds one stream with every message in cwlFilterMessages.
@@ -84,8 +85,8 @@ func TestCWLogs_FilterPatternsMatchAsPublished(t *testing.T) {
 		pattern string
 		want    []int
 	}{
-		{"empty matches all", "", []int{0, 1, 2, 3, 4, 5, 6}},
-		{"match everything", `" "`, []int{0, 1, 2, 3, 4, 5, 6}},
+		{"empty matches all", "", []int{0, 1, 2, 3, 4, 5, 6, 7}},
+		{"match everything", `" "`, []int{0, 1, 2, 3, 4, 5, 6, 7}},
 		{"single term", "ERROR", []int{0, 1, 3}},
 		{"terms are case-sensitive", "error", []int{}},
 		{"multiple terms are AND", "ERROR ARGUMENTS", []int{1}},
@@ -93,7 +94,8 @@ func TestCWLogs_FilterPatternsMatchAsPublished(t *testing.T) {
 		{"optional terms are ignored beside a required one", "?ARGUMENTS ?FAILED REQUEST", []int{0, 2}},
 		{"exact phrase", `"INTERNAL SERVER ERROR"`, []int{3}},
 		{"exclusion", "ERROR -ARGUMENTS", []int{0, 3}},
-		{"exclusion alone", "-ERROR", []int{2, 4, 5, 6}},
+		{"exclusion alone", "-ERROR", []int{2, 4, 5, 6, 7}},
+		{"a prefix before a newline is a literal term", "?\nARGUMENTS", []int{}},
 		{"excluded phrase", `ERROR -"BAD REQUEST"`, []int{1, 3}},
 		{"quoted term with non-alphanumerics", `"[ERROR 400]"`, []int{0}},
 

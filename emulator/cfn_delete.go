@@ -109,16 +109,25 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 			Headers: map[string]string{}, Params: map[string]string{"TopicArn": arn}}
 	},
 	"AWS::SNS::Subscription": queryDeleter("sns", "Unsubscribe", "SubscriptionArn"),
-	"AWS::SNS::TopicPolicy": func(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
-		// There is no DeleteTopicPolicy: a topic policy is an attribute, and
-		// removing it means setting it back to empty — the mirror of the
-		// SetTopicAttributes the deploy dispatched. The topic itself, if the stack
-		// also owns it, is deleted separately by its own entry.
+	"AWS::SNS::TopicPolicy": func(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, cctx *cfnContext) *AWSRequest {
+		// There is no DeleteTopicPolicy: a topic policy is an attribute, and SNS
+		// refuses an empty one, so removing it means restoring the topic's default
+		// policy, as CloudFormation's own handler does (#1608). The topic itself, if
+		// the stack also owns it, is deleted separately by its own entry. The
+		// default names the topic's owner, the account segment of its ARN.
+		account := cctx.accountID
+		if target, aerr := snsParseTopicARN(dr.PhysicalID); aerr == nil {
+			account = target.AccountID
+		}
+		policy, err := snsDefaultTopicPolicy(dr.PhysicalID, account)
+		if err != nil {
+			return nil
+		}
 		return &AWSRequest{Service: "sns", Operation: "SetTopicAttributes",
 			Headers: map[string]string{},
 			Params: map[string]string{
 				"Action": "SetTopicAttributes", "TopicArn": dr.PhysicalID,
-				"AttributeName": "Policy", "AttributeValue": "",
+				"AttributeName": "Policy", "AttributeValue": policy,
 			}}
 	},
 	"AWS::Events::Rule": jsonBodyDeleter("eventbridge", "DeleteRule", "Name"),

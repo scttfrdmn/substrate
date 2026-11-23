@@ -10,7 +10,9 @@ import (
 )
 
 // snsDerivedTopicAttributeNames are the GetTopicAttributes members substrate derives at read time
-// rather than reading out of the topic record's stored attribute map.
+// rather than reading out of the topic record's stored attribute map, and that a stored value cannot
+// shadow. Policy is derived too, but conditionally and the other way round: the default document is
+// reported only when no Policy is stored, and a stored one wins (#1608), so it is not listed here.
 //
 // It exists so the set is stated once and can be asserted against: [SNSPlugin.derivedTopicAttributes]
 // returns exactly these keys, and a test can name the members a stored attribute must not be able to
@@ -200,9 +202,9 @@ func snsCreateTopicAttributes(params map[string]string) (map[string]string, *AWS
 // the reading recorded here before #1608, that SNS mints no default; that reading confused "no operation
 // creates one" with "none exists", which KMS's own default (#983, [kmsDefaultKeyPolicy]) had already
 // shown is the wrong way round. The document is [snsDefaultTopicPolicy]. It is derived rather than
-// stored, so a SetTopicAttributes Policy replaces it, clearing that Policy (which is how substrate's
-// CloudFormation deleter removes an AWS::SNS::TopicPolicy) brings the default back, and a topic recorded
-// before #1608 reports it too. Unlike the four members above, a stored Policy wins.
+// stored, so a SetTopicAttributes Policy replaces it, and a topic recorded before #1608 — or one whose
+// Policy a pre-#1608 CloudFormation deleter cleared to the empty string — reports it too. Unlike the
+// four members above, a stored Policy wins.
 func (p *SNSPlugin) derivedTopicAttributes(
 	goCtx context.Context, ctx *RequestContext, t *SNSTopic, topicName string,
 ) (map[string]string, error) {
@@ -217,7 +219,11 @@ func (p *SNSPlugin) derivedTopicAttributes(
 		"TopicArn":               t.ARN,
 	}
 	if t.Attributes["Policy"] == "" {
-		derived["Policy"] = snsDefaultTopicPolicy(t.ARN, t.AccountID)
+		policy, err := snsDefaultTopicPolicy(t.ARN, t.AccountID)
+		if err != nil {
+			return nil, err
+		}
+		derived["Policy"] = policy
 	}
 	return derived, nil
 }
@@ -236,7 +242,7 @@ func (p *SNSPlugin) derivedTopicAttributes(
 //
 // The document is built and marshaled rather than fmt-composed, for the reason [kmsDefaultKeyPolicy]
 // gives: neither the ARN nor the account can escape the string it lands in.
-func snsDefaultTopicPolicy(topicARN, accountID string) string {
+func snsDefaultTopicPolicy(topicARN, accountID string) (string, error) {
 	document := map[string]any{
 		"Version": "2008-10-17",
 		"Id":      "__default_policy_ID",
@@ -260,10 +266,9 @@ func snsDefaultTopicPolicy(topicARN, accountID string) string {
 			},
 		},
 	}
-	// Every member is string-keyed and JSON-representable, so this cannot fail; see kmsDefaultKeyPolicy.
 	encoded, err := json.Marshal(document)
 	if err != nil {
-		return ""
+		return "", fmt.Errorf("sns default topic policy marshal: %w", err)
 	}
-	return string(encoded)
+	return string(encoded), nil
 }

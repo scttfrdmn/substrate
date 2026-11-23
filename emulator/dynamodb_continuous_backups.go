@@ -46,15 +46,23 @@ func dynamodbTableNotFound(name string) *AWSError {
 	}
 }
 
-// pitrTable loads the table a continuous-backups request names. TableName may be the table's
-// ARN ("You can also provide the Amazon Resource Name (ARN) of the table in this parameter").
-func (p *DynamoDBPlugin) pitrTable(ctx *RequestContext, name string) (*DynamoDBTable, error) {
+// pitrTableName resolves a continuous-backups request's TableName, which may be the table's ARN ("You
+// can also provide the Amazon Resource Name (ARN) of the table in this parameter").
+func pitrTableName(name string) (string, error) {
 	if name == "" {
-		return nil, &AWSError{Code: "ValidationException", Message: "TableName is required", HTTPStatus: http.StatusBadRequest}
+		return "", &AWSError{Code: "ValidationException", Message: "TableName is required", HTTPStatus: http.StatusBadRequest}
 	}
-	tableName := name
 	if strings.HasPrefix(name, "arn:") {
-		tableName = dynamodbTableNameFromARN(name)
+		return dynamodbTableNameFromARN(name), nil
+	}
+	return name, nil
+}
+
+// pitrTable loads the table a continuous-backups request names; see [pitrTableName].
+func (p *DynamoDBPlugin) pitrTable(ctx *RequestContext, name string) (*DynamoDBTable, error) {
+	tableName, err := pitrTableName(name)
+	if err != nil {
+		return nil, err
 	}
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, tableName)
 	if err != nil {
@@ -146,6 +154,14 @@ func (p *DynamoDBPlugin) updateContinuousBackups(ctx *RequestContext, req *AWSRe
 			Message:    fmt.Sprintf("RecoveryPeriodInDays must be between 1 and 35, got %d", *spec.RecoveryPeriodInDays),
 			HTTPStatus: http.StatusBadRequest}
 	}
+	tableName, err := pitrTableName(input.TableName)
+	if err != nil {
+		return nil, err
+	}
+	// Under the table's stripe from load to save, so a concurrent TagResource, UpdateTable or
+	// UpdateTimeToLive cannot write back a record that drops this change, or this one drop theirs.
+	unlock := p.lockTableForUpdate(ctx, tableName)
+	defer unlock()
 	tbl, err := p.pitrTable(ctx, input.TableName)
 	if err != nil {
 		return nil, err
@@ -157,6 +173,9 @@ func (p *DynamoDBPlugin) updateContinuousBackups(ctx *RequestContext, req *AWSRe
 			tbl.PITREnabled = true
 			tbl.PITREnabledAt = float64(p.tc.Now().UnixNano()) / 1e9
 		}
+		// An omitted period is the default, not the previous value: API_PointInTimeRecoverySpecification
+		// gives RecoveryPeriodInDays a default of 35, so a request without it asks for 35.
+		tbl.PITRRecoveryPeriodInDays = 0
 		if spec.RecoveryPeriodInDays != nil {
 			tbl.PITRRecoveryPeriodInDays = *spec.RecoveryPeriodInDays
 		}

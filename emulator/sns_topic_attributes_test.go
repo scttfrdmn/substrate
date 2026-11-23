@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"testing"
@@ -229,6 +230,52 @@ func TestSNSTopicAttributesPassesStoredMembersThrough(t *testing.T) {
 	assert.Equal(t, policy, after["Policy"], "a stored Policy is reported verbatim")
 	assert.Equal(t, "attrs-display", after["DisplayName"])
 	assert.Equal(t, arn, after["TopicArn"], "the derived members survive a stored one arriving")
+}
+
+// TestCFN_SNSTopicPolicyDeleteRestoresTheDefault deletes a stack whose AWS::SNS::TopicPolicy names a topic
+// the stack does not own. SNS refuses an empty Policy, so the deleter writes the default document back,
+// as CloudFormation's own handler does (#1608).
+func TestCFN_SNSTopicPolicyDeleteRestoresTheDefault(t *testing.T) {
+	d := newV016Deployer(t)
+	ctx := context.Background()
+	resp, err := d.DispatchForTest(ctx, &emulator.AWSRequest{
+		Service: "sns", Operation: "CreateTopic", Headers: map[string]string{},
+		Params: map[string]string{"Action": "CreateTopic", "Name": "policy-delete-topic"},
+	}, "probe")
+	require.NoError(t, err)
+	var created struct {
+		ARN string `xml:"CreateTopicResult>TopicArn"`
+	}
+	require.NoError(t, xml.Unmarshal(resp.Body, &created), "%s", resp.Body)
+
+	tmpl := `{"Resources":{"P":{"Type":"AWS::SNS::TopicPolicy","Properties":{
+		"Topics":["` + created.ARN + `"],
+		"PolicyDocument":{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"sns:Publish","Resource":"*"}]}}}}}`
+	_, err = d.Deploy(ctx, tmpl, "policy-delete", nil)
+	require.NoError(t, err)
+	require.NoError(t, d.DeleteStack(ctx, "policy-delete"))
+
+	resp, err = d.DispatchForTest(ctx, &emulator.AWSRequest{
+		Service: "sns", Operation: "GetTopicAttributes", Headers: map[string]string{},
+		Params: map[string]string{"Action": "GetTopicAttributes", "TopicArn": created.ARN},
+	}, "probe")
+	require.NoError(t, err)
+	var got struct {
+		Entries []struct {
+			Key   string `xml:"key"`
+			Value string `xml:"value"`
+		} `xml:"GetTopicAttributesResult>Attributes>entry"`
+	}
+	require.NoError(t, xml.Unmarshal(resp.Body, &got), "%s", resp.Body)
+	var policy string
+	for _, e := range got.Entries {
+		if e.Key == "Policy" {
+			policy = e.Value
+		}
+	}
+	assert.Contains(t, policy, "__default_policy_ID", "the default policy is back")
+	assert.NotContains(t, policy, "Deny", "the stack's policy is gone")
+	assert.Contains(t, policy, created.ARN)
 }
 
 // TestSNSDefaultTopicPolicyIsTheDocumentedOne decodes the default Policy member by member against the

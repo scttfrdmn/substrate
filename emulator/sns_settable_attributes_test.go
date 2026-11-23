@@ -207,29 +207,34 @@ func TestSNSSetTopicAttributesRequiresAnAttributeName(t *testing.T) {
 
 // TestSNSSetTopicAttributesAcceptsAnEmptyValue pins the half of the signature that is *not* required.
 //
-// AttributeValue is Required: No, and substrate's own CloudFormation deleter depends on it: there is no
-// DeleteTopicPolicy, so AWS::SNS::TopicPolicy is removed by setting Policy to the empty string
-// (cfn_delete.go:87). A guard that rejected an empty value would have broken stack deletion, which is
-// why the name check is the only one added.
+// AttributeValue is Required: No, so an empty DisplayName is a set to the empty string. Policy is the
+// exception (#1608): SNS refuses an empty Policy with InvalidParameter — observed behavior, reported by
+// go-to-k/cdkd#4610 — because a topic always has one, and substrate's CloudFormation deleter now
+// restores the default policy instead of clearing it.
 func TestSNSSetTopicAttributesAcceptsAnEmptyValue(t *testing.T) {
 	t.Parallel()
 	ts := snsTagServer(t)
 	arn := snsCreateTopic(t, ts, "settable-empty-value")
 
-	const policy = `{"Version":"2008-10-17","Statement":[]}`
-	status, errCode := snsSetTopicAttribute(t, ts, snsEastRegion, arn, "Policy", policy)
+	status, errCode := snsSetTopicAttribute(t, ts, snsEastRegion, arn, "DisplayName", "shown")
 	require.Equal(t, http.StatusOK, status)
 	require.Empty(t, errCode)
-
-	status, errCode = snsSetTopicAttribute(t, ts, snsEastRegion, arn, "Policy", "")
-	assert.Equal(t, http.StatusOK, status, "clearing a policy is a set to the empty string")
+	status, errCode = snsSetTopicAttribute(t, ts, snsEastRegion, arn, "DisplayName", "")
+	assert.Equal(t, http.StatusOK, status, "clearing a display name is a set to the empty string")
 	assert.Empty(t, errCode)
+
+	const policy = `{"Version":"2008-10-17","Statement":[]}`
+	status, errCode = snsSetTopicAttribute(t, ts, snsEastRegion, arn, "Policy", policy)
+	require.Equal(t, http.StatusOK, status)
+	require.Empty(t, errCode)
+	status, errCode = snsSetTopicAttribute(t, ts, snsEastRegion, arn, "Policy", "")
+	assert.Equal(t, http.StatusBadRequest, status, "an empty Policy is refused")
+	assert.Equal(t, "InvalidParameter", errCode)
 
 	attrs, errCode := snsTopicAttributes(t, ts, snsEastRegion, arn)
 	require.Empty(t, errCode)
-	assert.NotEqual(t, policy, attrs["Policy"], "the cleared policy is not left at its old value")
-	assert.Contains(t, attrs["Policy"], "__default_policy_ID",
-		"a cleared policy reports the default again, as a topic without one does (#1608)")
+	assert.Equal(t, "", attrs["DisplayName"])
+	assert.Equal(t, policy, attrs["Policy"], "the refused write left the stored policy in place")
 }
 
 // TestSNSSetTopicAttributesWriteOnlyNamesAreReadBack records a divergence rather than a fix.

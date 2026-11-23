@@ -346,6 +346,7 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 			KeySchema             []DynamoDBKeySchemaElement         `json:"KeySchema"`
 			Projection            DynamoDBProjection                 `json:"Projection"`
 			ProvisionedThroughput *DynamoDBProvisionedThroughputDesc `json:"ProvisionedThroughput"`
+			WarmThroughput        *DynamoDBWarmThroughput            `json:"WarmThroughput"`
 		} `json:"GlobalSecondaryIndexes"`
 		LocalSecondaryIndexes []struct {
 			IndexName  string                     `json:"IndexName"`
@@ -354,12 +355,26 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		} `json:"LocalSecondaryIndexes"`
 		StreamSpecification *DynamoDBStreamSpecification `json:"StreamSpecification"`
 		Tags                []DynamoDBTag                `json:"Tags"`
+		SSESpecification    *dynamodbSSESpecification    `json:"SSESpecification"`
+		WarmThroughput      *DynamoDBWarmThroughput      `json:"WarmThroughput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: "Failed to parse request: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 	if input.TableName == "" {
 		return nil, &AWSError{Code: "ValidationException", Message: "TableName is required", HTTPStatus: http.StatusBadRequest}
+	}
+	sse, err := dynamodbSSEDescriptionFor(input.SSESpecification, ctx.Region, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := dynamodbValidateWarmThroughput(input.WarmThroughput); err != nil {
+		return nil, err
+	}
+	for _, g := range input.GlobalSecondaryIndexes {
+		if err := dynamodbValidateWarmThroughput(g.WarmThroughput); err != nil {
+			return nil, err
+		}
 	}
 
 	existing, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
@@ -396,6 +411,7 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 			IndexStatus:           "ACTIVE",
 			ProvisionedThroughput: gpt,
 			IndexARN:              tableARN + "/index/" + g.IndexName,
+			WarmThroughput:        dynamodbMergeWarmThroughput(nil, g.WarmThroughput),
 		})
 	}
 
@@ -426,7 +442,9 @@ func (p *DynamoDBPlugin) createTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		ItemCount:              0,
 		// API_TableDescription: "Unique identifier for the table for which the backup was created."
 		// It is a UUID on the wire, and minting it from the request's IDs keeps a replay identical (#1608).
-		TableID: ctx.IDs.UUID(),
+		TableID:        ctx.IDs.UUID(),
+		WarmThroughput: dynamodbMergeWarmThroughput(nil, input.WarmThroughput),
+		SSEDescription: sse,
 	}
 
 	// Store any tags supplied at table creation time so they can be read back
@@ -478,6 +496,14 @@ func (p *DynamoDBPlugin) loadTableForTagging(ctx *RequestContext, resourceARN st
 	return tbl, nil
 }
 
+// lockTableForUpdate takes the stripe of the named table for a read-modify-write of its record, so two
+// concurrent writers — TagResource, UntagResource, UpdateTable, UpdateTimeToLive,
+// UpdateContinuousBackups — cannot each save a copy that drops the other's change. It shares the stripe
+// set that guards the item_keys list; neither holder takes another lock, so the two cannot deadlock.
+func (p *DynamoDBPlugin) lockTableForUpdate(ctx *RequestContext, tableName string) func() {
+	return p.locks.lockTable(ctx.AccountID, ctx.Region, tableName)
+}
+
 func (p *DynamoDBPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {
 		ResourceArn string        `json:"ResourceArn"`
@@ -486,6 +512,8 @@ func (p *DynamoDBPlugin) tagResource(ctx *RequestContext, req *AWSRequest) (*AWS
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	unlock := p.lockTableForUpdate(ctx, dynamodbTableNameFromARN(input.ResourceArn))
+	defer unlock()
 	tbl, err := p.loadTableForTagging(ctx, input.ResourceArn)
 	if err != nil {
 		return nil, err
@@ -511,6 +539,8 @@ func (p *DynamoDBPlugin) untagResource(ctx *RequestContext, req *AWSRequest) (*A
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	unlock := p.lockTableForUpdate(ctx, dynamodbTableNameFromARN(input.ResourceArn))
+	defer unlock()
 	tbl, err := p.loadTableForTagging(ctx, input.ResourceArn)
 	if err != nil {
 		return nil, err
@@ -681,11 +711,22 @@ func (p *DynamoDBPlugin) updateTable(ctx *RequestContext, req *AWSRequest) (*AWS
 		TableName             string                             `json:"TableName"`
 		BillingMode           string                             `json:"BillingMode"`
 		ProvisionedThroughput *DynamoDBProvisionedThroughputDesc `json:"ProvisionedThroughput"`
+		SSESpecification      *dynamodbSSESpecification          `json:"SSESpecification"`
+		WarmThroughput        *DynamoDBWarmThroughput            `json:"WarmThroughput"`
 	}
 	if err := json.Unmarshal(req.Body, &input); err != nil {
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
+	sse, err := dynamodbSSEDescriptionFor(input.SSESpecification, ctx.Region, ctx.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	if err := dynamodbValidateWarmThroughput(input.WarmThroughput); err != nil {
+		return nil, err
+	}
 
+	unlock := p.lockTableForUpdate(ctx, input.TableName)
+	defer unlock()
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err
@@ -700,6 +741,12 @@ func (p *DynamoDBPlugin) updateTable(ctx *RequestContext, req *AWSRequest) (*AWS
 	if input.ProvisionedThroughput != nil {
 		tbl.ProvisionedThroughput = *input.ProvisionedThroughput
 	}
+	// An SSESpecification replaces the encryption: Enabled false or absent returns the table to an AWS
+	// owned key, as API_SSESpecification states. A request without one leaves it alone (#1608).
+	if input.SSESpecification != nil {
+		tbl.SSEDescription = sse
+	}
+	tbl.WarmThroughput = dynamodbMergeWarmThroughput(tbl.WarmThroughput, input.WarmThroughput)
 
 	if err := p.saveTable(context.Background(), ctx.AccountID, ctx.Region, tbl); err != nil {
 		return nil, fmt.Errorf("dynamodb updateTable: %w", err)
@@ -1683,6 +1730,8 @@ func (p *DynamoDBPlugin) updateTimeToLive(ctx *RequestContext, req *AWSRequest) 
 		return nil, &AWSError{Code: "SerializationException", Message: err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
+	unlock := p.lockTableForUpdate(ctx, input.TableName)
+	defer unlock()
 	tbl, err := p.loadTable(context.Background(), ctx.AccountID, ctx.Region, input.TableName)
 	if err != nil {
 		return nil, err

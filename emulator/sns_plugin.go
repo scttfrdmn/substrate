@@ -484,6 +484,18 @@ func (p *SNSPlugin) setTopicAttributes(ctx *RequestContext, req *AWSRequest) (*A
 			HTTPStatus: http.StatusBadRequest,
 		}
 	}
+	// SNS refuses an empty Policy with InvalidParameter rather than clearing it — observed behavior, not
+	// a published rule: a CloudFormation-alike that cleared AWS::SNS::TopicPolicy this way found every
+	// clear refused (go-to-k/cdkd#4610, #4618), and CloudFormation's own handler restores the default
+	// policy instead. A topic always has a policy, so there is nothing for an empty one to mean (#1608).
+	// The message is substrate's own.
+	if attrName == "Policy" && attrValue == "" {
+		return nil, &AWSError{
+			Code:       "InvalidParameter",
+			Message:    "Invalid parameter: Policy must be a policy document; to remove a topic policy, set the default policy",
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
 
 	goCtx := context.Background()
 	t, _, err := p.requireTopic(goCtx, req.Params["TopicArn"])
