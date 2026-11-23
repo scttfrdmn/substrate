@@ -13,7 +13,8 @@ import (
 // SecretsManagerPlugin emulates the AWS Secrets Manager JSON-protocol API.
 // It handles CreateSecret, GetSecretValue, PutSecretValue, DescribeSecret,
 // UpdateSecret, DeleteSecret, RestoreSecret, ListSecrets, ListSecretVersionIds,
-// TagResource, UntagResource, and RotateSecret.
+// TagResource, UntagResource, RotateSecret, and the four resource-policy operations —
+// PutResourcePolicy, GetResourcePolicy, DeleteResourcePolicy and ValidateResourcePolicy.
 //
 // It deliberately does not handle ListTagsForResource, which the Secrets Manager API does not publish
 // among its twenty-three operations; substrate answered one until #929. Tags are read through
@@ -74,6 +75,14 @@ func (p *SecretsManagerPlugin) HandleRequest(ctx *RequestContext, req *AWSReques
 	// for it against real AWS gets.
 	case "RotateSecret":
 		return p.rotateSecret(ctx, req)
+	case "PutResourcePolicy":
+		return p.putResourcePolicy(ctx, req)
+	case "GetResourcePolicy":
+		return p.getResourcePolicy(ctx, req)
+	case "DeleteResourcePolicy":
+		return p.deleteResourcePolicy(ctx, req)
+	case "ValidateResourcePolicy":
+		return p.validateResourcePolicy(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}
@@ -692,61 +701,8 @@ func smInvalidMaxResults(value int) *AWSError {
 	}
 }
 
-func (p *SecretsManagerPlugin) listSecrets(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
-	var input struct {
-		MaxResults *int   `json:"MaxResults"`
-		NextToken  string `json:"NextToken"`
-	}
-	if len(req.Body) > 0 {
-		if err := json.Unmarshal(req.Body, &input); err != nil {
-			return nil, smInvalidBody()
-		}
-	}
-	maxResults, maxOK := smListMaxResults.resolve(input.MaxResults)
-	if !maxOK {
-		return nil, smInvalidMaxResults(*input.MaxResults)
-	}
-
-	// A token substrate did not issue is refused rather than answered with page one, which
-	// API_ListSecrets publishes InvalidNextTokenException for (#1086), and it is refused before the
-	// secret names are read — #887's ordering criterion, since nothing about the refusal depends on
-	// what the store holds.
-	offset, ok := decodeOffsetPaginationToken(input.NextToken)
-	if !ok {
-		return nil, smInvalidNextToken()
-	}
-
-	goCtx := context.Background()
-	names, err := p.loadSecretNames(goCtx, ctx.AccountID, ctx.Region)
-	if err != nil {
-		return nil, err
-	}
-	// Sorted before the cut, so the offset a token names means the same thing on every call of
-	// one walk.
-	sort.Strings(names)
-	page, nextToken := pageByOffsetToken(names, offset, maxResults)
-
-	type secretEntry struct {
-		ARN  string `json:"ARN"`
-		Name string `json:"Name"`
-	}
-	entries := make([]secretEntry, 0, len(page))
-	for _, name := range page {
-		s, loadErr := p.loadSecret(goCtx, ctx.AccountID, ctx.Region, name)
-		if loadErr != nil || s == nil {
-			continue
-		}
-		entries = append(entries, secretEntry{ARN: s.ARN, Name: s.Name})
-	}
-
-	out := map[string]interface{}{
-		"SecretList": entries,
-	}
-	if nextToken != "" {
-		out["NextToken"] = nextToken
-	}
-	return smJSONResponse(http.StatusOK, out)
-}
+// listSecrets lives in secretsmanager_list.go, beside the Filters, sort and IncludePlannedDeletion
+// rules it applies (#1622).
 
 func (p *SecretsManagerPlugin) listSecretVersionIDs(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var input struct {

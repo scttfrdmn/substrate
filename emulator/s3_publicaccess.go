@@ -170,6 +170,11 @@ func s3GrantHeadersArePublic(headers map[string]string) bool {
 // let a public policy through, which is the defect this check exists to close.
 //
 // Lookup is lowercased because IAM condition keys are case-insensitive.
+//
+// The two s3:DataAccessPoint* keys are S3's own and qualify only a bucket policy;
+// [policyGlobalQualifyingConditionKeys] is the same list without them, for a
+// resource policy of another service judged by this definition (Secrets Manager's
+// BlockPublicPolicy, #1623).
 var s3PolicyQualifyingConditionKeys = map[string]bool{
 	"aws:sourceip":              true,
 	"aws:sourcearn":             true,
@@ -183,6 +188,63 @@ var s3PolicyQualifyingConditionKeys = map[string]bool{
 	"aws:principalaccount":      true,
 	"s3:dataaccesspointarn":     true,
 	"s3:dataaccesspointaccount": true,
+}
+
+// policyGlobalQualifyingConditionKeys is [s3PolicyQualifyingConditionKeys] less
+// S3's own keys: the global condition keys that can qualify a resource policy
+// statement as non-public.
+var policyGlobalQualifyingConditionKeys = map[string]bool{
+	"aws:sourceip":         true,
+	"aws:sourcearn":        true,
+	"aws:sourcevpc":        true,
+	"aws:sourcevpce":       true,
+	"aws:sourceowner":      true,
+	"aws:sourceaccount":    true,
+	"aws:userid":           true,
+	"aws:principalorgid":   true,
+	"aws:principalarn":     true,
+	"aws:principalaccount": true,
+}
+
+// policyNarrowingConditionOperators are the condition operators that can make a
+// qualifying key pin access (#1641).
+//
+// The guide's test is that a policy "grant access only to fixed values", and only a
+// positive match does that: the operator must be satisfied by the named values and
+// by nothing else. Three families fail it, and each one grants access to the
+// public:
+//
+//   - A negated operator — StringNotEquals, StringNotLike, ArnNotEquals,
+//     ArnNotLike, NotIpAddress — grants every value *but* the fixed ones.
+//   - Any ...IfExists form is satisfied by a request that carries no such key,
+//     which is exactly the anonymous request the check is about.
+//   - Null tests presence, not value.
+//
+// A ForAllValues: qualifier is refused too, because it is vacuously true when the
+// request carries no value for the key; ForAnyValue: requires a matching value and
+// keeps its operator's meaning. StringLike and ArnLike qualify only with a value
+// that carries no wildcard, which [s3ValueIsFixed] already decides. The guide
+// names no operators at all, so this list is substrate's reading of "fixed values".
+var policyNarrowingConditionOperators = map[string]bool{
+	"StringEquals":           true,
+	"StringEqualsIgnoreCase": true,
+	"StringLike":             true,
+	"ArnEquals":              true,
+	"ArnLike":                true,
+	"IpAddress":              true,
+}
+
+// policyOperatorNarrows reports whether a Condition operator, as written in the
+// policy, can pin a key to its values; see [policyNarrowingConditionOperators].
+func policyOperatorNarrows(operator string) bool {
+	qualifier, base := splitConditionOperator(operator)
+	if qualifier != "" && qualifier != condForAnyValue {
+		return false
+	}
+	if _, ifExists := condSplitIfExists(base); ifExists {
+		return false
+	}
+	return policyNarrowingConditionOperators[base]
 }
 
 // s3PolicyIsPublic reports whether a bucket policy grants public access, by
@@ -234,6 +296,13 @@ func s3PolicyIsPublic(policyJSON []byte) bool {
 // "qualifies as public because of the third statement", and S3 then disables the
 // cross-account grant too.
 func s3StatementIsPublic(stmt *PolicyStatement) bool {
+	return policyStatementIsPublic(stmt, s3PolicyQualifyingConditionKeys)
+}
+
+// policyStatementIsPublic is [s3StatementIsPublic] over a caller's set of
+// qualifying condition keys, so a service other than S3 can apply the same
+// definition without S3's own keys qualifying its policies.
+func policyStatementIsPublic(stmt *PolicyStatement, qualifyingKeys map[string]bool) bool {
 	// Only an Allow can grant public access; a Deny narrows. Effect is compared
 	// case-insensitively because IAM accepts "Allow" and "allow" alike.
 	if !strings.EqualFold(stmt.Effect, "Allow") {
@@ -246,10 +315,14 @@ func s3StatementIsPublic(stmt *PolicyStatement) bool {
 		return false
 	}
 
-	// Otherwise a condition must pin one of the documented keys to a fixed value.
-	for _, values := range stmt.Condition {
+	// Otherwise a condition must pin one of the documented keys to a fixed value,
+	// under an operator that matches only those values.
+	for operator, values := range stmt.Condition {
+		if !policyOperatorNarrows(operator) {
+			continue
+		}
 		for key, vals := range values {
-			if !s3PolicyQualifyingConditionKeys[strings.ToLower(key)] {
+			if !qualifyingKeys[strings.ToLower(key)] {
 				continue
 			}
 			if s3ConditionPinsAccess(key, vals) {

@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1110 routed operations.
+// 68 plugins, 1117 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -630,11 +630,14 @@ var routedOperations = map[string][]string{
 		"DescribeRule",
 		"ListEventBuses",
 		"ListRules",
+		"ListTagsForResource",
 		"ListTargetsByRule",
 		"PutEvents",
 		"PutRule",
 		"PutTargets",
 		"RemoveTargets",
+		"TagResource",
+		"UntagResource",
 	},
 	// APIGatewayProxyPlugin serves a deployed API's own routes: it parses the API id
 	// from the Host header and the stage and resource from the path, then invokes the
@@ -1095,17 +1098,21 @@ var routedOperations = map[string][]string{
 	},
 	"secretsmanager": {
 		"CreateSecret",
+		"DeleteResourcePolicy",
 		"DeleteSecret",
 		"DescribeSecret",
+		"GetResourcePolicy",
 		"GetSecretValue",
 		"ListSecretVersionIds",
 		"ListSecrets",
+		"PutResourcePolicy",
 		"PutSecretValue",
 		"RestoreSecret",
 		"RotateSecret",
 		"TagResource",
 		"UntagResource",
 		"UpdateSecret",
+		"ValidateResourcePolicy",
 	},
 	"servicequotas": {
 		"GetAWSDefaultServiceQuota",

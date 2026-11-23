@@ -84,6 +84,11 @@ type SecretState struct {
 	// the simulated clock at the request plus RecoveryWindowInDays.
 	DeletionDate time.Time `json:"DeletionDate,omitempty"`
 
+	// ResourcePolicy is the resource-based policy PutResourcePolicy attached, as the text the caller
+	// submitted, and the empty string when none is attached (#1623). It is stored and answered by
+	// GetResourcePolicy; it takes no part in authorization (#1636). See secretsmanager_policy.go.
+	ResourcePolicy string `json:"ResourcePolicy,omitempty"`
+
 	// EverTagged records that this secret has carried a tag; see [taggingEverTagged] (#938).
 	EverTagged bool `json:"ever_tagged,omitempty"`
 }

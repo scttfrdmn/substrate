@@ -88,6 +88,16 @@ var smSecretIDOperations = []struct {
 	{"RotateSecret", func(id string) map[string]any {
 		return map[string]any{"SecretId": id, "ClientRequestToken": smRotationToken}
 	}},
+	// The resource-policy operations (#1623) check their own parameters before the secret, so a body
+	// carries a valid policy where one is required.
+	{"PutResourcePolicy", func(id string) map[string]any {
+		return map[string]any{"SecretId": id, "ResourcePolicy": smFixedPrincipalPolicy}
+	}},
+	{"GetResourcePolicy", func(id string) map[string]any { return map[string]any{"SecretId": id} }},
+	{"DeleteResourcePolicy", func(id string) map[string]any { return map[string]any{"SecretId": id} }},
+	{"ValidateResourcePolicy", func(id string) map[string]any {
+		return map[string]any{"SecretId": id, "ResourcePolicy": smFixedPrincipalPolicy}
+	}},
 }
 
 // smRotationToken is a ClientRequestToken of the shape AWS's own samples use — a UUID, which is what

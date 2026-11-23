@@ -235,7 +235,7 @@ func TestEB_ListEventBuses(t *testing.T) {
 func TestEB_DescribeRuleNotFound(t *testing.T) {
 	srv := newEBTestServer(t)
 	resp := ebRequest(t, srv, "DescribeRule", map[string]string{"Name": "nonexistent"})
-	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestEB_ListRulesPrefix(t *testing.T) {

@@ -119,6 +119,10 @@ func TestSecretsManagerWire_SecretResponsesCarryNoBookkeepingMember(t *testing.T
 		{op: "RotateSecret", body: map[string]any{"SecretId": name, "ClientRequestToken": "11111111-2222-3333-4444-555555555555",
 			"RotationLambdaARN": "arn:aws:lambda:" + smWireRegion + ":" + smWireAccount + ":function:wire-rotation"},
 			anchor: `"Name":"` + name + `"`},
+		{op: "PutResourcePolicy", body: map[string]any{"SecretId": name, "ResourcePolicy": smFixedPrincipalPolicy}, anchor: `"PolicyName":"default"`},
+		{op: "GetResourcePolicy", body: secret, anchor: `"ResourcePolicy"`},
+		{op: "ValidateResourcePolicy", body: map[string]any{"SecretId": name, "ResourcePolicy": smFixedPrincipalPolicy}, anchor: `"PolicyValidationPassed":true`},
+		{op: "DeleteResourcePolicy", body: secret, anchor: `"PolicyName":"default"`},
 		{op: "UntagResource", body: map[string]any{"SecretId": name, "TagKeys": []string{"team"}}, anchor: "{}"},
 		{op: "DeleteSecret", body: map[string]any{"SecretId": name, "RecoveryWindowInDays": 7}, anchor: `"Name":"` + name + `"`},
 		// After the delete, so there is a deletion to cancel; the record survives a scheduled delete.

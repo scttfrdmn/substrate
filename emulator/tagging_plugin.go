@@ -384,6 +384,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
+		{typePrefix: "events", scan: p.scanEventBridgeRules},
 		{typePrefix: "ssm", scan: p.scanSSMParameters},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindLoadBalancer)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindTargetGroup)},
