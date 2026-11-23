@@ -14122,8 +14122,9 @@ KMS keys, SNS topics, Secrets Manager secrets, Systems Manager parameters, and E
 balancers, target groups, listeners and listener rules.
 
 A CloudWatch alarm is reported under `arn:aws:cloudwatch:{region}:{account}:alarm:{name}`, the
-ARN CloudWatch's own `TagResource` takes, and `TagResources` and `UntagResources` write through
-to it under CloudWatch's 50-tag quota. Like a log group, its previously-tagged state is a
+ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` route to
+CloudWatch's own `TagResource` and `UntagResource` rather than editing the alarm, so CloudWatch
+serializes every write to an alarm and its 50-tag quota and refusals apply unchanged. Like a log group, its previously-tagged state is a
 side-car key rather than a member of its record; see [Alarm tags](#alarm-tags).
 
 An API Gateway HTTP or WebSocket API (`/apis/{id}`) is the newest (#1378), reached by the
@@ -18184,8 +18185,9 @@ one jump. Each event is one sample of value 1 with unit `Count`, so a period's `
 Nothing is sent from the Scheduler to CloudWatch. The Scheduler keeps a counter per metric per
 minute per group beside its timers, and CloudWatch reads those counters when it is asked, as it
 derives [EC2 vCPU usage](#ec2-vcpu-usage-in-aws-usage) from EC2's instances. So no extra event is
-recorded, and a replay rebuilds the same counters. A group's counters keep the last 10,080
-minutes that saw an invocation.
+recorded, and a replay rebuilds the same counters. The counters are kept one record per group
+per hour, and a run writes each hour it counted in once. A group keeps the last 168 hours that
+saw an invocation, a week of hours.
 
 Two metrics are never counted. `InvocationThrottleCount` would need a Scheduler invocation quota
 to exceed, and substrate models none. `InvocationsSentToDeadLetterCount_Truncated_MessageSizeExceeded`
@@ -18352,11 +18354,16 @@ workload. Two derived exceptions report values that are facts about API-observab
   point. A `Values` element counts its `Counts` entry, or 1 when `Counts` is omitted. A
   `StatisticValues` set contributes its own four members. A percentile `pNN` (`p0` to `p100`)
   is computed by **nearest rank**: the values are ordered, each weighted by its count, and the
-  answer is the smallest value whose cumulative weight reaches NN percent. AWS does not publish
-  its method, so this one is substrate's, chosen because it always answers a value that was
-  published. A `StatisticValues` set joins a percentile only in the two cases `PutMetricData`
-  names. Other extended statistics (trimmed and winsorized means, `IQM`, `PR`, `TC`, `TS`)
-  are not computed, and a query naming one gets no datapoint.
+  answer is the smallest value whose cumulative weight reaches rank `ceil(NN × n / 100)`. AWS
+  does not publish its method, so this one is substrate's, chosen because it always answers a
+  value that was published. A `StatisticValues` set joins a percentile only in the two cases
+  `PutMetricData` names. A period holding a negative value has no percentile: "Percentile
+  statistics are not available for metrics when any of the metric values are negative numbers."
+  Other extended statistics (trimmed and winsorized means, `IQM`, `PR`, `TC`, `TS`) are not
+  computed, and a query naming one gets no datapoint. `GetMetricStatistics` refuses an
+  `ExtendedStatistics` name that is not a percentile from `p0.0` to `p100`, and omits a period
+  for which none of the requested statistics could be computed. A statistic that is not a
+  finite number, such as a `Sum` past the double range, is omitted rather than rendered.
 - **Units.** A query naming a `Unit` reads only the points published with it. A datum that
   named none was published with `None`. A `GetMetricStatistics` datapoint reports the unit its
   points share, or `None` when they differ. AWS aggregates different units separately, and
@@ -18368,9 +18375,11 @@ workload. Two derived exceptions report values that are facts about API-observab
   `GetMetricStatistics` answers its datapoints in ascending order.
 - **Expressions.** `GetMetricData` evaluates the arithmetic core of metric math: numbers, the
   `Id`s of the request's other queries, `+ - * /`, unary minus and parentheses. Two series
-  combine at the timestamps both carry, and a point divided by zero is dropped. Anything else
-  is not evaluated: functions such as `SUM(METRICS())`, `SEARCH`, Metrics Insights `SELECT`,
-  a constant, an unknown `Id` or a cycle. Such a result carries no values and a `Messages`
+  combine at the timestamps both carry. A point divided by zero, or whose result is not a
+  finite number, is dropped. An `Expression` over the published 2,048 characters is refused
+  with `InvalidParameterValue`. Anything else is not evaluated: functions such as
+  `SUM(METRICS())`, `SEARCH`, Metrics Insights `SELECT`, a constant (`1/0` included), an
+  unknown `Id`, a cycle, or nesting deeper than 64 levels. Such a result carries no values and a `Messages`
   entry with `Code` `Unsupported`. That code and its text are substrate's own.
 - **Retention.** Each series keeps at most 10,080 points, a week at one-minute resolution, and
   drops its oldest when a write takes it past that. `cloudwatch.max_datapoints_per_series` in
@@ -18433,7 +18442,8 @@ this parameter are ignored." The account and Region come from the ARN, never fro
   and substrate does not model. It answers `ResourceNotFoundException` (404). Any other ARN is
   `InvalidParameterValue`.
 - `ListTagsForResource` always returns `Tags`, in key order, and empty for an alarm with none.
-- The [tagging API](#resource-groups-tagging) reports alarms and writes through to them.
+- The [tagging API](#resource-groups-tagging) reports alarms, and its writes route through
+  these operations.
   `DeleteAlarms` removes an alarm's tag history with it, so an alarm re-created under the name
   starts never-tagged.
 

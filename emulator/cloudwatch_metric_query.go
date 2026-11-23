@@ -77,6 +77,11 @@ type cwAgg struct {
 }
 
 func (a *cwAgg) observe(v, weight float64) {
+	if v < 0 {
+		// "Percentile statistics are not available for metrics when any of the metric values
+		// are negative numbers" (API_GetMetricStatistics).
+		a.noPercentile = true
+	}
 	if a.count == 0 || v < a.min {
 		a.min = v
 	}
@@ -115,6 +120,9 @@ func (a *cwAgg) add(pt cwPoint) {
 		if a.count == 0 || s.Maximum > a.max {
 			a.max = s.Maximum
 		}
+		if s.Minimum < 0 {
+			a.noPercentile = true
+		}
 		a.sum += s.Sum
 		a.count += s.SampleCount
 		// PutMetricData's two conditions under which a statistic set yields percentiles.
@@ -150,9 +158,20 @@ func cwParsePercentile(stat string) (float64, bool) {
 	return p, true
 }
 
-// stat computes one statistic over the period, reporting false when it cannot.
+// stat computes one statistic over the period, reporting false when it cannot — including when
+// the result is not a finite number, which a Sum of values near the published bound, or of huge
+// Counts, can reach. Such a statistic is omitted rather than rendered, since no protocol can
+// carry it.
 func (a *cwAgg) stat(name string) (float64, bool) {
-	if a.count <= 0 {
+	v, ok := a.rawStat(name)
+	if !ok || math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	return v, true
+}
+
+func (a *cwAgg) rawStat(name string) (float64, bool) {
+	if a.count <= 0 || math.IsInf(a.count, 0) {
 		return 0, false
 	}
 	switch name {
@@ -175,6 +194,10 @@ func (a *cwAgg) stat(name string) (float64, bool) {
 }
 
 // cwNearestRank is the nearest-rank percentile over weighted samples; see the file comment.
+//
+// The rank is ceil(p*n/100), computed with the multiplication first and a relative tolerance
+// before the ceiling, so floating-point error in p*n/100 cannot move it up a rank: p14 of 1..100
+// is 14 and p99.9 of 1..1000 is 999, where p/100*n gave 14.000000000000002 and 999.0000000000001.
 func cwNearestRank(samples []cwSample, p float64) float64 {
 	sorted := append([]cwSample(nil), samples...)
 	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].value < sorted[j].value })
@@ -182,11 +205,12 @@ func cwNearestRank(samples []cwSample, p float64) float64 {
 	for _, s := range sorted {
 		total += s.weight
 	}
-	target := p / 100 * total
+	eps := 1e-9 * math.Max(1, total)
+	rank := math.Ceil(p*total/100 - eps)
 	cum := 0.0
 	for _, s := range sorted {
 		cum += s.weight
-		if cum >= target && s.weight > 0 {
+		if s.weight > 0 && cum >= rank-eps {
 			return s.value
 		}
 	}
@@ -321,7 +345,10 @@ func (p *CloudWatchPlugin) getMetricData(ctx *RequestContext, req *AWSRequest) (
 
 	start, startOK := cwParseTimestamp(req.Params["StartTime"])
 	end, endOK := cwParseTimestamp(req.Params["EndTime"])
-	queries := cwParseMetricDataQueries(req.Params, "MetricDataQueries")
+	queries, awsErr := cwParseMetricDataQueries(req.Params, "MetricDataQueries")
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	results, err := p.evaluateQueries(ctx, queries, start, end, startOK && endOK)
 	if err != nil {
 		return nil, err
@@ -568,6 +595,12 @@ func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequ
 	case len(extended) > cwMaxExtendedStatistics:
 		return nil, cwInvalidParameterValue("ExtendedStatistics may name at most 10 statistics.")
 	}
+	for _, s := range extended {
+		if _, ok := cwParsePercentile(s); !ok {
+			return nil, cwInvalidParameterValue(fmt.Sprintf(
+				"The value %s for parameter ExtendedStatistics is not valid; specify a percentile between p0.0 and p100.", s))
+		}
+	}
 	wanted := make(map[string]bool, len(statistics))
 	for _, s := range statistics {
 		if !slices.Contains(cwStatisticNames, s) {
@@ -593,7 +626,9 @@ func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequ
 		}
 		if found {
 			stat := func(s string) (float64, bool) { return cwUsageStatistic(s, point.VCPUs, period) }
-			datapoints = append(datapoints, cwDatapointDoc(point.At, wanted, extended, stat, cwUsageUnit))
+			if dp, ok := cwDatapointDoc(point.At, wanted, extended, stat, cwUsageUnit); ok {
+				datapoints = append(datapoints, dp)
+			}
 		}
 	} else {
 		from := cwQueryStart(start, now, period)
@@ -602,7 +637,9 @@ func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequ
 			return nil, err
 		}
 		for _, b := range cwBuckets(points, from, end, period, unit) {
-			datapoints = append(datapoints, cwDatapointDoc(b.at, wanted, extended, b.agg.stat, b.agg.unit()))
+			if dp, ok := cwDatapointDoc(b.at, wanted, extended, b.agg.stat, b.agg.unit()); ok {
+				datapoints = append(datapoints, dp)
+			}
 		}
 	}
 
@@ -610,15 +647,19 @@ func (p *CloudWatchPlugin) getMetricStatistics(ctx *RequestContext, req *AWSRequ
 	return cwRespond(req, "GetMetricStatistics", ctx.RequestID, result)
 }
 
-// cwDatapointDoc renders one Datapoint with the statistics a request asked for. An extended
-// statistic substrate cannot compute is omitted from the map rather than reported as a number.
+// cwDatapointDoc renders one Datapoint with the statistics a request asked for, reporting false
+// when none of them could be computed — a period of statistic sets asked only for a percentile,
+// say — so the period is omitted rather than reported as a datapoint with no statistic. A
+// statistic substrate cannot compute is omitted rather than reported as a number.
 func cwDatapointDoc(at time.Time, wanted map[string]bool, extended []string,
-	stat func(string) (float64, bool), unit string) cwDoc {
+	stat func(string) (float64, bool), unit string) (cwDoc, bool) {
 	dp := cwDoc{}.with("Timestamp", at)
+	computed := false
 	for _, s := range cwStatisticNames {
 		if wanted[s] {
 			if v, ok := stat(s); ok {
 				dp = dp.with(s, v)
+				computed = true
 			}
 		}
 	}
@@ -626,13 +667,16 @@ func cwDatapointDoc(at time.Time, wanted map[string]bool, extended []string,
 	if len(extended) > 0 {
 		m := cwMap{}
 		for _, s := range extended {
-			if v, ok := stat(s); ok && !math.IsNaN(v) {
+			if v, ok := stat(s); ok && !math.IsNaN(v) && !math.IsInf(v, 0) {
 				m = append(m, cwMember{Name: s, Value: v})
 			}
 		}
-		dp = dp.with("ExtendedStatistics", m)
+		if len(m) > 0 {
+			dp = dp.with("ExtendedStatistics", m)
+			computed = true
+		}
 	}
-	return dp
+	return dp, computed
 }
 
 // cwMissingParameter is the refusal for an absent required member. MissingParameter is one

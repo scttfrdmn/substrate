@@ -119,9 +119,6 @@ func (p *CloudWatchPlugin) putMetricAlarm(ctx *RequestContext, req *AWSRequest) 
 		return nil, awsErr
 	}
 	requestTags, _ := cwParseTagList(req.Params, "Tags")
-	if awsErr := cwCheckTags(requestTags); awsErr != nil {
-		return nil, awsErr
-	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -144,6 +141,11 @@ func (p *CloudWatchPlugin) putMetricAlarm(ctx *RequestContext, req *AWSRequest) 
 		alarm.StateTransitionedTimestamp = existing.StateTransitionedTimestamp
 		alarm.Tags = existing.Tags
 	} else {
+		// The tags are checked only here: an update ignores them, so it cannot be refused for
+		// them either.
+		if awsErr := cwCheckTags(requestTags); awsErr != nil {
+			return nil, awsErr
+		}
 		// "When this operation creates an alarm, the alarm state is immediately set to
 		// INSUFFICIENT_DATA."
 		alarm.StateValue = "INSUFFICIENT_DATA"
@@ -193,6 +195,8 @@ func (p *CloudWatchPlugin) storeAlarm(ctx context.Context, stateKey string, alar
 func (p *CloudWatchPlugin) deleteAlarms(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	names := parseMemberList(req.Params, "AlarmNames")
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	goCtx := context.Background()
 	for _, name := range names {
 		stateKey := cwAlarmStateKey(ctx.AccountID, ctx.Region, name)
@@ -329,6 +333,8 @@ func (p *CloudWatchPlugin) setAlarmState(ctx *RequestContext, req *AWSRequest) (
 		return nil, &AWSError{Code: "InvalidParameterValue", Message: "StateValue must be OK, ALARM, or INSUFFICIENT_DATA", HTTPStatus: http.StatusBadRequest}
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	goCtx := context.Background()
 	stateKey := cwAlarmStateKey(ctx.AccountID, ctx.Region, name)
 	data, err := p.state.Get(goCtx, monitoringNamespace, stateKey)
@@ -375,6 +381,8 @@ func (p *CloudWatchPlugin) disableAlarmActions(ctx *RequestContext, req *AWSRequ
 func (p *CloudWatchPlugin) setActionsEnabled(ctx *RequestContext, req *AWSRequest, enabled bool) (*AWSResponse, error) {
 	names := parseMemberList(req.Params, "AlarmNames")
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	goCtx := context.Background()
 	for _, name := range names {
 		stateKey := cwAlarmStateKey(ctx.AccountID, ctx.Region, name)

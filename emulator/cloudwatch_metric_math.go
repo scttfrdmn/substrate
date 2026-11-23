@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -16,13 +17,19 @@ import (
 // use ("m2 / m1", "(error_total/m4)*100", "e2 + m3").
 //
 // Two series combine at the timestamps both carry, and a series and a number combine at every
-// timestamp of the series. A point divided by zero is dropped rather than reported. Those are
+// timestamp of the series. A point divided by zero, or one whose result is not a finite number,
+// is dropped rather than reported, so no result carries a value no protocol can render. Those are
 // substrate's readings: the metric-math page describes the operators, not how they align two
 // series whose timestamps differ, and the series GetMetricData answers are laid on the same period
 // grid from the same rounded start, so a request's MetricStat queries of one Period align anyway.
 //
+// An Expression longer than MetricDataQuery's published "Maximum length of 2048" is refused with
+// InvalidParameterValue before it is parsed, and parentheses and unary minus may nest at most
+// [cwMathMaxDepth] deep, so no expression can exhaust the parser's stack.
+//
 // Anything else — a function such as SUM(METRICS()), METRICS(), FILL or ANOMALY_DETECTION_BAND, a
-// SEARCH, a SELECT, an expression that is only a number, an unknown Id, or a cycle — is not
+// SEARCH, a SELECT, an expression that is only a number (1/0 included), an unknown Id, nesting past
+// the depth limit, or a cycle — is not
 // evaluated. Its result carries no values and a Messages entry saying so, with Code Unsupported;
 // that code and its text are substrate's own, since MessageData publishes neither a code list nor
 // wording, and it is a message rather than an error because "if there is a message, as much of the
@@ -31,6 +38,13 @@ import (
 // cwUnsupportedExpressionCode is the MessageData Code substrate attaches to a result whose
 // expression it did not evaluate.
 const cwUnsupportedExpressionCode = "Unsupported"
+
+// cwMaxExpressionLength is MetricDataQuery Expression's "Maximum length of 2048".
+const cwMaxExpressionLength = 2048
+
+// cwMathMaxDepth bounds how deeply parentheses and unary minus nest in one expression. It is a
+// guard against a hostile expression rather than a published limit.
+const cwMathMaxDepth = 64
 
 // cwSeriesValues is one time series in ascending timestamp order.
 type cwSeriesValues struct {
@@ -51,7 +65,17 @@ type cwMathResolver func(id string) (cwSeriesValues, error)
 type cwMathParser struct {
 	src     string
 	pos     int
+	depth   int
 	resolve cwMathResolver
+}
+
+// enter records one level of nesting, refusing one past [cwMathMaxDepth].
+func (p *cwMathParser) enter() error {
+	p.depth++
+	if p.depth > cwMathMaxDepth {
+		return fmt.Errorf("the expression nests deeper than %d levels", cwMathMaxDepth)
+	}
+	return nil
 }
 
 // cwEvalExpression evaluates expr, or explains why it was not.
@@ -126,6 +150,10 @@ func (p *cwMathParser) term() (cwMathValue, error) {
 func (p *cwMathParser) unary() (cwMathValue, error) {
 	if p.peek() == '-' {
 		p.pos++
+		if err := p.enter(); err != nil {
+			return cwMathValue{}, err
+		}
+		defer func() { p.depth-- }()
 		v, err := p.unary()
 		if err != nil {
 			return cwMathValue{}, err
@@ -140,6 +168,10 @@ func (p *cwMathParser) primary() (cwMathValue, error) {
 	switch {
 	case c == '(':
 		p.pos++
+		if err := p.enter(); err != nil {
+			return cwMathValue{}, err
+		}
+		defer func() { p.depth-- }()
 		v, err := p.expr()
 		if err != nil {
 			return cwMathValue{}, err
@@ -183,29 +215,35 @@ func cwMathIdentByte(b byte) bool {
 	return b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9' || b == '_'
 }
 
-// cwMathApply applies one operator, reporting false for a division by zero.
+// cwMathApply applies one operator, reporting false for a division by zero and for a result that
+// is not a finite number.
 func cwMathApply(a, b float64, op byte) (float64, bool) {
+	var v float64
 	switch op {
 	case '+':
-		return a + b, true
+		v = a + b
 	case '-':
-		return a - b, true
+		v = a - b
 	case '*':
-		return a * b, true
+		v = a * b
+	default:
+		if b == 0 {
+			return 0, false
+		}
+		v = a / b
 	}
-	if b == 0 {
-		return 0, false
-	}
-	return a / b, true
+	return v, !math.IsNaN(v) && !math.IsInf(v, 0)
 }
 
 // cwMathCombine applies op to two values; see the file comment for how series align.
 func cwMathCombine(a, b cwMathValue, op byte) cwMathValue {
 	switch {
 	case a.series == nil && b.series == nil:
+		// A constant stays a constant even when it is undefined, so 1/0 is reported as the
+		// constant expression it is; a series it later combines with drops every point.
 		v, ok := cwMathApply(a.scalar, b.scalar, op)
 		if !ok {
-			return cwMathValue{series: &cwSeriesValues{}}
+			return cwMathValue{scalar: math.NaN()}
 		}
 		return cwMathValue{scalar: v}
 	case a.series != nil && b.series != nil:

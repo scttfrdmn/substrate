@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -22,6 +23,10 @@ const taggingNamespace = "tagging"
 type TaggingPlugin struct {
 	state  StateManager
 	logger Logger
+
+	// registry reaches the services whose own tag operations the write-through routes to rather
+	// than editing their records directly; nil when the plugin is registered without one.
+	registry *PluginRegistry
 }
 
 // Name returns the service name handled by this plugin.
@@ -31,6 +36,9 @@ func (p *TaggingPlugin) Name() string { return taggingNamespace }
 func (p *TaggingPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	p.state = cfg.State
 	p.logger = cfg.Logger
+	if r, ok := cfg.Options["registry"].(*PluginRegistry); ok {
+		p.registry = r
+	}
 	return nil
 }
 
@@ -1530,7 +1538,7 @@ func (p *TaggingPlugin) tagResources(reqCtx *RequestContext, req *AWSRequest) (*
 			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
 		}
-		if err := p.mergeTags(goCtx, ns, key, in.Tags, nil); err != nil {
+		if err := p.mergeTags(goCtx, reqCtx, ns, key, arn, in.Tags, nil); err != nil {
 			failures[arn] = p.tagMergeFailure(arn, err)
 		}
 	}
@@ -1571,7 +1579,7 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 			failures[arn] = p.tagResolveFailure(arn, err)
 			continue
 		}
-		if err := p.mergeTags(goCtx, ns, key, nil, in.TagKeys); err != nil {
+		if err := p.mergeTags(goCtx, reqCtx, ns, key, arn, nil, in.TagKeys); err != nil {
 			failures[arn] = p.tagMergeFailure(arn, err)
 		}
 	}
@@ -2177,8 +2185,58 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 // This is the path that enforces the owning service's published per-resource tag quota, where the
 // deployer's stamp does not; see the comment on [taggingCheckTagQuota] for why the two differ
 // (#1000).
-func (p *TaggingPlugin) mergeTags(goCtx context.Context, ns, key string, addTags map[string]string, removeKeys []string) error {
+func (p *TaggingPlugin) mergeTags(goCtx context.Context, reqCtx *RequestContext, ns, key, arn string,
+	addTags map[string]string, removeKeys []string) error {
+	if ns == monitoringNamespace {
+		return p.routeAlarmTags(reqCtx, arn, addTags, removeKeys)
+	}
 	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
+}
+
+// routeAlarmTags writes a CloudWatch alarm's tags through CloudWatch's own TagResource and
+// UntagResource (#1618), sent through the registry, rather than editing the alarm record here.
+// CloudWatch serializes every write to an alarm under its own lock, and a second writer outside
+// that lock could interleave with a PutMetricAlarm, SetAlarmState or DeleteAlarms and lose a tag or
+// resurrect a deleted alarm. CloudWatch's refusal is carried out as the owning service's own code,
+// as a quota refusal is (tagging_tag_quota.go), and its ResourceNotFoundException as the tagging
+// API's not-found.
+func (p *TaggingPlugin) routeAlarmTags(reqCtx *RequestContext, arn string, addTags map[string]string, removeKeys []string) error {
+	if p.registry == nil {
+		return fmt.Errorf("tagging: no plugin registry to reach CloudWatch for %s", arn)
+	}
+	params := map[string]string{"ResourceARN": arn}
+	operation := "UntagResource"
+	if len(addTags) > 0 {
+		operation = "TagResource"
+		keys := make([]string, 0, len(addTags))
+		for k := range addTags {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for i, k := range keys {
+			base := "Tags.member." + strconv.Itoa(i+1) + "."
+			params[base+"Key"], params[base+"Value"] = k, addTags[k]
+		}
+	} else {
+		for i, k := range removeKeys {
+			params["TagKeys.member."+strconv.Itoa(i+1)] = k
+		}
+	}
+	params["Action"] = operation
+	_, err := p.registry.RouteRequest(reqCtx, &AWSRequest{
+		Service: monitoringNamespace, Operation: operation, Headers: map[string]string{}, Params: params,
+	})
+	if err == nil {
+		return nil
+	}
+	var awsErr *AWSError
+	if !errors.As(err, &awsErr) {
+		return fmt.Errorf("tagging: CloudWatch %s: %w", operation, err)
+	}
+	if awsErr.Code == "ResourceNotFoundException" {
+		return fmt.Errorf("%w: %s", errTagResourceNotFound, arn)
+	}
+	return taggingQuotaRefusal(awsErr)
 }
 
 // errTagResourceNotFound reports that ns/key addressed no record, so there was nothing for a tag
@@ -2397,31 +2455,6 @@ func mergeResourceTags(
 			return fmt.Errorf("put V2ApiState: %w", err)
 		}
 		return apigwv2StampEverTagged(goCtx, state, key, tagsBefore, len(addTags))
-
-	case monitoringNamespace:
-		// A CloudWatch alarm (#1618), decoded as [CWAlarm] because CloudWatch's own TagResource
-		// round-trips the same struct, and with its tag history in the side-car CloudWatch's own
-		// writers stamp; see cloudwatch_tags.go.
-		if !strings.HasPrefix(key, cwAlarmKeyPrefix) {
-			return fmt.Errorf("unsupported CloudWatch resource key: %s", key)
-		}
-		var alarm CWAlarm
-		if err := json.Unmarshal(raw, &alarm); err != nil {
-			return fmt.Errorf("unmarshal CWAlarm: %w", err)
-		}
-		tagsBefore := len(alarm.Tags)
-		alarm.Tags = mergeStringMap(alarm.Tags, addTags, removeKeys)
-		if len(alarm.Tags) == 0 {
-			alarm.Tags = nil
-		}
-		updated, err := json.Marshal(alarm)
-		if err != nil {
-			return fmt.Errorf("marshal CWAlarm: %w", err)
-		}
-		if err := state.Put(goCtx, ns, key, updated); err != nil {
-			return fmt.Errorf("put CWAlarm: %w", err)
-		}
-		return cwStampAlarmEverTagged(goCtx, state, key, tagsBefore, len(addTags))
 
 	case cloudwatchLogsNamespace:
 		// Behind a kind guard, because the namespace also holds log streams, event blobs, two name

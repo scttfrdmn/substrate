@@ -148,3 +148,29 @@ func TestSchedulerMetrics_RetriesDropsAndDeadLetters(t *testing.T) {
 		"Dimensions": []map[string]string{{"Name": "ScheduleGroup"}}})
 	assert.Len(t, filtered["Metrics"].([]any), 1)
 }
+
+func TestSchedulerMetrics_AGroupKeepsAWeekOfHours(t *testing.T) {
+	t.Parallel()
+	e := newSchedEnv(t)
+	queueURL, queueARN := e.createQueue("hourly")
+	e.mustSched(http.MethodPost, "/schedules/hourly", map[string]any{
+		"ScheduleExpression": "rate(1 hour)",
+		"StartDate":          float64(schedClockInstant.Unix()),
+		"FlexibleTimeWindow": map[string]any{"Mode": "OFF"},
+		"Target":             map[string]any{"Arn": queueARN, "RoleArn": schedRoleARN, "Input": "tick"},
+	})
+	// 171 hourly occurrences, one per hour, fired over the requests that follow the jump.
+	e.ts.AdvanceTime(170 * time.Hour)
+	for range 3 {
+		_ = e.receive(queueURL)
+	}
+	out := e.cloudwatch("GetMetricData", map[string]any{
+		"StartTime": schedClockInstant.Unix(), "EndTime": schedClockInstant.Add(171 * time.Hour).Unix(),
+		"MetricDataQueries": []any{map[string]any{"Id": "a", "MetricStat": map[string]any{
+			"Metric": map[string]any{"Namespace": "AWS/Scheduler", "MetricName": "InvocationAttemptCount"},
+			"Period": 171 * 3600, "Stat": "Sum",
+		}}},
+	})
+	values := out["MetricDataResults"].([]any)[0].(map[string]any)["Values"].([]any)
+	assert.Equal(t, []any{168.0}, values, "the group keeps the 168 most recent hours that saw an invocation")
+}

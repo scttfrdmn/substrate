@@ -215,7 +215,7 @@ func RegisterDefaultPlugins(
 		{&CloudFormationPlugin{}, "cloudformation", cfnOpts},
 		{&ELBPlugin{}, "elb", registryOpt},
 		{&Route53Plugin{}, "route53", nil},
-		{&TaggingPlugin{}, "tagging", nil},
+		{&TaggingPlugin{}, "tagging", registryOpt},
 		{&SNSPlugin{}, "sns", registryOpt},
 		{&SecretsManagerPlugin{}, "secretsmanager", nil},
 		{&SSMPlugin{}, "ssm", nil},

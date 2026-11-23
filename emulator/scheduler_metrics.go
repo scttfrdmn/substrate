@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -73,7 +74,7 @@ const (
 	schedMetricSentToDLQ        = "InvocationsSentToDeadLetterCount"
 	schedMetricFailedToSendDLQ  = "InvocationsFailedToBeSentToDeadLetterCount"
 	schedMetricsKeyPrefix       = "sched_metrics:"
-	schedMetricsMaxMinutesKept  = cwDefaultMaxDatapointsPerSeries
+	schedMetricsMaxHoursKept    = 7 * 24
 	schedMetricFailedCodePrefix = schedMetricFailedToSendDLQ + "_"
 )
 
@@ -85,19 +86,36 @@ type schedMetricMinute struct {
 	Counts map[string]int `json:"c"`
 }
 
-// schedMetricRecord is one schedule group's counters, oldest minute first. It keeps at most
-// [schedMetricsMaxMinutesKept] minutes, dropping the oldest, as a CloudWatch series keeps a fixed
-// number of points.
+// schedMetricRecord is one hour of one schedule group's counters, oldest minute first. A group
+// keeps at most [schedMetricsMaxHoursKept] hours, dropping the oldest, as a CloudWatch series keeps
+// a fixed number of points; an hour per record means a run rewrites the hour it counted in rather
+// than the group's whole history.
 type schedMetricRecord struct {
 	Minutes []schedMetricMinute `json:"minutes"`
 }
 
-// schedMetricsKey is the state key of a schedule group's counters.
-func schedMetricsKey(accountID, region, groupName string) string {
-	return schedMetricsKeyPrefix + accountID + "/" + region + "/" + groupName
+// schedMetricsGroupPrefix is the key prefix of one schedule group's hour records. A group name
+// cannot hold a slash — its pattern is [0-9a-zA-Z-_.]+ — so the prefix names one group.
+func schedMetricsGroupPrefix(accountID, region, groupName string) string {
+	return schedMetricsKeyPrefix + accountID + "/" + region + "/" + groupName + "/"
 }
 
-// loadSchedMetrics reads a group's counters from the Scheduler's namespace.
+// schedMetricsKey is the state key of one hour of a schedule group's counters.
+func schedMetricsKey(accountID, region, groupName string, hour int64) string {
+	return schedMetricsGroupPrefix(accountID, region, groupName) + fmt.Sprintf("%012d", hour)
+}
+
+// schedMetricsHour reads the hour a record key names.
+func schedMetricsHour(key string) (int64, bool) {
+	i := strings.LastIndexByte(key, '/')
+	if i < 0 {
+		return 0, false
+	}
+	h, err := strconv.ParseInt(key[i+1:], 10, 64)
+	return h, err == nil
+}
+
+// loadSchedMetrics reads one hour record from the Scheduler's namespace.
 func loadSchedMetrics(ctx context.Context, state StateManager, key string) (schedMetricRecord, error) {
 	data, err := state.Get(ctx, schedulerNamespace, key)
 	if err != nil {
@@ -113,35 +131,81 @@ func loadSchedMetrics(ctx context.Context, state StateManager, key string) (sche
 	return rec, nil
 }
 
-// countMetrics adds one event to each named metric of rec's schedule group, in the minute holding
-// at. The caller holds p.mu.
-func (p *SchedulerPlugin) countMetrics(ctx context.Context, rec *SchedulerRecord, at time.Time, metrics ...string) error {
-	key := schedMetricsKey(rec.AccountID, rec.Region, rec.GroupName)
-	m, err := loadSchedMetrics(ctx, p.state, key)
-	if err != nil {
-		return err
-	}
+// schedMetricCounts are the events one run counted: minute (Unix seconds) to metric to count.
+type schedMetricCounts map[int64]map[string]int
+
+// add counts one event of each named metric in the minute holding at.
+func (c schedMetricCounts) add(at time.Time, metrics ...string) {
 	minute := at.UTC().Truncate(time.Minute).Unix()
-	i := sort.Search(len(m.Minutes), func(i int) bool { return m.Minutes[i].T >= minute })
-	if i == len(m.Minutes) || m.Minutes[i].T != minute {
-		m.Minutes = append(m.Minutes, schedMetricMinute{})
-		copy(m.Minutes[i+1:], m.Minutes[i:])
-		m.Minutes[i] = schedMetricMinute{T: minute, Counts: map[string]int{}}
+	if c[minute] == nil {
+		c[minute] = map[string]int{}
 	}
 	for _, name := range metrics {
-		m.Minutes[i].Counts[name]++
+		c[minute][name]++
 	}
-	if excess := len(m.Minutes) - schedMetricsMaxMinutesKept; excess > 0 {
-		m.Minutes = m.Minutes[excess:]
+}
+
+// countMetrics adds a run's counts to rec's schedule group, writing each hour it touched once,
+// then drops the group's oldest hours past the retention cap. The caller holds p.mu.
+func (p *SchedulerPlugin) countMetrics(ctx context.Context, rec *SchedulerRecord, counts schedMetricCounts) error {
+	if len(counts) == 0 {
+		return nil
 	}
-	data, err := json.Marshal(m)
+	byHour := map[int64][]int64{}
+	for minute := range counts {
+		hour := minute - minute%3600
+		byHour[hour] = append(byHour[hour], minute)
+	}
+	hours := make([]int64, 0, len(byHour))
+	for h := range byHour {
+		hours = append(hours, h)
+	}
+	sort.Slice(hours, func(i, j int) bool { return hours[i] < hours[j] })
+	for _, hour := range hours {
+		key := schedMetricsKey(rec.AccountID, rec.Region, rec.GroupName, hour)
+		m, err := loadSchedMetrics(ctx, p.state, key)
+		if err != nil {
+			return err
+		}
+		for _, minute := range byHour[hour] {
+			i := sort.Search(len(m.Minutes), func(i int) bool { return m.Minutes[i].T >= minute })
+			if i == len(m.Minutes) || m.Minutes[i].T != minute {
+				m.Minutes = append(m.Minutes, schedMetricMinute{})
+				copy(m.Minutes[i+1:], m.Minutes[i:])
+				m.Minutes[i] = schedMetricMinute{T: minute, Counts: map[string]int{}}
+			}
+			for name, n := range counts[minute] {
+				m.Minutes[i].Counts[name] += n
+			}
+		}
+		data, err := json.Marshal(m)
+		if err != nil {
+			return fmt.Errorf("scheduler marshal metrics: %w", err)
+		}
+		if err := p.state.Put(ctx, schedulerNamespace, key, data); err != nil {
+			return fmt.Errorf("scheduler store metrics: %w", err)
+		}
+	}
+	keys, err := p.state.List(ctx, schedulerNamespace, schedMetricsGroupPrefix(rec.AccountID, rec.Region, rec.GroupName))
 	if err != nil {
-		return fmt.Errorf("scheduler marshal metrics: %w", err)
+		return fmt.Errorf("scheduler list metrics: %w", err)
 	}
-	if err := p.state.Put(ctx, schedulerNamespace, key, data); err != nil {
-		return fmt.Errorf("scheduler store metrics: %w", err)
+	for len(keys) > schedMetricsMaxHoursKept {
+		if err := p.state.Delete(ctx, schedulerNamespace, keys[0]); err != nil {
+			return fmt.Errorf("scheduler drop metrics: %w", err)
+		}
+		keys = keys[1:]
 	}
 	return nil
+}
+
+// schedGroupMetricKeys lists one group's hour records, oldest first.
+func schedGroupMetricKeys(ctx context.Context, state StateManager, accountID, region, group string) ([]string, error) {
+	keys, err := state.List(ctx, schedulerNamespace, schedMetricsGroupPrefix(accountID, region, group))
+	if err != nil {
+		return nil, fmt.Errorf("cloudwatch list scheduler metrics: %w", err)
+	}
+	return keys, nil
 }
 
 // cwSchedulerGroups returns the schedule groups the dimensions select, and false when they select
@@ -155,9 +219,12 @@ func cwSchedulerGroups(ctx context.Context, state StateManager, accountID, regio
 		if err != nil {
 			return nil, false, fmt.Errorf("cloudwatch list scheduler metrics: %w", err)
 		}
-		groups := make([]string, 0, len(keys))
+		var groups []string
 		for _, k := range keys {
-			groups = append(groups, strings.TrimPrefix(k, prefix))
+			group, _, _ := strings.Cut(strings.TrimPrefix(k, prefix), "/")
+			if len(groups) == 0 || groups[len(groups)-1] != group {
+				groups = append(groups, group)
+			}
 		}
 		return groups, true, nil
 	case len(dims) == 1 && dims[0].Name == schedMetricsDimension:
@@ -176,18 +243,35 @@ func cwSchedulerPoints(ctx context.Context, state StateManager, accountID, regio
 	}
 	var out []cwPoint
 	for _, g := range groups {
-		rec, err := loadSchedMetrics(ctx, state, schedMetricsKey(accountID, region, g))
+		keys, err := schedGroupMetricKeys(ctx, state, accountID, region, g)
 		if err != nil {
 			return nil, err
 		}
-		for _, m := range rec.Minutes {
-			at := time.Unix(m.T, 0).UTC()
-			if n := m.Counts[metricName]; n > 0 && !at.Before(from) && at.Before(to) {
-				out = append(out, cwPoint{T: at.UnixMilli(), Values: []float64{1}, Counts: []float64{float64(n)}, Unit: "Count"})
+		for _, k := range keys {
+			hour, ok := schedMetricsHour(k)
+			if !ok || !time.Unix(hour, 0).Before(to) || !time.Unix(hour+3600, 0).After(from) {
+				continue
 			}
+			rec, err := loadSchedMetrics(ctx, state, k)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, cwSchedulerRecordPoints(rec, metricName, from, to)...)
 		}
 	}
 	return out, nil
+}
+
+// cwSchedulerRecordPoints returns one hour record's points of one metric in [from, to).
+func cwSchedulerRecordPoints(rec schedMetricRecord, metricName string, from, to time.Time) []cwPoint {
+	var out []cwPoint
+	for _, m := range rec.Minutes {
+		at := time.Unix(m.T, 0).UTC()
+		if n := m.Counts[metricName]; n > 0 && !at.Before(from) && at.Before(to) {
+			out = append(out, cwPoint{T: at.UnixMilli(), Values: []float64{1}, Counts: []float64{float64(n)}, Unit: "Count"})
+		}
+	}
+	return out
 }
 
 // cwSchedulerMetrics returns the AWS/Scheduler metrics ListMetrics reports: for each metric any
@@ -201,19 +285,25 @@ func cwSchedulerMetrics(ctx context.Context, state StateManager, accountID, regi
 	type key struct{ name, group string }
 	last := map[key]time.Time{}
 	for _, g := range groups {
-		rec, err := loadSchedMetrics(ctx, state, schedMetricsKey(accountID, region, g))
+		keys, err := schedGroupMetricKeys(ctx, state, accountID, region, g)
 		if err != nil {
 			return nil, err
 		}
-		for _, m := range rec.Minutes {
-			at := time.Unix(m.T, 0).UTC()
-			for name, n := range m.Counts {
-				if n <= 0 {
-					continue
-				}
-				for _, k := range []key{{name, ""}, {name, g}} {
-					if at.After(last[k]) {
-						last[k] = at
+		for _, rk := range keys {
+			rec, err := loadSchedMetrics(ctx, state, rk)
+			if err != nil {
+				return nil, err
+			}
+			for _, m := range rec.Minutes {
+				at := time.Unix(m.T, 0).UTC()
+				for name, n := range m.Counts {
+					if n <= 0 {
+						continue
+					}
+					for _, k := range []key{{name, ""}, {name, g}} {
+						if at.After(last[k]) {
+							last[k] = at
+						}
 					}
 				}
 			}

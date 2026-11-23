@@ -423,6 +423,8 @@ type schedRun struct {
 	rec      *SchedulerRecord
 	now      time.Time
 	steps    int
+	// counts are the AWS/Scheduler events this run counted, written once when it ends.
+	counts schedMetricCounts
 }
 
 // runTimer does one due timer's work and updates t, which the caller reads Due from afterwards.
@@ -459,7 +461,8 @@ func (p *SchedulerPlugin) runTimer(ctx context.Context, trigger *RequestContext,
 		return p.saveTimer(ctx, key, t)
 	}
 
-	run := &schedRun{p: p, trigger: trigger, dispatch: dispatch, rec: &rec, now: now}
+	run := &schedRun{p: p, trigger: trigger, dispatch: dispatch, rec: &rec, now: now, counts: schedMetricCounts{}}
+	defer run.flushCounts(ctx)
 	before, err := json.Marshal(t)
 	if err != nil {
 		return fmt.Errorf("scheduler marshal timer: %w", err)
@@ -649,11 +652,17 @@ func schedAttemptMetrics(failure *schedFailure) []string {
 	return metrics
 }
 
-// count adds one event to each named AWS/Scheduler metric, in the minute holding at. A counter
-// that cannot be written is logged rather than failing the invocation it describes: what the
-// invocation did does not depend on whether it was counted.
-func (r *schedRun) count(ctx context.Context, at time.Time, metrics ...string) {
-	if err := r.p.countMetrics(ctx, r.rec, at, metrics...); err != nil {
+// count adds one event to each named AWS/Scheduler metric, in the minute holding at. The counts
+// are written once, when the run ends; see [schedRun.flushCounts].
+func (r *schedRun) count(_ context.Context, at time.Time, metrics ...string) {
+	r.counts.add(at, metrics...)
+}
+
+// flushCounts writes the run's counts. A counter that cannot be written is logged rather than
+// failing the invocations it describes: what they did does not depend on whether they were
+// counted.
+func (r *schedRun) flushCounts(ctx context.Context) {
+	if err := r.p.countMetrics(ctx, r.rec, r.counts); err != nil {
 		r.p.logger.Warn("scheduler: invocation metrics not counted", "schedule", r.rec.ARN, "err", err)
 	}
 }

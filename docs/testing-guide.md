@@ -160,6 +160,14 @@ replay does not re-apply them.
 An in-process `Client` draws from a server's sequence when built with
 `substrate.WithClientRequestIDs(ts.RequestIDs())`.
 
+**Timestamps a pinned clock refuses.** An operation that checks a caller's timestamp against
+the clock checks it against the simulated one. CloudWatch's `PutMetricData` refuses a datum
+`Timestamp` more than two weeks before the clock or more than two hours after it (#1595), so
+under an epoch pinned in the past a client that stamps datapoints with its own wall clock is
+refused with `InvalidParameterValue`. Stamp them relative to the server's clock, which a test
+reads from `ts.TimeController().Now()`, or omit `Timestamp`, and the datapoint takes the
+simulated clock.
+
 **What stays nondeterministic.** These are documented limits rather than defects:
 
 - **Concurrent requests.** Requests a client sends at once draw their IDs in whichever

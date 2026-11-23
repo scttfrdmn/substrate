@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // PutMetricAlarm's members, stored and rendered whole (#1620).
@@ -119,14 +120,19 @@ func cwParseBool(raw string) (value, ok bool) {
 	return false, false
 }
 
-// cwParseMetricStat reads one MetricStat structure under prefix, nil when it is absent.
-func cwParseMetricStat(params map[string]string, prefix string) *CWMetricStat {
+// cwParseMetricStat reads one MetricStat structure under prefix, nil when it is absent. A Period
+// that is not an integer of at least 1 is refused: MetricStat's Period has "Valid Range: Minimum
+// value of 1".
+func cwParseMetricStat(params map[string]string, prefix string) (*CWMetricStat, *AWSError) {
 	ns, name := params[prefix+"Metric.Namespace"], params[prefix+"Metric.MetricName"]
 	stat, period := params[prefix+"Stat"], params[prefix+"Period"]
 	if ns == "" && name == "" && stat == "" && period == "" {
-		return nil
+		return nil, nil
 	}
-	p, _ := strconv.Atoi(period)
+	p, _, awsErr := cwOptionalInt(params, prefix+"Period", 1)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	return &CWMetricStat{
 		Namespace:  ns,
 		MetricName: name,
@@ -134,31 +140,42 @@ func cwParseMetricStat(params map[string]string, prefix string) *CWMetricStat {
 		Period:     p,
 		Stat:       stat,
 		Unit:       params[prefix+"Unit"],
-	}
+	}, nil
 }
 
 // cwParseMetricDataQueries reads a list of MetricDataQuery structures under prefix — the
 // PutMetricAlarm Metrics member and the GetMetricData MetricDataQueries member are the same
-// shape — stopping at the first element with no Id.
-func cwParseMetricDataQueries(params map[string]string, prefix string) []CWMetricDataQuery {
+// shape — stopping at the first element with no Id. A Period that is not an integer of at least 1
+// and an Expression longer than the published 2,048 characters are refused.
+func cwParseMetricDataQueries(params map[string]string, prefix string) ([]CWMetricDataQuery, *AWSError) {
 	var queries []CWMetricDataQuery
 	for i := 1; ; i++ {
 		base := prefix + ".member." + strconv.Itoa(i) + "."
 		id, ok := params[base+"Id"]
 		if !ok || id == "" {
-			return queries
+			return queries, nil
+		}
+		stat, awsErr := cwParseMetricStat(params, base+"MetricStat.")
+		if awsErr != nil {
+			return nil, awsErr
 		}
 		q := CWMetricDataQuery{
 			ID:            id,
 			Expression:    params[base+"Expression"],
 			Label:         params[base+"Label"],
 			SourceAccount: params[base+"AccountId"],
-			MetricStat:    cwParseMetricStat(params, base+"MetricStat."),
+			MetricStat:    stat,
+		}
+		if utf8.RuneCountInString(q.Expression) > cwMaxExpressionLength {
+			return nil, cwInvalidParameterValue(fmt.Sprintf(
+				"The Expression of %s must be at most %d characters long.", strings.TrimSuffix(base, "."), cwMaxExpressionLength))
 		}
 		if v, ok := cwParseBool(params[base+"ReturnData"]); ok {
 			q.ReturnData = &v
 		}
-		q.Period, _ = strconv.Atoi(params[base+"Period"])
+		if q.Period, _, awsErr = cwOptionalInt(params, base+"Period", 1); awsErr != nil {
+			return nil, awsErr
+		}
 		queries = append(queries, q)
 	}
 }
@@ -202,8 +219,12 @@ func cwParseAlarm(params map[string]string) (CWAlarm, *AWSError) {
 		OKActions:                        parseMemberList(params, "OKActions"),
 		InsufficientDataActions:          parseMemberList(params, "InsufficientDataActions"),
 		Dimensions:                       cwParseDimensions(params, "Dimensions"),
-		Metrics:                          cwParseMetricDataQueries(params, "Metrics"),
 	}
+	metrics, awsErr := cwParseMetricDataQueries(params, "Metrics")
+	if awsErr != nil {
+		return CWAlarm{}, awsErr
+	}
+	a.Metrics = metrics
 	for _, check := range []*AWSError{
 		cwCheckEnum("Statistic", a.Statistic, cwStatisticNames),
 		cwCheckEnum("ComparisonOperator", a.ComparisonOperator, cwComparisonOperators),
@@ -238,7 +259,6 @@ func cwParseAlarm(params map[string]string) (CWAlarm, *AWSError) {
 		}
 		a.Threshold = v
 	}
-	var awsErr *AWSError
 	if a.EvaluationPeriods, _, awsErr = cwOptionalInt(params, "EvaluationPeriods", 1); awsErr != nil {
 		return CWAlarm{}, awsErr
 	}

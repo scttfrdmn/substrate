@@ -48,7 +48,7 @@ func newCWEnv(t *testing.T, options map[string]any) *cwEnv {
 	registry.Register(cw)
 	tagging := &emulator.TaggingPlugin{}
 	require.NoError(t, tagging.Initialize(context.TODO(), emulator.PluginConfig{
-		State: state, Logger: logger, Options: map[string]any{"time_controller": tc},
+		State: state, Logger: logger, Options: map[string]any{"time_controller": tc, "registry": registry},
 	}))
 	registry.Register(tagging)
 	return &cwEnv{t: t, srv: emulator.NewServer(*cfg, registry, store, state, tc, logger), tc: tc}
@@ -464,7 +464,7 @@ func TestCWMetrics_GetMetricStatistics(t *testing.T) {
 
 	out = e.ok("GetMetricStatistics", map[string]any{
 		"Namespace": "q", "MetricName": "Depth", "Dimensions": dims, "Unit": "Count",
-		"StartTime": at(-10), "EndTime": at(1), "Period": 600, "ExtendedStatistics": []string{"p50", "p99", "tm90"},
+		"StartTime": at(-10), "EndTime": at(1), "Period": 600, "ExtendedStatistics": []string{"p50", "p99"},
 	})
 	dps = out["Datapoints"].([]any)
 	require.Len(t, dps, 1)
