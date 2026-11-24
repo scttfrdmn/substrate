@@ -74,8 +74,7 @@ page is every record that sorts strictly after it. One primitive implements that
 listing migrated to it (`emulator/pagination.go`,
 [#1612](https://github.com/scttfrdmn/substrate/issues/1612)):
 
-- **Order.** Each item has a key of a primary value and a tie-break (a RAM principal's ID within its
-  share). The listing is rendered in key order, ascending unless the operation publishes otherwise, so
+- **Order.** Each item has a key of a primary value and an optional tie-break. The listing is rendered in key order, ascending unless the operation publishes otherwise, so
   the order a caller sees is the order the cursor compares in.
 - **Resuming.** The next page starts strictly after the cursor's key. A create or delete anywhere in the
   listing leaves every surviving record returned exactly once. A cursor naming a record that has since
@@ -96,7 +95,7 @@ listing migrated to it (`emulator/pagination.go`,
 | Operations | Cursor | Bad cursor | Page size |
 |-----------|--------|-----------|-----------|
 | ELBv2 `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules`; classic `DescribeLoadBalancers` ([#1528](https://github.com/scttfrdmn/substrate/issues/1528)) | opaque token over the ARN (classic: name) | `ValidationError`/400 | `PageSize` 1–400 |
-| RAM `ListPrincipals`, `ListResources` ([#1566](https://github.com/scttfrdmn/substrate/issues/1566)) | opaque token over (share ARN, principal ID or resource ARN) | `InvalidNextTokenException`/400 | `maxResults` 1–500 |
+| RAM `ListPrincipals`, `ListResources` ([#1566](https://github.com/scttfrdmn/substrate/issues/1566)) | opaque token over the principal ID or resource ARN | `InvalidNextTokenException`/400 | `maxResults` 1–500 |
 | CodePipeline `ListPipelines` ([#1543](https://github.com/scttfrdmn/substrate/issues/1543)) | opaque token over the name | `InvalidNextTokenException`/400 | `maxResults` 1–1000 (`ValidationException`) |
 | CloudFront `ListDistributions`, `ListOriginAccessControls` ([#1568](https://github.com/scttfrdmn/substrate/issues/1568)) | raw ID | not refused | `MaxItems` a positive integer, default 100 (`InvalidArgument`) |
 | IAM's key listings and tag listings | base64 of the last key | `ValidationError`/400 | `MaxItems` 1–1000 |

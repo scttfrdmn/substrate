@@ -732,8 +732,11 @@ func paginateSimulationResults(results []iamSimulationResult, marker string, max
 // encodeSimulationMarker encodes a result index as an opaque page cursor: base64 of the
 // decimal index, as [encodeOffsetPaginationToken] renders it.
 //
-// An index is a stable cursor here because the result list is computed from the request
-// alone, so the same request lists the same results on every page.
+// An index is a stable position because the result list has one entry per requested
+// (action, resource) pair, in request order, so the same request lists the same pairs on every
+// page. The decisions are not fixed by the request: SimulatePrincipalPolicy reads the principal's
+// policies on each call, so a policy changed between pages changes the decisions on later pages,
+// though not which pairs they hold.
 func encodeSimulationMarker(index int) string {
 	return encodeOffsetPaginationToken(index)
 }

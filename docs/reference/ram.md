@@ -103,12 +103,13 @@ position inside it takes one of two forms:
   rather than skipping the share that moved into its position. A position is refused unless it names a
   resource share in the caller's own account and Region; a share that has since expired still resumes.
 - **`ListPrincipals` and `ListResources`** ([#1566](https://github.com/scttfrdmn/substrate/issues/1566))
-  list the principals or resources of every live share in **share-ARN order, then principal ID or
-  resource ARN order**, and that pair is the position: the next page starts strictly after the pair
-  the token names. A delete, associate or disassociate between two pages therefore neither skips nor
-  repeats an item that survives it, and a token naming an item that has since gone resumes where it
-  was. A principal or resource associated with several shares is listed once, under the first share in
-  that order. The token is the shared [cursor token](/reference/concepts/listing-order#cursor-pagination),
+  list the principals or resources of every live share, each once, in **principal ID or resource ARN
+  order**, and that value is the position: the next page starts strictly after the one the token
+  names. A delete, associate or disassociate between two pages therefore neither skips nor repeats an
+  item listed on both sides of it, and a token naming an item that has since gone resumes where it
+  was. An item associated with several shares carries the first share in ARN order as its
+  `resourceShareArn` (`API_Principal` and `API_Resource` describe it as a share the item is associated
+  with), so that member can change between pages while the item's position cannot. The token is the shared [cursor token](/reference/concepts/listing-order#cursor-pagination),
   bound to the operation and to the request's filter members: a token reused with different filters,
   `GetResourceShares`' token, or one from the other listing is `InvalidNextTokenException`/400.
 

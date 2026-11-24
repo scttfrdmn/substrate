@@ -254,26 +254,29 @@ func (p *CodePipelinePlugin) deletePipeline(reqCtx *RequestContext, req *AWSRequ
 	return codepipelineJSONResponse(http.StatusOK, map[string]interface{}{})
 }
 
-// codepipelineListPipelinesPaging is ListPipelines' paging contract (API_ListPipelines).
+// codepipelineListPipelinesPaging returns ListPipelines' paging contract (API_ListPipelines).
 //
 // `maxResults` publishes "Valid Range: Minimum value of 1. Maximum value of 1000." and no default; an
 // absent one is 1000, the published maximum, which is substrate's reading. An out-of-range value is
 // ValidationException/400 and an unissued `nextToken` is InvalidNextTokenException/400, both
-// published on the page; the messages are its glosses of the two codes.
-var codepipelineListPipelinesPaging = jsonPaging{
-	op:   "ListPipelines",
-	size: pageSizeRange{member: "maxResults", min: 1, max: 1000, def: 1000},
-	invalidSize: func(message string) *AWSError {
-		return &AWSError{Code: "ValidationException", Message: message, HTTPStatus: http.StatusBadRequest}
-	},
-	invalidToken: func() *AWSError {
-		return &AWSError{
-			Code: "InvalidNextTokenException",
-			// API_ListPipelines, Errors.
-			Message:    "The next token was specified in an invalid format. Make sure that the next token you provide is the token returned by a previous call.",
-			HTTPStatus: http.StatusBadRequest,
-		}
-	},
+// published on the page. The InvalidNextTokenException message is the page's gloss of the code; the
+// maxResults message is substrate's own.
+func codepipelineListPipelinesPaging() jsonPaging {
+	return jsonPaging{
+		op:   "ListPipelines",
+		size: pageSizeRange{member: "maxResults", min: 1, max: 1000, def: 1000},
+		invalidSize: func(message string) *AWSError {
+			return &AWSError{Code: "ValidationException", Message: message, HTTPStatus: http.StatusBadRequest}
+		},
+		invalidToken: func() *AWSError {
+			return &AWSError{
+				Code: "InvalidNextTokenException",
+				// API_ListPipelines, Errors.
+				Message:    "The next token was specified in an invalid format. Make sure that the next token you provide is the token returned by a previous call.",
+				HTTPStatus: http.StatusBadRequest,
+			}
+		},
+	}
 }
 
 // listPipelines answers ListPipelines in name order, paged on a name cursor.
@@ -290,7 +293,7 @@ func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, req *AWSReque
 			return nil, codepipelineInvalidBody()
 		}
 	}
-	pr, awsErr := jsonNextToken(codepipelineListPipelinesPaging, nil, input.NextToken, input.MaxResults)
+	pr, awsErr := jsonNextToken(codepipelineListPipelinesPaging(), nil, input.NextToken, input.MaxResults)
 	if awsErr != nil {
 		return nil, awsErr
 	}
@@ -301,12 +304,10 @@ func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, req *AWSReque
 		return nil, fmt.Errorf("codepipeline listPipelines load index: %w", err)
 	}
 
-	res, err := page(names, func(name string) cursorKey { return cursorKey{Sort: name} }, pr)
-	if err != nil {
-		return nil, codepipelineListPipelinesPaging.invalidToken()
-	}
-	summaries := make([]map[string]interface{}, 0, len(res.Items))
-	for _, name := range res.Items {
+	// Every record is loaded before the page is cut, so a page is short only at the end of the
+	// listing and a token always names a pipeline that follows.
+	pipelines := make([]*CodePipelineState, 0, len(names))
+	for _, name := range names {
 		pl, err := p.loadPipeline(reqCtx.AccountID, reqCtx.Region, name)
 		var notFound *AWSError
 		if errors.As(err, &notFound) && notFound.Code == "PipelineNotFoundException" {
@@ -315,6 +316,14 @@ func (p *CodePipelinePlugin) listPipelines(reqCtx *RequestContext, req *AWSReque
 		if err != nil {
 			return nil, err
 		}
+		pipelines = append(pipelines, pl)
+	}
+	res, err := page(pipelines, func(pl *CodePipelineState) cursorKey { return cursorKey{Sort: pl.Name} }, pr)
+	if err != nil {
+		return nil, codepipelineListPipelinesPaging().invalidToken()
+	}
+	summaries := make([]map[string]interface{}, 0, len(res.Items))
+	for _, pl := range res.Items {
 		summaries = append(summaries, map[string]interface{}{
 			"name":    pl.Name,
 			"version": pl.Version,

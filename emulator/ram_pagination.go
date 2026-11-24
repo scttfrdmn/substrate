@@ -51,15 +51,16 @@ import (
 // this operation issues carries. That is a check on the text, not on state, so a token naming a share
 // that has since expired is accepted and resumes after it.
 //
-// # ListPrincipals and ListResources page on a composite cursor
+// # ListPrincipals and ListResources page on an entity cursor
 //
-// Their items are the principals or resources of every live share. Each listing is rendered in
-// resource-share ARN order and then principal ID or resource ARN order, and that pair is the cursor
-// ([page]'s Sort and Tie), so a delete, associate or disassociate between two pages neither skips nor
-// repeats an item that survives it. An item listed under several shares appears once, under the first
-// share in that order. The token is [page]'s opaque token, bound to the operation and to the request's
-// filter members, so neither operation accepts the other's token, GetResourceShares' token, or its
-// own token reused with different filters (#1566).
+// Their items are the principals or resources of every live share, each listed once, in principal ID
+// or resource ARN order, and that value is the cursor ([page]'s Sort), so a delete, associate or
+// disassociate between two pages neither skips nor repeats an item that is listed on both sides of
+// it. An item of several shares carries the first share in ARN order as its resourceShareArn, so
+// that member can change between pages while the item's position cannot. The token is [page]'s
+// opaque token, bound to the operation and to the request's filter members, so neither operation
+// accepts the other's token, GetResourceShares' token, or its own token reused with different
+// filters (#1566).
 
 const (
 	// ramMaxResultsMin and ramMaxResultsMax are the Valid Range all three pages publish for maxResults.
@@ -103,7 +104,7 @@ func ramDecodeToken(operation, raw string) (string, error) {
 
 // ramReadMaxResults validates maxResults, returning 0 — the whole listing — for an absent one.
 func ramReadMaxResults(maxResults *int) (int, error) {
-	n, awsErr := ramMaxResults.check(maxResults, ramInvalidParameter)
+	n, awsErr := ramMaxResults().check(maxResults, ramInvalidParameter)
 	if awsErr != nil {
 		return 0, awsErr
 	}
@@ -112,14 +113,16 @@ func ramReadMaxResults(maxResults *int) (int, error) {
 
 // ramMaxResults is the published maxResults range. An absent member answers the whole listing: the
 // pages publish no default number, only "a value that is specific to the operation".
-var ramMaxResults = pageSizeRange{member: "maxResults", min: ramMaxResultsMin, max: ramMaxResultsMax}
+func ramMaxResults() pageSizeRange {
+	return pageSizeRange{member: "maxResults", min: ramMaxResultsMin, max: ramMaxResultsMax}
+}
 
 // ramReadPage validates ListPrincipals' or ListResources' maxResults and nextToken against the
 // request's filter members, before any state is read.
 func ramReadPage(operation string, filter map[string][]string, maxResults *int, nextToken string) (pageRequest, error) {
 	pr, awsErr := jsonNextToken(jsonPaging{
 		op:           operation,
-		size:         ramMaxResults,
+		size:         ramMaxResults(),
 		invalidSize:  ramInvalidParameter,
 		invalidToken: ramInvalidNextToken,
 	}, filter, nextToken, maxResults)
@@ -129,13 +132,12 @@ func ramReadPage(operation string, filter map[string][]string, maxResults *int, 
 	return pr, nil
 }
 
-// ramPaged cuts one page out of items, keyed (resourceShareArn, entity), and answers it under
-// member, with `nextToken` when a further item exists.
+// ramPaged cuts one page out of items, keyed by their entity member, and answers it under member,
+// with `nextToken` when a further item exists.
 func ramPaged(member, entity string, items []map[string]interface{}, pr pageRequest) (*AWSResponse, error) {
 	res, err := page(items, func(item map[string]interface{}) cursorKey {
-		share, _ := item["resourceShareArn"].(string)
 		id, _ := item[entity].(string)
-		return cursorKey{Sort: share, Tie: id}
+		return cursorKey{Sort: id}
 	}, pr)
 	if err != nil {
 		return nil, ramInvalidNextToken()

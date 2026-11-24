@@ -656,25 +656,34 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, req *AWSReques
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront listDistributions loadIndex: %w", err)
 	}
-	// Paged over the index before any record is read, so only the page's distributions spend an
-	// observation of their status countdowns.
-	res := pageAfter(ids, cfIDKey, pg.after(), pg.maxItems, false)
-
-	// Every summary is built before any observation is spent (#1115): the summary's configuration
-	// members come from the stored configuration (see distributionSummary), and building them first
-	// means nothing about a summary can fail a list that has already consumed seeded countdowns.
-	dists := make([]CloudFrontDistribution, 0, len(res.Items))
-	summaries := make([]cfConfigNode, 0, len(res.Items))
-	for _, id := range res.Items {
+	// Every record is read before the page is cut, so a page is short only at the end of the
+	// listing. A store failure fails the call; an index entry whose record is gone, or a record
+	// that does not decode, is passed over.
+	all := make([]CloudFrontDistribution, 0, len(ids))
+	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, id))
-		if getErr != nil || data == nil {
+		if getErr != nil {
+			return nil, fmt.Errorf("cloudfront listDistributions get %s: %w", id, getErr)
+		}
+		if data == nil {
 			continue
 		}
 		var dist CloudFrontDistribution
 		if err := json.Unmarshal(data, &dist); err != nil {
 			continue
 		}
-		dists = append(dists, dist)
+		all = append(all, dist)
+	}
+	res := pageAfter(all, func(d CloudFrontDistribution) cursorKey { return cfIDKey(d.ID) },
+		pg.after(), pg.maxItems, false)
+
+	// Every summary is built before any observation is spent (#1115): the summary's configuration
+	// members come from the stored configuration (see distributionSummary), and building them first
+	// means nothing about a summary can fail a list that has already consumed seeded countdowns.
+	// Only the page's distributions spend one.
+	dists := res.Items
+	summaries := make([]cfConfigNode, 0, len(dists))
+	for _, dist := range dists {
 		summaries = append(summaries, p.distributionSummary(dist))
 	}
 	// ListDistributions is polled like GetDistribution, so each distribution it reports spends one

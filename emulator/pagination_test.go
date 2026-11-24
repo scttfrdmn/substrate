@@ -188,6 +188,9 @@ func TestPagination_TokenRoundTripsAndIsBound(t *testing.T) {
 	reordered := ok
 	reordered.Filter = map[string][]string{"Arn": {"a"}, "Names": {"y", "x"}, "Empty": nil, "Blank": {""}}
 	assert.True(t, accepted(reordered), "member order, value order and empty members do not change the filter")
+	duplicated := ok
+	duplicated.Filter = map[string][]string{"Arn": {"a", "a"}, "Names": {"x", "y", "x"}}
+	assert.True(t, accepted(duplicated), "a value repeated is the same set")
 
 	enc := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
 	canonical := string(raw)
@@ -232,10 +235,6 @@ func TestPagination_TokenRoundTripsAndIsBound(t *testing.T) {
 			r.Token = enc(`{"o":"ListThings","h":"0000000000000000","s":"a","t":""}`)
 			return r
 		}},
-		{"no position", func(r emulator.PageRequestForTest) emulator.PageRequestForTest {
-			r.Token = enc(`{"o":"ListThings","h":"` + tok["h"] + `","s":"","t":""}`)
-			return r
-		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := tc.req(ok)
@@ -246,4 +245,23 @@ func TestPagination_TokenRoundTripsAndIsBound(t *testing.T) {
 			assert.True(t, emulator.IsPageTokenErrorForTest(pageErr), "page refuses what validate refuses")
 		})
 	}
+}
+
+// TestPagination_TheZeroKeyIsAPosition pins the zero key's reading: it sorts first, a page ending on
+// it carries a token like any other, and that token resumes at the first non-zero key.
+func TestPagination_TheZeroKeyIsAPosition(t *testing.T) {
+	t.Parallel()
+	items := []emulator.PageItemForTest{{Sort: "b"}, {}, {Sort: "a"}}
+	req := emulator.PageRequestForTest{Op: "Op", Size: 1}
+	got, next, truncated, err := emulator.PageForTest(items, req)
+	require.NoError(t, err)
+	require.Equal(t, []emulator.PageItemForTest{{}}, got)
+	require.True(t, truncated)
+	require.NotEmpty(t, next, "a truncated page on the zero key still carries a token")
+	assert.Equal(t, []string{"", "a", "b"}, pgWalk(t, items, req, nil))
+
+	req.Token = next
+	got, _, _, err = emulator.PageForTest(items, req)
+	require.NoError(t, err)
+	assert.Equal(t, pgItems("a"), got)
 }

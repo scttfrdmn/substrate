@@ -145,6 +145,55 @@ func TestCloudFrontListPagination_EchoesAndPages(t *testing.T) {
 	}
 }
 
+// TestCloudFrontListPagination_AStoreFailureFailsTheList requires a record read failure to fail
+// either listing rather than answer a short page that still claims more.
+func TestCloudFrontListPagination_AStoreFailureFailsTheList(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	healthy := cfOACPluginOn(t, state)
+	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
+	cfCreateOAC(t, healthy, ctx, cfOACConfigXML)
+	status, body := cfCreate(t, healthy, ctx, false, cfTestConfigXML("store-failure"))
+	require.Equal(t, http.StatusCreated, status, "%s", body)
+
+	for _, tc := range []struct{ path, key string }{
+		{"/2020-05-31/distribution", "cfdist:"},
+		{cfOACPath, "cfoac:"},
+	} {
+		broken := cfOACPluginOn(t, &cfFaultStateManager{inner: state, failGet: tc.key + ctx.AccountID + "/"})
+		resp, err := broken.HandleRequest(ctx, cfRequest(http.MethodGet, tc.path, map[string]string{"MaxItems": "1"}, ""))
+		assert.Nil(t, resp, tc.path)
+		require.Error(t, err, tc.path)
+		var awsErr *emulator.AWSError
+		assert.NotErrorAs(t, err, &awsErr, "%s: a store failure is substrate's, not a published code", tc.path)
+	}
+}
+
+// TestCloudFrontListPagination_ADanglingEntryShortensNoPage cuts the page after passing over an
+// index entry whose record is gone, so a token always names an item that follows.
+func TestCloudFrontListPagination_ADanglingEntryShortensNoPage(t *testing.T) {
+	t.Parallel()
+	state := emulator.NewMemoryStateManager()
+	p := cfOACPluginOn(t, state)
+	ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
+	var ids []string
+	for i := range 3 {
+		body := strings.Replace(cfOACConfigXML, "substrate-oac", fmt.Sprintf("dangle-%d", i), 1)
+		doc, _ := cfCreateOAC(t, p, ctx, body)
+		ids = append(ids, doc.ID)
+	}
+	sort.Strings(ids)
+	require.NoError(t, state.Delete(t.Context(), "cloudfront", "cfoac:"+ctx.AccountID+"/"+ids[2]))
+
+	resp, err := p.HandleRequest(ctx, cfRequest(http.MethodGet, cfOACPath, map[string]string{"MaxItems": "2"}, ""))
+	require.NoError(t, err)
+	var doc cfListDoc
+	require.NoError(t, xml.Unmarshal(resp.Body, &doc))
+	assert.Equal(t, ids[:2], doc.ids())
+	assert.False(t, *doc.IsTruncated, "the dangling last entry is no next item")
+	assert.Nil(t, doc.NextMarker)
+}
+
 func TestCloudFrontListPagination_RefusesAnUnreadableMaxItems(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)

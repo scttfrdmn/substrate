@@ -151,6 +151,23 @@ func TestCodePipelineListPipelines_AnUnreadableRecordFailsAndADanglingEntryIsSki
 	require.NoError(t, json.Unmarshal(codepipelineWire(t, p, ctx, "ListPipelines", nil), &listed))
 	assert.Equal(t, []string{"cp-a", "cp-c"}, listed.names())
 
+	// The page is cut after the dangling entry is passed over, so a full page carries a token only
+	// when a pipeline follows, and no page comes back empty with a token.
+	require.NoError(t, json.Unmarshal(codepipelineWire(t, p, ctx, "ListPipelines", map[string]any{"maxResults": 1}), &listed))
+	assert.Equal(t, []string{"cp-a"}, listed.names())
+	require.NotNil(t, listed.NextToken)
+	var second cpListPage
+	require.NoError(t, json.Unmarshal(codepipelineWire(t, p, ctx, "ListPipelines",
+		map[string]any{"maxResults": 1, "nextToken": *listed.NextToken}), &second))
+	assert.Equal(t, []string{"cp-c"}, second.names())
+	assert.Nil(t, second.NextToken)
+	require.NoError(t, state.Delete(t.Context(), "codepipeline", key("cp-c")))
+	var last cpListPage
+	require.NoError(t, json.Unmarshal(codepipelineWire(t, p, ctx, "ListPipelines", map[string]any{"maxResults": 1}), &last))
+	assert.Equal(t, []string{"cp-a"}, last.names())
+	assert.Nil(t, last.NextToken, "no pipeline follows, so no token")
+	codepipelineWire(t, p, ctx, "CreatePipeline", codepipelineWirePipeline("cp-c"))
+
 	// A record that does not decode fails the listing rather than shortening it.
 	require.NoError(t, state.Put(t.Context(), "codepipeline", key("cp-c"), []byte("{not json")))
 	_, err := p.HandleRequest(ctx, codepipelineRequest(t, "ListPipelines", map[string]any{}))

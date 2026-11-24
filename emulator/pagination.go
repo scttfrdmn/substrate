@@ -46,8 +46,8 @@ var errPageToken = errors.New("pagination token was not issued for this request"
 
 // cursorKey is an item's position in a cursor-paged listing: items order by Sort, then by Tie.
 //
-// The pair must be unique within a listing. Tie breaks a Sort shared by several items, as a RAM
-// principal's ID does within its resource share.
+// The pair must be unique within a listing; Tie breaks a Sort shared by several items. The zero key
+// is a valid position: it sorts first, and a token naming it resumes at the first non-zero key.
 type cursorKey struct {
 	// Sort is the primary ordering value.
 	Sort string
@@ -131,9 +131,6 @@ func (r pageRequest) cursor() (*cursorKey, error) {
 	if tok.H != pageFilterHash(r.Filter) {
 		return nil, fmt.Errorf("%w: issued for different filter members", errPageToken)
 	}
-	if tok.S == "" && tok.T == "" {
-		return nil, fmt.Errorf("%w: names no position", errPageToken)
-	}
 	return &cursorKey{Sort: tok.S, Tie: tok.T}, nil
 }
 
@@ -148,8 +145,8 @@ func (r pageRequest) encode(last cursorKey) string {
 }
 
 // pageFilterHash is the fnv-64a hash of filter in canonical form: members in name order, each
-// member's values sorted, every string length-prefixed so that no two filters share an encoding. An
-// empty value is dropped, and a member left with no values is absent.
+// member's values sorted and deduplicated (a set), every string length-prefixed so that no two
+// filters share an encoding. An empty value is dropped, and a member left with no values is absent.
 func pageFilterHash(filter map[string][]string) string {
 	present := make(map[string][]string, len(filter))
 	names := make([]string, 0, len(filter))
@@ -157,7 +154,7 @@ func pageFilterHash(filter map[string][]string) string {
 		values = slices.DeleteFunc(slices.Clone(values), func(v string) bool { return v == "" })
 		if len(values) > 0 {
 			slices.Sort(values)
-			present[name] = values
+			present[name] = slices.Compact(values)
 			names = append(names, name)
 		}
 	}

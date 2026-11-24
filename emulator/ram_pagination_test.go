@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
 	"testing"
 	"time"
 
@@ -180,15 +179,15 @@ func TestRAMPagination_AnExpiryMidWalkSkipsNoShare(t *testing.T) {
 	assert.Empty(t, page2.NextToken)
 }
 
-// ramEntry is one ListPrincipals or ListResources item's cursor pair.
+// ramEntry is one ListPrincipals or ListResources item.
 type ramEntry struct {
 	Share string `json:"resourceShareArn"`
 	ID    string `json:"id"`
 	ARN   string `json:"arn"`
 }
 
-// key is the entry's (share, entity) pair, which is also the listing's order.
-func (e ramEntry) key() string { return e.Share + "|" + e.ID + e.ARN }
+// entity is the item's principal ID or resource ARN, which is the listing's order and its cursor.
+func (e ramEntry) entity() string { return e.ID + e.ARN }
 
 // ramEntries decodes a page's items.
 func ramEntries(t *testing.T, items []json.RawMessage) []ramEntry {
@@ -202,128 +201,170 @@ func ramEntries(t *testing.T, items []json.RawMessage) []ramEntry {
 	return out
 }
 
-// TestRAMPagination_ListingsRenderInCursorOrder pins the order ListPrincipals and ListResources
-// compare in: resource-share ARN, then principal ID or resource ARN, whatever the association order.
-func TestRAMPagination_ListingsRenderInCursorOrder(t *testing.T) {
-	t.Parallel()
-	ts := emulator.StartTestServer(t)
-	ramOwnershipShare(t, ts, "ordered", []string{"333333333333", "111111111111", "222222222222"},
-		[]string{
-			"arn:aws:ec2:us-east-1:123456789012:subnet/subnet-c",
-			"arn:aws:ec2:us-east-1:123456789012:subnet/subnet-a",
-		})
-	ramOwnershipShare(t, ts, "second", []string{"444444444444"}, nil)
+// ramListCase is ListPrincipals or ListResources, with how to name its entities.
+type ramListCase struct {
+	path, member, assocMember string
+	value                     func(string) string
+}
 
-	for _, tc := range []struct{ path, member string }{
-		{"/listprincipals", "principals"},
-		{"/listresources", "resources"},
-	} {
-		page := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF"})
-		keys := []string{}
-		for _, e := range ramEntries(t, page.Items) {
-			keys = append(keys, e.key())
-		}
-		assert.True(t, sort.StringsAreSorted(keys), "%s lists in (share, entity) order: %v", tc.path, keys)
+// ramListCases are the two entity listings.
+func ramListCases() []ramListCase {
+	return []ramListCase{
+		{"/listprincipals", "principals", "principals", func(s string) string { return "1111111111" + s }},
+		{"/listresources", "resources", "resourceArns", func(s string) string {
+			return "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-" + s
+		}},
 	}
 }
 
-// TestRAMPagination_AWalkSurvivesMidWalkChanges walks each listing a page at a time and, between the
-// first and second pages, deletes a share, disassociates the entity the token names, and associates a
-// new one on each side of the cursor. Every item that survives is returned exactly once.
-func TestRAMPagination_AWalkSurvivesMidWalkChanges(t *testing.T) {
+// ramShareWith creates a share holding tc's entities named by suffixes.
+func ramShareWith(t *testing.T, ts *emulator.TestServer, tc ramListCase, name string, suffixes ...string) string {
+	t.Helper()
+	values := []string{}
+	for _, s := range suffixes {
+		values = append(values, tc.value(s))
+	}
+	if tc.member == "principals" {
+		return ramOwnershipShare(t, ts, name, values, nil)
+	}
+	return ramOwnershipShare(t, ts, name, nil, values)
+}
+
+// ramChange associates or disassociates tc's entities named by suffixes on share.
+func ramChange(t *testing.T, ts *emulator.TestServer, tc ramListCase, path, share string, suffixes ...string) {
+	t.Helper()
+	values := []string{}
+	for _, s := range suffixes {
+		values = append(values, tc.value(s))
+	}
+	status, raw := ramOwnershipCall(t, ts, path, map[string]any{"resourceShareArn": share, tc.assocMember: values})
+	require.Equal(t, http.StatusOK, status, "%s", raw)
+}
+
+// ramWalkFrom follows token to the end at page size 2, returning every entity listed.
+func ramWalkFrom(t *testing.T, ts *emulator.TestServer, tc ramListCase, token string) []string {
+	t.Helper()
+	var out []string
+	for pages := 0; token != ""; pages++ {
+		require.Less(t, pages, 10, "the walk terminates")
+		pg := ramPageCall(t, ts, tc.path, tc.member, map[string]any{
+			"resourceOwner": "SELF", "maxResults": 2, "nextToken": token,
+		})
+		for _, e := range ramEntries(t, pg.Items) {
+			out = append(out, e.entity())
+		}
+		token = pg.NextToken
+	}
+	return out
+}
+
+// TestRAMPagination_ListingsRenderInEntityOrder pins the order ListPrincipals and ListResources
+// compare in: principal ID or resource ARN, across shares and whatever the association order. An
+// entity of several shares is listed once, under the first share in ARN order.
+func TestRAMPagination_ListingsRenderInEntityOrder(t *testing.T) {
 	t.Parallel()
-	subnet := func(s string) string { return "arn:aws:ec2:us-east-1:123456789012:subnet/subnet-" + s }
-	for _, tc := range []struct {
-		path, member, assocMember string
-		entity                    func(ramEntry) string
-		values                    func(...string) []string
-	}{
-		{"/listprincipals", "principals", "principals", func(e ramEntry) string { return e.ID },
-			func(s ...string) []string {
-				out := []string{}
-				for _, v := range s {
-					out = append(out, "1111111111"+v)
-				}
-				return out
-			}},
-		{"/listresources", "resources", "resourceArns", func(e ramEntry) string { return e.ARN },
-			func(s ...string) []string {
-				out := []string{}
-				for _, v := range s {
-					out = append(out, subnet(v))
-				}
-				return out
-			}},
-	} {
+	for _, tc := range ramListCases() {
 		t.Run(tc.member, func(t *testing.T) {
 			t.Parallel()
 			ts := emulator.StartTestServer(t)
-			create := func(name string, values []string) string {
-				if tc.member == "principals" {
-					return ramOwnershipShare(t, ts, name, values, nil)
-				}
-				return ramOwnershipShare(t, ts, name, nil, values)
+			one := ramShareWith(t, ts, tc, "one", "30", "10", "50")
+			two := ramShareWith(t, ts, tc, "two", "40", "20", "10")
+			first := one
+			if two < one {
+				first = two
 			}
-			create("s1", tc.values("10", "20", "30"))
-			create("s2", tc.values("40", "50"))
-			create("s3", tc.values("60"))
-			whole := ramEntries(t, ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF"}).Items)
-			require.Len(t, whole, 6)
 
-			page1 := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF", "maxResults": 2})
-			first := ramEntries(t, page1.Items)
-			require.Len(t, first, 2)
-			require.NotEmpty(t, page1.NextToken)
-			cursor := first[1]
-			// The deleted share is the last in the listing that is not the cursor's.
-			doomed := ""
-			for _, e := range whole {
-				if e.Share != cursor.Share {
-					doomed = e.Share
+			page := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF"})
+			got := ramEntries(t, page.Items)
+			var entities []string
+			for _, e := range got {
+				entities = append(entities, e.entity())
+				if e.entity() == tc.value("10") {
+					assert.Equal(t, first, e.Share, "a shared entity is listed under the first share in ARN order")
 				}
 			}
-			require.NotEmpty(t, doomed)
-
-			// The cursor's own entity is disassociated, one is added before the cursor and one after,
-			// and a later share is deleted outright.
-			change := func(path string, values []string) {
-				status, raw := ramOwnershipCall(t, ts, path, map[string]any{
-					"resourceShareArn": cursor.Share, tc.assocMember: values,
-				})
-				require.Equal(t, http.StatusOK, status, "%s", raw)
-			}
-			change("/disassociateresourceshare", []string{tc.entity(cursor)})
-			change("/associateresourceshare", tc.values("00", "99"))
-			status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": doomed})
-			require.Equal(t, http.StatusOK, status, "%s", raw)
-
-			walked := append([]ramEntry(nil), first...)
-			token := page1.NextToken
-			for pages := 0; token != ""; pages++ {
-				require.Less(t, pages, 10, "the walk terminates")
-				pg := ramPageCall(t, ts, tc.path, tc.member, map[string]any{
-					"resourceOwner": "SELF", "maxResults": 2, "nextToken": token,
-				})
-				walked = append(walked, ramEntries(t, pg.Items)...)
-				token = pg.NextToken
-			}
-
-			seen := map[string]int{}
-			for _, e := range walked {
-				seen[e.key()]++
-				assert.Equal(t, 1, seen[e.key()], "%s returned twice", e.key())
-			}
-			for _, e := range whole[2:] {
-				if e.Share == doomed {
-					assert.Zero(t, seen[e.key()], "an item of the deleted share is not listed")
-					continue
-				}
-				assert.Equal(t, 1, seen[e.key()], "the surviving item %s is returned exactly once", e.key())
-			}
-			added := tc.values("99")[0]
-			assert.Equal(t, 1, seen[cursor.Share+"|"+added], "an item added after the cursor is reached")
-			assert.Zero(t, seen[cursor.Share+"|"+tc.values("00")[0]], "an item added before the cursor is not")
+			assert.Equal(t, []string{tc.value("10"), tc.value("20"), tc.value("30"), tc.value("40"), tc.value("50")},
+				entities, "each entity once, in entity order")
 		})
+	}
+}
+
+// TestRAMPagination_AWalkSurvivesMidWalkChanges walks each listing a page at a time and changes it
+// between the first and second pages. Every entity listed both before and after the change is
+// returned exactly once, and nothing is returned twice.
+func TestRAMPagination_AWalkSurvivesMidWalkChanges(t *testing.T) {
+	t.Parallel()
+	for _, tc := range ramListCases() {
+		for _, change := range []struct {
+			name string
+			// apply changes the listing; the token's entity is 20.
+			apply func(t *testing.T, ts *emulator.TestServer, early, late string)
+			want  []string
+		}{
+			{
+				// The cursor's entity moves to an earlier share: its position does not move.
+				name: "the cursor's entity associated to an earlier share",
+				apply: func(t *testing.T, ts *emulator.TestServer, early, late string) {
+					ramChange(t, ts, tc, "/associateresourceshare", early, "20", "40")
+				},
+				want: []string{"10", "20", "30", "40", "50"},
+			},
+			{
+				name: "the cursor's entity disassociated",
+				apply: func(t *testing.T, ts *emulator.TestServer, early, late string) {
+					ramChange(t, ts, tc, "/disassociateresourceshare", late, "20")
+				},
+				want: []string{"10", "20", "30", "40", "50"},
+			},
+			{
+				name: "an entity after the cursor disassociated, one added on each side",
+				apply: func(t *testing.T, ts *emulator.TestServer, early, late string) {
+					ramChange(t, ts, tc, "/disassociateresourceshare", late, "30")
+					ramChange(t, ts, tc, "/associateresourceshare", late, "15", "45")
+				},
+				want: []string{"10", "20", "40", "45", "50"},
+			},
+			{
+				name: "a share deleted",
+				apply: func(t *testing.T, ts *emulator.TestServer, early, late string) {
+					status, raw := ramOwnershipCall(t, ts, "/deleteresourceshare", map[string]any{"resourceShareArn": early})
+					require.Equal(t, http.StatusOK, status, "%s", raw)
+				},
+				want: []string{"10", "20", "30"},
+			},
+		} {
+			t.Run(tc.member+"/"+change.name, func(t *testing.T) {
+				t.Parallel()
+				ts := emulator.StartTestServer(t)
+				a := ramOwnershipShare(t, ts, "a", nil, nil)
+				b := ramOwnershipShare(t, ts, "b", nil, nil)
+				early, late := a, b
+				if b < a {
+					early, late = b, a
+				}
+				// The cursor's entity, 20, is in the later share.
+				ramChange(t, ts, tc, "/associateresourceshare", early, "10", "40", "50")
+				ramChange(t, ts, tc, "/associateresourceshare", late, "20", "30")
+
+				page1 := ramPageCall(t, ts, tc.path, tc.member, map[string]any{"resourceOwner": "SELF", "maxResults": 2})
+				first := ramEntries(t, page1.Items)
+				require.Equal(t, []string{tc.value("10"), tc.value("20")}, []string{first[0].entity(), first[1].entity()})
+				require.NotEmpty(t, page1.NextToken)
+
+				change.apply(t, ts, early, late)
+				walked := []string{first[0].entity(), first[1].entity()}
+				walked = append(walked, ramWalkFrom(t, ts, tc, page1.NextToken)...)
+
+				want := []string{}
+				for _, s := range change.want {
+					want = append(want, tc.value(s))
+				}
+				assert.Equal(t, want, walked, "every surviving entity once, nothing repeated")
+				for _, e := range walked {
+					assert.NotEqual(t, tc.value("15"), e, "an entity added before the cursor is not reached")
+				}
+			})
+		}
 	}
 }
 

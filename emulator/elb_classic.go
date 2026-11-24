@@ -567,7 +567,7 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 	// `DependencyThrottle` and `LoadBalancerNotFound` and nothing else — so a refused cursor answers
 	// the Common Errors page's code; see [elbMarker].
 	names := extractIndexedParams(req.Params, "LoadBalancerNames.member")
-	pr, awsErr := elbMarker(req, "DescribeLoadBalancers", map[string][]string{"LoadBalancerNames": names})
+	pr, awsErr := elbMarker(req, "DescribeLoadBalancers@"+elbClassicAPIVersion, map[string][]string{"LoadBalancerNames": names})
 	if awsErr != nil {
 		return nil, awsErr
 	}

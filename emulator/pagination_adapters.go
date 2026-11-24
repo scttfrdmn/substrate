@@ -50,6 +50,9 @@ func jsonNextToken(p jsonPaging, filter map[string][]string, nextToken string, m
 // filter members is `ValidationError`/400: no ELB describe publishes a code for a bad marker, and
 // the Query Common Errors page each links as its own publishes `ValidationError` ("The input fails to
 // satisfy the constraints specified by an AWS service."). The message is substrate's own.
+//
+// op carries the API version where both generations share an operation name
+// (`DescribeLoadBalancers`), so neither generation accepts the other's marker.
 func elbMarker(req *AWSRequest, op string, filter map[string][]string) (pageRequest, *AWSError) {
 	size, awsErr := elbPageSize(req.Params["PageSize"])
 	if awsErr != nil {

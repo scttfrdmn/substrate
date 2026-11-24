@@ -208,7 +208,7 @@ func (p *ELBPlugin) describeLoadBalancers(reqCtx *RequestContext, req *AWSReques
 	names := extractIndexedParams(req.Params, "Names.member")
 	arns := extractIndexedParams(req.Params, "LoadBalancerArns.member")
 	// The cursor is resolved before any state is read; see [elbMarker].
-	pr, awsErr := elbMarker(req, "DescribeLoadBalancers", map[string][]string{
+	pr, awsErr := elbMarker(req, "DescribeLoadBalancers@2015-12-01", map[string][]string{
 		"Names": names, "LoadBalancerArns": arns,
 	})
 	if awsErr != nil {

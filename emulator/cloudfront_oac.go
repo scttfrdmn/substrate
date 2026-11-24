@@ -151,8 +151,8 @@ type cfOACListWire struct {
 	NextMarker  string              `xml:"NextMarker,omitempty"`
 	MaxItems    int                 `xml:"MaxItems"`
 	IsTruncated bool                `xml:"IsTruncated"`
-	Items       *[]cfOACSummaryWire `xml:"Items>OriginAccessControlSummary,omitempty"`
 	Quantity    int                 `xml:"Quantity"`
+	Items       *[]cfOACSummaryWire `xml:"Items>OriginAccessControlSummary,omitempty"`
 }
 
 // createOriginAccessControl handles POST /2020-05-31/origin-access-control.
@@ -223,9 +223,9 @@ func cfOACResponse(status int, oac CloudFrontOriginAccessControl) (*AWSResponse,
 
 // listOriginAccessControls handles GET /2020-05-31/origin-access-control.
 //
-// The listing is in ID order, paged on `Marker`/`MaxItems` through [cfListPage]. An unreadable record
-// is skipped rather than failing the list, following [listDistributions]: one corrupt record must
-// not make the account's other controls unfindable.
+// The listing is in ID order, paged on `Marker`/`MaxItems` through [cfListPage]. A record that does
+// not decode is skipped rather than failing the list, following [listDistributions]: one corrupt
+// record must not make the account's other controls unfindable. A store failure fails the call.
 func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	pg, awsErr := cfListPage(req)
 	if awsErr != nil {
@@ -236,14 +236,28 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AW
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront listOriginAccessControls loadIndex: %w", err)
 	}
-	res := pageAfter(ids, cfIDKey, pg.after(), pg.maxItems, false)
-
-	summaries := make([]cfOACSummaryWire, 0, len(res.Items))
-	for _, id := range res.Items {
-		oac, loadErr := p.loadOriginAccessControl(ctx.AccountID, id)
-		if loadErr != nil {
+	// Every record is read before the page is cut, so a page is short only at the end of the
+	// listing. A store failure fails the call.
+	all := make([]CloudFrontOriginAccessControl, 0, len(ids))
+	for _, id := range ids {
+		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfOACKey(ctx.AccountID, id))
+		if getErr != nil {
+			return nil, fmt.Errorf("cloudfront listOriginAccessControls get %s: %w", id, getErr)
+		}
+		if data == nil {
 			continue
 		}
+		var oac CloudFrontOriginAccessControl
+		if json.Unmarshal(data, &oac) != nil {
+			continue
+		}
+		all = append(all, oac)
+	}
+	res := pageAfter(all, func(o CloudFrontOriginAccessControl) cursorKey { return cfIDKey(o.ID) },
+		pg.after(), pg.maxItems, false)
+
+	summaries := make([]cfOACSummaryWire, 0, len(res.Items))
+	for _, oac := range res.Items {
 		summaries = append(summaries, cfOACSummaryWire{
 			Description:     oac.Description,
 			ID:              oac.ID,

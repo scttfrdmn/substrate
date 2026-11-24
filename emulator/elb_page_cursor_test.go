@@ -397,6 +397,32 @@ func TestELBPageCursor_AMarkerIsBoundToItsOperationAndFilters(t *testing.T) {
 		})
 	}
 
+	// The two generations' DescribeLoadBalancers share a name and refuse each other's marker.
+	elbCreateLB(t, ts.URL, "bound-alb-2", nil)
+	elbClassicCreate(t, ts.URL, "bound-classic-1", nil)
+	elbClassicCreate(t, ts.URL, "bound-classic-2", nil)
+	v2 := map[string]string{"Action": "DescribeLoadBalancers"}
+	classic := map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion}
+	v2Marker := elbDescribePage(t, ts, map[string]string{"Action": "DescribeLoadBalancers", "PageSize": "1"},
+		"LoadBalancers", "LoadBalancerArn").next
+	classicMarker := elbDescribePage(t, ts,
+		map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion, "PageSize": "1"},
+		"LoadBalancerDescriptions", "LoadBalancerName").next
+	require.NotEmpty(t, v2Marker)
+	require.NotEmpty(t, classicMarker)
+	for name, tc := range map[string]struct {
+		params map[string]string
+		marker string
+	}{
+		"a v2 marker on classic": {classic, v2Marker},
+		"a classic marker on v2": {v2, classicMarker},
+	} {
+		tc.params["Marker"] = tc.marker
+		got := elbSendForPageSizeAnswer(t, ts.URL, tc.params)
+		assert.Equal(t, "ValidationError", got.code, name)
+		assert.Equal(t, http.StatusBadRequest, got.status, name)
+	}
+
 	// The same filter members, in another order, are the same filter.
 	named := map[string]string{"Action": "DescribeTargetGroups", "PageSize": "1",
 		"Names.member.1": tgNames[0], "Names.member.2": tgNames[2]}

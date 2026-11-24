@@ -747,8 +747,11 @@ constraints"; none of these operations publishes a code of its own for it, and t
 substrate's own. The tag listings' `Marker` takes the same form, so it no longer names the next
 page's first tag key in the clear.
 
-`SimulatePrincipalPolicy` and `SimulateCustomPolicy` page their results on a base64 index, which is
-stable because the results are computed from the request alone. An index that does not decode is
+`SimulatePrincipalPolicy` and `SimulateCustomPolicy` page their results on a base64 index. The
+result list holds one entry per requested action and resource pair, in request order, so an index
+names the same pair on every page; `SimulatePrincipalPolicy` reads the principal's policies on each
+call, so a policy changed between pages changes the decisions later pages report, not which pairs
+they hold. An index that does not decode is
 `InvalidInput`/400, the code both pages publish ("The request was rejected because an invalid or
 out-of-range value was supplied for an input parameter."). `ListPolicyVersions`' marker is the next
 version's ID, and one naming no version is `InvalidInput`/400.

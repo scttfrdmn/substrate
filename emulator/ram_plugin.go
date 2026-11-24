@@ -482,8 +482,8 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if err != nil {
 			return nil, err
 		}
-		// Shares in ARN order and each share's principals in ID order, the cursor's order, so the
-		// share a duplicated principal is listed under is the first in that order.
+		// A principal of several shares is listed once, under the first share in ARN order:
+		// API_Principal's resourceShareArn is "a resource share the principal is associated with".
 		ramSortShares(shares)
 		seen := make(map[string]bool)
 		for _, share := range shares {
@@ -498,7 +498,7 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 			}) {
 				continue
 			}
-			for _, principal := range slices.Sorted(slices.Values(share.Principals)) {
+			for _, principal := range share.Principals {
 				if seen[principal] || !ramMatchesAny(input.Principals, principal) {
 					continue
 				}
@@ -558,7 +558,8 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if err != nil {
 			return nil, err
 		}
-		// Shares in ARN order and each share's resources in ARN order, the cursor's order.
+		// A resource of several shares is listed once, under the first share in ARN order:
+		// API_Resource's resourceShareArn is "the resource share this resource is associated with".
 		ramSortShares(shares)
 		seen := make(map[string]bool)
 		for _, share := range shares {
@@ -568,7 +569,7 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 			if input.Principal != "" && !slices.Contains(share.Principals, input.Principal) {
 				continue
 			}
-			for _, resourceArn := range slices.Sorted(slices.Values(share.ResourceArns)) {
+			for _, resourceArn := range share.ResourceArns {
 				if seen[resourceArn] || !ramMatchesAny(input.ResourceArns, resourceArn) ||
 					!ramMatchesType(input.ResourceType, resourceArn) {
 					continue
@@ -594,7 +595,8 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	return ramPaged("resources", "arn", resources, pr)
 }
 
-// ramSortShares orders shares by ARN, the leading half of ListPrincipals' and ListResources' cursor.
+// ramSortShares orders shares by ARN, which decides the share a principal or resource of several
+// shares is listed under.
 func ramSortShares(shares []RAMResourceShare) {
 	slices.SortFunc(shares, func(a, b RAMResourceShare) int {
 		return strings.Compare(a.ResourceShareArn, b.ResourceShareArn)

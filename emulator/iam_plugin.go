@@ -2917,6 +2917,8 @@ func parseIAMBody(body []byte, dst any) error {
 // paginateIAMKeys returns the page of keys, in sorted order, that starts strictly after pg's
 // Marker, the Marker that resumes after it ([iamEncodeMarker] of its last key), and whether more
 // results exist. A Marker naming a key that has since been deleted resumes where that key was.
+// Every key is an IAM name, path or ARN, each of which the API reference gives a minimum length of
+// 1, so no key is empty and every truncated page carries a Marker.
 func paginateIAMKeys(keys []string, pg iamPage) (page []string, nextMarker string, isTruncated bool) {
 	res := pageAfter(keys, func(k string) cursorKey { return cursorKey{Sort: k} }, pg.after, pg.size, false)
 	if res.Truncated {
