@@ -1205,7 +1205,7 @@ func (p *CloudFrontPlugin) loadDistributionForAccount(accountID, distID string) 
 // Named rather than written inline because three kinds of identifier draw from it — a
 // distribution ID, an invalidation ID and an origin access control's ID and ETag — and #856's
 // conversion turned the one function that held it into a mint call. A second copy would be a
-// second alphabet the day someone corrected one of them. [cfnOAIIDChars] (cfn_resources_v23.go)
+// second alphabet the day someone corrected one of them. [cfnOAIIDChars] (cfnOriginAccessIdentityID)
 // is a deliberate third copy, derived for CloudFormation's own reasons and documented there.
 const cfIDAlphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 

@@ -2,7 +2,9 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -72,7 +74,7 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::Backup::BackupPlan":  (*StackDeployer).updateBackupBackupPlan,
 	"AWS::EC2::LaunchTemplate": (*StackDeployer).updateEC2LaunchTemplate,
 	// The types CDK templates most often change in place (#1545, #1550); see
-	// cfn_resources_v129.go.
+	// cfnUpdateUnmodelledProperties.
 	"AWS::Lambda::Function":   (*StackDeployer).updateLambdaFunction,
 	"AWS::DynamoDB::Table":    (*StackDeployer).updateDynamoDBTable,
 	"AWS::SQS::Queue":         (*StackDeployer).updateSQSQueue,
@@ -82,13 +84,13 @@ var cfnResourceUpdaters = map[string]cfnUpdateFunc{
 	"AWS::KMS::Key":           (*StackDeployer).updateKMSKey,
 	"AWS::EC2::SecurityGroup": (*StackDeployer).updateEC2SecurityGroup,
 	"AWS::ECS::Service":       (*StackDeployer).updateECSService,
-	// The IAM types (#1545, #1560, #1562); see cfn_resources_v129_iam.go.
+	// The IAM types (#1545, #1560, #1562); see cfnIAMRecord.
 	"AWS::IAM::Role":          (*StackDeployer).updateIAMRole,
 	"AWS::IAM::User":          (*StackDeployer).updateIAMUser,
 	"AWS::IAM::Group":         (*StackDeployer).updateIAMGroup,
 	"AWS::IAM::Policy":        (*StackDeployer).updateIAMPolicy,
 	"AWS::IAM::ManagedPolicy": (*StackDeployer).updateIAMManagedPolicy,
-	// The CDK's routing and queue-policy types (#1605; cfn_resources_v131.go).
+	// The CDK's routing and queue-policy types (#1605).
 	"AWS::EC2::Route":                       (*StackDeployer).updateEC2Route,
 	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).updateEC2SubnetRouteTableAssociation,
 	"AWS::SQS::QueuePolicy":                 (*StackDeployer).updateQueuePolicy,
@@ -528,4 +530,158 @@ func cfnRemovedResources(baseline *cfnBaseline, tmpl *cfnTemplate, cctx *cfnCont
 		removed = append(removed, r)
 	}
 	return removed
+}
+
+// The in-place updates cfnResourceUpdaters names for AWS::Lambda::Function, AWS::DynamoDB::Table,
+// AWS::SQS::Queue, AWS::SNS::Topic, AWS::S3::Bucket, AWS::KMS::Key, AWS::EC2::SecurityGroup and
+// AWS::ECS::Service (#1545, #1550) live with each type's deploy helper, beside the create-side
+// configuration each shares with its update.
+//
+// Three rules hold for every one of those updaters, so each doc comment states only its exceptions:
+//
+//   - **What the update applies is what the create applies.** An updater sends the properties its
+//     type's deploy helper forwards, through the service's own update operation; a property the
+//     create does not forward either (most types' Tags, a Lambda function's VpcConfig, a queue's
+//     RedrivePolicy) is left alone and makes no call, which is what re-creating the resource used
+//     to do with it too. A property the create forwards and substrate has no routed operation to
+//     update is in cfnUpdateUnmodelledProperties instead, and a change to it fails the resource.
+//   - **A property removed from the template resets** where the resource page publishes the value
+//     an undeclared property has — SQS's attribute defaults, a Lambda function's Timeout and
+//     MemorySize — or where the create itself sends a value for an undeclared property, and the
+//     service's API can express it. Otherwise the removal is left as it is and the updater's doc
+//     comment says so.
+//   - **The physical ID stands**: an updater returns the prior record, so a Ref to the resource
+//     resolves as it did, and a refusal is reported on the resource exactly as a create's is.
+//
+// Template-level Tags are not applied by any of these creates, and so not by their updates. The
+// stack's own tags and CloudFormation's three aws:cloudformation:* tags are written on the same
+// records, so applying a template's Tags through a replace-the-set call (S3's PutBucketTagging)
+// would drop them; that reconciliation is its own change.
+
+// cfnUpdateUnmodelledProperties maps a type that has an updater to the properties its create
+// forwards and its update cannot apply, each with the reason. A change to one fails the resource
+// with the reason and the update rolls back, rather than leaving a resource whose live
+// configuration no longer matches its template. The reasons are substrate's own.
+var cfnUpdateUnmodelledProperties = map[string]map[string]string{
+	// The DynamoDB page gives KeySchema "Some interruptions" and the index and stream properties
+	// "No interruption"; substrate's UpdateTable takes BillingMode and ProvisionedThroughput only
+	// (#1574).
+	"AWS::DynamoDB::Table": {
+		"KeySchema":              "UpdateTable takes no KeySchema",
+		"AttributeDefinitions":   "substrate's UpdateTable takes no AttributeDefinitions",
+		"GlobalSecondaryIndexes": "substrate's UpdateTable takes no GlobalSecondaryIndexUpdates",
+		"LocalSecondaryIndexes":  "UpdateTable cannot change a table's local secondary indexes",
+		"StreamSpecification":    "substrate's UpdateTable takes no StreamSpecification",
+	},
+	// LaunchType is "Some interruptions" on the ECS::Service page; UpdateService has no launch type
+	// member, and how CloudFormation applies the change is not published.
+	"AWS::ECS::Service": {
+		"LaunchType": "UpdateService takes no launch type",
+	},
+}
+
+// cfnChooseIf follows Fn::If to the branch its condition selects, as many levels as it nests, and
+// reports false when the value is, or selects, AWS::NoValue.
+func cfnChooseIf(v interface{}, cctx *cfnContext) (interface{}, bool) {
+	for {
+		if isCFNNoValue(v, cctx) {
+			return nil, false
+		}
+		m, ok := v.(map[string]interface{})
+		if !ok || len(m) != 1 {
+			return v, true
+		}
+		args, isIf := m["Fn::If"].([]interface{})
+		if !isIf || len(args) < 3 {
+			return v, true
+		}
+		name, _ := args[0].(string)
+		if cctx.condition(name) {
+			v = args[1]
+		} else {
+			v = args[2]
+		}
+	}
+}
+
+// cfnResolveStructured resolves a structured property value — an object, or a list of objects —
+// keeping its shape. It is [resolveNested] with one difference that matters for a list of rules or
+// a map of variables: an Fn::If choosing an object or a list is followed into that branch and
+// resolved in turn, and one choosing AWS::NoValue drops the member or element. resolveNested
+// resolves such an Fn::If as a scalar, which renders the chosen object as a string.
+//
+// Any other intrinsic is resolved by resolveNested, so scalars become strings and list-valued
+// intrinsics splice into the list they stand in. An absent value, or one that is AWS::NoValue,
+// resolves to nil.
+func cfnResolveStructured(v interface{}, cctx *cfnContext) interface{} {
+	v, ok := cfnChooseIf(v, cctx)
+	if !ok {
+		return nil
+	}
+	switch val := v.(type) {
+	case map[string]interface{}:
+		if isCFNIntrinsic(val) {
+			return resolveNested(val, cctx)
+		}
+		out := make(map[string]interface{}, len(val))
+		for k, item := range val {
+			if chosen, present := cfnChooseIf(item, cctx); present {
+				out[k] = cfnResolveStructured(chosen, cctx)
+			}
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, 0, len(val))
+		for _, item := range val {
+			chosen, present := cfnChooseIf(item, cctx)
+			if !present {
+				continue
+			}
+			if m, isMap := chosen.(map[string]interface{}); isMap && isCFNIntrinsic(m) {
+				resolved := resolveNested(m, cctx)
+				if list, isList := resolved.([]interface{}); isList {
+					out = append(out, list...)
+				} else {
+					out = append(out, resolved)
+				}
+				continue
+			}
+			out = append(out, cfnResolveStructured(chosen, cctx))
+		}
+		return out
+	}
+	return v
+}
+
+// cfnChangedAny reports whether changed names any of props.
+func cfnChangedAny(changed []string, props ...string) bool {
+	for _, p := range props {
+		if slices.Contains(changed, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// cfnUpdateDispatch sends one update request and folds its cost and refusal into the running
+// totals, so an updater making several calls stops at the first refusal and reports it.
+func (d *StackDeployer) cfnUpdateDispatch(
+	ctx context.Context, req *AWSRequest, streamID string, cost *float64,
+) error {
+	_, c, err := d.dispatch(ctx, req, streamID)
+	*cost += c
+	return err
+}
+
+// cfnJSONRequest builds a JSON-protocol request to service with body marshaled.
+func cfnJSONRequest(service, operation string, body interface{}) (*AWSRequest, error) {
+	data, err := json.Marshal(body)
+	if err != nil {
+		return nil, fmt.Errorf("cfn %s %s marshal: %w", service, operation, err)
+	}
+	return &AWSRequest{
+		Service: service, Operation: operation, Body: data,
+		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+		Params:  map[string]string{},
+	}, nil
 }

@@ -1,140 +1,16 @@
 package emulator
 
-// cfn_resources_v21.go holds the StackDeployer.deployResource helpers for ECR and ECS.
-// The name records the substrate release that added them (v0.21.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's ECS resource types.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
+	"strconv"
 )
 
-// ----- v0.21.0 — ECR -------------------------------------------------------
-
-// deployECRRepository creates an ECR repository for the given CFN resource.
-func (d *StackDeployer) deployECRRepository(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	streamID string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	name := resolveStringProp(props, "RepositoryName", logicalID, cctx)
-
-	body := map[string]interface{}{"repositoryName": name}
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("cfn deployECRRepository marshal: %w", err)
-	}
-
-	req := &AWSRequest{
-		Service:   "ecr",
-		Operation: "CreateRepository",
-		Body:      bodyBytes,
-		Headers:   map[string]string{"x-amz-target": "AmazonEC2ContainerRegistry_V1_1_0.CreateRepository"},
-		Params:    map[string]string{},
-	}
-
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
-	dr := DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::ECR::Repository",
-		PhysicalID: name,
-		Metadata:   make(map[string]interface{}),
-	}
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-	} else if resp != nil {
-		var result struct {
-			Repository struct {
-				RepositoryArn string `json:"repositoryArn"`
-				RepositoryURI string `json:"repositoryUri"`
-			} `json:"repository"`
-		}
-		if jsonErr := json.Unmarshal(resp.Body, &result); jsonErr == nil {
-			if result.Repository.RepositoryArn != "" {
-				dr.ARN = result.Repository.RepositoryArn
-			}
-			if result.Repository.RepositoryURI != "" {
-				dr.Metadata["RepositoryUri"] = result.Repository.RepositoryURI
-			}
-		}
-	}
-	if dr.Error == "" {
-		if lp, ok := props["LifecyclePolicy"].(map[string]interface{}); ok {
-			lpCost, lpErr := d.putECRLifecyclePolicy(ctx, name, lp, streamID, cctx)
-			cost += lpCost
-			if lpErr != nil {
-				// The repository exists, but a failed resource is not one a rollback deletes, so it
-				// is deleted here; otherwise a rolled-back stack would leave it behind, and a retry
-				// would be refused with RepositoryAlreadyExistsException.
-				dr.Error = lpErr.Error()
-				if delErr := d.deleteECRRepository(ctx, name, streamID); delErr != nil {
-					dr.Error += " (and the repository could not be deleted: " + delErr.Error() + ")"
-				}
-			}
-		}
-	}
-	return dr, cost, nil
-}
-
-// deleteECRRepository deletes a repository this deploy created, with its images.
-func (d *StackDeployer) deleteECRRepository(ctx context.Context, name, streamID string) error {
-	body, err := json.Marshal(map[string]interface{}{"repositoryName": name, "force": true})
-	if err != nil {
-		return fmt.Errorf("cfn deleteECRRepository marshal: %w", err)
-	}
-	_, _, routeErr := d.dispatch(ctx, &AWSRequest{
-		Service:   "ecr",
-		Operation: "DeleteRepository",
-		Body:      body,
-		Headers:   map[string]string{"x-amz-target": "AmazonEC2ContainerRegistry_V1_1_0.DeleteRepository"},
-		Params:    map[string]string{},
-	}, streamID)
-	return routeErr
-}
-
-// putECRLifecyclePolicy applies a repository's LifecyclePolicy property — "Creates or updates a
-// lifecycle policy" — through PutLifecyclePolicy.
-//
-// This used to be the deploy helper of an AWS::ECR::LifecyclePolicy type, which CloudFormation
-// does not have: the resource specification lists no such type, so a template declaring one is
-// refused as unrecognized (#1605). The policy is the repository's own property, and only
-// LifecyclePolicyText is applied; RegistryId names the account, which is the stack's.
-func (d *StackDeployer) putECRLifecyclePolicy(
-	ctx context.Context, repoName string, lp map[string]interface{}, streamID string, cctx *cfnContext,
-) (float64, error) {
-	// LifecyclePolicyText is published as a String; cfnJSONDocument passes that
-	// form through unquoted and still accepts an object (#1153).
-	policy := cfnJSONDocument(lp["LifecyclePolicyText"], cctx)
-	if policy == "" {
-		return 0, nil
-	}
-
-	body := map[string]interface{}{
-		"repositoryName":      repoName,
-		"lifecyclePolicyText": policy,
-	}
-	bodyBytes, err := json.Marshal(body)
-	if err != nil {
-		return 0, fmt.Errorf("cfn putECRLifecyclePolicy marshal: %w", err)
-	}
-
-	req := &AWSRequest{
-		Service:   "ecr",
-		Operation: "PutLifecyclePolicy",
-		Body:      bodyBytes,
-		Headers:   map[string]string{"x-amz-target": "AmazonEC2ContainerRegistry_V1_1_0.PutLifecyclePolicy"},
-		Params:    map[string]string{},
-	}
-
-	_, cost, routeErr := d.dispatch(ctx, req, streamID)
-	return cost, routeErr
-}
-
-// ----- v0.21.0 — ECS -------------------------------------------------------
+// ----- ECS -----------------------------------------------------------------
 
 // deployECSCluster creates an ECS cluster for the given CFN resource.
 func (d *StackDeployer) deployECSCluster(
@@ -496,4 +372,52 @@ func ecsRewriteKeys(v interface{}, table map[string]string) interface{} {
 		return out
 	}
 	return v
+}
+
+// ----- AWS::ECS::Service ----------------------------------------------------------------
+
+// cfnECSDesiredCount is the service's DesiredCount, or the 1 the create has always sent for an
+// undeclared one.
+func cfnECSDesiredCount(props map[string]interface{}, cctx *cfnContext) int {
+	if v := resolveStringProp(props, "DesiredCount", "", cctx); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return 1
+}
+
+// updateECSService applies a changed AWS::ECS::Service's TaskDefinition and DesiredCount through
+// UpdateService, keeping the service. Cluster, ServiceName, Role and SchedulingStrategy are
+// Replacement; LaunchType is in cfnUpdateUnmodelledProperties. A removed DesiredCount returns to
+// the create's 1.
+func (d *StackDeployer) updateECSService(
+	ctx context.Context, logicalID string, prior DeployedResource,
+	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	dr := prior
+	dr.LogicalID = logicalID
+	if !cfnChangedAny(changed, "TaskDefinition", "DesiredCount") {
+		return dr, 0, nil
+	}
+	body := map[string]interface{}{
+		"cluster": resolveStringProp(props, "Cluster", "default", cctx),
+		"service": prior.PhysicalID,
+	}
+	if slices.Contains(changed, "TaskDefinition") {
+		body["taskDefinition"] = resolveStringProp(props, "TaskDefinition", "", cctx)
+	}
+	if slices.Contains(changed, "DesiredCount") {
+		body["desiredCount"] = cfnECSDesiredCount(props, cctx)
+	}
+	req, err := cfnJSONRequest("ecs", "UpdateService", body)
+	if err != nil {
+		return DeployedResource{}, 0, err
+	}
+	req.Headers = map[string]string{"x-amz-target": "AmazonEC2ContainerServiceV20141113.UpdateService"}
+	var cost float64
+	if routeErr := d.cfnUpdateDispatch(ctx, req, streamID, &cost); routeErr != nil {
+		dr.Error = routeErr.Error()
+	}
+	return dr, cost, nil
 }

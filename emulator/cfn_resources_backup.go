@@ -1,9 +1,7 @@
 package emulator
 
-// cfn_resources_v128.go holds the StackDeployer helpers v0.128.0 added: AWS Backup's two
-// resource types, which now dispatch the Backup API (#1428), and the in-place updates
-// cfnResourceUpdaters names (#1427, #1508). The name records the release rather than the
-// services, as the other cfn_resources_v*.go files do.
+// StackDeployer helpers for CloudFormation's AWS Backup resource types, which dispatch the Backup
+// API (#1428).
 
 import (
 	"context"
@@ -250,111 +248,4 @@ func backupSelectionDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]
 	return &AWSRequest{Service: "backup", Operation: "DELETE",
 		Path:    "/backup/plans/" + planID + "/selections/" + dr.PhysicalID,
 		Headers: map[string]string{}, Params: map[string]string{}}
-}
-
-// ----- In-place updates (#1427, #1508) ----------------------------------------------
-
-// cfnTransferUpdateExcluded are the AWS::Transfer::Server properties UpdateServer does not take.
-// Domain is Update requires: Replacement, so a change to it never reaches the update. Tags is a
-// TagResource call rather than an UpdateServer member, and TagResource is not routed for Transfer.
-// CreateWithHostKey "can be set only when you create the server"; a change to it fails the
-// resource before this is reached (cfnCreateOnlyProperties), so it is excluded only from the body
-// a rollback re-applies.
-var cfnTransferUpdateExcluded = map[string]bool{"Domain": true, "Tags": true, "CreateWithHostKey": true}
-
-// updateTransferServer applies a changed AWS::Transfer::Server through UpdateServer, keeping the
-// server's ID (#1427). Every property but Domain is updatable in place by the resource's page, and
-// UpdateServer's members carry the same names as the template's properties, so the declared
-// properties are sent as they are for the create, minus the three UpdateServer does not take.
-//
-// A property removed from the template is not reset: UpdateServer leaves an omitted member as it is,
-// and substrate has no record of the value the server was created without it. A change to Tags alone
-// makes no call, for the reason [cfnTransferUpdateExcluded] gives.
-func (d *StackDeployer) updateTransferServer(
-	ctx context.Context, logicalID string, prior DeployedResource,
-	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	dr := prior
-	dr.LogicalID = logicalID
-	applies := false
-	for _, prop := range changed {
-		if !cfnTransferUpdateExcluded[prop] {
-			applies = true
-		}
-	}
-	if !applies {
-		return dr, 0, nil
-	}
-	body := map[string]interface{}{"ServerId": prior.PhysicalID}
-	for key, v := range props {
-		if !cfnTransferUpdateExcluded[key] {
-			body[key] = resolveNested(v, cctx)
-		}
-	}
-	data, err := json.Marshal(body)
-	if err != nil {
-		return DeployedResource{}, 0, fmt.Errorf("cfn updateTransferServer marshal: %w", err)
-	}
-	_, cost, routeErr := d.dispatch(ctx, &AWSRequest{
-		Service: "transfer", Operation: "UpdateServer",
-		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.1"},
-		Params:  map[string]string{}, Body: data,
-	}, streamID)
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-		return dr, cost, nil //nolint:nilerr // A refused update is reported on the resource.
-	}
-	return dr, cost, nil
-}
-
-// updateEC2LaunchTemplate applies a changed AWS::EC2::LaunchTemplate's LaunchTemplateData by
-// adding a version with CreateLaunchTemplateVersion, keeping the template's ID (#1508).
-// LaunchTemplateData is Update requires: No interruption; LaunchTemplateName is Replacement, so a
-// renamed template never reaches here.
-//
-// LatestVersionNumber is the new version's number, from the response, so Fn::GetAtt on it answers
-// the version just created — the value an Auto Scaling group's LaunchTemplate.Version is written
-// against. DefaultVersionNumber is left as it was: the page says "the default version of a launch
-// template cannot be specified in AWS CloudFormation", and it is ModifyLaunchTemplate that sets it.
-//
-// A change to TagSpecifications or VersionDescription alone makes no call. VersionDescription is
-// "a description for the first version", which already exists; the template's own tags are a
-// CreateTags call, and are not re-applied here.
-func (d *StackDeployer) updateEC2LaunchTemplate(
-	ctx context.Context, logicalID string, prior DeployedResource,
-	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	dr := prior
-	dr.LogicalID = logicalID
-	if !slices.Contains(changed, "LaunchTemplateData") {
-		return dr, 0, nil
-	}
-	params := cfnLaunchTemplateDataParams(props, cctx)
-	params["Action"] = "CreateLaunchTemplateVersion"
-	params["LaunchTemplateId"] = prior.PhysicalID
-	resp, cost, routeErr := d.dispatch(ctx, &AWSRequest{
-		Service: "ec2", Operation: "CreateLaunchTemplateVersion",
-		Params: params, Headers: map[string]string{},
-	}, streamID)
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-		return dr, cost, nil //nolint:nilerr // A refused update is reported on the resource.
-	}
-	dr.Metadata = cfnCopyMetadata(prior.Metadata)
-	if resp != nil {
-		if v := extractXMLField(resp.Body, "versionNumber"); v != "" {
-			dr.Metadata["LatestVersionNumber"] = v
-		}
-	}
-	return dr, cost, nil
-}
-
-// cfnCopyMetadata returns a copy of m that an update can change without altering the record it
-// was read from, which the rollback still compares against.
-func cfnCopyMetadata(m map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(m)+1)
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
 }

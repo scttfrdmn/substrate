@@ -241,7 +241,7 @@ func TestAppSyncPaths_TheSchemaSegmentsAreGatedOnTheirVerb(t *testing.T) {
 // spells the path itself.
 //
 // Two in-tree sites build the URI rather than going through parseAppSyncOperation —
-// cfn_resources_v31.go for the create and cfn_delete.go for the delete — so lowercasing only the
+// deployAppSyncGraphQLApi for the create and cfn_delete.go for the delete — so lowercasing only the
 // router would have fixed the SDK path and broken CloudFormation, which is why #1065's fix touches
 // all three. The create was already exercised by TestCFN_AppSyncFullStack; the delete was exercised
 // nowhere, which is how a wrong-case path could have survived there unnoticed. Asserting the data

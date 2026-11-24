@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -396,4 +397,153 @@ func TestEC2_DefaultVPC_ConfigSwitch(t *testing.T) {
 	cfg, err = emulator.LoadConfig("")
 	require.NoError(t, err)
 	assert.False(t, cfg.EC2.DefaultVPC)
+}
+
+// TestEC2_DefaultVPC_LaunchUsesThePlacementZonesSubnet pins that a subnet-less launch naming a
+// zone lands in that zone's default subnet, and is refused when the zone has none.
+func TestEC2_DefaultVPC_LaunchUsesThePlacementZonesSubnet(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	call := ec2CallHTTP(t, func(p map[string]string) *http.Response { return ec2Request(t, ts, p) })
+	view := ec2ReadDefaultVPC(t, call)
+
+	var run struct {
+		SubnetID string `xml:"instancesSet>item>subnetId"`
+		Zone     string `xml:"instancesSet>item>placement>availabilityZone"`
+	}
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
+		"Placement.AvailabilityZone": "us-east-1b",
+	}, &run)
+	assert.Equal(t, view.subnets[1].SubnetID, run.SubnetID, "the zone-b default subnet")
+	assert.Equal(t, "us-east-1b", run.Zone)
+
+	call(map[string]string{"Action": "DeleteSubnet", "SubnetId": view.subnets[2].SubnetID})
+	status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
+		"Action": "RunInstances", "ImageId": ec2TestImage, "MinCount": "1", "MaxCount": "1",
+		"Placement.AvailabilityZone": "us-east-1c",
+	})
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Equal(t, "InvalidInput", code)
+	assert.Equal(t, "No default subnet for availability zone: 'us-east-1c'.", msg)
+}
+
+// TestEC2_CreateDefaultSubnet_AvoidsOverlapAndRaces pins the CIDR choice against a caller's own
+// subnet in the default VPC, and that concurrent creates for one zone make one subnet.
+func TestEC2_CreateDefaultSubnet_AvoidsOverlapAndRaces(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	call := ec2CallHTTP(t, func(p map[string]string) *http.Response { return ec2Request(t, ts, p) })
+	view := ec2ReadDefaultVPC(t, call)
+
+	call(map[string]string{"Action": "DeleteSubnet", "SubnetId": view.subnets[1].SubnetID})
+	// A /24 inside the freed 172.31.16.0/20: the /20 is no longer free.
+	ec2CreateTaggedSubnet(t, ts, view.vpcID, "172.31.17.0/24", "us-east-1b", nil)
+
+	const callers = 6
+	var wg sync.WaitGroup
+	statuses := make([]int, callers)
+	bodies := make([]string, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			form := url.Values{"Action": {"CreateDefaultSubnet"}, "AvailabilityZone": {"us-east-1b"}}
+			req, err := http.NewRequest(http.MethodPost, ts.URL+"/", strings.NewReader(form.Encode()))
+			if err != nil {
+				return
+			}
+			req.Host = "ec2.us-east-1.amazonaws.com"
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return
+			}
+			raw, _ := io.ReadAll(resp.Body)
+			_ = resp.Body.Close()
+			statuses[i], bodies[i] = resp.StatusCode, string(raw)
+		}(i)
+	}
+	wg.Wait()
+
+	created := 0
+	for i := range statuses {
+		if statuses[i] == http.StatusOK {
+			created++
+			assert.Contains(t, bodies[i], "<cidrBlock>172.31.48.0/20</cidrBlock>",
+				"the first /20 overlapping no subnet of the VPC")
+		} else {
+			assert.Contains(t, bodies[i], "DefaultSubnetAlreadyExistsInAvailabilityZone")
+		}
+	}
+	assert.Equal(t, 1, created, "one default subnet per zone, however many callers race")
+}
+
+// TestEC2_DefaultVPC_TimeTravelHonorsTheSwitch pins that a time-travel replay registers its
+// plugins with the server's default-VPC setting, so a server started without one does not
+// show one in the past either.
+func TestEC2_DefaultVPC_TimeTravelHonorsTheSwitch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		opts []emulator.TestServerOption
+		want bool
+	}{
+		{"seeded", []emulator.TestServerOption{emulator.WithRecordedBodies()}, true},
+		{"switched off", []emulator.TestServerOption{emulator.WithRecordedBodies(), emulator.WithoutDefaultVPC()}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := emulator.StartTestServer(t, tc.opts...)
+			ec2ReplayCall(t, ts, "DescribeVpcs", url.Values{})
+			resp, err := http.Get(ts.URL + "/v1/debug/events/1000/state")
+			require.NoError(t, err)
+			raw, err := io.ReadAll(resp.Body)
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusOK, resp.StatusCode, string(raw))
+			assert.Equal(t, tc.want, strings.Contains(string(raw), "default_vpc:"), string(raw))
+		})
+	}
+}
+
+// TestEC2_DefaultVPC_ARecordingReplaysWithZeroDifferences pins that a recording made under this
+// release — a subnet-less launch into the seeded default VPC, a group placed there without a
+// VpcId, and a Spot request replaced on terminate — replays identically, state hashes included.
+func TestEC2_DefaultVPC_ARecordingReplaysWithZeroDifferences(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies(), emulator.WithRecordedStateHashes())
+	ts.FreezeTime()
+
+	ec2ReplayCall(t, ts, "RunInstances", url.Values{
+		"ImageId": {ec2TestImage}, "MinCount": {"1"}, "MaxCount": {"1"},
+	})
+	ec2ReplayCall(t, ts, "CreateSecurityGroup", url.Values{"GroupName": {"workers"}, "GroupDescription": {"w"}})
+	body := ec2ReplayCall(t, ts, "RunInstances", url.Values{
+		"ImageId": {ec2TestImage}, "MinCount": {"1"}, "MaxCount": {"1"},
+		"InstanceMarketOptions.MarketType":                               {"spot"},
+		"InstanceMarketOptions.SpotOptions.SpotInstanceType":             {"persistent"},
+		"InstanceMarketOptions.SpotOptions.InstanceInterruptionBehavior": {"stop"},
+	})
+	instanceID := xmlElement(t, body, "instanceId")
+	ec2ReplayCall(t, ts, "TerminateInstances", url.Values{"InstanceId.1": {instanceID}})
+	ec2ReplayCall(t, ts, "DescribeSpotInstanceRequests", url.Values{})
+
+	results, err := replayEngineFor(ts, emulator.ReplayConfig{ValidateState: true}).Replay(t.Context(), replayStreamID)
+	require.NoError(t, err)
+	assert.Equal(t, results.TotalEvents, results.SuccessEvents)
+	assert.Empty(t, results.Differences, "%s", replayDifferenceSummary(results))
+	assert.True(t, results.StateValid, "state_hash_after matches: %v", results.StateErrors)
+}
+
+// xmlElement returns the text of the first <name> element in body.
+func xmlElement(t *testing.T, body []byte, name string) string {
+	t.Helper()
+	s := string(body)
+	start := strings.Index(s, "<"+name+">")
+	require.GreaterOrEqual(t, start, 0, "no <%s> in %s", name, s)
+	start += len(name) + 2
+	end := strings.Index(s[start:], "</"+name+">")
+	require.GreaterOrEqual(t, end, 0)
+	return s[start : start+end]
 }

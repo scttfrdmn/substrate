@@ -277,7 +277,7 @@ func writeFailureCases() []writeFailureCase {
 			restCall("POST", "batch"+wfRegion, "/v1/registerjobdefinition", `{"jobDefinitionName":"d","type":"container"}`),
 		}, call: restCall("POST", "batch"+wfRegion, "/v1/submitjob",
 			`{"jobName":"j","jobQueue":"q","jobDefinition":"d"}`)},
-		{file: "cfn_resources_v32.go", op: "CreateStack (stubStore, deployGenericStub)", call: queryCall("cloudformation"+wfRegion,
+		{file: "cfn_resources_stubs.go", op: "CreateStack (stubStore, deployGenericStub)", call: queryCall("cloudformation"+wfRegion,
 			"Action=CreateStack&Version=2010-05-15&StackName=s&TemplateBody="+url.QueryEscape(`{"Resources":{`+
 				`"StubbedACL":{"Type":"AWS::WAFv2::WebACL","Properties":{"Name":"acl","Scope":"REGIONAL"}},`+
 				`"Generic":{"Type":"AWS::IoT::Thing","Properties":{"ThingName":"x"}}}}`))},

@@ -137,7 +137,7 @@ func cfnConfigRules(t *testing.T, registry *emulator.PluginRegistry) []map[strin
 // substrate has no AWS::S3::BucketPolicy resource type: a template can create the
 // bucket but cannot express the policy the check wants, so a stack carrying a channel
 // needs the policy — or the delivery-policy seed — from somewhere else. That gap is
-// stated in cfn_resources_v101.go's doc comment, and this helper is the fixture form
+// stated in deployConfigDeliveryChannel's doc comment, and this helper is the fixture form
 // of it.
 func cfnConfigDeliveryBucket(t *testing.T, registry *emulator.PluginRegistry, bucket string) {
 	t.Helper()

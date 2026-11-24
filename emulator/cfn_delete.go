@@ -55,7 +55,7 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	},
 	// The policy, not the bucket: DeleteBucketPolicy on the bucket it was applied to (#1606).
 	"AWS::S3::BucketPolicy": cfnS3BucketPolicyDeleter,
-	// The CDK's routing and permission types (#1605; cfn_resources_v131.go).
+	// The CDK's routing and permission types (#1605).
 	"AWS::EC2::Route":                       cfnEC2RouteDeleter,
 	"AWS::EC2::SubnetRouteTableAssociation": cfnSubnetRouteTableAssociationDeleter,
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,

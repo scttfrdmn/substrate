@@ -116,7 +116,7 @@ func cfnResolveStampTarget(dr DeployedResource, accountID, region string) (cfnSt
 		// [ecsTagStateKey] builds a *four*-segment key, `service:<account>/<region>/<cluster>/<name>`
 		// and `taskdef:<account>/<region>/<family>/<revision>`, and neither the cluster nor the
 		// revision appears in the physical ID. Both are in the ARN, which the deployer records
-		// (`cfn_resources_v21.go:196`, `:241`), so the ARN is what resolves — through ECS's own
+		// ([StackDeployer.deployECSService], [StackDeployer.deployECSTaskDefinition]), so the ARN is what resolves — through ECS's own
 		// function, so the two cannot disagree about which record a task definition names.
 		if ns, key, ok := ecsTagStateKey(dr.ARN); ok {
 			return cfnStampTarget{namespace: ns, stateKey: key}, true
@@ -389,7 +389,7 @@ func cfnStampELBResource(
 // The ARN rather than the physical ID, because that is what Config keys a tag by: a rule's
 // physical ID is its *name* while its ARN names it by a hashed `ConfigRuleId`, and a recorder's
 // ARN carries a minted `RecorderId` that no API member holds. Both are read back from the service
-// at deploy time (`cfn_resources_v101.go:399`, `:121`) rather than rebuilt here, so an unreadable
+// at deploy time ([StackDeployer.cfgsvcCFNRuleAttributes], [StackDeployer.cfgsvcCFNRecorderARN]) rather than rebuilt here, so an unreadable
 // one leaves the ARN empty and this skips rather than guessing.
 //
 // A resolved-but-absent resource is "nothing to stamp" rather than an error, as ELBv2's arm has

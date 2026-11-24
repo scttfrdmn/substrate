@@ -16,13 +16,13 @@ var cfnSequencedDeleters = map[string]func(context.Context, *StackDeployer, Depl
 	"AWS::CloudFront::Distribution": cfnDeleteCloudFrontDistribution,
 	"AWS::Route53::RecordSet":       cfnDeleteRoute53RecordSet,
 	"AWS::Route53::RecordSetGroup":  cfnDeleteRoute53RecordSetGroup,
-	// The IAM types undo what their deploy recorded, then delete (cfn_resources_v129_iam.go).
+	// The IAM types undo what their deploy recorded, then delete (cfnDeleteIAMEntityFor).
 	"AWS::IAM::Role":          cfnDeleteIAMEntityFor("Role"),
 	"AWS::IAM::User":          cfnDeleteIAMEntityFor("User"),
 	"AWS::IAM::Group":         cfnDeleteIAMEntityFor("Group"),
 	"AWS::IAM::Policy":        cfnDeleteIAMPolicy,
 	"AWS::IAM::ManagedPolicy": cfnDeleteIAMManagedPolicy,
-	// One SetQueueAttributes per queue the policy was applied to (cfn_resources_v131.go).
+	// One SetQueueAttributes per queue the policy was applied to (cfnDeleteQueuePolicy).
 	"AWS::SQS::QueuePolicy": cfnDeleteQueuePolicy,
 }
 
