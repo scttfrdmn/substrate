@@ -1,18 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"flag"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
 
-// The emitter runs against the fixture models in testdata/models, so it needs no AWS CLI. The
-// fixtures hold one awsQuery service (sns) and one ec2-protocol service, with a shape for every
-// serialization fact the generator records, and testdata/golden.go.txt is what they must produce.
+// The emitter runs against the fixture models in testdata/models, which fixtureSnapshot packs into
+// the vendored snapshot's layout. The fixtures hold one awsQuery service (sns) and one ec2-protocol
+// service, with a shape for every serialization fact the generator records, and
+// testdata/golden.go.txt is what they must produce.
 
 var update = flag.Bool("update", false, "rewrite testdata/golden.go.txt from the fixtures")
 
@@ -21,10 +24,85 @@ var fixtureServices = []service{
 	{"ec2", "ec2", "ec2", true},
 }
 
-const fixtureModels = "testdata/models"
+// fixtureSnapshot writes each fixture model as emulator/wiremodel holds one, <name>.json.gz
+// wrapping service-2.json, and returns the directory.
+func fixtureSnapshot(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	for _, name := range []string{"sns", "ec2"} {
+		matches, err := filepath.Glob(filepath.Join("testdata", "models", name, "*", "service-2.json"))
+		if err != nil || len(matches) != 1 {
+			t.Fatalf("fixture %s: %v %v", name, matches, err)
+		}
+		raw, err := os.ReadFile(matches[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		doc, err := json.Marshal(map[string]json.RawMessage{
+			"apiVersion": json.RawMessage(`"` + filepath.Base(filepath.Dir(matches[0])) + `"`),
+			"service":    raw,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		writeGzip(t, filepath.Join(dir, name+".json.gz"), doc)
+	}
+	return dir
+}
+
+func writeGzip(t *testing.T, path string, data []byte) {
+	t.Helper()
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := zw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, buf.Bytes(), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerate_Refusals(t *testing.T) {
+	if _, err := generate(fixtureSnapshot(t), []service{{"sts", "sts", "sts", false}}); err == nil {
+		t.Error("a service with no model must fail")
+	}
+	for name, data := range map[string][]byte{
+		"not gzip": []byte("{not gzip"),
+		"not json": nil, // gzipped below
+	} {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "sns.json.gz")
+		if data == nil {
+			writeGzip(t, path, []byte("{not json"))
+		} else if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := generate(dir, fixtureServices[:1]); err == nil {
+			t.Errorf("a model that is %s must fail", name)
+		}
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "sns.json.gz"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	trunc := filepath.Join(dir, "sns.json.gz")
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write([]byte(`{"service": {}}`))
+	_ = zw.Close()
+	if err := os.WriteFile(trunc, buf.Bytes()[:buf.Len()-6], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := generate(dir, fixtureServices[:1]); err == nil {
+		t.Error("a truncated model must fail")
+	}
+}
 
 func TestGenerate_MatchesTheGolden(t *testing.T) {
-	src, err := generate(fixtureModels, fixtureServices)
+	src, err := generate(fixtureSnapshot(t), fixtureServices)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +124,7 @@ func TestGenerate_MatchesTheGolden(t *testing.T) {
 // The facts the golden encodes, stated one by one so a reviewer need not read the golden to know
 // what each fixture shape must produce.
 func TestGenerate_RecordsEachSerializationFact(t *testing.T) {
-	src, err := generate(fixtureModels, fixtureServices)
+	src, err := generate(fixtureSnapshot(t), fixtureServices)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,99 +168,24 @@ func TestGenerate_RecordsEachSerializationFact(t *testing.T) {
 }
 
 func TestRun_WritesAndChecks(t *testing.T) {
+	snap := fixtureSnapshot(t)
 	out := filepath.Join(t.TempDir(), "gen.go")
-	if err := run(fixtureModels, out, true, fixtureServices); err == nil {
+	if err := run(snap, out, true, fixtureServices); err == nil {
 		t.Fatal("-check of a missing file must fail")
 	}
-	if err := run(fixtureModels, out, false, fixtureServices); err != nil {
+	if err := run(snap, out, false, fixtureServices); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(fixtureModels, out, true, fixtureServices); err != nil {
+	if err := run(snap, out, true, fixtureServices); err != nil {
 		t.Fatalf("-check right after writing: %v", err)
 	}
 	if err := os.WriteFile(out, []byte("package emulator\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := run(fixtureModels, out, true, fixtureServices); !errors.Is(err, errStale) {
+	if err := run(snap, out, true, fixtureServices); !errors.Is(err, errStale) {
 		t.Fatalf("-check of a stale file: got %v, want errStale", err)
 	}
-	if err := run(fixtureModels, filepath.Join(t.TempDir(), "no", "such", "dir", "gen.go"), false, fixtureServices); err == nil {
+	if err := run(snap, filepath.Join(t.TempDir(), "no", "such", "dir", "gen.go"), false, fixtureServices); err == nil {
 		t.Fatal("an unwritable output must fail")
-	}
-}
-
-func TestGenerate_Refusals(t *testing.T) {
-	if _, err := generate(fixtureModels, []service{{"sts", "sts", "sts", false}}); err == nil {
-		t.Error("a service with no model must fail")
-	}
-	dir := t.TempDir()
-	bad := filepath.Join(dir, "sns", "2010-03-31")
-	if err := os.MkdirAll(bad, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(bad, "service-2.json"), []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := generate(dir, fixtureServices[:1]); err == nil {
-		t.Error("a model that will not decode must fail")
-	}
-}
-
-// findModels resolves `aws` on PATH through its symlink to the Homebrew/pip layout.
-func TestFindModels(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("symlinked executables")
-	}
-	root := t.TempDir()
-	cellar := filepath.Join(root, "Cellar", "awscli", "2.0.0")
-	data := filepath.Join(cellar, "libexec", "lib", "python3.99", "site-packages", "awscli", "botocore", "data")
-	if err := os.MkdirAll(data, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.MkdirAll(filepath.Join(cellar, "bin"), 0o750); err != nil {
-		t.Fatal(err)
-	}
-	bin := filepath.Join(cellar, "bin", "aws")
-	if err := os.WriteFile(bin, []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // a fake executable
-		t.Fatal(err)
-	}
-	pathDir := filepath.Join(root, "bin")
-	if err := os.MkdirAll(pathDir, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Symlink(bin, filepath.Join(pathDir, "aws")); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", pathDir)
-	got, err := findModels()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want, _ := filepath.EvalSymlinks(data); got != want {
-		gotReal, _ := filepath.EvalSymlinks(got)
-		if gotReal != want {
-			t.Fatalf("findModels = %s, want %s", got, want)
-		}
-	}
-
-	t.Setenv("PATH", t.TempDir())
-	if _, err := findModels(); err == nil {
-		t.Error("no aws on PATH must fail")
-	}
-	if err := run("", filepath.Join(t.TempDir(), "gen.go"), false, fixtureServices); err == nil {
-		t.Error("run with no -models and no aws on PATH must fail")
-	}
-
-	// An aws whose install has no botocore data directory.
-	empty := filepath.Join(t.TempDir(), "x", "bin")
-	if err := os.MkdirAll(empty, 0o750); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(empty, "aws"), []byte("#!/bin/sh\n"), 0o700); err != nil { //nolint:gosec // a fake executable
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", empty)
-	if _, err := findModels(); err == nil {
-		t.Error("an install with no data directory must fail")
 	}
 }

@@ -21,10 +21,14 @@ const (
 
 	// stepFault is fault injection, step 4.5.
 	stepFault prePluginStep = "fault"
+
+	// stepValidate is request validation against the vendored service models, step 4.6.
+	stepValidate prePluginStep = "validate"
 )
 
 // prePluginGates holds the four controllers a request passes through between parsing
-// and plugin dispatch. Any of them may be nil, in which case that step is skipped.
+// and plugin dispatch, and whether it is validated against its input shape. Any controller
+// may be nil, in which case that step is skipped.
 //
 // It exists so that the live path and the replay path cannot answer differently: a
 // replay called [PluginRegistry.RouteRequest] directly, so a request the recording
@@ -40,6 +44,11 @@ type prePluginGates struct {
 	quota       *QuotaController
 	consistency *ConsistencyController
 	fault       *FaultController
+
+	// validate runs [validateRequest] after the four controllers. The live server sets it from
+	// wire.validate; a replay sets it per event, from [Event.ValidationModel], and never for an
+	// internal dispatch.
+	validate bool
 }
 
 // prePluginOutcome is what the four gates decided about one request.
@@ -56,15 +65,22 @@ type prePluginOutcome struct {
 	// caller's decision — the live server sleeps, a replay does not, since no replay
 	// may consume wall-clock time.
 	latency time.Duration
+
+	// validated reports that the validation step ran on the request, which a live server
+	// records as [Event.ValidationModel] so a replay knows to run it again.
+	validated bool
 }
 
-// check runs the four gates in pipeline order and reports the first refusal.
+// check runs the gates in pipeline order and reports the first refusal.
 //
 // The order is the one [Server.handleAWSRequest] documents and is load-bearing:
 // authorization decides whether the caller may make the request at all, so it comes
 // before the two controllers that decide whether substrate will serve it now, and
-// fault injection comes last so that an injected failure stands in for the service's
-// own answer rather than for a refusal that would have happened anyway.
+// fault injection follows them so that an injected failure stands in for the service's
+// own answer rather than for a refusal that would have happened anyway. Validation comes
+// last: it is the first part of the service's own answer, so an injected fault replaces
+// it as it replaces the rest, and a caller refused authorization learns nothing about
+// what its request carried.
 //
 // A latency fault is reported alongside a nil error, and — like the live path before
 // this type existed — the rule's fired count is spent either way, so the caller must
@@ -85,24 +101,40 @@ func (g prePluginGates) check(reqCtx *RequestContext, req *AWSRequest) prePlugin
 			return prePluginOutcome{step: stepConsistency, err: err}
 		}
 	}
+	var out prePluginOutcome
 	if g.fault != nil {
 		faultErr, delay := g.fault.InjectFault(reqCtx, req)
-		out := prePluginOutcome{latency: delay}
+		out.latency = delay
 		if faultErr != nil {
 			out.step, out.err = stepFault, faultErr
+			return out
 		}
-		return out
 	}
-	return prePluginOutcome{}
+	if g.validate && wireValidates(req) {
+		out.validated = true
+		if err := validateRequest(req); err != nil {
+			out.step, out.err = stepValidate, err
+		}
+	}
+	return out
 }
 
-// prePluginGates returns the server's four pre-plugin controllers.
+// recordOption is the [EventRecordOption] that marks the request validated, when it was.
+func (o prePluginOutcome) recordOption() EventRecordOption {
+	if !o.validated {
+		return func(*eventRecordOptions) {}
+	}
+	return WithValidationModel(wireModelVersion)
+}
+
+// prePluginGates returns the server's pre-plugin gates.
 func (s *Server) prePluginGates() prePluginGates {
 	return prePluginGates{
 		auth:        s.opts.Auth,
 		quota:       s.opts.Quota,
 		consistency: s.opts.Consistency,
 		fault:       s.opts.Fault,
+		validate:    !s.config.Wire.SkipValidation,
 	}
 }
 

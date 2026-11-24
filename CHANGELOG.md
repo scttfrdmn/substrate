@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Pagination: one cursor primitive resumes strictly after the last item returned, with tokens bound to their operation and filter members (#1612).
 - CodePipeline: `ListPipelines` pages on `maxResults` (1–1000) and `nextToken`; the `maxResults` message is substrate's own (#1543).
 - CloudFront: `ListDistributions` and `ListOriginAccessControls` page on `Marker`/`MaxItems` and answer `Marker`, `MaxItems` and `NextMarker`; the messages are substrate's own (#1568).
+- Validation: requests to a validated service are checked against the operation's published input constraints (required members, lengths, ranges; enums and patterns per service) before any plugin runs, from botocore 1.44.10's models vendored in `emulator/wiremodel`; ACM is the first service validated (#1612).
+- Replay: `Event.ValidationModel` (`validation_model`) names the snapshot a request was validated against, and a replay runs the gate only for an event that carries it (#1612).
+- Tooling: `cmd/gen-wire-model` and `make wire-model`, `wire-model-check` (in CI) and `wire-model-fetch`; `make scheduler-query-model-check` (in CI) (#1612).
+
+### Changed
+
+- Tooling: `cmd/gen-scheduler-query-model` reads the vendored snapshot instead of the AWS CLI's models, and the regenerated table adds the missing `DescribeNetworkInterfaces` entry (#1612).
 
 ### Fixed
 
@@ -26,6 +33,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RAM: `ListPrincipals` and `ListResources` list in principal-ID or resource-ARN order, each item under its first share in ARN order; earlier tokens, and tokens reused with different filters, are refused `InvalidNextTokenException` (#1566).
 - CloudFront: list responses carry `Marker` and `MaxItems`, and an absent `MaxItems` is a page of 100; page on `NextMarker` to read more (#1568).
 - IAM: a malformed `Marker` is `ValidationError`/400 (`InvalidInput` on the simulate operations); tag listings' `Marker` is base64 of the last key, not the next key (#1612).
+- ACM: a request breaking a published constraint answers `ValidationException`/400 in ACM's message form, before the plugin runs. `RequestCertificate` without `DomainName` answers `ValidationException` instead of `InvalidParameterException`, and an enum value or tag outside its pattern is refused (#1612).
+- Config: `wire.validate: false` (`SUBSTRATE_WIRE_VALIDATE=false`, or `emulator.WithoutWireValidation()` on a `TestServer`) turns validation off. A stream recorded before validation existed replays unchanged (#1612).
 
 ## [v0.132.0] - 2026-11-24
 

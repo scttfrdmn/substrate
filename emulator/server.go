@@ -882,13 +882,14 @@ func (s *Server) handleReady(w http.ResponseWriter, _ *http.Request) {
 //  3. quota.CheckQuota()        → 429 ThrottlingException, or 503 SlowDown for S3
 //  4. consistency.CheckRead()   → 409 InconsistentStateException
 //     4.5. fault injection      → the armed rule's own code, or a latency delay
+//     4.6. validateRequest()    → the service's validation refusal (wire_validate_errors.go)
 //  5. registry.RouteRequest()   (plugin dispatch)
 //  6. cost := costs.CostForRequest(req)
 //  7. if success && mutating: consistency.RecordWrite(req)
 //  8. store.RecordRequest(…, cost, routeErr, WithStateHashes(before, after))
 //  9. write response
 //
-// Steps 2 through 4.5 are the four controllers of [prePluginGates], which
+// Steps 2 through 4.6 are the gates of [prePluginGates], which
 // [ReplayEngine.replayEvent] runs as well: a refusal before plugin dispatch is part
 // of what a recorded run means, so replaying it has to reach the same decisions
 // (#833). Everything above step 2 reads the live *http.Request and is skipped on
@@ -1088,8 +1089,8 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	// which case this is free (#833).
 	stateBefore := s.recordedStateHash(ctx)
 
-	// Steps 2, 3, 4 and 4.5: authorization, quota, consistency and fault injection,
-	// run through the same [prePluginGates] a replay runs — so a request the recording
+	// Steps 2, 3, 4, 4.5 and 4.6: authorization, quota, consistency, fault injection and
+	// request validation, run through the same [prePluginGates] a replay runs — so a request the recording
 	// refused before it reached a plugin is refused on replay too, instead of being
 	// re-executed and succeeding (#833).
 	gate := s.prePluginGates().check(reqCtx, req)
@@ -1102,7 +1103,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 	if gate.err != nil {
 		duration := time.Since(start)
 		if recordErr := s.store.RecordRequest(ctx, reqCtx, req, nil, duration, 0, gate.err,
-			WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
+			WithStateHashes(stateBefore, s.recordedStateHash(ctx)), gate.recordOption()); recordErr != nil {
 			s.logger.Warn("failed to record refused event", "step", string(gate.step), "err", recordErr)
 		}
 		// Only two of the four steps have ever had a counter of their own; the switch
@@ -1119,7 +1120,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 			case stepConsistency:
 				s.opts.Metrics.RecordConsistencyDelay(req.Service)
 				s.opts.Metrics.RecordRequest(req.Service, req.Operation, true, refusalErrorCode(gate.err))
-			case stepAuth, stepFault:
+			case stepAuth, stepFault, stepValidate:
 			}
 		}
 		s.writeError(w, gate.err, r, req.Service, reqCtx.RequestID)
@@ -1154,7 +1155,7 @@ func (s *Server) handleAWSRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Step 8: always record the event regardless of routing outcome.
 	if recordErr := s.store.RecordRequest(ctx, reqCtx, req, resp, duration, cost, routeErr,
-		WithStateHashes(stateBefore, s.recordedStateHash(ctx))); recordErr != nil {
+		WithStateHashes(stateBefore, s.recordedStateHash(ctx)), gate.recordOption()); recordErr != nil {
 		s.logger.Warn("failed to record event", "err", recordErr)
 	}
 

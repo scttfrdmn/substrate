@@ -88,6 +88,7 @@ type testServerConfig struct {
 	recordStateHashes bool
 	noDefaultVPC      bool
 	lenientCFN        bool
+	noWireValidation  bool
 	// unseededIDs and epoch are the deterministic-run options; see [WithDeterministicRun].
 	unseededIDs bool
 	epoch       *time.Time
@@ -169,6 +170,18 @@ func WithoutDefaultVPC() TestServerOption {
 // declare, are refused either way, because CloudFormation refuses them.
 func WithLenientCloudFormation() TestServerOption {
 	return func(c *testServerConfig) { c.lenientCFN = true }
+}
+
+// WithoutWireValidation starts the server with request validation off — the test-server form of
+// wire.validate=false (#1612).
+//
+// By default a request to a validated service that breaks its operation's published input
+// constraints — an absent required member, a length or a number out of range — is refused
+// before any plugin sees it, with the service's validation code. With this option such a
+// request reaches the plugin, as every request did before validation existed. Events recorded
+// without validation carry no [Event.ValidationModel], so their replay does not validate either.
+func WithoutWireValidation() TestServerOption {
+	return func(c *testServerConfig) { c.noWireValidation = true }
 }
 
 // testServerSeed is the request-ID seed every test server gets unless
@@ -320,6 +333,7 @@ func startTestServer(t testing.TB, tsCfg testServerConfig) *TestServer {
 	// plugins from, so the default-VPC switch has to be on both.
 	cfg.EC2.DefaultVPC = !tsCfg.noDefaultVPC
 	cfg.CloudFormation.Lenient = tsCfg.lenientCFN
+	cfg.Wire.SkipValidation = tsCfg.noWireValidation
 
 	state := NewMemoryStateManager()
 	run := testServerRun(tsCfg)

@@ -1,0 +1,293 @@
+{
+  "botocore": "1.44.10",
+  "models": {
+    "account": {
+      "apiVersion": "2021-02-01",
+      "operations": 4
+    },
+    "acm": {
+      "apiVersion": "2015-12-08",
+      "operations": 8
+    },
+    "apigateway": {
+      "apiVersion": "2015-07-09",
+      "operations": 41
+    },
+    "apigatewayv2": {
+      "apiVersion": "2018-11-29",
+      "operations": 35
+    },
+    "appsync": {
+      "apiVersion": "2017-07-25",
+      "operations": 23
+    },
+    "athena": {
+      "apiVersion": "2017-05-18",
+      "operations": 9
+    },
+    "autoscaling": {
+      "apiVersion": "2011-01-01",
+      "operations": 17
+    },
+    "backup": {
+      "apiVersion": "2018-11-15",
+      "operations": 13
+    },
+    "batch": {
+      "apiVersion": "2016-08-10",
+      "operations": 16
+    },
+    "bedrock": {
+      "apiVersion": "2023-04-20",
+      "operations": 4
+    },
+    "bedrock-runtime": {
+      "apiVersion": "2023-09-30",
+      "operations": 2
+    },
+    "budgets": {
+      "apiVersion": "2016-10-20",
+      "operations": 5
+    },
+    "ce": {
+      "apiVersion": "2017-10-25",
+      "operations": 3
+    },
+    "cloudformation": {
+      "apiVersion": "2010-05-15",
+      "operations": 20
+    },
+    "cloudfront": {
+      "apiVersion": "2020-05-31",
+      "operations": 17
+    },
+    "cloudtrail": {
+      "apiVersion": "2013-11-01",
+      "operations": 8
+    },
+    "cloudwatch": {
+      "apiVersion": "2010-08-01",
+      "operations": 14
+    },
+    "codebuild": {
+      "apiVersion": "2016-10-06",
+      "operations": 7
+    },
+    "codedeploy": {
+      "apiVersion": "2014-10-06",
+      "operations": 9
+    },
+    "codepipeline": {
+      "apiVersion": "2015-07-09",
+      "operations": 8
+    },
+    "cognito-identity": {
+      "apiVersion": "2014-06-30",
+      "operations": 8
+    },
+    "cognito-idp": {
+      "apiVersion": "2016-04-18",
+      "operations": 34
+    },
+    "config": {
+      "apiVersion": "2014-11-12",
+      "operations": 25
+    },
+    "dynamodb": {
+      "apiVersion": "2012-08-10",
+      "operations": 24
+    },
+    "dynamodbstreams": {
+      "apiVersion": "2012-08-10",
+      "operations": 4
+    },
+    "ec2": {
+      "apiVersion": "2016-11-15",
+      "operations": 100
+    },
+    "ecr": {
+      "apiVersion": "2015-09-21",
+      "operations": 26
+    },
+    "ecs": {
+      "apiVersion": "2014-11-13",
+      "operations": 21
+    },
+    "efs": {
+      "apiVersion": "2015-02-01",
+      "operations": 13
+    },
+    "elasticache": {
+      "apiVersion": "2015-02-02",
+      "operations": 17
+    },
+    "elb": {
+      "apiVersion": "2012-06-01",
+      "operations": 9
+    },
+    "elbv2": {
+      "apiVersion": "2015-12-01",
+      "operations": 24
+    },
+    "emr-serverless": {
+      "apiVersion": "2021-07-13",
+      "operations": 7
+    },
+    "events": {
+      "apiVersion": "2015-10-07",
+      "operations": 12
+    },
+    "firehose": {
+      "apiVersion": "2015-08-04",
+      "operations": 6
+    },
+    "fsx": {
+      "apiVersion": "2018-03-01",
+      "operations": 3
+    },
+    "glue": {
+      "apiVersion": "2017-03-31",
+      "operations": 33
+    },
+    "health": {
+      "apiVersion": "2016-08-04",
+      "operations": 4
+    },
+    "iam": {
+      "apiVersion": "2010-05-08",
+      "operations": 79
+    },
+    "kafka": {
+      "apiVersion": "2018-11-14",
+      "operations": 9
+    },
+    "kinesis": {
+      "apiVersion": "2013-12-02",
+      "operations": 18
+    },
+    "kms": {
+      "apiVersion": "2014-11-01",
+      "operations": 25
+    },
+    "lambda": {
+      "apiVersion": "2015-03-31",
+      "operations": 31
+    },
+    "logs": {
+      "apiVersion": "2014-03-28",
+      "operations": 16
+    },
+    "omics": {
+      "apiVersion": "2022-11-28",
+      "operations": 5
+    },
+    "organizations": {
+      "apiVersion": "2016-11-28",
+      "operations": 34
+    },
+    "pricing": {
+      "apiVersion": "2017-10-15",
+      "operations": 3
+    },
+    "quicksight": {
+      "apiVersion": "2018-04-01",
+      "operations": 4
+    },
+    "ram": {
+      "apiVersion": "2018-01-04",
+      "operations": 8
+    },
+    "rds": {
+      "apiVersion": "2014-10-31",
+      "operations": 23
+    },
+    "redshift": {
+      "apiVersion": "2012-12-01",
+      "operations": 10
+    },
+    "redshift-data": {
+      "apiVersion": "2019-12-20",
+      "operations": 3
+    },
+    "resourcegroupstaggingapi": {
+      "apiVersion": "2017-01-26",
+      "operations": 3
+    },
+    "route53": {
+      "apiVersion": "2013-04-01",
+      "operations": 6
+    },
+    "s3": {
+      "apiVersion": "2006-03-01",
+      "operations": 54
+    },
+    "sagemaker": {
+      "apiVersion": "2017-07-24",
+      "operations": 10
+    },
+    "scheduler": {
+      "apiVersion": "2021-06-30",
+      "operations": 12
+    },
+    "secretsmanager": {
+      "apiVersion": "2017-10-17",
+      "operations": 16
+    },
+    "service-quotas": {
+      "apiVersion": "2019-06-24",
+      "operations": 8
+    },
+    "sesv2": {
+      "apiVersion": "2019-09-27",
+      "operations": 5
+    },
+    "sns": {
+      "apiVersion": "2010-03-31",
+      "operations": 18
+    },
+    "sqs": {
+      "apiVersion": "2012-11-05",
+      "operations": 17
+    },
+    "ssm": {
+      "apiVersion": "2014-11-06",
+      "operations": 15
+    },
+    "sso-admin": {
+      "apiVersion": "2020-07-20",
+      "operations": 12
+    },
+    "stepfunctions": {
+      "apiVersion": "2016-11-23",
+      "operations": 18
+    },
+    "sts": {
+      "apiVersion": "2011-06-15",
+      "operations": 3
+    },
+    "timestream-query": {
+      "apiVersion": "2018-11-01",
+      "operations": 3
+    },
+    "timestream-write": {
+      "apiVersion": "2018-11-01",
+      "operations": 10
+    },
+    "transfer": {
+      "apiVersion": "2018-11-05",
+      "operations": 12
+    },
+    "wafv2": {
+      "apiVersion": "2019-07-29",
+      "operations": 13
+    }
+  },
+  "unmodelled": {
+    "appsync": [
+      "ExecuteGraphQL"
+    ],
+    "servicequotas": [
+      "ListRequestedServiceQuotaChangesByService"
+    ]
+  }
+}

@@ -69,6 +69,9 @@ type Config struct {
 	// Run controls deterministic-run mode: seeded request IDs and a pinned clock.
 	Run RunCfg `mapstructure:"run"`
 
+	// Wire controls request validation against the vendored service models.
+	Wire WireCfg `mapstructure:"wire"`
+
 	// Warnings lists what [LoadConfig] noticed but did not refuse, one message per
 	// item: today, each removed key the file or environment still sets. It is never
 	// read from configuration; the CLI logs each entry at startup.
@@ -687,6 +690,17 @@ type CloudFormationCfg struct {
 	Lenient bool `mapstructure:"lenient"`
 }
 
+// WireCfg controls request validation against the vendored service models (#1612).
+type WireCfg struct {
+	// SkipValidation turns request validation off. Validation — the default, and the zero
+	// value — refuses a request to a validated service that breaks its operation's published
+	// input constraints before any plugin sees it; see docs/reference/concepts/validation.md.
+	//
+	// Set by wire.validate: false (SUBSTRATE_WIRE_VALIDATE=false); see [LoadConfig]. It has
+	// no key of its own, so the zero Config validates.
+	SkipValidation bool `mapstructure:"-"`
+}
+
 // RunCfg controls deterministic-run mode (#1598): what makes two fresh servers given the
 // same calls answer the same bodies.
 //
@@ -889,6 +903,8 @@ func LoadConfig(path string) (*Config, error) {
 	// AutomaticEnv only binds a key it already knows.
 	v.SetDefault("run.seed", defaults.Run.Seed)
 	v.SetDefault("run.epoch", defaults.Run.Epoch)
+	// wire.validate is read after Unmarshal into its inverse, Wire.SkipValidation.
+	v.SetDefault("wire.validate", true)
 
 	// Environment variable overrides.
 	v.SetEnvPrefix("SUBSTRATE")
@@ -919,6 +935,7 @@ func LoadConfig(path string) (*Config, error) {
 	if !v.GetBool("cloudformation.strict") {
 		cfg.CloudFormation.Lenient = true
 	}
+	cfg.Wire.SkipValidation = !v.GetBool("wire.validate")
 	// No default is registered for a removed key, so IsSet is true only when the file
 	// or a SUBSTRATE_ environment variable sets it.
 	for _, removed := range removedConfigKeys() {

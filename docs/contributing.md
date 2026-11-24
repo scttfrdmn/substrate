@@ -189,6 +189,7 @@ drifting silently.
 | Routing identifiers (Display, Protocol, TargetPrefix, Hosts, SigningNames, Source) | `emulator/routing.go` `pluginRouting` | `routing_test.go` (both directions, and every host/signing name must parse to a registered plugin); `cmd/gen-service-reference` refuses a plugin with no entry |
 | Error protocol | `emulator/error_protocol.go` (e.g. `"elasticloadbalancing": errProtoQueryXML`) | `access_denied_code_test.go`; `unknownActionError` uses it to answer `InvalidAction`/`UnknownOperationException` |
 | Operation catalog | `make operation-catalog` regenerates `emulator/operation_catalog_gen.go` from each `HandleRequest` switch (on a variable named `op`, `action` or `operation`) | `make operation-catalog-check` |
+| Wire model (request validation) | `make wire-model-fetch` re-prunes the vendored botocore snapshot in `emulator/wiremodel` to the routed operations, then `make wire-model scheduler-query-model` regenerate the tables; a new plugin also needs a row in `pluginModels` (`cmd/gen-wire-model/plugins.go`) | `make wire-model-check`, which names a routed operation the snapshot lacks; `TestPluginModels_CoverEveryRoutedPlugin` |
 | Catalog totals | `routedOperationTotal`, `routedPluginTotal` and the per-service counts in `emulator/operation_catalog_test.go` — bumped by hand | `operation_catalog_test.go` |
 | Service page | `docs/reference/<plugin>.md`, named by the registry name, with one `# ` title and one *Supported operations* row per routed operation; `go run ./cmd/check-operation-docs -scaffold <plugin>` prints the page skeleton or the missing rows | `make operation-docs-check` (`scripts/undocumented-operations.txt` is empty and stays empty), `make docs-headings-check` |
 | Coverage matrix and sidebar | `make docs-reference` regenerates the matrix in `docs/services.md`, whose rows link to the pages, and `docs/.vitepress/services-sidebar.json` | `make docs-reference-check`, which also refuses a docs link naming an anchor its page lacks |
@@ -198,8 +199,10 @@ drifting silently.
 | Authz reference (optional) | `cmd/gen-authz-reference` + `emulator/authzref/*.json` | `make authz-reference-check` (offline) |
 | CloudFormation resource type (only for a new CFN type) | a row in `cfnResourceDeployers` (`emulator/cfn_resource_table.go`), the one list strict mode reads | `TestCFNStrict_EmulatedTypesAreRecognized` (the type must be in the vendored specification, `emulator/cfnschema`, checked by `make cfn-schema-check`) |
 
-Adding an operation to an existing plugin needs the catalog, totals, service-page row
-and coverage-matrix steps.
+Adding an operation to an existing plugin needs the catalog, wire-model, totals, service-page
+row and coverage-matrix steps. Turning request validation on for a service is a row in
+`validatedServices` (`emulator/wire_validate_errors.go`) with its codes and their sources; see
+[Request validation](/reference/concepts/validation).
 
 Renaming a heading on a reference page can strand an old link. Links written when the
 whole reference was one page read `/services#<anchor>`, and `docs/services.md` redirects
@@ -295,7 +298,7 @@ Two CI jobs exist only to catch bookkeeping drift. Run their targets before push
 
 | CI job | Targets | Regenerate after a deliberate change |
 |--------|---------|--------------------------------------|
-| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check cfn-schema-check doc-links-check` | `make operation-catalog docs-reference operation-docs-write` (and `make cfn-schema` after a `make cfn-schema-fetch`) |
+| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check cfn-schema-check wire-model-check scheduler-query-model-check doc-links-check` | `make operation-catalog docs-reference operation-docs-write` (and `make cfn-schema` after a `make cfn-schema-fetch`, `make wire-model scheduler-query-model` after a `make wire-model-fetch`) |
 | Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check comment-history-check` | `make wire-bookkeeping-write` |
 
 The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded
