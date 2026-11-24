@@ -225,7 +225,7 @@ func TestKMSPlugin_ScheduleAndCancelKeyDeletion(t *testing.T) {
 
 	// Cancel deletion. The key comes back Disabled, not Enabled — API_CancelKeyDeletion: "when this
 	// operation succeeds, the key state of the KMS key is Disabled. To enable the KMS key, use
-	// EnableKey." This assertion read Enabled until #963, which is the defect it was recording.
+	// EnableKey." (#963)
 	resp2 := kmsRequest(t, srv, "CancelKeyDeletion", map[string]interface{}{"KeyId": keyID})
 	assert.Equal(t, http.StatusOK, resp2.StatusCode)
 
@@ -275,13 +275,11 @@ func TestKMSPlugin_TagAndUntagResource(t *testing.T) {
 	assert.Len(t, tags4, 1)
 }
 
-// TestKMSPlugin_KeyPolicy is the original policy round trip, and #983 is what made it one.
+// TestKMSPlugin_KeyPolicy is the policy round trip (#983).
 //
-// The document it writes is byte-identical to the fallback `getKeyPolicy` answered before #983, so
-// until then this test would have passed against a `PutKeyPolicy` that stored nothing whatsoever — the
-// read hit the stand-in and the stand-in was the expectation. It is left as written because it now
-// proves what it always appeared to; the assertions #983 needs are in `kms_key_policy_test.go`, where
-// the caller's document differs from the default in more than one member for exactly this reason.
+// It is a minimal round trip. The assertions that a stored policy replaces the default are in
+// `kms_key_policy_test.go`, where the caller's document differs from the default in more than one
+// member so a read of the default cannot pass for a read of the stored document.
 func TestKMSPlugin_KeyPolicy(t *testing.T) {
 	srv := newKMSTestServer(t)
 
@@ -382,7 +380,7 @@ func TestKMSPlugin_DeleteAlias(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
 	// Now describe via alias should fail — at 400, which is the status API_DescribeKey publishes
-	// for NotFoundException. This read 404 until #923.
+	// for NotFoundException (#923).
 	resp2 := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{
 		"KeyId": "alias/to-delete",
 	})

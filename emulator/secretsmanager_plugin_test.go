@@ -284,8 +284,8 @@ func TestSMPlugin_TagAndUntagResource(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 
-	// Read the tag back through DescribeSecret, which is Secrets Manager's own read path for tags.
-	// This called ListTagsForResource until #929 removed it — an operation the API does not publish.
+	// Read the tag back through DescribeSecret, which is Secrets Manager's own read path for tags;
+	// the API publishes no ListTagsForResource (#929).
 	resp2 := smRequest(t, srv, "DescribeSecret", map[string]interface{}{
 		"SecretId": "sm-tag-test",
 	})

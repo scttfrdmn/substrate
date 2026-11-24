@@ -109,11 +109,10 @@ var cfnLaunchTemplateMetadataOptions = []string{"HttpEndpoint", "HttpProtocolIpv
 // LaunchTemplateData.* query parameters CreateLaunchTemplate and CreateLaunchTemplateVersion
 // both take.
 //
-// MetadataOptions and DisableApiTermination are forwarded since #1508. EC2 has stored and
-// validated both since #1471, so an instance launched from the template receives them, but the
-// deployer forwarded only the five members below and dropped both: a CDK template with
-// requireImdsv2 — which emits MetadataOptions.HttpTokens: required — launched instances that did
-// not require IMDSv2. The values are not checked here. EC2's own check runs on the request, and a
+// MetadataOptions and DisableApiTermination are forwarded too (#1508), and EC2 stores and validates
+// both (#1471), so an instance launched from the template receives them: a CDK template with
+// requireImdsv2 — which emits MetadataOptions.HttpTokens: required — launches instances that
+// require IMDSv2. The values are not checked here. EC2's own check runs on the request, and a
 // value it refuses fails the resource with EC2's code and message, which is what a CloudFormation
 // deploy reports for a property the service rejects.
 //
@@ -245,10 +244,9 @@ func (d *StackDeployer) deployEC2SecurityGroupEgress(
 // AWS::EC2::VPCGatewayAttachment, which "Attaches an internet gateway, or a virtual private
 // gateway to a VPC".
 //
-// Until #1492 the type fell through to [StackDeployer.deployGenericStub], so a stack's gateway
-// was never attached; now that DeleteVpc and DeleteInternetGateway refuse an attached gateway
-// with DependencyViolation, the attachment is real and the sweep detaches it (see
-// [cfnResourceDeleters]) before either delete runs. A virtual private gateway attachment is still
+// The attachment is real (#1492), and since DeleteVpc and DeleteInternetGateway refuse an attached
+// gateway with DependencyViolation, the sweep detaches it (see [cfnResourceDeleters]) before either
+// delete runs. A virtual private gateway attachment is still
 // a stub, because substrate models no virtual private gateways.
 //
 // The physical ID stays the logical ID the stub recorded, so a Ref to the attachment — "the ID of
@@ -343,9 +341,9 @@ func sgRuleParams(props map[string]interface{}, prefix string, cctx *cfnContext)
 	if cidr := resolveStringProp(props, "CidrIp", "", cctx); cidr != "" {
 		params[prefix+"IpRanges.1.CidrIp"] = cidr
 	}
-	// CidrIpv6 is its own source list since #1453 stored IPv6 ranges, so it no longer
-	// overwrites CidrIp: a rule declaring both carries both, and a revoke built from the
-	// same template names the same two sources.
+	// CidrIpv6 is its own source list (#1453), so it does not overwrite CidrIp: a rule
+	// declaring both carries both, and a revoke built from the same template names the
+	// same two sources.
 	if cidr6 := resolveStringProp(props, "CidrIpv6", "", cctx); cidr6 != "" {
 		params[prefix+"Ipv6Ranges.1.CidrIpv6"] = cidr6
 	}
@@ -810,8 +808,8 @@ func cfnSGPermissionParams(perms []EC2IPPermission) map[string]string {
 }
 
 // The route helpers below, deployLambdaPermission and deployQueuePolicy model the four resource
-// types every ordinary CDK app emits that had no deploy helper, so strict mode — the default
-// since #1605 — would have refused the app:
+// types every ordinary CDK app emits, which strict mode — the default (#1605) — would otherwise
+// refuse:
 //
 //   - AWS::EC2::Route and AWS::EC2::SubnetRouteTableAssociation, which every ec2.Vpc emits for
 //     each subnet's routing;

@@ -217,10 +217,9 @@ func TestCFN_GetAttNewAttributes(t *testing.T) {
 	assert.NotEmpty(t, result.Outputs["KeyArn"])
 	assert.NotEmpty(t, result.Outputs["KeyArn2"])
 	assert.NotEmpty(t, result.Outputs["TopicArn"])
-	// "Value — Returns the value of the parameter." This asserted the parameter *name*
-	// until #827: the resolver answered every unrecognized attribute with the physical ID,
-	// and for an SSM parameter that is the name. The value and the name are both plausible
-	// strings, which is why the wrong one went unnoticed here.
+	// "Value — Returns the value of the parameter." Not the parameter *name*, which is
+	// its physical ID (#827): the value and the name are both plausible strings, so only
+	// an exact comparison tells them apart.
 	assert.Equal(t, "param-value", result.Outputs["ParamVal"])
 	assert.Equal(t, "String", result.Outputs["ParamType"])
 }
