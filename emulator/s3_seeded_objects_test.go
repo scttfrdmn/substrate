@@ -302,6 +302,107 @@ func TestS3SeededObject_StoreFaults(t *testing.T) {
 	}
 }
 
+// TestS3SeededObject_TombstoneStoreFaults is the store-failure counterpart for the
+// tombstone a delete of a seeded key leaves: reading a corrupt one, and failing to clear
+// one when a seed is posted or cleared, are each a 500.
+func TestS3SeededObject_TombstoneStoreFaults(t *testing.T) {
+	t.Parallel()
+	const tombstone = "seeded-object-superseded:"
+	for _, tt := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		path   string
+		body   string
+	}{
+		{"GET, corrupt tombstone", func(m *cfFaultStateManager) { m.corruptGet = tombstone }, http.MethodGet, "/results/k", ""},
+		{"POST, tombstone clear", func(m *cfFaultStateManager) { m.failDelete = tombstone }, http.MethodPost, "/v1/s3/seeded-objects", `{"key":"k"}`},
+		{"DELETE one, tombstone clear", func(m *cfFaultStateManager) { m.failDelete = tombstone }, http.MethodDelete, "/v1/s3/seeded-objects?key=k", ""},
+		{"DELETE all, tombstone clear", func(m *cfFaultStateManager) { m.failDelete = tombstone }, http.MethodDelete, "/v1/s3/seeded-objects", ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newS3TestServerWithState(t, state)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+			seedS3Object(t, srv, map[string]any{"key": "k", "body": "x"})
+			require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, "/results/k", nil, nil).Code)
+
+			tt.arm(state)
+			var body []byte
+			if tt.body != "" {
+				body = []byte(tt.body)
+			}
+			w := s3Request(t, srv, tt.method, tt.path, body, nil)
+			assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+		})
+	}
+}
+
+// TestS3SeededObject_CopySourceStoreFaults covers the copy source loader's store
+// failures: the source record unreadable or corrupt, and the seed behind an absent
+// source unreadable. Each is a 500 and writes no destination.
+func TestS3SeededObject_CopySourceStoreFaults(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		source string
+	}{
+		{"source record read", func(m *cfFaultStateManager) { m.failGet = "object:results/real" }, "/results/real"},
+		{"corrupt source record", func(m *cfFaultStateManager) { m.corruptGet = "object:results/real" }, "/results/real"},
+		{"seed read behind an absent source", func(m *cfFaultStateManager) { m.failGet = "seeded-object:" }, "/results/seeded"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newS3TestServerWithState(t, state)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results/real", []byte("r"), nil).Code)
+			seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "seeded", "body": "s"})
+
+			tt.arm(state)
+			w := s3Request(t, srv, http.MethodPut, "/results/dst", nil, map[string]string{"X-Amz-Copy-Source": tt.source})
+			assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+		})
+	}
+}
+
+// TestS3SeededObject_SupersedeStoreFaults covers the write paths that supersede a seed
+// and are not in [TestS3SeededObject_StoreFaults]: a copy onto the seeded key and a
+// delete in a versioned bucket. A failed seed read on either is a 500.
+func TestS3SeededObject_SupersedeStoreFaults(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		versioned bool
+		do        func(t *testing.T, srv *emulator.Server) int
+	}{
+		{"CopyObject onto the key", false, func(t *testing.T, srv *emulator.Server) int {
+			return s3Request(t, srv, http.MethodPut, "/results/k", nil,
+				map[string]string{"X-Amz-Copy-Source": "/results/real"}).Code
+		}},
+		{"DeleteObject, versioned", true, func(t *testing.T, srv *emulator.Server) int {
+			return s3Request(t, srv, http.MethodDelete, "/results/k", nil, nil).Code
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newS3TestServerWithState(t, state)
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+			if tt.versioned {
+				s3EnableVersioning(t, srv, "results")
+			}
+			require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results/real", []byte("r"), nil).Code)
+			seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "k", "body": "s"})
+
+			state.failGet = "seeded-object:results/k"
+			assert.Equal(t, http.StatusInternalServerError, tt.do(t, srv))
+		})
+	}
+}
+
 // s3EnableVersioning turns versioning on for bucket.
 func s3EnableVersioning(t *testing.T, srv *emulator.Server, bucket string) {
 	t.Helper()

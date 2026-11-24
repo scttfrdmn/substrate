@@ -539,6 +539,45 @@ func TestInvokeResult_StoreFaults(t *testing.T) {
 	}
 }
 
+// TestInvokeError_StoreFaults is [TestInvokeResult_StoreFaults] for the error seed: a
+// store failure on it is a 500 rather than a silent fall-through to a result or the stub.
+func TestInvokeError_StoreFaults(t *testing.T) {
+	t.Parallel()
+	const record = "invoke-error:"
+	const invocations = "/2015-03-31/functions/fn/invocations"
+	for _, tt := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		path   string
+		body   any
+	}{
+		{"Invoke, seed read", func(m *cfFaultStateManager) { m.failGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"Invoke, corrupt seed", func(m *cfFaultStateManager) { m.corruptGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"POST, seed write", func(m *cfFaultStateManager) { m.failPut = record }, http.MethodPost, "/v1/lambda/invoke-error", map[string]any{"errorType": "Handled"}},
+		{"DELETE one", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-error?functionName=fn", nil},
+		{"DELETE all", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-error", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newFullServerOn(t, state)
+			createInvokeTestFunction(t, srv, "fn")
+			seedInvokeError(t, srv, map[string]any{"functionName": "fn", "errorType": "Handled"})
+
+			tt.arm(state)
+			if tt.path != invocations {
+				code, body := lambdaControl(t, srv, tt.method, tt.path, tt.body)
+				assert.Equal(t, http.StatusInternalServerError, code, body)
+				return
+			}
+			resp := lambdaRequest(t, srv, tt.method, tt.path, tt.body)
+			defer resp.Body.Close() //nolint:errcheck
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
 // TestInvoke_SeedPrecedence pins the order an invoke resolves its seeds in: exact error,
 // exact result, "*" error, "*" result. A seed for the function's own name outranks any
 // wildcard, and at one scope an error outranks a result.
