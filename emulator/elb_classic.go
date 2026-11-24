@@ -565,14 +565,12 @@ func (p *ELBPlugin) createClassicLoadBalancer(reqCtx *RequestContext, req *AWSRe
 func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	// No token code is published on this operation — its Errors section publishes
 	// `DependencyThrottle` and `LoadBalancerNotFound` and nothing else — so a refused cursor answers
-	// the Common Errors page's code. Refusing an unissued marker rather than restarting at page one
-	// began here, and #1245 made it the plugin's one rule, [elbPageCursor].
-	offset, pageSize, awsErr := elbPageCursor(req)
+	// the Common Errors page's code; see [elbMarker].
+	names := extractIndexedParams(req.Params, "LoadBalancerNames.member")
+	pr, awsErr := elbMarker(req, "DescribeLoadBalancers@"+elbClassicAPIVersion, map[string][]string{"LoadBalancerNames": names})
 	if awsErr != nil {
 		return nil, awsErr
 	}
-
-	names := extractIndexedParams(req.Params, "LoadBalancerNames.member")
 	all, err := p.loadClassicLoadBalancers(reqCtx)
 	if err != nil {
 		return nil, err
@@ -590,20 +588,30 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 	selected := all
 	if len(names) > 0 {
 		selected = make([]ELBClassicLoadBalancer, 0, len(names))
+		picked := make(map[string]bool, len(names))
 		for _, name := range names {
 			lb, found := byName[name]
 			if !found {
 				return nil, elbClassicNotFoundError(name)
 			}
-			selected = append(selected, lb)
+			if !picked[name] {
+				picked[name] = true
+				selected = append(selected, lb)
+			}
 		}
 	}
 
-	page, next := pageByOffsetToken(selected, offset, pageSize)
-	items := make([]elbClassicLBItem, 0, len(page))
-	for _, lb := range page {
+	// The listing is in name order, which the cursor compares in; a name requested twice is listed
+	// once, since a name is the cursor's whole key.
+	res, err := page(selected, func(lb ELBClassicLoadBalancer) cursorKey { return cursorKey{Sort: lb.Name} }, pr)
+	if err != nil {
+		return nil, err
+	}
+	items := make([]elbClassicLBItem, 0, len(res.Items))
+	for _, lb := range res.Items {
 		items = append(items, classicLBToItem(lb))
 	}
+	next := res.Next
 
 	type describeResult struct {
 		LoadBalancerDescriptions []elbClassicLBItem `xml:"LoadBalancerDescriptions>member"`
@@ -614,8 +622,7 @@ func (p *ELBPlugin) describeClassicLoadBalancers(reqCtx *RequestContext, req *AW
 }
 
 // loadClassicLoadBalancers reads every classic record in the caller's account and Region, in the
-// lexicographic key order [StateManager.List] guarantees (#865) — which is name order, and is what
-// makes the offset cursor above mean the same thing on every call.
+// lexicographic key order [StateManager.List] guarantees (#865), which is name order.
 func (p *ELBPlugin) loadClassicLoadBalancers(reqCtx *RequestContext) ([]ELBClassicLoadBalancer, error) {
 	goCtx := context.Background()
 	scope := reqCtx.AccountID + "/" + reqCtx.Region

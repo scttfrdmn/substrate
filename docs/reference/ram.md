@@ -102,15 +102,16 @@ position inside it takes one of two forms:
   two-hour window and then removed, and a walk that spans the removal resumes after the expired ARN
   rather than skipping the share that moved into its position. A position is refused unless it names a
   resource share in the caller's own account and Region; a share that has since expired still resumes.
-- **`ListPrincipals` and `ListResources`** list the principals or resources of every live share, in
-  share-ARN order and then association order, with duplicates across shares removed. Those items have
-  no identifier of their own in that order, so the position is an offset, never 0 (a token naming 0
-  is refused, since the first page is the absent token). An offset counts positions:
-  a delete, associate or disassociate between two pages shifts later pages, and a walk spanning it
-  skips or repeats one item. A token past a listing that has since shrunk answers an empty final page
-  rather than an error. An expiry does not shift them, because a `DELETED` share contributes nothing
-  to either. A value cursor here would reorder both responses, and is tracked as
-  [#1566](https://github.com/scttfrdmn/substrate/issues/1566).
+- **`ListPrincipals` and `ListResources`** ([#1566](https://github.com/scttfrdmn/substrate/issues/1566))
+  list the principals or resources of every live share, each once, in **principal ID or resource ARN
+  order**, and that value is the position: the next page starts strictly after the one the token
+  names. A delete, associate or disassociate between two pages therefore neither skips nor repeats an
+  item listed on both sides of it, and a token naming an item that has since gone resumes where it
+  was. An item associated with several shares carries the first share in ARN order as its
+  `resourceShareArn` (`API_Principal` and `API_Resource` describe it as a share the item is associated
+  with), so that member can change between pages while the item's position cannot. The token is the shared [cursor token](/reference/concepts/listing-order#cursor-pagination),
+  bound to the operation and to the request's filter members: a token reused with different filters,
+  `GetResourceShares`' token, or one from the other listing is `InvalidNextTokenException`/400.
 
 ## resourceOwner is required and read
 

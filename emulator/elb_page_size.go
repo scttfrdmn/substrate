@@ -37,20 +37,13 @@ import "strconv"
 // The code differs because the page does: `InvalidParameterValue` is what RDS and ElastiCache
 // publish, and `ValidationError` is what ELB's Common Errors page publishes.
 //
-// **The sweep #1150 asked for, and its count.** The plugin has six paginated operations — ELBv2
-// `DescribeLoadBalancers`, `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules` and
-// `DescribeAccountLimits`, plus classic `DescribeLoadBalancers`, each publishing `PageSize` 1–400 and
-// `Marker`. Two read the member and now answer through here. The other **four read neither `Marker`
-// nor `PageSize` at all**, which was a third answer and was filed as #1244 rather than widened into
-// this change: giving them the rule meant implementing the cursor, not validating a member. #1244
-// gave them the cursor through [elbPageCursor], which calls [elbPageSize], so the plugin did not
-// acquire a fourth answer. ELBv2 `DescribeTags` publishes no pagination member and is correctly
-// unpaginated.
-//
-// The `Marker` half of the same cursor was answered two ways — classic refused an unissued one,
-// `DescribeAccountLimits` restarted the walk at page one — until #1245 gave it one rule by the same
-// argument as this one at the sibling member. That rule is [elbPageCursor], and all six paginated
-// operations answer both members through it.
+// **Where the rule applies.** The plugin has six paginated operations — ELBv2 `DescribeLoadBalancers`,
+// `DescribeTargetGroups`, `DescribeListeners`, `DescribeRules` and `DescribeAccountLimits`, plus
+// classic `DescribeLoadBalancers` — each publishing `PageSize` 1–400 and `Marker`, and all six read
+// `PageSize` through [elbPageSize]. The five resource describes read `Marker` through [elbMarker], a
+// value cursor over the listing's ARN (ELBv2) or name (classic), because their listings change
+// between pages. `DescribeAccountLimits` lists a fixed set and reads it through [elbPageCursor], an
+// offset. ELBv2 `DescribeTags` publishes no pagination member and is unpaginated.
 
 // elbMinPageSize and elbMaxPageSize are the published bounds of `PageSize`, and elbDefaultPageSize is
 // the page size an absent member gets.
@@ -90,21 +83,14 @@ func elbPageSize(raw string) (int, *AWSError) {
 	return size, nil
 }
 
-// elbPageCursor resolves a request's `Marker` and `PageSize` together, for any paginated operation
-// in either generation (#1245, #1244).
+// elbPageCursor resolves `DescribeAccountLimits`' `Marker` and `PageSize`, whose listing is a fixed
+// set and so pages by offset (#1245).
 //
-// The `PageSize` half is [elbPageSize]. The `Marker` half is [decodeOffsetPaginationToken]: every
-// paginated ELB operation issues the base64 offset classic `DescribeLoadBalancers` already issued,
-// and a `Marker` substrate could not have issued — not base64, not an offset, a negative one — is
-// refused with `ValidationError`/400. No operation publishes a code for a bad marker; the code is
-// the consolidated Query Common Errors page's, which each operation links as its own (#1064), and the
-// message is substrate's own. Refusing rather than restarting at page one is the rule because a
-// restarted walk is a well-formed answer a paging loop cannot see is wrong (#915). An offset past the
-// end is a cursor substrate did issue over a listing that has since shrunk, so it is an empty last
-// page rather than a refusal, which [pageByOffsetToken] implements.
-//
-// Both members are checked before the caller reads any state, so a refused request is never
-// distinguishable by what it would have listed.
+// The `PageSize` half is [elbPageSize]. The `Marker` half is [decodeOffsetPaginationToken], and a
+// `Marker` substrate could not have issued — not base64, not an offset, a negative one — is refused
+// with `ValidationError`/400, the consolidated Query Common Errors page's code (#1064); the message is
+// substrate's own. An offset past the end is an empty last page, which [pageByOffsetToken]
+// implements. Both members are checked before any state is read.
 func elbPageCursor(req *AWSRequest) (offset, pageSize int, awsErr *AWSError) {
 	pageSize, awsErr = elbPageSize(req.Params["PageSize"])
 	if awsErr != nil {

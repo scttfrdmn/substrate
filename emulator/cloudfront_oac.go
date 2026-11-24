@@ -136,11 +136,8 @@ type cfOACSummaryWire struct {
 
 // cfOACListWire is the OriginAccessControlList document.
 //
-// Marker, MaxItems and NextMarker are published members and are not rendered, because substrate
-// answers the list whole and so holds no value for them — the same reading [listDistributions]
-// takes for DistributionList, and the same one docs/reference/cloudfront.md states for the three
-// DistributionConfig members substrate cannot answer. Inventing a MaxItems would assert a page
-// size AWS publishes nowhere.
+// Marker and MaxItems echo the request ([cfListPage]); NextMarker is present only when IsTruncated
+// is true, and is the ID of the page's last control.
 //
 // Items is a pointer to a slice so that an account using no OACs answers **no Items element at
 // all**, which is what the reference states: "If you're not using origin access controls for your
@@ -150,9 +147,12 @@ type cfOACSummaryWire struct {
 // deliberate and reviewable.
 type cfOACListWire struct {
 	XMLName     xml.Name            `xml:"OriginAccessControlList"`
+	Marker      string              `xml:"Marker"`
+	NextMarker  string              `xml:"NextMarker,omitempty"`
+	MaxItems    int                 `xml:"MaxItems"`
 	IsTruncated bool                `xml:"IsTruncated"`
-	Items       *[]cfOACSummaryWire `xml:"Items>OriginAccessControlSummary,omitempty"`
 	Quantity    int                 `xml:"Quantity"`
+	Items       *[]cfOACSummaryWire `xml:"Items>OriginAccessControlSummary,omitempty"`
 }
 
 // createOriginAccessControl handles POST /2020-05-31/origin-access-control.
@@ -223,21 +223,43 @@ func cfOACResponse(status int, oac CloudFrontOriginAccessControl) (*AWSResponse,
 
 // listOriginAccessControls handles GET /2020-05-31/origin-access-control.
 //
-// An unreadable record is skipped rather than failing the list, following [listDistributions]:
-// one corrupt record must not make the account's other controls unfindable.
-func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext) (*AWSResponse, error) {
+// The listing is in ID order, paged on `Marker`/`MaxItems` through [cfListPage]. A record that does
+// not decode is skipped rather than failing the list, following [listDistributions]: one corrupt
+// record must not make the account's other controls unfindable. A store failure fails the call.
+func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pg, awsErr := cfListPage(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	goCtx := context.Background()
 	ids, err := loadStringIndex(goCtx, p.state, cloudfrontNamespace, cfOACIDsKey(ctx.AccountID))
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront listOriginAccessControls loadIndex: %w", err)
 	}
-
-	summaries := make([]cfOACSummaryWire, 0, len(ids))
+	// Every record is read before the page is cut, so a page is short only at the end of the
+	// listing. A store failure fails the call.
+	all := make([]CloudFrontOriginAccessControl, 0, len(ids))
 	for _, id := range ids {
-		oac, loadErr := p.loadOriginAccessControl(ctx.AccountID, id)
-		if loadErr != nil {
+		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfOACKey(ctx.AccountID, id))
+		if getErr != nil {
+			return nil, fmt.Errorf("cloudfront listOriginAccessControls get %s: %w", id, getErr)
+		}
+		if data == nil {
 			continue
 		}
+		// A record whose ID is not the index entry it was loaded under is passed over, as in
+		// [listDistributions]: the ID is the page's cursor.
+		var oac CloudFrontOriginAccessControl
+		if json.Unmarshal(data, &oac) != nil || id == "" || oac.ID != id {
+			continue
+		}
+		all = append(all, oac)
+	}
+	res := pageAfter(all, func(o CloudFrontOriginAccessControl) cursorKey { return cfIDKey(o.ID) },
+		pg.after(), pg.maxItems, false)
+
+	summaries := make([]cfOACSummaryWire, 0, len(res.Items))
+	for _, oac := range res.Items {
 		summaries = append(summaries, cfOACSummaryWire{
 			Description:     oac.Description,
 			ID:              oac.ID,
@@ -248,7 +270,15 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext) (*AWSRe
 		})
 	}
 
-	list := cfOACListWire{Quantity: len(summaries)}
+	list := cfOACListWire{
+		Marker:      pg.marker,
+		MaxItems:    pg.maxItems,
+		IsTruncated: res.Truncated,
+		Quantity:    len(summaries),
+	}
+	if list.NextMarker, err = pg.nextMarker(res.Truncated, res.Last); err != nil {
+		return nil, err
+	}
 	if len(summaries) > 0 {
 		list.Items = &summaries
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 
@@ -107,17 +108,18 @@ func TestELBPageCursor_EveryOperationRefusesTheSameUnissuedMarker(t *testing.T) 
 	}
 }
 
-// TestELBPageCursor_PastTheEndIsAnEmptyLastPage covers the cursor that is not refused: an offset
-// substrate did issue over a listing that has since shrunk. Every operation answers 200, an empty
-// page, the result wrapper, and no `NextMarker`.
+// TestELBPageCursor_PastTheEndIsAnEmptyLastPage covers the offset cursor that is not refused:
+// `DescribeAccountLimits`' offset past the end of its fixed set answers 200, an empty page, the
+// result wrapper, and no `NextMarker`.
 func TestELBPageCursor_PastTheEndIsAnEmptyLastPage(t *testing.T) {
 	t.Parallel()
 	ts := newELBTestServer(t)
-	elbCreateLB(t, ts.URL, "past-end-alb", nil)
-	elbClassicCreate(t, ts.URL, "past-end-classic", nil)
 	marker := base64.StdEncoding.EncodeToString([]byte("9999"))
 
 	for _, op := range elbCursorOperations() {
+		if op.action != "DescribeAccountLimits" {
+			continue
+		}
 		resp := elbRequest(t, ts.URL, elbCursorParams(op, marker, ""))
 		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
@@ -248,4 +250,187 @@ func TestELBPageCursor_EachELBv2DescribeWalksEveryRecordOnce(t *testing.T) {
 			assert.Equal(t, whole.ids, walked, "a paged walk returns every record once, in order")
 		})
 	}
+}
+
+// elbWalkCase is one resource describe walked a page at a time with the listing changed mid-walk.
+type elbWalkCase struct {
+	name, listMember, idMember string
+	base                       map[string]string
+	create                     func(t *testing.T, name string)
+	remove                     func(t *testing.T, id string)
+}
+
+// elbWalkCases are the ELBv2 load-balancer and target-group describes and classic
+// `DescribeLoadBalancers`, each with a create and a delete.
+func elbWalkCases(ts *httptest.Server) []elbWalkCase {
+	send := func(t *testing.T, params map[string]string) {
+		t.Helper()
+		resp := elbRequest(t, ts.URL, params)
+		body, err := io.ReadAll(resp.Body)
+		require.NoError(t, err)
+		require.NoError(t, resp.Body.Close())
+		require.Equal(t, http.StatusOK, resp.StatusCode, "%s", body)
+	}
+	return []elbWalkCase{
+		{
+			name: "ELBv2 DescribeLoadBalancers", listMember: "LoadBalancers", idMember: "LoadBalancerArn",
+			base:   map[string]string{"Action": "DescribeLoadBalancers"},
+			create: func(t *testing.T, name string) { elbCreateLB(t, ts.URL, name, nil) },
+			remove: func(t *testing.T, id string) {
+				send(t, map[string]string{"Action": "DeleteLoadBalancer", "LoadBalancerArn": id})
+			},
+		},
+		{
+			name: "ELBv2 DescribeTargetGroups", listMember: "TargetGroups", idMember: "TargetGroupArn",
+			base:   map[string]string{"Action": "DescribeTargetGroups"},
+			create: func(t *testing.T, name string) { elbCreateTG(t, ts.URL, name, nil) },
+			remove: func(t *testing.T, id string) {
+				send(t, map[string]string{"Action": "DeleteTargetGroup", "TargetGroupArn": id})
+			},
+		},
+		{
+			name: "classic DescribeLoadBalancers", listMember: "LoadBalancerDescriptions", idMember: "LoadBalancerName",
+			base:   map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion},
+			create: func(t *testing.T, name string) { elbClassicCreate(t, ts.URL, name, nil) },
+			remove: func(t *testing.T, id string) {
+				send(t, map[string]string{"Action": "DeleteLoadBalancer", "Version": elbClassicVersion,
+					"LoadBalancerName": id})
+			},
+		},
+	}
+}
+
+// TestELBPageCursor_AWalkSurvivesAMidWalkCreateAndDelete is the value cursor's point: between two
+// pages the walk deletes the record the marker names and the record after it, and creates one that
+// sorts first and one that sorts last. Every record that survives is returned exactly once, the
+// deleted cursor record resumes in place, and nothing is returned twice.
+func TestELBPageCursor_AWalkSurvivesAMidWalkCreateAndDelete(t *testing.T) {
+	t.Parallel()
+	// Each case gets its own server; a case's closures read the server only when called.
+	for i, c := range elbWalkCases(nil) {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newELBTestServer(t)
+			tc := elbWalkCases(ts)[i]
+			for i := 1; i <= 6; i++ {
+				tc.create(t, fmt.Sprintf("m-%d", i))
+			}
+			params := func(marker string) map[string]string {
+				p := map[string]string{"PageSize": "2"}
+				for k, v := range tc.base {
+					p[k] = v
+				}
+				if marker != "" {
+					p["Marker"] = marker
+				}
+				return p
+			}
+
+			first := elbDescribePage(t, ts, params(""), tc.listMember, tc.idMember)
+			require.Len(t, first.ids, 2)
+			require.NotEmpty(t, first.next)
+			whole := elbDescribePage(t, ts, tc.base, tc.listMember, tc.idMember)
+			require.Len(t, whole.ids, 6)
+			assert.True(t, sort.StringsAreSorted(whole.ids), "the listing is in the order its cursor compares in")
+
+			tc.remove(t, first.ids[1]) // the record the marker names
+			tc.remove(t, whole.ids[2]) // the record after it
+			tc.create(t, "a-0")        // sorts before every record
+			tc.create(t, "z-9")        // sorts after every record
+
+			walked := append([]string(nil), first.ids...)
+			marker := first.next
+			for pages := 0; marker != ""; pages++ {
+				require.Less(t, pages, 10, "the walk did not terminate")
+				pg := elbDescribePage(t, ts, params(marker), tc.listMember, tc.idMember)
+				walked = append(walked, pg.ids...)
+				marker = pg.next
+			}
+
+			seen := map[string]int{}
+			for _, id := range walked {
+				seen[id]++
+				assert.Equal(t, 1, seen[id], "%s returned twice", id)
+			}
+			for _, id := range whole.ids[3:] {
+				assert.Equal(t, 1, seen[id], "the surviving record %s is returned exactly once", id)
+			}
+			assert.NotContains(t, walked, whole.ids[2], "a record deleted before its page is not listed")
+			assert.Contains(t, walked[len(walked)-1], "z-9", "a record created after the cursor is reached")
+			for _, id := range walked {
+				assert.NotContains(t, id, "a-0", "a record created before the cursor is not reached")
+			}
+		})
+	}
+}
+
+// TestELBPageCursor_AMarkerIsBoundToItsOperationAndFilters refuses a marker handed to another
+// describe, or reused with different filter members, with `ValidationError`/400.
+func TestELBPageCursor_AMarkerIsBoundToItsOperationAndFilters(t *testing.T) {
+	t.Parallel()
+	ts := newELBTestServer(t)
+	var tgNames []string
+	for i := 0; i < 3; i++ {
+		name := fmt.Sprintf("bound-tg-%d", i)
+		elbCreateTG(t, ts.URL, name, nil)
+		tgNames = append(tgNames, name)
+	}
+	elbCreateLB(t, ts.URL, "bound-alb", nil)
+	first := elbDescribePage(t, ts, map[string]string{"Action": "DescribeTargetGroups", "PageSize": "1"},
+		"TargetGroups", "TargetGroupArn")
+	require.NotEmpty(t, first.next)
+
+	for _, tc := range []struct {
+		name   string
+		params map[string]string
+	}{
+		{"another operation", map[string]string{"Action": "DescribeLoadBalancers"}},
+		{"the classic generation", map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion}},
+		{"a filter added", map[string]string{"Action": "DescribeTargetGroups", "Names.member.1": tgNames[1]}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.params["Marker"] = first.next
+			got := elbSendForPageSizeAnswer(t, ts.URL, tc.params)
+			assert.Equal(t, "ValidationError", got.code)
+			assert.Equal(t, http.StatusBadRequest, got.status)
+			assert.Contains(t, got.message, "Marker")
+		})
+	}
+
+	// The two generations' DescribeLoadBalancers share a name and refuse each other's marker.
+	elbCreateLB(t, ts.URL, "bound-alb-2", nil)
+	elbClassicCreate(t, ts.URL, "bound-classic-1", nil)
+	elbClassicCreate(t, ts.URL, "bound-classic-2", nil)
+	v2 := map[string]string{"Action": "DescribeLoadBalancers"}
+	classic := map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion}
+	v2Marker := elbDescribePage(t, ts, map[string]string{"Action": "DescribeLoadBalancers", "PageSize": "1"},
+		"LoadBalancers", "LoadBalancerArn").next
+	classicMarker := elbDescribePage(t, ts,
+		map[string]string{"Action": "DescribeLoadBalancers", "Version": elbClassicVersion, "PageSize": "1"},
+		"LoadBalancerDescriptions", "LoadBalancerName").next
+	require.NotEmpty(t, v2Marker)
+	require.NotEmpty(t, classicMarker)
+	for name, tc := range map[string]struct {
+		params map[string]string
+		marker string
+	}{
+		"a v2 marker on classic": {classic, v2Marker},
+		"a classic marker on v2": {v2, classicMarker},
+	} {
+		tc.params["Marker"] = tc.marker
+		got := elbSendForPageSizeAnswer(t, ts.URL, tc.params)
+		assert.Equal(t, "ValidationError", got.code, name)
+		assert.Equal(t, http.StatusBadRequest, got.status, name)
+	}
+
+	// The same filter members, in another order, are the same filter.
+	named := map[string]string{"Action": "DescribeTargetGroups", "PageSize": "1",
+		"Names.member.1": tgNames[0], "Names.member.2": tgNames[2]}
+	pg := elbDescribePage(t, ts, named, "TargetGroups", "TargetGroupArn")
+	require.NotEmpty(t, pg.next)
+	reordered := map[string]string{"Action": "DescribeTargetGroups", "PageSize": "1",
+		"Names.member.1": tgNames[2], "Names.member.2": tgNames[0], "Marker": pg.next}
+	second := elbDescribePage(t, ts, reordered, "TargetGroups", "TargetGroupArn")
+	assert.Len(t, second.ids, 1)
+	assert.Empty(t, second.next)
 }

@@ -108,7 +108,8 @@ func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, req *AWSRequest) (
 	if errResp := iamValidateInstanceProfilePathPrefix(params.PathPrefix); errResp != nil {
 		return errResp, nil
 	}
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -146,7 +147,7 @@ func (p *IAMPlugin) listInstanceProfiles(ctx *RequestContext, req *AWSRequest) (
 	// Paged over the *matched* keys, which is what makes the marker consistent with the filter:
 	// paginateIAMKeys sorts and then resumes after the key the marker names, so a walk that
 	// keeps sending the same PathPrefix — as AWS requires — sees each profile exactly once.
-	page, nextMarker, isTruncated := paginateIAMKeys(matched, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(matched, pg)
 
 	profiles := make([]IAMInstanceProfile, 0, len(page))
 	for _, k := range page {

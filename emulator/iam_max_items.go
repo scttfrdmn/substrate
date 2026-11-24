@@ -21,8 +21,8 @@ import (
 // around a page size it never asked for, and got a 400 from IAM the first time it ran for
 // real.
 //
-// The guard therefore lives in the handler, before the shared paginator, and the coercion in
-// [paginateIAMKeys] stays as the defaulting path for a value that was never sent. It is
+// The guard therefore lives in the handler, before the shared paginator, and [iamMarker]
+// applies the documented default for a value that was never sent. It is
 // applied at every IAM operation that declares the parameter — including the ones that parse
 // it and then have nothing to truncate, such as `ListAttachedUserPolicies` and
 // `ListPolicyVersions` — because AWS validates a request parameter before it decides whether

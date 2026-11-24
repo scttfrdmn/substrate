@@ -108,7 +108,8 @@ func (p *IAMPlugin) getAccountAuthorizationDetails(ctx *RequestContext, req *AWS
 		}
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -122,7 +123,7 @@ func (p *IAMPlugin) getAccountAuthorizationDetails(ctx *RequestContext, req *AWS
 		return nil, err
 	}
 
-	page, nextMarker, isTruncated := paginateIAMKeys(details.keys, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(details.keys, pg)
 
 	body, err := details.render(page)
 	if err != nil {

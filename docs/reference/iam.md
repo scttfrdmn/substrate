@@ -734,6 +734,28 @@ oversight: a form body carrying `MaxItems=` expressed no limit, so it takes the 
 refusal is per operation, in the handler, rather than in the paginator, because the paginator
 cannot tell an absent parameter from a zero one.
 
+## A `Marker` IAM did not issue is refused, not answered with page one
+
+Every IAM listing that pages on a key — `ListUsers`, `ListRoles`, `ListGroups`, `GetGroup`,
+`ListGroupsForUser`, `ListPolicies`, `ListInstanceProfiles`, `ListInstanceProfilesForRole`, the
+inline-policy listings, `GetAccountAuthorizationDetails` and the four tag listings — issues as its
+`Marker` the base64 of the page's last key, and the next page starts strictly after that key
+([cursor pagination](/reference/concepts/listing-order#cursor-pagination)). A key deleted between
+pages resumes where it was. A `Marker` that is not canonical base64 of a non-empty key is
+`ValidationError`/400, IAM `CommonErrors`' code for input that "doesn't meet the required format or
+constraints"; none of these operations publishes a code of its own for it, and the message is
+substrate's own. The tag listings' `Marker` takes the same form, so it no longer names the next
+page's first tag key in the clear.
+
+`SimulatePrincipalPolicy` and `SimulateCustomPolicy` page their results on a base64 index. The
+result list holds one entry per requested action and resource pair, in request order, so an index
+names the same pair on every page; `SimulatePrincipalPolicy` reads the principal's policies on each
+call, so a policy changed between pages changes the decisions later pages report, not which pairs
+they hold. An index that does not decode is
+`InvalidInput`/400, the code both pages publish ("The request was rejected because an invalid or
+out-of-range value was supplied for an input parameter."). `ListPolicyVersions`' marker is the next
+version's ID, and one naming no version is `InvalidInput`/400.
+
 ## `ListInstanceProfiles` filters before it pages
 
 `ListInstanceProfiles` applies `PathPrefix` to the whole account and *then* cuts the page
@@ -830,7 +852,7 @@ two of the four could accept one.
 | Instance profile | `TagInstanceProfile`, `UntagInstanceProfile`, `ListInstanceProfileTags` | `InstanceProfileName` |
 
 **A listing is sorted by tag key**, on all six — AWS states it on each, and it is not cosmetic:
-the response `Marker` names a key rather than an offset, so an unsorted underlying order would
+the response `Marker` encodes a key rather than an offset ([see above](#a-marker-iam-did-not-issue-is-refused-not-answered-with-page-one)), so an unsorted underlying order would
 make a second page arbitrary. All six render through one code path, so `ListUserTags` and
 `ListRoleTags` now sort too, where they previously reported tags in whatever order they were
 stored. `MaxItems` defaults to 100 (1–1000), and `Marker` appears in the response **only** when

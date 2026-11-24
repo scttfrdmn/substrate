@@ -113,43 +113,17 @@ func iamRemoveTagKeys(tags []IAMTag, keys []string, caseRule iamTagCase) []IAMTa
 // where `Tags` is `Required: No` and an untagged entity omits it (#796). `MaxItems` defaults
 // to 100, and `Marker` appears in the response only when `IsTruncated` is true.
 //
-// The page is taken from a key-sorted copy, per "The returned list of tags is sorted by tag
-// key" — a marker names a key rather than an offset, so an unsorted underlying order would
-// make a second page arbitrary.
-func iamTagListingResponse(operation string, tags []IAMTag, marker string, maxItems iamInt) (*AWSResponse, error) {
-	sorted := make([]IAMTag, len(tags))
-	copy(sorted, tags)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Key < sorted[j].Key })
-
-	// Only an unsent MaxItems reaches the default: the four tag listings refuse an
-	// out-of-range value in their handlers (#868, [iamValidateMaxItems]), which is also what
-	// bounds the page above — this helper used to accept a `MaxItems` of any size, so a
-	// caller asking for 5000 got 5000 where IAM answers a validation failure.
-	limit := maxItems.Int()
-	if limit <= 0 {
-		limit = iamMaxItemsDefault
-	}
-
-	start := 0
-	if marker != "" {
-		for i, t := range sorted {
-			if t.Key == marker {
-				start = i
-				break
-			}
-		}
-	}
-	end := start + limit
-	isTruncated := false
+// The page is in tag-key order, per "The returned list of tags is sorted by tag key", and starts
+// strictly after the key pg's Marker names ([iamMarker]), as every IAM listing's does.
+func iamTagListingResponse(operation string, tags []IAMTag, pg iamPage) (*AWSResponse, error) {
+	res := pageAfter(tags, func(t IAMTag) cursorKey { return cursorKey{Sort: t.Key} }, pg.after, pg.size, false)
+	isTruncated := res.Truncated
 	nextMarker := ""
-	if end < len(sorted) {
-		isTruncated = true
-		nextMarker = sorted[end].Key
-	} else {
-		end = len(sorted)
+	if isTruncated {
+		nextMarker = iamEncodeMarker(res.Last.Sort)
 	}
 
-	body := iamTagListXML(sorted[start:end]) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
+	body := iamTagListXML(res.Items) + "<IsTruncated>" + iamBoolXML(isTruncated) + "</IsTruncated>"
 	if nextMarker != "" {
 		body += "<Marker>" + xmlEsc(nextMarker) + "</Marker>"
 	}
@@ -351,7 +325,8 @@ func (p *IAMPlugin) listPolicyTags(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		return iamErrorResponse("ValidationError", "PolicyArn is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -368,7 +343,7 @@ func (p *IAMPlugin) listPolicyTags(ctx *RequestContext, req *AWSRequest) (*AWSRe
 	if record == nil {
 		return iamPolicyNotFound(params.PolicyArn), nil
 	}
-	return iamTagListingResponse("ListPolicyTags", record.tags, params.Marker, params.MaxItems)
+	return iamTagListingResponse("ListPolicyTags", record.tags, pg)
 }
 
 // --- Instance-profile tagging -----------------------------------------------
@@ -466,7 +441,8 @@ func (p *IAMPlugin) listInstanceProfileTags(ctx *RequestContext, req *AWSRequest
 		return iamErrorResponse("ValidationError", "InstanceProfileName is required", http.StatusBadRequest), nil
 	}
 
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -483,5 +459,5 @@ func (p *IAMPlugin) listInstanceProfileTags(ctx *RequestContext, req *AWSRequest
 	if record == nil {
 		return iamInstanceProfileNotFound(params.InstanceProfileName), nil
 	}
-	return iamTagListingResponse("ListInstanceProfileTags", record.tags, params.Marker, params.MaxItems)
+	return iamTagListingResponse("ListInstanceProfileTags", record.tags, pg)
 }

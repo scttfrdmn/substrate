@@ -31,7 +31,8 @@ func (p *IAMPlugin) listInstanceProfilesForRole(ctx *RequestContext, req *AWSReq
 	if params.RoleName == "" {
 		return iamErrorResponse("ValidationError", "RoleName is required", http.StatusBadRequest), nil
 	}
-	if errResp := iamValidateMaxItems(req, params.MaxItems); errResp != nil {
+	pg, errResp := iamMarker(req, params.MaxItems, params.Marker)
+	if errResp != nil {
 		return errResp, nil
 	}
 
@@ -76,7 +77,7 @@ func (p *IAMPlugin) listInstanceProfilesForRole(ctx *RequestContext, req *AWSReq
 			}
 		}
 	}
-	page, nextMarker, isTruncated := paginateIAMKeys(matched, params.Marker, params.MaxItems.Int())
+	page, nextMarker, isTruncated := paginateIAMKeys(matched, pg)
 	profiles := make([]IAMInstanceProfile, 0, len(page))
 	for _, k := range page {
 		profiles = append(profiles, byKey[k])

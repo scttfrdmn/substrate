@@ -79,7 +79,7 @@ func (p *CloudFrontPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 	case "GetOriginAccessControl":
 		return p.getOriginAccessControl(ctx, resourceID)
 	case "ListOriginAccessControls":
-		return p.listOriginAccessControls(ctx)
+		return p.listOriginAccessControls(ctx, req)
 	case "DeleteOriginAccessControl":
 		return p.deleteOriginAccessControl(ctx, req, resourceID)
 	case "TagResource":
@@ -643,29 +643,49 @@ func (p *CloudFrontPlugin) deleteDistribution(ctx *RequestContext, req *AWSReque
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
-func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest) (*AWSResponse, error) {
+// listDistributions answers ListDistributions in ID order, paged on `Marker`/`MaxItems` through
+// [cfListPage].
+func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
+	pg, awsErr := cfListPage(req)
+	if awsErr != nil {
+		return nil, awsErr
+	}
 	goCtx := context.Background()
 	idxKey := cfDistIDsKey(ctx.AccountID)
 	ids, err := loadStringIndex(goCtx, p.state, cloudfrontNamespace, idxKey)
 	if err != nil {
 		return nil, fmt.Errorf("cloudfront listDistributions loadIndex: %w", err)
 	}
+	// Every record is read before the page is cut, so a page is short only at the end of the
+	// listing. A store failure fails the call; an index entry whose record is gone is passed over.
+	all := make([]CloudFrontDistribution, 0, len(ids))
+	for _, id := range ids {
+		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, id))
+		if getErr != nil {
+			return nil, fmt.Errorf("cloudfront listDistributions get %s: %w", id, getErr)
+		}
+		if data == nil {
+			continue
+		}
+		// A record that does not decode, or whose ID is not the index entry it was loaded under, is
+		// passed over as a dangling entry is: the ID is the page's cursor, and an empty one would
+		// end a truncated page on no NextMarker.
+		var dist CloudFrontDistribution
+		if err := json.Unmarshal(data, &dist); err != nil || id == "" || dist.ID != id {
+			continue
+		}
+		all = append(all, dist)
+	}
+	res := pageAfter(all, func(d CloudFrontDistribution) cursorKey { return cfIDKey(d.ID) },
+		pg.after(), pg.maxItems, false)
 
 	// Every summary is built before any observation is spent (#1115): the summary's configuration
 	// members come from the stored configuration (see distributionSummary), and building them first
 	// means nothing about a summary can fail a list that has already consumed seeded countdowns.
-	dists := make([]CloudFrontDistribution, 0, len(ids))
-	summaries := make([]cfConfigNode, 0, len(ids))
-	for _, id := range ids {
-		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, id))
-		if getErr != nil || data == nil {
-			continue
-		}
-		var dist CloudFrontDistribution
-		if err := json.Unmarshal(data, &dist); err != nil {
-			continue
-		}
-		dists = append(dists, dist)
+	// Only the page's distributions spend one.
+	dists := res.Items
+	summaries := make([]cfConfigNode, 0, len(dists))
+	for _, dist := range dists {
 		summaries = append(summaries, p.distributionSummary(dist))
 	}
 	// ListDistributions is polled like GetDistribution, so each distribution it reports spends one
@@ -680,16 +700,43 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, _ *AWSRequest)
 
 	type xmlList struct {
 		XMLName     xml.Name       `xml:"DistributionList"`
-		Items       []cfConfigNode `xml:"Items>DistributionSummary"`
-		Quantity    int            `xml:"Quantity"`
+		Marker      string         `xml:"Marker"`
+		NextMarker  string         `xml:"NextMarker,omitempty"`
+		MaxItems    int            `xml:"MaxItems"`
 		IsTruncated bool           `xml:"IsTruncated"`
+		Quantity    int            `xml:"Quantity"`
+		Items       []cfConfigNode `xml:"Items>DistributionSummary"`
 	}
-	return cloudfrontXMLResponse(http.StatusOK, xmlList{
-		Items:       summaries,
+	list := xmlList{
+		Marker:      pg.marker,
+		MaxItems:    pg.maxItems,
+		IsTruncated: res.Truncated,
 		Quantity:    len(summaries),
-		IsTruncated: false,
+		Items:       summaries,
+	}
+	if list.NextMarker, err = pg.nextMarker(res.Truncated, res.Last); err != nil {
+		return nil, err
+	}
+	return cloudfrontXMLResponse(http.StatusOK, list)
+}
+
+// cfListMaxItemsDefault is the page size of a CloudFront listing whose request omits `MaxItems`.
+// AWS publishes no default; 100 is substrate's reading.
+const cfListMaxItemsDefault = 100
+
+// cfListPage reads a CloudFront listing's `Marker` and `MaxItems` ([restXMLMarker]).
+//
+// A `MaxItems` that is not a positive integer is InvalidArgument/400, the one code
+// API_ListDistributions and API_ListOriginAccessControls publish ("An argument is invalid."); the
+// message is substrate's own. The response echoes both members, as each list type marks them.
+func cfListPage(req *AWSRequest) (restXMLPage, *AWSError) {
+	return restXMLMarker(req, cfListMaxItemsDefault, func(message string) *AWSError {
+		return &AWSError{Code: "InvalidArgument", Message: message, HTTPStatus: http.StatusBadRequest}
 	})
 }
+
+// cfIDKey is a CloudFront listing's cursor key: the item's ID, which is also its NextMarker.
+func cfIDKey(id string) cursorKey { return cursorKey{Sort: id} }
 
 // --- Invalidation -----------------------------------------------------------
 

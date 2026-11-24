@@ -3,7 +3,6 @@ package emulator
 import (
 	"net/http"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -28,8 +27,9 @@ import (
 // # The token, and refusing one substrate did not issue
 //
 // A truncated page carries a `nextToken`; the last page carries none, as the pages require ("You
-// should repeat this until the NextToken response element comes back as null"). Every token is
-// [encodeQueryMarker] of `{Operation}:{position}`, so it names the operation that issued it: the page
+// should repeat this until the NextToken response element comes back as null"). Every token names the
+// operation that issued it — GetResourceShares' is [encodeQueryMarker] of `{Operation}:{position}`,
+// and ListPrincipals' and ListResources' is [page]'s opaque token — because the page
 // says a token must be one "you received in the NextToken response of a previous call to this
 // operation", and a ListPrincipals token handed to ListResources is not. A token that does not decode,
 // names another operation, or carries a position this operation never emits is
@@ -51,17 +51,16 @@ import (
 // this operation issues carries. That is a check on the text, not on state, so a token naming a share
 // that has since expired is accepted and resumes after it.
 //
-// # ListPrincipals and ListResources page on an offset
+// # ListPrincipals and ListResources page on an entity cursor
 //
-// Their items are not records with an identifier of their own in a sortable order: each listing is
-// the principals or resources of every live share, in share-ARN order and then association order,
-// deduplicated across shares. So the position is an offset, cut by [pageByOffsetToken]. The offset
-// is never 0 — the first page is the absent token — so a token naming offset 0 is refused. An offset
-// counts positions, so a delete, associate or disassociate between two pages shifts later pages and a
-// walk spanning it skips or repeats one item; a token past a listing that has since shrunk clamps to
-// an empty final page rather than erroring. An expiry does not shift them, because a DELETED share
-// contributes nothing to either. A value cursor here would need the items rendered in an order they
-// compare in, which reorders both responses; that is a follow-up (#1566), not part of this change.
+// Their items are the principals or resources of every live share, each listed once, in principal ID
+// or resource ARN order, and that value is the cursor ([page]'s Sort), so a delete, associate or
+// disassociate between two pages neither skips nor repeats an item that is listed on both sides of
+// it. An item of several shares carries the first share in ARN order as its resourceShareArn, so
+// that member can change between pages while the item's position cannot. The token is [page]'s
+// opaque token, bound to the operation and to the request's filter members, so neither operation
+// accepts the other's token, GetResourceShares' token, or its own token reused with different
+// filters (#1566).
 
 const (
 	// ramMaxResultsMin and ramMaxResultsMax are the Valid Range all three pages publish for maxResults.
@@ -105,59 +104,47 @@ func ramDecodeToken(operation, raw string) (string, error) {
 
 // ramReadMaxResults validates maxResults, returning 0 — the whole listing — for an absent one.
 func ramReadMaxResults(maxResults *int) (int, error) {
-	if maxResults == nil {
-		return 0, nil
+	n, awsErr := ramMaxResults().check(maxResults, ramInvalidParameter)
+	if awsErr != nil {
+		return 0, awsErr
 	}
-	if *maxResults < ramMaxResultsMin || *maxResults > ramMaxResultsMax {
-		return 0, ramInvalidParameter("maxResults must be between " + strconv.Itoa(ramMaxResultsMin) +
-			" and " + strconv.Itoa(ramMaxResultsMax) + ", was " + strconv.Itoa(*maxResults))
-	}
-	return *maxResults, nil
+	return n, nil
 }
 
-// ramPage is the decoded paging request of ListPrincipals or ListResources.
-type ramPage struct {
-	// operation is the listing's operation name, which its tokens carry.
-	operation string
-
-	// offset is where the page starts.
-	offset int
-
-	// size is the page size, or 0 for the whole remainder, which is an absent maxResults.
-	size int
+// ramMaxResults is the published maxResults range. An absent member answers the whole listing: the
+// pages publish no default number, only "a value that is specific to the operation".
+func ramMaxResults() pageSizeRange {
+	return pageSizeRange{member: "maxResults", min: ramMaxResultsMin, max: ramMaxResultsMax}
 }
 
-// ramReadPage validates an offset-paged listing's maxResults and nextToken, before any state is read.
-//
-// The offset must be the canonical decimal of a positive integer: substrate emits no other, and the
-// first page is the absent token rather than offset 0.
-func ramReadPage(operation string, maxResults *int, nextToken string) (ramPage, error) {
-	size, err := ramReadMaxResults(maxResults)
+// ramReadPage validates ListPrincipals' or ListResources' maxResults and nextToken against the
+// request's filter members, before any state is read.
+func ramReadPage(operation string, filter map[string][]string, maxResults *int, nextToken string) (pageRequest, error) {
+	pr, awsErr := jsonNextToken(jsonPaging{
+		op:           operation,
+		size:         ramMaxResults(),
+		invalidSize:  ramInvalidParameter,
+		invalidToken: ramInvalidNextToken,
+	}, filter, nextToken, maxResults)
+	if awsErr != nil {
+		return pageRequest{}, awsErr
+	}
+	return pr, nil
+}
+
+// ramPaged cuts one page out of items, keyed by their entity member, and answers it under member,
+// with `nextToken` when a further item exists.
+func ramPaged(member, entity string, items []map[string]interface{}, pr pageRequest) (*AWSResponse, error) {
+	res, err := page(items, func(item map[string]interface{}) cursorKey {
+		id, _ := item[entity].(string)
+		return cursorKey{Sort: id}
+	}, pr)
 	if err != nil {
-		return ramPage{}, err
+		return nil, ramInvalidNextToken()
 	}
-	page := ramPage{operation: operation, size: size}
-	position, err := ramDecodeToken(operation, nextToken)
-	if err != nil || position == "" {
-		return page, err
-	}
-	offset, convErr := strconv.Atoi(position)
-	if convErr != nil || offset < 1 || strconv.Itoa(offset) != position {
-		return ramPage{}, ramInvalidNextToken()
-	}
-	page.offset = offset
-	return page, nil
-}
-
-// ramPaged cuts one page out of items and answers it under member, with `nextToken` when a further
-// page exists. items must be in a stable order; both callers build them from the shares in ARN order.
-func ramPaged[T any](member string, items []T, page ramPage) (*AWSResponse, error) {
-	cut, next := pageByOffsetToken(items, page.offset, page.size)
-	out := map[string]interface{}{member: cut}
-	if next != "" {
-		// pageByOffsetToken emits a token only when a further item exists; the token this listing
-		// issues is its own, bound to the operation, at the same next offset.
-		out["nextToken"] = ramEncodeToken(page.operation, strconv.Itoa(page.offset+len(cut)))
+	out := map[string]interface{}{member: res.Items}
+	if res.Next != "" {
+		out["nextToken"] = res.Next
 	}
 	return ramJSONResponse(http.StatusOK, out)
 }

@@ -3,6 +3,7 @@ package emulator_test
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"math"
@@ -399,10 +400,12 @@ func TestIAMTagging_AListingPaginates(t *testing.T) {
 
 			first := page("")
 			assert.Equal(t, true, first["IsTruncated"])
-			assert.Equal(t, "zone", first["Marker"], "the marker names the next page's first key")
+			marker, _ := first["Marker"].(string)
+			assert.Equal(t, base64.StdEncoding.EncodeToString([]byte("owner")), marker,
+				"the marker names the page's last key, and the next page starts after it")
 			require.Len(t, first["Tags"], 2)
 
-			second := page("zone")
+			second := page(marker)
 			assert.Equal(t, false, second["IsTruncated"])
 			assert.NotContains(t, second, "Marker",
 				"Marker is present only when IsTruncated is true")

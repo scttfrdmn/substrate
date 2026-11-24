@@ -465,7 +465,13 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 	if err != nil {
 		return nil, err
 	}
-	page, err := ramReadPage("ListPrincipals", input.MaxResults, input.NextToken)
+	pr, err := ramReadPage("ListPrincipals", map[string][]string{
+		"resourceOwner":     {input.ResourceOwner},
+		"principals":        input.Principals,
+		"resourceArn":       {input.ResourceArn},
+		"resourceShareArns": input.ResourceShareArns,
+		"resourceType":      {input.ResourceType},
+	}, input.MaxResults, input.NextToken)
 	if err != nil {
 		return nil, err
 	}
@@ -476,6 +482,9 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 		if err != nil {
 			return nil, err
 		}
+		// A principal of several shares is listed once, under the first share in ARN order:
+		// API_Principal's resourceShareArn is "a resource share the principal is associated with".
+		ramSortShares(shares)
 		seen := make(map[string]bool)
 		for _, share := range shares {
 			if share.Status == ramShareStatusDeleted || !ramMatchesAny(input.ResourceShareArns, share.ResourceShareArn) {
@@ -502,7 +511,7 @@ func (p *RAMPlugin) listPrincipals(reqCtx *RequestContext, req *AWSRequest) (*AW
 		}
 	}
 
-	return ramPaged("principals", principals, page)
+	return ramPaged("principals", "id", principals, pr)
 }
 
 // listResources handles ListResources: the resources in the caller's active shares, filtered as
@@ -531,7 +540,14 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		return nil, ramInvalidParameter("resourceRegionScope must be one of " +
 			strings.Join(ramRegionScopes, ", ") + ", was " + input.ResourceRegionScope)
 	}
-	page, err := ramReadPage("ListResources", input.MaxResults, input.NextToken)
+	pr, err := ramReadPage("ListResources", map[string][]string{
+		"resourceOwner":       {input.ResourceOwner},
+		"principal":           {input.Principal},
+		"resourceArns":        input.ResourceArns,
+		"resourceShareArns":   input.ResourceShareArns,
+		"resourceType":        {input.ResourceType},
+		"resourceRegionScope": {input.ResourceRegionScope},
+	}, input.MaxResults, input.NextToken)
 	if err != nil {
 		return nil, err
 	}
@@ -542,6 +558,9 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		if err != nil {
 			return nil, err
 		}
+		// A resource of several shares is listed once, under the first share in ARN order:
+		// API_Resource's resourceShareArn is "the resource share this resource is associated with".
+		ramSortShares(shares)
 		seen := make(map[string]bool)
 		for _, share := range shares {
 			if share.Status == ramShareStatusDeleted || !ramMatchesAny(input.ResourceShareArns, share.ResourceShareArn) {
@@ -573,7 +592,15 @@ func (p *RAMPlugin) listResources(reqCtx *RequestContext, req *AWSRequest) (*AWS
 		}
 	}
 
-	return ramPaged("resources", resources, page)
+	return ramPaged("resources", "arn", resources, pr)
+}
+
+// ramSortShares orders shares by ARN, which decides the share a principal or resource of several
+// shares is listed under.
+func ramSortShares(shares []RAMResourceShare) {
+	slices.SortFunc(shares, func(a, b RAMResourceShare) int {
+		return strings.Compare(a.ResourceShareArn, b.ResourceShareArn)
+	})
 }
 
 // loadShare loads a RAMResourceShare from state or returns a not-found error.
