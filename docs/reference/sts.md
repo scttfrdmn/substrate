@@ -140,7 +140,7 @@ permissions boundary. A refusal says "(blocked by session policy)".
 Both limits are enforced: 2,048 characters for `Policy` and 10 ARNs for `PolicyArns`, each
 answering `ValidationError`. A `Policy` that is not a policy document is `MalformedPolicyDocument`,
 in substrate's own wording. A `PolicyArns` entry naming no policy is `MalformedPolicyDocument`
-"Policy <arn> does not exist or is not attachable.", observed from the service. The documents are
+`Policy <arn> does not exist or is not attachable.`, observed from the service. The documents are
 read when the session is minted, so a later change to a managed policy does not reach an existing
 session.
 
