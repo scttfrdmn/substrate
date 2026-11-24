@@ -162,6 +162,12 @@ jobs:
       - name: Fetch the AWS provider and the CDK app's packages
         run: make iac-e2e-setup
 
+      # The journey runs bin/app.ts with Node's type stripping, which never checks a type, so
+      # this is the only step that would catch a TypeScript or @types/node bump breaking the app.
+      - name: Typecheck the CDK app
+        working-directory: examples/cdk
+        run: npm run typecheck
+
       - name: Run the Terraform and CDK journeys
         run: make iac-e2e
 
