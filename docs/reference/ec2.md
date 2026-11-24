@@ -4221,6 +4221,16 @@ key in a supported format, placeholder strings included, is now `InvalidKeyPair.
 answers it; so is an RSA key of a length other than 1024, 2048 or 4096 bits. Neither `CreateKeyPair` nor `ImportKeyPair` renders `keyType` any longer;
 read it from `DescribeKeyPairs`.
 
+## Request validation for key pairs and placement groups
+
+EC2's key-pair and placement-group operations — `CreateKeyPair`, `ImportKeyPair`,
+`DeleteKeyPair`, `DescribeKeyPairs`, `CreatePlacementGroup`, `DeletePlacementGroup` and
+`DescribePlacementGroups` — are validated against the service model before any plugin sees a
+client's request (#1612; see [Request validation](/reference/concepts/validation)). The rest of
+EC2 is not yet. A missing required parameter is `MissingParameter`/400, `The request must contain
+the parameter KeyName`, naming the parameter as it is sent; the plugin answers a blank one the
+same way. The EC2 model publishes no length or range on these operations, and enum checks are off.
+
 ## Every response carries its requestId
 
 **Every EC2 success document leads with `requestId`** ([#1189](https://github.com/scttfrdmn/substrate/issues/1189)). Each operation

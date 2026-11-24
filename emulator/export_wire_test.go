@@ -36,7 +36,7 @@ func wireFailuresForTest(req *AWSRequest) []wireFailure {
 	if !ok {
 		return nil
 	}
-	w := wireWalker{rules: wireServiceRules{enum: true, pattern: true}}
+	w := wireWalker{rules: wireServiceRules{enum: true, pattern: true}, ec2: wireModels[op.Model].Protocol == "ec2"}
 	w.structure(view, op.Input, "")
 	if w.unreadable {
 		return nil
@@ -96,6 +96,13 @@ func WireRESTReadsForTest(req *AWSRequest) (list int, header string, headerBlob,
 		prefixed = v.entries(mapShape)
 	}
 	return list, header, headerBlob, prefixed
+}
+
+// WireEC2InvalidForTest renders EC2's refusal for a value of parameter wire that breaks a
+// constraint, a failure no operation of the EC2 slice can produce today.
+func WireEC2InvalidForTest(value, wire string) (string, string) {
+	err := validatedServices["ec2"].refusal([]wireFailure{{kind: wireNotInEnum, value: value, hasValue: true, wire: wire}})
+	return err.Code, err.Message
 }
 
 // WireModelVersionForTest returns the vendored snapshot's version.

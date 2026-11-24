@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CloudFront: `ListDistributions` and `ListOriginAccessControls` page on `Marker`/`MaxItems` and answer `Marker`, `MaxItems` and `NextMarker`; the messages are substrate's own (#1568).
 - Validation: requests to a validated service are checked against the operation's published input constraints (required members, lengths, ranges; enums and patterns per service) before any plugin runs, from botocore 1.44.10's models vendored in `emulator/wiremodel`; ACM is the first service validated (#1612).
 - Replay: `Event.ValidationModel` (`validation_model`) names the snapshot a request was validated against, and a replay runs the gate only for an event that carries it (#1612).
+- Validation: SESv2, Route 53, ElastiCache and EC2's key-pair and placement-group operations are validated; ElastiCache's message for a constraint other than a missing member is substrate's own (#1612).
 - Tooling: `cmd/gen-wire-model` and `make wire-model`, `wire-model-check` (in CI) and `wire-model-fetch`; `make scheduler-query-model-check` (in CI) (#1612).
 
 ### Changed
@@ -34,6 +35,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CloudFront: list responses carry `Marker` and `MaxItems`, and an absent `MaxItems` is a page of 100; page on `NextMarker` to read more (#1568).
 - IAM: a malformed `Marker` is `ValidationError`/400 (`InvalidInput` on the simulate operations); tag listings' `Marker` is base64 of the last key, not the next key (#1612).
 - ACM: a request breaking a published constraint answers `ValidationException`/400 in ACM's message form, before the plugin runs, and an enum value or a tag outside its pattern is refused. `RequestCertificate` without `DomainName` answers `ValidationException` instead of `InvalidParameterException`, and a malformed `CertificateArn` names the constraint it fails, also on a stack's or a schedule's dispatch (#1612).
+- SESv2: a constraint failure answers `BadRequestException` in SESv2's form, and `SendEmail` without `Content` is refused (#1612).
+- Route 53: a constraint failure, including a hosted zone `Id` over 32 characters and a record `Type` outside the enum, answers `InvalidInput` in Route 53's form, which replaces the plugin's own wording for a missing `Name` and a bad `Type` (#1612).
+- ElastiCache: a missing or blank required parameter answers `The parameter X must be provided and must not be blank.` instead of `X is required`, and `CreateCacheSubnetGroup` requires `SubnetIds` (#1612).
+- EC2: `CreateKeyPair`, `ImportKeyPair` and `DeletePlacementGroup` answer a missing parameter with `The request must contain the parameter X` instead of `X is required` (#1612).
 - Config: `wire.validate: false` (`SUBSTRATE_WIRE_VALIDATE=false`, or `emulator.WithoutWireValidation()` on a `TestServer`) turns validation off. A stream recorded before validation existed replays unchanged (#1612).
 
 ## [v0.132.0] - 2026-11-24

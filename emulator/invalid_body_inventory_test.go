@@ -1282,7 +1282,7 @@ var memberComplaintServices = []memberService{
 		host: "email.us-east-1.amazonaws.com",
 		code: "BadRequestException",
 		cases: []memberCase{
-			{name: "createEmailIdentity", path: "/v2/email/identities", body: "{}", wantMessage: "EmailIdentity is required"},
+			{name: "createEmailIdentity", path: "/v2/email/identities", body: "{}", wantMessage: "Value null at 'emailIdentity'"},
 			// Reachable because parseSESv2Operation does not trim a trailing slash (#1009).
 			{name: "getEmailIdentity", path: "/v2/email/identities/", method: http.MethodGet, body: "{}", wantMessage: "identity name is required"},
 			{name: "deleteEmailIdentity", path: "/v2/email/identities/", method: http.MethodDelete, body: "{}", wantMessage: "identity name is required"},

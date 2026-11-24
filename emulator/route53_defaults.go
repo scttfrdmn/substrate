@@ -71,23 +71,32 @@ func r53IsApexDefault(rrType, name, zoneName string) bool {
 	return (t == "SOA" || t == "NS") && r53CanonicalName(name) == r53CanonicalName(zoneName)
 }
 
-// r53RRTypes is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
-// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"). The values are
-// upper case, and an enum member is matched exactly, so "a" is not "A".
-var r53RRTypes = map[string]bool{
-	"SOA": true, "A": true, "TXT": true, "NS": true, "CNAME": true, "MX": true, "NAPTR": true,
-	"PTR": true, "SRV": true, "SPF": true, "AAAA": true, "CAA": true, "DS": true, "TLSA": true,
-	"SSHFP": true, "SVCB": true, "HTTPS": true,
+// r53RRTypeOrder is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
+// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"), in that order,
+// which is the model's. The values are upper case, and an enum member is matched exactly, so "a" is
+// not "A".
+var r53RRTypeOrder = []string{ //nolint:gochecknoglobals // published enum
+	"SOA", "A", "TXT", "NS", "CNAME", "MX", "NAPTR", "PTR", "SRV", "SPF", "AAAA", "CAA", "DS", "TLSA",
+	"SSHFP", "SVCB", "HTTPS",
 }
 
-// r53InvalidType refuses a record set Type outside [r53RRTypes] with InvalidInput (400), "The input is
-// not valid.", which API_ChangeResourceRecordSets publishes. The message is substrate's own.
-func r53InvalidType(rrType string) *AWSError {
-	return &AWSError{
-		Code:       "InvalidInput",
-		Message:    fmt.Sprintf("%q is not a valid resource record set Type; the valid values are upper case.", rrType),
-		HTTPStatus: http.StatusBadRequest,
-	}
+// r53IsRRType reports whether t is one of [r53RRTypeOrder].
+func r53IsRRType(t string) bool {
+	return slices.Contains(r53RRTypeOrder, t)
+}
+
+// r53InvalidType refuses the record set Type of the change at index i (counting from 0) when it is
+// outside [r53RRTypeOrder], with InvalidInput (400), "The input is not valid.", which
+// API_ChangeResourceRecordSets publishes. Request validation refuses it first for a client's
+// request; this answers a request the gate does not see in the same words (see validatedServices).
+func r53InvalidType(i int, rrType string) *AWSError {
+	return wireRefusal("route53", wireFailure{
+		kind:       wireNotInEnum,
+		path:       fmt.Sprintf("changeBatch.changes.%d.member.resourceRecordSet.type", i+1),
+		value:      rrType,
+		hasValue:   true,
+		constraint: "Member must satisfy enum value set: [" + strings.Join(r53RRTypeOrder, ", ") + "]",
+	})
 }
 
 // The InvalidChangeBatch messages for a batch that would leave a zone without its apex SOA or NS.

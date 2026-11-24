@@ -107,7 +107,7 @@ func validateRequest(req *AWSRequest) *AWSError {
 	if !ok {
 		return nil
 	}
-	w := wireWalker{rules: rules}
+	w := wireWalker{rules: rules, ec2: wireModels[op.Model].Protocol == "ec2"}
 	w.structure(view, op.Input, "")
 	if w.unreadable || len(w.failures) == 0 {
 		return nil
@@ -193,7 +193,9 @@ type wireWalker struct {
 	// a body it cannot decode is the service's.
 	unreadable bool
 	rules      wireServiceRules
-	failures   []wireFailure
+	// ec2 is set for a request on the EC2 protocol, whose parameter names differ.
+	ec2      bool
+	failures []wireFailure
 }
 
 // structure checks each constrained member of the structure at view.
@@ -218,7 +220,7 @@ func (w *wireWalker) member(view inputView, m *wireMember, path string) {
 	if !present {
 		if m.Required {
 			w.failures = append(w.failures, wireFailure{kind: wireMissing, path: child, member: m.Name,
-				wire: wireName(m), constraint: "Member must not be null"})
+				wire: queryWireName(m, w.ec2), constraint: "Member must not be null"})
 		}
 		return
 	}
@@ -249,7 +251,7 @@ func wireCheckMember(req *AWSRequest, name string, kinds ...wireFailureKind) *AW
 		if sh.Members[i].Name != name {
 			continue
 		}
-		w := wireWalker{rules: rules}
+		w := wireWalker{rules: rules, ec2: wireModels[op.Model].Protocol == "ec2"}
 		w.member(view, &sh.Members[i], "")
 		if w.unreadable {
 			return nil
@@ -297,7 +299,7 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 	fail := func(kind wireFailureKind, constraint string) {
 		f := wireFailure{kind: kind, path: path, constraint: constraint}
 		if m != nil {
-			f.member, f.wire = m.Name, wireName(m)
+			f.member, f.wire = m.Name, queryWireName(m, w.ec2)
 		}
 		f.value, f.hasValue = renderValue(v, sh)
 		w.failures = append(w.failures, f)
@@ -324,7 +326,7 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 		// A list of scalars is reported once, at the list, naming every constraint its
 		// element carries; see [wireElementConstraints].
 		for _, e := range elems {
-			sub := wireWalker{rules: w.rules}
+			sub := wireWalker{rules: w.rules, ec2: w.ec2}
 			sub.value(e, nil, sh.Member.Shape, path)
 			if sub.unreadable {
 				w.unreadable = true

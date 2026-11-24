@@ -4247,7 +4247,7 @@ func ec2KeyPairTags(params map[string]string) ([]EC2Tag, *AWSError) {
 func (p *EC2Plugin) createKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["KeyName"]
 	if name == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wireRequireMember(req, "KeyName")
 	}
 	if awsErr := ec2CheckKeyName(name); awsErr != nil {
 		return nil, awsErr
@@ -4438,10 +4438,10 @@ func (p *EC2Plugin) importKeyPair(reqCtx *RequestContext, req *AWSRequest) (*AWS
 	name := req.Params["KeyName"]
 	pubKeyMaterial := req.Params["PublicKeyMaterial"]
 	if name == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "KeyName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wireRequireMember(req, "KeyName")
 	}
 	if pubKeyMaterial == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "PublicKeyMaterial is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wireRequireMember(req, "PublicKeyMaterial")
 	}
 	if awsErr := ec2CheckKeyName(name); awsErr != nil {
 		return nil, awsErr
@@ -5829,7 +5829,7 @@ func (p *EC2Plugin) describePlacementGroups(reqCtx *RequestContext, req *AWSRequ
 func (p *EC2Plugin) deletePlacementGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["GroupName"]
 	if name == "" {
-		return nil, &AWSError{Code: "MissingParameter", Message: "GroupName is required", HTTPStatus: http.StatusBadRequest}
+		return nil, wireRequireMember(req, "GroupName")
 	}
 	key := ec2PlacementGroupStateKey(reqCtx.AccountID, reqCtx.Region, name)
 	data, err := p.state.Get(context.Background(), ec2Namespace, key)

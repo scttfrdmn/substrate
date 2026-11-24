@@ -89,7 +89,9 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 
 	name := xmlReq.Name
 	if name == "" {
-		return nil, &AWSError{Code: "InvalidInput", Message: "Name is required", HTTPStatus: http.StatusBadRequest}
+		// Request validation refuses a client's request without one first; a dispatch the gate does
+		// not see is answered in the same words.
+		return nil, wireRequireMember(req, "Name")
 	}
 	if !strings.HasSuffix(name, ".") {
 		name += "."
@@ -458,10 +460,10 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 	// then either makes all or none of the changes" — so every refusal is found before any change is
 	// made.
 	apex := make([]r53ApexChange, 0, len(xmlReq.ChangeBatch.Changes))
-	for _, change := range xmlReq.ChangeBatch.Changes {
+	for i, change := range xmlReq.ChangeBatch.Changes {
 		rrs := change.ResourceRecordSet
-		if !r53RRTypes[rrs.Type] {
-			return nil, r53InvalidType(rrs.Type)
+		if !r53IsRRType(rrs.Type) {
+			return nil, r53InvalidType(i, rrs.Type)
 		}
 		apex = append(apex, r53ApexChange{action: change.Action, rrType: rrs.Type, name: rrs.Name})
 	}

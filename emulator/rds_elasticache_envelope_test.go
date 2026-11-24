@@ -190,7 +190,7 @@ func TestElastiCacheEnvelope_EveryRoutedOperationAnswersTheEnvelope(t *testing.T
 		{operation: "DescribeReplicationGroups"},
 		{operation: "ModifyReplicationGroup", params: map[string]string{"ReplicationGroupId": "env-rg", "ReplicationGroupDescription": "e"}},
 		{operation: "DeleteReplicationGroup", params: map[string]string{"ReplicationGroupId": "env-rg"}},
-		{operation: "CreateCacheSubnetGroup", params: map[string]string{"CacheSubnetGroupName": "env-sng", "CacheSubnetGroupDescription": "d"}},
+		{operation: "CreateCacheSubnetGroup", params: map[string]string{"CacheSubnetGroupName": "env-sng", "CacheSubnetGroupDescription": "d", "SubnetIds.SubnetIdentifier.1": "subnet-0a1b2c3d"}},
 		{operation: "DescribeCacheSubnetGroups"},
 		{operation: "DeleteCacheSubnetGroup", params: map[string]string{"CacheSubnetGroupName": "env-sng"}, noResult: true},
 		{operation: "CreateCacheParameterGroup", params: map[string]string{"CacheParameterGroupName": "env-pg", "CacheParameterGroupFamily": "redis7", "Description": "d"}},

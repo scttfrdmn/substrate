@@ -65,6 +65,18 @@ ElastiCache cluster's tags and whether it has ever been tagged.
 | AWS::ElastiCache::CacheCluster | CacheClusterId | |
 | AWS::ElastiCache::ReplicationGroup | ReplicationGroupId | |
 
+## Request validation
+
+ElastiCache is validated against its service model before any plugin sees a client's request
+(#1612; see [Request validation](/reference/concepts/validation)). A missing required parameter
+is `InvalidParameterValue`/400 in ElastiCache's own sentence, `The parameter SubnetIds must be
+provided and must not be blank.`, which is AWS's observed answer and which the plugin also gives
+for a blank one. Any other failure is `InvalidParameterValue` in the validator's quoted form, `1
+validation error detected: Value '12345' at 'nodeGroupConfiguration.1.member.nodeGroupId' …`;
+no source shows ElastiCache's wording for it, so that message is substrate's own.
+
+`CreateCacheSubnetGroup` now requires `SubnetIds`, as the model does.
+
 ## Cost
 
 ElastiCache cache.t3.micro: $0.017 per node-hour (approximate).

@@ -116,6 +116,23 @@ rewrite a stored zone as a side effect of an unrelated request.
 `TestRoute53Wire_HostedZoneResponsesCarryNoBookkeepingMember` in `emulator/route53_wire_test.go` drives all six routed operations and walks each response's element names for the member
 ([#756](https://github.com/scttfrdmn/substrate/issues/756)).
 
+## Request validation
+
+Route 53 is validated against its service model before any plugin sees a client's request
+(#1612; see [Request validation](/reference/concepts/validation)). Every failure answers
+`InvalidInput`/400, which every routed operation publishes, in Route 53's form with the value
+quoted: `1 validation error detected: Value '3600000000000' at
+'changeBatch.changes.1.member.resourceRecordSet.tTL' failed to satisfy constraint: Member must
+have value less than or equal to 2147483647`. The path is AWS's own, `tTL` included. Enum checks
+are on, so a record `Type` or a `ListResourceRecordSets` `type` outside the published values is
+refused. Route 53 lists an enum's values in an order of its own; substrate lists them in the
+model's.
+
+A hosted zone `Id` longer than 32 characters, a `CallerReference` outside 1–128 and a missing
+`Name` or `CallerReference` are among the refusals. `CreateHostedZone`'s own `Name` check and
+`ChangeResourceRecordSets`' own `Type` check answer in the same words for a request that reaches
+the plugin without the gate.
+
 ## Cost
 
 Route 53 hosted zone: $0.50/month per zone (tracked as flat cost on CreateHostedZone).

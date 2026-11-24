@@ -323,7 +323,7 @@ func TestPluginTimeController_EveryDefaultRegistrationCarriesTheSimulatedClock(t
 			observe: func(t *testing.T, ts *emulator.TestServer) string {
 				t.Helper()
 				got := pluginClockREST(t, ts, "email.us-east-1.amazonaws.com", "ses",
-					"/v2/email/outbound-emails", "application/json", `{}`, http.StatusOK)
+					"/v2/email/outbound-emails", "application/json", `{"Content":{"Simple":{"Subject":{"Data":"s"},"Body":{"Text":{"Data":"b"}}}}}`, http.StatusOK)
 				return pluginClockJSONField(t, got, "", "MessageId")
 			},
 			want: pluginClockQuoted(fmt.Sprintf("msg-%d-1", pluginClockFrozen.UnixNano())),
