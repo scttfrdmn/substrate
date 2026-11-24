@@ -107,46 +107,76 @@ func (s *s3SeededObject) availableAt() (time.Time, error) {
 	return t, nil
 }
 
-// s3SeededObjectSupersededKey returns the state key recording that a write or delete
-// of bucket/key superseded the seed that applied to it.
-func s3SeededObjectSupersededKey(bucket, key string) string {
-	return s3CtrlSupersededPrefix + bucket + "/" + key
+// s3SeededObjectSupersededKey returns the state key of the tombstone recording that a
+// write or delete of bucket/key superseded the seed of scope — bucket itself, or "*" —
+// that answered it. One per scope, so superseding a bucket's own seed does not erase
+// the record that the "*" seed was superseded there too.
+func s3SeededObjectSupersededKey(bucket, scope, key string) string {
+	return s3CtrlSupersededPrefix + bucket + "/" + scope + "/" + key
 }
 
-// availableSeededObject returns the seed a read of bucket/key observes now: the exact-bucket
-// seed if there is one, otherwise the "*" seed. It returns nil when neither exists, when the
-// one that applies is still ahead of the simulated clock, or when a write or delete of the
-// key has superseded it; see [S3Plugin.supersedeSeededObject].
-func (p *S3Plugin) availableSeededObject(ctx context.Context, bucket, key string) (*s3SeededObject, time.Time, error) {
-	for _, stateKey := range []string{s3SeededObjectKey(bucket, key), s3SeededObjectKey("*", key)} {
-		data, err := p.state.Get(ctx, s3CtrlNamespace, stateKey)
+// s3SupersededSeed is a tombstone's value: the seed it superseded, identified by when
+// that seed was written. A seed written since does not match it, so the tombstone no
+// longer applies to it.
+type s3SupersededSeed struct {
+	// SeededAt is the superseded seed's [s3SeededObject.SeededAt].
+	SeededAt time.Time `json:"seededAt"`
+}
+
+// seedInScope returns the seed for bucket/key in scope ("" when absent) and the instant
+// it becomes available.
+func (p *S3Plugin) seedInScope(ctx context.Context, scope, key string) (*s3SeededObject, time.Time, error) {
+	data, err := p.state.Get(ctx, s3CtrlNamespace, s3SeededObjectKey(scope, key))
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("s3 seeded object get: %w", err)
+	}
+	if data == nil {
+		return nil, time.Time{}, nil
+	}
+	var seed s3SeededObject
+	if err := json.Unmarshal(data, &seed); err != nil {
+		return nil, time.Time{}, fmt.Errorf("s3 seeded object unmarshal: %w", err)
+	}
+	at, err := seed.availableAt()
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("s3 seeded object: %w", err)
+	}
+	return &seed, at, nil
+}
+
+// availableSeededObject returns the seed a read of bucket/key observes now, and its scope.
+// The bucket's own seed is consulted first and, when it exists, decides the answer alone;
+// otherwise the "*" seed does. It returns nil when neither exists, when the one that
+// applies is still ahead of the simulated clock, or when a write or delete of the key
+// superseded that very seed; see [S3Plugin.supersedeSeededObject].
+func (p *S3Plugin) availableSeededObject(ctx context.Context, bucket, key string) (*s3SeededObject, string, time.Time, error) {
+	for _, scope := range []string{bucket, "*"} {
+		seed, at, err := p.seedInScope(ctx, scope, key)
 		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("s3 seeded object get: %w", err)
+			return nil, "", time.Time{}, err
 		}
-		if data == nil {
+		if seed == nil {
 			continue
 		}
-		var seed s3SeededObject
-		if err := json.Unmarshal(data, &seed); err != nil {
-			return nil, time.Time{}, fmt.Errorf("s3 seeded object unmarshal: %w", err)
-		}
-		at, err := seed.availableAt()
-		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("s3 seeded object: %w", err)
-		}
 		if !at.IsZero() && p.tc.Now().Before(at) {
-			return nil, time.Time{}, nil
+			return nil, "", time.Time{}, nil
 		}
-		superseded, err := p.state.Get(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, key))
+		data, err := p.state.Get(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, scope, key))
 		if err != nil {
-			return nil, time.Time{}, fmt.Errorf("s3 seeded object superseded get: %w", err)
+			return nil, "", time.Time{}, fmt.Errorf("s3 seeded object superseded get: %w", err)
 		}
-		if superseded != nil {
-			return nil, time.Time{}, nil
+		if data != nil {
+			var tomb s3SupersededSeed
+			if err := json.Unmarshal(data, &tomb); err != nil {
+				return nil, "", time.Time{}, fmt.Errorf("s3 seeded object superseded unmarshal: %w", err)
+			}
+			if tomb.SeededAt.Equal(seed.SeededAt) {
+				return nil, "", time.Time{}, nil
+			}
 		}
-		return &seed, at, nil
+		return seed, scope, at, nil
 	}
-	return nil, time.Time{}, nil
+	return nil, "", time.Time{}, nil
 }
 
 // resolveSeededObject returns the seeded object for bucket and key; see
@@ -155,7 +185,7 @@ func (p *S3Plugin) availableSeededObject(ctx context.Context, bucket, key string
 // caller's NoSuchKey is the answer. A served seed goes through the caller's normal object
 // path, so range and conditional reads apply to it as to any other object.
 func (p *S3Plugin) resolveSeededObject(ctx context.Context, bucket, key string) (S3Object, []byte, bool, error) {
-	seed, at, err := p.availableSeededObject(ctx, bucket, key)
+	seed, _, at, err := p.availableSeededObject(ctx, bucket, key)
 	if err != nil || seed == nil {
 		return S3Object{}, nil, false, err
 	}
@@ -186,29 +216,38 @@ func (p *S3Plugin) resolveSeededObject(ctx context.Context, bucket, key string) 
 // Only a seed already available is superseded. One whose availableAt is still ahead
 // describes a write that has not happened yet, so a delete before it leaves the seed to
 // appear on time. A tombstone rather than a deletion, because the seed may be the "*"
-// one, which other buckets still observe. A new seed for the key clears the tombstone.
+// one, which other buckets still observe. The tombstone names the seed's scope and when
+// it was written, so it never suppresses a different seed; posting or clearing a seed
+// also clears the tombstones of its own scope, and only those.
 func (p *S3Plugin) supersedeSeededObject(ctx context.Context, bucket, key string) error {
-	seed, _, err := p.availableSeededObject(ctx, bucket, key)
+	seed, scope, _, err := p.availableSeededObject(ctx, bucket, key)
 	if err != nil || seed == nil {
 		return err
 	}
-	if err := p.state.Put(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, key), []byte("{}")); err != nil {
+	data, err := json.Marshal(s3SupersededSeed{SeededAt: seed.SeededAt})
+	if err != nil {
+		return fmt.Errorf("s3 supersede seeded object marshal: %w", err)
+	}
+	if err := p.state.Put(ctx, s3CtrlNamespace, s3SeededObjectSupersededKey(bucket, scope, key), data); err != nil {
 		return fmt.Errorf("s3 supersede seeded object: %w", err)
 	}
 	return nil
 }
 
-// clearSupersededSeeds removes the tombstones a new or cleared seed for bucket/key makes
-// stale: the one for that bucket, or every bucket's for the key when bucket is "*". An
-// empty key clears every tombstone.
-func (s *Server) clearSupersededSeeds(ctx context.Context, bucket, key string) error {
+// clearSupersededSeeds removes the tombstones of the seed of scope for key: the bucket's
+// own when scope names a bucket, and every bucket's tombstone of the "*" seed when scope
+// is "*". Tombstones of the other scope are left alone, so posting a "*" seed does not
+// revive a bucket's deleted seed, and clearing a bucket's seed does not revive the "*"
+// seed deleted there. An empty key clears every tombstone.
+func (s *Server) clearSupersededSeeds(ctx context.Context, scope, key string) error {
 	keys, err := s.state.List(ctx, s3CtrlNamespace, s3CtrlSupersededPrefix)
 	if err != nil {
 		return fmt.Errorf("list superseded seeds: %w", err)
 	}
 	for _, k := range keys {
-		b, kk, _ := strings.Cut(strings.TrimPrefix(k, s3CtrlSupersededPrefix), "/")
-		if key != "" && (kk != key || (bucket != "*" && b != bucket)) {
+		_, rest, _ := strings.Cut(strings.TrimPrefix(k, s3CtrlSupersededPrefix), "/")
+		tombScope, tombKey, _ := strings.Cut(rest, "/")
+		if key != "" && (tombKey != key || tombScope != scope) {
 			continue
 		}
 		if err := s.state.Delete(ctx, s3CtrlNamespace, k); err != nil {

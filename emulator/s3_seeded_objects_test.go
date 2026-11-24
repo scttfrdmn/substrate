@@ -479,6 +479,76 @@ func TestS3SeededObject_CopySource(t *testing.T) {
 	missing := s3Request(t, srv, http.MethodPut, "/results/copy2.txt", nil,
 		map[string]string{"X-Amz-Copy-Source": "/results/absent.txt"})
 	assert.Equal(t, http.StatusNotFound, missing.Code)
+	assert.Contains(t, missing.Body.String(), "NoSuchKey")
+
+	// A "*" seed does not make a bucket exist: copying from it in a bucket that does
+	// not is NoSuchBucket, as a GET of it is.
+	seedS3Object(t, srv, map[string]any{"bucket": "*", "key": "wild.txt", "body": "anywhere"})
+	noBucket := s3Request(t, srv, http.MethodPut, "/results/copy3.txt", nil,
+		map[string]string{"X-Amz-Copy-Source": "/no-such-bucket/wild.txt"})
+	assert.Equal(t, http.StatusNotFound, noBucket.Code)
+	assert.Contains(t, noBucket.Body.String(), "NoSuchBucket")
+	assert.Equal(t, http.StatusNotFound, s3Request(t, srv, http.MethodGet, "/results/copy3.txt", nil, nil).Code,
+		"a refused copy writes no destination")
+}
+
+// TestS3SeededObject_TombstonesStayInTheirScope pins that a tombstone suppresses only the
+// seed it superseded. Posting a "*" seed must not revive a bucket's own deleted seed, and
+// clearing a bucket's own seed must not revive the "*" seed deleted there.
+func TestS3SeededObject_TombstonesStayInTheirScope(t *testing.T) {
+	t.Parallel()
+	const path = "/results/k"
+	get := func(t *testing.T, srv *emulator.Server) (int, string) {
+		t.Helper()
+		w := s3Request(t, srv, http.MethodGet, path, nil, nil)
+		return w.Code, w.Body.String()
+	}
+
+	t.Run("a wildcard seed posted after a bucket seed was deleted", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := newS3TestServer(t)
+		require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+		seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "k", "body": "exact"})
+		require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+
+		seedS3Object(t, srv, map[string]any{"bucket": "*", "key": "k", "body": "wild"})
+		code, _ := get(t, srv)
+		assert.Equal(t, http.StatusNotFound, code,
+			"the bucket's own deleted seed still decides the key; the wildcard does not revive it")
+	})
+
+	t.Run("a bucket seed cleared after the wildcard seed was deleted there", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := newS3TestServer(t)
+		require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+		seedS3Object(t, srv, map[string]any{"bucket": "*", "key": "k", "body": "wild"})
+		require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+
+		seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "k", "body": "exact"})
+		code, body := get(t, srv)
+		require.Equal(t, http.StatusOK, code)
+		assert.Equal(t, "exact", body, "a new seed of the bucket's own scope is served")
+
+		require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodDelete,
+			"/v1/s3/seeded-objects?bucket=results&key=k", nil, nil).Code)
+		code, _ = get(t, srv)
+		assert.Equal(t, http.StatusNotFound, code, "the wildcard seed deleted here stays deleted")
+	})
+
+	t.Run("deleting a bucket seed keeps the wildcard's tombstone", func(t *testing.T) {
+		t.Parallel()
+		srv, _ := newS3TestServer(t)
+		require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPut, "/results", nil, nil).Code)
+		seedS3Object(t, srv, map[string]any{"bucket": "*", "key": "k", "body": "wild"})
+		require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+		seedS3Object(t, srv, map[string]any{"bucket": "results", "key": "k", "body": "exact"})
+		require.Equal(t, http.StatusNoContent, s3Request(t, srv, http.MethodDelete, path, nil, nil).Code)
+
+		require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodDelete,
+			"/v1/s3/seeded-objects?bucket=results&key=k", nil, nil).Code)
+		code, _ := get(t, srv)
+		assert.Equal(t, http.StatusNotFound, code, "superseding the bucket seed did not erase the wildcard's record")
+	})
 }
 
 // TestReplay_ASeedWrittenOnARunningClockReplaysToTheSameState pins that a seed which

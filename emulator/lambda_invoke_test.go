@@ -596,6 +596,44 @@ func TestInvoke_SeedPrecedence(t *testing.T) {
 	}
 }
 
+// TestInvokeSeeds_FunctionNameForms pins which name each FunctionName form keys a seed
+// by, read off both seed endpoints' responses. Only the two ARN forms are searched for
+// a function segment, so a function named "function" keeps its name.
+func TestInvokeSeeds_FunctionNameForms(t *testing.T) {
+	t.Parallel()
+	const arn = "arn:aws:lambda:us-east-1:123456789012:function:"
+	tests := []struct{ in, want string }{
+		{"", "*"},
+		{"*", "*"},
+		{"fn", "fn"},
+		{"fn:v1", "fn"},
+		{"fn:$LATEST", "fn"},
+		{"function", "function"},
+		{"function:prod", "function"},
+		{"123456789012:function:fn", "fn"},
+		{"123456789012:function:fn:prod", "fn"},
+		{"123456789012:function:function", "function"},
+		{"12345:function:fn", "12345"},
+		{arn + "fn", "fn"},
+		{arn + "fn:prod", "fn"},
+		{arn + "function", "function"},
+		{arn + "function:prod", "function"},
+	}
+	srv := newLambdaTestServer(t)
+	for _, tt := range tests {
+		for _, endpoint := range []string{"/v1/lambda/invoke-result", "/v1/lambda/invoke-error"} {
+			code, body := lambdaControl(t, srv, http.MethodPost, endpoint,
+				map[string]any{"functionName": tt.in, "payload": 1})
+			require.Equal(t, http.StatusOK, code, body)
+			var got struct {
+				FunctionName string `json:"functionName"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &got))
+			assert.Equal(t, tt.want, got.FunctionName, "%s %q", endpoint, tt.in)
+		}
+	}
+}
+
 // TestInvokeSeeds_NormaliseTheFunctionName pins that a seed POST or DELETE may name the
 // function in any form Invoke accepts — a qualified name, a full ARN or a partial one —
 // and keys the seed by the bare name an invoke looks it up under.

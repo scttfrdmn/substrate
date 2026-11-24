@@ -47,18 +47,22 @@ func lambdaCtrlKey(functionName string) string {
 
 // lambdaSeedFunctionName reduces the forms Invoke accepts as FunctionName to the bare
 // name a seed is keyed by, which is the name [LambdaPlugin.invoke] looks seeds up
-// under: a full or partial ARN (arn:aws:lambda:us-west-2:123456789012:function:my-function,
-// 123456789012:function:my-function) and a qualified name (my-function:v1) all name
-// my-function. Empty is the "*" wildcard.
+// under. Invoke's FunctionName documents three forms, each optionally followed by a
+// version or alias qualifier: a name (my-function), a full ARN
+// (arn:aws:lambda:us-west-2:123456789012:function:my-function) and a partial ARN
+// (123456789012:function:my-function). Only the two ARN forms are read for their
+// function segment; anything else is a name, whose first segment is the name, which is
+// how a function named "function" keeps its name. Empty is the "*" wildcard.
 func lambdaSeedFunctionName(functionName string) string {
 	if functionName == "" || functionName == "*" {
 		return "*"
 	}
 	parts := strings.Split(functionName, ":")
-	for i, part := range parts {
-		if part == "function" && i+1 < len(parts) {
-			return parts[i+1]
-		}
+	switch {
+	case parts[0] == "arn" && len(parts) >= 7 && parts[5] == "function":
+		return parts[6]
+	case len(parts) >= 3 && isAccountID(parts[0]) && parts[1] == "function":
+		return parts[2]
 	}
 	return parts[0]
 }
@@ -166,7 +170,8 @@ func (s *Server) handleLambdaSeedInvokeError(w http.ResponseWriter, r *http.Requ
 		http.Error(w, fmt.Sprintf(`{"error":%q}`, err.Error()), http.StatusInternalServerError)
 		return
 	}
-	writeJSONDebug(w, s.logger, map[string]any{"ok": true, "functionName": lambdaCtrlKey(seed.FunctionName)})
+	writeJSONDebug(w, s.logger, map[string]any{"ok": true,
+		"functionName": strings.TrimPrefix(lambdaCtrlKey(seed.FunctionName), "invoke-error:")})
 }
 
 // handleLambdaClearInvokeError handles DELETE /v1/lambda/invoke-error. With

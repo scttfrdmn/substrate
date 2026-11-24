@@ -6656,11 +6656,16 @@ wrote, so once a `PutObject`, `CopyObject`, `CompleteMultipartUpload`, `DeleteOb
 then reads as whatever the bucket holds: the written object, a delete marker in a versioned
 bucket, or `404 NoSuchKey`, including after the written versions are themselves deleted. This
 applies only to a seed already available. A delete before `availableAt` deletes nothing, and the
-seed still appears on time. For a `"*"` seed it applies to that bucket alone. Posting the seed
-again, or clearing it, makes it apply afresh.
+seed still appears on time. For a `"*"` seed it applies to that bucket alone.
+
+What is replaced is the one seed that answered, so the other scope is unaffected. Posting a `"*"`
+seed does not revive a bucket's own deleted seed, which still decides the key, and clearing a
+bucket's own seed does not revive the `"*"` seed deleted in that bucket. Posting or clearing a
+seed makes that seed apply afresh.
 
 **`CopyObject` and `UploadPartCopy` read a seeded source** the way `GetObject` does, so a seeded
-key can be copied. The other object operations treat a seeded key as absent: `GetObjectAcl`,
+key can be copied. A source bucket that does not exist is still `404 NoSuchBucket`, whatever `"*"`
+seed exists. The other object operations treat a seeded key as absent: `GetObjectAcl`,
 `PutObjectAcl`, `GetObjectTagging`, `PutObjectTagging`, `DeleteObjectTagging`,
 `SelectObjectContent`, `ListObjectVersions`, and the existence check of a conditional write.
 

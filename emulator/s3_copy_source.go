@@ -103,6 +103,12 @@ func (p *S3Plugin) loadS3CopySourceObject(ctx context.Context, src s3CopySource)
 		return S3Object{}, nil, nil, fmt.Errorf("get copy source metadata: %w", err)
 	}
 	if data == nil {
+		// A missing source bucket is NoSuchBucket, as GetObject answers it, and is decided
+		// before a seed is consulted: a "*" seed would otherwise answer for a bucket that
+		// does not exist.
+		if missing, bErr := p.bucketMissingResponse(ctx, src.Bucket); bErr != nil || missing != nil {
+			return S3Object{}, nil, missing, bErr
+		}
 		if src.VersionID == "" {
 			obj, body, handled, seedErr := p.resolveSeededObject(ctx, src.Bucket, src.Key)
 			if seedErr != nil {
