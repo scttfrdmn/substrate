@@ -104,7 +104,7 @@ func (d *StackDeployer) deployKinesisStreamConsumer(
 	}
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
-		return dr, cost, nil
+		return dr, cost, nil //nolint:nilerr // a refused create is recorded on the resource, as every deploy helper does.
 	}
 	var out struct {
 		Consumer kinesisConsumerView `json:"Consumer"`

@@ -55,12 +55,15 @@ func orgCheckServicePrincipal(principal string) error {
 		return orgInvalidInput("MAX_LENGTH_EXCEEDED",
 			fmt.Sprintf("the ServicePrincipal must be at most %d characters", orgServicePrincipalMaxLength))
 	}
-	if strings.IndexFunc(principal, func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_+=,.@-", r))
-	}) >= 0 {
+	if strings.IndexFunc(principal, func(r rune) bool { return !orgServicePrincipalRune(r) }) >= 0 {
 		return orgInvalidInput("INVALID_PATTERN", "the ServicePrincipal must match [\\w+=,.@-]*")
 	}
 	return nil
+}
+
+// orgServicePrincipalRune reports whether r is in ServicePrincipal's [\w+=,.@-] class.
+func orgServicePrincipalRune(r rune) bool {
+	return r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("_+=,.@-", r)
 }
 
 // orgServiceAccessDenied refuses a member account's enable or disable.
