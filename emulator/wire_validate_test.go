@@ -132,14 +132,28 @@ func TestWireValidation_ACMRefusesWhatTheModelForbids(t *testing.T) {
 // TestWireValidation_ThePluginsOwnChecksAnswerInTheGatesWords pins that ACM's handler, which a
 // dispatch on a caller's behalf reaches without the gate, refuses what the gate refuses with the
 // same code and message.
+// The CertificateArn values both comparisons below send: one over 2,048 characters, one over
+// 2,048 characters of which most are two-byte, and one under 2,048 characters but over 2,048
+// bytes, which must be measured in characters as the gate measures it.
+var (
+	long      = "arn:aws:acm:us-east-1:123456789012:certificate/" + strings.Repeat("a", 2048)
+	longRunes = "arn:aws:acm:us-east-1:123456789012:certificate/" + strings.Repeat("é", 2048)
+	wideBytes = "arn:aws:acm:us-east-1:123456789012:certificate/" + strings.Repeat("é", 1100)
+)
+
 func TestWireValidation_ThePluginsOwnChecksAnswerInTheGatesWords(t *testing.T) {
 	ts := emulator.StartTestServer(t)
 	p, reqCtx := setupACMPlugin(t)
-	long := "arn:aws:acm:us-east-1:123456789012:certificate/" + strings.Repeat("a", 2048)
 	for _, tc := range []struct{ name, op, body string }{
 		{"a missing DomainName", "RequestCertificate", `{}`},
+		{"an empty DomainName", "RequestCertificate", `{"DomainName":""}`},
 		{"a missing CertificateArn", "DescribeCertificate", `{}`},
+		{"an empty CertificateArn", "DescribeCertificate", `{"CertificateArn":""}`},
+		{"a too-short CertificateArn, failing length and pattern", "DescribeCertificate", `{"CertificateArn":"arn:aws:acm:x"}`},
 		{"an over-length CertificateArn", "DescribeCertificate", `{"CertificateArn":"` + long + `"}`},
+		{"an over-length non-ASCII CertificateArn", "DescribeCertificate", `{"CertificateArn":"` + longRunes + `"}`},
+		{"a non-ASCII CertificateArn within the length in characters, not in bytes", "DescribeCertificate",
+			`{"CertificateArn":"` + wideBytes + `"}`},
 		{"a CertificateArn off the pattern", "DeleteCertificate", `{"CertificateArn":"not-an-arn-but-long-enough"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -165,10 +179,16 @@ func TestWireValidation_WithItOffThePluginStillRefuses(t *testing.T) {
 	on := emulator.StartTestServer(t)
 	off := emulator.StartTestServer(t, emulator.WithoutWireValidation())
 	for _, tc := range []struct{ name, op, body string }{
-		{"an over-length CertificateArn", "DescribeCertificate",
-			`{"CertificateArn":"arn:aws:acm:us-east-1:123456789012:certificate/` + strings.Repeat("a", 2048) + `"}`},
-		{"a CertificateArn off the pattern", "DeleteCertificate", `{"CertificateArn":"not-an-arn-but-long-enough"}`},
 		{"a missing DomainName", "RequestCertificate", `{}`},
+		{"an empty DomainName", "RequestCertificate", `{"DomainName":""}`},
+		{"a missing CertificateArn", "DescribeCertificate", `{}`},
+		{"an empty CertificateArn", "DescribeCertificate", `{"CertificateArn":""}`},
+		{"a too-short CertificateArn, failing length and pattern", "DescribeCertificate", `{"CertificateArn":"arn:aws:acm:x"}`},
+		{"an over-length CertificateArn", "DescribeCertificate", `{"CertificateArn":"` + long + `"}`},
+		{"an over-length non-ASCII CertificateArn", "DescribeCertificate", `{"CertificateArn":"` + longRunes + `"}`},
+		{"a non-ASCII CertificateArn within the length in characters, not in bytes", "DescribeCertificate",
+			`{"CertificateArn":"` + wideBytes + `"}`},
+		{"a CertificateArn off the pattern", "DeleteCertificate", `{"CertificateArn":"not-an-arn-but-long-enough"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			onStatus, onBody := wireACMCall(t, on, tc.op, tc.body, nil)
@@ -451,7 +471,7 @@ func TestWireValidation_QueryRequestsAreReadFromTheirParameters(t *testing.T) {
 		}, []string{"tags.1.member.key"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			req := &emulator.AWSRequest{Service: tc.service, Operation: tc.op, Params: map[string]string{}}
+			req := &emulator.AWSRequest{Service: tc.service, Operation: tc.op, Params: map[string]string{"Action": tc.op}}
 			for k, v := range tc.params {
 				req.Params[k] = v[0]
 			}

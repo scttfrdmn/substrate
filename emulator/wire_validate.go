@@ -155,12 +155,21 @@ func requestView(req *AWSRequest, op wireOperation) (inputView, bool) {
 			return nil, false
 		}
 		return newJSONView(req.Body)
+	case !wireFormEncoded(req):
 	case speaks("ec2"):
 		return queryView{params: req.Params, ec2: true}, true
 	case speaks("query"):
 		return queryView{params: req.Params}, true
 	}
 	return nil, false
+}
+
+// wireFormEncoded reports whether a request is in the Query form: it names its Action, or its
+// body is a form. Anything else is not read as Query, because an absent parameter would then read
+// as a missing member.
+func wireFormEncoded(req *AWSRequest) bool {
+	return req.Params["Action"] != "" ||
+		strings.Contains(headerValue(req.Headers, "Content-Type"), "application/x-www-form-urlencoded")
 }
 
 // headerValue reads a header case-insensitively, since an in-process caller may not
@@ -194,22 +203,88 @@ func (w *wireWalker) structure(view inputView, shape int, path string) {
 		if w.unreadable {
 			return
 		}
-		m := &sh.Members[i]
-		msh := &wireShapes[m.Shape]
-		child := lowerFirst(m.Name)
-		if path != "" {
-			child = path + "." + child
+		w.member(view, &sh.Members[i], path)
+	}
+}
+
+// member checks one member of the structure at view, which is at path.
+func (w *wireWalker) member(view inputView, m *wireMember, path string) {
+	msh := &wireShapes[m.Shape]
+	child := lowerFirst(m.Name)
+	if path != "" {
+		child = path + "." + child
+	}
+	v, present := view.field(m, msh)
+	if !present {
+		if m.Required {
+			w.failures = append(w.failures, wireFailure{kind: wireMissing, path: child, member: m.Name,
+				wire: wireName(m), constraint: "Member must not be null"})
 		}
-		v, present := view.field(m, msh)
-		if !present {
-			if m.Required {
-				w.failures = append(w.failures, wireFailure{kind: wireMissing, path: child, member: m.Name,
-					wire: wireName(m), constraint: "Member must not be null"})
-			}
+		return
+	}
+	w.value(v, m, m.Shape, child)
+}
+
+// wireCheckMember checks one top-level member of req's operation input exactly as the gate
+// does — the same view, the same walk, the same refusal — and reports only failures of the given
+// kinds, or of any kind when none is given. A plugin calls it for a check it keeps because a
+// request the gate never sees reaches it (a stack's or a schedule's dispatch, or any request with
+// the gate off), so the answer is the gate's byte for byte. A request the tables do not cover, or
+// that cannot be read, returns nil, as the gate would.
+func wireCheckMember(req *AWSRequest, name string, kinds ...wireFailureKind) *AWSError {
+	rules, ok := validatedServices[req.Service]
+	if !ok || !rules.covers(req.Operation) {
+		return nil
+	}
+	op, ok := wireOperations[req.Service][req.Operation]
+	if !ok || op.Input == 0 {
+		return nil
+	}
+	view, ok := pluginView(req, op)
+	if !ok {
+		return nil
+	}
+	sh := &wireShapes[op.Input]
+	for i := range sh.Members {
+		if sh.Members[i].Name != name {
 			continue
 		}
-		w.value(v, m, m.Shape, child)
+		w := wireWalker{rules: rules}
+		w.member(view, &sh.Members[i], "")
+		if w.unreadable {
+			return nil
+		}
+		var kept []wireFailure
+		for _, f := range w.failures {
+			if len(kinds) == 0 || slices.Contains(kinds, f.kind) {
+				kept = append(kept, f)
+			}
+		}
+		if len(kept) == 0 {
+			return nil
+		}
+		return rules.refusal(kept)
 	}
+	return nil
+}
+
+// pluginView is [requestView] for a request a plugin holds, which may have been built in process
+// without the headers a client sends: a JSON-protocol request with no target is read as JSON, and
+// a Query one as its parameters.
+func pluginView(req *AWSRequest, op wireOperation) (inputView, bool) {
+	if view, ok := requestView(req, op); ok {
+		return view, true
+	}
+	model := wireModels[op.Model]
+	switch {
+	case slices.Contains(model.Protocols, "json"):
+		return newJSONView(req.Body)
+	case slices.Contains(model.Protocols, "ec2"):
+		return queryView{params: req.Params, ec2: true}, true
+	case slices.Contains(model.Protocols, "query"):
+		return queryView{params: req.Params}, true
+	}
+	return nil, false
 }
 
 // value checks one present value against its shape.
@@ -487,12 +562,17 @@ func (j jsonView) entries(*wireShape) int {
 }
 
 func (j jsonView) fits(kind wireKind) bool {
-	switch j.v.(type) {
+	switch t := j.v.(type) {
 	case map[string]any:
 		return kind == wireStructure || kind == wireMap
 	case []any:
 		return kind == wireList
 	case string:
+		if kind == wireFloat {
+			// A JSON float that is not a number travels as one of these strings (Smithy's JSON
+			// protocols); it carries no range to compare.
+			return t == "NaN" || t == "Infinity" || t == "-Infinity"
+		}
 		return kind == wireString || kind == wireBlob || kind == wireTimestamp
 	case []byte:
 		return kind == wireBlob

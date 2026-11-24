@@ -247,9 +247,25 @@ func TestFetch_PrunesStripsAndRenders(t *testing.T) {
 		t.Fatal("-check of a stale file must fail")
 	}
 
-	// A refresh removes a vendored model the new manifest does not list.
+	// A refresh removes a model the previous manifest vendored and the new one does not list,
+	// and leaves alone a file the snapshot never vendored.
 	stale := filepath.Join(dir, "gone.json.gz")
-	if err := os.WriteFile(stale, []byte("old"), 0o600); err != nil {
+	foreign := filepath.Join(dir, "foreign.json.gz")
+	for _, p := range []string{stale, foreign} {
+		if err := os.WriteFile(p, []byte("old"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	prev, err := readManifest(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prev.Models["gone"] = modelEntry{APIVersion: "1"}
+	encoded, err := json.Marshal(prev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifestName), encoded, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if code := run([]string{"-fetch", "-data", dir, "-tag", "9.9.9", "-url", srv.URL}, &stdout, &stderr); code != 0 {
@@ -257,6 +273,15 @@ func TestFetch_PrunesStripsAndRenders(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("a model the manifest no longer lists was left behind: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("a file the snapshot never vendored was removed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, manifestName), []byte("{"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := run([]string{"-fetch", "-data", dir, "-tag", "9.9.9", "-url", srv.URL}, &stdout, &stderr); code != 1 {
+		t.Error("a refresh over a manifest that does not parse must fail")
 	}
 
 	// A local tarball path refreshes the same way.

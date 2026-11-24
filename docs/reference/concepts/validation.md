@@ -37,7 +37,8 @@ it cannot decode is the plugin's own refusal (see [Errors](/reference/concepts/e
 validation has nothing to add to it. A request is read in the wire format it arrived in, among
 the protocols its model lists: CloudWatch serves CBOR, JSON and Query, and is read in each. A
 request in a format the model does not list, such as the Query form SQS accepts beside its JSON
-model, is not validated.
+model, is not validated, and a request is read as Query only when it names an `Action` or carries
+a form body.
 
 ## Which services are validated
 
@@ -84,8 +85,9 @@ Only a client's request is validated. A request a plugin sends another on a call
 a CloudFormation stack creating its resources, the API Gateway proxy invoking a function, the
 Scheduler firing a target — goes through the registry directly and is not, so a stack whose
 template carries a value the service would refuse from a client still deploys it. A plugin that
-keeps its own check for such a request answers it in the gate's words, as ACM does for an
-absent `DomainName` or a malformed `CertificateArn`.
+keeps its own check for such a request runs the gate's own walk over that member, so it answers in
+the gate's words byte for byte, as ACM does for an absent `DomainName` or a malformed
+`CertificateArn`.
 
 ## Turning it off
 

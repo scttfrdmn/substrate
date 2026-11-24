@@ -250,6 +250,10 @@ func writeSnapshot(dir, tag string, files map[string]*upstreamModel, stdout io.W
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", dir, err)
 	}
+	previous, err := readManifest(dir)
+	if err != nil {
+		return err
+	}
 	routed := routedByModel()
 	man := manifest{Botocore: tag, Models: map[string]modelEntry{}, Unmodelled: map[string][]string{}}
 	defined := map[string]map[string]bool{} // model -> operations it defines upstream
@@ -315,7 +319,7 @@ func writeSnapshot(dir, tag string, files map[string]*upstreamModel, stdout io.W
 			}
 		}
 	}
-	if err := removeStale(dir, man); err != nil {
+	if err := removeStale(dir, previous, man); err != nil {
 		return err
 	}
 	encoded, err := json.MarshalIndent(man, "", "  ")
@@ -330,19 +334,34 @@ func writeSnapshot(dir, tag string, files map[string]*upstreamModel, stdout io.W
 	return nil
 }
 
-// removeStale deletes each vendored model the new manifest no longer lists, so a model a
-// mapping change or a re-prune drops does not linger beside the snapshot that replaced it.
-func removeStale(dir string, man manifest) error {
-	existing, err := filepath.Glob(filepath.Join(dir, "*.json.gz"))
-	if err != nil {
-		return fmt.Errorf("list %s: %w", dir, err)
+// readManifest reads the snapshot's manifest, or returns an empty one when the directory has
+// none yet.
+func readManifest(dir string) (manifest, error) {
+	var man manifest
+	raw, err := os.ReadFile(filepath.Join(dir, manifestName)) //nolint:gosec // fixed snapshot location.
+	if os.IsNotExist(err) {
+		return man, nil
 	}
-	for _, p := range existing {
-		name := strings.TrimSuffix(filepath.Base(p), ".json.gz")
+	if err != nil {
+		return man, fmt.Errorf("read %s: %w", filepath.Join(dir, manifestName), err)
+	}
+	if err := json.Unmarshal(raw, &man); err != nil {
+		return man, fmt.Errorf("parse %s: %w", filepath.Join(dir, manifestName), err)
+	}
+	return man, nil
+}
+
+// removeStale deletes each model the previous manifest vendored and the new one no longer lists,
+// so a model a mapping change or a re-prune drops does not linger beside the snapshot that
+// replaced it. Only files the previous manifest named are touched: a directory with no manifest,
+// or a file the snapshot never vendored, is left alone.
+func removeStale(dir string, previous, man manifest) error {
+	for name := range previous.Models {
 		if _, ok := man.Models[name]; ok {
 			continue
 		}
-		if err := os.Remove(p); err != nil {
+		p := filepath.Join(dir, name+".json.gz")
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove stale %s: %w", p, err)
 		}
 	}
