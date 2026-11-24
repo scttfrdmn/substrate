@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
+
 ## [v0.133.0] - 2026-11-24
 
 ### Added
