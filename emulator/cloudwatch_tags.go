@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sort"
@@ -236,4 +237,126 @@ func cwTagList(tags map[string]string) cwList {
 		list = append(list, cwDoc{}.with("Key", k).with("Value", tags[k]))
 	}
 	return list
+}
+
+// ----- Tagging API provider ------------------------------------------------
+
+// CloudWatch answers the Resource Groups Tagging API for its alarms (#1609): GetResources through
+// [CloudWatchPlugin.listTaggedResources], and TagResources and UntagResources through
+// [CloudWatchPlugin.tagResourceByARN], under [CloudWatchPlugin.mu], the lock every write to an alarm
+// holds. A second writer outside that lock could interleave with a PutMetricAlarm, SetAlarmState or
+// DeleteAlarms and lose a tag or resurrect a deleted alarm. A refusal CloudWatch's own TagResource
+// would answer is carried out as a [taggingQuotaError], so the tagging API reports the owning
+// service's own code, as it does for a quota refusal.
+
+// cwAlarmTagStateKey resolves an alarm ARN to the alarm's state key, through [cwParseAlarmTagARN],
+// which CloudWatch's own three tagging operations parse through (#1618). A dashboard, metric stream
+// or Contributor Insights rule is taggable at AWS and unmodeled here, and is the unsupported-type
+// answer like any ARN this cannot key. resource is the ARN's resource portion, for the message.
+func cwAlarmTagStateKey(arn, resource string) (string, error) {
+	key, arnErr := cwParseAlarmTagARN(arn)
+	if arnErr != nil {
+		return "", unsupportedTagResource("CloudWatch %q is not an alarm ARN: %s", resource, arnErr.Code)
+	}
+	return key, nil
+}
+
+// cwListTaggedAlarms reports the caller's CloudWatch alarms (#1618), under the ARN the alarm
+// record carries — arn:aws:cloudwatch:{region}:{acct}:alarm:{name}, the form CloudWatch's own
+// TagResource takes. Whether an alarm is reported follows #938's rule through the tag-history
+// side-car ([cwAlarmEverTagged]). A store fault reading either is returned, which
+// [TaggingPlugin.scanAllResources] logs and skips.
+func cwListTaggedAlarms(_ context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := state.List(goCtx, monitoringNamespace, taggingScanPrefix(cwAlarmKeyPrefix, reqCtx))
+	if err != nil {
+		return nil, fmt.Errorf("list cloudwatch alarms: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := state.Get(goCtx, monitoringNamespace, k)
+		if err != nil {
+			return nil, fmt.Errorf("get cloudwatch alarm %s: %w", k, err)
+		}
+		var alarm CWAlarm
+		if raw == nil || json.Unmarshal(raw, &alarm) != nil {
+			continue
+		}
+		everTagged, err := cwAlarmEverTagged(goCtx, state, k)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: alarm.AlarmARN,
+			Tags:        mapToTaggingTags(alarm.Tags),
+			everTagged:  everTagged,
+		})
+	}
+	return out, nil
+}
+
+// listTaggedResources implements [taggableResourceLister].
+func (p *CloudWatchPlugin) listTaggedResources(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	return cwListTaggedAlarms(ctx, p.state, reqCtx)
+}
+
+// tagResourceByARN implements [resourceTagger].
+func (p *CloudWatchPlugin) tagResourceByARN(
+	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	parts, ok := taggingSplitARN(arn)
+	if !ok {
+		return taggingResolveFailed(fmt.Errorf("invalid ARN: %q", arn))
+	}
+	key, err := cwAlarmTagStateKey(arn, parts[5])
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// tagRecord implements [resourceTagger]: a merge applies TagResource's rules and a removal
+// UntagResource's, under the lock both hold. With quota enforced, the merged set is held to
+// [cwCheckTags], as TagResource holds it.
+//
+// A write that adds and removes nothing is refused with the MissingParameter UntagResource answers
+// for an absent TagKeys. That is the answer the tagging API has given for an alarm named in a
+// TagResources with no tags, or an UntagResources with no keys, since it reached alarms (#1618).
+func (p *CloudWatchPlugin) tagRecord(
+	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	if len(add) == 0 && len(remove) == 0 {
+		return taggingQuotaRefusal(cwMissingParameter("TagKeys"))
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	alarm, found, err := p.loadAlarm(ctx, key)
+	if err != nil {
+		return fmt.Errorf("tagging: CloudWatch: %w", err)
+	}
+	if !found {
+		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, monitoringNamespace, key)
+	}
+	tagsBefore := len(alarm.Tags)
+	if len(add) > 0 {
+		merged := mergeStringMap(alarm.Tags, add, nil)
+		if quota == enforceTagQuota {
+			if awsErr := cwCheckTags(merged); awsErr != nil {
+				return taggingQuotaRefusal(awsErr)
+			}
+		}
+		alarm.Tags = merged
+	} else {
+		alarm.Tags = mergeStringMap(alarm.Tags, nil, remove)
+		if len(alarm.Tags) == 0 {
+			alarm.Tags = nil
+		}
+	}
+	if err := p.storeAlarm(ctx, key, alarm); err != nil {
+		return fmt.Errorf("tagging: CloudWatch: %w", err)
+	}
+	if err := cwStampAlarmEverTagged(ctx, p.state, key, tagsBefore, len(add)); err != nil {
+		return fmt.Errorf("tagging: CloudWatch: %w", err)
+	}
+	return nil
 }

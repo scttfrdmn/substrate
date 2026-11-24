@@ -24,9 +24,22 @@ distributions, CloudWatch Logs log groups, CloudWatch alarms (`cloudwatch:alarm`
 KMS keys, SNS topics, Secrets Manager secrets, Systems Manager parameters, and ELBv2 load
 balancers, target groups, listeners and listener rules.
 
+CloudWatch, EC2 and S3 list and tag their own resources for the tagging API (#1609). A write
+through `TagResources` or `UntagResources` takes the lock the service's own tag operation holds
+(`TagResource`, `CreateTags`/`DeleteTags`, `PutBucketTagging`/`DeleteBucketTagging`), and so do
+CloudFormation's stamps on those services' resources. The lock orders tag writes with each other
+only: for EC2 and S3, another operation that rewrites the same record does not take it (#1674). The
+tagging plugin reads and merges every other service's records itself.
+
+`TagResources` and `UntagResources` refuse an `aws:` key for every resource. AWS reserves the prefix
+("You can't edit or delete a tag that begins with the `aws:` prefix"). EC2 and S3 answer with their
+own refusals (`InvalidParameterValue`, `InvalidTag`), and every other service with
+`InvalidParameterException`/400. An EC2 or S3 resource is also held to its service's key, value and
+50-tag rules.
+
 A CloudWatch alarm is reported under `arn:aws:cloudwatch:{region}:{account}:alarm:{name}`, the
-ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` route to
-CloudWatch's own `TagResource` and `UntagResource` rather than editing the alarm, so CloudWatch
+ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` are applied by
+CloudWatch itself, under the lock its own `TagResource` and `UntagResource` hold, so CloudWatch
 serializes every write to an alarm and its 50-tag quota and refusals apply unchanged. Like a log group, its previously-tagged state is a
 side-car key rather than a member of its record; see [Alarm tags](/reference/monitoring#alarm-tags).
 

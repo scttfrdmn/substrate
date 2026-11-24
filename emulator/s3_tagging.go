@@ -1,6 +1,9 @@
 package emulator
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -158,4 +161,126 @@ func resolveTaggingHeader(headers map[string]string) (map[string]string, *AWSRes
 		return nil, nil
 	}
 	return set, nil
+}
+
+// ----- Tagging API provider ------------------------------------------------
+
+// S3 answers the Resource Groups Tagging API for its buckets (#1609): GetResources through
+// [S3Plugin.listTaggedResources], and TagResources, UntagResources and CloudFormation's stamps
+// through [S3Plugin.tagResourceByARN] and [S3Plugin.tagRecord]. A bucket's tag writes, these and
+// PutBucketTagging's and DeleteBucketTagging's, hold [S3Plugin.lockBucketTags]. The functions below
+// take the state rather than the plugin, so the tagging plugin's direct path, used when no S3 plugin
+// is registered, runs the same code.
+
+// s3BucketTagStateKey resolves the resource portion of an S3 ARN to its bucket's state key.
+//
+// arn:aws:s3:::bucket-name — the resource portion is the bare bucket name, with no type prefix to
+// strip. An object, access point or job ARN carries a "/" and is not a bucket, which is the only
+// distinction this ARN shape offers.
+func s3BucketTagStateKey(resource string) (string, error) {
+	if strings.Contains(resource, "/") {
+		return "", unsupportedTagResource("S3 %q is not a bucket ARN", resource)
+	}
+	return "bucket:" + resource, nil
+}
+
+// s3ListTaggedBuckets lists the caller's buckets.
+//
+// S3 is the one service whose scope [taggingResourceInScope] cannot decide, because an S3 bucket ARN
+// is arn:aws:s3:::{name} — it carries neither an account nor a Region segment, S3's bucket namespace
+// being global. So the scope comes off the record instead: [S3Bucket] stores the Region it was
+// created in, and #937 added the account that created it. The key cannot carry either, since a bucket
+// name is globally unique and the key is what makes that true here as well.
+//
+// An empty Region or AccountID is in scope, on the same rule [taggingResourceInScope] applies to an
+// absent ARN segment: a record that states no scope is not evidence of a scope to exclude it from,
+// and a bucket written by a path that does not set the field would otherwise disappear from
+// GetResources rather than be reported with what is known about it.
+func s3ListTaggedBuckets(_ context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
+	keys, err := state.List(goCtx, s3Namespace, "bucket:")
+	if err != nil {
+		return nil, fmt.Errorf("list s3 buckets: %w", err)
+	}
+	var out []resourceTagMapping
+	for _, k := range keys {
+		raw, err := state.Get(goCtx, s3Namespace, k)
+		if err != nil || raw == nil {
+			continue
+		}
+		var b S3Bucket
+		if err := json.Unmarshal(raw, &b); err != nil {
+			continue
+		}
+		if b.Region != "" && b.Region != reqCtx.Region {
+			continue
+		}
+		if b.AccountID != "" && b.AccountID != reqCtx.AccountID {
+			continue
+		}
+		out = append(out, resourceTagMapping{
+			ResourceARN: s3BucketARN(b.Name),
+			Tags:        mapToTaggingTags(b.Tags),
+			everTagged:  b.EverTagged,
+		})
+	}
+	return out, nil
+}
+
+// s3MergeBucketTags merges addTags and removeKeys into the bucket record raw, stored at key.
+func s3MergeBucketTags(
+	goCtx context.Context, state StateManager, key string, raw []byte,
+	addTags map[string]string, removeKeys []string,
+) error {
+	var b S3Bucket
+	if err := json.Unmarshal(raw, &b); err != nil {
+		return fmt.Errorf("unmarshal S3Bucket: %w", err)
+	}
+	b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(addTags))
+	b.Tags = mergeStringMap(b.Tags, addTags, removeKeys)
+	updated, err := json.Marshal(b)
+	if err != nil {
+		return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+	}
+	return state.Put(goCtx, s3Namespace, key, updated)
+}
+
+// lockBucketTags acquires the lock every write of bucket's tag set holds, and returns its unlock
+// function. It is the bucket's slot in [S3Plugin.keyLocks] under the empty object key, which no
+// object can have, so it never contends with an object write except by sharing a stripe.
+func (p *S3Plugin) lockBucketTags(bucket string) func() {
+	return p.keyLocks.lock(bucket, "")
+}
+
+// listTaggedResources implements [taggableResourceLister].
+func (p *S3Plugin) listTaggedResources(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	return s3ListTaggedBuckets(ctx, p.state, reqCtx)
+}
+
+// tagResourceByARN implements [resourceTagger].
+func (p *S3Plugin) tagResourceByARN(
+	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	parts, ok := taggingSplitARN(arn)
+	if !ok {
+		return taggingResolveFailed(fmt.Errorf("invalid ARN: %q", arn))
+	}
+	key, err := s3BucketTagStateKey(parts[5])
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// tagRecord implements [resourceTagger]. The tagging API enforces no bucket tag quota, as it never
+// has (quota is unused): S3 is not among the services [taggingCheckTagQuota] checks.
+func (p *S3Plugin) tagRecord(
+	ctx context.Context, key string, add map[string]string, remove []string, _ tagQuotaMode,
+) error {
+	defer p.lockBucketTags(strings.TrimPrefix(key, "bucket:"))()
+	raw, err := loadTagRecord(ctx, p.state, s3Namespace, key)
+	if err != nil {
+		return err
+	}
+	return s3MergeBucketTags(ctx, p.state, key, raw, add, remove)
 }

@@ -1214,7 +1214,7 @@ func MergeResourceTagsForTest(
 	if enforceQuota {
 		mode = enforceTagQuota
 	}
-	return mergeResourceTags(context.Background(), state, ns, key, addTags, removeKeys, mode)
+	return mergeResourceTags(context.Background(), nil, state, ns, key, addTags, removeKeys, mode)
 }
 
 // ELBResourceKindFromARNForTest wraps elbResourceKindFromARN, which classifies an ELBv2 ARN as
@@ -1975,4 +1975,38 @@ func CFNRecognizedTypeForTest(typ string) bool { return cfnRecognizedType(typ) }
 // CFNELBHostedZoneIDForTest wraps cfnELBHostedZoneID.
 func CFNELBHostedZoneIDForTest(region, lbType string) string {
 	return cfnELBHostedZoneID(region, lbType)
+}
+
+// TaggingProvidersForTest returns the sorted names of the plugins in registry that answer the
+// tagging API for their own resources: those implementing taggableResourceLister and those
+// implementing resourceTagger. Neither interface is exported, so no request can tell which path
+// answered (#1609).
+func TaggingProvidersForTest(registry *PluginRegistry) (listers, taggers []string) {
+	return registry.taggingProviderNames()
+}
+
+// TaggingScanPlanForTest describes p's GetResources scan, one entry per step: "owner:lister" for a
+// step the owning plugin answers, and "owner:direct" for one the tagging plugin reads from the
+// owner's state itself.
+func TaggingScanPlanForTest(p *TaggingPlugin) []string {
+	steps := p.scanPlan()
+	out := make([]string, len(steps))
+	for i, s := range steps {
+		how := "direct"
+		if s.lister != nil {
+			how = "lister"
+		}
+		out[i] = s.owner + ":" + how
+	}
+	return out
+}
+
+// TaggingWriterForTest names the plugin that writes the tags of the resource arn names for p, or
+// returns "" when p merges them itself.
+func TaggingWriterForTest(p *TaggingPlugin, arn string) string {
+	owner, _, ok := p.taggerFor(arn)
+	if !ok {
+		return ""
+	}
+	return owner
 }

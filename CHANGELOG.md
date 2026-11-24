@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Code: release-named files renamed by domain (#1609).
 - Docs: the service reference is one page per plugin plus six concept pages under `docs/reference/`, indexed by `docs/services.md` (#1610).
+- Tagging: CloudWatch, EC2 and S3 list and tag their own resources for the tagging API, under their own tag locks (#1609).
 
 ### Removed
 

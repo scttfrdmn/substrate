@@ -18,7 +18,7 @@ type S3Bucket struct {
 	// An S3 bucket ARN is arn:aws:s3:::{name} — it carries neither an account nor a Region — so a
 	// caller asking the Resource Groups Tagging API for the resources in its own account and Region
 	// cannot be answered from the ARN the way every other service's can. This field is what
-	// scanS3Buckets scopes on instead (#937). It is empty on a record written before the field
+	// s3ListTaggedBuckets scopes on instead (#937). It is empty on a record written before the field
 	// existed, or by a path with no request context, and an empty value stays in scope.
 	AccountID string `json:"account_id"`
 

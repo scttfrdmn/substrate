@@ -3246,7 +3246,7 @@ func (d *StackDeployer) stampCFNResourceTags(dr DeployedResource, cctx *cfnConte
 		return
 	}
 
-	if _, err := cfnStampResourceTags(d.state, reqCtx, dr, tags); err != nil {
+	if _, err := cfnStampResourceTags(d.state, d.registry, reqCtx, dr, tags); err != nil {
 		d.warnStampFailed(dr, err)
 	}
 }
@@ -3298,7 +3298,7 @@ func (d *StackDeployer) reconcileStackTags(
 		if dr.PhysicalID == "" && dr.ARN == "" {
 			continue
 		}
-		if _, err := cfnPropagateStackTags(d.state, reqCtx, dr, previous, next); err != nil {
+		if _, err := cfnPropagateStackTags(d.state, d.registry, reqCtx, dr, previous, next); err != nil {
 			d.logger.Warn("cfn: could not propagate the stack's tags",
 				"logical_id", dr.LogicalID, "physical_id", dr.PhysicalID, "error", err)
 			failures = append(failures, CFNTagPropagationFailure{

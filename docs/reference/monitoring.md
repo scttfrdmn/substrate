@@ -164,8 +164,8 @@ this parameter are ignored." The account and Region come from the ARN, never fro
   and substrate does not model. It answers `ResourceNotFoundException` (404). Any other ARN is
   `InvalidParameterValue`.
 - `ListTagsForResource` always returns `Tags`, in key order, and empty for an alarm with none.
-- The [tagging API](/reference/tagging) reports alarms, and its writes route through
-  these operations.
+- The [tagging API](/reference/tagging) reports alarms, and its writes apply these
+  operations' rules under the same lock.
   `DeleteAlarms` removes an alarm's tag history with it, so an alarm re-created under the name
   starts never-tagged.
 

@@ -1,6 +1,9 @@
 package emulator
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -341,4 +344,288 @@ func ec2CheckReservedTagKeys(tags []EC2Tag) *AWSError {
 		}
 	}
 	return nil
+}
+
+// ----- Tagging API provider ------------------------------------------------
+
+// EC2 answers the Resource Groups Tagging API for its own resources (#1609): GetResources through
+// [EC2Plugin.listTaggedResources], and TagResources, UntagResources and CloudFormation's stamps
+// through [EC2Plugin.tagResourceByARN] and [EC2Plugin.tagRecord], under [EC2Plugin.tagMu], the lock
+// CreateTags and DeleteTags hold. The functions below take the state rather than the plugin, so the
+// tagging plugin's direct path, used when no EC2 plugin is registered, runs the same code.
+
+// taggingEC2ScannedType is one EC2 type the tagging API scans by state-key prefix.
+type taggingEC2ScannedType struct {
+	// arnType is the type segment of the resource's ARN.
+	arnType string
+
+	// keyPrefix is the type segment of the resource's state key, colon included.
+	keyPrefix string
+}
+
+// taggingEC2ScannedTypes are the EC2 types #1523 added, whose records [ec2MergeTaggedRecord] merges
+// on the raw record.
+var taggingEC2ScannedTypes = []taggingEC2ScannedType{
+	{arnType: "security-group", keyPrefix: "sg:"},
+	{arnType: "launch-template", keyPrefix: "lt:"},
+	{arnType: "volume", keyPrefix: "volume:"},
+}
+
+// taggingEC2RawMergedKey reports whether key belongs to one of [taggingEC2ScannedTypes].
+func taggingEC2RawMergedKey(key string) bool {
+	for _, t := range taggingEC2ScannedTypes {
+		if strings.HasPrefix(key, t.keyPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// taggingEC2ARN builds an EC2 resource ARN.
+func taggingEC2ARN(region, accountID, arnType, id string) string {
+	return "arn:aws:ec2:" + region + ":" + accountID + ":" + arnType + "/" + id
+}
+
+// ec2TagStateKey resolves the resource portion of an EC2 ARN to the state key of the record it
+// names. The account and Region come from the ARN, never from the caller, so an ARN naming another
+// account's resource resolves that resource or none.
+func ec2TagStateKey(region, account, resource string) (string, error) {
+	// arn:aws:ec2:{region}:{acct}:instance/{id}
+	if strings.HasPrefix(resource, "instance/") {
+		id := strings.TrimPrefix(resource, "instance/")
+		return "instance:" + account + "/" + region + "/" + id, nil
+	}
+	// arn:aws:ec2:{region}:{acct}:elastic-ip/{allocationId} (#1191).
+	if id, ok := strings.CutPrefix(resource, "elastic-ip/"); ok && id != "" {
+		return "eip:" + account + "/" + region + "/" + id, nil
+	}
+	// The three types GetResources scans since #1523, each under the ARN the Service
+	// Authorization Reference publishes for it.
+	for _, t := range taggingEC2ScannedTypes {
+		if id, ok := strings.CutPrefix(resource, t.arnType+"/"); ok && id != "" && !strings.Contains(id, "/") {
+			return t.keyPrefix + account + "/" + region + "/" + id, nil
+		}
+	}
+	return "", unsupportedTagResource("EC2 %q is not a taggable resource type", resource)
+}
+
+// ec2ScanTaggedInstances returns the caller's instances. A record that cannot be read or decoded is
+// reported as an error alongside the ones that could be, through [taggingScanRecords], rather than
+// skipped silently (#1523).
+func ec2ScanTaggedInstances(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := taggingScanRecords(ctx, state, ec2Namespace, taggingScanPrefix("instance:", reqCtx), func(inst EC2Instance) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: taggingEC2ARN(inst.Region, inst.AccountID, "instance", inst.InstanceID),
+			Tags:        ec2TagsToTaggingTags(inst.Tags),
+			everTagged:  inst.EverTagged,
+		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 instances: %w", err)
+	}
+	return out, nil
+}
+
+// ec2ScanTaggedElasticIPs returns the caller's Elastic IP addresses (#1191), under the ARN the
+// Service Authorization Reference publishes for the type,
+// arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}.
+//
+// A record that cannot be read or decoded fails the scan, through [ec2ScanRecords], rather than
+// being dropped from the listing; [TaggingPlugin.scanAllResources] logs the failure.
+func ec2ScanTaggedElasticIPs(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := ec2ScanRecords(ctx, state, taggingScanPrefix("eip:", reqCtx), func(_ string, eip EC2ElasticIP) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: "arn:aws:ec2:" + eip.Region + ":" + eip.AccountID + ":elastic-ip/" + eip.AllocationID,
+			Tags:        ec2TagsToTaggingTags(eip.Tags),
+			everTagged:  eip.EverTagged,
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("scan ec2 elastic IPs: %w", err)
+	}
+	return out, nil
+}
+
+// ec2ScanTaggedSecurityGroups returns the caller's security groups.
+func ec2ScanTaggedSecurityGroups(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := taggingScanRecords(ctx, state, ec2Namespace, taggingScanPrefix("sg:", reqCtx), func(sg EC2SecurityGroup) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: taggingEC2ARN(sg.Region, sg.AccountID, "security-group", sg.GroupID),
+			Tags:        ec2TagsToTaggingTags(sg.Tags),
+			everTagged:  sg.EverTagged,
+		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 security groups: %w", err)
+	}
+	return out, nil
+}
+
+// ec2ScanTaggedLaunchTemplates returns the caller's launch templates.
+func ec2ScanTaggedLaunchTemplates(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := taggingScanRecords(ctx, state, ec2Namespace, taggingScanPrefix("lt:", reqCtx), func(lt EC2LaunchTemplate) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: taggingEC2ARN(lt.Region, lt.AccountID, "launch-template", lt.LaunchTemplateID),
+			Tags:        ec2TagsToTaggingTags(lt.Tags),
+			everTagged:  lt.EverTagged,
+		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 launch templates: %w", err)
+	}
+	return out, nil
+}
+
+// ec2ScanTaggedVolumes returns the caller's EBS volumes, including those a launch created from a
+// TagSpecifications entry with ResourceType volume.
+func ec2ScanTaggedVolumes(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	err := taggingScanRecords(ctx, state, ec2Namespace, ec2VolumeStatePrefix(reqCtx.AccountID, reqCtx.Region), func(v EC2Volume) {
+		out = append(out, resourceTagMapping{
+			ResourceARN: taggingEC2ARN(v.Region, v.AccountID, "volume", v.VolumeID),
+			Tags:        ec2TagsToTaggingTags(v.Tags),
+			everTagged:  v.EverTagged,
+		})
+	})
+	if err != nil {
+		return out, fmt.Errorf("scan ec2 volumes: %w", err)
+	}
+	return out, nil
+}
+
+// ec2ListTaggedResources returns every EC2 resource the tagging API reports: instances, Elastic
+// IPs, security groups, launch templates and volumes. Each type's failure is joined into the error
+// and the others are still listed, so one unreadable type hides no other.
+func ec2ListTaggedResources(ctx context.Context, state StateManager, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	var out []resourceTagMapping
+	var errs []error
+	for _, scan := range []func(context.Context, StateManager, *RequestContext) ([]resourceTagMapping, error){
+		ec2ScanTaggedInstances,
+		ec2ScanTaggedElasticIPs,
+		ec2ScanTaggedSecurityGroups,
+		ec2ScanTaggedLaunchTemplates,
+		ec2ScanTaggedVolumes,
+	} {
+		resources, err := scan(ctx, state, reqCtx)
+		out = append(out, resources...)
+		if err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return out, errors.Join(errs...)
+}
+
+// ec2MergeTaggedRecord merges addTags and removeKeys into the EC2 record raw, stored at key.
+func ec2MergeTaggedRecord(
+	goCtx context.Context, state StateManager, key string, raw []byte,
+	addTags map[string]string, removeKeys []string,
+) error {
+	// The namespace holds Elastic IPs as well as instances since #1191, and decoding one as
+	// the other would rewrite it without its own members.
+	if strings.HasPrefix(key, "eip:") {
+		var eip EC2ElasticIP
+		if err := json.Unmarshal(raw, &eip); err != nil {
+			return fmt.Errorf("unmarshal EC2ElasticIP: %w", err)
+		}
+		eip.EverTagged = taggingEverTagged(eip.EverTagged, len(eip.Tags), len(addTags))
+		eip.Tags = mergeEC2Tags(eip.Tags, addTags, removeKeys)
+		updated, err := json.Marshal(eip)
+		if err != nil {
+			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+		}
+		return state.Put(goCtx, ec2Namespace, key, updated)
+	}
+	// Security groups, launch templates and volumes (#1523) are merged on the raw record,
+	// through the writer EC2's own CreateTags and DeleteTags use, so every member those records
+	// carry survives — including the ones a decode into a struct here would not know about.
+	if taggingEC2RawMergedKey(key) {
+		return mergeRecordEC2Tags(goCtx, state, key, raw, addTags, removeKeys)
+	}
+	var inst EC2Instance
+	if err := json.Unmarshal(raw, &inst); err != nil {
+		return fmt.Errorf("unmarshal EC2Instance: %w", err)
+	}
+	inst.EverTagged = taggingEverTagged(inst.EverTagged, len(inst.Tags), len(addTags))
+	inst.Tags = mergeEC2Tags(inst.Tags, addTags, removeKeys)
+	updated, err := json.Marshal(inst)
+	if err != nil {
+		return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
+	}
+	return state.Put(goCtx, ec2Namespace, key, updated)
+}
+
+// mergeRecordEC2Tags merges tags into the EC2 record at key through [mergeRecordTagListTags], which
+// stamps the previously-tagged flag from the pre-merge count and keeps every other member of the
+// record as stored.
+func mergeRecordEC2Tags(
+	goCtx context.Context, state StateManager, key string, raw []byte,
+	addTags map[string]string, removeKeys []string,
+) error {
+	updated, err := mergeRecordTagListTags(raw, "tags", "key", "value", addTags, removeKeys)
+	if err != nil {
+		return fmt.Errorf("tagging merge %s: %w", key, err)
+	}
+	if err := state.Put(goCtx, ec2Namespace, key, updated); err != nil {
+		return fmt.Errorf("tagging put %s: %w", key, err)
+	}
+	return nil
+}
+
+// listTaggedResources implements [taggableResourceLister].
+func (p *EC2Plugin) listTaggedResources(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	return ec2ListTaggedResources(ctx, p.state, reqCtx)
+}
+
+// tagResourceByARN implements [resourceTagger].
+func (p *EC2Plugin) tagResourceByARN(
+	_ *RequestContext, arn string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	parts, ok := taggingSplitARN(arn)
+	if !ok {
+		return taggingResolveFailed(fmt.Errorf("invalid ARN: %q", arn))
+	}
+	key, err := ec2TagStateKey(parts[3], parts[4], parts[5])
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	return p.tagRecord(context.Background(), key, add, remove, quota)
+}
+
+// tagRecord implements [resourceTagger]. The quota is EC2's 50 tags per resource
+// ([taggingEC2QuotaRefusal]), checked before anything is written.
+func (p *EC2Plugin) tagRecord(
+	ctx context.Context, key string, add map[string]string, remove []string, quota tagQuotaMode,
+) error {
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
+	raw, err := loadTagRecord(ctx, p.state, ec2Namespace, key)
+	if err != nil {
+		return err
+	}
+	if quota == enforceTagQuota && len(add) > 0 {
+		if refusal := taggingEC2QuotaRefusal(raw, add, remove); refusal != nil {
+			return taggingQuotaRefusal(refusal)
+		}
+	}
+	return ec2MergeTaggedRecord(ctx, p.state, key, raw, add, remove)
+}
+
+// taggingEC2QuotaRefusal applies [ec2CheckTagLimit] to a stored EC2 record.
+//
+// Every taggable EC2 record spells the member `tags` in lowercase and holds [EC2Tag], so one shape
+// covers all fourteen of them.
+func taggingEC2QuotaRefusal(raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
+	var record struct {
+		Tags []EC2Tag `json:"tags"`
+	}
+	if !taggingDecodeForQuota(raw, &record) {
+		return nil
+	}
+	return ec2CheckTagLimit(
+		taggingDropRemovedTags(record.Tags, removeKeys, func(t EC2Tag) string { return t.Key }),
+		taggingTagsAsEC2(addTags))
 }

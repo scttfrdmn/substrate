@@ -4110,6 +4110,7 @@ func (p *S3Plugin) putBucketTagging(_ *RequestContext, req *AWSRequest, bucket s
 		return s3ErrorResponse("MalformedXML", s3MalformedXMLMessage, http.StatusBadRequest), nil //nolint:nilerr // intentionally converted to S3 XML error response
 	}
 	ctx := context.Background()
+	defer p.lockBucketTags(bucket)()
 	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
 	if err != nil || data == nil {
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response
@@ -4162,6 +4163,7 @@ func (p *S3Plugin) getBucketTagging(_ *RequestContext, _ *AWSRequest, bucket str
 
 func (p *S3Plugin) deleteBucketTagging(_ *RequestContext, _ *AWSRequest, bucket string) (*AWSResponse, error) {
 	ctx := context.Background()
+	defer p.lockBucketTags(bucket)()
 	data, err := p.state.Get(ctx, s3Namespace, "bucket:"+bucket)
 	if err != nil || data == nil {
 		return s3ErrorResponse("NoSuchBucket", "The specified bucket does not exist.", http.StatusNotFound), nil //nolint:nilerr // intentionally converted to S3 XML error response

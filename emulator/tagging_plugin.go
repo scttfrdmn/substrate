@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -355,18 +354,50 @@ func taggingResourceInScope(arn string, reqCtx *RequestContext) bool {
 	return account == "" || account == reqCtx.AccountID
 }
 
-func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
-	descriptors := []resourceDescriptor{
-		{typePrefix: "s3", scan: p.scanS3Buckets},
+// taggingScanStep is one step of a GetResources scan: a plugin's own [taggableResourceLister]
+// when the registry holds one for the owner, and the tagging plugin's direct read of the owner's
+// state otherwise.
+type taggingScanStep struct {
+	// owner is the name of the plugin that owns the resources the step reports.
+	owner string
+
+	// lister is the owner's lister, or nil for a direct read.
+	lister taggableResourceLister
+
+	// scan is the direct read, used when lister is nil.
+	scan func(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error)
+}
+
+// scanPlan returns the steps a GetResources scan runs, in order. An owner whose plugin implements
+// [taggableResourceLister] is asked once, at the place of its first descriptor, and its remaining
+// descriptors are dropped, because its lister answers for every type it owns.
+func (p *TaggingPlugin) scanPlan() []taggingScanStep {
+	listers := p.registry.taggableResourceListers()
+	asked := make(map[string]bool, len(listers))
+	var steps []taggingScanStep
+	for _, d := range p.resourceDescriptors() {
+		owner := taggingARNOwner(d.typePrefix)
+		if l, ok := listers[owner]; ok {
+			if !asked[owner] {
+				asked[owner] = true
+				steps = append(steps, taggingScanStep{owner: owner, lister: l})
+			}
+			continue
+		}
+		steps = append(steps, taggingScanStep{owner: owner, scan: d.scan})
+	}
+	return steps
+}
+
+// resourceDescriptors lists the tagging plugin's direct reads of each owner's state, in the
+// order a scan runs them.
+func (p *TaggingPlugin) resourceDescriptors() []resourceDescriptor {
+	return []resourceDescriptor{
+		{typePrefix: "s3", scan: p.taggingStateScan(s3ListTaggedBuckets)},
 		{typePrefix: "lambda", scan: p.scanLambdaFunctions},
 		{typePrefix: "sqs", scan: p.scanSQSQueues},
 		{typePrefix: "dynamodb", scan: p.scanDynamoDBTables},
-		{typePrefix: "ec2", scan: p.scanEC2Instances},
-		{typePrefix: "ec2", scan: p.scanEC2ElasticIPs},
-		{typePrefix: "ec2", scan: p.scanEC2SecurityGroups},
-		{typePrefix: "ec2", scan: p.scanEC2LaunchTemplates},
-		{typePrefix: "ec2", scan: p.scanEC2Volumes},
+		{typePrefix: "ec2", scan: p.taggingStateScan(ec2ListTaggedResources)},
 		{typePrefix: "iam", scan: p.scanIAMEntities},
 		{typePrefix: "iam", scan: p.scanIAMInstanceProfiles},
 		{typePrefix: "apigateway", scan: p.scanAPIGatewayAPIs},
@@ -389,7 +420,7 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "acm", scan: p.scanACMCertificates},
 		{typePrefix: "cloudfront", scan: p.scanCloudFrontDistributions},
 		{typePrefix: "logs", scan: p.scanCloudWatchLogGroups},
-		{typePrefix: "cloudwatch", scan: p.scanCloudWatchAlarms},
+		{typePrefix: "cloudwatch", scan: p.taggingStateScan(cwListTaggedAlarms)},
 		{typePrefix: "kms", scan: p.scanKMSKeys},
 		{typePrefix: "sns", scan: p.scanSNSTopics},
 		{typePrefix: "secretsmanager", scan: p.scanSecretsManagerSecrets},
@@ -401,15 +432,24 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindRule)},
 		{typePrefix: "elasticloadbalancing", scan: p.scanELBKind(elbKindClassicLB)},
 	}
+}
 
+func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagMapping, error) {
+	goCtx := context.Background()
 	var all []resourceTagMapping
-	for _, d := range descriptors {
+	for _, step := range p.scanPlan() {
 		// A scan may return the records it could read alongside an error for the ones it could
 		// not (#1523), so the error is logged and the readable records are still reported: one
 		// unreadable record must not hide every other resource of its type.
-		resources, err := d.scan(goCtx, reqCtx)
+		var resources []resourceTagMapping
+		var err error
+		if step.lister != nil {
+			resources, err = step.lister.listTaggedResources(goCtx, reqCtx)
+		} else {
+			resources, err = step.scan(goCtx, reqCtx)
+		}
 		if err != nil {
-			p.logger.Warn("tagging: scan error", "type", d.typePrefix, "err", err)
+			p.logger.Warn("tagging: scan error", "type", step.owner, "err", err)
 		}
 		// Scope is decided here rather than in each scanner, so a scanner that cannot narrow its
 		// state-key prefix — or forgets to — still cannot report another account's or Region's
@@ -437,49 +477,6 @@ func (p *TaggingPlugin) scanAllResources(reqCtx *RequestContext) ([]resourceTagM
 		}
 	}
 	return all, nil
-}
-
-// scanS3Buckets lists the caller's buckets.
-//
-// S3 is the one service whose scope [taggingResourceInScope] cannot decide, because an S3 bucket ARN
-// is arn:aws:s3:::{name} — it carries neither an account nor a Region segment, S3's bucket namespace
-// being global. So the scope comes off the record instead: [S3Bucket] stores the Region it was
-// created in, and #937 added the account that created it. The key cannot carry either, since a bucket
-// name is globally unique and the key is what makes that true here as well.
-//
-// An empty Region or AccountID is in scope, on the same rule [taggingResourceInScope] applies to an
-// absent ARN segment: a record that states no scope is not evidence of a scope to exclude it from,
-// and a bucket written by a path that does not set the field would otherwise disappear from
-// GetResources rather than be reported with what is known about it.
-func (p *TaggingPlugin) scanS3Buckets(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, s3Namespace, "bucket:")
-	if err != nil {
-		return nil, fmt.Errorf("list s3 buckets: %w", err)
-	}
-	var out []resourceTagMapping
-	for _, k := range keys {
-		raw, err := p.state.Get(goCtx, s3Namespace, k)
-		if err != nil || raw == nil {
-			continue
-		}
-		var b S3Bucket
-		if err := json.Unmarshal(raw, &b); err != nil {
-			continue
-		}
-		if b.Region != "" && b.Region != reqCtx.Region {
-			continue
-		}
-		if b.AccountID != "" && b.AccountID != reqCtx.AccountID {
-			continue
-		}
-		out = append(out, resourceTagMapping{
-			ResourceARN: s3BucketARN(b.Name),
-			Tags:        mapToTaggingTags(b.Tags),
-			everTagged:  b.EverTagged,
-		})
-	}
-	return out, nil
 }
 
 // scanLambdaFunctions lists the caller's functions.
@@ -577,45 +574,6 @@ func (p *TaggingPlugin) scanDynamoDBTables(_ context.Context, reqCtx *RequestCon
 			Tags:        mapToTaggingTags(t.Tags),
 			everTagged:  t.EverTagged,
 		})
-	}
-	return out, nil
-}
-
-// scanEC2Instances returns the caller's instances. A record that cannot be read or decoded is
-// reported as an error alongside the ones that could be, through [taggingScanRecords], rather than
-// skipped silently (#1523).
-func (p *TaggingPlugin) scanEC2Instances(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	var out []resourceTagMapping
-	err := taggingScanRecords(ctx, p.state, ec2Namespace, taggingScanPrefix("instance:", reqCtx), func(inst EC2Instance) {
-		out = append(out, resourceTagMapping{
-			ResourceARN: taggingEC2ARN(inst.Region, inst.AccountID, "instance", inst.InstanceID),
-			Tags:        ec2TagsToTaggingTags(inst.Tags),
-			everTagged:  inst.EverTagged,
-		})
-	})
-	if err != nil {
-		return out, fmt.Errorf("scan ec2 instances: %w", err)
-	}
-	return out, nil
-}
-
-// scanEC2ElasticIPs returns the caller's Elastic IP addresses (#1191), under the ARN the
-// Service Authorization Reference publishes for the type,
-// arn:${Partition}:ec2:${Region}:${Account}:elastic-ip/${AllocationId}.
-//
-// A record that cannot be read or decoded fails the scan, through [ec2ScanRecords], rather than
-// being dropped from the listing; [TaggingPlugin.scanAllResources] logs the failure.
-func (p *TaggingPlugin) scanEC2ElasticIPs(ctx context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	var out []resourceTagMapping
-	err := ec2ScanRecords(ctx, p.state, taggingScanPrefix("eip:", reqCtx), func(_ string, eip EC2ElasticIP) {
-		out = append(out, resourceTagMapping{
-			ResourceARN: "arn:aws:ec2:" + eip.Region + ":" + eip.AccountID + ":elastic-ip/" + eip.AllocationID,
-			Tags:        ec2TagsToTaggingTags(eip.Tags),
-			everTagged:  eip.EverTagged,
-		})
-	})
-	if err != nil {
-		return nil, fmt.Errorf("scan ec2 elastic IPs: %w", err)
 	}
 	return out, nil
 }
@@ -1468,40 +1426,6 @@ func (p *TaggingPlugin) scanCloudWatchLogGroups(_ context.Context, reqCtx *Reque
 	return out, nil
 }
 
-// scanCloudWatchAlarms reports the caller's CloudWatch alarms (#1618), under the ARN the alarm
-// record carries — arn:aws:cloudwatch:{region}:{acct}:alarm:{name}, the form CloudWatch's own
-// TagResource takes. Whether an alarm is reported follows #938's rule through the tag-history
-// side-car; see cloudwatch_tags.go. A store fault reading either is returned, which
-// [TaggingPlugin.scanAllResources] logs and skips.
-func (p *TaggingPlugin) scanCloudWatchAlarms(_ context.Context, reqCtx *RequestContext) ([]resourceTagMapping, error) {
-	goCtx := context.Background()
-	keys, err := p.state.List(goCtx, monitoringNamespace, taggingScanPrefix(cwAlarmKeyPrefix, reqCtx))
-	if err != nil {
-		return nil, fmt.Errorf("list cloudwatch alarms: %w", err)
-	}
-	var out []resourceTagMapping
-	for _, k := range keys {
-		raw, err := p.state.Get(goCtx, monitoringNamespace, k)
-		if err != nil {
-			return nil, fmt.Errorf("get cloudwatch alarm %s: %w", k, err)
-		}
-		var alarm CWAlarm
-		if raw == nil || json.Unmarshal(raw, &alarm) != nil {
-			continue
-		}
-		everTagged, err := cwAlarmEverTagged(goCtx, p.state, k)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, resourceTagMapping{
-			ResourceARN: alarm.AlarmARN,
-			Tags:        mapToTaggingTags(alarm.Tags),
-			everTagged:  everTagged,
-		})
-	}
-	return out, nil
-}
-
 // ----- TagResources --------------------------------------------------------
 
 type tagResourcesInput struct {
@@ -1533,13 +1457,8 @@ func (p *TaggingPlugin) tagResources(reqCtx *RequestContext, req *AWSRequest) (*
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
-		if err != nil {
-			failures[arn] = p.tagResolveFailure(arn, err)
-			continue
-		}
-		if err := p.mergeTags(goCtx, reqCtx, ns, key, arn, in.Tags, nil); err != nil {
-			failures[arn] = p.tagMergeFailure(arn, err)
+		if err := p.tagARN(goCtx, reqCtx, arn, in.Tags, nil); err != nil {
+			failures[arn] = p.tagFailure(arn, err)
 		}
 	}
 
@@ -1574,13 +1493,8 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 	goCtx := context.Background()
 
 	for _, arn := range in.ResourceARNList {
-		ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
-		if err != nil {
-			failures[arn] = p.tagResolveFailure(arn, err)
-			continue
-		}
-		if err := p.mergeTags(goCtx, reqCtx, ns, key, arn, nil, in.TagKeys); err != nil {
-			failures[arn] = p.tagMergeFailure(arn, err)
+		if err := p.tagARN(goCtx, reqCtx, arn, nil, in.TagKeys); err != nil {
+			failures[arn] = p.tagFailure(arn, err)
 		}
 	}
 
@@ -1589,6 +1503,48 @@ func (p *TaggingPlugin) untagResources(reqCtx *RequestContext, req *AWSRequest) 
 		out.FailedResourcesMap = failures
 	}
 	return taggingJSONResponse(http.StatusOK, out)
+}
+
+// tagARN applies addTags and removeKeys to the resource arn names, enforcing the owning service's
+// per-resource tag quota.
+//
+// The owning plugin writes it when it implements [resourceTagger], under its own lock. Otherwise the
+// ARN is resolved here ([TaggingPlugin.resolveARN]) and merged through [mergeResourceTags]. Either
+// way a resolution failure comes back as a [taggingResolveError], so [TaggingPlugin.tagFailure]
+// answers it as the ARN's failure.
+func (p *TaggingPlugin) tagARN(goCtx context.Context, reqCtx *RequestContext, arn string,
+	addTags map[string]string, removeKeys []string) error {
+	if _, t, ok := p.taggerFor(arn); ok {
+		return t.tagResourceByARN(reqCtx, arn, addTags, removeKeys, enforceTagQuota)
+	}
+	ns, key, err := p.resolveARN(arn, reqCtx.AccountID)
+	if err != nil {
+		return taggingResolveFailed(err)
+	}
+	return mergeResourceTags(goCtx, p.registry, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
+}
+
+// taggerFor returns the plugin that writes the tags of the resource arn names, with its name,
+// when the registry holds one that implements [resourceTagger].
+func (p *TaggingPlugin) taggerFor(arn string) (string, resourceTagger, bool) {
+	parts, ok := taggingSplitARN(arn)
+	if !ok {
+		return "", nil, false
+	}
+	owner := taggingARNOwner(parts[2])
+	t, ok := p.registry.resourceTagger(owner)
+	return owner, t, ok
+}
+
+// tagFailure maps a [TaggingPlugin.tagARN] error onto the FailureInfo a caller sees: a resolution
+// failure through [TaggingPlugin.tagResolveFailure] and every other through
+// [TaggingPlugin.tagMergeFailure].
+func (p *TaggingPlugin) tagFailure(arn string, err error) failedResourcesInfo {
+	var resolveErr *taggingResolveError
+	if errors.As(err, &resolveErr) {
+		return p.tagResolveFailure(arn, resolveErr.err)
+	}
+	return p.tagMergeFailure(arn, err)
 }
 
 // ----- ARN resolver --------------------------------------------------------
@@ -1754,10 +1710,11 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		// arn:aws:s3:::bucket-name — the resource portion is the bare bucket name, with no
 		// type prefix to strip. An object, access point or job ARN carries a "/" and is not
 		// a bucket, which is the only distinction this ARN shape offers.
-		if strings.Contains(resource, "/") {
-			return "", "", unsupportedTagResource("S3 %q is not a bucket ARN", resource)
+		key, err := s3BucketTagStateKey(resource)
+		if err != nil {
+			return "", "", err
 		}
-		return s3Namespace, "bucket:" + resource, nil
+		return s3Namespace, key, nil
 
 	case "lambda":
 		// arn:aws:lambda:{region}:{acct}:function:{name}
@@ -1812,25 +1769,11 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		return dynamodbNamespace, "table:" + parts[4] + "/" + parts[3] + "/" + name, nil
 
 	case "ec2":
-		// arn:aws:ec2:{region}:{acct}:instance/{id}
-		if strings.HasPrefix(resource, "instance/") {
-			id := strings.TrimPrefix(resource, "instance/")
-			region := parts[3]
-			acct := parts[4]
-			return ec2Namespace, "instance:" + acct + "/" + region + "/" + id, nil
+		key, err := ec2TagStateKey(parts[3], parts[4], resource)
+		if err != nil {
+			return "", "", err
 		}
-		// arn:aws:ec2:{region}:{acct}:elastic-ip/{allocationId} (#1191).
-		if id, ok := strings.CutPrefix(resource, "elastic-ip/"); ok && id != "" {
-			return ec2Namespace, "eip:" + parts[4] + "/" + parts[3] + "/" + id, nil
-		}
-		// The three types GetResources scans since #1523, each under the ARN the Service
-		// Authorization Reference publishes for it.
-		for _, t := range taggingEC2ScannedTypes {
-			if id, ok := strings.CutPrefix(resource, t.arnType+"/"); ok && id != "" && !strings.Contains(id, "/") {
-				return ec2Namespace, t.keyPrefix + parts[4] + "/" + parts[3] + "/" + id, nil
-			}
-		}
-		return "", "", unsupportedTagResource("EC2 %q is not a taggable resource type", resource)
+		return ec2Namespace, key, nil
 
 	case "iam":
 		// The account comes from the ARN, as it does for every other arm here: an IAM
@@ -1882,13 +1825,9 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 		return apigatewayNamespace, apigwAPIKey(acct, parts[3], apiID), nil
 
 	case "cloudwatch":
-		// arn:aws:cloudwatch:{region}:{acct}:alarm:{name} — through [cwParseAlarmTagARN], which
-		// CloudWatch's own three tagging operations parse through (#1618). A dashboard, metric
-		// stream or Contributor Insights rule is taggable at AWS and unmodeled here, and is the
-		// unsupported-type answer like any ARN this arm cannot key.
-		key, arnErr := cwParseAlarmTagARN(arn)
-		if arnErr != nil {
-			return "", "", unsupportedTagResource("CloudWatch %q is not an alarm ARN: %s", resource, arnErr.Code)
+		key, err := cwAlarmTagStateKey(arn, resource)
+		if err != nil {
+			return "", "", err
 		}
 		return monitoringNamespace, key, nil
 
@@ -2176,69 +2115,6 @@ func (p *TaggingPlugin) resolveARN(arn, callerAccount string) (ns, key string, e
 	}
 }
 
-// mergeTags loads the resource at ns/key, applies addTags (merge) and removes
-// removeKeys, then persists the updated resource.
-//
-// A thin wrapper over [mergeResourceTags], which holds the behavior so the tagging plugin
-// and the CloudFormation deployer cannot drift into two merge semantics.
-//
-// This is the path that enforces the owning service's published per-resource tag quota, where the
-// deployer's stamp does not; see the comment on [taggingCheckTagQuota] for why the two differ
-// (#1000).
-func (p *TaggingPlugin) mergeTags(goCtx context.Context, reqCtx *RequestContext, ns, key, arn string,
-	addTags map[string]string, removeKeys []string) error {
-	if ns == monitoringNamespace {
-		return p.routeAlarmTags(reqCtx, arn, addTags, removeKeys)
-	}
-	return mergeResourceTags(goCtx, p.state, ns, key, addTags, removeKeys, enforceTagQuota)
-}
-
-// routeAlarmTags writes a CloudWatch alarm's tags through CloudWatch's own TagResource and
-// UntagResource (#1618), sent through the registry, rather than editing the alarm record here.
-// CloudWatch serializes every write to an alarm under its own lock, and a second writer outside
-// that lock could interleave with a PutMetricAlarm, SetAlarmState or DeleteAlarms and lose a tag or
-// resurrect a deleted alarm. CloudWatch's refusal is carried out as the owning service's own code,
-// as a quota refusal is (tagging_tag_quota.go), and its ResourceNotFoundException as the tagging
-// API's not-found.
-func (p *TaggingPlugin) routeAlarmTags(reqCtx *RequestContext, arn string, addTags map[string]string, removeKeys []string) error {
-	if p.registry == nil {
-		return fmt.Errorf("tagging: no plugin registry to reach CloudWatch for %s", arn)
-	}
-	params := map[string]string{"ResourceARN": arn}
-	operation := "UntagResource"
-	if len(addTags) > 0 {
-		operation = "TagResource"
-		keys := make([]string, 0, len(addTags))
-		for k := range addTags {
-			keys = append(keys, k)
-		}
-		sort.Strings(keys)
-		for i, k := range keys {
-			base := "Tags.member." + strconv.Itoa(i+1) + "."
-			params[base+"Key"], params[base+"Value"] = k, addTags[k]
-		}
-	} else {
-		for i, k := range removeKeys {
-			params["TagKeys.member."+strconv.Itoa(i+1)] = k
-		}
-	}
-	params["Action"] = operation
-	_, err := p.registry.RouteRequest(reqCtx, &AWSRequest{
-		Service: monitoringNamespace, Operation: operation, Headers: map[string]string{}, Params: params,
-	})
-	if err == nil {
-		return nil
-	}
-	var awsErr *AWSError
-	if !errors.As(err, &awsErr) {
-		return fmt.Errorf("tagging: CloudWatch %s: %w", operation, err)
-	}
-	if awsErr.Code == "ResourceNotFoundException" {
-		return fmt.Errorf("%w: %s", errTagResourceNotFound, arn)
-	}
-	return taggingQuotaRefusal(awsErr)
-}
-
 // errTagResourceNotFound reports that ns/key addressed no record, so there was nothing for a tag
 // to merge into.
 //
@@ -2271,16 +2147,20 @@ var errTagResourceNotFound = errors.New("no resource at the resolved state key")
 // parameter rather than always-on because the CloudFormation stamp path writes `aws:`-prefixed keys,
 // which the services that publish a quota either exclude from the count or never receive from a
 // caller at all; [taggingCheckTagQuota] records the reasoning (#1000).
+//
+// owners is the registry the namespace's plugin is looked up in. When the plugin registered under
+// ns implements [resourceTagger] it writes the record itself, under its own lock; otherwise, and
+// for a nil registry, the record is merged here.
 func mergeResourceTags(
-	goCtx context.Context, state StateManager, ns, key string,
+	goCtx context.Context, owners *PluginRegistry, state StateManager, ns, key string,
 	addTags map[string]string, removeKeys []string, quota tagQuotaMode,
 ) error {
-	raw, err := state.Get(goCtx, ns, key)
-	if err != nil {
-		return fmt.Errorf("get resource: %w", err)
+	if t, ok := owners.resourceTagger(ns); ok {
+		return t.tagRecord(goCtx, key, addTags, removeKeys, quota)
 	}
-	if raw == nil {
-		return fmt.Errorf("%w: %s/%s", errTagResourceNotFound, ns, key)
+	raw, err := loadTagRecord(goCtx, state, ns, key)
+	if err != nil {
+		return err
 	}
 
 	// Before the switch, so a refused request writes nothing — the rule #965 established for the
@@ -2293,17 +2173,7 @@ func mergeResourceTags(
 
 	switch ns {
 	case s3Namespace:
-		var b S3Bucket
-		if err := json.Unmarshal(raw, &b); err != nil {
-			return fmt.Errorf("unmarshal S3Bucket: %w", err)
-		}
-		b.EverTagged = taggingEverTagged(b.EverTagged, len(b.Tags), len(addTags))
-		b.Tags = mergeStringMap(b.Tags, addTags, removeKeys)
-		updated, err := json.Marshal(b)
-		if err != nil {
-			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-		}
-		return state.Put(goCtx, ns, key, updated)
+		return s3MergeBucketTags(goCtx, state, key, raw, addTags, removeKeys)
 
 	case lambdaNamespace:
 		var fn LambdaFunction
@@ -2345,38 +2215,7 @@ func mergeResourceTags(
 		return state.Put(goCtx, ns, key, updated)
 
 	case ec2Namespace:
-		// The namespace holds Elastic IPs as well as instances since #1191, and decoding one as
-		// the other would rewrite it without its own members.
-		if strings.HasPrefix(key, "eip:") {
-			var eip EC2ElasticIP
-			if err := json.Unmarshal(raw, &eip); err != nil {
-				return fmt.Errorf("unmarshal EC2ElasticIP: %w", err)
-			}
-			eip.EverTagged = taggingEverTagged(eip.EverTagged, len(eip.Tags), len(addTags))
-			eip.Tags = mergeEC2Tags(eip.Tags, addTags, removeKeys)
-			updated, err := json.Marshal(eip)
-			if err != nil {
-				return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-			}
-			return state.Put(goCtx, ns, key, updated)
-		}
-		// Security groups, launch templates and volumes (#1523) are merged on the raw record,
-		// through the writer EC2's own CreateTags and DeleteTags use, so every member those records
-		// carry survives — including the ones a decode into a struct here would not know about.
-		if taggingEC2RawMergedKey(key) {
-			return mergeRecordEC2Tags(goCtx, state, key, raw, addTags, removeKeys)
-		}
-		var inst EC2Instance
-		if err := json.Unmarshal(raw, &inst); err != nil {
-			return fmt.Errorf("unmarshal EC2Instance: %w", err)
-		}
-		inst.EverTagged = taggingEverTagged(inst.EverTagged, len(inst.Tags), len(addTags))
-		inst.Tags = mergeEC2Tags(inst.Tags, addTags, removeKeys)
-		updated, err := json.Marshal(inst)
-		if err != nil {
-			return fmt.Errorf("tagging mergeResourceTags marshal: %w", err)
-		}
-		return state.Put(goCtx, ns, key, updated)
+		return ec2MergeTaggedRecord(goCtx, state, key, raw, addTags, removeKeys)
 
 	case iamNamespace:
 		if strings.HasPrefix(key, "user:") {

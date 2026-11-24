@@ -126,7 +126,7 @@ func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]stri
 // A resource nothing can reach reports false and is skipped in silence, as the stamp is: the
 // services that model no tags at all are the majority of what a stack creates.
 func cfnPropagateStackTags(
-	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+	state StateManager, owners *PluginRegistry, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnPropagateELBStackTags(state, reqCtx, dr, prev, next)
@@ -135,7 +135,7 @@ func cfnPropagateStackTags(
 		return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 	}
 	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region); ok {
-		return cfnPropagateRecordStackTags(state, target, dr, prev, next)
+		return cfnPropagateRecordStackTags(state, owners, target, dr, prev, next)
 	}
 	return cfnPropagateEC2StackTags(state, reqCtx, dr, prev, next)
 }
@@ -149,7 +149,7 @@ func cfnPropagateStackTags(
 // Resource Groups Tagging API uses, so a propagated tag and a `TagResources` call cannot end up
 // merging differently.
 func cfnPropagateRecordStackTags(
-	state StateManager, target cfnStampTarget, dr DeployedResource, prev, next map[string]string,
+	state StateManager, owners *PluginRegistry, target cfnStampTarget, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	existing, found, err := cfnRecordTags(state, target)
 	if err != nil {
@@ -169,7 +169,7 @@ func cfnPropagateRecordStackTags(
 	// "Propagation does not enforce the target's own tag quota" section for the decision and the
 	// search behind it (#1077, decided; #1000 filed it).
 	if err := mergeResourceTags(
-		context.Background(), state, target.namespace, target.stateKey, write, remove, skipTagQuota,
+		context.Background(), owners, state, target.namespace, target.stateKey, write, remove, skipTagQuota,
 	); err != nil {
 		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
 	}
