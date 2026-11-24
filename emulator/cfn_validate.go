@@ -229,7 +229,7 @@ func cfnRefuseUnemulated(tmpl *cfnTemplate, cctx *cfnContext) error {
 			"turn strict mode off: cloudformation.lenient: true (SUBSTRATE_CLOUDFORMATION_LENIENT=true) "+
 			"on the server, WithLenientCloudFormation() on StartTestServer, WithDeployerLenient(true) on "+
 			"NewStackDeployer, or WithClientLenientCloudFormation() on NewClient; see \"Strict mode and "+
-			"template validation\" in docs/services.md", strings.Join(types, "; "))
+			"template validation\" in docs/reference/cloudformation.md", strings.Join(types, "; "))
 }
 
 // cfnValidateTemplate makes every request-level check a template is held to before CreateStack,

@@ -1,4 +1,7 @@
 import { defineConfig } from 'vitepress'
+// The Concepts and Services groups, written from the pages by `make docs-reference`
+// (cmd/gen-service-reference).
+import referenceSidebar from './services-sidebar.json'
 
 const siteUrl = 'https://scttfrdmn.github.io/substrate/'
 const ogImage = siteUrl + 'og-image.png'
@@ -89,6 +92,16 @@ export default defineConfig({
           { text: 'Service Reference', link: '/services' },
           { text: 'Compatibility & Fidelity', link: '/fidelity' },
         ],
+      },
+      {
+        text: 'Concepts',
+        collapsed: true,
+        items: referenceSidebar.concepts,
+      },
+      {
+        text: 'Services',
+        collapsed: true,
+        items: referenceSidebar.services,
       },
       {
         text: 'Contributing',

@@ -684,7 +684,7 @@ observation later reads. A replay resets the state manager, freezes the clock an
 the fault controller itself, so `/v1/state/reset`, `/v1/control/time`, `/v1/control/scale`
 and `/v1/fault/rules` are excluded; the remaining endpoints write nothing a replayed
 observation can read. See
-[How a seed survives a replay](services.md#how-a-seed-survives-a-replay) for the rule as
+[How a seed survives a replay](/reference/concepts/seeds-and-replay#how-a-seed-survives-a-replay) for the rule as
 the service reference states it.
 
 ### What a replay compares
@@ -1237,7 +1237,7 @@ policy") under the same code.
 **Writing a trust policy is the opt-in**, the same shape as the rule below one
 level down. A role created without one is not enforced, so every test that never
 wrote a trust policy keeps working — see
-[the STS service reference](services.md#a-role-s-trust-policy-is-enforced-and-sts-externalid-with-it)
+[the STS service reference](/reference/sts#a-role-s-trust-policy-is-enforced-and-sts-externalid-with-it)
 for the `Principal` forms that match.
 
 ### A principal that does not exist is not enforced
@@ -1269,8 +1269,8 @@ for its `Principal` element to be true of.
 A stack's resource calls are authorized too, as the stack's service role when it has
 one and as the creating principal otherwise. A refused resource call rolls the stack
 back and names the denial in `DescribeStackResources`' `ResourceStatusReason` — not
-as a `StackEvent`. See the CloudFormation section of
-[the service reference](services.md) for the `RoleARN` semantics.
+as a `StackEvent`. See
+[the CloudFormation reference](/reference/cloudformation) for the `RoleARN` semantics.
 
 ## CloudFormation Strict Mode
 
@@ -1307,7 +1307,7 @@ false`) in `substrate.yaml`, or `SUBSTRATE_CLOUDFORMATION_LENIENT=true`
 to `NewStackDeployer` or `emulator.WithClientLenientCloudFormation()` to `NewClient`. In
 lenient mode an unemulated type records its properties and creates nothing, as every
 template's did before strict mode existed; the checks CloudFormation itself makes still
-apply. See [Strict mode and template validation](services.md#strict-mode-and-template-validation)
+apply. See [Strict mode and template validation](/reference/cloudformation#strict-mode-and-template-validation)
 for every check and where its wording comes from.
 
 ## Multi-Region
@@ -1511,7 +1511,7 @@ func TestLambdaSQSTrigger(t *testing.T) {
     }
 
     // Receive the message (Substrate does not invoke Lambda on SQS receive —
-    // that cross-service dispatch is approximated; see services.md for details).
+    // that cross-service dispatch is approximated; see docs/reference/sqs.md).
     recv, err := sqsClient.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
         QueueUrl:            qOut.QueueUrl,
         MaxNumberOfMessages: 1,

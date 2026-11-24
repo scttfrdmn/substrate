@@ -9,12 +9,12 @@
 # /ready endpoint, instead.
 #
 # Scope:
-#   - README.md, python/README.md and docs/**/*.md other than docs/services.md: any
+#   - README.md, python/README.md and docs/**/*.md outside the service reference: any
 #     plugin, service or operation count.
-#   - docs/services.md outside the matrix: any plugin or service count, and an
-#     operation count of 1,000 or more, which can only be a total. A per-service
-#     section legitimately says how many operations that one service routes, and no
-#     AWS service has a thousand.
+#   - The service reference — docs/services.md outside the matrix, and every page under
+#     docs/reference/: any plugin or service count, and an operation count of 1,000 or
+#     more, which can only be a total. A service's page legitimately says how many
+#     operations that one service routes, and no AWS service has a thousand.
 #
 # What counts as a count: a number (digits, comma-grouped or not, or a spelled-out
 # number of twenty or more, which is how a total is written out), then up to five
@@ -88,8 +88,31 @@ for my $i (0 .. $#lines) {
 exit($hit ? 1 : 0);
 PERL
 
+# mode_for <file>: the matcher mode a file is scanned in.
+mode_for() {
+  case "$1" in
+    docs/services.md | docs/reference/*) echo services-md ;;
+    *) echo all ;;
+  esac
+}
+
 if [[ "${1:-}" == "--self-test" ]]; then
   status=0
+  mode_is() { # mode_is <file> <want>
+    local got
+    got="$(mode_for "$1")"
+    if [[ "$got" != "$2" ]]; then
+      echo "self-test: $1 is scanned in mode $got, want $2"
+      status=1
+    fi
+  }
+  mode_is docs/services.md services-md
+  mode_is docs/reference/ec2.md services-md
+  mode_is docs/reference/concepts/routing.md services-md
+  mode_is docs/testing-guide.md all
+  mode_is docs/index.md all
+  mode_is README.md all
+  mode_is python/README.md all
   check() { # check <mode> <want: bad|good> <line>
     local got
     if printf '%s\n' "$3" | FILE=self-test MODE="$1" perl -e "$matcher" >/dev/null; then got=good; else got=bad; fi
@@ -144,19 +167,15 @@ done < <(
     find docs -name '*.md' \
       -not -path '*/node_modules/*' \
       -not -path '*/.vitepress/dist/*' \
-      -not -path '*/.vitepress/cache/*' \
-      -not -path 'docs/services.md'
+      -not -path '*/.vitepress/cache/*'
   } | sort -u
 )
 
 status=0
 for f in "${files[@]}"; do
   [[ -f "$f" ]] || continue
-  FILE="$f" MODE=all perl -e "$matcher" <"$f" || status=1
+  FILE="$f" MODE="$(mode_for "$f")" perl -e "$matcher" <"$f" || status=1
 done
-if [[ -f docs/services.md ]]; then
-  FILE=docs/services.md MODE=services-md perl -e "$matcher" <docs/services.md || status=1
-fi
 
 if [[ "$status" -ne 0 ]]; then
   echo ""

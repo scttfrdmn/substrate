@@ -102,7 +102,7 @@ func TestReplaceMatrix_RendersFromTheRoutingTable(t *testing.T) {
 	if !strings.HasPrefix(out, "before\n") || !strings.HasSuffix(out, "\nafter\n") {
 		t.Errorf("content outside the markers changed: %q", out)
 	}
-	want := fmt.Sprintf("| 1 | %s | `sqs` | %s | %d |",
+	want := fmt.Sprintf("| 1 | [%s](/reference/sqs) | `sqs` | %s | %d |",
 		routing["sqs"].Display, routing["sqs"].Protocol, len(emu.RoutedOperations("sqs")))
 	if !strings.Contains(out, want) {
 		t.Errorf("want a row %q in:\n%s", want, out)

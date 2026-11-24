@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e iac-e2e iac-e2e-setup docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e iac-e2e iac-e2e-setup docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check docs-anchor-fixtures
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -43,11 +43,14 @@ tidy: ## Tidy and verify go modules
 	go mod tidy
 	go mod verify
 
-docs-reference: ## Regenerate docs/services.md from the plugin registry
+docs-reference: ## Regenerate the coverage matrix in docs/services.md and the services sidebar from the plugin registry
 	go run ./cmd/gen-service-reference
 
-docs-reference-check: ## Fail if docs/services.md is out of date with the registry
+docs-reference-check: ## Fail if the matrix or sidebar is stale, a legacy /services# anchor no longer lands, or a docs link names a missing anchor
 	go run ./cmd/gen-service-reference -check
+
+docs-anchor-fixtures: ## Regenerate the VitePress anchor fixtures docs-reference-check is tested against (dev-only; run `npm ci` in docs/ first)
+	node cmd/gen-service-reference/testdata/vitepress-anchors.mjs docs
 
 authz-reference: ## Regenerate emulator/authz_reference_gen.go from the vendored AWS snapshots
 	go run ./cmd/gen-authz-reference
@@ -76,13 +79,14 @@ operation-catalog: ## Regenerate emulator/operation_catalog_gen.go from each plu
 operation-catalog-check: ## Fail if operation_catalog_gen.go is out of date with the plugins' dispatch
 	go run ./cmd/gen-operation-catalog -check
 
-operation-docs-check: ## Fail if a routed operation has no row in docs/services.md, or a row names none
+operation-docs-check: ## Fail if a plugin has no docs/reference page (or a page no plugin), a routed operation no row, or a row names none
 	go run ./cmd/check-operation-docs
 
 operation-docs-write: ## Rewrite the undocumented-operations inventory (run by hand after writing rows)
 	go run ./cmd/check-operation-docs -write
 
-docs-headings-check: ## Fail if docs/services.md names a service section twice
+docs-headings-check: ## Fail if a reference page lacks one unique title or repeats a section
+	./scripts/check-docs-headings.sh --self-test
 	./scripts/check-docs-headings.sh
 
 docs-versions: ## Fail if docs/README pin a stale version in prose

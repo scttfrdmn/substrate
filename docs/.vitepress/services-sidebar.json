@@ -1,0 +1,302 @@
+{
+  "concepts": [
+    {
+      "text": "Errors",
+      "link": "/reference/concepts/errors"
+    },
+    {
+      "text": "Fault injection",
+      "link": "/reference/concepts/fault-injection"
+    },
+    {
+      "text": "Request routing",
+      "link": "/reference/concepts/routing"
+    },
+    {
+      "text": "Seeds and replay",
+      "link": "/reference/concepts/seeds-and-replay"
+    },
+    {
+      "text": "The order a listing returns its members in",
+      "link": "/reference/concepts/listing-order"
+    },
+    {
+      "text": "Which account a request is attributed to",
+      "link": "/reference/concepts/accounts"
+    }
+  ],
+  "services": [
+    {
+      "text": "Account Management",
+      "link": "/reference/account"
+    },
+    {
+      "text": "ACM",
+      "link": "/reference/acm"
+    },
+    {
+      "text": "API Gateway (REST)",
+      "link": "/reference/apigateway"
+    },
+    {
+      "text": "API Gateway v2 (HTTP)",
+      "link": "/reference/apigatewayv2"
+    },
+    {
+      "text": "AppSync",
+      "link": "/reference/appsync"
+    },
+    {
+      "text": "Athena",
+      "link": "/reference/athena"
+    },
+    {
+      "text": "AWS Backup",
+      "link": "/reference/backup"
+    },
+    {
+      "text": "Batch",
+      "link": "/reference/batch"
+    },
+    {
+      "text": "Bedrock Runtime",
+      "link": "/reference/bedrock-runtime"
+    },
+    {
+      "text": "Budgets",
+      "link": "/reference/budgets"
+    },
+    {
+      "text": "CloudFormation",
+      "link": "/reference/cloudformation"
+    },
+    {
+      "text": "CloudFront",
+      "link": "/reference/cloudfront"
+    },
+    {
+      "text": "CloudTrail",
+      "link": "/reference/cloudtrail"
+    },
+    {
+      "text": "CloudWatch",
+      "link": "/reference/monitoring"
+    },
+    {
+      "text": "CloudWatch Logs",
+      "link": "/reference/logs"
+    },
+    {
+      "text": "CodeBuild",
+      "link": "/reference/codebuild"
+    },
+    {
+      "text": "CodeDeploy",
+      "link": "/reference/codedeploy"
+    },
+    {
+      "text": "CodePipeline",
+      "link": "/reference/codepipeline"
+    },
+    {
+      "text": "Cognito Identity",
+      "link": "/reference/cognito-identity"
+    },
+    {
+      "text": "Cognito User Pools",
+      "link": "/reference/cognito-idp"
+    },
+    {
+      "text": "Config",
+      "link": "/reference/config"
+    },
+    {
+      "text": "Cost Explorer",
+      "link": "/reference/ce"
+    },
+    {
+      "text": "DynamoDB",
+      "link": "/reference/dynamodb"
+    },
+    {
+      "text": "EC2",
+      "link": "/reference/ec2"
+    },
+    {
+      "text": "EC2 Auto Scaling",
+      "link": "/reference/autoscaling"
+    },
+    {
+      "text": "ECR",
+      "link": "/reference/ecr"
+    },
+    {
+      "text": "ECS",
+      "link": "/reference/ecs"
+    },
+    {
+      "text": "EFS",
+      "link": "/reference/efs"
+    },
+    {
+      "text": "ElastiCache",
+      "link": "/reference/elasticache"
+    },
+    {
+      "text": "ELB v2",
+      "link": "/reference/elasticloadbalancing"
+    },
+    {
+      "text": "EMR Serverless",
+      "link": "/reference/emrserverless"
+    },
+    {
+      "text": "EventBridge",
+      "link": "/reference/eventbridge"
+    },
+    {
+      "text": "EventBridge Scheduler",
+      "link": "/reference/scheduler"
+    },
+    {
+      "text": "execute-api (API Gateway data plane)",
+      "link": "/reference/execute-api"
+    },
+    {
+      "text": "FSx",
+      "link": "/reference/fsx"
+    },
+    {
+      "text": "Glue",
+      "link": "/reference/glue"
+    },
+    {
+      "text": "Health",
+      "link": "/reference/health"
+    },
+    {
+      "text": "HealthOmics",
+      "link": "/reference/omics"
+    },
+    {
+      "text": "IAM",
+      "link": "/reference/iam"
+    },
+    {
+      "text": "Kinesis Data Firehose",
+      "link": "/reference/firehose"
+    },
+    {
+      "text": "Kinesis Data Streams",
+      "link": "/reference/kinesis"
+    },
+    {
+      "text": "KMS",
+      "link": "/reference/kms"
+    },
+    {
+      "text": "Lambda",
+      "link": "/reference/lambda"
+    },
+    {
+      "text": "MSK",
+      "link": "/reference/msk"
+    },
+    {
+      "text": "OpenSearch",
+      "link": "/reference/opensearch"
+    },
+    {
+      "text": "Organizations",
+      "link": "/reference/organizations"
+    },
+    {
+      "text": "Price List Query API",
+      "link": "/reference/pricing"
+    },
+    {
+      "text": "QuickSight",
+      "link": "/reference/quicksight"
+    },
+    {
+      "text": "RAM",
+      "link": "/reference/ram"
+    },
+    {
+      "text": "RDS",
+      "link": "/reference/rds"
+    },
+    {
+      "text": "Redshift",
+      "link": "/reference/redshift"
+    },
+    {
+      "text": "Redshift Data API",
+      "link": "/reference/redshift-data"
+    },
+    {
+      "text": "Resource Groups Tagging",
+      "link": "/reference/tagging"
+    },
+    {
+      "text": "Route 53",
+      "link": "/reference/route53"
+    },
+    {
+      "text": "S3",
+      "link": "/reference/s3"
+    },
+    {
+      "text": "SageMaker",
+      "link": "/reference/sagemaker"
+    },
+    {
+      "text": "Secrets Manager",
+      "link": "/reference/secretsmanager"
+    },
+    {
+      "text": "Service Quotas",
+      "link": "/reference/servicequotas"
+    },
+    {
+      "text": "SES v2",
+      "link": "/reference/sesv2"
+    },
+    {
+      "text": "SNS",
+      "link": "/reference/sns"
+    },
+    {
+      "text": "SQS",
+      "link": "/reference/sqs"
+    },
+    {
+      "text": "SSM Parameter Store",
+      "link": "/reference/ssm"
+    },
+    {
+      "text": "SSO / Identity Store",
+      "link": "/reference/sso"
+    },
+    {
+      "text": "Step Functions",
+      "link": "/reference/states"
+    },
+    {
+      "text": "STS",
+      "link": "/reference/sts"
+    },
+    {
+      "text": "Timestream",
+      "link": "/reference/timestream"
+    },
+    {
+      "text": "Transfer Family",
+      "link": "/reference/transfer"
+    },
+    {
+      "text": "WAFv2",
+      "link": "/reference/wafv2"
+    }
+  ]
+}

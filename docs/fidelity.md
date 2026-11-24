@@ -62,7 +62,7 @@ transitions is not "worse" than a stateful one.
 | **CFN-supported** | Substrate models the relevant CloudFormation resource types for deploy/drift. |
 | **Pricing-supported** | Operations carry cost data, so cost summaries and budget gates work. |
 
-The per-service sections of the [Service Reference](/services) note which of
+The per-service pages of the [Service Reference](/services) note which of
 these apply, and the generated coverage matrix lists every registered plugin.
 
 ## What "not yet supported" means

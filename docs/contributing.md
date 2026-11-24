@@ -188,16 +188,26 @@ drifting silently.
 | Error protocol | `emulator/error_protocol.go` (e.g. `"elasticloadbalancing": errProtoQueryXML`) | `access_denied_code_test.go`; `unknownActionError` uses it to answer `InvalidAction`/`UnknownOperationException` |
 | Operation catalog | `make operation-catalog` regenerates `emulator/operation_catalog_gen.go` from each `HandleRequest` switch (on a variable named `op`, `action` or `operation`) | `make operation-catalog-check` |
 | Catalog totals | `routedOperationTotal`, `routedPluginTotal` and the per-service counts in `emulator/operation_catalog_test.go` — bumped by hand | `operation_catalog_test.go` |
-| Service section | a `## <Section>` in `docs/services.md` with one *Supported operations* row per routed operation, plus a `docSections` entry in `cmd/check-operation-docs/main.go` | `make operation-docs-check` (`scripts/undocumented-operations.txt` is empty and stays empty), `make docs-headings-check` |
-| Coverage matrix | `make docs-reference` regenerates the matrix at the top of `docs/services.md` | `make docs-reference-check` |
+| Service page | `docs/reference/<plugin>.md`, named by the registry name, with one `# ` title and one *Supported operations* row per routed operation; `go run ./cmd/check-operation-docs -scaffold <plugin>` prints the page skeleton or the missing rows | `make operation-docs-check` (`scripts/undocumented-operations.txt` is empty and stays empty), `make docs-headings-check` |
+| Coverage matrix and sidebar | `make docs-reference` regenerates the matrix in `docs/services.md`, whose rows link to the pages, and `docs/.vitepress/services-sidebar.json` | `make docs-reference-check`, which also refuses a docs link naming an anchor its page lacks |
 | Wire bookkeeping | a state struct with a json-tagged `AccountID`, `Region`, `CreatedAt`, `UpdatedAt` or `EverTagged` needs lines in `scripts/wire-bookkeeping-baseline.txt` and in `-projected.txt` (naming a raw-bytes test proving the field never reaches the wire — `ecr_wire.go` is the pattern) or `-internal.txt` | `make wire-bookkeeping-check` |
 | `ResettablePlugin` list (only if you implement it) | `emulator/replay_plugin_reset_test.go` | the test asserts the exact set |
 | Costs (optional) | `defaultCostTable` in `emulator/costs.go` | unknown operations cost 0 |
 | Authz reference (optional) | `cmd/gen-authz-reference` + `emulator/authzref/*.json` | `make authz-reference-check` (offline) |
 | CloudFormation resource type (only for a new CFN type) | a row in `cfnResourceDeployers` (`emulator/cfn_resource_table.go`), the one list strict mode reads | `TestCFNStrict_EmulatedTypesAreRecognized` (the type must be in the vendored specification, `emulator/cfnschema`, checked by `make cfn-schema-check`) |
 
-Adding an operation to an existing plugin needs the catalog, totals, service-section
-row and coverage-matrix steps.
+Adding an operation to an existing plugin needs the catalog, totals, service-page row
+and coverage-matrix steps.
+
+Renaming a heading on a reference page can strand an old link. Links written when the
+whole reference was one page read `/services#<anchor>`, and `docs/services.md` redirects
+each one through `docs/.vitepress/legacy-anchors.json`. If `make docs-reference-check`
+names an entry there, point its value at the heading's new anchor. Never remove a key: the
+keys are the anchors that page published, and the check pins them.
+
+The check computes anchors the way VitePress does, and is tested against ids VitePress
+itself rendered. When a change to `docs/package.json` moves VitePress, run `npm ci` in
+`docs/` and then `make docs-anchor-fixtures`, and commit what changes.
 
 CFN resources live in `emulator/cfn_resources_<service>.go`: each service's deploy, update and
 delete helpers together. Files are named by domain, never by release (`TestFileNames_AreNamedByDomainNotRelease`).
@@ -305,5 +315,7 @@ needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrat
 - [ ] Tests added (table-driven, race-safe, no wall-clock/network), coverage
       maintained.
 - [ ] `make test` and `make lint` pass, and both drift jobs' targets pass.
-- [ ] `CHANGELOG.md` updated under `## [Unreleased]`.
+- [ ] `CHANGELOG.md` has one bullet per issue under `## [Unreleased]`, in the form
+      `- <Service>: <what changed> (#N).` (about 25 words or fewer), plus
+      `### Compatibility` if a consumer must act on upgrading.
 - [ ] Every exported symbol has a doc comment ending in a period.
