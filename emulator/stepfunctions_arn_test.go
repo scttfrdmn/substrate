@@ -781,19 +781,24 @@ func TestSFNARN_TheTaggingOperationsAndTheRestResolveOneARN(t *testing.T) {
 // extractSMNameFromARN the eleven operations used — so
 // arn:aws:lambda:…:function:score:PROD invoked a function named "PROD". The ASL executor reaches
 // Lambda through the shared plugin registry, which StartTestServer wires, so this runs over the wire
-// like the rest of the file.
+// like the rest of the file. The qualifier is the Invoke's Qualifier, so the alias must exist (#1613).
 func TestSFNARN_AQualifiedLambdaARNInvokesTheFunctionNotTheAlias(t *testing.T) {
 	ts := sfnArnServer(t)
 
-	// Create the function through Lambda's own REST endpoint.
+	// Create the function, a version and the PROD alias through Lambda's own REST endpoint.
 	createFn := `{"FunctionName":"score","Runtime":"python3.12",` +
 		`"Role":"arn:aws:iam::` + taggingTestAccount + `:role/lambda",` +
-		`"Handler":"index.handler","Code":{"ZipFile":""}}`
-	raw, status := scanScopeSigned(t, ts, taggingTestAccount, http.MethodPost,
-		"lambda."+sfnArnEastRegion+".amazonaws.com", "lambda", sfnArnEastRegion,
-		"/2015-03-31/functions", []byte(createFn), "application/json")
-	require.Truef(t, status == http.StatusCreated || status == http.StatusOK,
-		"CreateFunction: status %d, %s", status, raw)
+		`"Handler":"index.handler","Code":{"ZipFile":""},"Publish":true}`
+	for _, step := range []struct{ path, body string }{
+		{"/2015-03-31/functions", createFn},
+		{"/2015-03-31/functions/score/aliases", `{"Name":"PROD","FunctionVersion":"1"}`},
+	} {
+		raw, status := scanScopeSigned(t, ts, taggingTestAccount, http.MethodPost,
+			"lambda."+sfnArnEastRegion+".amazonaws.com", "lambda", sfnArnEastRegion,
+			step.path, []byte(step.body), "application/json")
+		require.Truef(t, status == http.StatusCreated || status == http.StatusOK,
+			"%s: status %d, %s", step.path, status, raw)
+	}
 
 	qualified := "arn:aws:lambda:" + sfnArnEastRegion + ":" + taggingTestAccount + ":function:score:PROD"
 	def := `{"StartAt":"T","States":{"T":{"Type":"Task","Resource":"` + qualified + `","End":true}}}`

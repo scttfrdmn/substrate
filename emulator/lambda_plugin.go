@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,10 +17,11 @@ import (
 )
 
 // LambdaPlugin emulates the AWS Lambda REST API.
-// It handles CreateFunction, GetFunction, DeleteFunction, ListFunctions,
-// UpdateFunctionCode, UpdateFunctionConfiguration, Invoke, InvokeAsync,
+// It handles CreateFunction, GetFunction, GetFunctionConfiguration, DeleteFunction,
+// ListFunctions, UpdateFunctionCode, UpdateFunctionConfiguration, Invoke, InvokeAsync,
 // AddPermission, RemovePermission, GetPolicy, PutFunctionEventInvokeConfig,
-// TagResource, UntagResource, ListTags, and event source mappings.
+// TagResource, UntagResource, ListTags, versions, aliases, layers and event source
+// mappings.
 // Function code never runs: Invoke answers a seeded result or error, or a stub
 // payload; see [LambdaPlugin.invoke].
 type LambdaPlugin struct {
@@ -35,6 +37,10 @@ type LambdaPlugin struct {
 	// seedMu serializes advancing a seeded role-propagation window (#1274); see
 	// [progression.observe].
 	seedMu sync.Mutex
+	// versionMu serializes the operations that read, check and write a function's versions and
+	// aliases: PublishVersion's counter, an alias's existence and targets, and the alias check that
+	// guards deleting a version.
+	versionMu sync.Mutex
 }
 
 // Name returns the service name "lambda".
@@ -93,19 +99,33 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 	case "CreateFunction":
 		return p.createFunction(ctx, req)
 	case "GetFunction":
-		return p.getFunction(ctx, name)
+		return p.getFunction(ctx, req, name)
+	case "GetFunctionConfiguration":
+		return p.getFunctionConfiguration(ctx, req, name)
 	case "UpdateFunctionCode":
 		return p.updateFunctionCode(ctx, req, name)
 	case "UpdateFunctionConfiguration":
 		return p.updateFunctionConfiguration(ctx, req, name)
 	case "DeleteFunction":
-		return p.deleteFunction(ctx, name)
+		return p.deleteFunction(ctx, req, name)
 	case "ListFunctions":
 		return p.listFunctions(ctx, req)
 	case "Invoke":
 		return p.invoke(ctx, req, name)
 	case "ListVersionsByFunction":
 		return p.listVersionsByFunction(ctx, req, name)
+	case "PublishVersion":
+		return p.publishVersion(ctx, req, name)
+	case "CreateAlias":
+		return p.createAlias(ctx, req, name)
+	case "GetAlias":
+		return p.getAlias(ctx, name, subResource)
+	case "UpdateAlias":
+		return p.updateAlias(ctx, req, name, subResource)
+	case "DeleteAlias":
+		return p.deleteAlias(ctx, name, subResource)
+	case "ListAliases":
+		return p.listAliasesResponse(ctx, req, name)
 	case "GetFunctionCodeSigningConfig":
 		return p.getFunctionCodeSigningConfig(ctx, name)
 	case "InvokeAsync":
@@ -113,9 +133,9 @@ func (p *LambdaPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWS
 	case "AddPermission":
 		return p.addPermission(ctx, req, name)
 	case "RemovePermission":
-		return p.removePermission(ctx, name, subResource)
+		return p.removePermission(ctx, req, name, subResource)
 	case "GetPolicy":
-		return p.getPolicy(ctx, name)
+		return p.getPolicy(ctx, req, name)
 	case "PutFunctionEventInvokeConfig":
 		return p.putFunctionEventInvokeConfig(ctx, req, name)
 	case "TagResource":
@@ -172,6 +192,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 			Variables map[string]string `json:"Variables"`
 		} `json:"Environment"`
 		TracingConfig lambdaTracingConfig `json:"TracingConfig"`
+		// Publish creates version 1 as part of the create.
+		Publish bool `json:"Publish"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
@@ -266,6 +288,7 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		// The package is not copied, so ZipStored stays false, but the object is usually
 		// in substrate's own S3, so its length is knowable without fetching it.
 		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.Code.S3Bucket, body.Code.S3Key, body.Code.S3ObjectVersion)
+		fn.CodeS3Location = lambdaCodeS3Location(body.Code.S3Bucket, body.Code.S3Key, body.Code.S3ObjectVersion)
 	} else if imageURI != "" {
 		// The same rule UpdateFunctionCode applies: an image function's package is the
 		// image, so its digest tracks the URI. Reporting one here and only there would
@@ -290,14 +313,36 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 		return nil, fmt.Errorf("lambda createFunction autoCreateLambdaLogGroup: %w", err)
 	}
 
+	if body.Publish {
+		return p.publishAndRespond(ctx, fn, http.StatusCreated)
+	}
 	return lambdaJSONResponse(http.StatusCreated, buildFunctionConfig(fn))
 }
 
-func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+// publishAndRespond publishes fn, just written as $LATEST, for a CreateFunction or
+// UpdateFunctionCode whose Publish is true — "set to true to publish a new version of the function
+// after updating the code" — and answers the published version's configuration, whose Version and
+// qualified FunctionArn name the version the call created.
+func (p *LambdaPlugin) publishAndRespond(ctx *RequestContext, fn LambdaFunction, status int) (*AWSResponse, error) {
+	p.versionMu.Lock()
+	defer p.versionMu.Unlock()
+	v, err := p.publish(ctx, ctx.AccountID, ctx.Region, fn, "")
 	if err != nil {
 		return nil, err
 	}
+	return lambdaJSONResponse(status, buildVersionConfig(v))
+}
+
+// getFunction answers GetFunction for the function, or with a Qualifier, or a FunctionName carrying
+// one, for a version or an alias. Tags are the function's whichever version is named: a version has
+// none of its own.
+func (p *LambdaPlugin) getFunction(ctx *RequestContext, req *AWSRequest, ref string) (*AWSResponse, error) {
+	t, err := p.resolveFunction(ctx, ref, req.Params["Qualifier"], "lambda:GetFunction")
+	if err != nil {
+		return nil, err
+	}
+	fn := t.function()
+	name := fn.FunctionName
 
 	type codeLocation struct {
 		RepositoryType   string `json:"RepositoryType"`
@@ -330,9 +375,9 @@ func (p *LambdaPlugin) getFunction(ctx *RequestContext, name string) (*AWSRespon
 		}
 	}
 	return lambdaJSONResponse(http.StatusOK, response{
-		Configuration: buildFunctionConfig(fn),
+		Configuration: t.configuration(),
 		Code:          loc,
-		Tags:          fn.Tags,
+		Tags:          t.latest.Tags,
 	})
 }
 
@@ -347,6 +392,8 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 		S3Key           string `json:"S3Key"`
 		S3ObjectVersion string `json:"S3ObjectVersion"`
 		ImageURI        string `json:"ImageUri"`
+		// Publish publishes a version from the updated code and configuration.
+		Publish bool `json:"Publish"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, lambdaInvalidBody()
@@ -369,6 +416,7 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 	case body.ZipFile != "":
 		decoded, decErr := base64.StdEncoding.DecodeString(body.ZipFile)
 		if decErr == nil && len(decoded) > 0 {
+			fn.CodeS3Location = ""
 			fn.CodeSize = int64(len(decoded))
 			fn.CodeSha256 = lambdaCodeSha256(decoded)
 			fn.ZipStored = true
@@ -382,10 +430,12 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 		// in substrate's own S3, so its length is knowable without fetching it.
 		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.S3Bucket, body.S3Key, body.S3ObjectVersion)
 		fn.ZipStored = false
+		fn.CodeS3Location = lambdaCodeS3Location(body.S3Bucket, body.S3Key, body.S3ObjectVersion)
 	}
 
 	if body.ImageURI != "" {
 		fn.ImageURI = body.ImageURI
+		fn.CodeS3Location = ""
 		fn.PackageType = "Image"
 		// An image function's package is the image, so its digest tracks the URI: it
 		// changes when the function is pointed at a different image and not otherwise.
@@ -398,6 +448,9 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 	resp, err := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, fn, http.StatusOK)
 	if err != nil {
 		return nil, err
+	}
+	if body.Publish {
+		return p.publishAndRespond(ctx, fn, http.StatusOK)
 	}
 	return resp, nil
 }
@@ -467,9 +520,38 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 	return resp, nil
 }
 
-func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSResponse, error) {
+// deleteFunction answers DeleteFunction. "To delete a specific function version, use the Qualifier
+// parameter. Otherwise, all versions and aliases are deleted." A Qualifier must name a published
+// version: an alias, or $LATEST, is not a version DeleteFunction deletes on its own, and is refused
+// with InvalidParameterValueException, whose messages here are substrate's own.
+func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, req *AWSRequest, ref string) (*AWSResponse, error) {
+	acct, region, name, derived, awsErr := lambdaFunctionScope(ctx, ref, "lambda:DeleteFunction")
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	qualifier, awsErr := lambdaMergeQualifier(derived, req.Params["Qualifier"])
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	if qualifier != "" {
+		fn, err := p.loadFunction(acct, region, name)
+		if err != nil {
+			return nil, err
+		}
+		switch {
+		case qualifier == lambdaLatestVersion:
+			return nil, lambdaInvalidParameterValue("$LATEST cannot be deleted on its own; delete the function without a Qualifier")
+		case !lambdaIsVersionNumber(qualifier):
+			return nil, lambdaInvalidParameterValue("Qualifier '" + qualifier +
+				"' names an alias; DeleteFunction deletes a version, and DeleteAlias an alias")
+		}
+		return p.deleteFunctionVersion(acct, region, fn, qualifier)
+	}
+
+	p.versionMu.Lock()
+	defer p.versionMu.Unlock()
 	existing, err := p.state.Get(context.Background(), lambdaNamespace,
-		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, name))
+		lambdaFunctionStateKey(acct, region, name))
 	if err != nil {
 		return nil, fmt.Errorf("lambda deleteFunction state.Get: %w", err)
 	}
@@ -477,17 +559,20 @@ func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSRes
 		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Function not found: " + name, HTTPStatus: http.StatusNotFound}
 	}
 	if err := p.state.Delete(context.Background(), lambdaNamespace,
-		lambdaFunctionStateKey(ctx.AccountID, ctx.Region, name)); err != nil {
+		lambdaFunctionStateKey(acct, region, name)); err != nil {
 		return nil, fmt.Errorf("lambda deleteFunction state.Delete: %w", err)
 	}
 	// Also delete policy, invoke config and the uploaded deployment package.
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
-		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name))
+		lambdaPolicyStateKey(acct, region, name))
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
-		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name))
+		lambdaInvokeConfigStateKey(acct, region, name))
 	// A deployment package is part of the function AWS says this operation deletes (#1035).
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
-		lambdaZipStateKey(ctx.AccountID, ctx.Region, name))
+		lambdaZipStateKey(acct, region, name))
+	if err := p.deleteFunctionChildren(acct, region, name); err != nil {
+		return nil, err
+	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
@@ -565,10 +650,13 @@ const (
 // asked for it with X-Amz-Log-Type: Tail. Emitting either unconditionally makes a
 // successful invoke indistinguishable from a failed one for the natural
 // `if "FunctionError" in response` check, which inverts against real AWS (#393).
-func invokeResponse(body []byte, functionError, logTail string) *AWSResponse {
+//
+// X-Amz-Executed-Version is "the version of the function that executed": $LATEST, the version the
+// request named, or the version an alias routed it to.
+func invokeResponse(body []byte, version, functionError, logTail string) *AWSResponse {
 	headers := map[string]string{
 		"Content-Type":           "application/json",
-		"X-Amz-Executed-Version": "$LATEST",
+		"X-Amz-Executed-Version": version,
 	}
 	if functionError != "" {
 		headers["X-Amz-Function-Error"] = functionError
@@ -587,12 +675,12 @@ func invokeResponse(body []byte, functionError, logTail string) *AWSResponse {
 // not run the handler, so it has no handler output to report. It carries the
 // START/END/REPORT lines the runtime emits, which is what a caller parsing
 // LogResult for a request ID or a duration reads.
-func lambdaLogTail(req *AWSRequest, fn LambdaFunction, requestID string, errored bool) string {
+func lambdaLogTail(req *AWSRequest, fn LambdaFunction, version, requestID string, errored bool) string {
 	if !strings.EqualFold(headerValueFold(req.Headers, "X-Amz-Log-Type"), "Tail") {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "START RequestId: %s Version: $LATEST\n", requestID)
+	fmt.Fprintf(&b, "START RequestId: %s Version: %s\n", requestID, version)
 	if errored {
 		fmt.Fprintf(&b, "[ERROR] Invocation failed\n")
 	}
@@ -602,10 +690,26 @@ func lambdaLogTail(req *AWSRequest, fn LambdaFunction, requestID string, errored
 	return b.String()
 }
 
-func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+// invoke answers Invoke for the function, or with a Qualifier, or a FunctionName carrying one, for a
+// version or an alias. An alias runs the version it points at, or with a routing configuration the
+// version [lambdaRouteAlias] draws for this request.
+func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, ref string) (*AWSResponse, error) {
+	t, err := p.resolveFunction(ctx, ref, req.Params["Qualifier"], "lambda:InvokeFunction")
 	if err != nil {
 		return nil, err
+	}
+	fn, version := t.function(), t.version
+	if t.alias != nil {
+		if routed := lambdaRouteAlias(ctx.IDs, t.alias); routed != version {
+			v, err := p.loadVersion(t.accountID, t.region, fn.FunctionName, routed)
+			if err != nil {
+				return nil, err
+			}
+			if v == nil {
+				return nil, lambdaQualifiedNotFound(t.latest.FunctionArn, routed)
+			}
+			fn, version = v.LambdaFunction, routed
+		}
 	}
 
 	// Substrate never runs the handler, so a seed is the only way a caller's error
@@ -620,15 +724,15 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 	}
 	if seededErr != nil {
 		body := seededErr.errorPayload(ctx.RequestID)
-		return invokeResponse(body, seededErr.functionErrorHeader(),
-			lambdaLogTail(req, fn, ctx.RequestID, true)), nil
+		return invokeResponse(body, version, seededErr.functionErrorHeader(),
+			lambdaLogTail(req, fn, version, ctx.RequestID, true)), nil
 	}
 	if seededResult != nil {
-		return invokeResponse(seededResult.body(), "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
+		return invokeResponse(seededResult.body(), version, "", lambdaLogTail(req, fn, version, ctx.RequestID, false)), nil
 	}
 
 	stubPayload := []byte(`{"statusCode":200,"body":"null"}`)
-	return invokeResponse(stubPayload, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
+	return invokeResponse(stubPayload, version, "", lambdaLogTail(req, fn, version, ctx.RequestID, false)), nil
 }
 
 func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {
@@ -723,13 +827,18 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		return nil, lambdaInvalidParameterValue("StatementId is required")
 	}
 
-	fn, err := p.loadFunction(ctx.AccountID, ctx.Region, name)
+	// "Qualifier — Specify a version or alias to add permissions to a published version of the
+	// function": the version or alias must exist, its statements live in a policy of its own, and
+	// each statement's Resource is the qualified ARN.
+	t, err := p.resolveFunction(ctx, name, req.Params["Qualifier"], "lambda:AddPermission")
 	if err != nil {
 		return nil, err
 	}
+	fn := t.latest
+	policyKey := lambdaQualifiedPolicyStateKey(t.accountID, t.region, fn.FunctionName, t.qualifier)
 
 	// Load existing policy or create new one.
-	policy, loadErr := p.loadPolicy(ctx.AccountID, ctx.Region, name)
+	policy, loadErr := p.loadPolicy(policyKey)
 	if loadErr != nil {
 		return nil, loadErr
 	}
@@ -744,12 +853,9 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 		}
 	}
 
-	// "Qualifier — Specify a version or alias to add permissions to a published version of the
-	// function": the statement's Resource is the qualified ARN. Substrate models no aliases, so the
-	// qualifier is not looked up.
 	resource := fn.FunctionArn
-	if q := req.Params["Qualifier"]; q != "" {
-		resource += ":" + q
+	if t.qualifier != "" {
+		resource += ":" + t.qualifier
 	}
 	stmt := LambdaPermissionStatement{
 		Sid:       body.StatementID,
@@ -766,8 +872,7 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 	if marshalErr != nil {
 		return nil, fmt.Errorf("lambda addPermission marshal: %w", marshalErr)
 	}
-	if putErr := p.state.Put(context.Background(), lambdaNamespace,
-		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name), policyData); putErr != nil {
+	if putErr := p.state.Put(context.Background(), lambdaNamespace, policyKey, policyData); putErr != nil {
 		return nil, fmt.Errorf("lambda addPermission state.Put: %w", putErr)
 	}
 
@@ -780,51 +885,86 @@ func (p *LambdaPlugin) addPermission(ctx *RequestContext, req *AWSRequest, name 
 	return lambdaJSONResponse(http.StatusCreated, map[string]string{"Statement": string(stmtData)})
 }
 
-func (p *LambdaPlugin) removePermission(ctx *RequestContext, name, statementID string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
-		return nil, err
+// removePermission removes a statement from the function's resource policy, or with a Qualifier
+// from the version's or alias's.
+//
+// A statement stored before versions and aliases had policies of their own sits in the function's
+// policy with the qualified ARN as its Resource. A qualified RemovePermission that does not find the
+// statement in the qualifier's policy looks for it there, so a stack deployed with such a statement
+// still deletes.
+func (p *LambdaPlugin) removePermission(ctx *RequestContext, req *AWSRequest, ref, statementID string) (*AWSResponse, error) {
+	acct, region, name, derived, awsErr := lambdaFunctionScope(ctx, ref, "lambda:RemovePermission")
+	if awsErr != nil {
+		return nil, awsErr
 	}
-
-	policy, err := p.loadPolicy(ctx.AccountID, ctx.Region, name)
+	qualifier, awsErr := lambdaMergeQualifier(derived, req.Params["Qualifier"])
+	if awsErr != nil {
+		return nil, awsErr
+	}
+	fn, err := p.loadFunction(acct, region, name)
 	if err != nil {
 		return nil, err
 	}
-	if policy == nil {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "No policy found for function: " + name, HTTPStatus: http.StatusNotFound}
+	key := lambdaQualifiedPolicyStateKey(acct, region, name, qualifier)
+	found, hadPolicy, err := p.removeStatement(key, statementID, "")
+	if err != nil {
+		return nil, err
 	}
+	if unqualified := lambdaPolicyStateKey(acct, region, name); !found && key != unqualified {
+		var legacyPolicy bool
+		found, legacyPolicy, err = p.removeStatement(unqualified, statementID, fn.FunctionArn+":"+qualifier)
+		if err != nil {
+			return nil, err
+		}
+		hadPolicy = hadPolicy || legacyPolicy
+	}
+	switch {
+	case !found && !hadPolicy:
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "No policy found for function: " + name, HTTPStatus: http.StatusNotFound}
+	case !found:
+		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Statement not found: " + statementID, HTTPStatus: http.StatusNotFound}
+	}
+	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
+}
 
+// removeStatement removes statement statementID from the policy at key, reporting whether it was
+// there and whether there was a policy at all. A non-empty resource also requires the statement's
+// Resource to be that ARN.
+func (p *LambdaPlugin) removeStatement(key, statementID, resource string) (found, hadPolicy bool, err error) {
+	policy, err := p.loadPolicy(key)
+	if err != nil || policy == nil {
+		return false, false, err
+	}
 	newStmts := make([]LambdaPermissionStatement, 0, len(policy.Statement))
-	found := false
 	for _, stmt := range policy.Statement {
-		if stmt.Sid == statementID {
+		if stmt.Sid == statementID && (resource == "" || stmt.Resource == resource) {
 			found = true
 			continue
 		}
 		newStmts = append(newStmts, stmt)
 	}
 	if !found {
-		return nil, &AWSError{Code: "ResourceNotFoundException", Message: "Statement not found: " + statementID, HTTPStatus: http.StatusNotFound}
+		return false, true, nil
 	}
-
 	policy.Statement = newStmts
 	policyData, err := json.Marshal(policy)
 	if err != nil {
-		return nil, fmt.Errorf("lambda removePermission marshal: %w", err)
+		return false, true, fmt.Errorf("lambda removePermission marshal: %w", err)
 	}
-	if err := p.state.Put(context.Background(), lambdaNamespace,
-		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name), policyData); err != nil {
-		return nil, fmt.Errorf("lambda removePermission state.Put: %w", err)
+	if err := p.state.Put(context.Background(), lambdaNamespace, key, policyData); err != nil {
+		return false, true, fmt.Errorf("lambda removePermission state.Put: %w", err)
 	}
-
-	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
+	return true, true, nil
 }
 
-func (p *LambdaPlugin) getPolicy(ctx *RequestContext, name string) (*AWSResponse, error) {
-	if _, err := p.loadFunction(ctx.AccountID, ctx.Region, name); err != nil {
+// getPolicy answers the function's resource policy, or with a Qualifier the version's or alias's.
+func (p *LambdaPlugin) getPolicy(ctx *RequestContext, req *AWSRequest, ref string) (*AWSResponse, error) {
+	t, err := p.resolveFunction(ctx, ref, req.Params["Qualifier"], "lambda:GetPolicy")
+	if err != nil {
 		return nil, err
 	}
-
-	policy, err := p.loadPolicy(ctx.AccountID, ctx.Region, name)
+	name := t.latest.FunctionName
+	policy, err := p.loadPolicy(lambdaQualifiedPolicyStateKey(t.accountID, t.region, name, t.qualifier))
 	if err != nil {
 		return nil, err
 	}
@@ -915,10 +1055,15 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 		return nil, lambdaInvalidBody()
 	}
 
+	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:TagResource"); awsErr != nil {
+		return nil, awsErr
+	}
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
 	}
+	// Saved in the function's own scope, which the check above made the caller's.
+	fnAcct, fnRegion := lambdaARNScope(fn.FunctionArn)
 	fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), len(body.Tags))
 	if fn.Tags == nil {
 		fn.Tags = make(map[string]string)
@@ -926,17 +1071,22 @@ func (p *LambdaPlugin) tagResource(ctx *RequestContext, req *AWSRequest, arn str
 	for k, v := range body.Tags {
 		fn.Tags[k] = v
 	}
-	if _, saveErr := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, *fn, http.StatusOK); saveErr != nil {
+	if _, saveErr := p.saveFunctionAndRespond(fnAcct, fnRegion, *fn, http.StatusOK); saveErr != nil {
 		return nil, saveErr
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/json"}, Body: nil}, nil
 }
 
 func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn string) (*AWSResponse, error) {
+	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:UntagResource"); awsErr != nil {
+		return nil, awsErr
+	}
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
 	}
+	// Saved in the function's own scope, which the check above made the caller's.
+	fnAcct, fnRegion := lambdaARNScope(fn.FunctionArn)
 	fn.EverTagged = taggingEverTagged(fn.EverTagged, len(fn.Tags), 0)
 	if fn.Tags != nil {
 		if keys, ok := req.Params["tagKeys"]; ok {
@@ -945,13 +1095,16 @@ func (p *LambdaPlugin) untagResource(ctx *RequestContext, req *AWSRequest, arn s
 			}
 		}
 	}
-	if _, saveErr := p.saveFunctionAndRespond(ctx.AccountID, ctx.Region, *fn, http.StatusOK); saveErr != nil {
+	if _, saveErr := p.saveFunctionAndRespond(fnAcct, fnRegion, *fn, http.StatusOK); saveErr != nil {
 		return nil, saveErr
 	}
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{"Content-Type": "application/json"}, Body: nil}, nil
 }
 
 func (p *LambdaPlugin) listTags(ctx *RequestContext, arn string) (*AWSResponse, error) {
+	if awsErr := lambdaCheckFunctionScope(ctx, arn, "lambda:ListTags"); awsErr != nil {
+		return nil, awsErr
+	}
 	fn, err := p.findFunctionByARN(arn)
 	if err != nil {
 		return nil, err
@@ -981,9 +1134,9 @@ func (p *LambdaPlugin) loadFunction(accountID, region, name string) (LambdaFunct
 	return fn, nil
 }
 
-func (p *LambdaPlugin) loadPolicy(accountID, region, name string) (*LambdaResourcePolicy, error) {
-	data, err := p.state.Get(context.Background(), lambdaNamespace,
-		lambdaPolicyStateKey(accountID, region, name))
+// loadPolicy reads the resource policy stored at key, nil when there is none.
+func (p *LambdaPlugin) loadPolicy(key string) (*LambdaResourcePolicy, error) {
+	data, err := p.state.Get(context.Background(), lambdaNamespace, key)
 	if err != nil {
 		return nil, fmt.Errorf("lambda loadPolicy state.Get: %w", err)
 	}
@@ -1012,23 +1165,28 @@ func (p *LambdaPlugin) saveFunctionAndRespond(accountID, region string, fn Lambd
 // buildFunctionConfig converts a LambdaFunction to the AWS API FunctionConfiguration shape.
 func buildFunctionConfig(fn LambdaFunction) map[string]interface{} {
 	cfg := map[string]interface{}{
-		"FunctionName":  fn.FunctionName,
-		"FunctionArn":   fn.FunctionArn,
-		"Runtime":       fn.Runtime,
-		"Role":          fn.Role,
-		"Handler":       fn.Handler,
-		"Description":   fn.Description,
-		"Timeout":       fn.Timeout,
-		"MemorySize":    fn.MemorySize,
-		"CodeSize":      fn.CodeSize,
-		"CodeSha256":    fn.CodeSha256,
-		"RevisionId":    fn.RevisionID,
-		"State":         fn.State,
-		"PackageType":   fn.PackageType,
-		"Architectures": fn.Architectures,
-		"LastModified":  fn.LastModified.Format(time.RFC3339),
-		// FunctionConfiguration's Version: substrate publishes no versions, so every
-		// configuration it answers is the unpublished one (lambda_versions.go).
+		"FunctionName": fn.FunctionName,
+		"FunctionArn":  fn.FunctionArn,
+		"Runtime":      fn.Runtime,
+		"Role":         fn.Role,
+		"Handler":      fn.Handler,
+		"Description":  fn.Description,
+		"Timeout":      fn.Timeout,
+		"MemorySize":   fn.MemorySize,
+		"CodeSize":     fn.CodeSize,
+		"CodeSha256":   fn.CodeSha256,
+		"RevisionId":   fn.RevisionID,
+		"State":        fn.State,
+		// "The status of the last update that was performed on the function. This is first set
+		// to Successful after function creation completes." Substrate applies every update
+		// within its request, so the last one has always completed; the Terraform AWS provider
+		// waits for this value after each code or configuration update (#1660).
+		"LastUpdateStatus": "Successful",
+		"PackageType":      fn.PackageType,
+		"Architectures":    fn.Architectures,
+		"LastModified":     fn.LastModified.Format(time.RFC3339),
+		// FunctionConfiguration's Version: this is the function's own record, the unpublished
+		// version; buildVersionConfig sets a published one's.
 		"Version": lambdaLatestVersion,
 		// Recorded intent only: substrate sends no trace to X-Ray. PassThrough is the
 		// mode a function created without a TracingConfig has.
@@ -1262,10 +1420,9 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 		startingPosition = "TRIM_HORIZON"
 	}
 
-	// Resolve function ARN.
-	functionARN := input.FunctionName
-	if !strings.HasPrefix(functionARN, "arn:") {
-		functionARN = "arn:aws:lambda:" + ctx.Region + ":" + ctx.AccountID + ":function:" + input.FunctionName
+	functionARN, awsErr := lambdaESMFunctionARN(ctx, input.FunctionName)
+	if awsErr != nil {
+		return nil, awsErr
 	}
 
 	uuid := ctx.IDs.HexUUID()
@@ -1300,6 +1457,44 @@ func (p *LambdaPlugin) createEventSourceMapping(ctx *RequestContext, req *AWSReq
 	}
 
 	return lambdaJSONResponse(http.StatusCreated, esm)
+}
+
+// moveESMIndex moves mapping uuid from one function's mapping index to another's, for an update
+// that re-points the mapping.
+func (p *LambdaPlugin) moveESMIndex(ctx context.Context, uuid, from, to string) error {
+	old, err := p.loadESMIDs(ctx, from)
+	if err != nil {
+		return err
+	}
+	if err := p.saveESMIDs(ctx, from, slices.DeleteFunc(old, func(id string) bool { return id == uuid })); err != nil {
+		return fmt.Errorf("lambda moveESMIndex save %s: %w", from, err)
+	}
+	ids, err := p.loadESMIDs(ctx, to)
+	if err != nil {
+		return err
+	}
+	if err := p.saveESMIDs(ctx, to, append(ids, uuid)); err != nil {
+		return fmt.Errorf("lambda moveESMIndex save %s: %w", to, err)
+	}
+	return nil
+}
+
+// lambdaESMFunctionARN resolves an event source mapping's FunctionName — a name, a qualified name, a
+// partial ARN or a full ARN — to the function ARN the mapping invokes, with any version or alias.
+//
+// A mapping invokes its function as the caller, so a function in another account, or a full ARN in
+// another Region, is refused as [lambdaCheckFunctionScope] refuses it: substrate does not evaluate a
+// function's resource policy for a cross-account invoke.
+func lambdaESMFunctionARN(ctx *RequestContext, ref string) (string, *AWSError) {
+	acct, region, name, qualifier, awsErr := lambdaFunctionScope(ctx, ref, "lambda:InvokeFunction")
+	if awsErr != nil {
+		return "", awsErr
+	}
+	arn := lambdaFunctionARN(region, acct, name)
+	if qualifier != "" {
+		arn += ":" + qualifier
+	}
+	return arn, nil
 }
 
 // The three bounds ListEventSourceMappings' MaxItems publishes, which are three facts rather
@@ -1475,18 +1670,29 @@ func (p *LambdaPlugin) getEventSourceMapping(_ *RequestContext, uuid string) (*A
 	return lambdaJSONResponse(http.StatusOK, esm)
 }
 
-func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSRequest, uuid string) (*AWSResponse, error) {
+func (p *LambdaPlugin) updateEventSourceMapping(ctx *RequestContext, req *AWSRequest, uuid string) (*AWSResponse, error) {
 	// Parsed before the lookup; see updateFunctionCode above. Both members are optional, so an absent body
 	// is still a no-op update rather than a refusal — only a body that is present and will not parse is
 	// refused (#1007).
 	var input struct {
-		BatchSize int   `json:"BatchSize"`
-		Enabled   *bool `json:"Enabled"`
+		BatchSize    int    `json:"BatchSize"`
+		Enabled      *bool  `json:"Enabled"`
+		FunctionName string `json:"FunctionName"`
 	}
 	if len(req.Body) > 0 {
 		if err := json.Unmarshal(req.Body, &input); err != nil {
 			return nil, lambdaInvalidBody()
 		}
+	}
+	// FunctionName re-points the mapping, and is refused for another account's or Region's function
+	// as CreateEventSourceMapping refuses it.
+	newFunctionARN := ""
+	if input.FunctionName != "" {
+		arn, awsErr := lambdaESMFunctionARN(ctx, input.FunctionName)
+		if awsErr != nil {
+			return nil, awsErr
+		}
+		newFunctionARN = arn
 	}
 
 	esm, err := p.loadESM(context.Background(), uuid)
@@ -1503,6 +1709,12 @@ func (p *LambdaPlugin) updateEventSourceMapping(_ *RequestContext, req *AWSReque
 
 	prevState := esm.State
 
+	if newFunctionARN != "" && newFunctionARN != esm.FunctionARN {
+		if err := p.moveESMIndex(context.Background(), uuid, esm.FunctionARN, newFunctionARN); err != nil {
+			return nil, err
+		}
+		esm.FunctionARN = newFunctionARN
+	}
 	if input.BatchSize > 0 {
 		esm.BatchSize = input.BatchSize
 	}

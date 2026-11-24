@@ -70,6 +70,12 @@ type LambdaFunction struct {
 	// ImageURI is the URI of a container image in ECR when PackageType is "Image".
 	ImageURI string `json:"ImageUri,omitempty"`
 
+	// CodeS3Location is the S3 object an S3-sourced package names, as bucket, key and object
+	// version joined by "/"; empty for an inline or image package. CodeSha256 can be empty for an
+	// S3 package substrate's S3 does not hold, so PublishVersion's fingerprint reads this too, and a
+	// package moved to another object publishes a new version.
+	CodeS3Location string `json:"CodeS3Location,omitempty"`
+
 	// ZipStored indicates whether the deployment ZIP bytes are held in state.
 	// False when the function was created via S3 reference (not directly uploaded).
 	ZipStored bool `json:"ZipStored,omitempty"`
@@ -182,4 +188,89 @@ func lambdaZipStateKey(accountID, region, name string) string {
 // lambdaInvokeConfigStateKey names the record one function's event-invoke configuration lives in.
 func lambdaInvokeConfigStateKey(accountID, region, name string) string {
 	return "function_invoke_config:" + accountID + "/" + region + "/" + name
+}
+
+// LambdaFunctionVersion is a published version of a function: an immutable snapshot of the
+// function's code and configuration as they were when PublishVersion ran.
+//
+// The embedded [LambdaFunction] is the snapshot. Its FunctionArn is the version's qualified ARN,
+// its RevisionID is the version's own, and it carries no Tags, because tags belong to the
+// function rather than to any one version.
+type LambdaFunctionVersion struct {
+	LambdaFunction
+
+	// Version is the version number, "1" for the first one published.
+	Version string `json:"Version"`
+
+	// Fingerprint identifies the $LATEST code and configuration the version was published from.
+	// PublishVersion compares it to decide whether anything has changed since the last version.
+	Fingerprint string `json:"Fingerprint"`
+}
+
+// LambdaAlias is a named pointer to a function version, with an optional second version that
+// receives a share of invocations.
+type LambdaAlias struct {
+	// Name is the alias name.
+	Name string `json:"Name"`
+
+	// FunctionName is the name of the function the alias belongs to.
+	FunctionName string `json:"FunctionName"`
+
+	// AliasArn is the function ARN qualified by the alias name.
+	AliasArn string `json:"AliasArn"`
+
+	// FunctionVersion is the version the alias invokes: "$LATEST" or a published version number.
+	FunctionVersion string `json:"FunctionVersion"`
+
+	// Description is a human-readable description of the alias.
+	Description string `json:"Description,omitempty"`
+
+	// AdditionalVersionWeights is RoutingConfig.AdditionalVersionWeights: the second version and
+	// the share of invocations, from 0.0 to 1.0, routed to it.
+	AdditionalVersionWeights map[string]float64 `json:"AdditionalVersionWeights,omitempty"`
+
+	// RevisionID changes on every update to the alias.
+	RevisionID string `json:"RevisionId"`
+}
+
+// lambdaVersionStateKey names the record one published version lives in.
+func lambdaVersionStateKey(accountID, region, name, version string) string {
+	return lambdaVersionKeyPrefix(accountID, region, name) + version
+}
+
+// lambdaVersionKeyPrefix is the [lambdaVersionStateKey] prefix selecting one function's
+// published versions. The trailing slash keeps function "a" from selecting function "ab".
+func lambdaVersionKeyPrefix(accountID, region, name string) string {
+	return "function_version:" + accountID + "/" + region + "/" + name + "/"
+}
+
+// lambdaVersionSeqStateKey names the record holding the last version number a function
+// published. Numbers are never reused, so the counter outlives the version it names and is
+// removed only with the function.
+func lambdaVersionSeqStateKey(accountID, region, name string) string {
+	return "function_version_seq:" + accountID + "/" + region + "/" + name
+}
+
+// lambdaAliasStateKey names the record one alias lives in.
+func lambdaAliasStateKey(accountID, region, name, alias string) string {
+	return lambdaAliasKeyPrefix(accountID, region, name) + alias
+}
+
+// lambdaAliasKeyPrefix is the [lambdaAliasStateKey] prefix selecting one function's aliases.
+func lambdaAliasKeyPrefix(accountID, region, name string) string {
+	return "function_alias:" + accountID + "/" + region + "/" + name + "/"
+}
+
+// lambdaQualifiedPolicyStateKey names the resource policy of one version or alias.
+//
+// Each version and alias has a policy of its own, separate from the function's: AddPermission's
+// Qualifier is "a version or alias to add permissions to a published version of the function", and
+// GetPolicy with the same Qualifier reads it back. An empty qualifier, or $LATEST, is the
+// function's own policy, [lambdaPolicyStateKey]. A function name cannot contain a colon, so the
+// qualified key cannot collide with another function's.
+func lambdaQualifiedPolicyStateKey(accountID, region, name, qualifier string) string {
+	if qualifier == "" || qualifier == lambdaLatestVersion {
+		return lambdaPolicyStateKey(accountID, region, name)
+	}
+	return lambdaPolicyStateKey(accountID, region, name) + ":" + qualifier
 }

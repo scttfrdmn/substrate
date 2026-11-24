@@ -7,19 +7,26 @@
 
 | Operation | Notes |
 |-----------|-------|
-| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent |
-| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`. Every configuration reports `Version: $LATEST` and `TracingConfig.Mode` (#1519) |
-| UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
-| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode` |
-| DeleteFunction | |
+| CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent. `Publish: true` publishes version 1 and answers its configuration (#1613) |
+| GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`, which reports `TracingConfig.Mode` (#1519) and `LastUpdateStatus: Successful`, since every update completes within its request (#1660). Takes a [`Qualifier`](#versions-and-aliases), or a qualified `FunctionName` |
+| GetFunctionConfiguration | The `Configuration` member of `GetFunction`: `$LATEST`, or with a [`Qualifier`](#versions-and-aliases) the version's, or the version an alias points at, with the qualified `FunctionArn` (#1660) |
+| UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither. `Publish: true` publishes a version from the result |
+| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode`. Changes `$LATEST` only; a published version keeps its configuration |
+| DeleteFunction | Without a `Qualifier`, deletes the function with all its versions, aliases and their policies. With one, deletes that version; a version an alias routes to is `ResourceConflictException`/409, and an alias or `$LATEST` is `InvalidParameterValueException` |
 | ListFunctions | |
-| ListVersionsByFunction | `$LATEST` alone, with the qualified `FunctionArn`, since substrate publishes no versions; `MaxItems` is checked against 1–10000 and any `Marker` is refused, since none is ever issued (#1519) |
+| PublishVersion | Snapshots `$LATEST` as the next version number; numbers are never reused. Answers the newest version again when the code and configuration are unchanged since it was published. A stale `RevisionId` is `PreconditionFailedException`/412, and a stale `CodeSha256` `InvalidParameterValueException` (#1613) |
+| ListVersionsByFunction | `$LATEST`, with the qualified `FunctionArn`, then the published versions in numeric order. At most 50 per page, as published; `MaxItems` is checked against 1–10000, and a `Marker` this call did not issue for this function is refused (#1613) |
+| CreateAlias | `Name`, `FunctionVersion`, `Description` and `RoutingConfig.AdditionalVersionWeights`, validated as the [weighted-alias rules](#versions-and-aliases) publish. An existing alias is `ResourceConflictException`/409, and a version never published `ResourceNotFoundException`/404 |
+| GetAlias | `ResourceNotFoundException`/404 for an alias the function does not have |
+| UpdateAlias | Each member replaces only what it names; an empty `AdditionalVersionWeights` clears the routing. A stale `RevisionId` is `PreconditionFailedException`/412 |
+| DeleteAlias | `204`, also for an alias that does not exist: the page publishes no not-found refusal. Deletes the alias's resource policy too |
+| ListAliases | In name order, filtered on `FunctionVersion` (an alias's own version or its weighted one); pages on `MaxItems`/`Marker` as `ListVersionsByFunction` does |
 | GetFunctionCodeSigningConfig | An empty `CodeSigningConfigArn`, since substrate models no code-signing configurations. Published under `2020-06-30` (#1519) |
-| Invoke | Never runs the function's code. Answers a [seeded error, a seeded result, or the stub](#invoke-answers-a-seed-or-a-stub) `{"statusCode":200,"body":"null"}`, always with `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
+| Invoke | Never runs the function's code. Answers a [seeded error, a seeded result, or the stub](#invoke-answers-a-seed-or-a-stub) `{"statusCode":200,"body":"null"}`, always with `200`, per the reference's *"the status code in the API response doesn't reflect function errors"*. A `Qualifier` or qualified `FunctionName` names a version or alias, and `X-Amz-Executed-Version` reports the version that ran, chosen [deterministically](#versions-and-aliases) for a weighted alias |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
-| AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](/reference/concepts/errors#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` makes the statement's `Resource` the qualified ARN; aliases are not modeled, so it is not looked up (#1605) |
-| RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
-| GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
+| AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](/reference/concepts/errors#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` must name an existing version or alias; the statement goes in that version's or alias's own policy, with the qualified ARN as its `Resource` (#1605, #1613) |
+| RemovePermission | Removes the statement by `StatementId`, from the qualifier's policy when a `Qualifier` is given; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
+| GetPolicy | Reports the stored policy as a JSON **string** in `Policy`, as published; with a `Qualifier`, the version's or alias's. A function with no policy is `ResourceNotFoundException`/404, not an empty document |
 | PutFunctionEventInvokeConfig | Records `MaximumRetryAttempts` and `MaximumEventAgeInSeconds` as intent; nothing retries, because nothing is invoked asynchronously. The body is parsed before the lookup. Published under [`2019-09-25`](#each-operation-is-published-under-its-own-api-version-date) |
 | CreateEventSourceMapping | |
 | GetEventSourceMapping | By UUID |
@@ -45,6 +52,72 @@ the one `Invoke`-shaped row in the table named something no caller can call, whi
 eight operations the plugin actually routes had no row at all (#1015). Rows are now
 listed in the router's own order, which is the order a reader checking one against the
 other needs.
+
+## Versions and aliases
+
+`PublishVersion` stores an immutable snapshot of `$LATEST`'s code and configuration under the next
+number of a per-function counter
+([#1613](https://github.com/scttfrdmn/substrate/issues/1613)). The counter never goes backwards, so
+a deleted version's number is not reused; deleting the function deletes the counter with its
+versions and aliases, and a function recreated under the name starts at 1 again. AWS *"doesn't
+publish a version if the function's configuration and code haven't changed since the last
+version"*; substrate answers the newest version in that case, which is what a deploy that publishes
+on every apply expects. `CreateFunction` and `UpdateFunctionCode` honour `Publish: true` the same
+way.
+
+Every operation that takes a `Qualifier` (`GetFunction`, `GetFunctionConfiguration`, `Invoke`,
+`AddPermission`, `RemovePermission`, `GetPolicy`, `DeleteFunction`) also accepts the qualifier
+appended to `FunctionName` (`my-fn:2`, or a full ARN ending `:live`); the two must agree, or the
+request is the `InvalidParameterValueException` the developer guide shows for that case. A number is
+a version, `$LATEST` the unpublished code, and any other name an alias, which resolves to its
+`FunctionVersion`. A version or alias the function does not have is `ResourceNotFoundException`/404.
+Each version and alias has a resource policy of its own, separate from the function's. Both forms
+are authorized against the same qualified ARN, so a policy on `function:my-fn:prod` governs
+`?Qualifier=prod` and `my-fn:prod` alike. That holds only for the operations that act on the version
+or alias a `Qualifier` names (`GetFunction`, `GetFunctionConfiguration`, `Invoke`, `DeleteFunction`
+and the three permission operations). Every other operation acts on the function and is authorized
+against it whatever `Qualifier` a request carries; `PutFunctionEventInvokeConfig`'s published
+`Qualifier` is not modelled. `PublishVersion`, `ListVersionsByFunction` and the alias operations
+take the function itself, and refuse a qualified `FunctionName` with `InvalidParameterValueException`.
+
+**A function outside the caller's account and Region is not reached.** A full or partial ARN naming
+another account's function is `AccessDeniedException`/403, because substrate does not evaluate a
+function's resource policy for a cross-account caller. Cross-account invoke through a resource
+policy is not modelled yet ([#1710](https://github.com/scttfrdmn/substrate/issues/1710)). A full ARN
+in another Region is `ResourceNotFoundException`/404,
+`Functions from 'us-west-2' are not reachable in this region ('us-east-1')` for a `us-west-2` ARN
+sent to `us-east-1`, the wording Lambda is observed to answer. The same refusals apply to the tag
+operations, to an event source mapping's `FunctionName` on create and update, and to an EventBridge
+Scheduler target naming a function, templated or through `aws-sdk:lambda:invoke`, on
+`CreateSchedule` and `UpdateSchedule`.
+
+SNS subscriptions, S3 notifications, API Gateway integrations, event source mappings and Step
+Functions tasks that name a function ARN invoke that function, under its own account and Region, and
+the version or alias it names. One naming another account's function is refused, not redirected to
+a same-named function of the caller's.
+
+A weighted alias follows the guide's rules: one additional version at most, and not the alias's own
+`FunctionVersion`, a weight from 0.0 to 1.0, both versions published (the alias cannot point at `$LATEST`) and both with the same execution
+role. The dead-letter-queue rule is not checked, because substrate models no dead-letter
+configuration.
+
+**Weighted routing is deterministic.** AWS *"uses a simple probabilistic model to distribute the
+traffic"*. Substrate draws the same proportion from the invoking request's ID mint rather than from
+a random source: four bytes derived from the request ID, read as a fraction of 2^32, route to the
+additional version when they fall below its weight. Replaying a recorded invocation therefore routes
+it to the same version, and over many invocations the shares approach the configured weights. A
+weight of `0` never routes to the additional version and a weight of `1` always does, which is how a
+test pins one branch.
+
+CloudFormation deploys `AWS::Lambda::Version` through `PublishVersion` (`Ref` is the version ARN,
+`Fn::GetAtt` `Version` its number) and `AWS::Lambda::Alias` through `CreateAlias` (`Ref` and
+`AliasArn` are the alias ARN), and updates an alias's `FunctionVersion`, `Description` and
+`RoutingConfig` in place: the shape the CDK emits for `currentVersion` and an alias over it. A Version
+whose function has not changed since its last version cannot adopt that version: the resource fails
+with *"A version for this Lambda function exists ( N ). Modify the function to create a new
+version."*, the wording CloudFormation is observed to use
+([aws/aws-cdk#14428](https://github.com/aws/aws-cdk/issues/14428)), and a replaced Version rolls back
+rather than deleting the version its predecessor names.
 
 ## Another account's layer
 

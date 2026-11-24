@@ -1088,7 +1088,7 @@ func (a *AuthController) buildResourceARN(reqCtx *RequestContext, req *AWSReques
 	case "lambda":
 		// A Lambda request names its resource in the path, and which path — and so which API
 		// version — depends on the operation; see lambdaAuthzResourceARN.
-		return lambdaAuthzResourceARN(req.Path, region, acct)
+		return lambdaAuthzResourceARN(requestMethod(req), req.Path, req.Params["Qualifier"], region, acct)
 	case "ssm":
 		return ssmAuthzResourceARN(req, region, acct)
 	case "dynamodb":

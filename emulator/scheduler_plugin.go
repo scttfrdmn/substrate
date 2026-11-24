@@ -473,6 +473,9 @@ func (p *SchedulerPlugin) createSchedule(ctx *RequestContext, req *AWSRequest) (
 	if awsErr := schedulerValidateScheduleInput(name, &body); awsErr != nil {
 		return nil, awsErr
 	}
+	if awsErr := schedulerCheckLambdaTarget(ctx, body.Target); awsErr != nil {
+		return nil, awsErr
+	}
 
 	groupName := body.GroupName
 	if groupName == "" {
@@ -588,6 +591,9 @@ func (p *SchedulerPlugin) updateSchedule(ctx *RequestContext, req *AWSRequest) (
 	// page's full-replace statement for the *optional* members holds too (#1089): applyTo below
 	// assigns every one of them, so an omitted member reverts rather than persisting.
 	if awsErr := schedulerValidateScheduleInput(name, &body); awsErr != nil {
+		return nil, awsErr
+	}
+	if awsErr := schedulerCheckLambdaTarget(ctx, body.Target); awsErr != nil {
 		return nil, awsErr
 	}
 

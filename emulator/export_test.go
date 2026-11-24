@@ -1728,7 +1728,24 @@ func ParseLambdaOperationForTest(method, path string) (op, name, subResource str
 // reports only the allow/deny. Asserting the ARN directly is what pins that a tags request is
 // evaluated against the ARN it names rather than against "*" (#1142).
 func LambdaAuthzResourceARNForTest(path, region, accountID string) string {
-	return lambdaAuthzResourceARN(path, region, accountID)
+	return lambdaAuthzResourceARN(http.MethodGet, path, "", region, accountID)
+}
+
+// LambdaQualifiedAuthzResourceARNForTest is [LambdaAuthzResourceARNForTest] for a request carrying a
+// Qualifier parameter.
+func LambdaQualifiedAuthzResourceARNForTest(method, path, qualifier, region, accountID string) string {
+	return lambdaAuthzResourceARN(method, path, qualifier, region, accountID)
+}
+
+// LambdaRouteAliasForTest wraps lambdaRouteAlias with a mint derived from seed, for an alias on
+// primary routing weight to extra.
+//
+// Exported because the property under test is that the choice is a function of the request id,
+// which no request can show: over the wire two invocations always carry different request ids.
+func LambdaRouteAliasForTest(seed, primary, extra string, weight float64) string {
+	return lambdaRouteAlias(NewIDMint(seed), &LambdaAlias{
+		FunctionVersion: primary, AdditionalVersionWeights: map[string]float64{extra: weight},
+	})
 }
 
 // IAMInstanceProfileStateKeyForTest returns the namespace and key IAM stores one instance profile

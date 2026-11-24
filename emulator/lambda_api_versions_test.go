@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -243,7 +244,30 @@ func TestLambdaOperationNameIsResolvedFromTheAPIVersion(t *testing.T) {
 		{name: "a method one mapping does not publish", method: http.MethodPost,
 			path: "/2015-03-31/event-source-mappings/uuid-1", wantOp: "Unknown"},
 		{name: "a sub-resource no page publishes", method: http.MethodGet,
+			path: "/2015-03-31/functions/fn/concurrency", wantOp: "Unknown"},
+		// Versions, aliases and the configuration read (#1613, #1660), all under 2015-03-31.
+		{name: "get the configuration", method: http.MethodGet,
+			path: "/2015-03-31/functions/fn/configuration", wantOp: "GetFunctionConfiguration", wantName: "fn"},
+		{name: "publish a version", method: http.MethodPost,
+			path: "/2015-03-31/functions/fn/versions", wantOp: "PublishVersion", wantName: "fn"},
+		{name: "create an alias", method: http.MethodPost,
+			path: "/2015-03-31/functions/fn/aliases", wantOp: "CreateAlias", wantName: "fn"},
+		{name: "list aliases", method: http.MethodGet,
+			path: "/2015-03-31/functions/fn/aliases", wantOp: "ListAliases", wantName: "fn"},
+		{name: "get an alias", method: http.MethodGet,
+			path: "/2015-03-31/functions/fn/aliases/live", wantOp: "GetAlias", wantName: "fn", wantSub: "live"},
+		{name: "update an alias", method: http.MethodPut,
+			path: "/2015-03-31/functions/fn/aliases/live", wantOp: "UpdateAlias", wantName: "fn", wantSub: "live"},
+		{name: "delete an alias", method: http.MethodDelete,
+			path: "/2015-03-31/functions/fn/aliases/live", wantOp: "DeleteAlias", wantName: "fn", wantSub: "live"},
+		{name: "a method the aliases collection does not publish", method: http.MethodPut,
 			path: "/2015-03-31/functions/fn/aliases", wantOp: "Unknown"},
+		{name: "a method one alias does not publish", method: http.MethodPost,
+			path: "/2015-03-31/functions/fn/aliases/live", wantOp: "Unknown"},
+		{name: "a path below an alias", method: http.MethodGet,
+			path: "/2015-03-31/functions/fn/aliases/live/x", wantOp: "Unknown"},
+		{name: "aliases under another date", method: http.MethodGet,
+			path: "/2019-09-25/functions/fn/aliases", wantOp: "Unknown"},
 		// A path that only begins like /functions, which the prefix match must not claim.
 		{name: "a segment merely starting with functions", method: http.MethodGet,
 			path: "/2015-03-31/functionsets", wantOp: "Unknown"},
@@ -304,11 +328,123 @@ func TestLambdaAuthzResourceARNNamesTheResourceTheRequestNames(t *testing.T) {
 			path: "/2018-10-31/layers/arn:aws:lambda:us-west-2:753240598075:layer:LambdaAdapterLayerArm64/versions",
 			want: "arn:aws:lambda:us-west-2:753240598075:layer:LambdaAdapterLayerArm64"},
 		{name: "ListLayers names no resource", path: "/2018-10-31/layers", want: "*"},
+		// The version and alias operations name their function like every other sub-resource (#1613).
+		{name: "an alias names its function", path: "/2015-03-31/functions/versions-fn/aliases/live", want: fnARN},
+		{name: "a publish names its function", path: "/2015-03-31/functions/versions-fn/versions", want: fnARN},
+		{name: "a qualified name is the qualified ARN", path: "/2015-03-31/functions/versions-fn:live/invocations",
+			want: fnARN + ":live"},
+		{name: "a FunctionName given as an ARN is the resource",
+			path: "/2015-03-31/functions/arn:aws:lambda:eu-west-1:210987654321:function:theirs:2/invocations",
+			want: "arn:aws:lambda:eu-west-1:210987654321:function:theirs:2"},
+		{name: "a partial ARN keeps its account",
+			path: "/2015-03-31/functions/210987654321:function:theirs/configuration",
+			want: "arn:aws:lambda:us-east-1:210987654321:function:theirs"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, emulator.LambdaAuthzResourceARNForTest(tt.path, region, acct))
 		})
+	}
+}
+
+// TestLambdaAuthzQualifierParamIsTheQualifiedARN pins that a version or alias named by the Qualifier
+// parameter is authorized against the same qualified ARN as one appended to the FunctionName, so a
+// Deny on `function:fn:prod` refuses both forms and neither of them reaches the alias through the
+// other (#1613).
+func TestLambdaAuthzQualifierParamIsTheQualifiedARN(t *testing.T) {
+	t.Parallel()
+	const fn = "arn:aws:lambda:us-east-1:123456789012:function:fn"
+	arns := []struct {
+		name, method, path, qualifier, want string
+	}{
+		{name: "a Qualifier parameter", method: "POST", path: "/2015-03-31/functions/fn/invocations", qualifier: "prod", want: fn + ":prod"},
+		{name: "a qualified FunctionName", method: "POST", path: "/2015-03-31/functions/fn:prod/invocations", want: fn + ":prod"},
+		{name: "both, agreeing", method: "POST", path: "/2015-03-31/functions/fn:prod/invocations", qualifier: "prod", want: fn + ":prod"},
+		{name: "$LATEST is the function", method: "GET", path: "/2015-03-31/functions/fn/configuration", qualifier: "$LATEST", want: fn},
+		{name: "no qualifier", method: "GET", path: "/2015-03-31/functions/fn", want: fn},
+		{name: "a full ARN with a Qualifier", method: "GET", path: "/2015-03-31/functions/" + fn + "/policy", qualifier: "2", want: fn + ":2"},
+		{name: "a tags request ignores it", method: "GET", path: "/2017-03-31/tags/" + fn, qualifier: "prod", want: fn},
+		// The operations that act on the function whatever a Qualifier says are authorized against the
+		// function, so the parameter cannot step around a Deny on it.
+		{name: "UpdateFunctionCode ignores it", method: "PUT", path: "/2015-03-31/functions/fn/code", qualifier: "x", want: fn},
+		{name: "UpdateFunctionConfiguration ignores it", method: "PUT", path: "/2015-03-31/functions/fn/configuration", qualifier: "x", want: fn},
+		{name: "PutFunctionEventInvokeConfig ignores it", method: "PUT", path: "/2019-09-25/functions/fn/event-invoke-config", qualifier: "x", want: fn},
+		{name: "GetFunctionCodeSigningConfig ignores it", method: "GET", path: "/2020-06-30/functions/fn/code-signing-config", qualifier: "x", want: fn},
+		{name: "PublishVersion ignores it", method: "POST", path: "/2015-03-31/functions/fn/versions", qualifier: "x", want: fn},
+	}
+	for _, tc := range arns {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, emulator.LambdaQualifiedAuthzResourceARNForTest(tc.method, tc.path, tc.qualifier, "us-east-1", "123456789012"))
+		})
+	}
+
+	const policyARN = "arn:aws:iam::123456789012:policy/lambda-prod-deny"
+	doc := emulator.PolicyDocument{Version: "2012-10-17", Statement: []emulator.PolicyStatement{
+		{Effect: "Allow", Action: emulator.StringOrSlice{"lambda:*"}, Resource: emulator.StringOrSlice{"*"}},
+		{Effect: "Deny", Action: emulator.StringOrSlice{"lambda:InvokeFunction"}, Resource: emulator.StringOrSlice{fn + ":prod"}},
+	}}
+	state := newAuthTestState(t, "dev", policyARN, doc)
+	auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))
+	invokes := []struct {
+		name, path, qualifier string
+		denied                bool
+	}{
+		{name: "the alias by Qualifier", path: "/2015-03-31/functions/fn/invocations", qualifier: "prod", denied: true},
+		{name: "the alias by FunctionName", path: "/2015-03-31/functions/fn:prod/invocations", denied: true},
+		{name: "another alias", path: "/2015-03-31/functions/fn/invocations", qualifier: "dev"},
+		{name: "the function", path: "/2015-03-31/functions/fn/invocations"},
+	}
+	for _, tc := range invokes {
+		t.Run(tc.name, func(t *testing.T) {
+			params := map[string]string{}
+			if tc.qualifier != "" {
+				params["Qualifier"] = tc.qualifier
+			}
+			req := &emulator.AWSRequest{Service: "lambda", Operation: "Invoke", HTTPMethod: http.MethodPost,
+				Path: tc.path, Headers: map[string]string{}, Params: params}
+			err := auth.CheckAccess(newAuthTestReqCtx("arn:aws:iam::123456789012:user/dev"), req)
+			if tc.denied {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestLambdaAuthzQualifierCannotBypassADenyOnTheFunction pins that a Qualifier parameter on an
+// operation that acts on the function itself is authorized against the function: a Deny on the
+// function refuses the operation whatever Qualifier the request carries.
+func TestLambdaAuthzQualifierCannotBypassADenyOnTheFunction(t *testing.T) {
+	t.Parallel()
+	const fn = "arn:aws:lambda:us-east-1:123456789012:function:fn"
+	denied := []string{"lambda:UpdateFunctionCode", "lambda:UpdateFunctionConfiguration",
+		"lambda:PutFunctionEventInvokeConfig", "lambda:GetFunctionCodeSigningConfig"}
+	doc := emulator.PolicyDocument{Version: "2012-10-17", Statement: []emulator.PolicyStatement{
+		{Effect: "Allow", Action: emulator.StringOrSlice{"lambda:*"}, Resource: emulator.StringOrSlice{"*"}},
+		{Effect: "Deny", Action: emulator.StringOrSlice(denied), Resource: emulator.StringOrSlice{fn}},
+	}}
+	state := newAuthTestState(t, "dev", "arn:aws:iam::123456789012:policy/lambda-fn-deny", doc)
+	auth := emulator.NewAuthController(state, emulator.NewDefaultLogger(slog.LevelError, false))
+	cases := []struct{ op, method, path string }{
+		{"UpdateFunctionCode", http.MethodPut, "/2015-03-31/functions/fn/code"},
+		{"UpdateFunctionConfiguration", http.MethodPut, "/2015-03-31/functions/fn/configuration"},
+		{"PutFunctionEventInvokeConfig", http.MethodPut, "/2019-09-25/functions/fn/event-invoke-config"},
+		{"GetFunctionCodeSigningConfig", http.MethodGet, "/2020-06-30/functions/fn/code-signing-config"},
+	}
+	for _, tc := range cases {
+		for _, qualifier := range []string{"", "x", "prod"} {
+			t.Run(tc.op+"?Qualifier="+qualifier, func(t *testing.T) {
+				params := map[string]string{}
+				if qualifier != "" {
+					params["Qualifier"] = qualifier
+				}
+				req := &emulator.AWSRequest{Service: "lambda", Operation: tc.op, HTTPMethod: tc.method,
+					Path: tc.path, Headers: map[string]string{}, Params: params}
+				require.Error(t, auth.CheckAccess(newAuthTestReqCtx("arn:aws:iam::123456789012:user/dev"), req),
+					"a Qualifier must not step around the Deny on the function")
+			})
+		}
 	}
 }

@@ -180,6 +180,9 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).deployEC2SubnetRouteTableAssociation,
 	"AWS::Lambda::Permission":               (*StackDeployer).deployLambdaPermission,
 	"AWS::SQS::QueuePolicy":                 (*StackDeployer).deployQueuePolicy,
+	// v0.134.0 — the types the CDK emits for a function's currentVersion and its aliases (#1613).
+	"AWS::Lambda::Version": (*StackDeployer).deployLambdaVersion,
+	"AWS::Lambda::Alias":   (*StackDeployer).deployLambdaAlias,
 }
 
 // cfnEmulatedType reports whether substrate's CloudFormation emulates a resource type.

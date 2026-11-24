@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"sort"
-	"strings"
 	"time"
 )
 
@@ -975,10 +974,8 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 		}
 	case "lambda":
 		fnName := sub.Endpoint
-		// Extract function name from ARN if necessary.
-		if parts := strings.Split(fnName, ":"); len(parts) > 6 {
-			fnName = parts[len(parts)-1]
-		}
+		// The endpoint is a function ARN, which may name a version or alias (#1613).
+		invokePath, invokeParams := lambdaInvokeTarget(fnName)
 		payload, err := json.Marshal(map[string]interface{}{
 			"Records": []map[string]interface{}{
 				{
@@ -1000,10 +997,10 @@ func (p *SNSPlugin) dispatchToSubscriber(ctx *RequestContext, sub *SNSSubscripti
 		_, err = p.registry.RouteRequest(ctx, &AWSRequest{
 			Service:   "lambda",
 			Operation: "POST",
-			Path:      "/2015-03-31/functions/" + fnName + "/invocations",
+			Path:      invokePath,
 			Body:      payload,
 			Headers:   map[string]string{},
-			Params:    map[string]string{},
+			Params:    invokeParams,
 		})
 		if err != nil {
 			p.logger.Warn("sns dispatch to lambda failed", "function", fnName, "err", err)

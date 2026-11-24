@@ -59,6 +59,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::EC2::Route":                       cfnEC2RouteDeleter,
 	"AWS::EC2::SubnetRouteTableAssociation": cfnSubnetRouteTableAssociationDeleter,
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
+	"AWS::Lambda::Version":                  cfnLambdaVersionDeleter,
+	"AWS::Lambda::Alias":                    cfnLambdaAliasDeleter,
 	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
 	"AWS::Kinesis::Stream":                  cfnKinesisStreamDeleter,
 	"AWS::Kinesis::StreamConsumer":          jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
