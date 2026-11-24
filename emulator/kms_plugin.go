@@ -1437,8 +1437,8 @@ func (p *KMSPlugin) updateAlias(ctx *RequestContext, req *AWSRequest) (*AWSRespo
 	if err != nil {
 		return nil, err
 	}
-	// A pointer to a key with no record can only be one an older build wrote (#1085), which closed the
-	// two paths that produced them. The type match is skipped rather than failed there, because the
+	// A pointer to a key with no record can only be one written by a build older than #1085, which
+	// closed the two paths that produced them. The type match is skipped rather than failed there, because the
 	// restriction is a comparison and there is nothing to compare — and refusing would leave a caller no
 	// way to repair a dangling alias through the operation whose purpose is to re-point it.
 	if current != nil {

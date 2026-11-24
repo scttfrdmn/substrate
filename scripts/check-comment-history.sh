@@ -25,10 +25,14 @@
 # "AWS no longer publishes …") and "previously" are not matched at all.
 #
 # A record persisted by an older build is a fact about the data the code must still
-# read, not narration, so "recorded|written|persisted|stored|minted|registered|made|
-# created|exported|saved before #N" and "a record|recording|stream from before #N" are
-# allowed. For any other legitimate case, put
-# `history-ok:` in the same comment with the reason; use it rarely.
+# read, not narration, so "recorded|written|persisted|stored|minted|registered|exported|
+# saved before #N" and "a record|recording|stream from before #N" are allowed. Only
+# "before" is: "written since #N" or "stored until #N" says what the code did, and a
+# generic verb ("made", "created") says nothing about persisted data. For any other
+# legitimate case, put `history-ok:` in the same comment with the reason; use it rarely.
+#
+# A `…` raw string can span lines, so whether a line starts inside one is carried from
+# line to line within a diff hunk: a `//` inside a raw string is not a comment.
 #
 # `--self-test` runs the matcher over known-bad and known-good lines and exits.
 set -euo pipefail
@@ -44,10 +48,12 @@ use warnings;
 my $mode = $ENV{MODE} // 'diff';
 
 # The comment text of one line of Go, or undef: the part after the first `//` that is
-# outside a "…", `…` or '…' literal.
+# outside a "…", `…` or '…' literal. $raw is a reference to whether the line starts inside
+# a `…` raw string; it is updated to whether the line ends inside one.
 sub comment_of {
-  my ($s) = @_;
-  my $q = '';
+  my ($s, $raw) = @_;
+  my $q = $$raw ? '`' : '';
+  $$raw = 0;
   for (my $i = 0; $i < length $s; $i++) {
     my $c = substr($s, $i, 1);
     if ($q ne '') {
@@ -58,16 +64,17 @@ sub comment_of {
     if ($c eq '"' || $c eq '`' || $c eq "'") { $q = $c; next }
     return substr($s, $i + 2) if substr($s, $i, 2) eq '//';
   }
+  $$raw = 1 if $q eq '`';
   return undef;
 }
 
 my $verbs = qr/(?:be|treat|report|answer|return|refuse|accept|drop|mint|store)/i;
-my $data  = qr/(?:recorded|written|persisted|stored|minted|registered|made|created|exported|saved|(?:record|recording|stream)s? from)/i;
+my $data  = qr/(?:recorded|written|persisted|stored|minted|registered|exported|saved|(?:record|recording|stream)s? from)/i;
 sub offends {
   my ($c) = @_;
   return 0 if $c =~ /history-ok:/;
-  while ($c =~ /(?<![\w-])(?:before|until|since|after) ?#\d+/gi) {
-    next if substr($c, 0, $-[0]) =~ /\b$data\s+$/;
+  while ($c =~ /(?<![\w-])(before|until|since|after) ?#\d+/gi) {
+    next if lc($1) eq 'before' && substr($c, 0, $-[0]) =~ /\b$data\s+$/;
     return 1;
   }
   return 1 if $c =~ /(?<![\w-])pre- ?#\d+/i;
@@ -80,20 +87,20 @@ sub offends {
   return 0;
 }
 
-my ($file, $line, $hit) = ('', 0, 0);
+my ($file, $line, $hit, $raw) = ('', 0, 0, 0);
 while (my $l = <STDIN>) {
   chomp $l;
   if ($mode eq 'lines') {
     $line++;
-    my $c = comment_of($l);
+    my $c = comment_of($l, \$raw);
     if (defined $c && offends($c)) { print "self-test:$line: $l\n"; $hit = 1 }
     next;
   }
-  if ($l =~ m{^\+\+\+ (?:b/)?(.*)$}) { $file = $1; next }
-  if ($l =~ /^@@ -\S+ \+(\d+)/) { $line = $1; next }
+  if ($l =~ m{^\+\+\+ (?:b/)?(.*)$}) { ($file, $raw) = ($1, 0); next }
+  if ($l =~ /^@@ -\S+ \+(\d+)/) { ($line, $raw) = ($1, 0); next }
   next unless $l =~ /^\+(.*)$/s;
   my $src = $1;
-  my $c = comment_of($src);
+  my $c = comment_of($src, \$raw);
   if (defined $c && offends($c)) { print "$file:$line: $src\n"; $hit = 1 }
   $line++;
 }
@@ -124,6 +131,11 @@ if [[ "${1:-}" == "--self-test" ]]; then
   check bad '	// before this fix the list was unsorted'
   check bad '	x := 1 // until #12 this was 2'
   check bad '	s := "a//b" // used to be "a/b"'
+  check bad '	// The range is canonical as written since #1553.'
+  check bad '	// The bare name was stored until #943.'
+  check bad '	// A topic created after #1200 carries a policy.'
+  check bad '	// by a recording made before #1210'
+  check bad $'\tx := `a\nb` // until #3 it was c'
   # Known-good: present tense, citations, and the English the pattern must not hit.
   check good '	// A previously-tagged resource keeps its tag set (#708).'
   check good '	// The key is used to return the cached page.'
@@ -135,7 +147,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   check good '	// API_CreateTopic publishes Attributes.entry.N (see #993 for the reasoning).'
   check good '	// A stream recorded before #1601 carries no requestId.'
   check good '	// A group written before #1553 holds each range as sent.'
-  check good '	// by a recording made before #1210'
+  check good '	// Absent from a record persisted before #1071.'
   check good '	// Empty on a record from before #1196, which accepts any version.'
   check good '	// any AMI registered before #711 has a root device'
   check good '	// The 403 reading stands until #1700 decides it. history-ok: pending decision.'
@@ -143,6 +155,7 @@ if [[ "${1:-}" == "--self-test" ]]; then
   check good '	re := `until #4` // the literal is test data'
   check good '	// The used-to-be-default path is gone.'
   check good '	// Use it before #N style references are added.'
+  check good $'\tre := `\n// before #12 is test data inside a raw string\n`'
   [[ "$status" -eq 0 ]] && echo "check-comment-history self-test: ok"
   exit "$status"
 fi
@@ -153,8 +166,13 @@ if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
   exit 2
 fi
 
+if ! diff=$(git diff -U0 -M --no-color --no-ext-diff "$base"...HEAD -- '*.go'); then
+  echo "check-comment-history: git diff $base...HEAD failed; is the base fetched with full history?" >&2
+  exit 2
+fi
+
 status=0
-git diff -U0 --no-color --no-ext-diff "$base"...HEAD -- '*.go' | MODE=diff perl -e "$matcher" || status=1
+printf '%s\n' "$diff" | MODE=diff perl -e "$matcher" || status=1
 
 if [[ "$status" -ne 0 ]]; then
   echo ""

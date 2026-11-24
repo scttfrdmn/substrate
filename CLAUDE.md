@@ -103,7 +103,8 @@ PR conventions, as practiced:
   #N", "used to", "previously", "this fix", and no note left where a deleted function
   used to be. History belongs in git, the PR and the CHANGELOG. A trailing `(#N)`
   pointing at the reasoning is fine, and so are AWS source citations and `TODO(#N)`.
-  `make comment-history-check` refuses the narrow forms in added lines, and
+  So is a factual note about records an older build wrote, which the code still reads
+  ("a record written before #N carries no …"). `make comment-history-check` refuses the narrow forms in added lines, and
   `make doc-links-check` refuses a `[name]` doc link that names no identifier.
 
 ## Testing

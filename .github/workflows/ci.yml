@@ -229,7 +229,7 @@ jobs:
       - name: Check every doc link in a Go comment names an identifier
         run: make doc-links-check
 
-  # Pure bash and awk, so no toolchain: the check is lexical by construction (see
+  # Bash, awk and Perl, so no Go toolchain: every check here is lexical by construction (see
   # scripts/check-wire-bookkeeping.sh for why it cannot be a reachability check).
   # It runs here rather than only in `make` because a baseline that nothing
   # executes is not a ratchet — it is a TODO list, and #756's whole complaint is
