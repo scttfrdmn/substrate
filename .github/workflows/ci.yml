@@ -183,12 +183,14 @@ jobs:
       - name: Check the operation catalog is in sync with the plugins' dispatch
         run: make operation-catalog-check
 
-      - name: Check docs/services.md is in sync with the plugin registry
+      # Also checks that every frozen legacy /services#<anchor> still lands on its page,
+      # and that every link between docs pages names an anchor the page has (#1610).
+      - name: Check the service reference index and sidebar are in sync with the plugin registry
         run: make docs-reference-check
 
       # The check above compares the generated matrix, not the hand-written prose, so a
       # section copied in twice passes it. #1384 shipped 41 duplicated sections that way.
-      - name: Check docs/services.md names each service section once
+      - name: Check each reference page has one unique title and no repeated section
         run: make docs-headings-check
 
       # The matrix is the one place a plugin or operation count can be stated, because it
@@ -206,7 +208,7 @@ jobs:
       # in CI and not only in `make` for the reason the wire-bookkeeping baseline does: an
       # inventory nothing executes is a TODO list, and a routed operation documented
       # nowhere has to fail a PR rather than wait to be noticed (#1015).
-      - name: Check every routed operation has a row, and every row a routed operation
+      - name: Check every plugin has a reference page, every routed operation a row, and every row a routed operation
         run: make operation-docs-check
 
       # Offline: regenerates from the vendored snapshots under emulator/authzref and

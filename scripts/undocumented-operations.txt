@@ -1,10 +1,10 @@
 # undocumented-operations.txt — every operation substrate routes that has no row in
-# its service's operation table in docs/services.md, as of #1015.
+# its service's operation table in docs/reference/<plugin>.md, as of #1015.
 #
 # Columns, tab-separated:  registered-plugin-name  Operation
 #
-# THIS FILE IS AN INVENTORY OF DEFECTS, NOT A SUPPRESSION LIST. docs/services.md heads
-# each of these tables "Supported operations", so a reader takes the table to be the
+# THIS FILE IS AN INVENTORY OF DEFECTS, NOT A SUPPRESSION LIST. Each reference page heads
+# its table "Supported operations", so a reader takes the table to be the
 # list — and for these operations it was short. Every line was expected to be deleted as
 # its row was written, which is why cmd/check-operation-docs fails both on an operation
 # missing from this file (new drift: an operation routed without being documented) and

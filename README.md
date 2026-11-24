@@ -359,8 +359,8 @@ operations it routes; it is generated from the plugin registry, so it cannot dri
 - **Security & identity** — IAM, STS, KMS, Secrets Manager, ACM, Cognito, SSO, WAFv2, RAM
 - **Management & cost** — CloudWatch (+ Logs), CloudTrail, Organizations, Budgets, Cost Explorer, Service Quotas, SSM, Health, the CodeSuite, Step Functions, Backup, Transfer
 
-Many are also reachable through CloudFormation deployment. See the
-[Service Reference](docs/services.md) for per-operation detail. A running server
+Many are also reachable through CloudFormation deployment. Each plugin has a page under
+[`docs/reference/`](docs/reference/) with its per-operation detail. A running server
 reports its plugins from the `/ready` endpoint (`curl http://localhost:4566/ready`).
 
 ### Known limitations
@@ -384,7 +384,7 @@ for the current version and [CHANGELOG.md](CHANGELOG.md) for full history.
 📖 **Full documentation: [scttfrdmn.github.io/substrate](https://scttfrdmn.github.io/substrate/)**
 
 - **[Getting Started](docs/getting-started.md)** — install, first test, 15-minute tutorial
-- **[Service Reference](docs/services.md)** — every plugin with its operation list
+- **[Service Reference](docs/services.md)** — the coverage matrix, with a page per plugin under [`docs/reference/`](docs/reference/)
 - **[Testing Guide](docs/testing-guide.md)** — `StartTestServer`, recording/replay, cost assertions
 - **[Endpoint Configuration](docs/endpoint-configuration.md)** — SDK and tool configuration
 

@@ -80,7 +80,8 @@ PR conventions, as practiced:
   milestone's work in one area.
 - Body: `Fixes #N` lines first (a title reference does not close anything; write
   `Part of #N` plus what remains when an issue ships partly), then one bullet per
-  area, the routed-operation catalog count change ("from 1,042 to 1,055"), the gates
+  area carrying the reasoning and provenance the CHANGELOG bullet leaves out, the
+  routed-operation catalog count change ("from 1,042 to 1,055"), the gates
   run locally, and follow-up issues filed with their numbers.
 - A release PR (`chore/release-vX.Y.Z`) changes only `CHANGELOG.md`; versions are
   stamped by ldflags (`emulator/doc.go` stays `"dev"`) and docs carry no pinned
@@ -111,6 +112,19 @@ PR conventions, as practiced:
 Update `CHANGELOG.md` in every PR under `## [Unreleased]` following the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
+
+An entry is one bullet per issue, one sentence of about 25 words or fewer:
+
+```
+- <Service>: <what changed> (#N).
+```
+
+For example, `- Lambda: POST /v1/lambda/invoke-result seeds a successful Invoke payload (#1611).`
+Add a `### Compatibility` section whenever a consumer must act on upgrading: a removed
+API, config key, route or seed, or a changed default. Say what to do, not why. The
+reasoning, provenance and AWS sources go in the PR or issue body, which the bullet's
+`(#N)` reaches; the CHANGELOG is the index, not the record. Earlier releases' entries
+are longer and stay as they are.
 
 ## Releasing
 
@@ -148,13 +162,13 @@ These enforce the rules below server-side — do not attempt to bypass them.
    tip, producing an unsigned tag at whatever commit happens to be checked out.
    Create releases in ascending version order, and pass `--latest` on the newest.
    Notes follow the house style: a prose lede naming the release's theme, the
-   CHANGELOG entries condensed one bullet per issue (**not** verbatim — the
-   CHANGELOG carries the full reasoning and the release links to it), a
+   release's CHANGELOG bullets (one per issue, already terse, so reuse them), a
    `## Provenance` section when any error code comes from observed behaviour
-   rather than the API model, and a `## Compatibility` section stating what a
-   consumer must know before upgrading. Close with the CHANGELOG anchor and the
-   compare link. A release body is editable after publication (`gh release edit`),
-   unlike the tag it points at. `make tag-releases-check` asserts this step
+   rather than the API model (drawn from the PR bodies), and a `## Compatibility`
+   section stating what a consumer must know before upgrading. Close with the
+   CHANGELOG anchor, the compare link, and a line pointing at the release's PRs and
+   issues (the milestone page), which carry the reasoning. A release body is
+   editable after publication (`gh release edit`), unlike the tag it points at. `make tag-releases-check` asserts this step
    happened; the `Release Audit` workflow runs it daily, so a forgotten Release
    surfaces within a day rather than at the next release.
 5. Close the issues the release resolves. A `(#N)` reference in a commit or PR
@@ -180,7 +194,7 @@ service before writing code or tests.
 you go, not in a sweep (#487). Any change that adds or touches an `AWSError` uses AWS's wording
 when a source publishes it: the API reference, a user-guide page, or a documented CLI/SDK example.
 Note that source in a comment next to the literal. Where nothing publishes the wording, keep
-substrate's own message and say so in the CHANGELOG ("the messages are substrate's own"), or
+substrate's own message and say so in the PR body ("the messages are substrate's own"), or
 cite observed behaviour (an SDK or Terraform report) under the release's `## Provenance`.
 Never invent text that imitates AWS without a source.
 
@@ -193,5 +207,6 @@ Never invent text that imitates AWS without a source.
 | `emulator/eventstore.go` | Immutable event log |
 | `emulator/replay.go` | Replay engine and time-travel debugging |
 | `emulator/plugins.go` | `RegisterDefaultPlugins` — the plugin registry |
-| `docs/services.md` | Generated service reference (`make docs-reference`) |
+| `docs/services.md` | Service reference index; its coverage matrix is generated (`make docs-reference`) |
+| `docs/reference/<plugin>.md` | One hand-written page per plugin; `docs/reference/concepts/` holds the cross-cutting pages |
 | `cmd/substrate/main.go` | CLI entry point |

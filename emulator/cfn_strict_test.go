@@ -80,7 +80,7 @@ func TestCFNStrict_RequestLevelRefusals(t *testing.T) {
 				"creates nothing as CREATE_COMPLETE. To deploy them as stubs, turn strict mode off: cloudformation.lenient: " +
 				"true (SUBSTRATE_CLOUDFORMATION_LENIENT=true) on the server, WithLenientCloudFormation() on StartTestServer, " +
 				"WithDeployerLenient(true) on NewStackDeployer, or WithClientLenientCloudFormation() on NewClient; see " +
-				"\"Strict mode and template validation\" in docs/services.md",
+				"\"Strict mode and template validation\" in docs/reference/cloudformation.md",
 			validateAccepts: true,
 		},
 		{

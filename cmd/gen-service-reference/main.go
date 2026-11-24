@@ -1,16 +1,21 @@
-// Command gen-service-reference keeps the coverage matrix in docs/services.md in
-// sync with the live plugin registry so the documented service count and plugin
-// list can never drift from the implementation (see issue #364).
+// Command gen-service-reference keeps the service reference's index in sync with the live
+// plugin registry, so the documented plugin list and counts cannot drift from the
+// implementation (#364).
 //
-// It boots the default plugin registry, enumerates the registered plugins, and
-// renders a Markdown coverage table between the marker comments
+// It boots the default plugin registry and renders two things from it:
 //
-//	<!-- BEGIN GENERATED COVERAGE MATRIX -->
-//	<!-- END GENERATED COVERAGE MATRIX -->
+//   - the coverage matrix in docs/services.md, between the marker comments
+//     <!-- BEGIN GENERATED COVERAGE MATRIX --> and <!-- END GENERATED COVERAGE MATRIX -->,
+//     one row per plugin linking to its page, docs/reference/<plugin>.md. Everything
+//     outside the markers is hand-written and left untouched;
+//   - docs/.vitepress/services-sidebar.json, the sidebar's Services group.
 //
-// in docs/services.md. Everything outside the markers — including the
-// hand-written per-service operation, CloudFormation, and cost detail — is left
-// untouched. Per-plugin display names and protocols come from the emulator's own
+// It then checks what the index promises but does not generate: that every entry of the
+// frozen docs/.vitepress/legacy-anchors.json still lands on a heading (see
+// [checkLegacyAnchors]), and that every link between docs pages names an anchor its target
+// page has (see [checkLinks]).
+//
+// Per-plugin display names and protocols come from the emulator's own
 // routing table ([emu.PluginRoutingCatalog], emulator/routing.go); the tool fails
 // if a registered plugin has no entry there (or an entry names a plugin that is
 // not registered), which is what a CI drift check enforces.
@@ -25,18 +30,27 @@
 //
 // Usage:
 //
-//	go run ./cmd/gen-service-reference -out docs/services.md          # rewrite the matrix
-//	go run ./cmd/gen-service-reference -out docs/services.md -check    # exit non-zero if out of date
+//	go run ./cmd/gen-service-reference                # rewrite the matrix and the sidebar
+//	go run ./cmd/gen-service-reference -check         # exit non-zero if either is out of date
+//
+// The sidebar is written beside the index, under its directory's .vitepress, so -out
+// alone places both.
 package main
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	emu "github.com/scttfrdmn/substrate/emulator"
@@ -57,45 +71,76 @@ const (
 var routing = emu.PluginRoutingCatalog()
 
 func main() {
-	check := flag.Bool("check", false, "exit non-zero if the file is out of date instead of writing it")
-	out := flag.String("out", "docs/services.md", "path to the services reference file")
-	flag.Parse()
+	if err := run(os.Args[1:], os.Stdout); err != nil {
+		fmt.Fprintln(os.Stderr, "gen-service-reference:", err)
+		os.Exit(1)
+	}
+}
+
+// output is one file this tool renders: its path, and how to render it from what the
+// file holds now (the matrix is spliced into hand-written prose; the sidebar is whole).
+type output struct {
+	path   string
+	render func(existing []byte) ([]byte, error)
+}
+
+func run(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("gen-service-reference", flag.ContinueOnError)
+	flags.SetOutput(stdout)
+	check := flags.Bool("check", false, "exit non-zero if a file is out of date instead of writing it")
+	out := flags.String("out", filepath.Join("docs", "services.md"), "path to the service reference index")
+	if err := flags.Parse(args); err != nil {
+		return fmt.Errorf("parse flags: %w", err)
+	}
+	docsDir := filepath.Dir(*out)
 
 	names, err := registeredPlugins()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "gen-service-reference:", err)
-		os.Exit(1)
+		return err
 	}
-
-	existing, err := os.ReadFile(*out)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "gen-service-reference: read %s: %v\n", *out, err)
-		os.Exit(1)
+	outputs := []output{
+		{path: *out, render: func(existing []byte) ([]byte, error) { return replaceMatrix(existing, names) }},
+		{path: filepath.Join(docsDir, ".vitepress", "services-sidebar.json"),
+			render: func([]byte) ([]byte, error) { return renderSidebar(names) }},
 	}
-
-	updated, err := replaceMatrix(existing, names)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "gen-service-reference:", err)
-		os.Exit(1)
-	}
-
-	if *check {
-		if !bytes.Equal(existing, updated) {
-			fmt.Fprintf(os.Stderr, "gen-service-reference: %s coverage matrix is out of date; run `make docs-reference` and commit the result\n", *out)
-			os.Exit(1)
+	for _, o := range outputs {
+		if err := generate(o, *check, stdout); err != nil {
+			return err
 		}
-		return
 	}
 
-	if bytes.Equal(existing, updated) {
-		fmt.Printf("%s already up to date (%d plugins)\n", *out, len(names))
-		return
+	if err := checkLegacyAnchors(docsDir); err != nil {
+		return err
 	}
-	if err := os.WriteFile(*out, updated, 0o644); err != nil { //nolint:gosec // docs file, world-readable is fine.
-		fmt.Fprintln(os.Stderr, "gen-service-reference:", err)
-		os.Exit(1)
+	return checkLinks(docsDir)
+}
+
+// generate renders one output and either writes it or, with check, refuses a file that
+// differs from its rendering. A missing file renders from nothing: the sidebar is whole,
+// and the index refuses for want of its markers.
+func generate(o output, check bool, stdout io.Writer) error {
+	existing, err := os.ReadFile(o.path)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("read %s: %w", o.path, err)
 	}
-	fmt.Printf("updated %s (%d plugins)\n", *out, len(names))
+	updated, err := o.render(existing)
+	if err != nil {
+		return fmt.Errorf("%s: %w", o.path, err)
+	}
+	switch {
+	case bytes.Equal(existing, updated):
+		if !check {
+			_, _ = fmt.Fprintf(stdout, "%s already up to date\n", o.path)
+		}
+		return nil
+	case check:
+		return fmt.Errorf("%s is out of date; run `make docs-reference` and commit the result", o.path)
+	}
+	if err := os.WriteFile(o.path, updated, 0o644); err != nil { //nolint:gosec // docs file, world-readable is fine.
+		return fmt.Errorf("write %s: %w", o.path, err)
+	}
+	_, _ = fmt.Fprintf(stdout, "updated %s\n", o.path)
+	return nil
 }
 
 // registeredPlugins boots the default registry and returns the sorted plugin
@@ -195,7 +240,8 @@ func replaceMatrix(doc []byte, names []string) ([]byte, error) {
 	fmt.Fprintln(&matrix, "(`make operation-catalog`) and is readable at run time through")
 	fmt.Fprintln(&matrix, "`emulator.RoutedServices` and `emulator.RoutedOperations`. The live plugin count is")
 	fmt.Fprintln(&matrix, "also available from the `/ready` endpoint (`curl http://localhost:4566/ready`).")
-	fmt.Fprintln(&matrix, "Per-service operation, CloudFormation, and cost detail follows below the matrix.")
+	fmt.Fprintln(&matrix, "Each row links to the plugin's page, which carries its operation, CloudFormation and")
+	fmt.Fprintln(&matrix, "cost detail.")
 	fmt.Fprintln(&matrix)
 	fmt.Fprintln(&matrix, "Two plugins route **0** operations, and that is their protocol rather than a gap:")
 	fmt.Fprintln(&matrix, "`execute-api` serves a deployed API's own routes (AWS's action for it is the single")
@@ -206,7 +252,8 @@ func replaceMatrix(doc []byte, names []string) ([]byte, error) {
 	fmt.Fprintln(&matrix, "|---|---------|-------------|----------|-----------:|")
 	for i, n := range names {
 		m := routing[n]
-		fmt.Fprintf(&matrix, "| %d | %s | `%s` | %s | %d |\n", i+1, m.Display, n, m.Protocol, len(emu.RoutedOperations(n)))
+		fmt.Fprintf(&matrix, "| %d | [%s](%s) | `%s` | %s | %d |\n",
+			i+1, m.Display, pageLink(n), n, m.Protocol, len(emu.RoutedOperations(n)))
 	}
 	fmt.Fprint(&matrix, endMarker)
 
@@ -215,4 +262,41 @@ func replaceMatrix(doc []byte, names []string) ([]byte, error) {
 	result.Write(matrix.Bytes())
 	result.Write(doc[end+len(endMarker):])
 	return result.Bytes(), nil
+}
+
+// pageLink is the site route of a plugin's reference page, docs/reference/<plugin>.md. The
+// page is named by the registry name so that cmd/check-operation-docs can pair the two
+// without a hand-kept map.
+func pageLink(plugin string) string { return "/reference/" + plugin }
+
+// sidebarItem is one entry of a VitePress sidebar group.
+type sidebarItem struct {
+	Text string `json:"text"`
+	Link string `json:"link"`
+}
+
+// renderSidebar renders docs/.vitepress/services-sidebar.json, which config.mts imports as
+// the Services group: one entry per registered plugin, labeled as the matrix labels it and
+// ordered by that label, so a reader scanning for "Lambda" finds it under L rather than
+// under the registry name.
+func renderSidebar(names []string) ([]byte, error) {
+	items := make([]sidebarItem, 0, len(names))
+	for _, n := range names {
+		items = append(items, sidebarItem{Text: routing[n].Display, Link: pageLink(n)})
+	}
+	sort.SliceStable(items, func(i, j int) bool {
+		a, b := strings.ToLower(items[i].Text), strings.ToLower(items[j].Text)
+		if a != b {
+			return a < b
+		}
+		return items[i].Link < items[j].Link
+	})
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(items); err != nil {
+		return nil, fmt.Errorf("encode sidebar: %w", err)
+	}
+	return buf.Bytes(), nil
 }

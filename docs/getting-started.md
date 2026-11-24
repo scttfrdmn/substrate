@@ -383,11 +383,12 @@ func TestCostTracking(t *testing.T) {
 }
 ```
 
-<!-- TODO(#178): link to Cost Explorer plugin docs once services.md is complete -->
+The [Cost Explorer reference](/reference/ce) lists the operations that answer the same figures
+over the wire.
 
 ## Next steps
 
-- [Service Reference](services.md) — every plugin with its full operation list
+- [Service Reference](/services) — the coverage matrix, with a page per plugin listing its operations
 - [Testing Guide](testing-guide.md) — advanced patterns: fault injection,
   multi-region, time-travel debugging, cost assertions
 - [Endpoint Configuration](endpoint-configuration.md) — configure Terraform,
