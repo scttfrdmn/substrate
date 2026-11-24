@@ -77,7 +77,7 @@ type iamResourceRef struct {
 // (#747).
 var iamAuthzOperationResource = map[string]iamResourceRef{
 	// Users. Path is on the wire for the create and read from the record for the rest; see
-	// [iamAuthzMintResourceARN].
+	// [iamAuthzMintResource].
 	"CreateUser":                    {Type: "user", NameParams: []string{"UserName"}},
 	"GetUser":                       {Type: "user", NameParams: []string{"UserName"}, CallerIsResource: true},
 	"DeleteUser":                    {Type: "user", NameParams: []string{"UserName"}},

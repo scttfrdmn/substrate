@@ -42,11 +42,8 @@ import (
 //
 // The second is that every identifier in the stream is one the caller chose — a bucket
 // name, a key, a body — so a replay of these streams mints nothing and can be asserted to
-// produce **no** differences at all. A stream containing an EC2 create could not: substrate
-// mints its ids from crypto/rand, so the replay's volume id differs from the recording's
-// and every later request naming it diverges (#856). That debt would force these tests to
-// assert something weaker than "identical", and the point of #1140 is that the two runs are
-// identical.
+// produce **no** differences at all without depending on how a create's identifiers are
+// minted (#856), and the point of #1140 is that the two runs are identical.
 
 // controlPlaneEventService is the [emulator.Event.Service] a recorded control-plane write
 // carries.

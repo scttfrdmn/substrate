@@ -1573,7 +1573,7 @@ func (p *TaggingPlugin) tagFailure(arn string, err error) failedResourcesInfo {
 // the tagging API does not handle. It exists to keep that case distinguishable from a
 // malformed ARN, because the two answer different error codes.
 //
-// [FailureInfo] documents InternalServiceException as covering the case where "the resource
+// `FailureInfo` documents InternalServiceException as covering the case where "the resource
 // type in the request is not supported by the Resource Groups Tagging API", and tells the
 // caller "it's safe to retry the request and then call GetResources to verify the changes".
 // InvalidParameterException is documented for a different set of causes, of which the one

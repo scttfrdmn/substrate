@@ -22,7 +22,7 @@ const ec2MaxTagResults = 1000
 //
 // AWS documents this operation's range as "between 5 and 1000", where
 // DescribeLaunchTemplateVersions' is 1 to 200 — the floor is per-operation, so it cannot be
-// shared with [ec2MaxLaunchTemplateVersionResults]' check even though the two read alike. Four
+// shared with [ec2MinLaunchTemplateResults]' check even though the two read alike. Four
 // of the pages #917 covers publish no range at all, which is why the helper takes the bounds as
 // arguments rather than owning them.
 const ec2MinTagResults = 5

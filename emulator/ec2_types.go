@@ -533,75 +533,64 @@ type EC2RouteTable struct {
 	Region string `json:"region"`
 }
 
-// generateEC2InstanceID generates a random EC2 instance ID in the format
-// "i-" followed by 17 hex characters.
+// generateEC2InstanceID mints an EC2 instance ID in the format
+// "i-" followed by 16 hex characters.
 func generateEC2InstanceID(m *IDMint) string {
 	return "i-" + m.Hex(8)
 }
 
-// generateENIID generates a random elastic network interface ID in the format
-// "eni-" followed by 8 hex characters.
+// generateENIID mints an elastic network interface ID in the format
+// "eni-" followed by 16 hex characters.
 func generateENIID(m *IDMint) string {
 	return "eni-" + m.Hex(8)
 }
 
-// generateVPCID generates a random VPC ID in the format "vpc-" followed by
-// 8 hex characters.
+// generateVPCID mints a VPC ID in the format "vpc-" followed by
+// 16 hex characters.
 func generateVPCID(m *IDMint) string {
 	return "vpc-" + m.Hex(8)
 }
 
-// generateSubnetID generates a random subnet ID in the format "subnet-"
-// followed by 8 hex characters.
+// generateSubnetID mints a subnet ID in the format "subnet-"
+// followed by 16 hex characters.
 func generateSubnetID(m *IDMint) string {
 	return "subnet-" + m.Hex(8)
 }
 
-// generateSGID generates a random security group ID in the format "sg-"
-// followed by 8 hex characters.
+// generateSGID mints a security group ID in the format "sg-"
+// followed by 16 hex characters.
 func generateSGID(m *IDMint) string {
 	return "sg-" + m.Hex(8)
 }
 
-// generateIGWID generates a random internet gateway ID in the format "igw-"
-// followed by 8 hex characters.
+// generateIGWID mints an internet gateway ID in the format "igw-"
+// followed by 16 hex characters.
 func generateIGWID(m *IDMint) string {
 	return "igw-" + m.Hex(8)
 }
 
-// generateRTBID generates a random route table ID in the format "rtb-"
-// followed by 8 hex characters.
+// generateRTBID mints a route table ID in the format "rtb-"
+// followed by 16 hex characters.
 func generateRTBID(m *IDMint) string {
 	return "rtb-" + m.Hex(8)
 }
 
-// generateKeyPairID generates a random EC2 key pair ID in the format "key-"
-// followed by 17 hex characters.
+// generateKeyPairID mints an EC2 key pair ID in the format "key-"
+// followed by 34 hex characters.
 func generateKeyPairID(m *IDMint) string {
 	return "key-" + m.Hex(17)
 }
 
-// generateReservationID generates a random reservation ID in the format
-// "r-" followed by 8 hex characters.
+// generateReservationID mints a reservation ID in the format
+// "r-" followed by 16 hex characters.
 func generateReservationID(m *IDMint) string {
 	return "r-" + m.Hex(8)
 }
 
-// generateAssociationID generates a random route table association ID.
+// generateAssociationID mints a route table association ID.
 func generateAssociationID(m *IDMint) string {
 	return "rtbassoc-" + m.Hex(8)
 }
-
-// randomHex is deleted. It was the shared crypto/rand draw site every service's ids came
-// through before #856, and the migration was arranged around it: a caller moved by taking a
-// mint and calling [IDMint.Hex] with the same width, which is what let the tiers proceed one
-// service family at a time instead of as a flag day. Its last caller minted an AIPA…
-// instance-profile id inside a *describe*, which #1291 resolved from IAM state instead — so
-// the only crypto/rand read left in the tree is [IDMint]'s own seedless fallback.
-//
-// The note stays where the function was because a dozen mint sites' doc comments say what they
-// replaced, and a reader who follows one of those — or an old changelog entry, or #856 itself —
-// otherwise finds the name and nothing explaining where it went.
 
 // EC2Image represents an Amazon Machine Image (AMI) registered in Substrate.
 type EC2Image struct {
@@ -797,14 +786,14 @@ type EC2CreateVolumePermission struct {
 	Group string `json:"group,omitempty"`
 }
 
-// generateImageID generates a random AMI ID in the format "ami-" followed
-// by 17 hex characters.
+// generateImageID mints an AMI ID in the format "ami-" followed
+// by 16 hex characters.
 func generateImageID(m *IDMint) string {
 	return "ami-" + m.Hex(8)
 }
 
-// generateEBSSnapshotID generates a random EBS snapshot ID in the format "snap-"
-// followed by 17 hex characters.
+// generateEBSSnapshotID mints an EBS snapshot ID in the format "snap-"
+// followed by 16 hex characters.
 func generateEBSSnapshotID(m *IDMint) string {
 	return "snap-" + m.Hex(8)
 }
@@ -849,8 +838,8 @@ type EC2PlacementGroup struct {
 	Region string `json:"region"`
 }
 
-// generatePlacementGroupID generates a random placement group ID in the format
-// "pg-" followed by 17 hex characters.
+// generatePlacementGroupID mints a placement group ID in the format
+// "pg-" followed by 16 hex characters.
 func generatePlacementGroupID(m *IDMint) string {
 	return "pg-" + m.Hex(8)
 }
@@ -963,17 +952,17 @@ type EC2NATGateway struct {
 	Region string `json:"region"`
 }
 
-// generateAllocationID generates a random Elastic IP allocation ID.
+// generateAllocationID mints an Elastic IP allocation ID.
 func generateAllocationID(m *IDMint) string {
 	return "eipalloc-" + m.Hex(8)
 }
 
-// generateEIPAssociationID generates a random Elastic IP association ID.
+// generateEIPAssociationID mints an Elastic IP association ID.
 func generateEIPAssociationID(m *IDMint) string {
 	return "eipassoc-" + m.Hex(8)
 }
 
-// generateNATGatewayID generates a random NAT gateway ID.
+// generateNATGatewayID mints a NAT gateway ID.
 func generateNATGatewayID(m *IDMint) string {
 	return "nat-" + m.Hex(8)
 }
@@ -1259,7 +1248,7 @@ func (t EC2LaunchTemplate) TemplateVersions() []EC2LaunchTemplateVersion {
 	}}
 }
 
-// generateLaunchTemplateID generates a random launch template ID.
+// generateLaunchTemplateID mints a launch template ID.
 func generateLaunchTemplateID(m *IDMint) string {
 	return "lt-" + m.Hex(8)
 }
@@ -1346,7 +1335,7 @@ type EC2Volume struct {
 	Region string `json:"region"`
 }
 
-// generateVolumeID generates a random EBS volume ID.
+// generateVolumeID mints an EBS volume ID.
 func generateVolumeID(m *IDMint) string {
 	return "vol-" + m.Hex(8)
 }

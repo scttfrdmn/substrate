@@ -263,7 +263,7 @@ type StateMachineState struct {
 	// LoggingConfiguration, TracingConfiguration and EncryptionConfiguration are the request's own
 	// configuration objects, as sent to CreateStateMachine or the last UpdateStateMachine that named
 	// each, and nil when none was. DescribeStateMachine answers each verbatim, or its published default
-	// when nil; see [sfnStateMachineConfig] (#1199). Absent from a record written before #1199.
+	// when nil; see [sfnOrDefault] (#1199). Absent from a record written before #1199.
 	LoggingConfiguration    json.RawMessage `json:"LoggingConfiguration,omitempty"`
 	TracingConfiguration    json.RawMessage `json:"TracingConfiguration,omitempty"`
 	EncryptionConfiguration json.RawMessage `json:"EncryptionConfiguration,omitempty"`

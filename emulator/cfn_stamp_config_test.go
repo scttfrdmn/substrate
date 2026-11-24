@@ -54,7 +54,7 @@ import (
 //     [cfnStampConfigDeliveryBucket] sets up.
 //   - `Rule`'s `Source` is the one requirement the resource page and the API model agree on.
 //   - `Rule`'s `ConfigRuleName` is pinned so the rule is addressable by name, which is what
-//     [cfnStampFixture.configRuleARNFor]'s absence would otherwise force: a generated name is
+//     the absence of a configRuleARNFor helper would otherwise force: a generated name is
 //     fine for the deploy but says nothing about the ARN, and the ARN is the whole question here.
 const cfnConfigStampTemplate = `{
 	"Resources": {

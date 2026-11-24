@@ -3,14 +3,12 @@ package emulator
 // An instance's iamInstanceProfile is resolved from IAM, not minted per read (#1291).
 //
 // `ec2InstanceItemFor` — the builder both RunInstances and DescribeInstances render an
-// instance through — used to report `"AIPA" + randomHex(8)`, which is a value drawn on
-// **every call**. Three things followed. Two DescribeInstances calls on one unchanged
-// instance reported two different `iamInstanceProfile.id` values, so a consumer that
-// describes and compares — a drift check, a Terraform refresh, a cache — saw a change that
-// did not happen. The id named nothing: substrate's IAM plugin mints a real AIPA… id when
-// `CreateInstanceProfile` runs, and this value was unrelated to it, so a caller taking the id
-// from a describe and handing it to IAM got a not-found. And it was the last caller of
-// randomHex, the shared crypto/rand helper #856 exists to remove.
+// instance through — reports the profile IAM stored. A value drawn per call would make two
+// DescribeInstances calls on one unchanged instance report two different
+// `iamInstanceProfile.id` values, so a consumer that describes and compares — a drift check,
+// a Terraform refresh, a cache — would see a change that did not happen. It would also name
+// nothing: substrate's IAM plugin mints a real AIPA… id when `CreateInstanceProfile` runs,
+// and a caller taking the id from a describe and handing it to IAM expects that one.
 //
 // # What decides the value
 //
@@ -30,11 +28,10 @@ package emulator
 // Substrate lets an instance launch with a profile name that was never created, so the
 // resolution has to answer for a profile that does not exist. It derives the id from the
 // account and the name — the way a public IP is derived from its instance id and a secret's
-// ARN from its name — rather than drawing one. Deriving keeps the property the draw lacked:
-// the same instance reports the same id on every read, and two profiles report different
-// ids. It deliberately does *not* derive from the request id through [IDMint], which is
-// #856's seam: a request-derived value is stable across a *replay* of one request and would
-// still differ between two describes, which is the bug.
+// ARN from its name — rather than drawing one, so the same instance reports the same id on
+// every read and two profiles report different ids. It deliberately does *not* derive from
+// the request id through [IDMint] (#856): a request-derived value is stable across a
+// *replay* of one request but differs between two describes.
 //
 // # Rendering
 //
@@ -43,9 +40,7 @@ package emulator
 // `InstanceProfileId` with a **minimum length of 16, a maximum of 128, and pattern `[\w]+`**.
 // Substrate's own [generateIAMID] renders 21 characters of `[A-Z0-9]` behind the AIPA prefix
 // and satisfies both, so a derived id uses that form and is indistinguishable from one IAM
-// itself stored. The old 20-character lowercase-hex form satisfied the published pattern too —
-// this is not a case of #671's rule being broken — but it disagreed with the rendering
-// substrate's own IAM plugin uses, which is the rendering a resolved profile now reports.
+// itself stored: a derived and a resolved profile render alike.
 
 import (
 	"context"

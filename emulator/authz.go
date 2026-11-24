@@ -94,7 +94,7 @@ func (a *AuthController) authzTimeContext(ctx map[string]string, now time.Time, 
 // IAMUserChangePassword, and of every "let a user manage their own things" statement —
 // resolved to nothing, so the statement matched no resource and every such grant was a
 // false deny. The name comes from [Principal.UserName], recorded when the credential was
-// resolved, and never from the ARN: [Server.resolveCallerPrincipal] synthesizes
+// resolved, and never from the ARN: [buildCallerARN] synthesizes
 // `…:user/<access-key-id>` for a registry hit with no IAM entity behind it, so parsing
 // this ARN would publish a credential ID as a user name.
 //
@@ -964,7 +964,7 @@ type authzResource struct {
 // its own tags. All of them must be allowed for the request to be allowed.
 //
 // Almost every AWS operation names one resource, and for those this returns
-// exactly one pair — [buildResourceARN] plus the tags [AuthController.addResourceTags]
+// exactly one pair — [buildResourceARN] plus the tags [AuthController.resourceTagsFor]
 // reads. Three operations are exceptions:
 //
 //   - `organizations:MoveAccount` names an account, a source parent and a

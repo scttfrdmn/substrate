@@ -99,6 +99,12 @@ PR conventions, as practiced:
 - All new packages must live in the root `package substrate` unless there is
   a compelling reason for a sub-package (discuss in an issue first).
 - TODOs must reference an issue number: `// TODO(#N): description.`
+- Comments describe the code as it is. Do not narrate history: no "before/until/since
+  #N", "used to", "previously", "this fix", and no note left where a deleted function
+  used to be. History belongs in git, the PR and the CHANGELOG. A trailing `(#N)`
+  pointing at the reasoning is fine, and so are AWS source citations and `TODO(#N)`.
+  `make comment-history-check` refuses the narrow forms in added lines, and
+  `make doc-links-check` refuses a `[name]` doc link that names no identifier.
 
 ## Testing
 

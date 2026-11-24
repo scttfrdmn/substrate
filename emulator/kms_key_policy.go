@@ -87,7 +87,7 @@ const kmsDefaultPolicyName = "default"
 // document naming a foreign root would grant nothing to anyone who can reach the key.
 //
 // The ARN is composed with the `aws` partition, matching every other IAM ARN substrate renders
-// ([iamAccountResourceARN], [buildCallerARN]). Substrate models no other partition, and the SM2 key
+// ([iamAuthzAccountResourceARN], [buildCallerARN]). Substrate models no other partition, and the SM2 key
 // spec — the one KMS feature that is China-Regions-only — is admitted everywhere for the same reason.
 //
 // Whitespace is not preserved from the example. AWS's response formats the document with spaces

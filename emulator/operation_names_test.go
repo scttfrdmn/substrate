@@ -114,7 +114,7 @@ func TestParseAWSRequest_LeavesUnresolvableOperationsAlone(t *testing.T) {
 			assert.NotEmpty(t, req.Operation, "an unresolved operation is still named")
 			// HTTPMethod is the verb of the request unconditionally, whether or not
 			// the name resolved. resolveOperationName also backfills it, which makes
-			// this incidentally true for the 18 services that have a resolver — so
+			// this incidentally true for every service that has a resolver — so
 			// assert it where nothing backfills, or the field's contract holds only
 			// by accident and the next REST service added without a table entry
 			// reaches its plugin with no verb at all.

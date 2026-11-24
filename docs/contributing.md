@@ -293,14 +293,17 @@ Two CI jobs exist only to catch bookkeeping drift. Run their targets before push
 
 | CI job | Targets | Regenerate after a deliberate change |
 |--------|---------|--------------------------------------|
-| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check cfn-schema-check` | `make operation-catalog docs-reference operation-docs-write` (and `make cfn-schema` after a `make cfn-schema-fetch`) |
-| Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check` | `make wire-bookkeeping-write` |
+| Service Reference Drift | `make operation-catalog-check docs-reference-check docs-headings-check operation-docs-check authz-reference-check cfn-schema-check doc-links-check` | `make operation-catalog docs-reference operation-docs-write` (and `make cfn-schema` after a `make cfn-schema-fetch`) |
+| Wire Bookkeeping Drift | `make wire-bookkeeping-check discarded-unmarshal-check discarded-marshal-check discarded-state-check nondeterminism-check comment-history-check` | `make wire-bookkeeping-write` |
 
 The `discarded-*` checks are lexical: no `_ = json.Unmarshal(req.Body…)`, no discarded
 `json`/`xml.Marshal`, no discarded `state.Put`. So is `nondeterminism-check`: no wall-clock read
 (`time.Now`, `time.Since`, `time.After` and their relatives), no `math/rand` or `crypto/rand`,
 and no `generateRequestID` or `NewIDMint("")` in emulator code outside its allowlist. `make docs-versions` refuses a pinned
-release number in README or `docs/` prose. `make e2e` runs the aws-sdk-go-v2 suite in
+release number in README or `docs/` prose. `make comment-history-check` reads only the Go
+lines your branch adds (`git diff origin/main...HEAD`; set `BASE` to diff another ref) and
+refuses a comment narrating history: "before #N", "until #N", "used to return", "before
+this fix". `make doc-links-check` refuses a `[name]` doc link that names no identifier. `make e2e` runs the aws-sdk-go-v2 suite in
 `test/e2e` (a separate module with `replace … => ../../`, so a root `go.mod` bump
 needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrate.
 

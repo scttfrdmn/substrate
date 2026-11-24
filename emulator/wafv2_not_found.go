@@ -23,7 +23,7 @@ import (
 // the message rather than composing it. What it fixes in one place is the pair that was wrong together:
 // the code and its status.
 //
-// The `404` that stays is [UnknownOperationException] for an operation this plugin does not route, which
+// The `404` that stays is `UnknownOperationException` for an operation this plugin does not route, which
 // is a protocol-level refusal published at 404 on the JSON protocol's own Common Errors page rather than
 // anything in WAFv2's vocabulary — so the assertion at wafv2_plugin_test.go's default-arm test keeps its
 // 404 and did *not* move with this change, contrary to what #1098's acceptance criteria assumed.

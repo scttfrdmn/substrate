@@ -53,7 +53,7 @@ import "strings"
 //
 // # Why one resolver decides more than routing
 //
-// [parseLambdaOperation] is also Lambda's entry in [operationNameResolvers], which names the
+// [parseLambdaOperation] is also Lambda's entry in [operationResolvers], which names the
 // operation for authorization, metering and fault injection alike. So `lambda:TagResource` resolved
 // to `"Unknown"` for policy evaluation too: an IAM policy naming the action could neither allow nor
 // deny it, and a fault seeded on it could not fire. Fixing the parser fixes all four at once, which
@@ -81,7 +81,7 @@ const (
 )
 
 // lambdaUnknownOperation is what the parser reports for a path no routed operation publishes. The
-// dispatch answers it with [unknownRouteError], and [operationNameResolvers] reports it as the
+// dispatch answers it with [unknownRouteError], and [operationResolvers] reports it as the
 // operation name.
 const lambdaUnknownOperation = "Unknown"
 

@@ -133,17 +133,13 @@ func pipelineSignedPutBucket(t *testing.T, ts *emulator.TestServer, bucket, acce
 // recorded 403 replays as a 403, and the bucket the refusal prevented is still
 // absent afterwards.
 //
-// It is also the test that settles what #833 was thought to be blocked on. The
-// recorded Authorization header names an access key that a replay re-mints
-// *differently* (#856), so re-resolving the key would find nothing and leave the
-// request unenforced. Nothing in the authorization path reads the key: CheckAccess
+// It is also the test that settles what #833 was thought to be blocked on: the
+// authorization path does not depend on the replay re-minting the recorded access
+// key. Nothing in the authorization path reads the key: CheckAccess
 // resolves the caller with resolveIAMEntity(…, Principal.ARN), and an IAM user's ARN
-// is derived from the name CreateUser was given — so it survives a replay where the
-// key does not. Event.Principal records exactly that ARN.
-//
-// Before the fix a replay carried no principal at all, so this stream replayed with
-// every authorization door open — the pipeline's and each plugin's own — and the
-// bucket existed afterwards.
+// is derived from the name CreateUser was given. Event.Principal records exactly that
+// ARN, so the replay enforces every authorization door — the pipeline's and each
+// plugin's own — and the bucket stays absent.
 func TestReplayPipeline_ReproducesAnAuthorizationRefusal(t *testing.T) {
 	ts := emulator.StartTestServer(t, emulator.WithRecordedBodies())
 
@@ -175,13 +171,11 @@ func TestReplayPipeline_ReproducesAnAuthorizationRefusal(t *testing.T) {
 	assert.Empty(t, replayDifferencesOn(results, "status_code"),
 		"no event answered a different status")
 
-	// What does diverge is the two earlier events' bodies, and it is the honest
-	// report of #856 rather than a failure of this replay: CreateUser's UserId and
-	// CreateAccessKey's AccessKeyId and SecretAccessKey are minted from crypto/rand,
-	// so a replay produces three values the recording cannot predict. #817's body
-	// comparison reports them by path instead of normalising them away, precisely
-	// because masking a minted identifier would report a reproduced run that was not
-	// one. Every difference in this stream is one of those.
+	// Any other difference must be in a response body. The identifiers the earlier
+	// events mint — CreateUser's UserId, CreateAccessKey's AccessKeyId and
+	// SecretAccessKey — derive from the recorded request IDs (#856), so the replay
+	// reproduces them, and #817's body comparison reports a body difference by path
+	// rather than normalising it away.
 	for _, diff := range results.Differences {
 		assert.True(t, strings.HasPrefix(diff.Field, "response_body/"),
 			"unexpected difference outside a response body: %s = %v vs %v",
