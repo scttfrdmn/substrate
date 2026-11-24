@@ -61,7 +61,7 @@ func TestJourney_RecordAndReplay(t *testing.T) {
 		ts.StateManager(),
 		ts.TimeController(),
 		ts.Registry(),
-		emulator.ReplayConfig{RandomSeed: 42, StopOnError: true},
+		emulator.ReplayConfig{StopOnError: true},
 		emulator.NewDefaultLogger(slog.LevelError, false),
 	)
 

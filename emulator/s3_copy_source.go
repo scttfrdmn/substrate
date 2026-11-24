@@ -89,36 +89,59 @@ func parseS3CopySource(header string) (s3CopySource, *AWSResponse) {
 // an HTTP 400 Bad Request error, because you are not allowed to specify a delete marker as a version"
 // (API_UploadPartCopy). The page gives no code; InvalidRequest is substrate's reading and the message
 // is its own.
-func (p *S3Plugin) loadS3CopySourceObject(ctx context.Context, src s3CopySource) (S3Object, *AWSResponse, error) {
+//
+// An absent current version may be answered by a seeded object, as GetObject's is; see
+// [S3Plugin.resolveSeededObject]. Its body is returned too, because a seed's bytes are not in the
+// filesystem [S3Plugin.readS3CopySourceBody] reads. It is nil for every other source.
+func (p *S3Plugin) loadS3CopySourceObject(ctx context.Context, src s3CopySource) (S3Object, []byte, *AWSResponse, error) {
 	stateKey := "object:" + src.Bucket + "/" + src.Key
 	if src.VersionID != "" {
 		stateKey = "object_version:" + src.Bucket + "/" + src.Key + "/" + src.VersionID
 	}
 	data, err := p.state.Get(ctx, s3Namespace, stateKey)
 	if err != nil {
-		return S3Object{}, nil, fmt.Errorf("get copy source metadata: %w", err)
+		return S3Object{}, nil, nil, fmt.Errorf("get copy source metadata: %w", err)
 	}
 	if data == nil {
-		return S3Object{}, s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		// A missing source bucket is NoSuchBucket, as GetObject answers it, and is decided
+		// before a seed is consulted: a "*" seed would otherwise answer for a bucket that
+		// does not exist.
+		if missing, bErr := p.bucketMissingResponse(ctx, src.Bucket); bErr != nil || missing != nil {
+			return S3Object{}, nil, missing, bErr
+		}
+		if src.VersionID == "" {
+			obj, body, handled, seedErr := p.resolveSeededObject(ctx, src.Bucket, src.Key)
+			if seedErr != nil {
+				return S3Object{}, nil, nil, seedErr
+			}
+			if handled {
+				return obj, body, nil, nil
+			}
+		}
+		return S3Object{}, nil, s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
 	}
 	var obj S3Object
 	if err := json.Unmarshal(data, &obj); err != nil {
-		return S3Object{}, nil, fmt.Errorf("unmarshal copy source metadata: %w", err)
+		return S3Object{}, nil, nil, fmt.Errorf("unmarshal copy source metadata: %w", err)
 	}
 	if obj.IsDeleteMarker {
 		if src.VersionID != "" {
-			return S3Object{}, s3ErrorResponse("InvalidRequest",
+			return S3Object{}, nil, s3ErrorResponse("InvalidRequest",
 				"The copy source version is a delete marker.", http.StatusBadRequest), nil
 		}
-		return S3Object{}, s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
+		return S3Object{}, nil, s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
 	}
-	return obj, nil, nil
+	return obj, nil, nil, nil
 }
 
 // readS3CopySourceBody reads the bytes of the object a copy names, or nil for a directory-marker key,
 // which has none. A named version is read from its versioned path, falling back to the key's main
-// path for an object written before versioning was enabled, as GetObject does.
-func (p *S3Plugin) readS3CopySourceBody(src s3CopySource) ([]byte, error) {
+// path for an object written before versioning was enabled, as GetObject does. seeded is the body
+// [S3Plugin.loadS3CopySourceObject] returned for a seeded source, which is used as it is.
+func (p *S3Plugin) readS3CopySourceBody(src s3CopySource, seeded []byte) ([]byte, error) {
+	if seeded != nil {
+		return seeded, nil
+	}
 	if !s3ObjectHasBody(src.Key) {
 		return nil, nil
 	}

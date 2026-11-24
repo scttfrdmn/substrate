@@ -5,11 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -358,81 +357,353 @@ func TestSeedInvokeError_RejectsMalformedBody(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// startFakeRIE stands in a Lambda runtime interface emulator on a local port,
-// answering with the given body and X-Amz-Function-Error header. The real RIE
-// needs Docker, so without this the header plumbing invokePOST performs would go
-// untested — and that plumbing is the only path by which a genuine handler
-// failure becomes observable.
-func startFakeRIE(t *testing.T, body, functionError string) int {
+// lambdaControl sends one request to a Lambda control-plane endpoint and returns the
+// status and body.
+func lambdaControl(t *testing.T, srv *emulator.Server, method, path string, body any) (int, string) {
 	t.Helper()
-	mux := http.NewServeMux()
-	mux.HandleFunc("/2015-03-31/functions/function/invocations", func(w http.ResponseWriter, _ *http.Request) {
-		if functionError != "" {
-			w.Header().Set("X-Amz-Function-Error", functionError)
+	var reader io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		require.NoError(t, err)
+		reader = bytes.NewReader(b)
+	}
+	r := httptest.NewRequest(method, path, reader)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	return w.Code, w.Body.String()
+}
+
+// invokeBody invokes name and returns the response body and whether
+// X-Amz-Function-Error was present.
+func invokeBody(t *testing.T, srv *emulator.Server, name string) (string, bool) {
+	t.Helper()
+	resp := lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions/"+name+"/invocations", map[string]any{})
+	defer resp.Body.Close() //nolint:errcheck
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_, errored := resp.Header["X-Amz-Function-Error"]
+	return string(b), errored
+}
+
+// TestInvoke_SeededResult covers POST /v1/lambda/invoke-result: a seeded success
+// payload is returned verbatim with no X-Amz-Function-Error, an exact function name
+// beats the wildcard, and a seeded invoke-error still wins over either.
+func TestInvoke_SeededResult(t *testing.T) {
+	t.Parallel()
+	const stub = `{"statusCode":200,"body":"null"}`
+	tests := []struct {
+		name        string
+		results     []map[string]any
+		seedError   bool
+		wantBody    string
+		wantErrored bool
+	}{
+		{name: "no seed answers the stub", wantBody: stub},
+		{
+			name:     "exact function name",
+			results:  []map[string]any{{"functionName": "fn", "payload": map[string]any{"ok": true, "n": 3}}},
+			wantBody: `{"ok":true,"n":3}`,
+		},
+		{
+			name:     "wildcard",
+			results:  []map[string]any{{"payload": []int{1, 2}}},
+			wantBody: `[1,2]`,
+		},
+		{
+			name: "exact name beats the wildcard",
+			results: []map[string]any{
+				{"functionName": "*", "payload": "wild"},
+				{"functionName": "fn", "payload": "exact"},
+			},
+			wantBody: `"exact"`,
+		},
+		{
+			name:     "a different function's seed does not apply",
+			results:  []map[string]any{{"functionName": "other", "payload": 1}},
+			wantBody: stub,
+		},
+		{
+			name:        "a seeded error wins",
+			results:     []map[string]any{{"functionName": "fn", "payload": 1}},
+			seedError:   true,
+			wantErrored: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLambdaTestServer(t)
+			createInvokeTestFunction(t, srv, "fn")
+			for _, seed := range tt.results {
+				code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result", seed)
+				require.Equal(t, http.StatusOK, code, body)
+			}
+			if tt.seedError {
+				seedInvokeError(t, srv, map[string]any{"functionName": "fn", "errorType": "Handled"})
+			}
+			body, errored := invokeBody(t, srv, "fn")
+			assert.Equal(t, tt.wantErrored, errored)
+			if !tt.wantErrored {
+				assert.JSONEq(t, tt.wantBody, body)
+			}
+		})
+	}
+}
+
+// TestInvoke_ClearSeededResult covers both DELETE forms: by function name, which
+// leaves other seeds in place, and with no name, which removes every result seed
+// but no error seed.
+func TestInvoke_ClearSeededResult(t *testing.T) {
+	t.Parallel()
+	srv := newLambdaTestServer(t)
+	createInvokeTestFunction(t, srv, "a")
+	createInvokeTestFunction(t, srv, "b")
+	for _, name := range []string{"a", "b"} {
+		code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+			map[string]any{"functionName": name, "payload": name})
+		require.Equal(t, http.StatusOK, code, body)
+		assert.JSONEq(t, `{"ok":true,"functionName":"`+name+`"}`, body)
+	}
+
+	code, _ := lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-result?functionName=a", nil)
+	require.Equal(t, http.StatusOK, code)
+	body, _ := invokeBody(t, srv, "a")
+	assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, body)
+	body, _ = invokeBody(t, srv, "b")
+	assert.JSONEq(t, `"b"`, body)
+
+	seedInvokeError(t, srv, map[string]any{"functionName": "a", "errorType": "Handled"})
+	code, _ = lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-result", nil)
+	require.Equal(t, http.StatusOK, code)
+	body, _ = invokeBody(t, srv, "b")
+	assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, body)
+	_, errored := invokeBody(t, srv, "a")
+	assert.True(t, errored, "clearing result seeds must leave error seeds alone")
+}
+
+// TestSeedInvokeResult_RejectsBadBodies covers the two refusals: a body that is not
+// JSON, and a seed with no payload, which would otherwise answer an empty body.
+func TestSeedInvokeResult_RejectsBadBodies(t *testing.T) {
+	t.Parallel()
+	srv := newLambdaTestServer(t)
+
+	r := httptest.NewRequest(http.MethodPost, "/v1/lambda/invoke-result", bytes.NewReader([]byte(`{not json`)))
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, r)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result", map[string]any{"functionName": "f"})
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "payload is required")
+}
+
+// TestInvokeResult_StoreFaults pins that a store failure on a result seed is a 500
+// rather than a silent fall-through to the stub, on every path that touches it.
+func TestInvokeResult_StoreFaults(t *testing.T) {
+	t.Parallel()
+	const record = "invoke-result:"
+	const invocations = "/2015-03-31/functions/fn/invocations"
+	for _, tt := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		path   string
+		body   any
+	}{
+		{"Invoke, seed read", func(m *cfFaultStateManager) { m.failGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"Invoke, corrupt seed", func(m *cfFaultStateManager) { m.corruptGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"POST, seed write", func(m *cfFaultStateManager) { m.failPut = record }, http.MethodPost, "/v1/lambda/invoke-result", map[string]any{"payload": 1}},
+		{"DELETE one", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-result?functionName=fn", nil},
+		{"DELETE all", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-result", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newFullServerOn(t, state)
+			createInvokeTestFunction(t, srv, "fn")
+			code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+				map[string]any{"functionName": "fn", "payload": 1})
+			require.Equal(t, http.StatusOK, code, body)
+
+			tt.arm(state)
+			if tt.path != invocations {
+				code, body = lambdaControl(t, srv, tt.method, tt.path, tt.body)
+				assert.Equal(t, http.StatusInternalServerError, code, body)
+				return
+			}
+			resp := lambdaRequest(t, srv, tt.method, tt.path, tt.body)
+			defer resp.Body.Close() //nolint:errcheck
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// TestInvokeError_StoreFaults is [TestInvokeResult_StoreFaults] for the error seed: a
+// store failure on it is a 500 rather than a silent fall-through to a result or the stub.
+func TestInvokeError_StoreFaults(t *testing.T) {
+	t.Parallel()
+	const record = "invoke-error:"
+	const invocations = "/2015-03-31/functions/fn/invocations"
+	for _, tt := range []struct {
+		name   string
+		arm    func(*cfFaultStateManager)
+		method string
+		path   string
+		body   any
+	}{
+		{"Invoke, seed read", func(m *cfFaultStateManager) { m.failGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"Invoke, corrupt seed", func(m *cfFaultStateManager) { m.corruptGet = record }, http.MethodPost, invocations, map[string]any{}},
+		{"POST, seed write", func(m *cfFaultStateManager) { m.failPut = record }, http.MethodPost, "/v1/lambda/invoke-error", map[string]any{"errorType": "Handled"}},
+		{"DELETE one", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-error?functionName=fn", nil},
+		{"DELETE all", func(m *cfFaultStateManager) { m.failDelete = record }, http.MethodDelete, "/v1/lambda/invoke-error", nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			state := &cfFaultStateManager{inner: emulator.NewMemoryStateManager()}
+			srv := newFullServerOn(t, state)
+			createInvokeTestFunction(t, srv, "fn")
+			seedInvokeError(t, srv, map[string]any{"functionName": "fn", "errorType": "Handled"})
+
+			tt.arm(state)
+			if tt.path != invocations {
+				code, body := lambdaControl(t, srv, tt.method, tt.path, tt.body)
+				assert.Equal(t, http.StatusInternalServerError, code, body)
+				return
+			}
+			resp := lambdaRequest(t, srv, tt.method, tt.path, tt.body)
+			defer resp.Body.Close() //nolint:errcheck
+			assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		})
+	}
+}
+
+// TestInvoke_SeedPrecedence pins the order an invoke resolves its seeds in: exact error,
+// exact result, "*" error, "*" result. A seed for the function's own name outranks any
+// wildcard, and at one scope an error outranks a result.
+func TestInvoke_SeedPrecedence(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name                    string
+		exactErr, wildErr       bool
+		exactResult, wildResult bool
+		want                    string // "error", "exact", "wild" or "stub"
+	}{
+		{name: "exact error beats exact result", exactErr: true, exactResult: true, want: "error"},
+		{name: "exact result beats wildcard error", wildErr: true, exactResult: true, want: "exact"},
+		{name: "exact error beats wildcard result", exactErr: true, wildResult: true, want: "error"},
+		{name: "wildcard error beats wildcard result", wildErr: true, wildResult: true, want: "error"},
+		{name: "wildcard result alone", wildResult: true, want: "wild"},
+		{name: "all four", exactErr: true, wildErr: true, exactResult: true, wildResult: true, want: "error"},
+		{name: "none", want: "stub"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLambdaTestServer(t)
+			createInvokeTestFunction(t, srv, "fn")
+			seedResult := func(name, payload string) {
+				code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+					map[string]any{"functionName": name, "payload": payload})
+				require.Equal(t, http.StatusOK, code, body)
+			}
+			if tt.exactErr {
+				seedInvokeError(t, srv, map[string]any{"functionName": "fn", "errorType": "Handled"})
+			}
+			if tt.wildErr {
+				seedInvokeError(t, srv, map[string]any{"functionName": "*", "errorType": "Handled"})
+			}
+			if tt.exactResult {
+				seedResult("fn", "exact")
+			}
+			if tt.wildResult {
+				seedResult("*", "wild")
+			}
+
+			body, errored := invokeBody(t, srv, "fn")
+			switch tt.want {
+			case "error":
+				assert.True(t, errored, body)
+			case "stub":
+				assert.False(t, errored)
+				assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, body)
+			default:
+				assert.False(t, errored, body)
+				assert.JSONEq(t, `"`+tt.want+`"`, body)
+			}
+		})
+	}
+}
+
+// TestInvokeSeeds_FunctionNameForms pins which name each FunctionName form keys a seed
+// by, read off both seed endpoints' responses. Only the two ARN forms are searched for
+// a function segment, so a function named "function" keeps its name.
+func TestInvokeSeeds_FunctionNameForms(t *testing.T) {
+	t.Parallel()
+	const arn = "arn:aws:lambda:us-east-1:123456789012:function:"
+	tests := []struct{ in, want string }{
+		{"", "*"},
+		{"*", "*"},
+		{"fn", "fn"},
+		{"fn:v1", "fn"},
+		{"fn:$LATEST", "fn"},
+		{"function", "function"},
+		{"function:prod", "function"},
+		{"123456789012:function:fn", "fn"},
+		{"123456789012:function:fn:prod", "fn"},
+		{"123456789012:function:function", "function"},
+		{"12345:function:fn", "12345"},
+		{arn + "fn", "fn"},
+		{arn + "fn:prod", "fn"},
+		{arn + "function", "function"},
+		{arn + "function:prod", "function"},
+	}
+	srv := newLambdaTestServer(t)
+	for _, tt := range tests {
+		for _, endpoint := range []string{"/v1/lambda/invoke-result", "/v1/lambda/invoke-error"} {
+			code, body := lambdaControl(t, srv, http.MethodPost, endpoint,
+				map[string]any{"functionName": tt.in, "payload": 1})
+			require.Equal(t, http.StatusOK, code, body)
+			var got struct {
+				FunctionName string `json:"functionName"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(body), &got))
+			assert.Equal(t, tt.want, got.FunctionName, "%s %q", endpoint, tt.in)
 		}
-		// The RIE answers 200 whether or not the handler raised; the header is the
-		// only difference.
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(body))
-	})
-
-	// Bind port 0 and read the port back off the live listener, rather than asking
-	// FindFreePort and re-binding what it named. FindFreePort closes its listener
-	// before returning the number, so between the close and the re-bind the port is
-	// free for anything else to take — including a sibling t.Parallel() test that
-	// FindFreePort then hands the very same number. That is the "bind: address
-	// already in use" flake these two tests hit under -race (#634).
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
-	go func() { _ = srv.Serve(ln) }()
-	t.Cleanup(func() { _ = srv.Close() })
-	return ln.Addr().(*net.TCPAddr).Port
+	}
 }
 
-// TestInvokePOST_PropagatesFunctionErrorHeader asserts invokePOST surfaces the
-// runtime's X-Amz-Function-Error. It was discarding the response headers
-// entirely, so a handler that raised was indistinguishable from one that
-// succeeded — there was no path by which the header could ever be set (#393).
-func TestInvokePOST_PropagatesFunctionErrorHeader(t *testing.T) {
+// TestInvokeSeeds_NormaliseTheFunctionName pins that a seed POST or DELETE may name the
+// function in any form Invoke accepts — a qualified name, a full ARN or a partial one —
+// and keys the seed by the bare name an invoke looks it up under.
+func TestInvokeSeeds_NormaliseTheFunctionName(t *testing.T) {
 	t.Parallel()
-	exec := emulator.NewLambdaExecutorForTest(emulator.LambdaExecCfg{ReplayMode: "live"},
-		emulator.NewDefaultLogger(-4, false), true)
-	defer exec.StopAll()
+	const arn = "arn:aws:lambda:us-east-1:123456789012:function:fn"
+	for _, name := range []string{"fn:v1", arn, arn + ":prod", "123456789012:function:fn"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			srv := newLambdaTestServer(t)
+			createInvokeTestFunction(t, srv, "fn")
 
-	port := startFakeRIE(t, `{"errorMessage":"boom","errorType":"ValueError"}`, "Handled")
-	body, funcErr, err := emulator.InvokePOSTForTest(exec, port, []byte(`{}`))
-	require.NoError(t, err)
-	assert.Equal(t, "Handled", funcErr)
-	assert.Contains(t, string(body), "boom")
-}
+			code, body := lambdaControl(t, srv, http.MethodPost, "/v1/lambda/invoke-result",
+				map[string]any{"functionName": name, "payload": "seeded"})
+			require.Equal(t, http.StatusOK, code, body)
+			assert.JSONEq(t, `{"ok":true,"functionName":"fn"}`, body)
+			got, _ := invokeBody(t, srv, "fn")
+			assert.JSONEq(t, `"seeded"`, got)
 
-// TestInvokePOST_NoHeaderOnSuccess is the other side: a runtime that sets no
-// header must yield an empty functionError, which is what lets invoke omit it.
-func TestInvokePOST_NoHeaderOnSuccess(t *testing.T) {
-	t.Parallel()
-	exec := emulator.NewLambdaExecutorForTest(emulator.LambdaExecCfg{ReplayMode: "live"},
-		emulator.NewDefaultLogger(-4, false), true)
-	defer exec.StopAll()
+			seedInvokeError(t, srv, map[string]any{"functionName": name, "errorType": "Handled"})
+			_, errored := invokeBody(t, srv, "fn")
+			assert.True(t, errored)
 
-	port := startFakeRIE(t, `{"statusCode":200}`, "")
-	body, funcErr, err := emulator.InvokePOSTForTest(exec, port, []byte(`{}`))
-	require.NoError(t, err)
-	assert.Empty(t, funcErr)
-	assert.Contains(t, string(body), "statusCode")
-}
-
-// TestInvokePOST_UnreachableRuntimeErrors asserts a runtime that cannot be
-// reached is a propagated error, not a silent empty success.
-func TestInvokePOST_UnreachableRuntimeErrors(t *testing.T) {
-	t.Parallel()
-	exec := emulator.NewLambdaExecutorForTest(emulator.LambdaExecCfg{ReplayMode: "live"},
-		emulator.NewDefaultLogger(-4, false), true)
-	defer exec.StopAll()
-
-	// Claim a port, then release it so nothing is listening.
-	port, err := emulator.FindFreePort()
-	require.NoError(t, err)
-	_, _, err = emulator.InvokePOSTForTest(exec, port, []byte(`{}`))
-	require.Error(t, err)
+			query := "?functionName=" + url.QueryEscape(name)
+			code, _ = lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-error"+query, nil)
+			require.Equal(t, http.StatusOK, code)
+			code, _ = lambdaControl(t, srv, http.MethodDelete, "/v1/lambda/invoke-result"+query, nil)
+			require.Equal(t, http.StatusOK, code)
+			got, errored = invokeBody(t, srv, "fn")
+			assert.False(t, errored)
+			assert.JSONEq(t, `{"statusCode":200,"body":"null"}`, got)
+		})
+	}
 }

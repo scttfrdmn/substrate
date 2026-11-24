@@ -201,53 +201,6 @@ func MeanFloatForTest(vals []float64) float64 { return meanFloat(vals) }
 // StddevFloatForTest wraps the unexported stddevFloat for direct unit testing.
 func StddevFloatForTest(vals []float64, mean float64) float64 { return stddevFloat(vals, mean) }
 
-// RuntimeToImage wraps runtimeToImage for external tests.
-func RuntimeToImage(runtime string) string { return runtimeToImage(runtime) }
-
-// FindFreePort wraps findFreePort for external tests.
-func FindFreePort() (int, error) { return findFreePort() }
-
-// RIEReadyProbeForTest exposes rieReadyProbe, the Lambda container readiness probe (#1129).
-func RIEReadyProbeForTest(port int) error { return rieReadyProbe(port) }
-
-// WaitReadyForTest runs LambdaExecutor.waitReady for a container on port with probe in place of the
-// HTTP probe, so the readiness loop is exercised without Docker. No request can observe it: the
-// probe runs only while a container starts, which needs a Docker daemon.
-func (e *LambdaExecutor) WaitReadyForTest(port int, timeout time.Duration, probe func(port int) error) error {
-	e.probe = probe
-	return e.waitReady(&containerHandle{port: port}, timeout)
-}
-
-// NewLambdaExecutorForTest creates a LambdaExecutor with a forced Docker
-// availability value, allowing tests to run without a Docker daemon.
-func NewLambdaExecutorForTest(cfg LambdaExecCfg, logger Logger, dockerAvail bool) *LambdaExecutor {
-	e := NewLambdaExecutor(cfg, logger)
-	// Override the availability probe result.
-	e.availOnce.Do(func() { e.available = dockerAvail })
-	return e
-}
-
-// NewLambdaPluginForTest constructs a bare LambdaPlugin wired to the given
-// state manager. It is used to test replay-cache helpers without a full server.
-func NewLambdaPluginForTest(state StateManager, tc *TimeController) *LambdaPlugin {
-	return &LambdaPlugin{
-		state:     state,
-		logger:    NewDefaultLogger(-4, false),
-		tc:        tc,
-		esmActive: make(map[string]struct{}),
-	}
-}
-
-// SaveReplayForTest exposes saveReplay for external tests.
-func (p *LambdaPlugin) SaveReplayForTest(functionARN string, payload, response []byte) error {
-	return p.saveReplay(functionARN, payload, response)
-}
-
-// LoadReplayForTest exposes loadReplay for external tests.
-func (p *LambdaPlugin) LoadReplayForTest(functionARN string, payload []byte) ([]byte, bool) {
-	return p.loadReplay(functionARN, payload)
-}
-
 // BuildV1ProxyEventForTest wraps buildV1ProxyEvent for external tests.
 func BuildV1ProxyEventForTest(req *AWSRequest, apiID, stage, resourcePath string) ([]byte, error) {
 	_, requestID := apigwProxyRequestIDs(nil)
@@ -330,94 +283,6 @@ func ParseProxyResponseForTest(body []byte) (*AWSResponse, error) {
 // ExtractLambdaARNFromURIForTest wraps extractLambdaARNFromURI for external tests.
 func ExtractLambdaARNFromURIForTest(uri string) string {
 	return extractLambdaARNFromURI(uri)
-}
-
-// NewRDSExecutorForTest wraps NewRDSExecutor for external tests.
-func NewRDSExecutorForTest(logger Logger) *RDSExecutor {
-	return NewRDSExecutor(logger)
-}
-
-// InjectRDSHandleForTest inserts a fake RDSContainerHandle into the executor's
-// active map to exercise code paths that iterate over active containers.
-func InjectRDSHandleForTest(e *RDSExecutor, instanceID, containerID string) {
-	e.mu.Lock()
-	e.active[instanceID] = &RDSContainerHandle{ContainerID: containerID, HostPort: 5432}
-	e.mu.Unlock()
-}
-
-// RDSStopContainerForTest calls StopContainer for external tests.
-func RDSStopContainerForTest(e *RDSExecutor, ctx context.Context, containerID string) error {
-	return e.StopContainer(ctx, containerID)
-}
-
-// EvictStaleForTest exposes LambdaExecutor.evictStale for external tests.
-func (e *LambdaExecutor) EvictStaleForTest() { e.evictStale() }
-
-// InjectPoolEntryForTest inserts a fake containerHandle into the executor's
-// warm pool to exercise code paths that iterate over the pool (e.g., StopAll).
-func InjectPoolEntryForTest(e *LambdaExecutor, arn, containerID string) {
-	e.mu.Lock()
-	e.pool[arn] = &containerHandle{containerID: containerID}
-	e.mu.Unlock()
-}
-
-// IsDockerAvailableForTest exposes LambdaExecutor.isDockerAvailable for tests.
-func (e *LambdaExecutor) IsDockerAvailableForTest() bool { return e.isDockerAvailable() }
-
-// WarmPoolARNsForTest returns the function ARNs the executor still believes it holds a
-// container for, sorted.
-//
-// This is the accessor that makes #1035's invalidation assertable without Docker. Whether an
-// invoke runs the new code is only observable with a container actually running, which CI has
-// not got; whether the *pool entry* survived an `UpdateFunctionCode` is the bookkeeping the
-// fix consists of, and it is observable either way. Same reasoning as
-// [RDSActiveContainerCountForTest], which #903 added for the same reason.
-//
-// ARNs rather than a count, because the point of per-ARN eviction is that it drops one
-// function's entry and not another's — a count cannot tell those apart.
-func WarmPoolARNsForTest(e *LambdaExecutor) []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	arns := make([]string, 0, len(e.pool))
-	for arn := range e.pool {
-		arns = append(arns, arn)
-	}
-	sort.Strings(arns)
-	return arns
-}
-
-// ShutdownLambdaPluginForTest calls LambdaPlugin.Shutdown for coverage.
-func ShutdownLambdaPluginForTest(p *LambdaPlugin, ctx context.Context) error {
-	return p.Shutdown(ctx)
-}
-
-// LambdaPluginSetExecutorForTest injects a LambdaExecutor into the plugin for
-// tests that need to exercise Docker execution or replay paths.
-func LambdaPluginSetExecutorForTest(p *LambdaPlugin, exec *LambdaExecutor) {
-	p.executor = exec
-}
-
-// LambdaPluginCreateFunctionForTest writes a minimal LambdaFunction to state
-// so that invoke can load it without a real HTTP CreateFunction request.
-//
-// The account and Region the record is keyed under come from the function's own ARN, which is
-// the pair a caller's invoke has to present to load it back (#943), so a caller supplying a
-// consistent ARN needs no second parameter to say the same thing twice.
-func LambdaPluginCreateFunctionForTest(p *LambdaPlugin, fn LambdaFunction) {
-	acct, region := lambdaARNScope(fn.FunctionArn)
-	_, _ = p.saveFunctionAndRespond(acct, region, fn, 200)
-}
-
-// InvokeLambdaForTest calls the unexported invoke method directly.
-func InvokeLambdaForTest(p *LambdaPlugin, ctx *RequestContext, req *AWSRequest, name string) (*AWSResponse, error) {
-	return p.invoke(ctx, req, name)
-}
-
-// InvokePOSTForTest calls invokePOST against a container handle pointing at the
-// given localhost port, letting a test stand in a fake Lambda runtime interface
-// instead of a real Docker container.
-func InvokePOSTForTest(e *LambdaExecutor, port int, payload []byte) (body []byte, functionError string, err error) {
-	return e.invokePOST(context.Background(), &containerHandle{port: port}, payload)
 }
 
 // SQSQueueNameFromURLForTest wraps sqsQueueNameFromURL for external tests.
@@ -1578,31 +1443,6 @@ func (p *LambdaPlugin) ESMPollerCountForTest() int {
 	p.esmMu.Lock()
 	defer p.esmMu.Unlock()
 	return len(p.esmActive)
-}
-
-// EvictionStoppedForTest reports whether the executor's idle-eviction goroutine has
-// been told to exit — the one difference between [LambdaExecutor.StopAll] and
-// [LambdaExecutor.DrainPool], and the reason a state reset calls the second (#903).
-//
-// The read is non-blocking, so it reports the channel's state rather than waiting on
-// it, and it does not depend on whether the goroutine has noticed yet.
-func (e *LambdaExecutor) EvictionStoppedForTest() bool {
-	select {
-	case <-e.stopCh:
-		return true
-	default:
-		return false
-	}
-}
-
-// RDSActiveContainerCountForTest returns the number of Postgres containers the
-// executor still believes it is holding. Until #903 nothing ever dropped an entry, so
-// the map grew for the life of the process and StopAll re-stopped containers it had
-// already stopped.
-func RDSActiveContainerCountForTest(e *RDSExecutor) int {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return len(e.active)
 }
 
 // CheckReplayGatesForTest runs the four pre-plugin gates a [ReplayPipeline] holds and

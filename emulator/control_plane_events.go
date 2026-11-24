@@ -126,6 +126,13 @@ func (s *Server) recordControlPlaneWrites(next http.Handler) http.Handler {
 		var respBody bytes.Buffer
 		ww.Tee(&respBody)
 
+		// Held across the handler and the event's timestamp, as [Server.handleAWSRequest]
+		// holds it, so a seed that stores the time it was written stores the instant the
+		// event records. A replay freezes the clock at that instant before re-issuing the
+		// write, so it stores the same value.
+		release := s.tc.Hold()
+		defer release()
+
 		start := time.Now()
 		next.ServeHTTP(ww, r)
 		duration := time.Since(start)

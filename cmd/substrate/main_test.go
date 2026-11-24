@@ -103,6 +103,21 @@ func (l *recordingLogger) Warn(msg string, _ ...any) { l.warn = append(l.warn, m
 
 func (l *recordingLogger) Error(string, ...any) {}
 
+// TestPrintConfigWarnings pins that a removed key a config file still sets reaches
+// stderr as a warning, rather than being dropped by the non-strict unmarshal (#1611).
+func TestPrintConfigWarnings(t *testing.T) {
+	cfg, err := substrate.LoadConfig(writeCLIConfig(t, t.TempDir(), "lambda:\n  docker_enabled: true\n"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	var out strings.Builder
+	printConfigWarnings(&out, cfg)
+	lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+	if len(lines) != 1 || !strings.HasPrefix(lines[0], "substrate: warning: config key lambda.docker_enabled was removed") {
+		t.Fatalf("warnings = %q, want one naming lambda.docker_enabled", out.String())
+	}
+}
+
 // TestNewCredentialWiring covers what `substrate server` does with the
 // credentials: section, which was decorative until #736: the shipped default must
 // change nothing, and the two flags must reach the server the way the section has

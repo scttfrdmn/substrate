@@ -417,7 +417,6 @@ func setupTestHarness(t *testing.T) (*substrate.TestServer, *substrate.ReplayEng
         ts.TimeController(),
         ts.Registry(),
         substrate.ReplayConfig{
-            RandomSeed:  42,
             StopOnError: true,
         },
         substrate.NewDefaultLogger(slog.LevelError, false),
@@ -781,8 +780,6 @@ replay:
   # Start from the nearest stored snapshot instead of replaying from empty state.
   # Default false; a snapshot skips the events it already covers.
   use_snapshots: false
-  # Seeds the engine's random source. Default 0, which leaves it unseeded.
-  random_seed: 0
 ```
 
 Until #880 this section did not exist, and the command built its engine with a

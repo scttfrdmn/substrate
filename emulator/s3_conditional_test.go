@@ -1048,3 +1048,25 @@ func TestS3_ConditionalWrite_UnconditionalPathUnaffected(t *testing.T) {
 	_, parseErr := time.Parse(http.TimeFormat, w.Header().Get("Last-Modified"))
 	assert.NoError(t, parseErr, "Last-Modified must be an HTTP date")
 }
+
+// TestS3_ConditionalRead_EchoedLastModified pins that a date precondition compares at
+// the resolution Last-Modified is rendered in. The object is written at a half-second,
+// the header drops the fraction, and a caller echoing the header back must get the
+// answer for the object it came from: 304 for If-Modified-Since, 200 for
+// If-Unmodified-Since.
+func TestS3_ConditionalRead_EchoedLastModified(t *testing.T) {
+	srv := condFixture(t, "cond-echo")
+	require.Equal(t, http.StatusOK, s3Request(t, srv, http.MethodPost, "/v1/control/time",
+		[]byte(`{"time":"2026-01-01T12:00:00.5Z","frozen":true}`), nil).Code)
+	putCondObject(t, srv, "cond-echo", "obj", "body")
+
+	lastModified := s3Request(t, srv, http.MethodHead, "/cond-echo/obj", nil, nil).Header().Get("Last-Modified")
+	require.Equal(t, "Thu, 01 Jan 2026 12:00:00 GMT", lastModified)
+
+	for _, verb := range []string{http.MethodGet, http.MethodHead} {
+		assert.Equal(t, http.StatusNotModified, s3Request(t, srv, verb, "/cond-echo/obj", nil,
+			map[string]string{"If-Modified-Since": lastModified}).Code, verb)
+		assert.Equal(t, http.StatusOK, s3Request(t, srv, verb, "/cond-echo/obj", nil,
+			map[string]string{"If-Unmodified-Since": lastModified}).Code, verb)
+	}
+}

@@ -1167,6 +1167,9 @@ func (p *S3Plugin) putObject(reqCtx *RequestContext, req *AWSRequest, bucket, ke
 	if err := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, data); err != nil {
 		return nil, fmt.Errorf("save object metadata: %w", err)
 	}
+	if err := p.supersedeSeededObject(ctx, bucket, key); err != nil {
+		return nil, err
+	}
 
 	// A PUT replaces the whole object, its ACL included, so an overwrite that names no
 	// ACL resets one a previous PutObjectAcl had set rather than inheriting it. See
@@ -1217,12 +1220,16 @@ func (p *S3Plugin) getObject(_ *RequestContext, req *AWSRequest, bucket, key str
 	var obj S3Object
 	var body []byte
 	if data == nil {
-		// No real object at this key: a GET of tasks/<task_id>/completion.json may
-		// be a seedable spore.host task-completion observation (#360). A real
-		// staged object always wins, so this only runs when the key is absent.
+		// No real object at this key, so a seeded one may answer; see
+		// [S3Plugin.resolveSeededObject]. A seed has no version history, so a GET
+		// naming a version never reaches it.
 		var handled bool
 		if versionID == "" {
-			obj, body, handled = p.resolveTaskCompletion(ctx, key)
+			var seedErr error
+			obj, body, handled, seedErr = p.resolveSeededObject(ctx, bucket, key)
+			if seedErr != nil {
+				return nil, seedErr
+			}
 		}
 		if !handled {
 			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
@@ -1314,19 +1321,18 @@ func (p *S3Plugin) headObject(_ *RequestContext, req *AWSRequest, bucket, key st
 
 	var obj S3Object
 	if data == nil {
-		// Mirror getObject: no real object at this key, so a HEAD of
-		// tasks/<task_id>/completion.json may be a seedable spore.host
-		// task-completion observation (#360). HEAD has to consult the same resolver
-		// GET does, because HEAD and GET disagreeing about whether a key exists is
-		// something real S3 never does — and `aws s3 cp` HEADs before it GETs, so a
-		// HEAD-only 404 made a synthesized record unreadable through the CLI (#457).
-		//
-		// The body is discarded: the resolver returns a fully-populated S3Object, so
-		// Content-Length, ETag and Content-Type below match what GET reports, and the
-		// clock gate that makes a not-yet-complete record absent applies identically.
+		// Mirror getObject: a seeded object may answer. HEAD consults the same
+		// resolver GET does, because HEAD and GET disagreeing about whether a key
+		// exists is something real S3 never does, and `aws s3 cp` HEADs before it
+		// GETs (#457). The body is discarded; the resolver's S3Object carries the
+		// Content-Length, ETag and Content-Type GET reports.
 		var handled bool
 		if versionID == "" {
-			obj, _, handled = p.resolveTaskCompletion(ctx, key)
+			var seedErr error
+			obj, _, handled, seedErr = p.resolveSeededObject(ctx, bucket, key)
+			if seedErr != nil {
+				return nil, seedErr
+			}
 		}
 		if !handled {
 			return s3ErrorResponse("NoSuchKey", "The specified key does not exist.", http.StatusNotFound), nil
@@ -1430,6 +1436,9 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 		if putErr := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, markerData); putErr != nil {
 			return nil, fmt.Errorf("update current to delete marker: %w", putErr)
 		}
+		if err := p.supersedeSeededObject(ctx, bucket, key); err != nil {
+			return nil, err
+		}
 		vids := p.loadVersionIDs(ctx, bucket, key)
 		vids = append([]string{markerVersionID}, vids...)
 		if err := p.saveVersionIDs(ctx, bucket, key, vids); err != nil {
@@ -1448,6 +1457,11 @@ func (p *S3Plugin) deleteObject(reqCtx *RequestContext, req *AWSRequest, bucket,
 	_ = p.state.Delete(ctx, s3Namespace, "object:"+bucket+"/"+key)
 	if s3ObjectHasBody(key) {
 		_ = p.fs.Remove("/" + bucket + "/" + key)
+	}
+	// A delete of a key a seed answers removes that object too; see
+	// [S3Plugin.supersedeSeededObject].
+	if err := p.supersedeSeededObject(ctx, bucket, key); err != nil {
+		return nil, err
 	}
 
 	p.fireNotifications(reqCtx, bucket, key, "s3:ObjectRemoved:Delete", 0, "")
@@ -1550,7 +1564,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	if srcErr != nil {
 		return srcErr, nil
 	}
-	srcObj, missing, err := p.loadS3CopySourceObject(ctx, src)
+	srcObj, seededBody, missing, err := p.loadS3CopySourceObject(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -1665,7 +1679,7 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	// marker key records only state. srcBody stays nil for a marker source, which is
 	// the body it has, so the ETag and checksum below are computed over the right
 	// bytes either way.
-	srcBody, err := p.readS3CopySourceBody(src)
+	srcBody, err := p.readS3CopySourceBody(src, seededBody)
 	if err != nil {
 		return nil, err
 	}
@@ -1718,6 +1732,9 @@ func (p *S3Plugin) copyObject(_ *RequestContext, req *AWSRequest, dstBucket, dst
 	}
 	if err := p.state.Put(ctx, s3Namespace, "object:"+dstBucket+"/"+dstKey, dstMeta); err != nil {
 		return nil, fmt.Errorf("save dest metadata: %w", err)
+	}
+	if err := p.supersedeSeededObject(ctx, dstBucket, dstKey); err != nil {
+		return nil, err
 	}
 
 	if err := p.s3StoreObjectACL(ctx, dstBucket, dstKey, dstACL); err != nil {
@@ -2169,7 +2186,7 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 	if srcErr != nil {
 		return srcErr, nil
 	}
-	srcObj, missing, err := p.loadS3CopySourceObject(ctx, src)
+	srcObj, seededBody, missing, err := p.loadS3CopySourceObject(ctx, src)
 	if err != nil {
 		return nil, err
 	}
@@ -2191,7 +2208,7 @@ func (p *S3Plugin) uploadPartCopy(_ *RequestContext, req *AWSRequest, bucket, ke
 		return s3PreconditionFailedResponse(), nil
 	}
 
-	srcBody, err := p.readS3CopySourceBody(src)
+	srcBody, err := p.readS3CopySourceBody(src, seededBody)
 	if err != nil {
 		return nil, err
 	}
@@ -2660,6 +2677,9 @@ func (p *S3Plugin) completeMultipartUpload(_ *RequestContext, req *AWSRequest, b
 	}
 	if err := p.state.Put(ctx, s3Namespace, "object:"+bucket+"/"+key, objData); err != nil {
 		return nil, fmt.Errorf("save assembled object metadata: %w", err)
+	}
+	if err := p.supersedeSeededObject(ctx, bucket, key); err != nil {
+		return nil, err
 	}
 
 	// The ACL crosses from the upload the same way the metadata families do, and for

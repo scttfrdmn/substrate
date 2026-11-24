@@ -50,23 +50,6 @@ func TestReplayEngine_ReplayWithStateManager(t *testing.T) {
 	assert.Equal(t, 1, results.TotalEvents)
 }
 
-func TestReplayEngine_RandFloat64(t *testing.T) {
-	engine := newTestEngine(t)
-	for range 10 {
-		v := engine.RandFloat64()
-		assert.GreaterOrEqual(t, v, 0.0)
-		assert.Less(t, v, 1.0)
-	}
-}
-
-func TestReplayEngine_RandInt64(t *testing.T) {
-	engine := newTestEngine(t)
-	for range 10 {
-		v := engine.RandInt64()
-		assert.GreaterOrEqual(t, v, int64(0))
-	}
-}
-
 func TestReplayEngine_StartStopRecording(t *testing.T) {
 	engine := newTestEngine(t)
 	ctx := context.Background()
@@ -302,33 +285,4 @@ func TestReplayEngine_ValidateState_HashMismatch(t *testing.T) {
 	require.NoError(t, err)
 	// Hash mismatch differences are recorded; StateValid set to false.
 	assert.False(t, results.StateValid)
-}
-
-func TestReplayEngine_RandWithSeed(t *testing.T) {
-	// After Replay() with RandomSeed set, r.rng is initialized;
-	// RandFloat64/RandInt64 use the deterministic seeded path.
-	store := emulator.NewEventStore(emulator.EventStoreConfig{Enabled: true, Backend: "memory"})
-	ctx := context.Background()
-	const streamID = "seed-stream"
-
-	require.NoError(t, store.RecordEvent(ctx, &emulator.Event{
-		StreamID:  streamID,
-		Service:   "s3",
-		Operation: "Get",
-		Timestamp: time.Now(),
-	}))
-
-	tc := emulator.NewTimeController(time.Now())
-	engine := emulator.NewReplayEngine(store, nil, tc, emulator.NewPluginRegistry(),
-		emulator.ReplayConfig{RandomSeed: 42}, &testLogger{})
-
-	_, err := engine.Replay(ctx, streamID)
-	require.NoError(t, err)
-
-	v := engine.RandFloat64()
-	assert.GreaterOrEqual(t, v, 0.0)
-	assert.Less(t, v, 1.0)
-
-	n := engine.RandInt64()
-	assert.GreaterOrEqual(t, n, int64(0))
 }

@@ -300,7 +300,7 @@ func TestAPIGatewayProxy_EndToEnd(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 
-	// Create a Lambda function (stub; Docker not required).
+	// Create a Lambda function.
 	fnName := fmt.Sprintf("proxy-e2e-fn-%d", time.Now().UnixNano())
 	proxyCreateLambdaFunction(t, ts, fnName)
 
@@ -359,7 +359,7 @@ func TestAPIGatewayProxy_V2EndToEnd(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
 
-	// Create a Lambda function (stub; Docker not required).
+	// Create a Lambda function.
 	fnName := fmt.Sprintf("proxy-v2-fn-%d", time.Now().UnixNano())
 	proxyCreateLambdaFunction(t, ts, fnName)
 

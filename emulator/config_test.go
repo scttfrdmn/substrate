@@ -68,6 +68,49 @@ func TestLoadConfig_EnvOverride(t *testing.T) {
 	assert.Equal(t, "warn", cfg.Log.Level)
 }
 
+// TestLoadConfig_RemovedKeysWarn pins that a key substrate no longer reads still loads, and
+// is reported in Config.Warnings rather than ignored silently, whether the file or the
+// environment sets it (#1611).
+func TestLoadConfig_RemovedKeysWarn(t *testing.T) {
+	tests := []struct {
+		name  string
+		yaml  string
+		env   map[string]string
+		wants []string
+	}{
+		{name: "nothing removed is set", yaml: "log:\n  level: debug\n"},
+		{
+			name: "every removed key in the file",
+			yaml: "lambda:\n  docker_enabled: true\n  replay_mode: recorded\n  warm_pool_ttl: 1m\n" +
+				"rds:\n  engine: container\nreplay:\n  random_seed: 42\n",
+			wants: []string{"lambda.docker_enabled", "lambda.replay_mode", "lambda.warm_pool_ttl",
+				"rds.engine", "replay.random_seed"},
+		},
+		{
+			name:  "a removed key in the environment",
+			yaml:  "log:\n  level: debug\n",
+			env:   map[string]string{"SUBSTRATE_LAMBDA_DOCKER_ENABLED": "true", "SUBSTRATE_RDS_ENGINE": "container"},
+			wants: []string{"lambda.docker_enabled", "rds.engine"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for k, v := range tt.env {
+				t.Setenv(k, v)
+			}
+			path := filepath.Join(t.TempDir(), "substrate.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.yaml), 0o600))
+
+			cfg, err := emulator.LoadConfig(path)
+			require.NoError(t, err, "a removed key must not stop the server starting")
+			require.Len(t, cfg.Warnings, len(tt.wants), "%q", cfg.Warnings)
+			for i, key := range tt.wants {
+				assert.Contains(t, cfg.Warnings[i], "config key "+key+" was removed and is ignored")
+			}
+		})
+	}
+}
+
 func TestLoadConfig_MissingFile(t *testing.T) {
 	_, err := emulator.LoadConfig("/nonexistent/path/substrate.yaml")
 	require.Error(t, err)
@@ -181,7 +224,6 @@ func TestReplayCfg_Defaults(t *testing.T) {
 	assert.False(t, cfg.Replay.ValidateState,
 		"off deliberately: a comparison needs event_store.include_state_hashes, itself off by default")
 	assert.False(t, cfg.Replay.UseSnapshots, "a replay re-executes the stream from empty state")
-	assert.Equal(t, int64(0), cfg.Replay.RandomSeed, "unseeded, as every replay has been")
 
 	assert.Equal(t, emulator.ReplayConfig{}, cfg.Replay.ToReplayConfig(),
 		"the defaults must reproduce the zero value the command used before the section existed")
@@ -196,14 +238,12 @@ func TestReplayCfg_ToReplayConfig(t *testing.T) {
 		StopOnError:     true,
 		ValidateState:   true,
 		UseSnapshots:    true,
-		RandomSeed:      99,
 	}.ToReplayConfig()
 
 	assert.Equal(t, 2.5, rc.SpeedMultiplier)
 	assert.True(t, rc.StopOnError)
 	assert.True(t, rc.ValidateState)
 	assert.True(t, rc.UseSnapshots)
-	assert.Equal(t, int64(99), rc.RandomSeed)
 }
 
 // TestLoadConfig_ReplaySection covers the round trip the section exists for: a
@@ -216,7 +256,6 @@ replay:
   stop_on_error: true
   validate_state: true
   use_snapshots: true
-  random_seed: 4242
 `
 	path := filepath.Join(t.TempDir(), "substrate.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o600))
@@ -228,7 +267,6 @@ replay:
 		StopOnError:     true,
 		ValidateState:   true,
 		UseSnapshots:    true,
-		RandomSeed:      4242,
 	}, cfg.Replay.ToReplayConfig())
 
 	// A config file with no replay: block keeps the defaults.

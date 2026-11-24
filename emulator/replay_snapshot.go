@@ -32,7 +32,7 @@ type replaySnapshotter interface {
 }
 
 // errReplaySnapshotUnsupported reports plugin state a replay snapshot cannot capture,
-// such as a filesystem the caller injected or a running container.
+// such as a filesystem the caller injected.
 var errReplaySnapshotUnsupported = errors.New("plugin state cannot be snapshotted for replay")
 
 // snapshotInterval returns how many events apart the engine takes snapshots, from the
@@ -275,11 +275,8 @@ func (p *SESv2Plugin) restoreForReplay(_ context.Context, v any) error {
 }
 
 // snapshotForReplay copies the set of event-source mappings [LambdaPlugin.RunDue] polls.
-// Their poll cursors are in the state manager. A warm container cannot be captured.
+// Their poll cursors are in the state manager.
 func (p *LambdaPlugin) snapshotForReplay() (any, error) {
-	if p.executor != nil {
-		return nil, errReplaySnapshotUnsupported
-	}
 	p.esmMu.Lock()
 	defer p.esmMu.Unlock()
 	active := make(map[string]struct{}, len(p.esmActive))
@@ -305,15 +302,3 @@ func (p *LambdaPlugin) restoreForReplay(_ context.Context, v any) error {
 	p.esmMu.Unlock()
 	return nil
 }
-
-// snapshotForReplay captures nothing for the stub engine. A running container cannot be
-// captured.
-func (p *RDSPlugin) snapshotForReplay() (any, error) {
-	if p.executor != nil {
-		return nil, errReplaySnapshotUnsupported
-	}
-	return nil, nil
-}
-
-// restoreForReplay is a no-op for the stub engine, which keeps no run state.
-func (p *RDSPlugin) restoreForReplay(_ context.Context, _ any) error { return nil }

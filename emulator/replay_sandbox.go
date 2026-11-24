@@ -75,9 +75,7 @@ func WithSandboxReplayConfig(rc ReplayConfig) ReplaySandboxOption {
 // configuration the recording server ran with; nil means [DefaultConfig]. Its quotas,
 // consistency and fault sections decide how those gates are re-decided, so a sandbox
 // for a server that ran without one of those controllers must be given a configuration
-// that turns it off; [TestServer.ReplaySandbox] does this for a test server. The Docker
-// Lambda and RDS executors are always off in a sandbox, because a replay must not start
-// containers.
+// that turns it off; [TestServer.ReplaySandbox] does this for a test server.
 func NewReplaySandbox(
 	ctx context.Context,
 	cfg *Config,
@@ -95,8 +93,6 @@ func NewReplaySandbox(
 		copied := *cfg
 		sandboxCfg = &copied
 	}
-	sandboxCfg.Lambda.DockerEnabled = false
-	sandboxCfg.RDS.Engine = "stub"
 
 	state := NewMemoryStateManager()
 	tc := NewTimeController(time.Time{})

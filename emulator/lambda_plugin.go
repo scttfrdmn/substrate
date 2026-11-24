@@ -20,13 +20,12 @@ import (
 // UpdateFunctionCode, UpdateFunctionConfiguration, Invoke, InvokeAsync,
 // AddPermission, RemovePermission, GetPolicy, PutFunctionEventInvokeConfig,
 // TagResource, UntagResource, ListTags, and event source mappings.
-// When a LambdaExecutor is configured (Docker enabled) real function code is
-// executed; otherwise stub responses are returned.
+// Function code never runs: Invoke answers a seeded result or error, or a stub
+// payload; see [LambdaPlugin.invoke].
 type LambdaPlugin struct {
 	state    StateManager
 	logger   Logger
 	tc       *TimeController
-	executor *LambdaExecutor // nil when Docker is disabled
 	registry *PluginRegistry // for SQS ESM polls
 	// esmMu guards esmActive, the enabled SQS mappings [LambdaPlugin.RunDue] polls.
 	esmMu     sync.Mutex
@@ -50,9 +49,6 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	} else {
 		p.tc = NewTimeController(time.Now())
 	}
-	if exec, ok := cfg.Options["lambda_exec"].(*LambdaExecutor); ok {
-		p.executor = exec
-	}
 	if reg, ok := cfg.Options["registry"].(*PluginRegistry); ok {
 		p.registry = reg
 	}
@@ -60,82 +56,26 @@ func (p *LambdaPlugin) Initialize(_ context.Context, cfg PluginConfig) error {
 	return nil
 }
 
-// Shutdown stops all ESM pollers and the Docker executor (if active).
+// Shutdown stops all ESM pollers.
 func (p *LambdaPlugin) Shutdown(_ context.Context) error {
 	p.stopAllPollers()
-
-	if p.executor != nil {
-		p.executor.StopAll()
-	}
 	return nil
 }
 
-// ResetForRun stops every event-source-mapping poller and drops the executor's warm
-// containers — the two pieces of state Lambda keeps outside the [StateManager]. It
-// implements [ResettablePlugin]; see [ReplayEngine.resetState] for why a replay
-// needs it, and #903 for the decision.
+// ResetForRun stops every event-source-mapping poller, the one piece of state Lambda
+// keeps outside the [StateManager]. It implements [ResettablePlugin]; see
+// [ReplayEngine.resetState] for why a replay needs it, and #903 for the decision.
 //
 // A poller has to stop because the reset has just deleted the mapping record that
-// owned it. DeleteEventSourceMapping is the only call that closes a stop channel,
-// and it answers ResourceNotFoundException once the record is gone, so the
-// goroutine becomes unreachable through the API: it keeps polling on a one-second
-// wall-clock ticker for the life of the process. Both the queue URL it polls and
-// the function ARN it invokes are derived from names, so a later test case that
-// reuses those names has its messages received and deleted, and its function
-// invoked, by a poller it never created — a cross-case leak whose timing depends on
-// real elapsed time.
-//
-// The warm pool has to be dropped because it is keyed by function ARN alone. A
-// function recreated under the same name after a reset would be invoked in the
-// previous run's container, running the previous run's code. Dropping a warm
-// container is always safe: the next invocation starts a fresh one.
-//
-// That last paragraph described a defect as well as a reason, and scoping it to the
-// reset boundary was half a fix (#1035): two ordinary API calls in one run reach the
-// same stale container, with no reset involved. The other half is
-// [LambdaPlugin.evictWarmContainer], called by the three operations that can leave a
-// running container holding code or configuration the function no longer has.
+// owned it. DeleteEventSourceMapping is the only call that removes a mapping from the
+// polled set, and it answers ResourceNotFoundException once the record is gone, so the
+// poller becomes unreachable through the API. Both the queue URL it polls and the function
+// ARN it invokes are derived from names, so a later test case that reuses those
+// names would have its messages received and deleted, and its function invoked, by
+// a poller it never created.
 func (p *LambdaPlugin) ResetForRun(_ context.Context) error {
 	p.stopAllPollers()
-
-	if p.executor != nil {
-		p.executor.DrainPool()
-	}
 	return nil
-}
-
-// evictWarmContainer drops the warm container a function's later invocations would
-// otherwise reuse, after an operation that changed what that container should be running.
-//
-// Three operations call it, and the boundary between them and the rest of the plugin is what
-// the container is started from rather than what the API publishes as mutable:
-//
-//   - `UpdateFunctionCode` — the container was started with the old ZIP mounted at
-//     /var/task (`startZIPContainer`) or the old image URI in its `docker run`
-//     (`startImageContainer`). Nothing about a running container follows the new bytes.
-//   - `UpdateFunctionConfiguration` — `Runtime` chooses the image through [runtimeToImage],
-//     `Handler` is passed as both an environment variable and the container's command
-//     argument, and every entry of `Environment` is a `-e` flag. All three are fixed at
-//     `docker run` time on both paths. `MemorySize` and `Timeout` reach no container at all,
-//     so they are the two members that would not need this; the eviction is unconditional
-//     anyway, because deciding per-member means comparing against a [containerHandle] that
-//     stores none of them, and a needless restart costs one cold start where a missed one
-//     serves the wrong answer.
-//   - `DeleteFunction` — the ARN is derived from account, Region and name, so a function
-//     recreated under the same name inherits the dead one's pool entry. This is the
-//     name-derived-key trap #903 fixed for pollers, on the live path.
-//
-// `PublishVersion` and the alias operations are deliberately absent: substrate's pool is
-// keyed by the unqualified function ARN and its invoke path resolves a qualifier to the same
-// function record, so neither changes what a container should be running.
-//
-// The nil check is not defensive — the executor is absent whenever Docker execution is not
-// configured, which includes every test run in CI.
-func (p *LambdaPlugin) evictWarmContainer(accountID, region, name string) {
-	if p.executor == nil {
-		return
-	}
-	p.executor.Evict(lambdaFunctionARN(region, accountID, name))
 }
 
 // stopAllPollers forgets every mapping [LambdaPlugin.RunDue] polls. It is safe on a plugin
@@ -323,9 +263,8 @@ func (p *LambdaPlugin) createFunction(ctx *RequestContext, req *AWSRequest) (*AW
 			}
 		}
 	} else if body.Code.S3Bucket != "" {
-		// The bytes are not staged for execution — that is what ZipStored records and
-		// it stays false — but the object is usually in substrate's own S3, so its
-		// length is knowable even though the package is not fetched.
+		// The package is not copied, so ZipStored stays false, but the object is usually
+		// in substrate's own S3, so its length is knowable without fetching it.
 		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.Code.S3Bucket, body.Code.S3Key, body.Code.S3ObjectVersion)
 	} else if imageURI != "" {
 		// The same rule UpdateFunctionCode applies: an image function's package is the
@@ -439,9 +378,8 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 			}
 		}
 	case body.S3Bucket != "":
-		// The bytes are not staged for execution — that is what ZipStored records and
-		// it stays false — but the object is usually in substrate's own S3, so its
-		// length is knowable even though the package is not fetched.
+		// The package is not copied, so ZipStored stays false, but the object is usually
+		// in substrate's own S3, so its length is knowable without fetching it.
 		fn.CodeSize, fn.CodeSha256 = p.sizeS3Package(body.S3Bucket, body.S3Key, body.S3ObjectVersion)
 		fn.ZipStored = false
 	}
@@ -461,9 +399,6 @@ func (p *LambdaPlugin) updateFunctionCode(ctx *RequestContext, req *AWSRequest, 
 	if err != nil {
 		return nil, err
 	}
-	// After the write, not before: a save that failed stored no new code, so the warm container is
-	// still running what the function has. The eviction follows the state change it is about (#1035).
-	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
 	return resp, nil
 }
 
@@ -529,9 +464,6 @@ func (p *LambdaPlugin) updateFunctionConfiguration(ctx *RequestContext, req *AWS
 	if err != nil {
 		return nil, err
 	}
-	// Handler, Runtime and Environment are fixed at `docker run` time; see
-	// [LambdaPlugin.evictWarmContainer] for why this is unconditional rather than per-member (#1035).
-	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
 	return resp, nil
 }
 
@@ -553,17 +485,9 @@ func (p *LambdaPlugin) deleteFunction(ctx *RequestContext, name string) (*AWSRes
 		lambdaPolicyStateKey(ctx.AccountID, ctx.Region, name))
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
 		lambdaInvokeConfigStateKey(ctx.AccountID, ctx.Region, name))
-	// The ZIP outlived every other trace of the function before #1035, so the bytes of every deleted
-	// function accumulated for the life of the process. No stale read followed from it — the invoke
-	// path is gated on ZipStored, which a function recreated under the same name sets for itself — so
-	// this was a leak rather than a wrong answer, and it is released here because a deployment package
-	// is part of the function AWS says this operation deletes.
+	// A deployment package is part of the function AWS says this operation deletes (#1035).
 	_ = p.state.Delete(context.Background(), lambdaNamespace,
 		lambdaZipStateKey(ctx.AccountID, ctx.Region, name))
-
-	// The pool is keyed by an ARN derived from the name, so a function recreated under this one would
-	// otherwise be invoked in the deleted function's container (#1035).
-	p.evictWarmContainer(ctx.AccountID, ctx.Region, name)
 	return &AWSResponse{StatusCode: http.StatusNoContent, Headers: map[string]string{}, Body: nil}, nil
 }
 
@@ -684,53 +608,27 @@ func (p *LambdaPlugin) invoke(ctx *RequestContext, req *AWSRequest, name string)
 		return nil, err
 	}
 
-	payload := req.Body
-
-	// A seeded failure short-circuits every path below: substrate never runs the
-	// handler, so seeding is the only way a caller's error branch becomes
-	// reachable. The status stays 200 — per the Invoke reference, "the status code
-	// in the API response doesn't reflect function errors".
-	seed, seedErr := p.resolveSeededError(fn.FunctionName)
+	// Substrate never runs the handler, so a seed is the only way a caller's error
+	// branch, or a specific success payload, becomes reachable; see
+	// [LambdaPlugin.resolveInvokeSeeds] for which seed wins. A seeded failure still
+	// answers 200 — per the Invoke reference, "the status code in the API response
+	// doesn't reflect function errors". With no seed, the stub payload is the nominal
+	// success.
+	seededErr, seededResult, seedErr := p.resolveInvokeSeeds(fn.FunctionName)
 	if seedErr != nil {
 		return nil, seedErr
 	}
-	if seed != nil {
-		body := seed.errorPayload(ctx.RequestID)
-		return invokeResponse(body, seed.functionErrorHeader(),
+	if seededErr != nil {
+		body := seededErr.errorPayload(ctx.RequestID)
+		return invokeResponse(body, seededErr.functionErrorHeader(),
 			lambdaLogTail(req, fn, ctx.RequestID, true)), nil
 	}
-
-	// Stub path: no executor or Docker unavailable.
-	if p.executor == nil || !p.executor.isDockerAvailable() {
-		stubPayload := []byte(`{"statusCode":200,"body":"null"}`)
-		return invokeResponse(stubPayload, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
+	if seededResult != nil {
+		return invokeResponse(seededResult.body(), "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
 	}
 
-	// Recorded replay: return cached result when available.
-	if p.executor.cfg.ReplayMode == "recorded" {
-		if cached, ok := p.loadReplay(fn.FunctionArn, payload); ok {
-			return invokeResponse(cached, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
-		}
-	}
-
-	// Load stored ZIP bytes (nil for Image-type functions).
-	var zipBytes []byte
-	if fn.ZipStored {
-		zipBytes, _ = p.state.Get(context.Background(), lambdaNamespace,
-			lambdaZipStateKey(ctx.AccountID, ctx.Region, name))
-	}
-
-	result, funcErr, execErr := p.executor.Execute(context.Background(), fn, zipBytes, payload)
-	if execErr != nil {
-		return nil, fmt.Errorf("lambda invoke execute: %w", execErr)
-	}
-
-	// Cache result for future "recorded" replays.
-	if err := p.saveReplay(fn.FunctionArn, payload, result); err != nil {
-		return nil, fmt.Errorf("lambda invoke saveReplay: %w", err)
-	}
-
-	return invokeResponse(result, funcErr, lambdaLogTail(req, fn, ctx.RequestID, funcErr != "")), nil
+	stubPayload := []byte(`{"statusCode":200,"body":"null"}`)
+	return invokeResponse(stubPayload, "", lambdaLogTail(req, fn, ctx.RequestID, false)), nil
 }
 
 func (p *LambdaPlugin) invokeAsync(_ string) (*AWSResponse, error) {
