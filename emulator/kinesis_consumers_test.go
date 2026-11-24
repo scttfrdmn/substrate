@@ -329,3 +329,22 @@ func TestKinesisResourceTags_StreamsAndConsumers(t *testing.T) {
 		t.Run(name, func(t *testing.T) { ksRefusal(t, ts, tc.op, tc.body, tc.code) })
 	}
 }
+
+func TestKinesisConsumers_AnARNSeedGovernsOneConsumer(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ksOK(t, ts, "CreateStream", map[string]any{"StreamName": "arnseed", "ShardCount": 1})
+	a := ksRegister(t, ts, "arnseed", "a")
+	b := ksRegister(t, ts, "arnseed", "b")
+	seed := `{"consumerARN":"` + a.ConsumerARN + `","pendingObservations":1}`
+	ksControl(t, ts, http.MethodPost, "/v1/kinesis/consumer-status", seed)
+	assert.Equal(t, "CREATING", ksDescribeConsumer(t, ts, map[string]any{"ConsumerARN": a.ConsumerARN}).ConsumerStatus)
+	assert.Equal(t, "ACTIVE", ksDescribeConsumer(t, ts, map[string]any{"ConsumerARN": b.ConsumerARN}).ConsumerStatus,
+		"an ARN seed governs only its consumer")
+	assert.Equal(t, "ACTIVE", ksDescribeConsumer(t, ts, map[string]any{"ConsumerARN": a.ConsumerARN}).ConsumerStatus)
+
+	ksControl(t, ts, http.MethodPost, "/v1/kinesis/consumer-status", seed)
+	ksControl(t, ts, http.MethodDelete, "/v1/kinesis/consumer-status?consumer="+a.ConsumerARN, "")
+	assert.Equal(t, "ACTIVE", ksDescribeConsumer(t, ts, map[string]any{"ConsumerARN": a.ConsumerARN}).ConsumerStatus,
+		"clearing the ARN seed settles the consumer")
+}

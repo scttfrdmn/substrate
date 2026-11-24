@@ -158,3 +158,30 @@ func TestKinesisListShards_ShardFilterReadsTheReshardHistory(t *testing.T) {
 	out := ksOK(t, ts, "DescribeStream", map[string]any{"StreamName": "lf"})
 	assert.Contains(t, string(out), parents[0])
 }
+
+func TestKinesisListShards_ATokenKeepsItsFilter(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	ts.FreezeTimeAt(time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC))
+	ksOK(t, ts, "CreateStream", map[string]any{"StreamName": "lk", "ShardCount": 3})
+	filter := map[string]any{"Type": "FROM_TIMESTAMP", "Timestamp": 1772323200.5}
+	_, token := ksListShards(t, ts, map[string]any{"StreamName": "lk", "ShardFilter": filter, "MaxResults": 1})
+	require.NotEmpty(t, token)
+
+	// The same filter is accepted beside the token, and a follow-up without one keeps the token's.
+	ids, _ := ksListShards(t, ts, map[string]any{"NextToken": token, "ShardFilter": filter})
+	assert.Equal(t, []string{"shardId-000000000001", "shardId-000000000002"}, ids)
+	ids, _ = ksListShards(t, ts, map[string]any{"NextToken": token})
+	assert.Len(t, ids, 2)
+
+	for name, other := range map[string]map[string]any{
+		"another timestamp": {"Type": "FROM_TIMESTAMP", "Timestamp": 1772323201},
+		"another type":      {"Type": "AT_TIMESTAMP", "Timestamp": 1772323200.5},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ksRefusal(t, ts, "ListShards", map[string]any{"NextToken": token, "ShardFilter": other}, "InvalidArgumentException")
+		})
+	}
+	_, plain := ksListShards(t, ts, map[string]any{"StreamName": "lk", "MaxResults": 1})
+	ksRefusal(t, ts, "ListShards", map[string]any{"NextToken": plain, "ShardFilter": filter}, "InvalidArgumentException")
+}

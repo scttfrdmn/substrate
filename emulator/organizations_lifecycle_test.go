@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"errors"
 	"net/http"
 	"testing"
 
@@ -238,6 +239,49 @@ func TestOrganizations_DeleteOrganizationLeavesFullAWSAccessToOtherOrganizations
 	assert.Len(t, targets.Targets, 2, "the other organization's root and account keep their attachment: %v", targets.Targets)
 	for _, target := range targets.Targets {
 		assert.NotEqual(t, orgManagementAccount, target["TargetId"], "the deleted organization's account is no longer a target")
+	}
+}
+
+// TestOrganizations_LifecycleStoreFailuresPropagate asserts a store failure in a create or a delete
+// is reported as one rather than as an organization created, deleted or absent.
+func TestOrganizations_LifecycleStoreFailuresPropagate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, op, prefix string
+		get, put, del    bool
+		list             bool
+	}{
+		{"create clears the marker", "CreateOrganization", "org_deleted:", false, false, true, false},
+		{"create writes the organization", "CreateOrganization", "org:", false, true, false, false},
+		{"delete reads the accounts", "DeleteOrganization", "account_ids:", true, false, false, false},
+		{"delete reads the OUs", "DeleteOrganization", "ou_ids:", true, false, false, false},
+		{"delete reads the policies", "DeleteOrganization", "policy_ids:", true, false, false, false},
+		{"delete reads the requests", "DeleteOrganization", "car_ids:", true, false, false, false},
+		{"delete reads the resource policy", "DeleteOrganization", "resource_policy:", true, false, false, false},
+		{"delete reads the attachments", "DeleteOrganization", "attachments:", true, false, false, false},
+		{"delete removes a record", "DeleteOrganization", "children:", false, false, true, false},
+		{"delete writes the marker", "DeleteOrganization", "org_deleted:", false, true, false, false},
+		{"service access reads the list", "ListAWSServiceAccessForOrganization", "service_access:", true, false, false, false},
+		{"service access writes the list", "EnableAWSServiceAccess", "service_access:", false, true, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			state := &errOrgState{inner: emulator.NewMemoryStateManager(), prefix: tc.prefix,
+				err: errors.New("store unavailable"), onGet: tc.get, onPut: tc.put, onDelete: tc.del, onList: tc.list}
+			p := newOrgFaultFixture(t, state)
+			if tc.op != "CreateOrganization" {
+				_, err := p.EnsureOrganizationForTest(t.Context(), orgTestAccount)
+				require.NoError(t, err)
+			}
+			state.armed = true
+			_, err := p.HandleRequest(&emulator.RequestContext{AccountID: orgTestAccount, Region: "us-east-1"}, &emulator.AWSRequest{
+				Service: "organizations", Operation: tc.op, Body: []byte(`{"ServicePrincipal":"sso.amazonaws.com"}`),
+				Headers: map[string]string{}, Params: map[string]string{},
+			})
+			require.Error(t, err)
+			var awsErr *emulator.AWSError
+			assert.False(t, errors.As(err, &awsErr), "a store failure is not an AWS answer: %v", err)
+		})
 	}
 }
 
