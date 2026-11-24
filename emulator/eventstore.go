@@ -246,6 +246,14 @@ type Event struct {
 
 	// Metadata holds arbitrary key-value data attached to the event.
 	Metadata map[string]interface{} `json:"metadata,omitempty"`
+
+	// ValidationModel names the service-model snapshot the request was validated against —
+	// "botocore/<tag>", the vendored snapshot's version — when the validation gate ran on it
+	// live (#1612). A replay runs the gate only for an event that carries it, with whatever
+	// snapshot the replaying binary holds, so a stream recorded before the gate existed, or
+	// with wire.validate off, replays exactly as it did. Empty for an internal dispatch,
+	// which is never validated.
+	ValidationModel string `json:"validation_model,omitempty"`
 }
 
 // Snapshot captures emulator state at a specific event sequence position,
@@ -439,6 +447,7 @@ type EventRecordOption func(*eventRecordOptions)
 type eventRecordOptions struct {
 	stateHashBefore string
 	stateHashAfter  string
+	validationModel string
 }
 
 // WithStateHashes attaches state hashes taken before and after the request, for
@@ -457,6 +466,16 @@ func WithStateHashes(before, after string) EventRecordOption {
 	return func(o *eventRecordOptions) {
 		o.stateHashBefore = before
 		o.stateHashAfter = after
+	}
+}
+
+// WithValidationModel records that the validation gate ran on the request, against the
+// snapshot named version; see [Event.ValidationModel]. Unlike a state hash it is recorded
+// whatever the store's configuration, because a replay cannot reproduce the request's answer
+// without it.
+func WithValidationModel(version string) EventRecordOption {
+	return func(o *eventRecordOptions) {
+		o.validationModel = version
 	}
 }
 
@@ -499,14 +518,15 @@ func (e *EventStore) RecordRequest(
 		event.Response, event.ResponseBodyOmitted = e.recordedResponse(resp)
 	}
 
+	var o eventRecordOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
 	if e.config.IncludeStateHashes {
-		var o eventRecordOptions
-		for _, opt := range opts {
-			opt(&o)
-		}
 		event.StateHashBefore = o.stateHashBefore
 		event.StateHashAfter = o.stateHashAfter
 	}
+	event.ValidationModel = o.validationModel
 
 	if err != nil {
 		event.Error = err.Error()

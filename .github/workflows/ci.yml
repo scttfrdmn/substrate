@@ -223,6 +223,12 @@ jobs:
       - name: Check the CloudFormation schema table is in sync with its snapshot
         run: make cfn-schema-check
 
+      # The botocore snapshot under emulator/wiremodel is the source of the request-validation
+      # tables (#1612) and of the Scheduler's Query serialization table. Both checks are
+      # offline; only `make wire-model-fetch`, run by hand, touches the network.
+      - name: Check the wire-model and Scheduler Query tables are in sync with their snapshot
+        run: make wire-model-check scheduler-query-model-check
+
       # A doc link to a renamed or deleted identifier still compiles and still reads as
       # authoritative (#1609). It needs the Go toolchain, so it runs here rather than in
       # the wire-bookkeeping job with the other comment gate.

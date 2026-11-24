@@ -25,10 +25,9 @@ package emulator
 //   - A value breaking a documented constraint on the member is ValidationException/400, whose own
 //     description is exactly that: "The supplied input failed to satisfy constraints of an AWS
 //     service." CertificateArn publishes Length 20-2048 and the Pattern below, so this tier is
-//     AWS's own. It also covers an absent CertificateArn, which fails the minimum length — that
-//     is why there is no separate required-member check any more, and it replaces an
-//     InvalidParameterException that ListTagsForCertificate and DescribeCertificate do not
-//     publish at all.
+//     AWS's own. Request validation (wire_validate.go) answers it for a client's request,
+//     including an absent CertificateArn, which every one of these operations requires, and
+//     [acmCheckCertificateARN] answers it in the same words for a request the gate does not see.
 //
 //   - An ARN that satisfies the Pattern but names no certificate is InvalidArnException/400.
 //     This tier is **substrate's reading**. AWS publishes the code on all five operations but
@@ -57,6 +56,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // acmCertificateARNPattern is the Pattern AWS publishes for CertificateArn, anchored.
@@ -72,12 +72,13 @@ import (
 // restriction is published in prose on each page ("This action applies only to the certificate
 // resource type"), and ACM does have other types with their own shapes. See acm_tags.go's
 // preamble.
-var acmCertificateARNPattern = regexp.MustCompile(
-	`^arn:[\w+=/,.@-]+:acm:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)*$`)
+var acmCertificateARNPattern = regexp.MustCompile(`^` + acmCertificateARNPatternText + `$`)
 
-// The published Length range for CertificateArn. Named rather than written inline because the
-// message quotes them, and a message disagreeing with the check it explains is worse than no
-// message.
+// acmCertificateARNPatternText is the published Pattern as the reference and the model write it,
+// which is what a refusal quotes.
+const acmCertificateARNPatternText = `arn:[\w+=/,.@-]+:acm:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)*`
+
+// The published Length range for CertificateArn.
 const (
 	acmCertificateARNMinLen = 20
 	acmCertificateARNMaxLen = 2048
@@ -92,13 +93,16 @@ const (
 // string is wrong and retrying is pointless, the other says the string is fine and the resource
 // is not there. See this file's preamble for which tier is AWS's and which is substrate's reading.
 //
-// Length is checked before the pattern so an oversized value is refused on its size rather than
-// run through a regexp, following [iamValidatePolicyARN].
+// This is the tagging API's check, through [acmResolveARN], and its length and pattern messages
+// are substrate's own; ACM's own operations check the request first with [acmCheckCertificateARN],
+// in ACM's validation form. Length is counted in characters and checked before the pattern so an
+// oversized value is refused on its size rather than run through a regexp, following
+// [iamValidatePolicyARN].
 func acmValidateCertificateARN(arn string) *AWSError {
-	if len(arn) < acmCertificateARNMinLen || len(arn) > acmCertificateARNMaxLen {
+	if n := utf8.RuneCountInString(arn); n < acmCertificateARNMinLen || n > acmCertificateARNMaxLen {
 		return acmValidationError(fmt.Sprintf(
 			"CertificateArn must be between %d and %d characters long, and this one is %d",
-			acmCertificateARNMinLen, acmCertificateARNMaxLen, len(arn)))
+			acmCertificateARNMinLen, acmCertificateARNMaxLen, n))
 	}
 	if !acmCertificateARNPattern.MatchString(arn) {
 		return acmValidationError(fmt.Sprintf(
@@ -124,6 +128,19 @@ func acmValidateCertificateARN(arn string) *AWSError {
 		return acmInvalidARN(arn, "it names something nested under a certificate")
 	}
 	return nil
+}
+
+// acmCheckCertificateARN refuses the CertificateArn of an ACM operation's request: first as request
+// validation would — absent, out of length or off the pattern, in ACM's validation form and byte
+// for byte the gate's answer, because [wireCheckMember] runs the gate's own walk — and then on the
+// tiers no model expresses, through [acmValidateCertificateARN]. The gate answers a client's
+// request before the plugin runs; this answers one the gate did not see, a stack's or a
+// schedule's dispatch or any request with validation off, the same way.
+func acmCheckCertificateARN(req *AWSRequest, arn string) *AWSError {
+	if err := wireCheckMember(req, "CertificateArn"); err != nil {
+		return err
+	}
+	return acmValidateCertificateARN(arn)
 }
 
 // acmCertificateARNAccountRegion returns the account and Region a certificate ARN names.

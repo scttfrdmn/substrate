@@ -48,10 +48,11 @@ the answer was "not found" for a string that could not name a certificate at all
 | Pattern satisfied but naming no certificate: empty Region, another ACM resource type, a type with no identifier, or something nested under a certificate | `InvalidArnException`/400 | **Substrate's** — AWS publishes the code but describes it as *"does not refer to an existing resource"*, which is about non-existence, not syntax |
 | A well-formed certificate ARN with no record | `ResourceNotFoundException`/400 | **AWS's** — *"The specified certificate cannot be found in the caller's account or the caller's account cannot be found"* |
 
-The absent-`CertificateArn` case is refused on the published minimum length rather than by a
-separate required-member check, which is why it no longer answers `InvalidParameterException` — a
-code `ListTagsForCertificate` and `DescribeCertificate` do not publish at all, their error lists
-being three codes long.
+The first tier is answered in ACM's validation form — `1 validation error detected: Value null at
+'certificateArn' failed to satisfy constraint: Member must not be null` for an absent ARN, and the
+length or pattern constraint for the others; see [Request validation](#request-validation) below.
+Request validation answers it for a client's request before the plugin runs, and the plugin
+answers it in the same words for a request that reaches it without the gate.
 
 ACM's own operations and the tagging API's resolver run the same validation, so neither can accept
 an ARN the other refuses. The tagging API renders its refusal as a `FailedResourcesMap` entry
@@ -69,6 +70,39 @@ One answer is deliberately left as it is. ACM publishes `AccessDeniedException` 
 substrate answers it at **403**, from the central authorization check every service shares — moving
 it for one service would have the emulator answer two statuses for one decision, so it is recorded
 here rather than changed.
+
+## Request validation
+
+ACM is validated against its service model before any plugin sees a client's request (#1612; see
+[Request validation](/reference/concepts/validation)). Every failure answers
+`ValidationException`/400, the code every operation taking a certificate publishes with the
+description *"The supplied input failed to satisfy constraints of an AWS service"*.
+`RequestCertificate`'s own Errors section omits it, and ACM answers it there anyway.
+
+| Request | Answer |
+|---|---|
+| A required member absent, or `null` | `1 validation error detected: Value null at 'domainName' failed to satisfy constraint: Member must not be null` |
+| A length or a number out of range | `… Value of the input at 'domainName' failed to satisfy constraint: Member must have length less than or equal to 253` |
+| A value outside an enum (`KeyAlgorithm`, `CertificateStatuses`, …) | `… Member must satisfy enum value set: [RSA_1024, RSA_2048, …]` |
+| A value failing a pattern (a tag's key or value, a `CertificateArn`) | `… Member must satisfy regular expression pattern: …` |
+
+ACM withholds the value ("Value of the input at"), and that form, the `Value null` form for a
+missing member, and ACM's enforcement of enums and patterns are each from ACM's observed answers
+rather than from the reference, which publishes no message text; the sources are cited in
+`emulator/wire_validate_errors.go`. `DomainName`'s published pattern uses a lookahead Go cannot
+compile, so a malformed domain name is not refused on its pattern.
+
+Two of the plugin's own refusals now answer in this form too, because a request the gate does
+not see still reaches them — a stack's dispatch, a schedule's target, the tagging API's resolver —
+and it should get the answer a client gets:
+
+- **`RequestCertificate` with no `DomainName`** answers `ValidationException`, not
+  `InvalidParameterException`.
+- **A `CertificateArn` absent, of the wrong length or off the pattern** answers the constraint it
+  fails rather than substrate's own wording.
+
+`wire.validate: false` (`SUBSTRATE_WIRE_VALIDATE=false`, or `WithoutWireValidation()` on a
+`TestServer`) turns the gate off; those two refusals are then the plugin's, in the same words.
 
 ## DescribeCertificate answers the published shape, with dates as epoch seconds
 

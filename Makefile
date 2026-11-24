@@ -1,4 +1,4 @@
-.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e iac-e2e iac-e2e-setup docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check docs-anchor-fixtures comment-history-check doc-links-check
+.PHONY: build build-substrate build-substratelocal test lint coverage clean tidy vet bench e2e iac-e2e iac-e2e-setup docker-build compose-up compose-down compose-logs python-test python-lint python-build vuln scan-fs scan-image scan-iac sast security docs-reference docs-reference-check docs-headings-check docs-versions docs-counts-check authz-reference authz-reference-check authz-reference-fetch cfn-schema cfn-schema-check cfn-schema-fetch scheduler-query-model scheduler-query-model-check wire-model wire-model-check wire-model-fetch operation-catalog operation-catalog-check operation-docs-check operation-docs-write version-check discarded-unmarshal-check discarded-marshal-check discarded-state-check wire-bookkeeping-check wire-bookkeeping-write tag-releases-check nondeterminism-check docs-anchor-fixtures comment-history-check doc-links-check
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X github.com/scttfrdmn/substrate/emulator.Version=$(VERSION)"
@@ -70,8 +70,20 @@ cfn-schema-check: ## Fail if cfn_schema_gen.go is out of date with emulator/cfns
 cfn-schema-fetch: ## Refresh emulator/cfnschema from AWS (REQUIRES NETWORK; run by hand, never in CI)
 	go run ./cmd/gen-cfn-schema -fetch
 
-scheduler-query-model: ## Regenerate emulator/scheduler_query_model_gen.go from the AWS CLI v2's botocore models (needs `aws` on PATH)
+scheduler-query-model: ## Regenerate emulator/scheduler_query_model_gen.go from the vendored botocore snapshot in emulator/wiremodel
 	go run ./cmd/gen-scheduler-query-model
+
+scheduler-query-model-check: ## Fail if scheduler_query_model_gen.go is out of date with emulator/wiremodel (offline)
+	go run ./cmd/gen-scheduler-query-model -check
+
+wire-model: ## Regenerate emulator/wire_model_gen.go from the vendored botocore snapshot in emulator/wiremodel
+	go run ./cmd/gen-wire-model
+
+wire-model-check: ## Fail if wire_model_gen.go is out of date with emulator/wiremodel (offline)
+	go run ./cmd/gen-wire-model -check
+
+wire-model-fetch: ## Refresh emulator/wiremodel from the pinned botocore tag on GitHub (REQUIRES NETWORK; run by hand, never in CI)
+	go run ./cmd/gen-wire-model -fetch
 
 operation-catalog: ## Regenerate emulator/operation_catalog_gen.go from each plugin's dispatch switch
 	go run ./cmd/gen-operation-catalog

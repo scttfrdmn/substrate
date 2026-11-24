@@ -81,8 +81,11 @@ func (p *ACMPlugin) requestCertificate(ctx *RequestContext, req *AWSRequest) (*A
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if body.DomainName == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "DomainName is required", HTTPStatus: http.StatusBadRequest}
+	// Request validation refuses a client's request with no DomainName, or an empty one, first; a
+	// stack's dispatch, which the gate does not see, is refused in the same words. A longer name
+	// than the model allows is left to the gate, as it always has been for a stack.
+	if err := wireCheckMember(req, "DomainName", wireMissing, wireTooShort); err != nil {
+		return nil, err
 	}
 
 	keyAlgo := body.KeyAlgorithm
@@ -144,7 +147,7 @@ func (p *ACMPlugin) describeCertificate(ctx *RequestContext, req *AWSRequest) (*
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+	if arnErr := acmCheckCertificateARN(req, body.CertificateArn); arnErr != nil {
 		return nil, arnErr
 	}
 
@@ -176,7 +179,7 @@ func (p *ACMPlugin) deleteCertificate(ctx *RequestContext, req *AWSRequest) (*AW
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+	if arnErr := acmCheckCertificateARN(req, body.CertificateArn); arnErr != nil {
 		return nil, arnErr
 	}
 
@@ -273,7 +276,7 @@ func (p *ACMPlugin) addTagsToCertificate(ctx *RequestContext, req *AWSRequest) (
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+	if arnErr := acmCheckCertificateARN(req, body.CertificateArn); arnErr != nil {
 		return nil, arnErr
 	}
 
@@ -323,7 +326,7 @@ func (p *ACMPlugin) removeTagsFromCertificate(ctx *RequestContext, req *AWSReque
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+	if arnErr := acmCheckCertificateARN(req, body.CertificateArn); arnErr != nil {
 		return nil, arnErr
 	}
 
@@ -366,7 +369,7 @@ func (p *ACMPlugin) listTagsForCertificate(ctx *RequestContext, req *AWSRequest)
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, acmInvalidBody()
 	}
-	if arnErr := acmValidateCertificateARN(body.CertificateArn); arnErr != nil {
+	if arnErr := acmCheckCertificateARN(req, body.CertificateArn); arnErr != nil {
 		return nil, arnErr
 	}
 

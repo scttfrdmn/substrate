@@ -560,8 +560,8 @@ anyway.
 
 ### What a replay re-executes
 
-A live request passes through nine pipeline steps before its response is written, and a
-replay does not re-run all of them. Four are re-decided, four are skipped, and one is
+A live request passes through ten pipeline steps before its response is written, and a
+replay does not re-run all of them. Five are re-decided, four are skipped, and one is
 replaced — each for a reason about what the recording settled and what it did not
 (#833):
 
@@ -571,6 +571,7 @@ replaced — each for a reason about what the recording settled and what it did 
 | Quota (`QuotaController.CheckQuota`) | **re-decided**, with the token buckets rewound and the clock at the recorded instant; exact for serialized traffic only |
 | Consistency (`ConsistencyController.CheckRead`) | **re-decided**: replayed writes open their windows and replayed reads are checked against them; exact for serialized traffic only |
 | Fault injection | **re-decided**, with the controller rewound to its armed state |
+| Request validation | **re-decided** for an event whose `validation_model` says it ran live, against the replaying binary's model snapshot; skipped for any other event — see [Request validation](/reference/concepts/validation#replay) |
 | Credential resolution | replaced by principal restoration — the recorded access key resolves to nothing |
 | SigV4 verification | skipped: the canonical request cannot be rebuilt, and the signature was checked once already |
 | Presigned-URL expiry | skipped: a statement about the wall-clock moment the URL was signed |
@@ -1309,6 +1310,25 @@ lenient mode an unemulated type records its properties and creates nothing, as e
 template's did before strict mode existed; the checks CloudFormation itself makes still
 apply. See [Strict mode and template validation](/reference/cloudformation#strict-mode-and-template-validation)
 for every check and where its wording comes from.
+
+## Request Validation
+
+A request to a validated service (ACM today) is checked against its operation's published
+input constraints before any plugin sees it: an absent required member, a length or a number
+out of range, and, where the service opts in, a value outside an enum or a pattern. The refusal
+is the service's own validation error, such as ACM's `ValidationException` with
+`1 validation error detected: Value null at 'domainName' failed to satisfy constraint: Member
+must not be null`. An SDK checks most of these on the client, so a test sees the server's
+answer only over raw HTTP or with client-side validation off.
+
+```go
+ts := emulator.StartTestServer(t, emulator.WithoutWireValidation())
+```
+
+turns it off, as do `wire.validate: false` in `substrate.yaml` and
+`SUBSTRATE_WIRE_VALIDATE=false`. A request CloudFormation or another plugin sends on a caller's
+behalf is never validated. See [Request validation](/reference/concepts/validation) for what
+is checked, the message forms, and how a replay decides whether to validate.
 
 ## Multi-Region
 

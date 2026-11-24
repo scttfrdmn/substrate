@@ -582,7 +582,7 @@ func (r *ReplayEngine) advance(ctx context.Context, replay *ActiveReplay) (bool,
 //
 // # What a replay re-executes, and what it does not
 //
-// A refusal before plugin dispatch is part of what a recorded run means, so four of
+// A refusal before plugin dispatch is part of what a recorded run means, so five of
 // [Server.handleAWSRequest]'s steps run here too, through the same [prePluginGates]
 // the live path uses. The other five read the live *http.Request or the replay's own
 // configuration and are skipped. An internal dispatch (see [isInternalDispatchEvent])
@@ -618,6 +618,8 @@ func (r *ReplayEngine) advance(ctx context.Context, replay *ActiveReplay) (bool,
 //     [FaultController.rewindForReplay]. A latency rule's delay is *not* slept: the
 //     recorded [Event.Duration] is what the live run took, and no replay may consume
 //     wall-clock time.
+//   - **Step 4.6, request validation** — re-decided for an event carrying
+//     [Event.ValidationModel], against this binary's snapshot, and skipped for any other.
 //
 // A replay writes no events, so a refusal here is compared against the recording
 // rather than recorded, and it counts in [ReplayResults.FailedEvents] — which means
@@ -749,6 +751,10 @@ func (r *ReplayEngine) replayEvent(ctx context.Context, event *Event, replay *Ac
 	if internal {
 		gates.quota, gates.consistency, gates.fault = nil, nil, nil
 	}
+	// Validation re-runs only where it ran live: the event says so by carrying the snapshot
+	// version, and an internal dispatch never does. It runs against this binary's snapshot even
+	// when the recorded version differs; see docs/reference/concepts/validation.md.
+	gates.validate = !internal && event.ValidationModel != ""
 	if gate := gates.check(reqCtx, event.Request); gate.err != nil {
 		r.recordErrorDifference(replay, event, gate.err)
 		return true, gate.err
