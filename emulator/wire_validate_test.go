@@ -126,6 +126,35 @@ func TestWireValidation_ACMRefusesWhatTheModelForbids(t *testing.T) {
 	}
 }
 
+// TestWireValidation_ThePluginsOwnChecksAnswerInTheGatesWords pins that ACM's handler, which a
+// dispatch on a caller's behalf reaches without the gate, refuses what the gate refuses with the
+// same code and message.
+func TestWireValidation_ThePluginsOwnChecksAnswerInTheGatesWords(t *testing.T) {
+	ts := emulator.StartTestServer(t)
+	p, reqCtx := setupACMPlugin(t)
+	long := "arn:aws:acm:us-east-1:123456789012:certificate/" + strings.Repeat("a", 2048)
+	for _, tc := range []struct{ name, op, body string }{
+		{"a missing DomainName", "RequestCertificate", `{}`},
+		{"a missing CertificateArn", "DescribeCertificate", `{}`},
+		{"an over-length CertificateArn", "DescribeCertificate", `{"CertificateArn":"` + long + `"}`},
+		{"a CertificateArn off the pattern", "DeleteCertificate", `{"CertificateArn":"not-an-arn-but-long-enough"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			status, body := wireACMCall(t, ts, tc.op, tc.body, nil)
+			require.Equal(t, http.StatusBadRequest, status)
+			gateCode, gateMessage := wireACMError(t, body)
+
+			req := &emulator.AWSRequest{Service: "acm", Operation: tc.op, Body: []byte(tc.body),
+				Headers: map[string]string{"X-Amz-Target": "CertificateManager." + tc.op}}
+			_, err := p.HandleRequest(reqCtx, req)
+			var awsErr *emulator.AWSError
+			require.ErrorAs(t, err, &awsErr)
+			assert.Equal(t, gateCode, awsErr.Code)
+			assert.Equal(t, gateMessage, awsErr.Message)
+		})
+	}
+}
+
 // TestWireValidation_AnUnreadableBodyIsThePlugins pins that validation leaves a body that will
 // not parse to the plugin, whose refusal for it is ACM's published one.
 func TestWireValidation_AnUnreadableBodyIsThePlugins(t *testing.T) {
@@ -177,14 +206,21 @@ func TestWireValidation_AValidRequestIsAnsweredIdentically(t *testing.T) {
 	}
 }
 
-// TestWireValidation_TheOptOutReachesThePlugin pins WithoutWireValidation: the request the gate
-// would refuse reaches ACM's own handler, which answers its own refusal.
+// TestWireValidation_TheOptOutReachesThePlugin pins WithoutWireValidation: a request the gate
+// would refuse reaches ACM's own handler. ListCertificates' handler makes no range check of its
+// own, so the out-of-range MaxItems is served; RequestCertificate's handler keeps its DomainName
+// check for the dispatches the gate does not see, and answers it in the gate's words.
 func TestWireValidation_TheOptOutReachesThePlugin(t *testing.T) {
 	ts := emulator.StartTestServer(t, emulator.WithoutWireValidation())
-	status, body := wireACMCall(t, ts, "RequestCertificate", `{}`, nil)
+	status, body := wireACMCall(t, ts, "ListCertificates", `{"MaxItems":0}`, nil)
+	require.Equal(t, http.StatusOK, status, "the plugin served what the gate would refuse: %s", body)
+
+	status, body = wireACMCall(t, ts, "RequestCertificate", `{}`, nil)
 	require.Equal(t, http.StatusBadRequest, status, string(body))
-	code, _ := wireACMError(t, body)
-	assert.Equal(t, "InvalidParameterException", code, "the plugin's own check answered, not the gate")
+	code, message := wireACMError(t, body)
+	assert.Equal(t, "ValidationException", code)
+	assert.Equal(t, "1 validation error detected: Value null at 'domainName' failed to satisfy constraint: "+
+		"Member must not be null", message)
 
 	events, err := ts.Store().GetEvents(t.Context(), emulator.EventFilter{Service: "acm"})
 	require.NoError(t, err)
@@ -300,10 +336,8 @@ func TestWireValidation_ReplayIsVersioned(t *testing.T) {
 		// existed looks like: the plugin answered the request, and no event names a snapshot.
 		ts := emulator.StartTestServer(t, emulator.WithDeterministicRun(epoch), emulator.WithoutWireValidation())
 		wireACMCertificate(t, ts, "example.com")
-		status, body := wireACMCall(t, ts, "RequestCertificate", `{}`, nil)
-		require.Equal(t, http.StatusBadRequest, status)
-		code, _ := wireACMError(t, body)
-		require.Equal(t, "InvalidParameterException", code)
+		status, body := wireACMCall(t, ts, "ListCertificates", `{"MaxItems":0}`, nil)
+		require.Equal(t, http.StatusOK, status, string(body))
 
 		events, err := ts.Store().GetEvents(t.Context(), emulator.EventFilter{Service: "acm"})
 		require.NoError(t, err)
@@ -312,10 +346,11 @@ func TestWireValidation_ReplayIsVersioned(t *testing.T) {
 		assert.NotContains(t, string(raw), "validation_model", "the field is omitted when empty")
 
 		// Replayed into a server that validates: the events carry no version, so the gate does
-		// not run and the plugin answers exactly what it answered then.
+		// not run and the plugin serves the request it served then, which a client could not get
+		// past the gate today.
 		results := emulator.StartTestServer(t, emulator.WithDeterministicRun(epoch)).ReplayEvents(t, events)
 		emulator.AssertReplayMatches(t, results)
-		assert.Equal(t, 1, results.FailedEvents)
+		assert.Zero(t, results.FailedEvents)
 	})
 
 	t.Run("an exported fixture carries the version", func(t *testing.T) {

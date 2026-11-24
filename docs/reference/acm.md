@@ -48,17 +48,15 @@ the answer was "not found" for a string that could not name a certificate at all
 | Pattern satisfied but naming no certificate: empty Region, another ACM resource type, a type with no identifier, or something nested under a certificate | `InvalidArnException`/400 | **Substrate's** — AWS publishes the code but describes it as *"does not refer to an existing resource"*, which is about non-existence, not syntax |
 | A well-formed certificate ARN with no record | `ResourceNotFoundException`/400 | **AWS's** — *"The specified certificate cannot be found in the caller's account or the caller's account cannot be found"* |
 
-An absent `CertificateArn`, and one whose length falls outside 20–2048, are refused by request
-validation before the plugin runs, with ACM's own message — `1 validation error detected: Value
-null at 'certificateArn' failed to satisfy constraint: Member must not be null`; see
-[Request validation](#request-validation) below. The pattern and the two later tiers are the
-plugin's.
+The first tier is answered in ACM's validation form — `1 validation error detected: Value null at
+'certificateArn' failed to satisfy constraint: Member must not be null` for an absent ARN, and the
+length or pattern constraint for the others; see [Request validation](#request-validation) below.
+Request validation answers it for a client's request before the plugin runs, and the plugin
+answers it in the same words for a request that reaches it without the gate.
 
-ACM's own operations and the tagging API's resolver run the same pattern and type checks, so
-neither can accept an ARN the other refuses on its shape. The tagging API renders its refusal as a
-`FailedResourcesMap` entry rather than an error response, so the shapes differ and the decision
-does not. The tagging API is not validated, so an ARN over 2,048 characters that otherwise names a
-certificate reaches its lookup and is reported not found there.
+ACM's own operations and the tagging API's resolver run the same validation, so neither can accept
+an ARN the other refuses. The tagging API renders its refusal as a `FailedResourcesMap` entry
+rather than an error response, so the shapes differ and the decision does not.
 
 The unparseable-body case was left open by #921 and settled by
 [#950](https://github.com/scttfrdmn/substrate/issues/950), which confirmed that deferral's guess: it
@@ -94,17 +92,17 @@ rather than from the reference, which publishes no message text; the sources are
 `emulator/wire_validate_errors.go`. `DomainName`'s published pattern uses a lookahead Go cannot
 compile, so a malformed domain name is not refused on its pattern.
 
-Two refusals the plugin answered before are now answered by validation, with a different code
-or message:
+Two of the plugin's own refusals now answer in this form too, because a request the gate does
+not see still reaches them — a stack's dispatch, a schedule's target, the tagging API's resolver —
+and it should get the answer a client gets:
 
 - **`RequestCertificate` with no `DomainName`** answers `ValidationException`, not
-  `InvalidParameterException`. The plugin's own check stays for a stack's dispatch, which is not
-  validated.
-- **A `CertificateArn` of the wrong length** answers the message above rather than the plugin's
-  own wording.
+  `InvalidParameterException`.
+- **A `CertificateArn` absent, of the wrong length or off the pattern** answers the constraint it
+  fails rather than substrate's own wording.
 
 `wire.validate: false` (`SUBSTRATE_WIRE_VALIDATE=false`, or `WithoutWireValidation()` on a
-`TestServer`) restores the plugin's answers.
+`TestServer`) turns the gate off; those two refusals are then the plugin's, in the same words.
 
 ## DescribeCertificate answers the published shape, with dates as epoch seconds
 

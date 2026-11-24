@@ -26,8 +26,9 @@ package emulator
 //     description is exactly that: "The supplied input failed to satisfy constraints of an AWS
 //     service." CertificateArn publishes Length 20-2048 and the Pattern below, so this tier is
 //     AWS's own. Request validation (wire_validate.go) answers it for a client's request,
-//     including an absent CertificateArn, which every one of these operations requires; the
-//     pattern check here is what the tagging API's resolver, which no gate covers, relies on.
+//     including an absent CertificateArn, which every one of these operations requires, and
+//     [acmValidateCertificateARN] answers it in the same words for a request the gate does not
+//     see.
 //
 //   - An ARN that satisfies the Pattern but names no certificate is InvalidArnException/400.
 //     This tier is **substrate's reading**. AWS publishes the code on all five operations but
@@ -71,8 +72,17 @@ import (
 // restriction is published in prose on each page ("This action applies only to the certificate
 // resource type"), and ACM does have other types with their own shapes. See acm_tags.go's
 // preamble.
-var acmCertificateARNPattern = regexp.MustCompile(
-	`^arn:[\w+=/,.@-]+:acm:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)*$`)
+var acmCertificateARNPattern = regexp.MustCompile(`^` + acmCertificateARNPatternText + `$`)
+
+// acmCertificateARNPatternText is the published Pattern as the reference and the model write it,
+// which is what a refusal quotes.
+const acmCertificateARNPatternText = `arn:[\w+=/,.@-]+:acm:[\w+=/,.@-]*:[0-9]+:[\w+=,.@-]+(/[\w+=,.@-]+)*`
+
+// The published Length range for CertificateArn.
+const (
+	acmCertificateARNMinLen = 20
+	acmCertificateARNMaxLen = 2048
+)
 
 // acmValidateCertificateARN reports whether arn can name an ACM certificate, returning the
 // [AWSError] to refuse it with when it cannot.
@@ -83,14 +93,26 @@ var acmCertificateARNPattern = regexp.MustCompile(
 // string is wrong and retrying is pointless, the other says the string is fine and the resource
 // is not there. See this file's preamble for which tier is AWS's and which is substrate's reading.
 //
-// The published Length, 20–2048, is not checked here: request validation refuses a client's
-// value outside it before the plugin runs (wire_validate.go), with ACM's own message. The one
-// other caller, the tagging API's [acmResolveARN], refuses every ARN this function refuses, and
-// no ARN shorter than 20 characters passes the type checks below.
+// Request validation (wire_validate.go) refuses a client's CertificateArn that is absent, out of
+// length or off the pattern before the plugin runs. The same three checks are made here, in the
+// same words, because two callers reach this function without passing the gate: the tagging
+// API's [acmResolveARN] and a dispatch on a caller's behalf, such as a schedule's target. Length
+// is checked before the pattern so an oversized value is refused on its size rather than run
+// through a regexp, following [iamValidatePolicyARN].
 func acmValidateCertificateARN(arn string) *AWSError {
-	if !acmCertificateARNPattern.MatchString(arn) {
-		return acmValidationError(fmt.Sprintf(
-			"CertificateArn %q does not satisfy the pattern an ACM ARN must match", arn))
+	const member = "certificateArn"
+	switch {
+	case arn == "":
+		return acmValidationError(wireMissingMember(member, "CertificateArn"))
+	case len(arn) < acmCertificateARNMinLen:
+		return acmValidationError(wireFailure{kind: wireTooShort, path: member,
+			constraint: fmt.Sprintf("Member must have length greater than or equal to %d", acmCertificateARNMinLen)})
+	case len(arn) > acmCertificateARNMaxLen:
+		return acmValidationError(wireFailure{kind: wireTooLong, path: member,
+			constraint: fmt.Sprintf("Member must have length less than or equal to %d", acmCertificateARNMaxLen)})
+	case !acmCertificateARNPattern.MatchString(arn):
+		return acmValidationError(wireFailure{kind: wirePatternMismatch, path: member,
+			constraint: "Member must satisfy regular expression pattern: " + acmCertificateARNPatternText})
 	}
 
 	// The pattern guarantees six colon-separated fields and that the last of them holds no
@@ -125,18 +147,15 @@ func acmCertificateARNAccountRegion(arn string) (accountID, region string) {
 	return fields[4], fields[3]
 }
 
-// acmValidationError refuses a CertificateArn that breaks one of its published constraints.
+// acmValidationError refuses a member that breaks one of its published constraints, in the form
+// request validation answers for ACM (see validatedServices).
 //
 // ValidationException/400 is AWS's own code for this, described as "The supplied input failed to
 // satisfy constraints of an AWS service", and it is published on every ACM operation that takes a
 // certificate — including the two, ListTagsForCertificate and DescribeCertificate, whose published
 // error list is only three codes long and does not include InvalidParameterException.
-func acmValidationError(message string) *AWSError {
-	return &AWSError{
-		Code:       "ValidationException",
-		Message:    message,
-		HTTPStatus: http.StatusBadRequest,
-	}
+func acmValidationError(f wireFailure) *AWSError {
+	return wireRefusal("acm", f)
 }
 
 // acmInvalidARN refuses an ARN that satisfies the published pattern but cannot name a certificate,

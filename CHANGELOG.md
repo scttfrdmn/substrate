@@ -33,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - RAM: `ListPrincipals` and `ListResources` list in principal-ID or resource-ARN order, each item under its first share in ARN order; earlier tokens, and tokens reused with different filters, are refused `InvalidNextTokenException` (#1566).
 - CloudFront: list responses carry `Marker` and `MaxItems`, and an absent `MaxItems` is a page of 100; page on `NextMarker` to read more (#1568).
 - IAM: a malformed `Marker` is `ValidationError`/400 (`InvalidInput` on the simulate operations); tag listings' `Marker` is base64 of the last key, not the next key (#1612).
-- ACM: a request breaking a published constraint answers `ValidationException`/400 in ACM's message form, before the plugin runs. `RequestCertificate` without `DomainName` answers `ValidationException` instead of `InvalidParameterException`, and an enum value or tag outside its pattern is refused (#1612).
+- ACM: a request breaking a published constraint answers `ValidationException`/400 in ACM's message form, before the plugin runs, and an enum value or a tag outside its pattern is refused. `RequestCertificate` without `DomainName` answers `ValidationException` instead of `InvalidParameterException`, and a malformed `CertificateArn` names the constraint it fails, also on a stack's or a schedule's dispatch (#1612).
 - Config: `wire.validate: false` (`SUBSTRATE_WIRE_VALIDATE=false`, or `emulator.WithoutWireValidation()` on a `TestServer`) turns validation off. A stream recorded before validation existed replays unchanged (#1612).
 
 ## [v0.132.0] - 2026-11-24

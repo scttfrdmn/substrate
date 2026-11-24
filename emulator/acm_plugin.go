@@ -82,7 +82,9 @@ func (p *ACMPlugin) requestCertificate(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, acmInvalidBody()
 	}
 	if body.DomainName == "" {
-		return nil, &AWSError{Code: "InvalidParameterException", Message: "DomainName is required", HTTPStatus: http.StatusBadRequest}
+		// Request validation refuses a client's request without one first; a stack's dispatch,
+		// which the gate does not see, is answered in the same words.
+		return nil, acmValidationError(wireMissingMember("domainName", "DomainName"))
 	}
 
 	keyAlgo := body.KeyAlgorithm

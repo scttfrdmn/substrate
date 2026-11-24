@@ -84,6 +84,19 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 	},
 }
 
+// wireRefusal renders one failure in service's validation form. A plugin calls it for a check it
+// keeps because a request the gate never sees reaches it — a stack's or a schedule's dispatch —
+// so that request is answered exactly as the gate answers a client's.
+func wireRefusal(service string, f wireFailure) *AWSError {
+	return validatedServices[service].refusal([]wireFailure{f})
+}
+
+// wireMissingMember is the failure for an absent required member at path; wire is its name
+// on the wire, which the EC2 form reports.
+func wireMissingMember(path, wire string) wireFailure {
+	return wireFailure{kind: wireMissing, path: path, wire: wire, constraint: "Member must not be null"}
+}
+
 // refusal renders failures into the service's error.
 //
 // The count and separators follow AWS's published form for several failures, "2 validation

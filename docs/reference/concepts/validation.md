@@ -79,7 +79,9 @@ Validation is step 4.6, the last gate before the plugin:
 Only a client's request is validated. A request a plugin sends another on a caller's behalf —
 a CloudFormation stack creating its resources, the API Gateway proxy invoking a function, the
 Scheduler firing a target — goes through the registry directly and is not, so a stack whose
-template carries a value the service would refuse from a client still deploys it.
+template carries a value the service would refuse from a client still deploys it. A plugin that
+keeps its own check for such a request answers it in the gate's words, as ACM does for an
+absent `DomainName` or a malformed `CertificateArn`.
 
 ## Turning it off
 
