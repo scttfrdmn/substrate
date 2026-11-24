@@ -37,3 +37,8 @@ func PageValidateForTest(req PageRequestForTest) error {
 func IsPageTokenErrorForTest(err error) bool {
 	return errors.Is(err, errPageToken)
 }
+
+// RestXMLNextMarkerForTest wraps [restXMLPage.nextMarker] for a page ending on the ID last.
+func RestXMLNextMarkerForTest(truncated bool, last string) (string, error) {
+	return restXMLPage{}.nextMarker(truncated, cursorKey{Sort: last})
+}

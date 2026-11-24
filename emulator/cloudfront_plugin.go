@@ -657,8 +657,7 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, req *AWSReques
 		return nil, fmt.Errorf("cloudfront listDistributions loadIndex: %w", err)
 	}
 	// Every record is read before the page is cut, so a page is short only at the end of the
-	// listing. A store failure fails the call; an index entry whose record is gone, or a record
-	// that does not decode, is passed over.
+	// listing. A store failure fails the call; an index entry whose record is gone is passed over.
 	all := make([]CloudFrontDistribution, 0, len(ids))
 	for _, id := range ids {
 		data, getErr := p.state.Get(goCtx, cloudfrontNamespace, cfDistKey(ctx.AccountID, id))
@@ -668,8 +667,11 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, req *AWSReques
 		if data == nil {
 			continue
 		}
+		// A record that does not decode, or whose ID is not the index entry it was loaded under, is
+		// passed over as a dangling entry is: the ID is the page's cursor, and an empty one would
+		// end a truncated page on no NextMarker.
 		var dist CloudFrontDistribution
-		if err := json.Unmarshal(data, &dist); err != nil {
+		if err := json.Unmarshal(data, &dist); err != nil || id == "" || dist.ID != id {
 			continue
 		}
 		all = append(all, dist)
@@ -712,8 +714,8 @@ func (p *CloudFrontPlugin) listDistributions(ctx *RequestContext, req *AWSReques
 		Quantity:    len(summaries),
 		Items:       summaries,
 	}
-	if res.Truncated {
-		list.NextMarker = res.Last.Sort
+	if list.NextMarker, err = pg.nextMarker(res.Truncated, res.Last); err != nil {
+		return nil, err
 	}
 	return cloudfrontXMLResponse(http.StatusOK, list)
 }

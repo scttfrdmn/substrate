@@ -2,6 +2,7 @@ package emulator
 
 import (
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strconv"
 )
@@ -129,6 +130,19 @@ func (p restXMLPage) after() *cursorKey {
 		return nil
 	}
 	return &cursorKey{Sort: p.marker}
+}
+
+// nextMarker returns the NextMarker of a page that ends on last, empty unless truncated. A truncated
+// page must name a non-empty ID, since an empty NextMarker reads as the start of the listing and a
+// caller following it would loop; a listing that ends on an empty key is an error, not a page.
+func (p restXMLPage) nextMarker(truncated bool, last cursorKey) (string, error) {
+	if !truncated {
+		return "", nil
+	}
+	if last.Sort == "" {
+		return "", errors.New("pagination: a truncated page ends on an empty ID")
+	}
+	return last.Sort, nil
 }
 
 // restXMLMarker reads a CloudFront listing's `Marker` and `MaxItems` query parameters.

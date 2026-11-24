@@ -247,8 +247,10 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AW
 		if data == nil {
 			continue
 		}
+		// A record whose ID is not the index entry it was loaded under is passed over, as in
+		// [listDistributions]: the ID is the page's cursor.
 		var oac CloudFrontOriginAccessControl
-		if json.Unmarshal(data, &oac) != nil {
+		if json.Unmarshal(data, &oac) != nil || id == "" || oac.ID != id {
 			continue
 		}
 		all = append(all, oac)
@@ -274,8 +276,8 @@ func (p *CloudFrontPlugin) listOriginAccessControls(ctx *RequestContext, req *AW
 		IsTruncated: res.Truncated,
 		Quantity:    len(summaries),
 	}
-	if res.Truncated {
-		list.NextMarker = res.Last.Sort
+	if list.NextMarker, err = pg.nextMarker(res.Truncated, res.Last); err != nil {
+		return nil, err
 	}
 	if len(summaries) > 0 {
 		list.Items = &summaries

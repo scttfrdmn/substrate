@@ -194,6 +194,77 @@ func TestCloudFrontListPagination_ADanglingEntryShortensNoPage(t *testing.T) {
 	assert.Nil(t, doc.NextMarker)
 }
 
+// TestCloudFrontListPagination_ARecordWithNoIDIsPassedOver overwrites a record with `{}`, which
+// decodes with an empty ID, and walks each listing a page of one at a time to the end. The record
+// is passed over, so no truncated page carries an empty NextMarker and the walk terminates.
+func TestCloudFrontListPagination_ARecordWithNoIDIsPassedOver(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ path, prefix string }{
+		{"/2020-05-31/distribution", "cfdist:"},
+		{cfOACPath, "cfoac:"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			t.Parallel()
+			state := emulator.NewMemoryStateManager()
+			p := cfOACPluginOn(t, state)
+			ctx := &emulator.RequestContext{AccountID: "123456789012", Region: "us-east-1", RequestID: "req-1"}
+			var ids []string
+			for i := range 3 {
+				if tc.prefix == "cfoac:" {
+					doc, _ := cfCreateOAC(t, p, ctx, strings.Replace(cfOACConfigXML, "substrate-oac", fmt.Sprintf("noid-%d", i), 1))
+					ids = append(ids, doc.ID)
+					continue
+				}
+				status, body := cfCreate(t, p, ctx, false, cfTestConfigXML(fmt.Sprintf("noid-%d", i)))
+				require.Equal(t, http.StatusCreated, status, "%s", body)
+				var doc struct {
+					ID string `xml:"Id"`
+				}
+				require.NoError(t, xml.Unmarshal([]byte(body), &doc))
+				ids = append(ids, doc.ID)
+			}
+			sort.Strings(ids)
+			// The first record in ID order decodes with no ID.
+			require.NoError(t, state.Put(t.Context(), "cloudfront", tc.prefix+ctx.AccountID+"/"+ids[0], []byte("{}")))
+
+			var walked []string
+			marker := ""
+			for pages := 0; ; pages++ {
+				require.Less(t, pages, 10, "the walk terminates")
+				params := map[string]string{"MaxItems": "1"}
+				if marker != "" {
+					params["Marker"] = marker
+				}
+				resp, err := p.HandleRequest(ctx, cfRequest(http.MethodGet, tc.path, params, ""))
+				require.NoError(t, err)
+				var doc cfListDoc
+				require.NoError(t, xml.Unmarshal(resp.Body, &doc), "%s", resp.Body)
+				walked = append(walked, doc.ids()...)
+				if !*doc.IsTruncated {
+					break
+				}
+				require.NotNil(t, doc.NextMarker)
+				require.NotEmpty(t, *doc.NextMarker, "a truncated page never carries an empty NextMarker")
+				marker = *doc.NextMarker
+			}
+			assert.Equal(t, ids[1:], walked)
+		})
+	}
+}
+
+// TestCloudFrontListPagination_ATruncatedPageNeverEndsOnAnEmptyID pins the adapter's guard.
+func TestCloudFrontListPagination_ATruncatedPageNeverEndsOnAnEmptyID(t *testing.T) {
+	t.Parallel()
+	_, err := emulator.RestXMLNextMarkerForTest(true, "")
+	require.Error(t, err)
+	next, err := emulator.RestXMLNextMarkerForTest(true, "E1")
+	require.NoError(t, err)
+	assert.Equal(t, "E1", next)
+	next, err = emulator.RestXMLNextMarkerForTest(false, "")
+	require.NoError(t, err)
+	assert.Empty(t, next)
+}
+
 func TestCloudFrontListPagination_RefusesAnUnreadableMaxItems(t *testing.T) {
 	t.Parallel()
 	ts := emulator.StartTestServer(t)
