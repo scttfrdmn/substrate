@@ -7,9 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Kinesis: `ListShards` with `ShardFilter`, `ExclusiveStartShardId` and `NextToken` paging (#1613).
+- Kinesis: enhanced fan-out consumers (`Register`/`Describe`/`List`/`DeregisterStreamConsumer`), 20 per stream, with a seeded `CREATING` status at `/v1/kinesis/consumer-status` (#1613).
+- Kinesis: `IncreaseStreamRetentionPeriod` and `DecreaseStreamRetentionPeriod`, 24–8760 hours (#1613).
+- Kinesis: `UpdateMaxRecordSize`; a value outside 1024–10240 is `ValidationException`, as its page states (#1539).
+- Kinesis: `TagResource`, `UntagResource` and `ListTagsForResource` for streams and consumers (#1613).
+- Kinesis: `SubscribeToShard` is refused with `UnknownOperationException` naming #1695 (#1613).
+- CloudFormation: `AWS::Kinesis::StreamConsumer` (#1613).
+- Organizations: `CreateOrganization` and `DeleteOrganization` (#1627).
+- Organizations: `EnableAWSServiceAccess`, `DisableAWSServiceAccess` and `ListAWSServiceAccessForOrganization`, which Terraform's `aws_organizations_organization` reads (#1627).
+- Kinesis and Organizations: the new refusals' messages are substrate's own, except `AWSOrganizationsNotInUseException`, `AlreadyInOrganizationException`, `OrganizationNotEmptyException` and `ORGANIZATION_NOT_IN_ALL_FEATURES_MODE`, which use the API reference's descriptions (#1613, #1627).
+
 ### Changed
 
 - Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
+
+### Fixed
+
+- Kinesis: `DescribeStream` and `DescribeStreamSummary` report `EncryptionType` `NONE`, so Terraform's `aws_kinesis_stream` plans no change on refresh (#1613).
+
+### Compatibility
+
+- Kinesis: `DeleteStream` refuses a stream with registered consumers with `ResourceInUseException` unless `EnforceConsumerDeletion` is true (#1613).
+- Organizations: after `DeleteOrganization`, every call from that management account answers `AWSOrganizationsNotInUseException` until `CreateOrganization`; other accounts still auto-create (#1627).
+- Organizations: an explicit `CreateOrganization` enables no policy type at the root; the auto-created organization still enables SCPs (#1627).
+- Organizations: `DescribeOrganization`'s `AvailablePolicyTypes` reports the root's policy types, so it is absent after `DisablePolicyType` (#1627).
+- Organizations: the trusted-service-access operations answer `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` under `CONSOLIDATED_BILLING` (#1627).
+- CloudFormation: deleting an `AWS::Kinesis::Stream` sends `EnforceConsumerDeletion`, so consumers registered outside the stack go with it; this is substrate's reading (#1613).
 
 ## [v0.133.0] - 2026-11-24
 

@@ -387,6 +387,11 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 	if found {
 		return &org, nil
 	}
+	// An account whose organization DeleteOrganization removed is in none until it calls
+	// CreateOrganization; only an account that has never had one is given one here (#1627).
+	if err := p.requireNotDeleted(ctx, acct); err != nil {
+		return nil, err
+	}
 
 	// Auto-create. The feature set comes from the control-plane seed when one is
 	// set, so a test can have the organization exist in CONSOLIDATED_BILLING mode
@@ -395,10 +400,18 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 	if err != nil {
 		return nil, err
 	}
+	return p.foundOrganization(ctx, acct, featureSet, featureSet == orgFeatureSetAll)
+}
+
+// foundOrganization creates acct's organization with featureSet: the organization, its root and
+// its management account. With enableSCP, SERVICE_CONTROL_POLICY is enabled at the root and
+// p-FullAWSAccess attached to the root and the management account, as AWS attaches it while the
+// type is enabled.
+func (p *OrganizationsPlugin) foundOrganization(ctx context.Context, acct, featureSet string, enableSCP bool) (*Organization, error) {
 	// Both identifiers come from the request's mint (#1600); see [orgCaller.context].
 	ids := orgMintFrom(ctx)
 	orgID := "o-" + ids.Chars(10, orgLowerAlphanum)
-	org = Organization{
+	org := Organization{
 		ID:                 orgID,
 		Arn:                fmt.Sprintf("arn:aws:organizations::%s:organization/%s", acct, orgID),
 		FeatureSet:         featureSet,
@@ -419,16 +432,16 @@ func (p *OrganizationsPlugin) ensureOrganization(ctx context.Context, acct strin
 		Arn:  fmt.Sprintf("arn:aws:organizations::%s:root/%s/%s", acct, orgID, rootID),
 		Name: "Root",
 	}
-	// An ALL-features organization has SERVICE_CONTROL_POLICY enabled from the
-	// start; under CONSOLIDATED_BILLING no policy type is available at all, which
-	// is what CreateOrganization documents for that mode.
-	if featureSet == orgFeatureSetAll {
+	// An auto-created ALL-features organization has SERVICE_CONTROL_POLICY enabled
+	// from the start; under CONSOLIDATED_BILLING no policy type is available at all,
+	// which is what CreateOrganization documents for that mode.
+	if enableSCP {
 		root.PolicyTypes = []OrgPolicyTypeSummary{{Type: orgPolicyTypeSCP, Status: "ENABLED"}}
 	}
 	if err := p.orgPutJSON(ctx, orgRootKey(acct), root); err != nil {
 		return nil, err
 	}
-	if featureSet == orgFeatureSetAll {
+	if enableSCP {
 		if _, err := p.attachPolicyTo(ctx, orgFullAWSAccessID, rootID); err != nil {
 			return nil, err
 		}

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // ----- Kinesis -------------------------------------------------------------
@@ -62,5 +63,60 @@ func (d *StackDeployer) deployKinesisStream(
 	if routeErr != nil {
 		dr.Error = routeErr.Error()
 	}
+	return dr, cost, nil
+}
+
+// deployKinesisStreamConsumer registers an enhanced fan-out consumer for an
+// AWS::Kinesis::StreamConsumer. Ref is the consumer ARN, so it is the physical ID; the five
+// attributes are recorded from RegisterStreamConsumer's response. StreamARN is recorded because the
+// generic ARN rule would otherwise answer the consumer's own ARN for it.
+func (d *StackDeployer) deployKinesisStreamConsumer(
+	ctx context.Context,
+	logicalID string,
+	props map[string]interface{},
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	streamARN := resolveStringProp(props, "StreamARN", "", cctx)
+	body := map[string]interface{}{
+		"StreamARN":    streamARN,
+		"ConsumerName": resolveStringProp(props, "ConsumerName", logicalID, cctx),
+	}
+	if tags, ok := props["Tags"]; ok {
+		body["Tags"] = cfnTagMap(tags, cctx)
+	}
+	bodyBytes, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployKinesisStreamConsumer marshal: %w", err)
+	}
+	req := &AWSRequest{
+		Service:   "kinesis",
+		Operation: "RegisterStreamConsumer",
+		Body:      bodyBytes,
+		Headers:   map[string]string{"x-amz-target": "Kinesis_20131202.RegisterStreamConsumer"},
+		Params:    map[string]string{},
+	}
+	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
+	dr := DeployedResource{
+		LogicalID: logicalID,
+		Type:      "AWS::Kinesis::StreamConsumer",
+		Metadata:  map[string]interface{}{"StreamARN": streamARN},
+	}
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr // a refused create is recorded on the resource, as every deploy helper does.
+	}
+	var out struct {
+		Consumer kinesisConsumerView `json:"Consumer"`
+	}
+	if err := json.Unmarshal(resp.Body, &out); err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn deployKinesisStreamConsumer unmarshal: %w", err)
+	}
+	dr.PhysicalID = out.Consumer.ConsumerARN
+	dr.ARN = out.Consumer.ConsumerARN
+	dr.Metadata["ConsumerARN"] = out.Consumer.ConsumerARN
+	dr.Metadata["ConsumerName"] = out.Consumer.ConsumerName
+	dr.Metadata["ConsumerStatus"] = out.Consumer.ConsumerStatus
+	dr.Metadata["ConsumerCreationTimestamp"] = time.Time(out.Consumer.ConsumerCreationTimestamp).UTC().Format(time.RFC3339)
 	return dr, cost, nil
 }

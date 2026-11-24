@@ -5,15 +5,29 @@
 
 ## Supported operations
 
-All eighteen operations accept `StreamARN`, `StreamName` or both, except the four noted below — see
-[Naming a stream: by name or by ARN](#naming-a-stream-by-name-or-by-arn).
+The operations that name a stream accept `StreamARN`, `StreamName` or both, except those whose rows say
+otherwise — see [Naming a stream: by name or by ARN](#naming-a-stream-by-name-or-by-arn).
+`SubscribeToShard` is refused with `UnknownOperationException`/404 and a message pointing at
+[#1695](https://github.com/scttfrdmn/substrate/issues/1695): it opens an HTTP/2 event stream substrate does not model. Read with
+`GetShardIterator` and `GetRecords` instead.
 
 | Operation | Notes |
 |-----------|-------|
 | CreateStream | Names the stream by `StreamName` only — the service's one operation-wide `Required: Yes`, and the one operation minting an ARN rather than resolving one; stores a [create-time `Tags` map](#how-many-tags-a-stream-may-carry) and refuses it under the same two bounds `AddTagsToStream` enforces, before the stream is written. Records `StreamModeDetails` (an `ON_DEMAND` stream starts with four shards) and `MaxRecordSizeInKiB` (1024–10 240) — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
 | DescribeStream | Answers an `API_StreamDescription` — which carries `Shards` and `HasMoreShards` and **no** `OpenShardCount`; see [The two describe shapes, and the bounds on a reshard](#the-two-describe-shapes-and-the-bounds-on-a-reshard). Carries `StreamModeDetails` |
-| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards`. Carries `StreamModeDetails` and `MaxRecordSizeInKiB` |
-| DeleteStream | A store fault deleting a shard's records is an error, not a stream reported deleted (#1399) |
+| DescribeStreamSummary | Answers an `API_StreamDescriptionSummary` — which carries `OpenShardCount` and **neither** `Shards` **nor** `HasMoreShards`. Carries `StreamModeDetails`, `MaxRecordSizeInKiB` and `ConsumerCount` |
+| DeleteStream | A store fault deleting a shard's records is an error, not a stream reported deleted (#1399). A stream with [registered consumers](#enhanced-fan-out-consumers) is refused with `ResourceInUseException` unless `EnforceConsumerDeletion` is true, which deletes them too |
+| ListShards | The shards `DescribeStream` reports, by shard ID, filtered by `ShardFilter` and paged by `MaxResults` and `NextToken` — see [Listing shards](#listing-shards) |
+| IncreaseStreamRetentionPeriod | Must exceed the current period and be at most 8760 hours; refuses a stream that is not `ACTIVE` — see [Retention and maximum record size](#retention-and-maximum-record-size) |
+| DecreaseStreamRetentionPeriod | Must be below the current period and at least 24 hours; otherwise as its sibling |
+| UpdateMaxRecordSize | Names the stream by `StreamARN` only. Sets the maximum record size `PutRecord` and `PutRecords` enforce; a value outside 1024–10 240 is `ValidationException`/400 |
+| RegisterStreamConsumer | `StreamARN` and `ConsumerName` required; accepts `Tags`. At most 20 consumers per stream and five `CREATING` at once — see [Enhanced fan-out consumers](#enhanced-fan-out-consumers) |
+| DescribeStreamConsumer | By `ConsumerARN`, or `StreamARN` and `ConsumerName`, or all three when they agree. Reports `CREATING` under a seed |
+| ListStreamConsumers | `StreamARN` required; pages by `MaxResults` (default and cap 100) and `NextToken` |
+| DeregisterStreamConsumer | Addressed as `DescribeStreamConsumer`; the consumer is gone at once |
+| TagResource | `ResourceARN` names a stream or a consumer; at most 50 tags on one — see [Tagging by ARN](#tagging-by-arn) |
+| UntagResource | `TagKeys` is 1–50 keys |
+| ListTagsForResource | Every tag on the stream or consumer, sorted by key |
 | ListStreams | Names no single stream, so it publishes neither member and lists the caller's own account and Region. Pages by `Limit` (1–10 000, default 100, at most 100 returned) and `ExclusiveStartStreamName`, reporting `HasMoreStreams`; names are listed lexicographically; `NextToken` is not read — see [Resharding acts on the shards it names](#resharding-acts-on-the-shards-it-names) |
 | UpdateShardCount | `ScalingType` and `TargetShardCount` both required and both checked: the enum, the published minimum of 1, the 10 000 ceiling and the double/half pair, all `InvalidArgumentException`/400. Reports all four published members including `StreamARN`. Reports `UPDATING` for as many observations as a seed holds it, and refuses a stream that is not `ACTIVE` with `ResourceInUseException`/400 — see [A stream's status progresses](#a-stream-s-status-progresses). Refuses an on-demand stream with `ValidationException`/400 |
 | UpdateStreamMode | Names the stream by `StreamARN` only, which is `Required: Yes`, as is `StreamModeDetails`. Switches the capacity mode and reports `UPDATING` under a seed like a reshard; switching to the mode the stream already has changes nothing. `WarmThroughputMiBps` is not read — see [Capacity mode, and the reshards it refuses](#capacity-mode-and-the-reshards-it-refuses) |
@@ -470,7 +484,92 @@ either page's Errors section carries, and the messages are substrate's own.
 What the request alone decides — the key lengths, the entry count and the 10 MiB total — is checked
 before the stream is read, so it is refused even for a stream that does not exist. The per-record check
 needs the stream's own maximum, so it runs after the stream is loaded, the same order `UpdateShardCount`
-uses for its bounds against the current shard count. `UpdateMaxRecordSize` is not routed.
+uses for its bounds against the current shard count. `UpdateMaxRecordSize` changes the maximum after
+creation, and `DescribeStreamSummary` reports it.
+
+## Listing shards
+
+`ListShards` lists the shards `DescribeStream` reports, ordered by shard ID.
+
+| Member | Answer |
+|--------|--------|
+| `MaxResults` | 1–10 000; the default is 1000, and at most 1000 are returned, as the page publishes. Outside the range is `InvalidArgumentException`/400 |
+| `ExclusiveStartShardId` | Starts strictly after the named ID, which need not exist |
+| `NextToken` | Names the stream and the filter by itself. With `StreamName`, `ExclusiveStartShardId` or `StreamCreationTimestamp` it is `InvalidArgumentException`/400, since the page says they cannot be given together. A `StreamARN` or `ShardFilter` sent beside it must match the token. A token this operation did not issue is `InvalidArgumentException`; tokens do not expire, so `ExpiredNextTokenException` is not answered |
+| `StreamCreationTimestamp` | Must be the stream's own creation time to the second, or `ResourceNotFoundException`: substrate holds only the current stream of a name |
+| `ShardFilter` | Below |
+
+| `ShardFilter.Type` | Shards listed |
+|--------------------|---------------|
+| none, `FROM_TRIM_HORIZON` | Every open shard, and every closed shard that ended within the retention period |
+| `AFTER_SHARD_ID` | As `FROM_TRIM_HORIZON`, starting after `ShardId` |
+| `AT_TRIM_HORIZON` | The shards open at the trim horizon |
+| `AT_LATEST` | The open shards |
+| `AT_TIMESTAMP` | The shards open at `Timestamp` |
+| `FROM_TIMESTAMP` | Every open shard, and every closed shard that ended at or after `Timestamp`, corrected to the trim horizon when earlier |
+
+`ShardId` is required with `AFTER_SHARD_ID` and refused with any other type, and `Timestamp` likewise
+with the two timestamp types; both are `InvalidArgumentException`/400. A shard's start and end come
+from its sequence numbers, which a reshard mints from the simulated clock; a shard `CreateStream` made
+starts when the stream was created. The trim horizon is the later of the stream's creation and the
+current time less its retention period. Records are never expired, so a shard that `ListShards` no
+longer lists is still readable through `GetShardIterator`.
+
+## Enhanced fan-out consumers
+
+A consumer is registered with one stream, under a name unique on that stream. Its ARN is the stream's
+followed by `/consumer/{name}:{seconds}`, the registration time in epoch seconds on the simulated clock,
+so a consumer registered again under the same name later has a new ARN, and the old ARN answers
+`ResourceNotFoundException`.
+
+| Condition | Answer |
+|-----------|--------|
+| A name already registered on the stream | `ResourceInUseException`/400 |
+| A 21st consumer on one stream | `LimitExceededException`/400. The 50-consumer limit of On-demand Advantage streams is not modeled |
+| A sixth consumer while five are `CREATING` | `LimitExceededException`/400 |
+| A stream that is not `ACTIVE` | `ResourceInUseException`/400 |
+| `ConsumerName` outside 1–128 characters or `[a-zA-Z0-9_.-]+` | `InvalidArgumentException`/400 |
+| `ConsumerARN` with a `StreamARN` or `ConsumerName` it disagrees with | `InvalidArgumentException`/400 |
+
+A consumer is `ACTIVE` from registration unless a seed holds it `CREATING`:
+
+```
+POST   /v1/kinesis/consumer-status   {"consumerName": "app", "pendingObservations": 2}
+POST   /v1/kinesis/consumer-status   {"consumerARN": "arn:aws:kinesis:…/consumer/app:1767225600", "pendingObservations": 2}
+POST   /v1/kinesis/consumer-status   {"pendingObservations": 2}            (every consumer)
+DELETE /v1/kinesis/consumer-status   (every seed; ?consumer=<name or ARN> for one)
+```
+
+`DescribeStreamConsumer` and `ListStreamConsumers` each spend one observation of every consumer they
+report; `RegisterStreamConsumer`'s own response and its count of `CREATING` consumers peek. The rules
+are those of [A stream's status progresses](#a-stream-s-status-progresses): the ARN seed wins over the
+name seed, which wins over the wildcard, and the countdown is kept per consumer ARN.
+`DeregisterStreamConsumer` removes the consumer in the request, so `DELETING` is not observable.
+`SubscribeToShard`, the read a consumer exists for, is refused; see
+[#1695](https://github.com/scttfrdmn/substrate/issues/1695).
+
+## Retention and maximum record size
+
+`IncreaseStreamRetentionPeriod` and `DecreaseStreamRetentionPeriod` take `RetentionPeriodHours`, which
+the pages bound at 8760 hours and 24 hours and require to be *"more than"* and *"less than"* the current
+period. Either outside the range, or not moving the period in its direction, is
+`InvalidArgumentException`/400; a stream that is not `ACTIVE` is `ResourceInUseException`/400. Neither
+starts a status transition. The period governs which closed shards [`ListShards`](#listing-shards)
+lists; records themselves are not expired.
+
+`UpdateMaxRecordSize` (#1539) takes `StreamARN` and `MaxRecordSizeInKiB`. Its page says of a value
+outside 1024–10 240 that *"`UpdateMaxRecordSize` sends back an `ValidationException` message"*, so that
+is the code, at 400. `CreateStream` keeps `InvalidArgumentException` for the same range, because its
+member publishes no code of its own and `InvalidArgumentException` is the code its page gives a
+parameter that *"exceeds its restrictions"*. The messages are substrate's own.
+
+## Tagging by ARN
+
+`TagResource`, `UntagResource` and `ListTagsForResource` take a `ResourceARN` that names a stream or an
+enhanced fan-out consumer. A stream's ARN reaches the same tags `AddTagsToStream` writes. A queue or
+channel ARN, which the pattern admits, is `InvalidArgumentException`/400, since substrate models
+neither. The bounds are `AddTagsToStream`'s: 200 entries in one request and 50 tags on one resource,
+the second `LimitExceededException`/400.
 
 ## The account and Region a record carries reach no response
 
@@ -484,7 +583,7 @@ reads back. None of them reaches a body:
 - Every other operation answers a map or a list of names.
 - `CreatedAt` reaches the wire only as the published `StreamCreationTimestamp`.
 
-All eighteen routed operations are driven by
+The eighteen stream operations that predate consumers are driven by
 `TestKinesisWire_StreamResponsesCarryNoBookkeepingMember` and its shard-topology sibling in
 `emulator/kinesis_wire_test.go`. Each walks the decoded document and fails on a bookkeeping member at
 any depth. `ever_tagged` carries `,omitempty` and is set only by a tag write (#938). So the test
@@ -502,6 +601,7 @@ millisecond. The stored record keeps its `time.Time`, so a recorded run replays 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::Kinesis::Stream | StreamName | Forwards `ShardCount`, `StreamModeDetails` and `MaxRecordSizeInKiB` as declared. A provisioned stream declaring no `ShardCount` gets one shard, and an `ON_DEMAND` one sends none |
+| AWS::Kinesis::StreamConsumer | ConsumerARN | `RegisterStreamConsumer` with `ConsumerName`, `StreamARN` and `Tags`; `Fn::GetAtt` answers `ConsumerARN`, `ConsumerName`, `ConsumerStatus`, `ConsumerCreationTimestamp` and the stream's `StreamARN`. Deleted with `DeregisterStreamConsumer`, before its stream. A stack's `AWS::Kinesis::Stream` is deleted with `EnforceConsumerDeletion`, so a consumer registered outside the stack goes with it; that is substrate's reading, since neither the resource's page nor a published resource provider says what CloudFormation sends |
 
 ## A shard iterator carries its account and Region only inside the token
 

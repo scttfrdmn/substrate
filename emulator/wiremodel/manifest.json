@@ -163,7 +163,7 @@
     },
     "kinesis": {
       "apiVersion": "2013-12-02",
-      "operations": 18
+      "operations": 29
     },
     "kms": {
       "apiVersion": "2014-11-01",
@@ -183,7 +183,7 @@
     },
     "organizations": {
       "apiVersion": "2016-11-28",
-      "operations": 34
+      "operations": 39
     },
     "pricing": {
       "apiVersion": "2017-10-15",

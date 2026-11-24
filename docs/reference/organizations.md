@@ -9,7 +9,8 @@
 alias (#739).
 
 On the first call, the plugin auto-creates an organization, its management
-account, and its root. All three are persisted, so the root's ID and ARN are
+account, and its root, unless the account has deleted its organization — see
+[Creating and deleting an organization](#creating-and-deleting-an-organization). All three are persisted, so the root's ID and ARN are
 stable for the life of the state store — an organization whose root ID moved
 between calls could not be governed at all, since nothing could reference the
 thing policies attach to.
@@ -25,7 +26,12 @@ document has no `Reason` member to put them in.
 
 | Operation | Notes |
 |-----------|-------|
-| DescribeOrganization | Auto-creates the organization, its management account and its root on first call |
+| DescribeOrganization | Auto-creates the organization, its management account and its root on first call. `AvailablePolicyTypes`, which the API reference deprecates in favour of `ListRoots`, reports the root's policy types and is absent when the root has none |
+| CreateOrganization | `FeatureSet` `ALL` (the default) or `CONSOLIDATED_BILLING`; enables no policy type; `AlreadyInOrganizationException` when the caller has or belongs to one — see [Creating and deleting an organization](#creating-and-deleting-an-organization) |
+| DeleteOrganization | Management-only; `OrganizationNotEmptyException` while any other account is in it; afterwards every call answers `AWSOrganizationsNotInUseException` until `CreateOrganization` |
+| EnableAWSServiceAccess | Management-only; records the principal and the time; enabling one already enabled changes nothing. Under `CONSOLIDATED_BILLING`, all three service-access operations answer `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` |
+| DisableAWSServiceAccess | Management-only; disabling one not enabled succeeds |
+| ListAWSServiceAccessForOrganization | Management-only; sorted by principal, paginated by `NextToken` |
 | ListRoots | The same root ID on every call; `PolicyTypes` is empty under `CONSOLIDATED_BILLING` |
 | ListAccounts | Reports a vending account immediately, before its status resolves |
 | DescribeAccount | `AccountNotFoundException` |
@@ -62,6 +68,29 @@ document has no `Reason` member to put them in.
 
 `CreateOrganization` is not implemented: the organization already exists on first
 contact, so there is nothing for it to create.
+
+## Creating and deleting an organization
+
+An account that has never had an organization is given one on its first observation, as above, so a
+test needs no setup. `CreateOrganization` on such an account creates the organization with the
+requested `FeatureSet` instead. On an account that already has one, auto-created or not, or that is a
+member of one, it answers `AlreadyInOrganizationException`.
+
+**An explicitly created organization enables no policy type at its root**, so nothing carries
+`p-FullAWSAccess` until `EnablePolicyType`. The API reference says an `ALL` organization is created with
+*"service control policies automatically enabled in the root"*; the observed answer is otherwise: the
+Terraform AWS provider's acceptance test `testAccOrganization_basic` asserts `roots.0.policy_types.#` is
+0 after a `CreateOrganization` with `FeatureSet` `ALL`, against AWS. The auto-created organization keeps
+service control policies enabled.
+
+`DeleteOrganization` refuses an organization holding any account other than the management account
+with `OrganizationNotEmptyException`, and a member caller with `AccessDeniedException`/403. Otherwise it
+deletes everything the organization holds: its root, OUs, policies, attachments, tags, resource policy,
+trusted service access and `CreateAccount` statuses. From then on every operation the management
+account calls answers `AWSOrganizationsNotInUseException`, including one naming a former OU or policy
+by ID, until it calls `CreateOrganization`, which founds a new organization with new IDs. This applies
+only to that account: another account that has never had an organization still gets one on its first
+observation. The three exception messages are the exceptions' descriptions in the API reference.
 
 ## The resource policy
 

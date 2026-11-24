@@ -107,6 +107,7 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::Cognito::IdentityPoolRoleAttachment": (*StackDeployer).deployCognitoIdentityPoolRoleAttachment,
 	// v0.23.0 — Kinesis and CloudFront.
 	"AWS::Kinesis::Stream":                            (*StackDeployer).deployKinesisStream,
+	"AWS::Kinesis::StreamConsumer":                    (*StackDeployer).deployKinesisStreamConsumer,
 	"AWS::CloudFront::Distribution":                   (*StackDeployer).deployCloudFrontDistribution,
 	"AWS::CloudFront::CloudFrontOriginAccessIdentity": (*StackDeployer).deployCloudFrontOAI,
 	// v0.25.0 — RDS and ElastiCache.

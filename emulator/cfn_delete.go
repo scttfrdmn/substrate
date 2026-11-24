@@ -60,7 +60,8 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::EC2::SubnetRouteTableAssociation": cfnSubnetRouteTableAssociationDeleter,
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
 	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
-	"AWS::Kinesis::Stream":                  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
+	"AWS::Kinesis::Stream":                  cfnKinesisStreamDeleter,
+	"AWS::Kinesis::StreamConsumer":          jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),
@@ -643,6 +644,21 @@ func jsonBodyDeleter(service, operation, field string) cfnDeleteRequestFunc {
 		return &AWSRequest{Service: service, Operation: operation, Body: body,
 			Headers: map[string]string{}, Params: map[string]string{}}
 	}
+}
+
+// cfnKinesisStreamDeleter deletes a stream together with any consumers registered with it.
+//
+// DeleteStream refuses a stream with registered consumers unless EnforceConsumerDeletion is true,
+// so a consumer registered outside the stack would otherwise fail the stack's delete. Sending true
+// is substrate's reading: the AWS::Kinesis::Stream page says nothing about consumers, and the
+// resource provider's source is not published.
+func cfnKinesisStreamDeleter(_ *StackDeployer, dr DeployedResource, _ map[string]interface{}, _ *cfnContext) *AWSRequest {
+	body, err := json.Marshal(map[string]interface{}{"StreamName": dr.PhysicalID, "EnforceConsumerDeletion": true})
+	if err != nil {
+		return nil
+	}
+	return &AWSRequest{Service: "kinesis", Operation: "DeleteStream", Body: body,
+		Headers: map[string]string{}, Params: map[string]string{}}
 }
 
 // pathDeleter builds a deleter for a REST API, where the operation is the HTTP

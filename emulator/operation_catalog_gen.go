@@ -6,7 +6,7 @@
 // router does not route; `make operation-catalog-check` fails when the projection is
 // stale. See cmd/gen-operation-catalog for why this is generated and not declared (#1095).
 //
-// 68 plugins, 1128 routed operations.
+// 68 plugins, 1144 routed operations.
 //
 // Regenerate with `make operation-catalog`.
 
@@ -784,20 +784,31 @@ var routedOperations = map[string][]string{
 	"kinesis": {
 		"AddTagsToStream",
 		"CreateStream",
+		"DecreaseStreamRetentionPeriod",
 		"DeleteStream",
+		"DeregisterStreamConsumer",
 		"DescribeStream",
+		"DescribeStreamConsumer",
 		"DescribeStreamSummary",
 		"DisableEnhancedMonitoring",
 		"EnableEnhancedMonitoring",
 		"GetRecords",
 		"GetShardIterator",
+		"IncreaseStreamRetentionPeriod",
+		"ListShards",
+		"ListStreamConsumers",
 		"ListStreams",
+		"ListTagsForResource",
 		"ListTagsForStream",
 		"MergeShards",
 		"PutRecord",
 		"PutRecords",
+		"RegisterStreamConsumer",
 		"RemoveTagsFromStream",
 		"SplitShard",
+		"TagResource",
+		"UntagResource",
+		"UpdateMaxRecordSize",
 		"UpdateShardCount",
 		"UpdateStreamMode",
 	},
@@ -922,8 +933,10 @@ var routedOperations = map[string][]string{
 		"AttachPolicy",
 		"CloseAccount",
 		"CreateAccount",
+		"CreateOrganization",
 		"CreateOrganizationalUnit",
 		"CreatePolicy",
+		"DeleteOrganization",
 		"DeleteOrganizationalUnit",
 		"DeletePolicy",
 		"DeleteResourcePolicy",
@@ -934,8 +947,11 @@ var routedOperations = map[string][]string{
 		"DescribePolicy",
 		"DescribeResourcePolicy",
 		"DetachPolicy",
+		"DisableAWSServiceAccess",
 		"DisablePolicyType",
+		"EnableAWSServiceAccess",
 		"EnablePolicyType",
+		"ListAWSServiceAccessForOrganization",
 		"ListAccounts",
 		"ListAccountsForParent",
 		"ListChildren",

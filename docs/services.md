@@ -31,7 +31,7 @@ onUnmounted(() => window.removeEventListener('hashchange', redirect))
 ## Coverage matrix
 
 <!-- BEGIN GENERATED COVERAGE MATRIX -->
-Substrate ships **68 built-in service plugins** routing **1128 operations**. This
+Substrate ships **68 built-in service plugins** routing **1144 operations**. This
 section is generated from the plugin registry and the operation catalog
 (`make docs-reference`), so the counts and the plugin list cannot drift from the
 implementation: the catalog is itself generated from each plugin's dispatch switch
@@ -84,7 +84,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 34 | [Glue](/reference/glue) | `glue` | JSON | 33 |
 | 35 | [Health](/reference/health) | `health` | JSON | 4 |
 | 36 | [IAM](/reference/iam) | `iam` | Query | 79 |
-| 37 | [Kinesis Data Streams](/reference/kinesis) | `kinesis` | JSON | 18 |
+| 37 | [Kinesis Data Streams](/reference/kinesis) | `kinesis` | JSON | 29 |
 | 38 | [KMS](/reference/kms) | `kms` | JSON | 25 |
 | 39 | [Lambda](/reference/lambda) | `lambda` | REST/JSON | 31 |
 | 40 | [CloudWatch Logs](/reference/logs) | `logs` | JSON | 16 |
@@ -92,7 +92,7 @@ shape, as AWS's own per-verb `es:ESHttp*` actions reflect.
 | 42 | [MSK](/reference/msk) | `msk` | REST/JSON | 9 |
 | 43 | [HealthOmics](/reference/omics) | `omics` | REST/JSON | 5 |
 | 44 | [OpenSearch](/reference/opensearch) | `opensearch` | REST/JSON | 0 |
-| 45 | [Organizations](/reference/organizations) | `organizations` | JSON | 34 |
+| 45 | [Organizations](/reference/organizations) | `organizations` | JSON | 39 |
 | 46 | [Price List Query API](/reference/pricing) | `pricing` | JSON | 3 |
 | 47 | [QuickSight](/reference/quicksight) | `quicksight` | REST/JSON | 4 |
 | 48 | [RAM](/reference/ram) | `ram` | REST/JSON | 8 |
