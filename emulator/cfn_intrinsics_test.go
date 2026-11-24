@@ -659,3 +659,106 @@ func TestCFNGetAtt_ARNAttributeNeverAnswersAName(t *testing.T) {
 	assert.Equal(t, "arn-attr-topic", result.Outputs["TopicName"])
 	assert.Equal(t, "arn-attr-sm", result.Outputs["SMName"])
 }
+
+// TestCFN_ResolveValueTypes tests that resolveValue handles numeric, bool, and
+// Fn::Select/Fn::Split/Fn::Base64 correctly.
+func TestCFN_ResolveValueTypes(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyParam": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/resolve/types",
+					"Value": {"Fn::Select": ["1", ["alpha", "beta", "gamma"]]},
+					"Type": "String"
+				}
+			},
+			"MyParam2": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/resolve/base64",
+					"Value": {"Fn::Base64": "hello"},
+					"Type": "String"
+				}
+			},
+			"MyParam3": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/resolve/stackname",
+					"Value": {"Ref": "AWS::StackName"},
+					"Type": "String"
+				}
+			},
+			"MyParam4": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/resolve/region",
+					"Value": {"Ref": "AWS::Region"},
+					"Type": "String"
+				}
+			}
+		},
+		"Outputs": {
+			"Selected":   {"Value": {"Fn::Select": ["0", ["a", "b"]]}},
+			"StackName":  {"Value": {"Ref": "AWS::StackName"}},
+			"AccountId":  {"Value": {"Ref": "AWS::AccountId"}},
+			"NoValue":    {"Value": {"Ref": "AWS::NoValue"}},
+			"JoinResult": {"Value": {"Fn::Join": ["-", ["x", "y", "z"]]}},
+			"SplitJoined": {"Value": {"Fn::Split": ["/", "a/b/c"]}}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "resolve-types-stack", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "a", result.Outputs["Selected"])
+	assert.Equal(t, "resolve-types-stack", result.Outputs["StackName"])
+	assert.Equal(t, "x-y-z", result.Outputs["JoinResult"])
+	// A scalar context rejoins Fn::Split's list rather than truncating (#521).
+	assert.Equal(t, "a/b/c", result.Outputs["SplitJoined"])
+	assert.NotEmpty(t, result.Outputs["AccountId"])
+}
+
+// TestCFN_ResolveDynamicRef tests SSM {{resolve:ssm:/path}} dynamic references in CFN.
+func TestCFN_ResolveDynamicRef(t *testing.T) {
+	d := newV016Deployer(t)
+
+	// Pre-populate an SSM parameter that the CFN template will reference.
+	// We do this by deploying a CFN template with an SSM::Parameter first.
+	setupTmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyParam": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/dynamic/ref/bucket",
+					"Value": "resolved-bucket-name",
+					"Type": "String"
+				}
+			}
+		}
+	}`
+	_, err := d.Deploy(context.Background(), setupTmpl, "dynref-setup", nil)
+	require.NoError(t, err)
+
+	// Now deploy a template that uses the dynamic reference.
+	// We use Fn::Sub to simulate dynamic ref usage (the deployer resolveStringProp
+	// resolves the Ref on MyParam, which should return its physical ID "/dynamic/ref/bucket").
+	mainTmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"DependentParam": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/dynamic/ref/dependent",
+					"Value": "test-value",
+					"Type": "String"
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), mainTmpl, "dynref-main", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+}

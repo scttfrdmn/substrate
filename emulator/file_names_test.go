@@ -8,8 +8,8 @@ import (
 )
 
 // releaseNamedFile matches a file named after a release (cfn_resources_v19.go,
-// ec2_v0126_review_test.go) rather than the domain it holds.
-var releaseNamedFile = regexp.MustCompile(`_v[0-9]`)
+// ec2_v0126_review_test.go, v016_extra_test.go) rather than the domain it holds.
+var releaseNamedFile = regexp.MustCompile(`(^|_)v[0-9]`)
 
 // TestFileNames_AreNamedByDomainNotRelease refuses a Go file in this package whose name records
 // the release that added it. Code is found by what it does — cfn_resources_<service>.go for a

@@ -369,3 +369,30 @@ func TestLambdaPlugin_UpdateFunctionCode_Image(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
+
+// TestLambdaPlugin_ListFunctionsMaxItems verifies MaxItems pagination param.
+func TestLambdaPlugin_ListFunctionsMaxItems(t *testing.T) {
+	srv := newLambdaTestServer(t)
+
+	for _, name := range []string{"func-a", "func-b", "func-c"} {
+		lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+			"FunctionName": name,
+			"Runtime":      "python3.12",
+			"Role":         "arn:aws:iam::123456789012:role/role",
+			"Handler":      "index.handler",
+			"Code":         map[string]any{"ZipFile": "Zm9v"},
+		}).Body.Close() //nolint:errcheck
+	}
+
+	// List with MaxItems=2 — should return only 2 items and a next marker.
+	listResp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/functions?MaxItems=2", nil)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("ListFunctions MaxItems: %d", listResp.StatusCode)
+	}
+	var result map[string]any
+	decodeLambdaJSON(t, listResp, &result)
+	funcs, _ := result["Functions"].([]any)
+	if len(funcs) != 2 {
+		t.Errorf("expected 2 functions with MaxItems=2, got %d", len(funcs))
+	}
+}

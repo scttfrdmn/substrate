@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -364,4 +365,228 @@ func TestSSM_SeedCommandInvocation_WildcardAndClear(t *testing.T) {
 	assert.Equal(t, http.StatusOK, postSeed(map[string]any{"status": "Failed"}))
 	assert.Equal(t, http.StatusOK, del(""))
 	assert.Equal(t, "Success", getStatus())
+}
+
+// TestSSMPlugin_GetParameterHistory tests SSM GetParameterHistory (currently 0% coverage).
+func TestSSMPlugin_GetParameterHistory(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+		"Name":  "/hist/param",
+		"Value": "v1",
+		"Type":  "String",
+	})
+	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+		"Name":      "/hist/param",
+		"Value":     "v2",
+		"Type":      "String",
+		"Overwrite": true,
+	})
+
+	resp := ssmRequest(t, srv, "GetParameterHistory", map[string]interface{}{
+		"Name": "/hist/param",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSSMBody(t, resp)
+	params, ok := body["Parameters"].([]interface{})
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, len(params), 1)
+}
+
+// TestSSMPlugin_LabelParameterVersion tests SSM LabelParameterVersion.
+func TestSSMPlugin_LabelParameterVersion(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+		"Name":  "/label/param",
+		"Value": "v1",
+		"Type":  "String",
+	})
+
+	resp := ssmRequest(t, srv, "LabelParameterVersion", map[string]interface{}{
+		"Name":             "/label/param",
+		"ParameterVersion": 1,
+		"Labels":           []string{"production"},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSSMPlugin_DeleteParameters(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	for _, name := range []string{"/a", "/b", "/c"} {
+		ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+			"Name":  name,
+			"Value": "v",
+			"Type":  "String",
+		})
+	}
+
+	resp := ssmRequest(t, srv, "DeleteParameters", map[string]interface{}{
+		"Names": []string{"/a", "/b", "/does-not-exist"},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSSMBody(t, resp)
+	deleted, ok := body["DeletedParameters"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, deleted, 2)
+	invalid, ok2 := body["InvalidParameters"].([]interface{})
+	require.True(t, ok2)
+	assert.Len(t, invalid, 1)
+
+	// /c should still exist.
+	resp2 := ssmRequest(t, srv, "GetParameter", map[string]interface{}{"Name": "/c"})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+}
+
+func TestSSMPlugin_DescribeParameters(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	for _, name := range []string{"/x/y", "/x/z"} {
+		ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+			"Name":  name,
+			"Value": "v",
+			"Type":  "String",
+		})
+	}
+
+	resp := ssmRequest(t, srv, "DescribeParameters", map[string]interface{}{})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSSMBody(t, resp)
+	params, ok := body["Parameters"].([]interface{})
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, len(params), 2)
+}
+
+func TestSSMPlugin_AddAndListTags(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+		"Name":  "/tagged/param",
+		"Value": "v",
+		"Type":  "String",
+	})
+
+	// AddTagsToResource.
+	resp := ssmRequest(t, srv, "AddTagsToResource", map[string]interface{}{
+		"ResourceType": "Parameter",
+		"ResourceId":   "/tagged/param",
+		"Tags": []map[string]string{
+			{"Key": "env", "Value": "prod"},
+		},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListTagsForResource.
+	resp2 := ssmRequest(t, srv, "ListTagsForResource", map[string]interface{}{
+		"ResourceType": "Parameter",
+		"ResourceId":   "/tagged/param",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body := readSSMBody(t, resp2)
+	tags, ok := body["TagList"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, tags, 1)
+}
+
+func TestSSMPlugin_RemoveTagsFromResource(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+		"Name":  "/tagged2",
+		"Value": "v",
+		"Type":  "String",
+	})
+	ssmRequest(t, srv, "AddTagsToResource", map[string]interface{}{
+		"ResourceType": "Parameter",
+		"ResourceId":   "/tagged2",
+		"Tags": []map[string]string{
+			{"Key": "a", "Value": "1"},
+			{"Key": "b", "Value": "2"},
+		},
+	})
+
+	resp := ssmRequest(t, srv, "RemoveTagsFromResource", map[string]interface{}{
+		"ResourceType": "Parameter",
+		"ResourceId":   "/tagged2",
+		"TagKeys":      []string{"a"},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp2 := ssmRequest(t, srv, "ListTagsForResource", map[string]interface{}{
+		"ResourceType": "Parameter",
+		"ResourceId":   "/tagged2",
+	})
+	body := readSSMBody(t, resp2)
+	tags, ok := body["TagList"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, tags, 1)
+}
+
+// TestSSMPlugin_GetParametersByPathPagination tests SSM pagination.
+func TestSSMPlugin_GetParametersByPathPagination(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	// Create 11 params under /paged/ to trigger pagination (MaxResults defaults to 10).
+	for i := 0; i < 11; i++ {
+		ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+			"Name":  fmt.Sprintf("/paged/p%02d", i),
+			"Value": fmt.Sprintf("v%d", i),
+			"Type":  "String",
+		})
+	}
+
+	// First page: MaxResults=5.
+	resp := ssmRequest(t, srv, "GetParametersByPath", map[string]interface{}{
+		"Path":       "/paged",
+		"Recursive":  true,
+		"MaxResults": 5,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSSMBody(t, resp)
+	params, ok := body["Parameters"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, params, 5)
+	nextToken, ok2 := body["NextToken"].(string)
+	require.True(t, ok2)
+	assert.NotEmpty(t, nextToken)
+
+	// Second page.
+	resp2 := ssmRequest(t, srv, "GetParametersByPath", map[string]interface{}{
+		"Path":       "/paged",
+		"Recursive":  true,
+		"MaxResults": 5,
+		"NextToken":  nextToken,
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body2 := readSSMBody(t, resp2)
+	params2, ok := body2["Parameters"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, params2, 5)
+}
+
+// TestSSMPlugin_DescribeParametersPagination tests SSM DescribeParameters pagination.
+func TestSSMPlugin_DescribeParametersPagination(t *testing.T) {
+	srv := newSSMTestServer(t)
+
+	for i := 0; i < 6; i++ {
+		ssmRequest(t, srv, "PutParameter", map[string]interface{}{
+			"Name":  fmt.Sprintf("/desc/p%d", i),
+			"Value": "v",
+			"Type":  "String",
+		})
+	}
+
+	// First page with MaxResults=3.
+	resp := ssmRequest(t, srv, "DescribeParameters", map[string]interface{}{
+		"MaxResults": 3,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSSMBody(t, resp)
+	params, ok := body["Parameters"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, params, 3)
+	nextToken, ok2 := body["NextToken"].(string)
+	require.True(t, ok2)
+	assert.NotEmpty(t, nextToken)
 }

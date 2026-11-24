@@ -179,3 +179,48 @@ func TestCFN_GetAttHostedZoneID(t *testing.T) {
 		assert.Equal(t, "Z26RNL4JYFTOTI", result.Outputs["Zone"])
 	})
 }
+
+// TestCFN_GetAttNewAttributes tests GetAtt for new resource types to improve resolveFnGetAtt coverage.
+func TestCFN_GetAttNewAttributes(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyKey": {
+				"Type": "AWS::KMS::Key",
+				"Properties": {}
+			},
+			"MyTopic": {
+				"Type": "AWS::SNS::Topic",
+				"Properties": {"TopicName": "getatt-test-topic"}
+			},
+			"MyParam": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/getatt/test",
+					"Value": "param-value",
+					"Type": "String"
+				}
+			}
+		},
+		"Outputs": {
+			"KeyArn":    {"Value": {"Fn::GetAtt": ["MyKey", "Arn"]}},
+			"KeyArn2":   {"Value": {"Fn::GetAtt": ["MyKey", "KeyArn"]}},
+			"TopicArn":  {"Value": {"Fn::GetAtt": ["MyTopic", "TopicArn"]}},
+			"ParamVal":  {"Value": {"Fn::GetAtt": ["MyParam", "Value"]}},
+			"ParamType": {"Value": {"Fn::GetAtt": ["MyParam", "Type"]}}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "getatt-stack", nil)
+	require.NoError(t, err)
+	assert.NotEmpty(t, result.Outputs["KeyArn"])
+	assert.NotEmpty(t, result.Outputs["KeyArn2"])
+	assert.NotEmpty(t, result.Outputs["TopicArn"])
+	// "Value — Returns the value of the parameter." This asserted the parameter *name*
+	// until #827: the resolver answered every unrecognized attribute with the physical ID,
+	// and for an SSM parameter that is the name. The value and the name are both plausible
+	// strings, which is why the wrong one went unnoticed here.
+	assert.Equal(t, "param-value", result.Outputs["ParamVal"])
+	assert.Equal(t, "String", result.Outputs["ParamType"])
+}

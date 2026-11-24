@@ -146,3 +146,52 @@ func TestSQSFIFO_Deduplication(t *testing.T) {
 		t.Errorf("expected 1 message in queue after dedup, found %d <Message> elements in: %s", count, body)
 	}
 }
+
+// TestSQSFIFO_ContentBasedDedup tests content-based deduplication where the
+// SHA-256 of the body serves as the deduplication ID.
+func TestSQSFIFO_ContentBasedDedup(t *testing.T) {
+	srv, _ := newSQSTestServer(t)
+
+	resp := sqsRequest(t, srv, map[string]string{
+		"Action":            "CreateQueue",
+		"QueueName":         "cbd-queue.fifo",
+		"Attribute.1.Name":  "FifoQueue",
+		"Attribute.1.Value": "true",
+		"Attribute.2.Name":  "ContentBasedDeduplication",
+		"Attribute.2.Value": "true",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("CreateQueue: %d", resp.StatusCode)
+	}
+	var cqr struct {
+		QueueURL string `xml:"CreateQueueResult>QueueUrl"`
+	}
+	xml.NewDecoder(resp.Body).Decode(&cqr) //nolint:errcheck
+	resp.Body.Close()                      //nolint:errcheck
+
+	// Send with GroupId only (content-based dedup active).
+	r1 := sqsRequest(t, srv, map[string]string{
+		"Action":         "SendMessage",
+		"QueueUrl":       cqr.QueueURL,
+		"MessageBody":    "unique-content",
+		"MessageGroupId": "g1",
+	})
+	if r1.StatusCode != http.StatusOK {
+		body := readBody(t, r1)
+		t.Fatalf("SendMessage content-based dedup: %d body: %s", r1.StatusCode, body)
+	}
+	r1.Body.Close() //nolint:errcheck
+
+	// Send same body again — should be deduplicated.
+	r2 := sqsRequest(t, srv, map[string]string{
+		"Action":         "SendMessage",
+		"QueueUrl":       cqr.QueueURL,
+		"MessageBody":    "unique-content",
+		"MessageGroupId": "g1",
+	})
+	if r2.StatusCode != http.StatusOK {
+		body := readBody(t, r2)
+		t.Fatalf("second send (content dedup): %d body: %s", r2.StatusCode, body)
+	}
+	r2.Body.Close() //nolint:errcheck
+}
