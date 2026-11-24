@@ -36,7 +36,7 @@ func wireFailuresForTest(req *AWSRequest) []wireFailure {
 	if !ok {
 		return nil
 	}
-	w := wireWalker{rules: wireServiceRules{enum: true, pattern: true}}
+	w := wireWalker{rules: wireServiceRules{enum: true, pattern: true}, ec2: wireModels[op.Model].Protocol == "ec2"}
 	w.structure(view, op.Input, "")
 	if w.unreadable {
 		return nil
@@ -98,6 +98,13 @@ func WireRESTReadsForTest(req *AWSRequest) (list int, header string, headerBlob,
 	return list, header, headerBlob, prefixed
 }
 
+// WireEC2InvalidForTest renders EC2's refusal for a value of parameter wire that breaks a
+// constraint, a failure no operation of the EC2 slice can produce today.
+func WireEC2InvalidForTest(value, wire string) (string, string) {
+	err := validatedServices["ec2"].refusal([]wireFailure{{kind: wireNotInEnum, value: value, hasValue: true, wire: wire}})
+	return err.Code, err.Message
+}
+
 // WireModelVersionForTest returns the vendored snapshot's version.
 func WireModelVersionForTest() string { return wireModelVersion }
 
@@ -115,3 +122,36 @@ func WireOperationCoveredForTest(plugin, op string) bool {
 	_, ok := wireOperations[plugin][op]
 	return ok
 }
+
+// WireRequireMemberFallbackForTest calls wireRequireMember for a service the tables do not
+// validate, which must answer the plugin's own fallback.
+func WireRequireMemberFallbackForTest() *AWSError {
+	fallback := &AWSError{Code: "Fallback", Message: "the plugin's own", HTTPStatus: 400}
+	return wireRequireMember("no-such-service", "Op", &AWSRequest{}, "Name", fallback)
+}
+
+// WireMissingAfterInvalidForTest renders ElastiCache's refusal for a length failure followed by
+// a missing member.
+func WireMissingAfterInvalidForTest() string {
+	return validatedServices["elasticache"].refusal([]wireFailure{
+		{kind: wireTooLong, path: "a", wire: "A", value: "x", hasValue: true, constraint: "Member must have length less than or equal to 0"},
+		{kind: wireMissing, path: "b", wire: "B", constraint: "Member must not be null"},
+	}).Message
+}
+
+// WireCheckMemberForTest exposes wireCheckMember, returning the refusal's message or "".
+func WireCheckMemberForTest(service, operation string, req *AWSRequest, name string) string {
+	if err := wireCheckMember(service, operation, req, name); err != nil {
+		return err.Message
+	}
+	return ""
+}
+
+// WireEnumAtForTest exposes wireEnumAt.
+func WireEnumAtForTest(service, operation string, path ...string) []string {
+	return wireEnumAt(service, operation, path...)
+}
+
+// R53InvalidTypeForTest exposes r53InvalidType, the refusal for a record Type the gate's walk did
+// not see.
+func R53InvalidTypeForTest(i int, rrType string) *AWSError { return r53InvalidType(i, rrType) }

@@ -25,6 +25,13 @@ const (
 	// 'member' failed to satisfy constraint: …". A missing member still renders as "Value null
 	// at 'member'".
 	wireStyleOfTheInput
+	// wireStyleElided is [wireStyleQuoted] with the value left out: "Value at 'member' failed to
+	// satisfy constraint: …".
+	wireStyleElided
+	// wireStyleEC2 is the EC2 API's form, which names one parameter rather than listing
+	// failures: "Value (x) for parameter Name is invalid." for a value, and the rules'
+	// missingSentence for an absent parameter.
+	wireStyleEC2
 )
 
 // wireErrorCode is a code and HTTP status.
@@ -42,6 +49,10 @@ type wireServiceRules struct {
 	missing, invalid wireErrorCode
 	// style is the message's form.
 	style wireMessageStyle
+	// missingSentence, when set, is the service's own sentence for an absent required member,
+	// with a %s for the parameter's wire name. A request missing one is refused with that
+	// sentence alone, naming the first such member, rather than with the validator's list.
+	missingSentence string
 	// enum and pattern opt the service into enum and pattern checks, each only on a source
 	// showing the service enforces them.
 	enum, pattern bool
@@ -82,7 +93,110 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 		enum:    true,
 		pattern: true,
 	},
+
+	// SESv2, REST-JSON. BadRequestException at HTTP 400, "The input you provided is invalid.", is
+	// in the Errors section of every SESv2 operation substrate routes (see sesv2_errors.go). The
+	// message form is SESv2's observed answer, which leaves the value out: "BadRequestException: 1
+	// validation error detected: Value at 'deliveryOptions.maxDeliverySeconds' failed to satisfy
+	// constraint: Member must have value greater than or equal to 300"
+	// (hashicorp/terraform-provider-aws#40591). The enum opt-in is from "Value at
+	// 'suppressionOptions.suppressedReasons' failed to satisfy constraint: Member must satisfy
+	// constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"
+	// (hashicorp/terraform-provider-aws#38207). No source shows SESv2's answer for a missing member,
+	// so its "Value null at" form is the one every other service in this table answers, and is
+	// substrate's reading for SESv2.
+	"sesv2": {
+		missing: wireErrorCode{"BadRequestException", http.StatusBadRequest},
+		invalid: wireErrorCode{"BadRequestException", http.StatusBadRequest},
+		style:   wireStyleElided,
+		enum:    true,
+	},
+
+	// Route 53, REST-XML. InvalidInput at HTTP 400, "The input is not valid.", is in the Errors
+	// section of every Route 53 operation substrate routes (API_CreateHostedZone,
+	// API_ChangeResourceRecordSets, API_GetHostedZone, API_DeleteHostedZone, API_ListHostedZones,
+	// API_ListResourceRecordSets). The message form, value quoted, is Route 53's observed answer:
+	// "InvalidInput: 1 validation error detected: Value '/hostedzone/…' at 'resourceId' failed to
+	// satisfy constraint: Member must have length less than or equal to 32"
+	// (hashicorp/terraform-provider-aws#37817). The enum opt-in is from "InvalidInput: 1 validation
+	// error detected: Value 'to' at 'startRecordType' failed to satisfy constraint: Member must
+	// satisfy enum value set: [AAAA, A, CAA, NS, SOA, SPF, MX, PTR, CNAME, TXT, SRV, NAPTR]"
+	// (hashicorp/terraform-provider-aws#11677). Route 53 lists the values in an order of its own;
+	// substrate lists them in the model's. No source shows Route 53's answer for a missing member, so
+	// its "Value null at" form is the one the rest of this table answers, and is substrate's own.
+	"route53": {
+		missing: wireErrorCode{"InvalidInput", http.StatusBadRequest},
+		invalid: wireErrorCode{"InvalidInput", http.StatusBadRequest},
+		style:   wireStyleQuoted,
+		enum:    true,
+	},
+
+	// ElastiCache, Query. Its common-errors page publishes InvalidParameterValue at 400, "An
+	// invalid or out-of-range value was supplied for the input parameter", and a missing member
+	// is answered with it too, in ElastiCache's own sentence: "InvalidParameterValue: The parameter
+	// CacheSubnetGroupName must be provided and must not be blank." (Stack Overflow, "The parameter
+	// CacheSubnetGroupName must be provided and must not be blank", quoting AWS through Terraform;
+	// cloudposse/terraform-aws-elasticache-redis#89 for CacheParameterGroupName). No source shows
+	// ElastiCache's message for a length, so that form is the quoted one, and is substrate's own.
+	"elasticache": {
+		missing:         wireErrorCode{"InvalidParameterValue", http.StatusBadRequest},
+		invalid:         wireErrorCode{"InvalidParameterValue", http.StatusBadRequest},
+		style:           wireStyleQuoted,
+		missingSentence: "The parameter %s must be provided and must not be blank.",
+	},
+
+	// EC2, key pairs and placement groups only: the slice #1612 pilots, chosen because their
+	// handlers' own checks are few and their tests exercise them over the wire. The rest of EC2
+	// follows with the protocol batches. The codes and sentences are [wireEC2MissingSentence]'s.
+	"ec2": {
+		ops: map[string]bool{
+			"CreateKeyPair": true, "DeleteKeyPair": true, "DescribeKeyPairs": true, "ImportKeyPair": true,
+			"CreatePlacementGroup": true, "DeletePlacementGroup": true, "DescribePlacementGroups": true,
+		},
+		missing:         wireErrorCode{"MissingParameter", http.StatusBadRequest},
+		invalid:         wireErrorCode{"InvalidParameterValue", http.StatusBadRequest},
+		style:           wireStyleEC2,
+		missingSentence: wireEC2MissingSentence,
+	},
 }
+
+// wireRequireMember refuses the top-level member name of operation of service's input, which a
+// plugin found absent or blank in req, as the gate does. An absent member, and a blank one the
+// model gives a minimum length, are refused through the gate's own walk over that member
+// ([wireCheckMember]), so the answer is the gate's byte for byte. A blank one the model does not
+// bound, which the gate lets through, is refused with "Member must not be blank", a constraint
+// of substrate's own, or with the service's missing-member sentence where it has one, since
+// ElastiCache's sentence covers a blank value too. fallback is returned when the tables hold no
+// such member, so a plugin keeps its own refusal rather than answering an empty code.
+func wireRequireMember(service, operation string, req *AWSRequest, name string, fallback *AWSError) *AWSError {
+	if err := wireCheckMember(service, operation, req, name, wireMissing, wireTooShort); err != nil {
+		return err
+	}
+	m, rules, view, ok := wirePluginMember(service, operation, req, name)
+	if !ok {
+		return fallback
+	}
+	f := wireFailure{kind: wireMissing, path: lowerFirst(m.Name), member: m.Name, wire: wireName(m),
+		constraint: "Member must not be null"}
+	if _, present := view.field(m, &wireShapes[m.Shape]); present {
+		f.kind, f.value, f.hasValue, f.constraint = wireBlank, "", true, "Member must not be blank"
+	}
+	return rules.refusal([]wireFailure{f})
+}
+
+// The EC2 API's sentences. MissingParameter and InvalidParameterValue are the codes the EC2 API
+// reference's error-codes page publishes for "The request is missing a required parameter" and "A
+// value specified in a parameter is not valid", both at 400. The wording is EC2's observed answer:
+// "The request must contain the parameter instanceId (Service: AmazonEC2; Status Code: 400; Error
+// Code: MissingParameter …)" (Amazon developer forums, "EC2 Missing parameter") and "MissingParameter:
+// The request must contain the parameter ebs" (hashicorp/packer#3799). Both name the parameter by
+// the model's lower-camel locationName, so the sentence does too, and by the member name where the
+// model gives none; that rule is substrate's reading of the two answers. The value sentence is the form EC2's KeyType refusal takes in
+// [EC2Plugin.createKeyPair]; no source publishes it for a model constraint, so it is substrate's.
+const (
+	wireEC2MissingSentence = "The request must contain the parameter %s"
+	wireEC2InvalidSentence = "Value (%s) for parameter %s is invalid."
+)
 
 // refusal renders failures into the service's error.
 //
@@ -97,6 +211,23 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 // The code is the first failure's: a missing member's code when the first failure is one, the
 // invalid code otherwise.
 func (r wireServiceRules) refusal(failures []wireFailure) *AWSError {
+	first := failures[0]
+	if r.missingSentence != "" {
+		// The sentence names one parameter, the first absent or blank one in the model's order,
+		// even when another failure precedes it: the service's own refusal for a missing
+		// parameter is the answer, and a nested member is named by its own wire name alone,
+		// which is substrate's choice, since no source shows the sentence for one.
+		for _, f := range failures {
+			if f.kind == wireMissing || f.kind == wireBlank {
+				return &AWSError{Code: r.missing.code, Message: fmt.Sprintf(r.missingSentence, f.wire),
+					HTTPStatus: r.missing.status}
+			}
+		}
+	}
+	if r.style == wireStyleEC2 {
+		return &AWSError{Code: r.invalid.code, Message: fmt.Sprintf(wireEC2InvalidSentence, first.value, first.wire),
+			HTTPStatus: r.invalid.status}
+	}
 	parts := make([]string, len(failures))
 	for i, f := range failures {
 		parts[i] = r.clause(f)
@@ -124,6 +255,8 @@ func (r wireServiceRules) clause(f wireFailure) string {
 		subject = "Value null"
 	case r.style == wireStyleOfTheInput:
 		subject = "Value of the input"
+	case r.style == wireStyleElided:
+		subject = "Value"
 	case f.hasValue:
 		subject = fmt.Sprintf("Value '%s'", f.value)
 	default:

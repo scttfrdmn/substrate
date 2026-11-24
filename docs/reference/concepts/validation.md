@@ -45,6 +45,10 @@ a form body.
 | Service | Operations | Refusal | Enum | Pattern |
 |---|---|---|---|---|
 | ACM | all routed | `ValidationException`/400 | yes | yes |
+| SESv2 | all routed | `BadRequestException`/400 | yes | no |
+| Route 53 | all routed | `InvalidInput`/400 | yes | no |
+| ElastiCache | all routed | `InvalidParameterValue`/400 | no | no |
+| EC2 | key pairs and placement groups: `CreateKeyPair`, `ImportKeyPair`, `DeleteKeyPair`, `DescribeKeyPairs`, `CreatePlacementGroup`, `DeletePlacementGroup`, `DescribePlacementGroups` | `MissingParameter`/400 | no | no |
 
 Each service's codes, statuses and message form are in `emulator/wire_validate_errors.go`,
 each with its source, and its reference page says what changed for its callers.
@@ -59,7 +63,16 @@ JSON services answer AWS's front-end validator's form:
 
 and, for several failures, `2 validation errors detected: …; …`. A missing member reads
 `Value null at 'name' failed to satisfy constraint: Member must not be null`. A service may
-withhold the value: ACM answers `Value of the input at 'domainName' …`.
+withhold the value: ACM answers `Value of the input at 'domainName' …`, and SESv2 `Value at
+'emailIdentity' …`.
+
+Two services answer a missing member in a sentence of their own and name only the first:
+ElastiCache, `The parameter SubnetIds must be provided and must not be blank.`, and EC2, `The
+request must contain the parameter KeyName`. ElastiCache names the parameter as it is sent; EC2
+names it by the model's `locationName` where it has one (`groupName`), as its observed answers
+do. A required member present but blank where the model sets no minimum length is refused by the
+plugin, with the sentence where the service has one and otherwise with `Member must not be
+blank`, which is substrate's own.
 
 The path is the member names from the model with the first letter lowered, joined by dots. A
 list element is `<list>.<n>.member`, counting from 1, so the second tag's key is

@@ -172,9 +172,10 @@ var sixDescribeOps = []sixDescribeOp{
 		create:    "CreateCacheSubnetGroup",
 		createParams: func(id string) map[string]string {
 			return map[string]string{
-				"Action":                      "CreateCacheSubnetGroup",
-				"CacheSubnetGroupName":        id,
-				"CacheSubnetGroupDescription": "paging",
+				"Action":                       "CreateCacheSubnetGroup",
+				"CacheSubnetGroupName":         id,
+				"CacheSubnetGroupDescription":  "paging",
+				"SubnetIds.SubnetIdentifier.1": "subnet-0a1b2c3d",
 			}
 		},
 		describe:       "DescribeCacheSubnetGroups",

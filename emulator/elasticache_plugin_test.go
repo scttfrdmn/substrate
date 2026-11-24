@@ -264,9 +264,10 @@ func TestElastiCachePlugin_SubnetAndParamGroups(t *testing.T) {
 
 	// CreateCacheSubnetGroup
 	resp := ecRequest(t, ts, map[string]string{
-		"Action":                      "CreateCacheSubnetGroup",
-		"CacheSubnetGroupName":        "my-cache-sg",
-		"CacheSubnetGroupDescription": "test subnet group",
+		"Action":                       "CreateCacheSubnetGroup",
+		"CacheSubnetGroupName":         "my-cache-sg",
+		"CacheSubnetGroupDescription":  "test subnet group",
+		"SubnetIds.SubnetIdentifier.1": "subnet-0a1b2c3d",
 	})
 	body := ecBody(t, resp)
 	if resp.StatusCode != http.StatusOK {
@@ -602,9 +603,10 @@ func TestElastiCachePlugin_DeleteSubnetAndParamGroups(t *testing.T) {
 
 	// SubnetGroup.
 	resp := ecRequest(t, ts, map[string]string{
-		"Action":                      "CreateCacheSubnetGroup",
-		"CacheSubnetGroupName":        "del-sg",
-		"CacheSubnetGroupDescription": "to delete",
+		"Action":                       "CreateCacheSubnetGroup",
+		"CacheSubnetGroupName":         "del-sg",
+		"CacheSubnetGroupDescription":  "to delete",
+		"SubnetIds.SubnetIdentifier.1": "subnet-0a1b2c3d",
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("CreateCacheSubnetGroup status %d", resp.StatusCode)

@@ -72,20 +72,24 @@ func r53IsApexDefault(rrType, name, zoneName string) bool {
 }
 
 // r53RRTypes is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
-// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"). The values are
-// upper case, and an enum member is matched exactly, so "a" is not "A".
-var r53RRTypes = map[string]bool{
-	"SOA": true, "A": true, "TXT": true, "NS": true, "CNAME": true, "MX": true, "NAPTR": true,
-	"PTR": true, "SRV": true, "SPF": true, "AAAA": true, "CAA": true, "DS": true, "TLSA": true,
-	"SSHFP": true, "SVCB": true, "HTTPS": true,
+// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"), read from the
+// vendored model so that it is the list request validation checks. The values are upper case, and
+// an enum member is matched exactly, so "a" is not "A".
+func r53RRTypes() []string {
+	return wireEnumAt("route53", "ChangeResourceRecordSets", "ChangeBatch", "Changes", "ResourceRecordSet", "Type")
 }
 
-// r53InvalidType refuses a record set Type outside [r53RRTypes] with InvalidInput (400), "The input is
-// not valid.", which API_ChangeResourceRecordSets publishes. The message is substrate's own.
-func r53InvalidType(rrType string) *AWSError {
+// r53InvalidType refuses the record set Type of the change at index i (counting from 0) when it is
+// outside [r53RRTypes], with InvalidInput (400), "The input is not valid.", which
+// API_ChangeResourceRecordSets publishes. The handler checks the whole ChangeBatch through the
+// gate's own walk first ([wireCheckMember]), which refuses a bad Type in the gate's words with
+// every other failure in the batch; this answers only a Type that walk did not see, for a body it
+// could not read, and its message is substrate's own.
+func r53InvalidType(i int, rrType string) *AWSError {
 	return &AWSError{
-		Code:       "InvalidInput",
-		Message:    fmt.Sprintf("%q is not a valid resource record set Type; the valid values are upper case.", rrType),
+		Code: "InvalidInput",
+		Message: fmt.Sprintf("change %d: %q is not a valid resource record set Type; the valid values are %s.",
+			i+1, rrType, strings.Join(r53RRTypes(), ", ")),
 		HTTPStatus: http.StatusBadRequest,
 	}
 }

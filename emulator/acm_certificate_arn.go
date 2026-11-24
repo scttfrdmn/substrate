@@ -136,8 +136,8 @@ func acmValidateCertificateARN(arn string) *AWSError {
 // tiers no model expresses, through [acmValidateCertificateARN]. The gate answers a client's
 // request before the plugin runs; this answers one the gate did not see, a stack's or a
 // schedule's dispatch or any request with validation off, the same way.
-func acmCheckCertificateARN(req *AWSRequest, arn string) *AWSError {
-	if err := wireCheckMember(req, "CertificateArn"); err != nil {
+func acmCheckCertificateARN(operation string, req *AWSRequest, arn string) *AWSError {
+	if err := wireCheckMember("acm", operation, req, "CertificateArn"); err != nil {
 		return err
 	}
 	return acmValidateCertificateARN(arn)

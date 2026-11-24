@@ -36,6 +36,21 @@ identity always answers the same bytes.
 `GET /v1/emails`, where the account and Region are the point. It is recorded as such in
 `scripts/wire-bookkeeping-internal.txt`, anchored on that route.
 
+## Request validation
+
+SESv2 is validated against its service model before any plugin sees a client's request (#1612; see
+[Request validation](/reference/concepts/validation)). Every failure answers
+`BadRequestException`/400, which every routed operation publishes, in SESv2's form, which leaves
+the value out: `1 validation error detected: Value at 'emailIdentity' failed to satisfy
+constraint: Member must have length greater than or equal to 1`. Enum checks are on. The form
+and the enum enforcement are from SESv2's observed answers, cited in
+`emulator/wire_validate_errors.go`; no source shows SESv2's answer for a missing member, so its
+`Value null at 'emailIdentity'` form is substrate's reading.
+
+`SendEmail` without `Content` is refused, and `CreateEmailIdentity` without `EmailIdentity`
+answers the validator's message rather than substrate's own, also from the plugin for a request
+that reaches it without the gate.
+
 ## CloudFormation resource types
 
 | Type | Ref | Notes |
