@@ -108,28 +108,67 @@ func TestRun_RefusesAnIndexWithoutMarkers(t *testing.T) {
 	}
 }
 
-func TestRenderSidebar_OrdersByLabel(t *testing.T) {
-	raw, err := renderSidebar([]string{"sqs", "ec2", "apigatewayv2", "lambda"})
+func TestRenderSidebar_LabelsEachEntryWithItsPageTitle(t *testing.T) {
+	docs := t.TempDir()
+	write := func(rel, src string) {
+		p := filepath.Join(docs, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(p), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(src), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("reference/sqs.md", "# SQS\n")
+	write("reference/ec2.md", "```\n# not the title\n```\n\n# EC2\n")
+	write("reference/apigatewayv2.md", "# API Gateway v2 (HTTP)\n")
+	write("reference/lambda.md", "# `Lambda` {#lambda}\n")
+	write("reference/concepts/routing.md", "# Request routing\n")
+	write("reference/concepts/errors.md", "# Errors\n")
+
+	raw, err := renderSidebar(docs, []string{"sqs", "ec2", "apigatewayv2", "lambda"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var items []sidebarItem
-	if err := json.Unmarshal(raw, &items); err != nil {
+	var sb sidebar
+	if err := json.Unmarshal(raw, &sb); err != nil {
 		t.Fatal(err)
 	}
-	var got []string
-	for _, it := range items {
-		if it.Text != routing[strings.TrimPrefix(it.Link, "/reference/")].Display {
-			t.Errorf("item %+v is not labeled with its plugin's display name", it)
+	label := func(items []sidebarItem) string {
+		var out []string
+		for _, it := range items {
+			out = append(out, it.Text+"="+it.Link)
 		}
-		got = append(got, it.Link)
+		return strings.Join(out, ", ")
 	}
-	// "API Gateway (HTTP)", "EC2 / VPC", "Lambda", "SQS".
-	if want := "/reference/apigatewayv2,/reference/ec2,/reference/lambda,/reference/sqs"; strings.Join(got, ",") != want {
-		t.Errorf("order = %s, want %s", strings.Join(got, ","), want)
+	// The page title, not PluginRouting.Display ("API Gateway (HTTP)", "EC2 / VPC").
+	want := "API Gateway v2 (HTTP)=/reference/apigatewayv2, EC2=/reference/ec2, Lambda=/reference/lambda, SQS=/reference/sqs"
+	if got := label(sb.Services); got != want {
+		t.Errorf("services = %s\nwant       %s", got, want)
 	}
-	if !bytes.HasSuffix(raw, []byte("]\n")) {
+	if got, want := label(sb.Concepts), "Errors=/reference/concepts/errors, Request routing=/reference/concepts/routing"; got != want {
+		t.Errorf("concepts = %s, want %s", got, want)
+	}
+	if !bytes.HasSuffix(raw, []byte("}\n")) {
 		t.Error("want a trailing newline")
+	}
+
+	if _, err := renderSidebar(docs, []string{"sqs", "kms"}); err == nil || !strings.Contains(err.Error(), "-scaffold kms") {
+		t.Errorf("want a plugin with no page refused with the scaffold hint, got %v", err)
+	}
+	write("reference/concepts/untitled.md", "no title\n")
+	if _, err := renderSidebar(docs, []string{"sqs"}); err == nil || !strings.Contains(err.Error(), "has no `# ` title") {
+		t.Errorf("want an untitled concept page refused, got %v", err)
+	}
+}
+
+func TestRun_CheckRefusesAConceptPageTheSidebarLacks(t *testing.T) {
+	docs := copyDocs(t)
+	if err := os.WriteFile(filepath.Join(docs, "reference", "concepts", "pagination.md"), []byte("# Pagination\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runIn(t, docs, "-check"); err == nil || !strings.Contains(err.Error(), "services-sidebar.json is out of date") {
+		t.Fatalf("want the stale sidebar refused, got %v", err)
 	}
 }
 
@@ -264,20 +303,25 @@ func TestCheckLinks(t *testing.T) {
 	write("index.md", "# Home\n\n[root](/) [self](#home) [ext](https://x.invalid#nope) [img](/og.png#x)\n")
 	write("guide.md", "# Guide\n\n## Part one\n\n[page](/reference/ec2#supported-operations) [rel](reference/ec2.md)\n"+
 		"[html](/reference/ec2.html#ec2) `[code](#nope)`\n\n```\n[fenced](#nope)\n```\n")
-	write("reference/ec2.md", "# EC2\n\n## Supported operations\n\n[up](../guide#part-one) [same](#ec2)\n")
+	write("reference/ec2.md", "# EC2\n\n## Supported operations\n\n[up](../guide#part-one) [same](#ec2)\n"+
+		"[angle](</guide#part-one>) [def]\n\n[def]: /guide#part-one\n\n<a href=\"/reference/ec2#supported-operations\">x</a>\n"+
+		"[encoded](/reference/ec2#supported%2Doperations)\n")
 	write("node_modules/x/readme.md", "[dead](#nope)\n")
 	write(".vitepress/cache/x.md", "[dead](#nope)\n")
 	if err := checkLinks(docs); err != nil {
 		t.Fatalf("want every link accepted, got %v", err)
 	}
 
-	write("reference/s3.md", "# S3\n\n[a](#no-such-heading) [b](/reference/nope) [c](/guide#part-two) [d](/guide#part-one)\n")
+	write("reference/s3.md", "# S3\n\n[a](#no-such-heading) [b](/reference/nope) [c](/guide#part-two) [d](/guide#part-one)\n"+
+		"\n[e]: /guide#part-three\n\n<a href='#gone'>x</a>\n")
 	err := checkLinks(docs)
 	if err == nil {
 		t.Fatal("want dead links refused")
 	}
 	for _, want := range []string{
-		"3 links between docs pages do not land",
+		"5 links between docs pages do not land",
+		"(/guide#part-three) names an anchor",
+		"(#gone) names an anchor",
 		"(#no-such-heading) names an anchor",
 		"(/reference/nope) names a page that does not exist",
 		"(/guide#part-two) names an anchor",

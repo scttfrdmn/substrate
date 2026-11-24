@@ -111,7 +111,8 @@ PR conventions, as practiced:
 
 Update `CHANGELOG.md` in every PR under `## [Unreleased]` following the
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
-Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections.
+Use **Added / Changed / Deprecated / Removed / Fixed / Security** sections, plus
+**Compatibility** (below).
 
 An entry is one bullet per issue, one sentence of about 25 words or fewer:
 
@@ -121,7 +122,9 @@ An entry is one bullet per issue, one sentence of about 25 words or fewer:
 
 For example, `- Lambda: POST /v1/lambda/invoke-result seeds a successful Invoke payload (#1611).`
 Add a `### Compatibility` section whenever a consumer must act on upgrading: a removed
-API, config key, route or seed, or a changed default. Say what to do, not why. The
+API, config key, route or seed, or a changed default. Its bullets take the same
+`- <Area>: … (#N).` form and may run longer, because they name exactly what to change
+(every removed symbol, a seed body to copy). Say what to do, not why. The
 reasoning, provenance and AWS sources go in the PR or issue body, which the bullet's
 `(#N)` reaches; the CHANGELOG is the index, not the record. Earlier releases' entries
 are longer and stay as they are.

@@ -18,10 +18,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # headings <level-prefix> <file>: the headings of that level outside fenced code blocks.
+# A fence opens on three or more backticks or tildes (after up to three spaces) and closes
+# only on a run of the same character at least as long, as CommonMark has it, so a ````
+# fence can hold a ``` example.
 headings() {
   awk -v p="$1" '
-    /^ ? ? ?(```|~~~)/ { fenced = !fenced; next }
-    !fenced && index($0, p) == 1 { print substr($0, length(p) + 1) }
+    {
+      line = $0
+      sub(/^ ? ? ?/, "", line)
+      ch = substr(line, 1, 1)
+      n = 0
+      if (ch == "`" || ch == "~") { while (substr(line, n + 1, 1) == ch) n++ }
+      if (fence != "") {
+        if (ch == substr(fence, 1, 1) && n >= length(fence) && substr(line, n + 1) ~ /^[ \t]*$/) fence = ""
+        next
+      }
+      if (n >= 3) { fence = substr(line, 1, n); next }
+      if (index($0, p) == 1) print substr($0, length(p) + 1)
+    }
   ' "$2"
 }
 
@@ -71,12 +85,16 @@ if [[ "${1:-}" == "--self-test" ]]; then
   }
   printf '# EC2\n\n## Supported operations\n\n## Cost\n' >"$dir/good.md"
   printf '# S3\n\n```sh\n# a shell comment\n## and another\n```\n\n## Cost\n' >"$dir/fenced.md"
+  printf '# SNS\n\n````md\n```\n# inside\n````\n\n~~~\n## Cost\n~~~\n\n## Cost\n' >"$dir/nested-fence.md"
+  printf '# SES\n\n```\n~~~\n# still inside\n```\n' >"$dir/mixed-fence.md"
   printf 'no title\n\n## Cost\n' >"$dir/untitled.md"
   printf '# EC2\n\n# Lambda\n' >"$dir/two-titles.md"
   printf '# SQS\n\n## Cost\n\n## Cost\n' >"$dir/dup-section.md"
   printf '# EC2\n\n## Other\n' >"$dir/same-title.md"
   expect ok "one title, distinct sections" "$dir/good.md"
   expect ok "headings in a fence are not headings" "$dir/fenced.md" "$dir/good.md"
+  expect ok "a longer fence holds a shorter one" "$dir/nested-fence.md"
+  expect ok "a tilde line does not close a backtick fence" "$dir/mixed-fence.md"
   expect fail "a page with no title" "$dir/untitled.md"
   expect fail "a page with two titles" "$dir/two-titles.md"
   expect fail "a section repeated within a page" "$dir/dup-section.md"

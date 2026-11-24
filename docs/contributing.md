@@ -205,6 +205,10 @@ each one through `docs/.vitepress/legacy-anchors.json`. If `make docs-reference-
 names an entry there, point its value at the heading's new anchor. Never remove a key: the
 keys are the anchors that page published, and the check pins them.
 
+The check computes anchors the way VitePress does, and is tested against ids VitePress
+itself rendered. When a change to `docs/package.json` moves VitePress, run `npm ci` in
+`docs/` and then `make docs-anchor-fixtures`, and commit what changes.
+
 CFN resources live in `emulator/cfn_resources_<service>.go`: each service's deploy, update and
 delete helpers together. Files are named by domain, never by release (`TestFileNames_AreNamedByDomainNotRelease`).
 
@@ -311,5 +315,7 @@ needs `cd test/e2e && go mod tidy`), and `make python-test` runs pytest-substrat
 - [ ] Tests added (table-driven, race-safe, no wall-clock/network), coverage
       maintained.
 - [ ] `make test` and `make lint` pass, and both drift jobs' targets pass.
-- [ ] `CHANGELOG.md` updated under `## [Unreleased]`.
+- [ ] `CHANGELOG.md` has one bullet per issue under `## [Unreleased]`, in the form
+      `- <Service>: <what changed> (#N).` (about 25 words or fewer), plus
+      `### Compatibility` if a consumer must act on upgrading.
 - [ ] Every exported symbol has a doc comment ending in a period.

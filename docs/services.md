@@ -19,8 +19,8 @@ function redirect() {
   } catch {
     return
   }
+  if (!Object.hasOwn(legacyAnchors, anchor)) return
   const target = legacyAnchors[anchor]
-  if (!target) return
   history.replaceState({}, '', withBase(target))
   router.go(withBase(target))
 }

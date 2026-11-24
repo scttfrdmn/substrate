@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitepress'
-// One entry per registered plugin, written by `make docs-reference` (cmd/gen-service-reference).
-import servicesSidebar from './services-sidebar.json'
+// The Concepts and Services groups, written from the pages by `make docs-reference`
+// (cmd/gen-service-reference).
+import referenceSidebar from './services-sidebar.json'
 
 const siteUrl = 'https://scttfrdmn.github.io/substrate/'
 const ogImage = siteUrl + 'og-image.png'
@@ -95,19 +96,12 @@ export default defineConfig({
       {
         text: 'Concepts',
         collapsed: true,
-        items: [
-          { text: 'Request routing', link: '/reference/concepts/routing' },
-          { text: 'Errors', link: '/reference/concepts/errors' },
-          { text: 'Account attribution', link: '/reference/concepts/accounts' },
-          { text: 'Listing order', link: '/reference/concepts/listing-order' },
-          { text: 'Seeds and replay', link: '/reference/concepts/seeds-and-replay' },
-          { text: 'Fault injection', link: '/reference/concepts/fault-injection' },
-        ],
+        items: referenceSidebar.concepts,
       },
       {
         text: 'Services',
         collapsed: true,
-        items: servicesSidebar,
+        items: referenceSidebar.services,
       },
       {
         text: 'Contributing',

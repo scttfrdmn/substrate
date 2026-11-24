@@ -65,6 +65,10 @@ func main() {
 	}
 }
 
+// openFence matches the line that opens a fenced code block. The block closes only on a run
+// of the same character at least as long, so a ```` fence can hold a ``` example.
+var openFence = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})")
+
 // operationNamePattern is what an AWS operation name looks like. A first-column cell that
 // does not match it — "PutObject (multipart)", a type name, a prose note — names no
 // operation, so it is neither a row that documents one nor a phantom row.
@@ -166,15 +170,21 @@ func readPages(dir string) (map[string]string, error) {
 // would count a name appearing in a resource-type or error-code table. The operation table
 // is the thing headed "Operation", and it is the claim a reader takes the page to be making.
 func parseOperationTable(src string) ([]string, bool) {
-	fenced := false
+	fence := ""
 	lines := strings.Split(src, "\n")
 	for i := 0; i < len(lines); i++ {
 		line := strings.TrimRight(lines[i], " \t")
-		if strings.HasPrefix(line, "```") {
-			fenced = !fenced
+		if fence != "" {
+			if t := strings.TrimSpace(line); strings.HasPrefix(t, fence) && strings.Trim(t, fence[:1]) == "" {
+				fence = ""
+			}
 			continue
 		}
-		if fenced || !strings.HasPrefix(line, "|") {
+		if m := openFence.FindStringSubmatch(line); m != nil {
+			fence = m[1]
+			continue
+		}
+		if !strings.HasPrefix(line, "|") {
 			continue
 		}
 		// A table starts here. Consume it whole either way, so a later table cannot be

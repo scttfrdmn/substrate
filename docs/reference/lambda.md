@@ -10,12 +10,12 @@
 | CreateFunction | Stores function metadata; no actual execution; records [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the deployment package, and `TracingConfig.Mode` (`Active` or `PassThrough`) as recorded intent |
 | GetFunction | Reports `Code.ImageUri` with `RepositoryType: ECR` for an [image-packaged function](#an-image-packaged-function-reports-its-image), and the function's `Tags` beside `Configuration`. Every configuration reports `Version: $LATEST` and `TracingConfig.Mode` (#1519) |
 | UpdateFunctionCode | Re-derives [`CodeSize` and `CodeSha256`](#what-codesize-and-codesha256-report) from the new package; an update carrying no package changes neither |
-| UpdateFunctionConfiguration | [Drops the function's warm container](#which-operations-drop-a-warm-container) when `Handler`, `Runtime` or `Environment` changes; also updates `TracingConfig.Mode` |
+| UpdateFunctionConfiguration | Also updates `TracingConfig.Mode` |
 | DeleteFunction | |
 | ListFunctions | |
 | ListVersionsByFunction | `$LATEST` alone, with the qualified `FunctionArn`, since substrate publishes no versions; `MaxItems` is checked against 1–10000 and any `Marker` is refused, since none is ever issued (#1519) |
 | GetFunctionCodeSigningConfig | An empty `CodeSigningConfigArn`, since substrate models no code-signing configurations. Published under `2020-06-30` (#1519) |
-| Invoke | Answers the stub `{"statusCode":200,"body":"null"}` when no container executor is available; a **seeded** failure (`POST`/`DELETE /v1/lambda/invoke-error`) short-circuits every path and still answers `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
+| Invoke | Never runs the function's code. Answers a [seeded error, a seeded result, or the stub](#invoke-answers-a-seed-or-a-stub) `{"statusCode":200,"body":"null"}`, always with `200`, per the reference's *"the status code in the API response doesn't reflect function errors"* |
 | InvokeAsync | Always `202` with `{"Status":202}`; the payload is not stored and nothing is queued. The operation is deprecated in AWS's own reference, and is published under [its own API version date](#each-operation-is-published-under-its-own-api-version-date), `2014-11-13` |
 | AddPermission | Adds a statement to the function's resource policy and answers it as `Statement`, a string holding the statement's JSON, as published (#1382); the body is [parsed before the function is looked up](/reference/concepts/errors#whether-a-body-is-parsed-before-the-resource-is-looked-up). `Principal` takes AddPermission's output forms — a service as `{"Service": …}`, an account ID as `{"AWS": "arn:aws:iam::{account}:root"}`, an ARN as `{"AWS": …}`, `*` as `"*"` — and `SourceArn`, `SourceAccount`, `PrincipalOrgID`, `EventSourceToken`, `FunctionUrlAuthType` and `InvokedViaFunctionUrl` become the statement's `Condition` with the keys the developer guide's resource-based policy examples use. A `Qualifier` makes the statement's `Resource` the qualified ARN; aliases are not modeled, so it is not looked up (#1605) |
 | RemovePermission | Removes the statement by `StatementId`; `204` with no body. An absent function, an absent policy and an unmatched `StatementId` are all `ResourceNotFoundException`/404 |
@@ -184,7 +184,7 @@ claim a caller can act on and be wrong about.
 An enabled SQS event-source mapping consumes its queue: it receives a batch, invokes the function
 with it, and deletes the batch if the invocation succeeded. A failed invocation leaves the batch on
 the queue until its visibility timeout passes, which is how a real mapping retries it. Substrate does
-not run the function's code (see [Docker execution](#docker-execution-runs-an-image-never-a-zip)); the
+not run the function's code (see [Invoke answers a seed or a stub](#invoke-answers-a-seed-or-a-stub)); the
 observable effect is the queue's.
 
 Until #1292 a goroutine drove each mapping from a one-second **wall-clock** ticker. A frozen or scaled
@@ -258,107 +258,50 @@ worth comparing.
 forwarded as the API spells them, and each goes through the template's `Ref` and
 pseudo-parameter resolution like every other property.
 
-## Docker execution runs an image, never a ZIP
+## Invoke answers a seed or a stub
 
-Docker execution is **off unless `lambda.docker_enabled` is set**, which is the default and
-every CI run. With it unset no executor is constructed, no container is ever started, and
-`Invoke` answers the stub payload `{"statusCode":200,"body":"null"}` — or a seeded failure,
-which short-circuits every path (see the `Invoke` row above). Everything in this subsection and
-the next applies only to the configured case.
+Substrate never runs a function's code. Running a handler is the workload behind the API rather
+than an observation through it, so per the scope rule it is out of scope. `Invoke` instead answers
+a seed or the stub:
 
-With it set, there are two paths and they are not equally capable:
+- **A seeded error**, through `POST`/`DELETE /v1/lambda/invoke-error`. The response carries
+  `X-Amz-Function-Error` (`Handled` or `Unhandled`, default `Unhandled`) and an error payload, or the
+  seed's own `payload` verbatim.
+- **A seeded result**, through `POST`/`DELETE /v1/lambda/invoke-result`. The seed's `payload`, any
+  JSON value, is returned verbatim with no `X-Amz-Function-Error`.
+- **The stub** `{"statusCode":200,"body":"null"}`, with no `X-Amz-Function-Error`, when no seed
+  applies.
 
-| `PackageType` | What the container runs |
-|---|---|
-| `Image` | The image's own code, which substrate neither builds nor inspects |
-| `Zip` (or unset) | **Nothing.** The archive is mounted, not extracted |
+A seed for the function's own name outranks a `"*"` seed of either kind, and at the same scope an
+error outranks a result. The first that exists answers, in this order:
 
-The ZIP path writes the stored deployment package into a temporary directory as a single file
-named `function.zip` and mounts that directory at `/var/task:ro`. The Lambda runtime interface
-expects `/var/task` to hold the module tree, so the container sees one archive and no
-`index.py` — the handler cannot be imported whatever the ZIP contains.
+1. the error seeded for the function;
+2. the result seeded for the function;
+3. the `"*"` error;
+4. the `"*"` result.
 
-**What a caller observes is not a stub, and that is the part worth knowing.** `docker run`
-succeeds, the container passes its readiness check, it is pooled, and the invoke returns what
-the runtime interface answered: **HTTP 200 with an import-error body and
-`X-Amz-Function-Error: Unhandled`**, which substrate forwards verbatim. So `Invoke` reports
-that *the caller's handler raised* — for code that was never loaded, and indistinguishable
-from a genuine `Runtime.ImportModuleError`. The stub is returned only when the `docker` binary
-cannot be run or the container fails to start.
+So a wildcard failure does not mask a result seeded for one function.
 
-Extraction is deliberately not implemented
-([#1079](https://github.com/scttfrdmn/substrate/issues/1079)). Running a caller's handler is
-outside substrate's scope by name — it is the workload behind the API rather than an
-observation through it — and a test of it could not avoid container-start latency, the
-handler's own I/O
-and clock, and an image pull over the network, all of which this project forbids a test to
-depend on. The ZIP write stays as the **recorded intent** the same boundary asks for: the
-bytes are what `GetFunction`'s `CodeSha256` and `CodeSize` are computed from, and they are
-what an `UpdateFunctionCode` changes.
+```
+POST   /v1/lambda/invoke-result   {"functionName","payload"}
+DELETE /v1/lambda/invoke-result?functionName=<name>   (or with no query, clear all)
+```
 
-So the execution semantics a real Lambda has — a timeout firing, a handler exception becoming
-`Handled`, an `Environment` variable reaching the code — are not reachable through either path
-here. `X-Amz-Function-Error` and a function-error payload are still fully testable, because
-they are **seedable** through `POST`/`DELETE /v1/lambda/invoke-error` — which is the mechanism
-substrate offers in place of running the work, and which answers instantly and reproducibly
-where a real handler would not.
+Both seeds are keyed by function name, or by `"*"` for any function. `functionName` defaults to
+`"*"`, and in a POST or DELETE it takes the forms `Invoke` does: a name, a qualified name
+(`resize:v1`), or a full or partial ARN, all keyed by the bare name. `payload` is required. Clearing result seeds
+leaves error seeds in place, and the reverse. Every path that invokes a function reads the same
+seeds, including an event-source mapping's poll, a Step Functions task, a Scheduler target and an
+API Gateway proxy integration.
 
-**A cold start costs the caller nothing beyond its own invoke.** The readiness check is an HTTP
-request to a path the runtime interface emulator does not route, which its HTTP server answers 404
-without reaching the function. Until [#1129](https://github.com/scttfrdmn/substrate/issues/1129) the
-check POSTed `{}` to the invocation endpoint, so on the image path every cold start ran the handler
-once with an event the caller never sent, before the caller's own. The emulator publishes no
-readiness endpoint, and its invocation handler runs the function for any method, so the probe cannot
-be that endpoint.
+```console
+$ curl -X POST http://localhost:4566/v1/lambda/invoke-result \
+    -d '{"functionName":"resize","payload":{"statusCode":200,"body":"{\"width\":640}"}}'
+```
 
-## Which operations drop a warm container
-
-This applies only when Docker execution is configured. Without it there is no executor
-and no pool, which is the default and every CI run.
-
-A warm container is pooled by **function ARN alone**, and the handle records no code
-identity — no `CodeSha256`, no `RevisionId`, no image URI — so nothing in the invoke
-path can notice that a container is running code the function no longer has. Until
-[#1035](https://github.com/scttfrdmn/substrate/issues/1035) only a shutdown, a state
-reset and the idle TTL ever dropped an entry, and the TTL measures **idle** time, so a
-function invoked in a loop kept its stale container indefinitely: `GetFunction` reported
-the new `CodeSha256` while `Invoke` returned the previous code's output, and the response
-a caller was asserting on was the stale one.
-
-Three operations now drop the container for the function they name, and the line between
-them and the rest of the plugin is what a container is started from rather than what the
-API publishes as mutable:
-
-| Operation | Why |
-|-----------|-----|
-| `UpdateFunctionCode` | The old package is mounted into the container, or the old image URI is baked into its `docker run` |
-| `UpdateFunctionConfiguration` | `Runtime` chooses the image, `Handler` is both an environment variable and the container's command argument, and each `Environment` entry is a `-e` flag — all fixed at start |
-| `DeleteFunction` | The ARN is derived from account, Region and name, so a function recreated under the same name would inherit the dead one's entry |
-
-`MemorySize` and `Timeout` are the two `UpdateFunctionConfiguration` members that reach
-no container at all, so they would not need the eviction. It happens anyway:
-distinguishing them means comparing five members against a handle that stores none of
-them, and dropping a container costs one cold start where keeping a stale one serves the
-wrong answer. The eviction is **per ARN** — one function's update leaves every other
-function's container alone — and it runs **after** the write, so a refused update
-disturbs nothing.
-
-`PublishVersion` and the alias operations do not drop a container: the pool is keyed by
-the unqualified ARN and the invoke path resolves a qualifier to the same function record,
-so neither changes what a container should be running.
-
-`DeleteFunction` also releases the stored deployment package, which it did not before
-#1035. No stale read followed from that — the invoke path is gated on whether a package
-is staged, which a recreated function sets for itself — so it was a leak rather than a
-wrong answer.
-
-**A caveat on all of the above:** substrate writes a ZIP package into the mounted
-directory without extracting it, so the runtime interface never finds a module tree and
-no container down that path runs a caller's handler at all. Per this repository's scope
-boundary, running a Lambda's code is out of scope; whether the path should therefore be
-documented as inert or completed is
-[#1079](https://github.com/scttfrdmn/substrate/issues/1079). The invalidation above is
-about container *identity*, which is observable either way.
+The deployment package is still stored. Its bytes are what `GetFunction`'s `CodeSha256` and
+`CodeSize` report, and an `UpdateFunctionCode` changes them. A timeout firing, a handler exception or
+an `Environment` variable reaching the code are not modeled; seed the outcome each would produce.
 
 ## The tag bookkeeping a function carries reaches no response
 

@@ -101,7 +101,7 @@ func run(args []string, stdout io.Writer) error {
 	outputs := []output{
 		{path: *out, render: func(existing []byte) ([]byte, error) { return replaceMatrix(existing, names) }},
 		{path: filepath.Join(docsDir, ".vitepress", "services-sidebar.json"),
-			render: func([]byte) ([]byte, error) { return renderSidebar(names) }},
+			render: func([]byte) ([]byte, error) { return renderSidebar(docsDir, names) }},
 	}
 	for _, o := range outputs {
 		if err := generate(o, *check, stdout); err != nil {
@@ -275,28 +275,73 @@ type sidebarItem struct {
 	Link string `json:"link"`
 }
 
-// renderSidebar renders docs/.vitepress/services-sidebar.json, which config.mts imports as
-// the Services group: one entry per registered plugin, labeled as the matrix labels it and
-// ordered by that label, so a reader scanning for "Lambda" finds it under L rather than
-// under the registry name.
-func renderSidebar(names []string) ([]byte, error) {
-	items := make([]sidebarItem, 0, len(names))
+// sidebar is docs/.vitepress/services-sidebar.json, which config.mts imports for the
+// Concepts and Services groups.
+type sidebar struct {
+	Concepts []sidebarItem `json:"concepts"`
+	Services []sidebarItem `json:"services"`
+}
+
+// renderSidebar renders the sidebar from the pages themselves: one Services entry per
+// registered plugin, and one Concepts entry per page under docs/reference/concepts/. Each
+// entry is labeled with its page's `# ` title, so the sidebar says what the page says, and
+// each group is ordered by label, so a reader scanning for "Lambda" finds it under L rather
+// than under the registry name. A renamed, added or removed concept page changes the file,
+// which `make docs-reference-check` then refuses until it is regenerated.
+func renderSidebar(docsDir string, names []string) ([]byte, error) {
+	var sb sidebar
 	for _, n := range names {
-		items = append(items, sidebarItem{Text: routing[n].Display, Link: pageLink(n)})
-	}
-	sort.SliceStable(items, func(i, j int) bool {
-		a, b := strings.ToLower(items[i].Text), strings.ToLower(items[j].Text)
-		if a != b {
-			return a < b
+		title, err := pageTitle(filepath.Join(docsDir, "reference", n+".md"))
+		if err != nil {
+			return nil, fmt.Errorf("%w; `go run ./cmd/check-operation-docs -scaffold %s` prints a page to start from", err, n)
 		}
-		return items[i].Link < items[j].Link
-	})
+		sb.Services = append(sb.Services, sidebarItem{Text: title, Link: pageLink(n)})
+	}
+	concepts, err := filepath.Glob(filepath.Join(docsDir, "reference", "concepts", "*.md"))
+	if err != nil {
+		return nil, fmt.Errorf("list concept pages: %w", err)
+	}
+	for _, p := range concepts {
+		title, err := pageTitle(p)
+		if err != nil {
+			return nil, err
+		}
+		link := "/reference/concepts/" + strings.TrimSuffix(filepath.Base(p), ".md")
+		sb.Concepts = append(sb.Concepts, sidebarItem{Text: title, Link: link})
+	}
+	for _, group := range [][]sidebarItem{sb.Concepts, sb.Services} {
+		sort.SliceStable(group, func(i, j int) bool {
+			a, b := strings.ToLower(group[i].Text), strings.ToLower(group[j].Text)
+			if a != b {
+				return a < b
+			}
+			return group[i].Link < group[j].Link
+		})
+	}
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	enc.SetIndent("", "  ")
-	if err := enc.Encode(items); err != nil {
+	if err := enc.Encode(sb); err != nil {
 		return nil, fmt.Errorf("encode sidebar: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// pageTitle is the text of a page's `# ` heading, as a reader sees it.
+func pageTitle(page string) (string, error) {
+	raw, err := os.ReadFile(page) //nolint:gosec // a page under the docs directory.
+	if err != nil {
+		return "", fmt.Errorf("read %s: %w", page, err)
+	}
+	lines := proseLines(string(raw))
+	refs := referenceLabels(lines)
+	for _, line := range lines {
+		if h := atxHeading.FindStringSubmatch(line); h != nil && h[1] == "#" {
+			if title, _ := headingText(h[2], refs); strings.TrimSpace(title) != "" {
+				return strings.TrimSpace(title), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%s has no `# ` title", page)
 }

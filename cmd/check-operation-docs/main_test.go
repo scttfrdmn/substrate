@@ -367,6 +367,17 @@ func TestParseOperationTable_ScopesToTheFirstOperationTable(t *testing.T) {
 			name: "a fenced table is an example, not a claim",
 			src:  "# Gamma\n\n```\n| Operation | Notes |\n|---|---|\n| DoFenced | |\n```\n",
 		},
+		{
+			name: "a longer fence holds a shorter one",
+			src: "# Delta\n\n````md\n```\n| Operation | Notes |\n|---|---|\n| DoFenced | |\n````\n\n" +
+				"| Operation | Notes |\n|---|---|\n| DoDelta | |\n",
+			rows:  []string{"DoDelta"},
+			found: true,
+		},
+		{
+			name: "a tilde fence closes only on tildes",
+			src:  "# Epsilon\n\n~~~\n```\n| Operation | Notes |\n|---|---|\n| DoFenced | |\n~~~\n",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

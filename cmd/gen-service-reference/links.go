@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -152,17 +153,26 @@ func checkLinks(docsDir string) error {
 }
 
 var (
-	inlineLink = regexp.MustCompile(`\]\(([^()\s]+)(?:\s+"[^"]*")?\)`)
-	codeSpan   = regexp.MustCompile("`+[^`]*`+")
-	scheme     = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+	codeSpan = regexp.MustCompile("`+[^`]*`+")
+	scheme   = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9+.-]*:`)
+	// linkForms capture a destination in group 1, or in group 2 where a form has two.
+	linkForms = []*regexp.Regexp{
+		regexp.MustCompile(`\]\(<([^<>\n]*)>|\]\(([^()\s]+)(?:\s+(?:"[^"]*"|'[^']*'))?\)`), // [text](dest "title")
+		regexp.MustCompile(`^ {0,3}\[(?:[^\[\]\\]|\\.)+\]:\s*(?:<([^<>\n]*)>|(\S+))`),      // [label]: dest
+		regexp.MustCompile(`\shref\s*=\s*(?:"([^"]*)"|'([^']*)')`),                         // <a href="dest">
+	}
 )
 
-// pageLinks returns the destination of every inline Markdown link in src outside code.
+// pageLinks returns the destination of every link in src outside code: inline links,
+// reference definitions, and href attributes in the page's HTML.
 func pageLinks(src string) []string {
 	var out []string
 	for _, line := range proseLines(src) {
-		for _, m := range inlineLink.FindAllStringSubmatch(codeSpan.ReplaceAllString(line, ""), -1) {
-			out = append(out, m[1])
+		line = codeSpan.ReplaceAllString(line, "")
+		for _, re := range linkForms {
+			for _, m := range re.FindAllStringSubmatch(line, -1) {
+				out = append(out, m[1]+m[2])
+			}
 		}
 	}
 	return out
@@ -175,6 +185,9 @@ func resolveLink(docsDir, file, link string) (target, anchor string, ok bool) {
 		return "", "", false
 	}
 	route, anchor, _ := strings.Cut(link, "#")
+	if decoded, err := url.PathUnescape(anchor); err == nil {
+		anchor = decoded
+	}
 	switch {
 	case route == "":
 		return file, anchor, true
