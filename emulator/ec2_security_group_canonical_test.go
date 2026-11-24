@@ -227,3 +227,46 @@ func TestEC2_SecurityGroupRules_GroupNameResolvesInTheDefaultVPC(t *testing.T) {
 		ec2RequireRefusal(t, ts, rule("AuthorizeSecurityGroupIngress", nil), "MissingParameter")
 	})
 }
+
+// TestEC2_SecurityGroup_PairNamesResolveToIDs pins that a rule authorized by group name is
+// revoked by group ID, and the other way round.
+func TestEC2_SecurityGroup_PairNamesResolveToIDs(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name              string
+		authorize, revoke func(id string) map[string]string
+	}{
+		{"authorize by name, revoke by ID",
+			func(string) map[string]string { return map[string]string{"IpPermissions.1.Groups.1.GroupName": "peer"} },
+			func(id string) map[string]string { return map[string]string{"IpPermissions.1.Groups.1.GroupId": id} }},
+		{"authorize by ID, revoke by name",
+			func(id string) map[string]string { return map[string]string{"IpPermissions.1.Groups.1.GroupId": id} },
+			func(string) map[string]string { return map[string]string{"IpPermissions.1.Groups.1.GroupName": "peer"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newEC2TestServer(t)
+			vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
+			peer := ec2CreateSG(t, ts, "peer", "peer", vpcID)
+			groupID := ec2CreateSG(t, ts, "app", "app", vpcID)
+			call := func(action string, source map[string]string) {
+				params := map[string]string{
+					"Action": action, "GroupId": groupID,
+					"IpPermissions.1.IpProtocol": "tcp", "IpPermissions.1.FromPort": "5432", "IpPermissions.1.ToPort": "5432",
+				}
+				for k, v := range source {
+					params[k] = v
+				}
+				ec2FleetXML(t, ts, params, nil)
+			}
+			call("AuthorizeSecurityGroupIngress", tc.authorize(peer))
+			groups := ec2DescribeSGs(t, ts, map[string]string{"GroupId.1": groupID})
+			require.Len(t, groups[0].Ingress, 1)
+			require.Len(t, groups[0].Ingress[0].Groups, 1)
+			assert.Equal(t, peer, groups[0].Ingress[0].Groups[0].GroupID, "a named source is stored with its ID")
+
+			call("RevokeSecurityGroupIngress", tc.revoke(peer))
+			assert.Empty(t, ec2DescribeSGs(t, ts, map[string]string{"GroupId.1": groupID})[0].Ingress)
+		})
+	}
+}

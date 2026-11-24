@@ -3,6 +3,7 @@ package emulator
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // cfn_resource_table.go is the one list of the resource types substrate's CloudFormation
@@ -169,8 +170,7 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::EC2::SecurityGroupEgress":  (*StackDeployer).deployEC2SecurityGroupEgress,
 	"AWS::EC2::VPCGatewayAttachment": (*StackDeployer).deployEC2VPCGatewayAttachment,
 	// v0.131.0 — the record the CDK adds to every synthesized stack (#1605), and the four types
-	// every ordinary CDK app emits that had no helper, so strict mode would have refused the app
-	// (cfn_resources_v131.go).
+	// every ordinary CDK app emits that had no helper, so strict mode would have refused the app.
 	cfnCDKMetadataType:                      (*StackDeployer).deployCDKMetadata,
 	"AWS::EC2::Route":                       (*StackDeployer).deployEC2Route,
 	"AWS::EC2::SubnetRouteTableAssociation": (*StackDeployer).deployEC2SubnetRouteTableAssociation,
@@ -198,4 +198,39 @@ func (d *StackDeployer) deployCDKMetadata(
 		return DeployedResource{}, 0, fmt.Errorf("cfn deployCDKMetadata stubStore: %w", err)
 	}
 	return DeployedResource{LogicalID: logicalID, Type: cfnCDKMetadataType, PhysicalID: logicalID}, 0, nil
+}
+
+// cfnTypeServiceOverrides maps CFN service segments whose lower-cased form is
+// not the substrate plugin name.
+var cfnTypeServiceOverrides = map[string]string{
+	"elasticloadbalancingv2": "elbv2",
+	"certificatemanager":     "acm",
+	"opensearchservice":      "opensearch",
+	"servicediscovery":       "servicediscovery",
+	"elasticache":            "elasticache",
+	"applicationautoscaling": "application-autoscaling",
+	"secretsmanager":         "secretsmanager",
+	"stepfunctions":          "states",
+	"serverless":             "lambda",
+}
+
+// servicePluginLoaded reports whether a plugin for the CFN resource type's
+// service is registered. A generic stub for a type whose plugin *is* loaded
+// usually means the type needs wiring rather than that the service is
+// unsupported, which is the distinction the stub warning should surface (#388).
+func (d *StackDeployer) servicePluginLoaded(resType string) bool {
+	parts := strings.SplitN(resType, "::", 3)
+	if len(parts) < 2 {
+		return false
+	}
+	service := strings.ToLower(parts[1])
+	if override, ok := cfnTypeServiceOverrides[service]; ok {
+		service = override
+	}
+	for _, name := range d.registry.Names() {
+		if name == service {
+			return true
+		}
+	}
+	return false
 }

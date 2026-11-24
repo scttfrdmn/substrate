@@ -175,3 +175,315 @@ func TestKMSPlugin_ListKeys(t *testing.T) {
 	require.True(t, ok)
 	assert.Len(t, keys, 3)
 }
+
+func TestKMSPlugin_EnableDisableKey(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	// Disable.
+	resp := kmsRequest(t, srv, "DisableKey", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify disabled.
+	desc := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{"KeyId": keyID})
+	body := readKMSBody(t, desc)
+	km := body["KeyMetadata"].(map[string]interface{})
+	assert.Equal(t, "Disabled", km["KeyState"])
+	assert.Equal(t, false, km["Enabled"])
+
+	// Re-enable.
+	resp2 := kmsRequest(t, srv, "EnableKey", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	desc2 := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{"KeyId": keyID})
+	body2 := readKMSBody(t, desc2)
+	km2 := body2["KeyMetadata"].(map[string]interface{})
+	assert.Equal(t, "Enabled", km2["KeyState"])
+	assert.Equal(t, true, km2["Enabled"])
+}
+
+func TestKMSPlugin_ScheduleAndCancelKeyDeletion(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	// Schedule deletion.
+	resp := kmsRequest(t, srv, "ScheduleKeyDeletion", map[string]interface{}{
+		"KeyId":               keyID,
+		"PendingWindowInDays": 7,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readKMSBody(t, resp)
+	assert.Equal(t, "PendingDeletion", body["KeyState"])
+
+	// Cancel deletion. The key comes back Disabled, not Enabled — API_CancelKeyDeletion: "when this
+	// operation succeeds, the key state of the KMS key is Disabled. To enable the KMS key, use
+	// EnableKey." This assertion read Enabled until #963, which is the defect it was recording.
+	resp2 := kmsRequest(t, srv, "CancelKeyDeletion", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+
+	desc := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{"KeyId": keyID})
+	body2 := readKMSBody(t, desc)
+	km := body2["KeyMetadata"].(map[string]interface{})
+	assert.Equal(t, "Disabled", km["KeyState"])
+}
+
+func TestKMSPlugin_TagAndUntagResource(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	// Tag.
+	resp := kmsRequest(t, srv, "TagResource", map[string]interface{}{
+		"KeyId": keyID,
+		"Tags": []map[string]string{
+			{"TagKey": "env", "TagValue": "test"},
+			{"TagKey": "owner", "TagValue": "alice"},
+		},
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// ListResourceTags.
+	resp2 := kmsRequest(t, srv, "ListResourceTags", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body := readKMSBody(t, resp2)
+	tags, ok := body["Tags"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, tags, 2)
+
+	// Untag.
+	resp3 := kmsRequest(t, srv, "UntagResource", map[string]interface{}{
+		"KeyId":   keyID,
+		"TagKeys": []string{"env"},
+	})
+	assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+	resp4 := kmsRequest(t, srv, "ListResourceTags", map[string]interface{}{"KeyId": keyID})
+	body4 := readKMSBody(t, resp4)
+	tags4, ok := body4["Tags"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, tags4, 1)
+}
+
+// TestKMSPlugin_KeyPolicy is the original policy round trip, and #983 is what made it one.
+//
+// The document it writes is byte-identical to the fallback `getKeyPolicy` answered before #983, so
+// until then this test would have passed against a `PutKeyPolicy` that stored nothing whatsoever — the
+// read hit the stand-in and the stand-in was the expectation. It is left as written because it now
+// proves what it always appeared to; the assertions #983 needs are in `kms_key_policy_test.go`, where
+// the caller's document differs from the default in more than one member for exactly this reason.
+func TestKMSPlugin_KeyPolicy(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	policy := `{"Version":"2012-10-17","Statement":[]}`
+
+	// PutKeyPolicy.
+	resp := kmsRequest(t, srv, "PutKeyPolicy", map[string]interface{}{
+		"KeyId":      keyID,
+		"PolicyName": "default",
+		"Policy":     policy,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// GetKeyPolicy.
+	resp2 := kmsRequest(t, srv, "GetKeyPolicy", map[string]interface{}{
+		"KeyId":      keyID,
+		"PolicyName": "default",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body := readKMSBody(t, resp2)
+	assert.Equal(t, policy, body["Policy"])
+}
+
+func TestKMSPlugin_KeyRotation(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	// Enable rotation.
+	resp := kmsRequest(t, srv, "EnableKeyRotation", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// GetKeyRotationStatus.
+	resp2 := kmsRequest(t, srv, "GetKeyRotationStatus", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+	body := readKMSBody(t, resp2)
+	assert.Equal(t, true, body["KeyRotationEnabled"])
+
+	// Disable rotation.
+	resp3 := kmsRequest(t, srv, "DisableKeyRotation", map[string]interface{}{"KeyId": keyID})
+	assert.Equal(t, http.StatusOK, resp3.StatusCode)
+
+	resp4 := kmsRequest(t, srv, "GetKeyRotationStatus", map[string]interface{}{"KeyId": keyID})
+	body4 := readKMSBody(t, resp4)
+	assert.Equal(t, false, body4["KeyRotationEnabled"])
+}
+
+func TestKMSPlugin_ListAliases(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	kmsRequest(t, srv, "CreateAlias", map[string]interface{}{
+		"AliasName":   "alias/test-a",
+		"TargetKeyId": keyID,
+	})
+	kmsRequest(t, srv, "CreateAlias", map[string]interface{}{
+		"AliasName":   "alias/test-b",
+		"TargetKeyId": keyID,
+	})
+
+	resp := kmsRequest(t, srv, "ListAliases", map[string]interface{}{})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readKMSBody(t, resp)
+	aliases, ok := body["Aliases"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, aliases, 2)
+}
+
+func TestKMSPlugin_DeleteAlias(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	kmsRequest(t, srv, "CreateAlias", map[string]interface{}{
+		"AliasName":   "alias/to-delete",
+		"TargetKeyId": keyID,
+	})
+
+	// Delete the alias.
+	resp := kmsRequest(t, srv, "DeleteAlias", map[string]interface{}{
+		"AliasName": "alias/to-delete",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Now describe via alias should fail — at 400, which is the status API_DescribeKey publishes
+	// for NotFoundException. This read 404 until #923.
+	resp2 := kmsRequest(t, srv, "DescribeKey", map[string]interface{}{
+		"KeyId": "alias/to-delete",
+	})
+	assert.Equal(t, http.StatusBadRequest, resp2.StatusCode)
+	assert.Equal(t, "NotFoundException", readKMSBody(t, resp2)["__type"])
+}
+
+func TestKMSPlugin_UpdateAlias(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	c1 := readKMSBody(t, kmsRequest(t, srv, "CreateKey", map[string]interface{}{}))
+	key1 := c1["KeyMetadata"].(map[string]interface{})["KeyId"].(string)
+
+	c2 := readKMSBody(t, kmsRequest(t, srv, "CreateKey", map[string]interface{}{}))
+	key2 := c2["KeyMetadata"].(map[string]interface{})["KeyId"].(string)
+
+	kmsRequest(t, srv, "CreateAlias", map[string]interface{}{
+		"AliasName":   "alias/switchable",
+		"TargetKeyId": key1,
+	})
+
+	// Point the alias at key2.
+	resp := kmsRequest(t, srv, "UpdateAlias", map[string]interface{}{
+		"AliasName":   "alias/switchable",
+		"TargetKeyId": key2,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Describe via alias should return key2.
+	desc := readKMSBody(t, kmsRequest(t, srv, "DescribeKey", map[string]interface{}{
+		"KeyId": "alias/switchable",
+	}))
+	km := desc["KeyMetadata"].(map[string]interface{})
+	assert.Equal(t, key2, km["KeyId"])
+}
+
+func TestKMSPlugin_GenerateDataKey(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	createResp := kmsRequest(t, srv, "CreateKey", map[string]interface{}{})
+	createBody := readKMSBody(t, createResp)
+	meta := createBody["KeyMetadata"].(map[string]interface{})
+	keyID := meta["KeyId"].(string)
+
+	resp := kmsRequest(t, srv, "GenerateDataKey", map[string]interface{}{
+		"KeyId":   keyID,
+		"KeySpec": "AES_256",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readKMSBody(t, resp)
+	assert.NotEmpty(t, body["Plaintext"])
+	assert.NotEmpty(t, body["CiphertextBlob"])
+}
+
+func TestKMSPlugin_GenerateDataKeyWithoutPlaintext(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	c := readKMSBody(t, kmsRequest(t, srv, "CreateKey", map[string]interface{}{}))
+	keyID := c["KeyMetadata"].(map[string]interface{})["KeyId"].(string)
+
+	resp := kmsRequest(t, srv, "GenerateDataKeyWithoutPlaintext", map[string]interface{}{
+		"KeyId":   keyID,
+		"KeySpec": "AES_256",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readKMSBody(t, resp)
+	assert.NotEmpty(t, body["CiphertextBlob"])
+	assert.Empty(t, body["Plaintext"])
+}
+
+func TestKMSPlugin_ReEncrypt(t *testing.T) {
+	srv := newKMSTestServer(t)
+
+	c1 := readKMSBody(t, kmsRequest(t, srv, "CreateKey", map[string]interface{}{}))
+	key1ID := c1["KeyMetadata"].(map[string]interface{})["KeyId"].(string)
+
+	c2 := readKMSBody(t, kmsRequest(t, srv, "CreateKey", map[string]interface{}{}))
+	key2ID := c2["KeyMetadata"].(map[string]interface{})["KeyId"].(string)
+
+	// Encrypt with key1.
+	plaintext := base64.StdEncoding.EncodeToString([]byte("reencrypt-test"))
+	encBody := readKMSBody(t, kmsRequest(t, srv, "Encrypt", map[string]interface{}{
+		"KeyId":     key1ID,
+		"Plaintext": plaintext,
+	}))
+	ciphertext := encBody["CiphertextBlob"].(string)
+
+	// ReEncrypt to key2.
+	resp := kmsRequest(t, srv, "ReEncrypt", map[string]interface{}{
+		"CiphertextBlob":   ciphertext,
+		"DestinationKeyId": key2ID,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readKMSBody(t, resp)
+	newCiphertext, ok := body["CiphertextBlob"].(string)
+	require.True(t, ok)
+	assert.NotEqual(t, ciphertext, newCiphertext)
+
+	// Decrypt the re-encrypted blob.
+	decBody := readKMSBody(t, kmsRequest(t, srv, "Decrypt", map[string]interface{}{
+		"CiphertextBlob": newCiphertext,
+	}))
+	assert.Equal(t, plaintext, decBody["Plaintext"])
+}

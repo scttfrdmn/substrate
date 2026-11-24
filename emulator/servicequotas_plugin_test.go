@@ -246,3 +246,38 @@ func TestServiceQuotas_GetAWSDefaultServiceQuota(t *testing.T) {
 		t.Errorf("expected QuotaName=Table count, got %v", quota["QuotaName"])
 	}
 }
+
+// TestServiceQuotas_RequestIncrease_Empty verifies that listing increases for a
+// service with no requests returns an empty (non-error) response.
+func TestServiceQuotas_RequestIncrease_Empty(t *testing.T) {
+	srv := emulator.StartTestServer(t)
+	resp := makeServiceQuotasRequest(t, srv, "ListRequestedServiceQuotaChangesByService", map[string]interface{}{
+		"ServiceCode": "ec2",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ListRequested empty: %d", resp.StatusCode)
+	}
+}
+
+// TestServiceQuotas_GetRequestedChange_NotFound verifies 404 for unknown requestID.
+func TestServiceQuotas_GetRequestedChange_NotFound(t *testing.T) {
+	srv := emulator.StartTestServer(t)
+	resp := makeServiceQuotasRequest(t, srv, "GetRequestedServiceQuotaChange", map[string]interface{}{
+		"RequestId": "nonexistent-id",
+	})
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("expected error for nonexistent requestId, got 200")
+	}
+}
+
+// TestServiceQuotas_UnknownOperation returns an error for unknown operations.
+func TestServiceQuotas_UnknownOperation(t *testing.T) {
+	srv := emulator.StartTestServer(t)
+	resp := makeServiceQuotasRequest(t, srv, "UnknownOperation", nil)
+	defer resp.Body.Close() //nolint:errcheck
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("expected error for unknown operation, got 200")
+	}
+}

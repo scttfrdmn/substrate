@@ -1,16 +1,13 @@
 package emulator
 
-// cfn_resources_v43.go holds the StackDeployer.deployResource helpers for FSx.
-// The name records the substrate release that added them (v0.43.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's FSx resource type.
 
 import (
 	"context"
 	"encoding/json"
 )
 
-// ----- v0.43.0 — FSx ----------------------------------------------------------
+// ----- FSx --------------------------------------------------------------------
 
 // fsxConfigBlocks are AWS::FSx::FileSystem's four per-type configuration properties.
 var fsxConfigBlocks = []string{"LustreConfiguration", "WindowsConfiguration", "OpenZFSConfiguration", "OntapConfiguration"}

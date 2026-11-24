@@ -432,7 +432,7 @@ func (f *cfnStampFixture) configTagRecordKeys(t *testing.T) []string {
 // Outside the template rather than in it because substrate has no `AWS::S3::BucketPolicy` resource
 // type: a template can create the bucket but cannot express the policy `PutDeliveryChannel` reads
 // real S3 state for, so a stack carrying a channel needs the policy from somewhere else. That gap is
-// stated in `cfn_resources_v101.go`; this is its fixture form, and it is the same one
+// stated in [StackDeployer.deployConfigDeliveryChannel]; this is its fixture form, and it is the same one
 // [cfnConfigDeliveryBucket] uses, written against the stamp fixture's own plugin rather than a
 // registry it does not expose.
 func cfnStampConfigDeliveryBucket(t *testing.T, f *cfnStampFixture, bucket string) {

@@ -8,6 +8,9 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // fleetInstanceItem mirrors a CreateFleet fleetInstanceSet item. instanceIds is a
@@ -1146,4 +1149,33 @@ func TestEC2_DeleteFleets_TerminationProtection(t *testing.T) {
 		t.Errorf("unprotected sibling %s in another zone state = %q, want terminated",
 			inB, states[inB])
 	}
+}
+
+// TestEC2_CreateFleet_SpotPoolInstancesAreSpot pins that a fleet's Spot pool launches Spot
+// Instances, so instance-lifecycle=spot selects them, and that no Spot Instance request is
+// written for them.
+func TestEC2_CreateFleet_SpotPoolInstancesAreSpot(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	ltID := newFleetLaunchTemplate(t, ts, "fleet-spot-lifecycle")
+
+	var got createFleetResp
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "CreateFleet", "Type": "instant",
+		"LaunchTemplateConfigs.1.LaunchTemplateSpecification.LaunchTemplateId": ltID,
+		"LaunchTemplateConfigs.1.Overrides.1.InstanceType":                     "c5.large",
+		"TargetCapacitySpecification.TotalTargetCapacity":                      "2",
+		"TargetCapacitySpecification.SpotTargetCapacity":                       "2",
+		"TargetCapacitySpecification.DefaultTargetCapacityType":                "spot",
+	}, &got)
+	require.Len(t, got.Instances, 1)
+	require.Len(t, got.Instances[0].InstanceIDs, 2)
+
+	spot := ec2SpotInstances(t, ts, ec2Filter("instance-lifecycle", "spot"))
+	require.Len(t, spot, 2, "the fleet's Spot instances are selected by instance-lifecycle=spot")
+	for _, inst := range spot {
+		assert.Empty(t, inst.RequestID, "a fleet Spot Instance has no sir- request")
+	}
+	requests, _ := ec2DescribeSpotRequests(t, ts, nil)
+	assert.Empty(t, requests)
 }

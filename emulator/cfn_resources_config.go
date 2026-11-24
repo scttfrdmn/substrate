@@ -1,10 +1,5 @@
 package emulator
 
-// cfn_resources_v101.go holds the StackDeployer.deployResource helpers for AWS
-// Config. The name records the substrate release that added them (v0.101.0) rather
-// than the service, because several releases touched overlapping services; the
-// helpers here follow the same pattern as those in cfn_resources_v77.go.
-
 import (
 	"context"
 	"encoding/json"
@@ -421,19 +416,6 @@ func (d *StackDeployer) cfgsvcCFNRuleAttributes(
 	}
 
 	return total
-}
-
-// cfnSetMetadata records a GetAtt-resolvable attribute on a resource, allocating the
-// map on first use and ignoring an empty value so an absent attribute stays absent
-// rather than resolving to "".
-func cfnSetMetadata(dr *DeployedResource, key, value string) {
-	if value == "" {
-		return
-	}
-	if dr.Metadata == nil {
-		dr.Metadata = map[string]interface{}{}
-	}
-	dr.Metadata[key] = value
 }
 
 // cfgsvcCFNRequest builds a Config API request for a dispatched CloudFormation

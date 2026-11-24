@@ -499,3 +499,289 @@ func TestSNS_Publish_FilterPolicy(t *testing.T) {
 	assert.Contains(t, body, "red message")
 	assert.NotContains(t, body, "green message")
 }
+
+// TestSNSPlugin_PublishBatch tests SNS PublishBatch.
+func TestSNSPlugin_PublishBatch(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "batch-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:batch-topic"
+
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":                                 "PublishBatch",
+		"TopicArn":                               topicARN,
+		"PublishBatchRequestEntries.member.1.Id": "msg1",
+		"PublishBatchRequestEntries.member.1.Message": "hello batch",
+		"PublishBatchRequestEntries.member.2.Id":      "msg2",
+		"PublishBatchRequestEntries.member.2.Message": "world batch",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSNSBody(t, resp)
+	assert.Contains(t, body, "Successful")
+}
+
+// newSNSFanoutTestServer creates a test server with SNS wired to a registry for fan-out.
+func newSNSFanoutTestServer(t *testing.T) *emulator.Server {
+	t.Helper()
+	cfg := emulator.DefaultConfig()
+	registry := emulator.NewPluginRegistry()
+	state := emulator.NewMemoryStateManager()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := emulator.NewTimeController(time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	sqsPlugin := &emulator.SQSPlugin{}
+	require.NoError(t, sqsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(sqsPlugin)
+
+	snsPlugin := &emulator.SNSPlugin{}
+	require.NoError(t, snsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:  state,
+		Logger: logger,
+		Options: map[string]any{
+			"time_controller": tc,
+			"registry":        registry,
+		},
+	}))
+	registry.Register(snsPlugin)
+
+	return emulator.NewServer(*cfg, registry, store, state, tc, logger)
+}
+
+// TestSNSPlugin_DispatchToSubscriber tests fan-out Publish to an SQS subscriber.
+func TestSNSPlugin_DispatchToSubscriber(t *testing.T) {
+	srv := newSNSFanoutTestServer(t)
+
+	// Create a topic.
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "fanout-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:fanout-topic"
+
+	// Subscribe SQS endpoint.
+	snsRequest(t, srv, map[string]string{
+		"Action":   "Subscribe",
+		"TopicArn": topicARN,
+		"Protocol": "sqs",
+		"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/fanout-queue",
+	})
+
+	// Publish — triggers dispatchToSubscriber → SQS SendMessage.
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":   "Publish",
+		"TopicArn": topicARN,
+		"Message":  "fan-out message",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+// TestSNSPlugin_TagResourceReplaceKey tests that tagging with same key replaces the value.
+func TestSNSPlugin_TagResourceReplaceKey(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "replace-tag-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:replace-tag-topic"
+
+	// Tag once.
+	snsRequest(t, srv, map[string]string{
+		"Action":              "TagResource",
+		"ResourceArn":         topicARN,
+		"Tags.member.1.Key":   "env",
+		"Tags.member.1.Value": "dev",
+	})
+
+	// Tag again with same key — should replace.
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":              "TagResource",
+		"ResourceArn":         topicARN,
+		"Tags.member.1.Key":   "env",
+		"Tags.member.1.Value": "prod",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify replacement.
+	resp2 := snsRequest(t, srv, map[string]string{
+		"Action":      "ListTagsForResource",
+		"ResourceArn": topicARN,
+	})
+	body := readSNSBody(t, resp2)
+	assert.Contains(t, body, "prod")
+	assert.NotContains(t, body, "dev")
+}
+
+func TestSNSPlugin_GetAndSetTopicAttributes(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "attr-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:attr-topic"
+
+	// GetTopicAttributes.
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":   "GetTopicAttributes",
+		"TopicArn": topicARN,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// SetTopicAttributes.
+	resp2 := snsRequest(t, srv, map[string]string{
+		"Action":         "SetTopicAttributes",
+		"TopicArn":       topicARN,
+		"AttributeName":  "DisplayName",
+		"AttributeValue": "My Topic",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+}
+
+func TestSNSPlugin_ListSubscriptionsByTopic(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "subs-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:subs-topic"
+
+	// Subscribe.
+	snsRequest(t, srv, map[string]string{
+		"Action":   "Subscribe",
+		"TopicArn": topicARN,
+		"Protocol": "https",
+		"Endpoint": "https://example.com/sns",
+	})
+
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":   "ListSubscriptionsByTopic",
+		"TopicArn": topicARN,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	body := readSNSBody(t, resp)
+	assert.Contains(t, body, "subs-topic")
+}
+
+func TestSNSPlugin_GetSubscriptionAttributes(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "gsa-topic",
+	})
+	subResp := snsRequest(t, srv, map[string]string{
+		"Action":   "Subscribe",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:gsa-topic",
+		"Protocol": "https",
+		"Endpoint": "https://example.com/sns",
+	})
+	subBody := readSNSBody(t, subResp)
+	start := strings.Index(subBody, "<SubscriptionArn>")
+	end := strings.Index(subBody, "</SubscriptionArn>")
+	require.True(t, start >= 0 && end > start)
+	subARN := subBody[start+len("<SubscriptionArn>") : end]
+
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":          "GetSubscriptionAttributes",
+		"SubscriptionArn": subARN,
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSNSPlugin_SetSubscriptionAttributes(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "ssa-topic",
+	})
+	subResp := snsRequest(t, srv, map[string]string{
+		"Action":   "Subscribe",
+		"TopicArn": "arn:aws:sns:us-east-1:123456789012:ssa-topic",
+		"Protocol": "https",
+		"Endpoint": "https://example.com/sns",
+	})
+	subBody := readSNSBody(t, subResp)
+	start := strings.Index(subBody, "<SubscriptionArn>")
+	end := strings.Index(subBody, "</SubscriptionArn>")
+	require.True(t, start >= 0 && end > start)
+	subARN := subBody[start+len("<SubscriptionArn>") : end]
+
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":          "SetSubscriptionAttributes",
+		"SubscriptionArn": subARN,
+		"AttributeName":   "RawMessageDelivery",
+		"AttributeValue":  "true",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+}
+
+func TestSNSPlugin_AddRemovePermission(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "perm-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:perm-topic"
+
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":                "AddPermission",
+		"TopicArn":              topicARN,
+		"Label":                 "TestLabel",
+		"ActionName.member.1":   "Publish",
+		"AWSAccountId.member.1": "123456789012",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	resp2 := snsRequest(t, srv, map[string]string{
+		"Action":   "RemovePermission",
+		"TopicArn": topicARN,
+		"Label":    "TestLabel",
+	})
+	assert.Equal(t, http.StatusOK, resp2.StatusCode)
+}
+
+func TestSNSPlugin_UntagResource(t *testing.T) {
+	srv := newSNSTestServer(t)
+
+	snsRequest(t, srv, map[string]string{
+		"Action": "CreateTopic",
+		"Name":   "untag-topic",
+	})
+	topicARN := "arn:aws:sns:us-east-1:123456789012:untag-topic"
+
+	// Tag.
+	snsRequest(t, srv, map[string]string{
+		"Action":              "TagResource",
+		"ResourceArn":         topicARN,
+		"Tags.member.1.Key":   "env",
+		"Tags.member.1.Value": "test",
+	})
+
+	// Untag.
+	resp := snsRequest(t, srv, map[string]string{
+		"Action":           "UntagResource",
+		"ResourceArn":      topicARN,
+		"TagKeys.member.1": "env",
+	})
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+
+	// Verify no tags remain.
+	resp2 := snsRequest(t, srv, map[string]string{
+		"Action":      "ListTagsForResource",
+		"ResourceArn": topicARN,
+	})
+	body := readSNSBody(t, resp2)
+	assert.NotContains(t, body, "env")
+}

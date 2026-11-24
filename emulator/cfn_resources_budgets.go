@@ -1,9 +1,6 @@
 package emulator
 
-// cfn_resources_v27.go holds the StackDeployer.deployResource helpers for Budgets.
-// The name records the substrate release that added them (v0.27.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's Budgets resource type.
 
 import (
 	"context"
@@ -11,7 +8,7 @@ import (
 	"fmt"
 )
 
-// ----- v0.27.0 — Budgets -----------------------------------------------------
+// ----- Budgets ---------------------------------------------------------------
 
 // deployBudgetsBudget creates an AWS Budgets budget for the given CFN resource.
 func (d *StackDeployer) deployBudgetsBudget(

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Code: release-named files renamed by domain (#1609).
+
 ## [v0.131.0] - 2026-11-23
 
 ### Added

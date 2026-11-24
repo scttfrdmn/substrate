@@ -1,11 +1,10 @@
 package emulator
 
-// cfn_resources_v129_iam.go holds the StackDeployer helpers v0.129.0 added for IAM: an
-// AWS::IAM::Policy deployed as the inline policies its page describes (#1562), an
-// AWS::IAM::ManagedPolicy deployed and updated through the managed-policy API (#1560),
-// AWS::IAM::User and AWS::IAM::Group deployed at all, and an AWS::IAM::Role that honors
-// ManagedPolicyArns, Policies, Tags and PermissionsBoundary and updates in place (#1545). The name
-// records the release rather than the service, as the other cfn_resources_v*.go files do.
+// StackDeployer helpers for CloudFormation's IAM resource types: an AWS::IAM::Policy deployed as
+// the inline policies its page describes (#1562), an AWS::IAM::ManagedPolicy deployed and updated
+// through the managed-policy API (#1560), AWS::IAM::User and AWS::IAM::Group, an AWS::IAM::Role
+// that honors ManagedPolicyArns, Policies, Tags and PermissionsBoundary and updates in place
+// (#1545).
 //
 // **What a resource remembers.** Each of these types records, in its DeployedResource.Metadata
 // under [cfnIAMRecordKey], what it attached, embedded and joined — what is *in place*, written as
@@ -163,25 +162,6 @@ func cfnInlinePolicies(v interface{}, cctx *cfnContext) []cfnInlinePolicy {
 			continue
 		}
 		out = append(out, cfnInlinePolicy{Name: name, Document: cfnJSONDocument(m["PolicyDocument"], cctx)})
-	}
-	return out
-}
-
-// cfnTagMap resolves a Tags property — a list of {Key, Value} — to a map. A keyless entry is
-// skipped, as [cfnELBClassicTagParams] skips one.
-func cfnTagMap(v interface{}, cctx *cfnContext) map[string]string {
-	list, _ := v.([]interface{})
-	out := make(map[string]string, len(list))
-	for _, item := range list {
-		m, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		key := resolveValue(m["Key"], cctx)
-		if key == "" {
-			continue
-		}
-		out[key] = resolveValue(m["Value"], cctx)
 	}
 	return out
 }
@@ -1332,4 +1312,75 @@ func cfnDeleteIAMManagedPolicy(ctx context.Context, d *StackDeployer, dr Deploye
 		return cfnIAMDeleteFailure(dr, d.deleteStubKey(ctx, dr, cctx))
 	}
 	return cfnDeleteManagedPolicy(ctx, d, dr, cfnIAMRecordOf(dr), streamID)
+}
+
+// deployIAMInstanceProfile creates an IAM instance profile for the given CFN
+// resource and attaches the roles listed in Roles. An EC2 instance that
+// references a stubbed profile is launched without one, which silently changes
+// its permissions.
+func (d *StackDeployer) deployIAMInstanceProfile(
+	ctx context.Context,
+	logicalID string,
+	props map[string]interface{},
+	streamID string,
+	cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	name := resolveStringProp(props, "InstanceProfileName",
+		cfnGeneratedName(cctx, "AWS::IAM::InstanceProfile", logicalID), cctx)
+	path := resolveStringProp(props, "Path", "/", cctx)
+
+	bodyBytes, err := json.Marshal(map[string]string{
+		"InstanceProfileName": name,
+		"Path":                path,
+	})
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("marshal instance profile body: %w", err)
+	}
+
+	resp, cost, routeErr := d.dispatch(ctx, &AWSRequest{
+		Service:   "iam",
+		Operation: "CreateInstanceProfile",
+		Body:      bodyBytes,
+		Headers:   map[string]string{},
+		Params:    map[string]string{},
+	}, streamID)
+
+	dr := DeployedResource{LogicalID: logicalID, Type: "AWS::IAM::InstanceProfile", PhysicalID: name}
+	if routeErr != nil {
+		// Recorded on the resource, not returned — a returned error aborts the stack.
+		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr
+	}
+	if resp != nil {
+		var result struct {
+			ARN string `xml:"CreateInstanceProfileResult>InstanceProfile>Arn"`
+		}
+		if xmlErr := xmlUnmarshalIAM(resp.Body, &result); xmlErr == nil {
+			dr.ARN = result.ARN
+		}
+	}
+
+	// Attach each role. CFN allows only one, but the list form is what templates use.
+	totalCost := cost
+	for _, roleName := range resolveStringList(props["Roles"], cctx) {
+		roleBody, marshalErr := json.Marshal(map[string]string{
+			"InstanceProfileName": name,
+			"RoleName":            roleName,
+		})
+		if marshalErr != nil {
+			return dr, totalCost, fmt.Errorf("marshal add-role body: %w", marshalErr)
+		}
+		_, addCost, addErr := d.dispatch(ctx, &AWSRequest{
+			Service:   "iam",
+			Operation: "AddRoleToInstanceProfile",
+			Body:      roleBody,
+			Headers:   map[string]string{},
+			Params:    map[string]string{},
+		}, streamID)
+		totalCost += addCost
+		if addErr != nil && dr.Error == "" {
+			dr.Error = addErr.Error()
+		}
+	}
+	return dr, totalCost, nil
 }

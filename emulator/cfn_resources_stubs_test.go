@@ -153,7 +153,7 @@ func TestCFN_CloudTrailTrail(t *testing.T) {
 // expectations: each template was invalid against the real API — the rule's carried
 // no Source, the recorder's no RoleARN — and newTestDeployer registers no Config
 // plugin, so both went green while creating nothing. That is the defect, not the
-// baseline. Their replacements are in cfn_resources_v101_test.go, against a deployer
+// baseline. Their replacements are TestCFN_ConfigConfigRule and TestCFN_ConfigConfigurationRecorder, against a deployer
 // that registers Config.
 
 // TestCFN_AthenaWorkGroup verifies the Athena WorkGroup stub.

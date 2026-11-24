@@ -499,3 +499,60 @@ func TestEC2_Spot_SeedIsScopedByInstanceType(t *testing.T) {
 	_, code, _ := ec2ErrorDetail(t, ts, ec2SpotRunParams(map[string]string{"InstanceType": "p4d.24xlarge"}))
 	assert.Equal(t, "InsufficientInstanceCapacity", code)
 }
+
+// TestEC2_Spot_OpenRequestIsFulfilledOnceTheSeedClears pins that a wait-for-fulfillment loop
+// terminates: a request left open by a capacity seed is fulfilled by the first describe after
+// the seed is cleared, and not before.
+func TestEC2_Spot_OpenRequestIsFulfilledOnceTheSeedClears(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	ec2SeedSpotOutcome(t, ts, `{"statusCode":"capacity-not-available"}`)
+
+	var created struct {
+		Requests []ec2DescribedSpotRequest `xml:"spotInstanceRequestSet>item"`
+	}
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "RequestSpotInstances", "Type": "persistent", "LaunchSpecification.ImageId": ec2TestImage,
+	}, &created)
+	require.Len(t, created.Requests, 1)
+	id := created.Requests[0].ID
+
+	r := ec2SpotRequest(t, ts, id)
+	assert.Equal(t, "open", r.State, "still seeded: the describe launches nothing")
+	assert.Empty(t, r.InstanceID)
+
+	req, err := http.NewRequest(http.MethodDelete, ts.URL+"/v1/ec2/spot-request-outcomes", nil)
+	require.NoError(t, err)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	require.NoError(t, resp.Body.Close())
+
+	r = ec2SpotRequest(t, ts, id)
+	assert.Equal(t, "active", r.State)
+	assert.Equal(t, "fulfilled", r.StatusCode)
+	require.NotEmpty(t, r.InstanceID)
+	got := ec2SpotInstances(t, ts, map[string]string{"InstanceId.1": r.InstanceID})
+	require.Len(t, got, 1)
+	assert.Equal(t, "spot", got[0].Lifecycle)
+	assert.Equal(t, id, got[0].RequestID)
+
+	assert.Equal(t, r.InstanceID, ec2SpotRequest(t, ts, id).InstanceID, "a second describe launches nothing more")
+}
+
+// TestEC2_Spot_OpenRequestPastValidUntilExpires pins the other way out of open.
+func TestEC2_Spot_OpenRequestPastValidUntilExpires(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	ec2SeedSpotOutcome(t, ts, `{"statusCode":"price-too-low"}`)
+	var created struct {
+		Requests []ec2DescribedSpotRequest `xml:"spotInstanceRequestSet>item"`
+	}
+	ec2FleetXML(t, ts, map[string]string{
+		"Action": "RequestSpotInstances", "Type": "persistent", "ValidUntil": "2001-01-01T00:00:00Z",
+		"LaunchSpecification.ImageId": ec2TestImage,
+	}, &created)
+	require.Len(t, created.Requests, 1)
+	r := ec2SpotRequest(t, ts, created.Requests[0].ID)
+	assert.Equal(t, "closed", r.State)
+	assert.Equal(t, "schedule-expired", r.StatusCode)
+}

@@ -137,3 +137,75 @@ func TestLambdaESM_GetNotFound(t *testing.T) {
 	}
 	resp.Body.Close() //nolint:errcheck
 }
+
+// TestLambdaESM_ListByFunctionName verifies filtering ESMs by function name.
+func TestLambdaESM_ListByFunctionName(t *testing.T) {
+	srv := newLambdaTestServer(t)
+
+	lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "fn-filter",
+		"Runtime":      "python3.12",
+		"Role":         "arn:aws:iam::123456789012:role/role",
+		"Handler":      "index.handler",
+		"Code":         map[string]any{"ZipFile": "Zm9v"},
+	}).Body.Close() //nolint:errcheck
+
+	esmResp := lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/event-source-mappings/", map[string]any{
+		"FunctionName":     "fn-filter",
+		"EventSourceArn":   "arn:aws:kinesis:us-east-1:123456789012:stream/stream-s",
+		"StartingPosition": "LATEST",
+	})
+	if esmResp.StatusCode != http.StatusCreated {
+		t.Fatalf("CreateESM: %d", esmResp.StatusCode)
+	}
+	esmResp.Body.Close() //nolint:errcheck
+
+	// List by FunctionName query param.
+	listResp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/event-source-mappings/?FunctionName=fn-filter", nil)
+	if listResp.StatusCode != http.StatusOK {
+		body := readBody(t, listResp)
+		t.Fatalf("ListESM by function: %d body: %s", listResp.StatusCode, body)
+	}
+	var listResult map[string]any
+	decodeLambdaJSON(t, listResp, &listResult)
+	mappings, _ := listResult["EventSourceMappings"].([]any)
+	if len(mappings) == 0 {
+		t.Error("expected ESM in list filtered by function name")
+	}
+}
+
+// TestLambdaESM_ListAll verifies that ListEventSourceMappings returns all ESMs.
+func TestLambdaESM_ListAll(t *testing.T) {
+	srv := newLambdaTestServer(t)
+
+	lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/functions", map[string]any{
+		"FunctionName": "fn-x",
+		"Runtime":      "python3.12",
+		"Role":         "arn:aws:iam::123456789012:role/role",
+		"Handler":      "index.handler",
+		"Code":         map[string]any{"ZipFile": "Zm9v"},
+	}).Body.Close() //nolint:errcheck
+
+	for i := 0; i < 2; i++ {
+		esmResp := lambdaRequest(t, srv, http.MethodPost, "/2015-03-31/event-source-mappings/", map[string]any{
+			"FunctionName":     "fn-x",
+			"EventSourceArn":   "arn:aws:kinesis:us-east-1:123456789012:stream/s",
+			"StartingPosition": "LATEST",
+		})
+		if esmResp.StatusCode != http.StatusCreated {
+			t.Fatalf("CreateESM %d: %d", i, esmResp.StatusCode)
+		}
+		esmResp.Body.Close() //nolint:errcheck
+	}
+
+	listResp := lambdaRequest(t, srv, http.MethodGet, "/2015-03-31/event-source-mappings/", nil)
+	if listResp.StatusCode != http.StatusOK {
+		t.Fatalf("ListESM: %d", listResp.StatusCode)
+	}
+	var listResult map[string]any
+	decodeLambdaJSON(t, listResp, &listResult)
+	mappings, _ := listResult["EventSourceMappings"].([]any)
+	if len(mappings) < 2 {
+		t.Errorf("expected at least 2 ESMs, got %d", len(mappings))
+	}
+}

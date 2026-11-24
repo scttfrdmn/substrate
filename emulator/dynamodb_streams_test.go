@@ -321,3 +321,78 @@ func TestDynamoDBPartiQL_BatchExecuteStatement(t *testing.T) {
 		t.Errorf("expected 2 batch responses, got %d", len(responses))
 	}
 }
+
+// TestDynamoDBStreams_UpdateItemRecord verifies MODIFY records appear in the
+// stream after an UpdateItem call.
+func TestDynamoDBStreams_UpdateItemRecord(t *testing.T) {
+	srv := newDynamoDBTestServer(t)
+
+	dynamodbRequest(t, srv, "CreateTable", map[string]any{
+		"TableName": "update-stream-table",
+		"AttributeDefinitions": []map[string]any{
+			{"AttributeName": "pk", "AttributeType": "S"},
+		},
+		"KeySchema": []map[string]any{
+			{"AttributeName": "pk", "KeyType": "HASH"},
+		},
+		"BillingMode": "PAY_PER_REQUEST",
+		"StreamSpecification": map[string]any{
+			"StreamEnabled":  true,
+			"StreamViewType": "NEW_AND_OLD_IMAGES",
+		},
+	}).Body.Close() //nolint:errcheck
+
+	dynamodbRequest(t, srv, "PutItem", map[string]any{
+		"TableName": "update-stream-table",
+		"Item":      map[string]any{"pk": map[string]any{"S": "row1"}, "v": map[string]any{"N": "1"}},
+	}).Body.Close() //nolint:errcheck
+
+	dynamodbRequest(t, srv, "UpdateItem", map[string]any{
+		"TableName":        "update-stream-table",
+		"Key":              map[string]any{"pk": map[string]any{"S": "row1"}},
+		"UpdateExpression": "SET v = :v",
+		"ExpressionAttributeValues": map[string]any{
+			":v": map[string]any{"N": "2"},
+		},
+	}).Body.Close() //nolint:errcheck
+
+	dtResp := dynamodbRequest(t, srv, "DescribeTable", map[string]any{"TableName": "update-stream-table"})
+	var dtResult map[string]any
+	decodeDynamoDB(t, dtResp, &dtResult)
+	tbl, _ := dtResult["Table"].(map[string]any)
+	streamARN, _ := tbl["LatestStreamArn"].(string)
+	if streamARN == "" {
+		t.Skip("stream ARN not populated; skipping")
+	}
+
+	dsResp := dynamodbRequest(t, srv, "DescribeStream", map[string]any{"StreamArn": streamARN})
+	var dsResult map[string]any
+	decodeDynamoDB(t, dsResp, &dsResult)
+	shards, _ := dsResult["StreamDescription"].(map[string]any)["Shards"].([]any)
+	if len(shards) == 0 {
+		t.Skip("no shards")
+	}
+	shardID, _ := shards[0].(map[string]any)["ShardId"].(string)
+
+	gsiResp := dynamodbRequest(t, srv, "GetShardIterator", map[string]any{
+		"StreamArn": streamARN, "ShardId": shardID, "ShardIteratorType": "TRIM_HORIZON",
+	})
+	var gsiResult map[string]any
+	decodeDynamoDB(t, gsiResp, &gsiResult)
+	iter, _ := gsiResult["ShardIterator"].(string)
+
+	grResp := dynamodbRequest(t, srv, "GetRecords", map[string]any{"ShardIterator": iter})
+	var grResult map[string]any
+	decodeDynamoDB(t, grResp, &grResult)
+	records, _ := grResult["Records"].([]any)
+
+	hasModify := false
+	for _, r := range records {
+		if m, ok := r.(map[string]any); ok && m["eventName"] == "MODIFY" {
+			hasModify = true
+		}
+	}
+	if !hasModify {
+		t.Errorf("expected MODIFY record in stream, got records: %v", records)
+	}
+}

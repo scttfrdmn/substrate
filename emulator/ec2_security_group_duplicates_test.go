@@ -1,6 +1,7 @@
 package emulator_test
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
@@ -206,4 +207,20 @@ func TestEC2_DeleteSecurityGroup_ByNameInTheDefaultVPC(t *testing.T) {
 	ec2OK(t, ts, map[string]string{"Action": "DeleteSecurityGroup", "GroupName": "Batch"})
 	assert.Empty(t, ec2DescribeSGNames(t, ts, map[string]string{"GroupName.1": "batch"}))
 	require.Equal(t, []string{"elsewhere"}, ec2DescribeSGNames(t, ts, map[string]string{"GroupId.1": elsewhere}))
+}
+
+// TestEC2_CreateSecurityGroup_RefusesTheReservedName pins EC2's observed refusal of "default",
+// in any case.
+func TestEC2_CreateSecurityGroup_RefusesTheReservedName(t *testing.T) {
+	t.Parallel()
+	ts := newEC2TestServer(t)
+	vpcID := ec2CreateVPC(t, ts, "10.0.0.0/16")
+	for _, name := range []string{"default", "Default"} {
+		status, code, msg := ec2ErrorDetail(t, ts, map[string]string{
+			"Action": "CreateSecurityGroup", "GroupName": name, "GroupDescription": "x", "VpcId": vpcID,
+		})
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Equal(t, "InvalidParameterValue", code)
+		assert.Equal(t, "Cannot use reserved security group name: "+name, msg)
+	}
 }

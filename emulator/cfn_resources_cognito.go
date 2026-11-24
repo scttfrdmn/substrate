@@ -1,9 +1,6 @@
 package emulator
 
-// cfn_resources_v22.go holds the StackDeployer.deployResource helpers for Cognito.
-// The name records the substrate release that added them (v0.22.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's Cognito resource types.
 
 import (
 	"context"
@@ -11,7 +8,7 @@ import (
 	"fmt"
 )
 
-// ----- v0.22.0 — Cognito ---------------------------------------------------
+// ----- Cognito -------------------------------------------------------------
 
 // deployCognitoUserPool creates a Cognito User Pool for the given CFN resource.
 func (d *StackDeployer) deployCognitoUserPool(

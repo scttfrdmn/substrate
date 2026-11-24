@@ -2792,3 +2792,698 @@ func TestCFN_DriftDetection_DeclaredOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "IN_SYNC", result.DriftStatus, "undeclared property must not produce drift")
 }
+
+// newV016Deployer creates a StackDeployer with all v0.16.0 plugins registered.
+func newV016Deployer(t *testing.T) *emulator.StackDeployer {
+	t.Helper()
+	cfg := emulator.DefaultConfig()
+	registry := emulator.NewPluginRegistry()
+	state := emulator.NewMemoryStateManager()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	costs := emulator.NewCostController(emulator.CostConfig{Enabled: true})
+
+	kmsPlugin := &emulator.KMSPlugin{}
+	require.NoError(t, kmsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(kmsPlugin)
+
+	smPlugin := &emulator.SecretsManagerPlugin{}
+	require.NoError(t, smPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(smPlugin)
+
+	ssmPlugin := &emulator.SSMPlugin{}
+	require.NoError(t, ssmPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(ssmPlugin)
+
+	snsPlugin := &emulator.SNSPlugin{}
+	require.NoError(t, snsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(snsPlugin)
+
+	sqsPlugin := &emulator.SQSPlugin{}
+	require.NoError(t, sqsPlugin.Initialize(context.Background(), emulator.PluginConfig{
+		State:   state,
+		Logger:  logger,
+		Options: map[string]any{"time_controller": tc},
+	}))
+	registry.Register(sqsPlugin)
+
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs)
+}
+
+func TestCFN_KMSKey(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyKey": {
+				"Type": "AWS::KMS::Key",
+				"Properties": {
+					"Description": "Test KMS key",
+					"KeyUsage": "ENCRYPT_DECRYPT"
+				}
+			}
+		},
+		"Outputs": {
+			"KeyArn": {
+				"Value": {"Fn::GetAtt": ["MyKey", "Arn"]}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "kms-key-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::KMS::Key", result.Resources[0].Type)
+	assert.NotEmpty(t, result.Resources[0].ARN)
+	assert.Contains(t, result.Resources[0].ARN, "arn:aws:kms:")
+	assert.Contains(t, result.Outputs["KeyArn"], "arn:aws:kms:")
+}
+
+// TestCFN_KMSKeyAsymmetricSpecNeedsItsKeyUsage records what #977's CreateKey validation does to a
+// CloudFormation template, which is the one place substrate builds a CreateKey request for a caller.
+//
+// [StackDeployer.deployKMSKey] sends AWS::KMS::Key's own two defaults — SYMMETRIC_DEFAULT and
+// ENCRYPT_DECRYPT — unconditionally, so a template naming an asymmetric or HMAC KeySpec and no KeyUsage
+// now produces a pair CreateKey refuses. That is the same answer AWS gives, because the property "is
+// required for asymmetric KMS keys and HMAC KMS keys"; the template is invalid rather than the deploy
+// being wrong, so the defaults stay and this test pins the consequence.
+//
+// The first row is the case that used to succeed and now does not. The second and third exist so the
+// first cannot pass by refusing every asymmetric key: a spec paired with a usage it admits deploys, and
+// the two ends of the pairing table (an RSA key that encrypts, an HMAC key that MACs) are both covered.
+func TestCFN_KMSKeyAsymmetricSpecNeedsItsKeyUsage(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		props     string
+		refusedBy string
+	}{
+		{
+			name:      "an ECC spec with no KeyUsage inherits ENCRYPT_DECRYPT and is refused",
+			props:     `"KeySpec": "ECC_NIST_P384"`,
+			refusedBy: "UnsupportedOperationException",
+		},
+		{
+			name:  "an RSA spec with a usage it admits deploys",
+			props: `"KeySpec": "RSA_3072", "KeyUsage": "SIGN_VERIFY"`,
+		},
+		{
+			name:  "an HMAC spec with its only usage deploys",
+			props: `"KeySpec": "HMAC_384", "KeyUsage": "GENERATE_VERIFY_MAC"`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := newV016Deployer(t)
+			tmpl := `{
+				"AWSTemplateFormatVersion": "2010-09-09",
+				"Resources": {
+					"MyKey": {
+						"Type": "AWS::KMS::Key",
+						"Properties": {` + tc.props + `}
+					}
+				}
+			}`
+
+			result, err := d.Deploy(context.Background(), tmpl, "kms-pair-stack", nil)
+			require.NoError(t, err, "the deploy reports a resource failure rather than an error")
+			require.Len(t, result.Resources, 1)
+
+			if tc.refusedBy != "" {
+				assert.Contains(t, result.Resources[0].Error, tc.refusedBy,
+					"the resource carries the refusal CreateKey answered")
+				assert.Empty(t, result.Resources[0].ARN, "a refused key has no ARN")
+				return
+			}
+			assert.Empty(t, result.Resources[0].Error, "the pair is admissible")
+			assert.Contains(t, result.Resources[0].ARN, "arn:aws:kms:", "the key was created")
+		})
+	}
+}
+
+func TestCFN_KMSAlias(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyKey": {
+				"Type": "AWS::KMS::Key",
+				"Properties": {}
+			},
+			"MyAlias": {
+				"Type": "AWS::KMS::Alias",
+				"Properties": {
+					"AliasName": "alias/my-cfn-key",
+					"TargetKeyId": {"Fn::GetAtt": ["MyKey", "Arn"]}
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "kms-alias-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 2)
+}
+
+func TestCFN_Secret(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySecret": {
+				"Type": "AWS::SecretsManager::Secret",
+				"Properties": {
+					"Name": "my-cfn-secret",
+					"Description": "A test secret",
+					"SecretString": "{\"password\":\"test123\"}"
+				}
+			}
+		},
+		"Outputs": {
+			"SecretArn": {
+				"Value": {"Fn::GetAtt": ["MySecret", "Arn"]}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "secret-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::SecretsManager::Secret", result.Resources[0].Type)
+	assert.NotEmpty(t, result.Resources[0].ARN)
+}
+
+func TestCFN_SSMParameter(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyParam": {
+				"Type": "AWS::SSM::Parameter",
+				"Properties": {
+					"Name": "/cfn/test/param",
+					"Value": "hello-from-cfn",
+					"Type": "String",
+					"Description": "CFN test parameter"
+				}
+			}
+		},
+		"Outputs": {
+			"ParamName": {
+				"Value": {"Ref": "MyParam"}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "ssm-param-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::SSM::Parameter", result.Resources[0].Type)
+	assert.Equal(t, "/cfn/test/param", result.Resources[0].PhysicalID)
+}
+
+func TestCFN_SNSTopic(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyTopic": {
+				"Type": "AWS::SNS::Topic",
+				"Properties": {
+					"TopicName": "cfn-test-topic"
+				}
+			}
+		},
+		"Outputs": {
+			"TopicArn": {
+				"Value": {"Fn::GetAtt": ["MyTopic", "TopicArn"]}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "sns-topic-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::SNS::Topic", result.Resources[0].Type)
+}
+
+func TestCFN_SNSSubscription(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyTopic": {
+				"Type": "AWS::SNS::Topic",
+				"Properties": {
+					"TopicName": "sub-cfn-topic"
+				}
+			},
+			"MySQSQueue": {
+				"Type": "AWS::SQS::Queue",
+				"Properties": {
+					"QueueName": "sub-cfn-queue"
+				}
+			},
+			"MySubscription": {
+				"Type": "AWS::SNS::Subscription",
+				"Properties": {
+					"TopicArn": {"Fn::GetAtt": ["MyTopic", "TopicArn"]},
+					"Protocol": "sqs",
+					"Endpoint": "https://sqs.us-east-1.amazonaws.com/123456789012/sub-cfn-queue"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "sns-sub-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 3)
+}
+
+func TestCFN_SNSTopicPolicy(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyTopic": {
+				"Type": "AWS::SNS::Topic",
+				"Properties": {
+					"TopicName": "policy-cfn-topic"
+				}
+			},
+			"MyTopicPolicy": {
+				"Type": "AWS::SNS::TopicPolicy",
+				"Properties": {
+					"Topics": [{"Fn::GetAtt": ["MyTopic", "TopicArn"]}],
+					"PolicyDocument": {
+						"Version": "2012-10-17",
+						"Statement": []
+					}
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "sns-policy-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+}
+
+func TestCFN_SecretsManagerTargetAttachment(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySecret": {
+				"Type": "AWS::SecretsManager::Secret",
+				"Properties": {
+					"Name": "attach-test-secret"
+				}
+			},
+			"MyAttachment": {
+				"Type": "AWS::SecretsManager::SecretTargetAttachment",
+				"Properties": {
+					"SecretId": {"Ref": "MySecret"},
+					"TargetId": "db-instance-id",
+					"TargetType": "AWS::RDS::DBInstance"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "sm-attach-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+}
+
+func TestCFN_SSMAssociation(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyAssociation": {
+				"Type": "AWS::SSM::Association",
+				"Properties": {
+					"Name": "AWS-RunShellScript"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "ssm-assoc-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+	assert.NotEmpty(t, result.Resources[0].PhysicalID)
+}
+
+func TestCFN_KMSReplicaKey(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyReplicaKey": {
+				"Type": "AWS::KMS::ReplicaKey",
+				"Properties": {
+					"PrimaryKeyArn": "arn:aws:kms:us-east-1:123456789012:key/stub",
+					"Description": "Replica key"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "kms-replica-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+	assert.NotEmpty(t, result.Resources[0].ARN)
+}
+
+func TestCFN_SecretRotationSchedule(t *testing.T) {
+	d := newV016Deployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MySecret": {
+				"Type": "AWS::SecretsManager::Secret",
+				"Properties": {
+					"Name": "rotation-test-secret",
+					"SecretString": "initial"
+				}
+			},
+			"MyRotation": {
+				"Type": "AWS::SecretsManager::RotationSchedule",
+				"Properties": {
+					"SecretId": {"Ref": "MySecret"},
+					"RotationLambdaARN": "arn:aws:lambda:us-east-1:123456789012:function:rotator",
+					"RotationRules": {
+						"AutomaticallyAfterDays": 30
+					}
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "secret-rotation-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 2)
+
+	// The template gained a RotationLambdaARN in #952 and this assertion came with it. RotateSecret now
+	// refuses a secret with no rotation function, and deploySecretRotationSchedule reports a routing
+	// refusal by setting DeployedResource.Error and returning a nil error — so without the assertion the
+	// test would have kept passing on a resource that had failed, which is the whole reason the
+	// pass-through is part of #952 rather than a follow-up.
+	for _, r := range result.Resources {
+		assert.Empty(t, r.Error, "%s deployed without error", r.LogicalID)
+	}
+}
+
+// newV016FullDeployer creates a StackDeployer with all plugins (including ELB and Route53).
+func newV016FullDeployer(t *testing.T) *emulator.StackDeployer {
+	t.Helper()
+	cfg := emulator.DefaultConfig()
+	registry := emulator.NewPluginRegistry()
+	state := emulator.NewMemoryStateManager()
+	logger := emulator.NewDefaultLogger(slog.LevelError, false)
+	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
+	tc := emulator.NewTimeController(time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC))
+	costs := emulator.NewCostController(emulator.CostConfig{Enabled: true})
+
+	for _, p := range []struct {
+		plugin emulator.Plugin
+		opts   map[string]any
+	}{
+		{&emulator.KMSPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.SecretsManagerPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.SSMPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.SNSPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.SQSPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.LambdaPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.ELBPlugin{}, map[string]any{"time_controller": tc}},
+		{&emulator.Route53Plugin{}, nil},
+	} {
+		require.NoError(t, p.plugin.Initialize(context.Background(), emulator.PluginConfig{
+			State:   state,
+			Logger:  logger,
+			Options: p.opts,
+		}))
+		registry.Register(p.plugin)
+	}
+
+	return emulator.NewStackDeployer(registry, store, state, tc, logger, costs)
+}
+
+func TestCFN_ELBTargetGroup(t *testing.T) {
+	d := newV016FullDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyTG": {
+				"Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+				"Properties": {
+					"Name": "my-cfn-tg",
+					"Protocol": "HTTP",
+					"Port": "80",
+					"TargetType": "instance"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "elb-tg-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::ElasticLoadBalancingV2::TargetGroup", result.Resources[0].Type)
+}
+
+func TestCFN_ELBLoadBalancer(t *testing.T) {
+	d := newV016FullDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyLB": {
+				"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+				"Properties": {
+					"Name": "my-cfn-lb",
+					"Type": "application",
+					"Scheme": "internet-facing"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "elb-lb-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+}
+
+func TestCFN_Route53HostedZone(t *testing.T) {
+	d := newV016FullDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyZone": {
+				"Type": "AWS::Route53::HostedZone",
+				"Properties": {
+					"Name": "example.com"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "r53-zone-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 1)
+	assert.Equal(t, "AWS::Route53::HostedZone", result.Resources[0].Type)
+}
+
+func TestCFN_ELBListenerAndRule(t *testing.T) {
+	d := newV016FullDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyLB": {
+				"Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+				"Properties": {
+					"Name": "listener-test-lb",
+					"Type": "application"
+				}
+			},
+			"MyTG": {
+				"Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+				"Properties": {
+					"Name": "listener-test-tg",
+					"Protocol": "HTTP",
+					"Port": "80",
+					"TargetType": "instance"
+				}
+			},
+			"MyListener": {
+				"Type": "AWS::ElasticLoadBalancingV2::Listener",
+				"Properties": {
+					"LoadBalancerArn": {"Fn::GetAtt": ["MyLB", "LoadBalancerArn"]},
+					"Protocol": "HTTP",
+					"Port": "80"
+				}
+			},
+			"MyRule": {
+				"Type": "AWS::ElasticLoadBalancingV2::ListenerRule",
+				"Properties": {
+					"ListenerArn": {"Fn::GetAtt": ["MyListener", "ListenerArn"]},
+					"Priority": "10"
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "elb-full-stack", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Resources, 4)
+}
+
+// TestCFN_Route53RecordSetGroup deploys a record set and a record set group into a hosted zone.
+//
+// Both name the zone with `Ref`, which is what AWS documents as returning a hosted zone's ID —
+// AWS::Route53::HostedZone documents only `Id` and `NameServers` as Fn::GetAtt attributes, and no
+// `Arn` at all. This asked for `!GetAtt MyZone.Arn` until #827, which resolved to the zone *name*
+// because the resolver answered any unrecognized attribute with the physical ID; the deploy passed
+// regardless, since nothing here reads the HostedZoneId back.
+//
+// #1123 made it assert each resource rather than only `require.NoError` and `assert.Len(…, 3)`, which a
+// resource that failed does not disturb. Until #1256 the record set was refused: `Ref` on the hosted
+// zone answered CreateHostedZone's `/hostedzone/Z…` path form where the CloudFormation page publishes
+// the bare ID, so the record set's own path carried the segment twice, and the group discarded its
+// child's identical refusal. Both now deploy cleanly, which is what AWS's own examples describe.
+func TestCFN_Route53RecordSetGroup(t *testing.T) {
+	d := newV016FullDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyZone": {
+				"Type": "AWS::Route53::HostedZone",
+				"Properties": {
+					"Name": "testzone.com"
+				}
+			},
+			"MyRecordSet": {
+				"Type": "AWS::Route53::RecordSet",
+				"Properties": {
+					"HostedZoneId": {"Ref": "MyZone"},
+					"Name": "api.testzone.com",
+					"Type": "A",
+					"TTL": "300",
+					"ResourceRecords": "1.2.3.4"
+				}
+			},
+			"MyRecordSetGroup": {
+				"Type": "AWS::Route53::RecordSetGroup",
+				"Properties": {
+					"HostedZoneId": {"Ref": "MyZone"},
+					"RecordSets": [
+						{
+							"Name": "www.testzone.com",
+							"Type": "A",
+							"TTL": "300",
+							"ResourceRecords": "5.6.7.8"
+						}
+					]
+				}
+			}
+		}
+	}`
+
+	result, err := d.Deploy(context.Background(), tmpl, "r53-full-stack", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Resources, 3)
+
+	byLogical := map[string]emulator.DeployedResource{}
+	for _, r := range result.Resources {
+		byLogical[r.LogicalID] = r
+	}
+
+	// The zone's physical ID — what Ref answers — is the bare hosted zone ID the page publishes, and
+	// its ARN the arn:aws:route53:::hostedzone/<id> form the same page quotes.
+	zone := byLogical["MyZone"]
+	assert.Empty(t, zone.Error)
+	assert.Regexp(t, `^Z[0-9A-Z]+$`, zone.PhysicalID, "Ref answers the bare hosted zone ID (#1256)")
+	assert.Equal(t, "arn:aws:route53:::hostedzone/"+zone.PhysicalID, zone.ARN)
+
+	// So the record set and the group that name the zone by Ref both deploy.
+	assert.Empty(t, byLogical["MyRecordSet"].Error, "a RecordSet naming its zone by Ref deploys (#1256)")
+	assert.Empty(t, byLogical["MyRecordSetGroup"].Error)
+	assert.Equal(t, "CREATE_COMPLETE", result.Status)
+}
+
+// TestCFN_S3BucketVersioning deploys an S3 bucket with versioning via CFN.
+func TestCFN_S3BucketVersioning(t *testing.T) {
+	d := newTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"VersionedBucket": {
+				"Type": "AWS::S3::Bucket",
+				"Properties": {
+					"BucketName": "versioned-cfn-bucket",
+					"VersioningConfiguration": {"Status": "Enabled"}
+				}
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}
+
+// TestCFN_LambdaEventSourceMapping deploys a Lambda function + ESM via CFN.
+func TestCFN_LambdaEventSourceMapping(t *testing.T) {
+	d := newTestDeployer(t)
+	tmpl := `{
+		"AWSTemplateFormatVersion": "2010-09-09",
+		"Resources": {
+			"MyFunction": {
+				"Type": "AWS::Lambda::Function",
+				"Properties": {
+					"FunctionName": "esm-fn",
+					"Runtime": "python3.12",
+					"Role": "arn:aws:iam::123456789012:role/r",
+					"Handler": "index.handler",
+					"Code": {"ZipFile": "def handler(e,c): pass"}
+				}
+			},
+			"MyESM": {
+				"Type": "AWS::Lambda::EventSourceMapping",
+				"Properties": {
+					"FunctionName": "esm-fn",
+					"EventSourceArn": "arn:aws:kinesis:us-east-1:123456789012:stream/s",
+					"StartingPosition": "LATEST",
+					"BatchSize": 10
+				},
+				"DependsOn": ["MyFunction"]
+			}
+		}
+	}`
+	result, err := d.Deploy(context.Background(), tmpl, "test-stream", nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if result == nil {
+		t.Fatal("expected non-nil result")
+	}
+}

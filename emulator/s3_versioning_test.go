@@ -334,3 +334,40 @@ func TestS3Lifecycle_RoundTrip(t *testing.T) {
 		t.Fatalf("expected 404 after lifecycle delete, got %d body: %s", wg3.Code, wg3.Body.String())
 	}
 }
+
+// TestS3Versioning_GetBucketVersioningNotSet verifies that a fresh bucket
+// returns a valid (empty) versioning response.
+func TestS3Versioning_GetBucketVersioningNotSet(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/fresh-bucket", nil, nil)
+	w := s3Request(t, srv, http.MethodGet, "/fresh-bucket?versioning", nil, nil)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetBucketVersioning on fresh bucket: %d body: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestS3Versioning_PermanentDelete verifies that DELETE with a versionId
+// permanently removes that specific version.
+func TestS3Versioning_PermanentDelete(t *testing.T) {
+	srv, _ := newS3TestServer(t)
+	s3Request(t, srv, http.MethodPut, "/pd-bucket", nil, nil)
+	s3Request(t, srv, http.MethodPut, "/pd-bucket?versioning",
+		[]byte(`<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>`),
+		map[string]string{"Content-Type": "application/xml"})
+
+	w := s3Request(t, srv, http.MethodPut, "/pd-bucket/k", []byte("body"), nil)
+	vid := w.Header().Get("X-Amz-Version-Id")
+	if vid == "" {
+		t.Fatal("expected version ID")
+	}
+
+	wd := s3Request(t, srv, http.MethodDelete, "/pd-bucket/k?versionId="+vid, nil, nil)
+	if wd.Code != http.StatusNoContent {
+		t.Fatalf("permanent delete: %d", wd.Code)
+	}
+
+	wg := s3Request(t, srv, http.MethodGet, "/pd-bucket/k?versionId="+vid, nil, nil)
+	if wg.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 after permanent delete, got %d", wg.Code)
+	}
+}

@@ -1,11 +1,9 @@
 package emulator
 
-// cfn_resources_v32.go holds the StackDeployer.deployResource helpers for
-// Athena, CloudTrail, the CodeSuite, OpenSearch, Transfer and WAFv2. Backup's two
-// types moved to cfn_resources_v128.go when they began dispatching the Backup API
-// (#1428). The name records the substrate release that added them (v0.32.0) rather
-// than the services, because several releases touched overlapping services; the
-// helpers here follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's Athena, CloudTrail, CodeSuite, OpenSearch, Transfer and
+// WAFv2 resource types, the stub store behind them, and the Fn::GetAtt refusal for attributes
+// substrate does not model. Backup's two types dispatch the Backup API (#1428), through
+// deployBackupBackupPlan and deployBackupBackupSelection.
 
 import (
 	"context"
@@ -15,7 +13,7 @@ import (
 	"strings"
 )
 
-// ----- v0.32.0 — Extended CFN stubs -------------------------------------------
+// ----- Extended CFN stubs -----------------------------------------------------
 
 // stubStore persists resource properties into cfnStubNamespace.
 func (d *StackDeployer) stubStore(ctx context.Context, acct, region, logicalID string, props map[string]interface{}) error {
@@ -377,7 +375,7 @@ func (d *StackDeployer) deployCloudTrailTrail(
 
 // The AWS::Config::ConfigRule and AWS::Config::ConfigurationRecorder stubs that
 // shipped here in v0.32.0 are gone: they now dispatch real Config operations from
-// cfn_resources_v101.go, which became possible once the service's handlers existed
+// deployConfigConfigRule and deployConfigConfigurationRecorder, which became possible once the service's handlers existed
 // (#580).
 
 // deployTransferServer deploys an AWS::Transfer::Server through the Transfer plugin's CreateServer.
@@ -581,4 +579,59 @@ func (d *StackDeployer) cfnValidateOutputAttributes(tmpl *cfnTemplate, cctx *cfn
 		}
 	}
 	return nil
+}
+
+// ----- AWS::Transfer::Server in-place update (#1427) -------------------------------
+
+// cfnTransferUpdateExcluded are the AWS::Transfer::Server properties UpdateServer does not take.
+// Domain is Update requires: Replacement, so a change to it never reaches the update. Tags is a
+// TagResource call rather than an UpdateServer member, and TagResource is not routed for Transfer.
+// CreateWithHostKey "can be set only when you create the server"; a change to it fails the
+// resource before this is reached (cfnCreateOnlyProperties), so it is excluded only from the body
+// a rollback re-applies.
+var cfnTransferUpdateExcluded = map[string]bool{"Domain": true, "Tags": true, "CreateWithHostKey": true}
+
+// updateTransferServer applies a changed AWS::Transfer::Server through UpdateServer, keeping the
+// server's ID (#1427). Every property but Domain is updatable in place by the resource's page, and
+// UpdateServer's members carry the same names as the template's properties, so the declared
+// properties are sent as they are for the create, minus the three UpdateServer does not take.
+//
+// A property removed from the template is not reset: UpdateServer leaves an omitted member as it is,
+// and substrate has no record of the value the server was created without it. A change to Tags alone
+// makes no call, for the reason [cfnTransferUpdateExcluded] gives.
+func (d *StackDeployer) updateTransferServer(
+	ctx context.Context, logicalID string, prior DeployedResource,
+	props map[string]interface{}, changed []string, streamID string, cctx *cfnContext,
+) (DeployedResource, float64, error) {
+	dr := prior
+	dr.LogicalID = logicalID
+	applies := false
+	for _, prop := range changed {
+		if !cfnTransferUpdateExcluded[prop] {
+			applies = true
+		}
+	}
+	if !applies {
+		return dr, 0, nil
+	}
+	body := map[string]interface{}{"ServerId": prior.PhysicalID}
+	for key, v := range props {
+		if !cfnTransferUpdateExcluded[key] {
+			body[key] = resolveNested(v, cctx)
+		}
+	}
+	data, err := json.Marshal(body)
+	if err != nil {
+		return DeployedResource{}, 0, fmt.Errorf("cfn updateTransferServer marshal: %w", err)
+	}
+	_, cost, routeErr := d.dispatch(ctx, &AWSRequest{
+		Service: "transfer", Operation: "UpdateServer",
+		Headers: map[string]string{"Content-Type": "application/x-amz-json-1.1"},
+		Params:  map[string]string{}, Body: data,
+	}, streamID)
+	if routeErr != nil {
+		dr.Error = routeErr.Error()
+		return dr, cost, nil //nolint:nilerr // A refused update is reported on the resource.
+	}
+	return dr, cost, nil
 }

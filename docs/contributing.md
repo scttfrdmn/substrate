@@ -202,6 +202,9 @@ drifting silently.
 Adding an operation to an existing plugin needs the catalog, totals, service-section
 row and coverage-matrix steps.
 
+CFN resources live in `emulator/cfn_resources_<service>.go`: each service's deploy, update and
+delete helpers together. Files are named by domain, never by release (`TestFileNames_AreNamedByDomainNotRelease`).
+
 ### Models to copy
 
 Each plugin owns its wire encoding, so start from the closest existing one rather than

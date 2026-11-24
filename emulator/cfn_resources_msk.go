@@ -1,75 +1,14 @@
 package emulator
 
-// cfn_resources_v34.go holds the StackDeployer.deployResource helpers for
-// MSK and RDS (Aurora clusters).
-// The name records the substrate release that added them (v0.34.0) rather than the
-// services, because several releases touched overlapping services; the helpers here
-// follow the same pattern as those in cfn_deployer.go.
+// StackDeployer helpers for CloudFormation's MSK resource type.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strconv"
-	"strings"
 )
 
-// ----- v0.34.0 — RDS Aurora cluster ----------------------------------------
-
-// deployRDSDBCluster creates an RDS Aurora DB cluster for the given CFN resource.
-func (d *StackDeployer) deployRDSDBCluster(
-	ctx context.Context,
-	logicalID string,
-	props map[string]interface{},
-	streamID string,
-	cctx *cfnContext,
-) (DeployedResource, float64, error) {
-	id := resolveStringProp(props, "DBClusterIdentifier", logicalID, cctx)
-	engine := resolveStringProp(props, "Engine", "aurora-mysql", cctx)
-
-	params := map[string]string{
-		"Action":              "CreateDBCluster",
-		"DBClusterIdentifier": id,
-		"Engine":              engine,
-		"MasterUsername":      resolveStringProp(props, "MasterUsername", "admin", cctx),
-	}
-	if ev := resolveStringProp(props, "EngineVersion", "", cctx); ev != "" {
-		params["EngineVersion"] = ev
-	}
-	if sg := resolveStringProp(props, "DBSubnetGroupName", "", cctx); sg != "" {
-		params["DBSubnetGroupName"] = sg
-	}
-
-	req := &AWSRequest{
-		Service:   "rds",
-		Operation: "CreateDBCluster",
-		Params:    params,
-		Headers:   map[string]string{},
-	}
-
-	resp, cost, routeErr := d.dispatch(ctx, req, streamID)
-	arn := fmt.Sprintf("arn:aws:rds:%s:%s:cluster:%s", cctx.region, cctx.accountID, id)
-	dr := DeployedResource{
-		LogicalID:  logicalID,
-		Type:       "AWS::RDS::DBCluster",
-		PhysicalID: id,
-		ARN:        arn,
-		Metadata:   make(map[string]interface{}),
-	}
-	if routeErr != nil {
-		dr.Error = routeErr.Error()
-	} else if resp != nil {
-		if addr := extractXMLField(resp.Body, "Endpoint"); addr != "" {
-			dr.Metadata["Endpoint.Address"] = addr
-		}
-		if port := extractXMLField(resp.Body, "Port"); port != "" {
-			dr.Metadata["Endpoint.Port"] = port
-		}
-	}
-	return dr, cost, nil
-}
-
-// ----- v0.34.0 — MSK --------------------------------------------------------
+// ----- MSK ------------------------------------------------------------------
 
 // deployMSKCluster creates an Amazon MSK cluster for the given CFN resource.
 func (d *StackDeployer) deployMSKCluster(
@@ -155,19 +94,4 @@ func (d *StackDeployer) deployMSKCluster(
 		}
 	}
 	return dr, cost, nil
-}
-
-// cfnIntProp resolves an integer property, which a template may write as a number or as a string
-// (a Ref to a Number parameter resolves to one). The second result is false when the property is
-// absent or does not resolve to an integer.
-func cfnIntProp(props map[string]interface{}, key string, cctx *cfnContext) (int, bool) {
-	v, ok := props[key]
-	if !ok || v == nil {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(resolveValue(v, cctx)))
-	if err != nil {
-		return 0, false
-	}
-	return n, true
 }

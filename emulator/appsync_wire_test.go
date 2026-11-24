@@ -196,7 +196,7 @@ func TestAppSyncWire_ChildShapesPublishNoAPIID(t *testing.T) {
 
 // TestAppSyncWire_CloudFormationStillReportsTheAPIARN is #1121's fourth criterion.
 //
-// cfn_resources_v31.go reads the ARN out of the plugin's own response rather than rebuilding it, so
+// deployAppSyncGraphQLApi reads the ARN out of the plugin's own response rather than rebuilding it, so
 // the member rename had to move that reader in the same commit. If it had not, Ref and
 // Fn::GetAtt Arn would both answer "" — and a CFN test that asserts only "deploy returned no error"
 // would not see it, which is #1123's finding.
