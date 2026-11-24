@@ -1237,6 +1237,7 @@ var typePriority = map[string]int{
 	"AWS::Cognito::IdentityPoolRoleAttachment": 4,
 	// v0.23.0 — Kinesis and CloudFront.
 	"AWS::Kinesis::Stream":                            2,
+	"AWS::Kinesis::StreamConsumer":                    3,
 	"AWS::CloudFront::CloudFrontOriginAccessIdentity": 2,
 	"AWS::CloudFront::Distribution":                   3,
 	// v0.25.0 — RDS and ElastiCache.

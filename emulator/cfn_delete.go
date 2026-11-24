@@ -61,6 +61,7 @@ var cfnResourceDeleters = map[string]cfnDeleteRequestFunc{
 	"AWS::Lambda::Permission":               cfnLambdaPermissionDeleter,
 	"AWS::DynamoDB::Table":                  jsonBodyDeleter("dynamodb", "DeleteTable", "TableName"),
 	"AWS::Kinesis::Stream":                  jsonBodyDeleter("kinesis", "DeleteStream", "StreamName"),
+	"AWS::Kinesis::StreamConsumer":          jsonBodyDeleter("kinesis", "DeregisterStreamConsumer", "ConsumerARN"),
 	"AWS::KinesisFirehose::DeliveryStream": jsonBodyDeleter("firehose", "DeleteDeliveryStream",
 		"DeliveryStreamName"),
 	"AWS::EFS::FileSystem":  pathDeleter("efs", "/2015-02-01/file-systems/"),

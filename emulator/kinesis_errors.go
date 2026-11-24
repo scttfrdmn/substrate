@@ -49,3 +49,19 @@ func kinesisInvalidArgument(message string) *AWSError {
 		HTTPStatus: http.StatusBadRequest,
 	}
 }
+
+// kinesisSubscribeToShard is the one Kinesis operation substrate refuses by name.
+const kinesisSubscribeToShard = "SubscribeToShard"
+
+// kinesisSubscribeToShardRefusal is SubscribeToShard's answer. The operation opens a long-lived
+// HTTP/2 event stream that pushes records as they arrive, which substrate does not model; #1695
+// tracks a bounded, replayable form. The code is the one every unrouted JSON-protocol operation
+// answers, as the OpenSearch control plane's refusal is, and the message is substrate's own.
+func kinesisSubscribeToShardRefusal() *AWSError {
+	return &AWSError{
+		Code: "UnknownOperationException",
+		Message: "substrate does not support SubscribeToShard, the enhanced fan-out HTTP/2 event stream; " +
+			"read with GetShardIterator and GetRecords instead. See https://github.com/scttfrdmn/substrate/issues/1695",
+		HTTPStatus: http.StatusNotFound,
+	}
+}

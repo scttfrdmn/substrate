@@ -26,6 +26,10 @@ type KinesisPlugin struct {
 	// seedMu serializes advancing a seeded stream-status progression (#1119); see
 	// [progression.observe] for why the read-modify-write needs it.
 	seedMu sync.Mutex
+	// consumerMu serializes the read-check-write of a stream's consumer set: the duplicate check, the
+	// per-stream limits and the write in RegisterStreamConsumer, and the lookup and delete in
+	// DeregisterStreamConsumer and DeleteStream.
+	consumerMu sync.Mutex
 }
 
 // Name returns the service name "kinesis".
@@ -94,7 +98,32 @@ func (p *KinesisPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AW
 		return p.enableEnhancedMonitoring(ctx, req)
 	case "DisableEnhancedMonitoring":
 		return p.disableEnhancedMonitoring(ctx, req)
+	case "ListShards":
+		return p.listShards(ctx, req)
+	case "RegisterStreamConsumer":
+		return p.registerStreamConsumer(ctx, req)
+	case "DescribeStreamConsumer":
+		return p.describeStreamConsumer(ctx, req)
+	case "ListStreamConsumers":
+		return p.listStreamConsumers(ctx, req)
+	case "DeregisterStreamConsumer":
+		return p.deregisterStreamConsumer(ctx, req)
+	case "IncreaseStreamRetentionPeriod":
+		return p.increaseStreamRetentionPeriod(ctx, req)
+	case "DecreaseStreamRetentionPeriod":
+		return p.decreaseStreamRetentionPeriod(ctx, req)
+	case "UpdateMaxRecordSize":
+		return p.updateMaxRecordSize(ctx, req)
+	case "TagResource":
+		return p.tagResource(ctx, req)
+	case "UntagResource":
+		return p.untagResource(ctx, req)
+	case "ListTagsForResource":
+		return p.listTagsForResource(ctx, req)
 	default:
+		if op == kinesisSubscribeToShard {
+			return nil, kinesisSubscribeToShardRefusal()
+		}
 		return nil, unknownActionError(p.Name(), op)
 	}
 }
@@ -212,6 +241,7 @@ func (p *KinesisPlugin) createStream(ctx *RequestContext, req *AWSRequest) (*AWS
 func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	var body struct {
 		kinesisStreamRef
+		EnforceConsumerDeletion bool `json:"EnforceConsumerDeletion"`
 	}
 	if err := json.Unmarshal(req.Body, &body); err != nil {
 		return nil, kinesisInvalidBody()
@@ -224,6 +254,29 @@ func (p *KinesisPlugin) deleteStream(ctx *RequestContext, req *AWSRequest) (*AWS
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
+	}
+
+	// API_DeleteStream: with EnforceConsumerDeletion unset or false, "the stream has registered
+	// enhanced fan-out consumers, the call to DeleteStream fails with a ResourceInUseException";
+	// with it true, the stream and every consumer registered with it are deleted.
+	p.consumerMu.Lock()
+	defer p.consumerMu.Unlock()
+	consumers, err := p.listConsumers(target)
+	if err != nil {
+		return nil, err
+	}
+	if len(consumers) > 0 && !body.EnforceConsumerDeletion {
+		return nil, &AWSError{
+			Code: "ResourceInUseException",
+			Message: fmt.Sprintf("Stream %s has %d registered consumers; deregister them or set EnforceConsumerDeletion.",
+				kinesisStreamARN(target), len(consumers)),
+			HTTPStatus: http.StatusBadRequest,
+		}
+	}
+	for _, consumer := range consumers {
+		if err := p.deleteConsumer(consumer); err != nil {
+			return nil, err
+		}
 	}
 
 	// Every key removed is derived from the resolved target, so a delete through a cross-account ARN
@@ -300,8 +353,12 @@ func (p *KinesisPlugin) describeStreamSummary(ctx *RequestContext, req *AWSReque
 		return nil, err
 	}
 
+	consumers, err := p.listConsumers(target)
+	if err != nil {
+		return nil, err
+	}
 	return kinesisJSONResponse(http.StatusOK, map[string]interface{}{
-		"StreamDescriptionSummary": buildStreamDescriptionSummary(stream),
+		"StreamDescriptionSummary": buildStreamDescriptionSummary(stream, len(consumers)),
 	})
 }
 

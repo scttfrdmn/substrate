@@ -94,13 +94,21 @@ func (p *OrganizationsPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest
 		p.accountOperation,
 		p.tagOperation,
 		p.resourcePolicyOperation,
+		p.lifecycleOperation,
+		p.serviceAccessOperation,
 	} {
 		if h, ok := claim(req.Operation); ok {
 			caller, err := p.resolveOrgCaller(context.Background(), ctx)
 			if err != nil {
 				return nil, fmt.Errorf("organizations resolve caller: %w", err)
 			}
-			return h(caller, req)
+			if req.Operation != "CreateOrganization" {
+				if err := p.requireInUse(context.Background(), caller.AccountID); err != nil {
+					return nil, err
+				}
+			}
+			resp, err := h(caller, req)
+			return resp, orgUnwrapNotInUse(err)
 		}
 	}
 	return nil, unknownActionError(p.Name(), req.Operation)
@@ -148,17 +156,25 @@ func (p *OrganizationsPlugin) describeOrganization(reqCtx *orgCaller, _ *AWSRequ
 	if err != nil {
 		return nil, fmt.Errorf("describeOrganization: %w", err)
 	}
-	// The feature set is read through the control plane so a seed set after the
-	// organization was created still governs what the caller observes.
-	featureSet, err := p.effectiveFeatureSet(goCtx, reqCtx.AccountID)
+	if err := p.renderOrganization(goCtx, reqCtx.AccountID, org); err != nil {
+		return nil, err
+	}
+	return orgJSONResponse(map[string]interface{}{"Organization": org}, "describeOrganization")
+}
+
+// renderOrganization sets the members DescribeOrganization and CreateOrganization report from more
+// than the record. The feature set is read through the control plane so a seed set after the
+// organization was created still governs what the caller observes.
+func (p *OrganizationsPlugin) renderOrganization(ctx context.Context, acct string, org *Organization) error {
+	featureSet, err := p.effectiveFeatureSet(ctx, acct)
 	if err != nil {
-		return nil, fmt.Errorf("describeOrganization feature set: %w", err)
+		return fmt.Errorf("organization feature set: %w", err)
 	}
 	org.FeatureSet = featureSet
 	if featureSet == orgFeatureSetAll {
 		org.AvailablePolicyTypes = []OrgPolicyTypeSummary{{Type: orgPolicyTypeSCP, Status: "ENABLED"}}
 	}
-	return orgJSONResponse(map[string]interface{}{"Organization": org}, "describeOrganization")
+	return nil
 }
 
 func (p *OrganizationsPlugin) listAccounts(reqCtx *orgCaller, req *AWSRequest) (*AWSResponse, error) {

@@ -562,6 +562,8 @@ func (s *Server) buildRouter() *chi.Mux {
 		// Kinesis stream-status progression control-plane endpoints (#1119).
 		cp.Post("/v1/kinesis/stream-status", s.handleKinesisSeedStreamStatus)
 		cp.Delete("/v1/kinesis/stream-status", s.handleKinesisClearStreamStatus)
+		cp.Post("/v1/kinesis/consumer-status", s.handleKinesisSeedConsumerStatus)
+		cp.Delete("/v1/kinesis/consumer-status", s.handleKinesisClearConsumerStatus)
 		cp.Post("/v1/lambda/role-propagation", s.handleLambdaSeedRolePropagation)
 		cp.Delete("/v1/lambda/role-propagation", s.handleLambdaClearRolePropagation)
 		cp.Post("/v1/ec2/nat-gateway-state", s.handleEC2SeedNatGatewayState)

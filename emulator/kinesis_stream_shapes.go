@@ -19,9 +19,12 @@ package emulator
 //
 // Both builders render StreamModeDetails from the record (#1118), and the summary renders
 // MaxRecordSizeInKiB (#1418). Both are Required: No, and a record holding neither reads back as
-// PROVISIONED and 1024. Neither builder renders EncryptionType or KeyId, and the summary renders
-// none of ChannelCount, ConsumerCount, RecordDistributionStrategy, StreamId or WarmThroughput. All
-// are Required: No on their pages and substrate holds no state for any of them.
+// PROVISIONED and 1024. Both render EncryptionType as NONE, the value PutRecord and GetRecords
+// already report: substrate models no stream encryption, and Terraform's aws_kinesis_stream plans a
+// change on every refresh when the member is absent. Neither renders KeyId, and the summary renders
+// none of ChannelCount, RecordDistributionStrategy, StreamId or WarmThroughput. All are Required: No
+// on their pages and substrate holds no state for any of them. The summary renders ConsumerCount,
+// the number of registered enhanced fan-out consumers, which its caller supplies.
 
 // kinesisRenderEnhancedMonitoring renders a stream's stored metric names as the published shape.
 //
@@ -51,6 +54,9 @@ func kinesisRenderEnhancedMonitoring(stored []string) []map[string]interface{} {
 	return []map[string]interface{}{{"ShardLevelMetrics": rendered}}
 }
 
+// kinesisEncryptionNone is the EncryptionType of every stream: substrate models no encryption.
+const kinesisEncryptionNone = "NONE"
+
 // buildStreamDescription builds the API_StreamDescription body DescribeStream answers.
 func buildStreamDescription(stream KinesisStream) map[string]interface{} {
 	return map[string]interface{}{
@@ -61,6 +67,7 @@ func buildStreamDescription(stream KinesisStream) map[string]interface{} {
 		"RetentionPeriodHours":    stream.RetentionPeriodHours,
 		"StreamCreationTimestamp": stream.CreatedAt.Unix(),
 		"EnhancedMonitoring":      kinesisRenderEnhancedMonitoring(stream.EnhancedMonitoring),
+		"EncryptionType":          kinesisEncryptionNone,
 		"Shards":                  stream.Shards,
 		"HasMoreShards":           false,
 	}
@@ -71,7 +78,7 @@ func buildStreamDescription(stream KinesisStream) map[string]interface{} {
 // OpenShardCount is the summary's own member and is read from the stored ShardCount, which every
 // reshard keeps equal to the number of open shards. It is not len(Shards): a merge, a split and an
 // UpdateShardCount close their parents and leave them listed (#1399).
-func buildStreamDescriptionSummary(stream KinesisStream) map[string]interface{} {
+func buildStreamDescriptionSummary(stream KinesisStream, consumerCount int) map[string]interface{} {
 	return map[string]interface{}{
 		"StreamName":              stream.StreamName,
 		"StreamARN":               stream.StreamArn,
@@ -82,5 +89,7 @@ func buildStreamDescriptionSummary(stream KinesisStream) map[string]interface{} 
 		"OpenShardCount":          stream.ShardCount,
 		"StreamModeDetails":       kinesisRenderStreamModeDetails(stream),
 		"MaxRecordSizeInKiB":      kinesisMaxRecordSizeBytes(stream) >> 10,
+		"EncryptionType":          kinesisEncryptionNone,
+		"ConsumerCount":           consumerCount,
 	}
 }
