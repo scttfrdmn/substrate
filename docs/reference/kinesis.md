@@ -601,7 +601,7 @@ millisecond. The stored record keeps its `time.Time`, so a recorded run replays 
 | Type | Ref | Notes |
 |------|-----|-------|
 | AWS::Kinesis::Stream | StreamName | Forwards `ShardCount`, `StreamModeDetails` and `MaxRecordSizeInKiB` as declared. A provisioned stream declaring no `ShardCount` gets one shard, and an `ON_DEMAND` one sends none |
-| AWS::Kinesis::StreamConsumer | ConsumerARN | `RegisterStreamConsumer` with `ConsumerName`, `StreamARN` and `Tags`; `Fn::GetAtt` answers `ConsumerARN`, `ConsumerName`, `ConsumerStatus`, `ConsumerCreationTimestamp` and the stream's `StreamARN`. Deleted with `DeregisterStreamConsumer`, before its stream |
+| AWS::Kinesis::StreamConsumer | ConsumerARN | `RegisterStreamConsumer` with `ConsumerName`, `StreamARN` and `Tags`; `Fn::GetAtt` answers `ConsumerARN`, `ConsumerName`, `ConsumerStatus`, `ConsumerCreationTimestamp` and the stream's `StreamARN`. Deleted with `DeregisterStreamConsumer`, before its stream. A stack's `AWS::Kinesis::Stream` is deleted with `EnforceConsumerDeletion`, so a consumer registered outside the stack goes with it; that is substrate's reading, since neither the resource's page nor a published resource provider says what CloudFormation sends |
 
 ## A shard iterator carries its account and Region only inside the token
 

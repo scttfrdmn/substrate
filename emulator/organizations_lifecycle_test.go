@@ -2,6 +2,7 @@ package emulator_test
 
 import (
 	"errors"
+	"io"
 	"net/http"
 	"testing"
 
@@ -76,6 +77,7 @@ func TestOrganizations_CreateOrganizationOnAFreshAccount(t *testing.T) {
 			assert.Equal(t, created.Organization.ID, described.Organization.ID, "the created organization is the one described")
 			assert.Equal(t, tc.want, described.Organization.FeatureSet)
 			assert.Empty(t, orgRootPolicyTypes(t, ts), "an explicitly created organization enables no policy type")
+			assert.Empty(t, described.Organization.AvailablePolicyTypes, "AvailablePolicyTypes follows the root")
 		})
 	}
 }
@@ -172,7 +174,7 @@ func TestOrganizations_DeleteOrganizationThenEveryCallIsNotInUse(t *testing.T) {
 	var recreated struct {
 		Organization emulator.Organization `json:"Organization"`
 	}
-	status, code = orgCall(t, ts, "CreateOrganization", map[string]any{"FeatureSet": "CONSOLIDATED_BILLING"}, &recreated)
+	status, code = orgCall(t, ts, "CreateOrganization", map[string]any{}, &recreated)
 	require.Equal(t, http.StatusOK, status, code)
 	assert.NotEqual(t, created.Organization.ID, recreated.Organization.ID)
 	status, code = orgCall(t, ts, "DescribeOrganizationalUnit", map[string]any{"OrganizationalUnitId": ou.OrganizationalUnit.ID}, nil)
@@ -283,6 +285,53 @@ func TestOrganizations_LifecycleStoreFailuresPropagate(t *testing.T) {
 			assert.False(t, errors.As(err, &awsErr), "a store failure is not an AWS answer: %v", err)
 		})
 	}
+}
+
+func TestOrganizations_AvailablePolicyTypesFollowsTheRoot(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	describe := func() []emulator.OrgPolicyTypeSummary {
+		t.Helper()
+		var out struct {
+			Organization emulator.Organization `json:"Organization"`
+		}
+		status, code := orgCall(t, ts, "DescribeOrganization", map[string]any{}, &out)
+		require.Equal(t, http.StatusOK, status, code)
+		return out.Organization.AvailablePolicyTypes
+	}
+	scp := []emulator.OrgPolicyTypeSummary{{Type: "SERVICE_CONTROL_POLICY", Status: "ENABLED"}}
+	assert.Equal(t, scp, describe(), "the auto-created organization enables SCPs")
+	status, code := orgCall(t, ts, "DisablePolicyType", map[string]any{
+		"RootId": orgRootID(t, ts), "PolicyType": "SERVICE_CONTROL_POLICY",
+	}, nil)
+	require.Equal(t, http.StatusOK, status, code)
+	assert.Empty(t, describe(), "nothing is available once the root disables it")
+	status, code = orgCall(t, ts, "EnablePolicyType", map[string]any{
+		"RootId": orgRootID(t, ts), "PolicyType": "SERVICE_CONTROL_POLICY",
+	}, nil)
+	require.Equal(t, http.StatusOK, status, code)
+	assert.Equal(t, scp, describe())
+}
+
+func TestOrganizations_ServiceAccessNeedsAllFeatures(t *testing.T) {
+	t.Parallel()
+	ts := emulator.StartTestServer(t)
+	status, code := orgCall(t, ts, "CreateOrganization", map[string]any{"FeatureSet": "CONSOLIDATED_BILLING"}, nil)
+	require.Equal(t, http.StatusOK, status, code)
+	for _, op := range []string{"EnableAWSServiceAccess", "DisableAWSServiceAccess", "ListAWSServiceAccessForOrganization"} {
+		resp := orgSignedRequest(t, ts, orgManagementAccount, op, map[string]any{"ServicePrincipal": "sso.amazonaws.com"})
+		var body struct {
+			Message string `json:"message"`
+		}
+		status, code := decodeAWSResponse(t, resp, &body)
+		assert.Equal(t, http.StatusBadRequest, status, op)
+		assert.Equal(t, "ConstraintViolationException", code, op)
+	}
+	raw := orgSignedRequest(t, ts, orgManagementAccount, "ListAWSServiceAccessForOrganization", map[string]any{})
+	defer raw.Body.Close() //nolint:errcheck
+	out, err := io.ReadAll(raw.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "ORGANIZATION_NOT_IN_ALL_FEATURES_MODE")
 }
 
 func TestOrganizations_ServiceAccess(t *testing.T) {

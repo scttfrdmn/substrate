@@ -1,6 +1,7 @@
 package emulator
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"slices"
@@ -12,12 +13,31 @@ import (
 // list on every refresh of an ALL-features organization, so without it the resource could not be
 // applied.
 //
+// All three are refused in a CONSOLIDATED_BILLING organization; see requireAllFeatures.
+//
 // The organization keeps the enabled service principals, each with the simulated time it was
 // enabled. Enabling one already enabled keeps its original date, and disabling one not enabled
 // succeeds; no published error covers either case. Enabling records intent only: substrate creates
 // no service-linked roles in member accounts. Only the management account may call them, as the pages
 // state; a delegated administrator, which the list's page also admits, is not modeled. The list is sorted by principal and paged like the plugin's other listings. The
 // refusal messages are substrate's own.
+
+// requireAllFeatures refuses trusted service access in a CONSOLIDATED_BILLING organization with
+// ConstraintViolationException/ORGANIZATION_NOT_IN_ALL_FEATURES_MODE. Trusted access works through
+// service-linked roles, which the user guide says a consolidated-billing organization never uses.
+// The message is the reason's description in the API reference (ConstraintViolationException).
+func (p *OrganizationsPlugin) requireAllFeatures(ctx context.Context, acct string) error {
+	featureSet, err := p.effectiveFeatureSet(ctx, acct)
+	if err != nil {
+		return err
+	}
+	if featureSet == orgFeatureSetAll {
+		return nil
+	}
+	return orgConstraintViolation("ORGANIZATION_NOT_IN_ALL_FEATURES_MODE",
+		"You attempted to perform an operation that requires the organization to be configured to support all features. "+
+			"An organization that supports only consolidated billing features can't perform this operation.")
+}
 
 // orgServiceAccessKey holds the service principals enabled for acct's organization.
 func orgServiceAccessKey(acct string) string { return "service_access:" + acct }
@@ -94,6 +114,9 @@ func (p *OrganizationsPlugin) changeServiceAccess(reqCtx *orgCaller, req *AWSReq
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("%s ensure org: %w", op, err)
 	}
+	if err := p.requireAllFeatures(goCtx, reqCtx.AccountID); err != nil {
+		return nil, err
+	}
 	var enabled []orgEnabledServicePrincipal
 	if _, err := p.orgGetJSON(goCtx, orgServiceAccessKey(reqCtx.AccountID), &enabled); err != nil {
 		return nil, err
@@ -142,6 +165,9 @@ func (p *OrganizationsPlugin) listAWSServiceAccess(reqCtx *orgCaller, req *AWSRe
 	}
 	if _, err := p.ensureOrganization(goCtx, reqCtx.AccountID); err != nil {
 		return nil, fmt.Errorf("listAWSServiceAccess ensure org: %w", err)
+	}
+	if err := p.requireAllFeatures(goCtx, reqCtx.AccountID); err != nil {
+		return nil, err
 	}
 	var enabled []orgEnabledServicePrincipal
 	if _, err := p.orgGetJSON(goCtx, orgServiceAccessKey(reqCtx.AccountID), &enabled); err != nil {

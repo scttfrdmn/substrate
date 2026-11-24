@@ -18,7 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CloudFormation: `AWS::Kinesis::StreamConsumer` (#1613).
 - Organizations: `CreateOrganization` and `DeleteOrganization` (#1627).
 - Organizations: `EnableAWSServiceAccess`, `DisableAWSServiceAccess` and `ListAWSServiceAccessForOrganization`, which Terraform's `aws_organizations_organization` reads (#1627).
-- Kinesis and Organizations: the new refusals' messages are substrate's own, except `AWSOrganizationsNotInUseException`, `AlreadyInOrganizationException` and `OrganizationNotEmptyException`, which use the API reference's descriptions (#1613, #1627).
+- Kinesis and Organizations: the new refusals' messages are substrate's own, except `AWSOrganizationsNotInUseException`, `AlreadyInOrganizationException`, `OrganizationNotEmptyException` and `ORGANIZATION_NOT_IN_ALL_FEATURES_MODE`, which use the API reference's descriptions (#1613, #1627).
 
 ### Changed
 
@@ -32,11 +32,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Kinesis: `DeleteStream` refuses a stream with registered consumers with `ResourceInUseException` unless `EnforceConsumerDeletion` is true (#1613).
 - Organizations: after `DeleteOrganization`, every call from that management account answers `AWSOrganizationsNotInUseException` until `CreateOrganization`; other accounts still auto-create (#1627).
-- Organizations: an explicit `CreateOrganization` enables no policy type at the root, as the Terraform provider's acceptance tests observe of AWS; the auto-created organization still enables SCPs (#1627).
-
-### Provenance
-
-- Organizations: `CreateOrganization` leaving the root's policy types empty follows the Terraform AWS provider's `testAccOrganization_basic` (v6.73.0), which asserts `roots.0.policy_types.#` is 0 against AWS, over the API reference's "automatically enabled" (#1627).
+- Organizations: an explicit `CreateOrganization` enables no policy type at the root; the auto-created organization still enables SCPs (#1627).
+- Organizations: `DescribeOrganization`'s `AvailablePolicyTypes` reports the root's policy types, so it is absent after `DisablePolicyType` (#1627).
+- Organizations: the trusted-service-access operations answer `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` under `CONSOLIDATED_BILLING` (#1627).
+- CloudFormation: deleting an `AWS::Kinesis::Stream` sends `EnforceConsumerDeletion`, so consumers registered outside the stack go with it; this is substrate's reading (#1613).
 
 ## [v0.133.0] - 2026-11-24
 

@@ -47,6 +47,32 @@ func cfnKinesisCall(t *testing.T, d *emulator.StackDeployer, op string, body map
 	}, "probe")
 }
 
+// TestCFN_KinesisStreamDeleteTakesConsumersRegisteredOutsideTheStack is substrate's reading that a
+// stack delete sends EnforceConsumerDeletion.
+func TestCFN_KinesisStreamDeleteTakesConsumersRegisteredOutsideTheStack(t *testing.T) {
+	t.Parallel()
+	d := newFullTestDeployer(t)
+	ctx := context.Background()
+	tmpl := `{"Resources": {"Stream": {"Type": "AWS::Kinesis::Stream", "Properties": {"Name": "cfn-outside"}}}}`
+	_, err := d.Deploy(ctx, tmpl, "kinesis-outside", nil)
+	require.NoError(t, err)
+	_, err = cfnKinesisCall(t, d, "RegisterStreamConsumer", map[string]any{
+		"StreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/cfn-outside", "ConsumerName": "stray",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, d.DeleteStack(ctx, "kinesis-outside"))
+	_, err = cfnKinesisCall(t, d, "DescribeStream", map[string]any{"StreamName": "cfn-outside"})
+	var awsErr *emulator.AWSError
+	require.ErrorAs(t, err, &awsErr)
+	assert.Equal(t, "ResourceNotFoundException", awsErr.Code, "the stack delete removed the stream and its consumer")
+	_, err = cfnKinesisCall(t, d, "DescribeStreamConsumer", map[string]any{
+		"StreamARN": "arn:aws:kinesis:us-east-1:123456789012:stream/cfn-outside", "ConsumerName": "stray",
+	})
+	require.ErrorAs(t, err, &awsErr)
+	assert.Equal(t, "ResourceNotFoundException", awsErr.Code)
+}
+
 func TestCFN_KinesisStreamConsumer(t *testing.T) {
 	t.Parallel()
 	d := newFullTestDeployer(t)

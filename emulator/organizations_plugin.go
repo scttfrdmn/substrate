@@ -165,15 +165,23 @@ func (p *OrganizationsPlugin) describeOrganization(reqCtx *orgCaller, _ *AWSRequ
 // renderOrganization sets the members DescribeOrganization and CreateOrganization report from more
 // than the record. The feature set is read through the control plane so a seed set after the
 // organization was created still governs what the caller observes.
+//
+// AvailablePolicyTypes is the root's PolicyTypes, as ListRoots reports them: the API reference marks
+// the member deprecated and points to ListRoots for "the policies that are enabled and available for
+// use", so the two answer alike rather than one reporting a type the other does not. It is absent
+// when the root has none, which is the case under CONSOLIDATED_BILLING, after DisablePolicyType, and
+// for an organization CreateOrganization made.
 func (p *OrganizationsPlugin) renderOrganization(ctx context.Context, acct string, org *Organization) error {
 	featureSet, err := p.effectiveFeatureSet(ctx, acct)
 	if err != nil {
 		return fmt.Errorf("organization feature set: %w", err)
 	}
 	org.FeatureSet = featureSet
-	if featureSet == orgFeatureSetAll {
-		org.AvailablePolicyTypes = []OrgPolicyTypeSummary{{Type: orgPolicyTypeSCP, Status: "ENABLED"}}
+	root, err := p.loadRoot(ctx, acct)
+	if err != nil {
+		return fmt.Errorf("organization root: %w", err)
 	}
+	org.AvailablePolicyTypes = root.PolicyTypes
 	return nil
 }
 

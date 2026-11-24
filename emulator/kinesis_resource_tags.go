@@ -89,6 +89,10 @@ func (p *KinesisPlugin) tagResource(_ *RequestContext, req *AWSRequest) (*AWSRes
 	if tagErr := kinesisValidateTagMap(body.Tags); tagErr != nil {
 		return nil, tagErr
 	}
+	// Held across the load and the save, so a concurrent deregistration or stream delete cannot be
+	// undone by writing back the record this request read.
+	p.consumerMu.Lock()
+	defer p.consumerMu.Unlock()
 	res, err := p.resolveTaggable(body.ResourceARN)
 	if err != nil {
 		return nil, err
@@ -121,6 +125,9 @@ func (p *KinesisPlugin) untagResource(_ *RequestContext, req *AWSRequest) (*AWSR
 	if n := len(body.TagKeys); n < 1 || n > kinesisMaxUntagKeys {
 		return nil, kinesisInvalidArgument(fmt.Sprintf("TagKeys must hold between 1 and %d keys; it holds %d.", kinesisMaxUntagKeys, n))
 	}
+	// As in tagResource.
+	p.consumerMu.Lock()
+	defer p.consumerMu.Unlock()
 	res, err := p.resolveTaggable(body.ResourceARN)
 	if err != nil {
 		return nil, err

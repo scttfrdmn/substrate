@@ -96,6 +96,14 @@ func TestKinesisListShards_Refusals(t *testing.T) {
 		t.Run(name, func(t *testing.T) { ksRefusal(t, ts, "ListShards", body, "InvalidArgumentException") })
 	}
 	ksRefusal(t, ts, "ListShards", map[string]any{"StreamName": "missing"}, "ResourceNotFoundException")
+
+	// A request carrying every conflicting member names the same one each time.
+	for range 20 {
+		_, out := ksCall(t, ts, "ListShards", map[string]any{
+			"NextToken": token, "StreamName": "lr", "ExclusiveStartShardId": "x", "StreamCreationTimestamp": 1,
+		})
+		assert.Contains(t, string(out), "StreamName cannot be specified with NextToken")
+	}
 	ksRefusal(t, ts, "ListShards", map[string]any{"StreamName": "lr", "StreamCreationTimestamp": 1},
 		"ResourceNotFoundException")
 

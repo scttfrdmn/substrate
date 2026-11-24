@@ -26,10 +26,10 @@ document has no `Reason` member to put them in.
 
 | Operation | Notes |
 |-----------|-------|
-| DescribeOrganization | Auto-creates the organization, its management account and its root on first call |
+| DescribeOrganization | Auto-creates the organization, its management account and its root on first call. `AvailablePolicyTypes`, which the API reference deprecates in favour of `ListRoots`, reports the root's policy types and is absent when the root has none |
 | CreateOrganization | `FeatureSet` `ALL` (the default) or `CONSOLIDATED_BILLING`; enables no policy type; `AlreadyInOrganizationException` when the caller has or belongs to one — see [Creating and deleting an organization](#creating-and-deleting-an-organization) |
 | DeleteOrganization | Management-only; `OrganizationNotEmptyException` while any other account is in it; afterwards every call answers `AWSOrganizationsNotInUseException` until `CreateOrganization` |
-| EnableAWSServiceAccess | Management-only; records the principal and the time; enabling one already enabled changes nothing |
+| EnableAWSServiceAccess | Management-only; records the principal and the time; enabling one already enabled changes nothing. Under `CONSOLIDATED_BILLING`, all three service-access operations answer `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` |
 | DisableAWSServiceAccess | Management-only; disabling one not enabled succeeds |
 | ListAWSServiceAccessForOrganization | Management-only; sorted by principal, paginated by `NextToken` |
 | ListRoots | The same root ID on every call; `PolicyTypes` is empty under `CONSOLIDATED_BILLING` |

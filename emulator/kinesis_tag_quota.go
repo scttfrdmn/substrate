@@ -57,7 +57,9 @@ package emulator
 
 import (
 	"fmt"
+	"maps"
 	"net/http"
+	"slices"
 )
 
 const (
@@ -98,7 +100,9 @@ func kinesisValidateTagMap(tags map[string]string) *AWSError {
 		return kinesisInvalidTagArgument(fmt.Sprintf("Tags may contain at most %d entries; got %d",
 			kinesisMaxTagMapEntries, len(tags)))
 	}
-	for key, value := range tags {
+	// In key order, so a map holding several bad entries names the same one every time.
+	for _, key := range slices.Sorted(maps.Keys(tags)) {
+		value := tags[key]
 		if len(key) < 1 || len(key) > kinesisMaxTagKeyLength {
 			return kinesisInvalidTagArgument(fmt.Sprintf(
 				"tag key %q must be between 1 and %d characters; got %d",

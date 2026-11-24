@@ -223,7 +223,7 @@ func (p *KinesisPlugin) listConsumers(target kinesisStreamTarget) ([]KinesisCons
 func (p *KinesisPlugin) saveConsumer(consumer KinesisConsumer) error {
 	target, name, refErr := kinesisParseConsumerARN(consumer.ConsumerARN)
 	if refErr != nil {
-		return fmt.Errorf("kinesis saveConsumer: %s", refErr.Message)
+		return fmt.Errorf("kinesis saveConsumer: %w", refErr)
 	}
 	return p.putJSON(kinesisConsumerKey(target, name), consumer)
 }
@@ -232,7 +232,7 @@ func (p *KinesisPlugin) saveConsumer(consumer KinesisConsumer) error {
 func (p *KinesisPlugin) deleteConsumer(consumer KinesisConsumer) error {
 	target, name, refErr := kinesisParseConsumerARN(consumer.ConsumerARN)
 	if refErr != nil {
-		return fmt.Errorf("kinesis deleteConsumer: %s", refErr.Message)
+		return fmt.Errorf("kinesis deleteConsumer: %w", refErr)
 	}
 	goCtx := context.Background()
 	if err := p.state.Delete(goCtx, kinesisNamespace, kinesisConsumerKey(target, name)); err != nil {
@@ -315,6 +315,11 @@ func (p *KinesisPlugin) registerStreamConsumer(_ *RequestContext, req *AWSReques
 		}
 	}
 
+	// The stream check, the count, the duplicate check and the write are one read-modify-write over
+	// the stream's consumer set. The stream is read under the lock so a DeleteStream that ran first
+	// cannot leave a consumer registered with a stream that no longer exists.
+	p.consumerMu.Lock()
+	defer p.consumerMu.Unlock()
 	stream, err := p.loadStream(target)
 	if err != nil {
 		return nil, err
@@ -323,11 +328,6 @@ func (p *KinesisPlugin) registerStreamConsumer(_ *RequestContext, req *AWSReques
 	if err := p.requireStreamActive(goCtx, stream, target); err != nil {
 		return nil, err
 	}
-
-	// The count, the duplicate check and the write are one read-modify-write over the stream's
-	// consumer set.
-	p.consumerMu.Lock()
-	defer p.consumerMu.Unlock()
 	existing, err := p.listConsumers(target)
 	if err != nil {
 		return nil, err

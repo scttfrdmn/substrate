@@ -318,13 +318,14 @@ func TestKinesisResourceTags_StreamsAndConsumers(t *testing.T) {
 		body map[string]any
 		code string
 	}{
-		"a 51st tag":         {"TagResource", map[string]any{"ResourceARN": consumerARN, "Tags": map[string]string{"one": "more"}}, "LimitExceededException"},
-		"no tags":            {"TagResource", map[string]any{"ResourceARN": consumerARN}, "InvalidArgumentException"},
-		"no ARN":             {"ListTagsForResource", map[string]any{}, "InvalidArgumentException"},
-		"a queue ARN":        {"ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:kinesis:us-east-1:123456789012:queue/q"}, "InvalidArgumentException"},
-		"a missing stream":   {"ListTagsForResource", map[string]any{"ResourceARN": ksTestARN("nope")}, "ResourceNotFoundException"},
-		"a missing consumer": {"ListTagsForResource", map[string]any{"ResourceARN": ksTestARN("tg") + "/consumer/nope:1"}, "ResourceNotFoundException"},
-		"no keys":            {"UntagResource", map[string]any{"ResourceARN": consumerARN, "TagKeys": []string{}}, "InvalidArgumentException"},
+		"a 51st tag":              {"TagResource", map[string]any{"ResourceARN": consumerARN, "Tags": map[string]string{"one": "more"}}, "LimitExceededException"},
+		"no tags":                 {"TagResource", map[string]any{"ResourceARN": consumerARN}, "InvalidArgumentException"},
+		"no ARN":                  {"ListTagsForResource", map[string]any{}, "InvalidArgumentException"},
+		"a queue ARN":             {"ListTagsForResource", map[string]any{"ResourceARN": "arn:aws:kinesis:us-east-1:123456789012:queue/q"}, "InvalidArgumentException"},
+		"a missing stream":        {"ListTagsForResource", map[string]any{"ResourceARN": ksTestARN("nope")}, "ResourceNotFoundException"},
+		"a missing consumer":      {"ListTagsForResource", map[string]any{"ResourceARN": ksTestARN("tg") + "/consumer/nope:1"}, "ResourceNotFoundException"},
+		"no keys":                 {"UntagResource", map[string]any{"ResourceARN": consumerARN, "TagKeys": []string{}}, "InvalidArgumentException"},
+		"a deregistered consumer": {"TagResource", map[string]any{"ResourceARN": ksTestARN("tg") + "/consumer/app:1", "Tags": map[string]string{"k": "v"}}, "ResourceNotFoundException"},
 	} {
 		t.Run(name, func(t *testing.T) { ksRefusal(t, ts, tc.op, tc.body, tc.code) })
 	}

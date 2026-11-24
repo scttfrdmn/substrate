@@ -121,13 +121,18 @@ func (p *KinesisPlugin) listShards(ctx *RequestContext, req *AWSRequest) (*AWSRe
 		after  *cursorKey
 	)
 	if body.NextToken != "" {
-		for member, set := range map[string]bool{
-			"StreamName":              body.StreamName != "",
-			"ExclusiveStartShardId":   body.ExclusiveStartShardID != "",
-			"StreamCreationTimestamp": body.StreamCreationTimestamp != nil,
+		// A slice, not a map, so a request carrying several conflicting members names the same one
+		// every time.
+		for _, conflict := range []struct {
+			member string
+			set    bool
+		}{
+			{"StreamName", body.StreamName != ""},
+			{"ExclusiveStartShardId", body.ExclusiveStartShardID != ""},
+			{"StreamCreationTimestamp", body.StreamCreationTimestamp != nil},
 		} {
-			if set {
-				return nil, kinesisInvalidArgument(member + " cannot be specified with NextToken")
+			if conflict.set {
+				return nil, kinesisInvalidArgument(conflict.member + " cannot be specified with NextToken")
 			}
 		}
 		cursor, err := pr.cursor()
@@ -198,7 +203,9 @@ func kinesisShardFiltersEqual(a, b *kinesisShardFilter) bool {
 	if a.Type != b.Type || a.ShardID != b.ShardID || (a.Timestamp == nil) != (b.Timestamp == nil) {
 		return false
 	}
-	return a.Timestamp == nil || time.Time(*a.Timestamp).Equal(time.Time(*b.Timestamp))
+	// At millisecond precision, the precision the token renders a timestamp at (EpochSeconds) and
+	// the one API_ShardFilter publishes for it.
+	return a.Timestamp == nil || time.Time(*a.Timestamp).UnixMilli() == time.Time(*b.Timestamp).UnixMilli()
 }
 
 // kinesisFilterShards returns the shards a filter selects, as of now. No filter is
