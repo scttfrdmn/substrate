@@ -10,11 +10,12 @@ import (
 	"time"
 )
 
-// CloudWatchPlugin emulates the Amazon CloudWatch Alarms and Metrics API. It
+// CloudWatchPlugin emulates the Amazon CloudWatch Alarms, Metrics and Dashboards API. It
 // handles PutMetricAlarm, DeleteAlarms, DescribeAlarms, DescribeAlarmsForMetric,
 // SetAlarmState, EnableAlarmActions, DisableAlarmActions, PutMetricData,
-// ListMetrics, GetMetricData, GetMetricStatistics, TagResource, UntagResource and
-// ListTagsForResource.
+// ListMetrics, GetMetricData, GetMetricStatistics, TagResource, UntagResource,
+// ListTagsForResource, and PutDashboard, GetDashboard, ListDashboards and
+// DeleteDashboards (cloudwatch_dashboards.go).
 //
 // All three wire protocols CloudWatch's service shape declares are served —
 // aws.protocols#awsQuery, aws.protocols#awsJson1_0 and
@@ -100,6 +101,14 @@ func (p *CloudWatchPlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (
 		return p.untagResource(ctx, req)
 	case "ListTagsForResource":
 		return p.listTagsForResource(ctx, req)
+	case "PutDashboard":
+		return p.putDashboard(ctx, req)
+	case "GetDashboard":
+		return p.getDashboard(ctx, req)
+	case "ListDashboards":
+		return p.listDashboards(ctx, req)
+	case "DeleteDashboards":
+		return p.deleteDashboards(ctx, req)
 	default:
 		return nil, unknownActionError(p.Name(), req.Operation)
 	}

@@ -330,6 +330,33 @@ type S3Grantee struct {
 	EmailAddress string `xml:"EmailAddress,omitempty" json:"EmailAddress,omitempty"`
 }
 
+// s3XSINamespace is the XML Schema instance namespace a Grantee's xsi:type attribute lives in.
+const s3XSINamespace = "http://www.w3.org/2001/XMLSchema-instance"
+
+// s3GranteeWire is how a Grantee is written on the wire: the type is the namespaced xsi:type
+// attribute, with the xmlns:xsi declaration beside it, as the S3 API reference's examples write it
+// (`<Grantee xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:type="CanonicalUser">` in
+// API_GetBucketLogging's). A bare type attribute is in no namespace, and botocore, which reads the
+// attribute by its qualified name, drops it.
+type s3GranteeWire struct {
+	XSI          string `xml:"xmlns:xsi,attr"`
+	Type         string `xml:"xsi:type,attr"`
+	ID           string `xml:"ID,omitempty"`
+	URI          string `xml:"URI,omitempty"`
+	DisplayName  string `xml:"DisplayName,omitempty"`
+	EmailAddress string `xml:"EmailAddress,omitempty"`
+}
+
+// MarshalXML writes g through [s3GranteeWire]. Decoding needs no counterpart: the type,attr tag
+// matches xsi:type, because encoding/xml matches an attribute by local name when the tag names
+// no namespace.
+func (g S3Grantee) MarshalXML(e *xml.Encoder, start xml.StartElement) error {
+	return e.EncodeElement(s3GranteeWire{
+		XSI: s3XSINamespace, Type: g.Type, ID: g.ID, URI: g.URI,
+		DisplayName: g.DisplayName, EmailAddress: g.EmailAddress,
+	}, start)
+}
+
 // S3NotificationConfiguration holds event notification configurations for an S3
 // bucket. This is the *state* encoding: it is what S3Plugin persists under
 // "notification:<bucket>" and what fireNotifications reads back to decide where

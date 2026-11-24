@@ -706,7 +706,8 @@ a new ID, and the first stayed behind.
   | `AWS::DynamoDB::Table` | `UpdateTable`, `UpdateTimeToLive` | `BillingMode`, `ProvisionedThroughput`; `TimeToLiveSpecification` |
   | `AWS::SQS::Queue` | `SetQueueAttributes` | `VisibilityTimeout`, `MessageRetentionPeriod`, `DelaySeconds`, `ReceiveMessageWaitTimeSeconds`, `MaximumMessageSize` |
   | `AWS::SNS::Topic` | `SetTopicAttributes` | `DisplayName` |
-  | `AWS::S3::Bucket` | `PUT ?versioning`, `PUT`/`DELETE ?encryption`, `PUT`/`DELETE ?cors`, `PUT`/`DELETE ?lifecycle`, `PUT`/`DELETE ?publicAccessBlock` | `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration`, `LifecycleConfiguration`, `PublicAccessBlockConfiguration` |
+  | `AWS::S3::Bucket` | `PUT ?versioning`, `PUT`/`DELETE ?encryption`, `PUT`/`DELETE ?cors`, `PUT`/`DELETE ?lifecycle`, `PUT`/`DELETE ?publicAccessBlock`, `PUT`/`DELETE ?website`, `PUT ?logging`, `PUT ?accelerate`, `PUT`/`DELETE ?replication` | `VersioningConfiguration`, `BucketEncryption`, `CorsConfiguration`, `LifecycleConfiguration`, `PublicAccessBlockConfiguration`, `WebsiteConfiguration`, `LoggingConfiguration`, `AccelerateConfiguration`, `ReplicationConfiguration`; `ObjectLockEnabled` turned on (`PUT ?object-lock`) |
+  | `AWS::CloudWatch::Dashboard` | `PutDashboard` | `DashboardBody`; a changed `DashboardName` is Replacement |
   | `AWS::S3::BucketPolicy` | `PutBucketPolicy` | `PolicyDocument`; a changed `Bucket` is Replacement |
   | `AWS::KMS::Key` | `UpdateKeyDescription`, `PutKeyPolicy`, `EnableKeyRotation`/`DisableKeyRotation`, `EnableKey`/`DisableKey` | `Description`, `KeyPolicy`, `EnableKeyRotation`, `RotationPeriodInDays`, `Enabled` |
   | `AWS::EC2::SecurityGroup` | `RevokeSecurityGroupIngress`/`Egress`, then `AuthorizeSecurityGroupIngress`/`Egress` | `SecurityGroupIngress`, `SecurityGroupEgress` |

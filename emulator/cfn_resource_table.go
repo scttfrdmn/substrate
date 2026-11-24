@@ -73,6 +73,7 @@ var cfnResourceDeployers = map[string]cfnDeployFunc{
 	"AWS::Logs::LogStream":                        (*StackDeployer).deployLogsLogStream,
 	"AWS::Events::Rule":                           (*StackDeployer).deployEventsRule,
 	"AWS::CloudWatch::Alarm":                      (*StackDeployer).deployCloudWatchAlarm,
+	"AWS::CloudWatch::Dashboard":                  (*StackDeployer).deployCloudWatchDashboard,
 	// v0.19.0 — API Gateway and ACM.
 	"AWS::CertificateManager::Certificate": (*StackDeployer).deployACMCertificate,
 	"AWS::ApiGateway::RestApi":             (*StackDeployer).deployAPIGatewayRestAPI,

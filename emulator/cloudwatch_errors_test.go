@@ -44,6 +44,9 @@ func TestCloudWatchErrorShapes(t *testing.T) {
 		{"LimitExceededException", "com.amazonaws.cloudwatch#LimitExceededException", "Message", false, 400},
 		{"ResourceConflict", "com.amazonaws.cloudwatch#ResourceConflict", "message", false, 409},
 		{"ResourceNotFound", "com.amazonaws.cloudwatch#ResourceNotFound", "message", false, 404},
+		// Raised for a missing dashboard; its Query code is ResourceNotFound, which
+		// cloudWatchQueryErrorCodes supplies.
+		{"DashboardNotFoundError", "com.amazonaws.cloudwatch#DashboardNotFoundError", "message", false, 404},
 		{"KmsAccessDeniedException", "com.amazonaws.cloudwatch#KmsAccessDeniedException", "Message", false, 400},
 		{"KmsKeyDisabledException", "com.amazonaws.cloudwatch#KmsKeyDisabledException", "Message", false, 400},
 		{"KmsKeyNotFoundException", "com.amazonaws.cloudwatch#KmsKeyNotFoundException", "Message", false, 400},

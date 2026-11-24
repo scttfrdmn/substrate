@@ -18,8 +18,15 @@ import (
 //
 // LifecycleConfiguration and PublicAccessBlockConfiguration joined the set in v0.131.0, because the
 // CDK bootstrap template declares both on its staging bucket (#1606, part of #1573).
+//
+// WebsiteConfiguration, LoggingConfiguration, AccelerateConfiguration and ReplicationConfiguration
+// joined it in v0.134.0 (#1613), with ObjectLockEnabled, which only an update applies here: the
+// create sends it as CreateBucket's x-amz-bucket-object-lock-enabled. ObjectLockEnabled and
+// ReplicationConfiguration come after VersioningConfiguration, because PutObjectLockConfiguration
+// and PutBucketReplication each refuse a bucket whose versioning is not yet Enabled.
 var cfnS3BucketConfigProperties = []string{"VersioningConfiguration", "BucketEncryption", "CorsConfiguration",
-	"LifecycleConfiguration", "PublicAccessBlockConfiguration"}
+	"LifecycleConfiguration", "PublicAccessBlockConfiguration", "WebsiteConfiguration", "LoggingConfiguration",
+	"AccelerateConfiguration", "ObjectLockEnabled", "ReplicationConfiguration"}
 
 // cfnS3SSEConfiguration is PutBucketEncryption's body, built from the template's BucketEncryption.
 type cfnS3SSEConfiguration struct {
@@ -323,8 +330,8 @@ func cfnS3PublicAccessBlockXML(v interface{}, cctx *cfnContext) ([]byte, error) 
 }
 
 // configureS3Bucket applies the bucket subresources the template declares — versioning, default
-// encryption, CORS, lifecycle and Block Public Access — for the properties in apply, and returns
-// the first refusal.
+// encryption, CORS, lifecycle, Block Public Access, website, logging, Transfer Acceleration and
+// replication — for the properties in apply, and returns the first refusal.
 //
 // The create calls it for every declared property; the update for the changed ones. A declared
 // VersioningConfiguration sends its Status; a create skips Suspended, which a new bucket already
@@ -333,7 +340,10 @@ func cfnS3PublicAccessBlockXML(v interface{}, cctx *cfnContext) ([]byte, error) 
 // without it has (SSE-S3 default encryption, no CORS, no lifecycle rules, no Block Public Access
 // configuration — substrate does not apply S3's account-level default, see putPublicAccessBlock). A
 // removed VersioningConfiguration is left as it is: a bucket that has been versioned cannot return
-// to unversioned, and the page does not say what CloudFormation does instead.
+// to unversioned, and the page does not say what CloudFormation does instead. A removed
+// WebsiteConfiguration or ReplicationConfiguration is deleted, a removed LoggingConfiguration
+// disables logging, and a removed AccelerateConfiguration, like an ObjectLockEnabled turned off, is
+// left as it is, for the reason its case gives.
 func (d *StackDeployer) configureS3Bucket(
 	ctx context.Context, bucket string, props map[string]interface{}, apply []string, creating bool,
 	streamID string, cctx *cfnContext,
@@ -410,6 +420,58 @@ func (d *StackDeployer) configureS3Bucket(
 				return cost, xmlErr
 			}
 			err = send("PUT", "publicAccessBlock", body)
+		case "WebsiteConfiguration":
+			if !declared {
+				err = send("DELETE", "website", nil)
+				break
+			}
+			body, xmlErr := cfnS3WebsiteXML(raw, cctx)
+			if xmlErr != nil {
+				return cost, xmlErr
+			}
+			err = send("PUT", "website", body)
+		case "LoggingConfiguration":
+			// A removed LoggingConfiguration disables logging, which PutBucketLogging spells as an
+			// empty BucketLoggingStatus.
+			body := []byte("<BucketLoggingStatus/>")
+			if declared {
+				var xmlErr error
+				if body, xmlErr = cfnS3LoggingXML(raw, bucket, cctx); xmlErr != nil {
+					return cost, xmlErr
+				}
+			}
+			err = send("PUT", "logging", body)
+		case "ObjectLockEnabled":
+			// The create sent it to CreateBucket. On an update, true enables Object Lock on the
+			// existing bucket; false or a removal is left as it is, because "you can't disable
+			// Object Lock" once it is enabled (userguide/object-lock-configure.html).
+			enabled, _ := cfnBoolValue(cfnResolveStructured(raw, cctx))
+			if creating || !declared || !enabled {
+				continue
+			}
+			err = send("PUT", "object-lock",
+				[]byte("<ObjectLockConfiguration><ObjectLockEnabled>Enabled</ObjectLockEnabled></ObjectLockConfiguration>"))
+		case "AccelerateConfiguration":
+			// There is no DeleteBucketAccelerateConfiguration, and a bucket whose state was once set
+			// cannot return to having none, so a removed AccelerateConfiguration is left as it is.
+			if !declared {
+				continue
+			}
+			body, xmlErr := cfnS3AccelerateXML(raw, cctx)
+			if xmlErr != nil {
+				return cost, xmlErr
+			}
+			err = send("PUT", "accelerate", body)
+		case "ReplicationConfiguration":
+			if !declared {
+				err = send("DELETE", "replication", nil)
+				break
+			}
+			body, xmlErr := cfnS3ReplicationXML(raw, cctx)
+			if xmlErr != nil {
+				return cost, xmlErr
+			}
+			err = send("PUT", "replication", body)
 		}
 		if err != nil {
 			return cost, err
@@ -418,8 +480,8 @@ func (d *StackDeployer) configureS3Bucket(
 	return cost, nil
 }
 
-// updateS3Bucket applies a changed AWS::S3::Bucket's versioning, default encryption, CORS, lifecycle
-// and Block Public Access through their bucket subresources (see [StackDeployer.configureS3Bucket]).
+// updateS3Bucket applies a changed AWS::S3::Bucket's configuration properties
+// ([cfnS3BucketConfigProperties]) through their bucket subresources (see [StackDeployer.configureS3Bucket]).
 // BucketName, BucketNamePrefix and BucketNamespace are Replacement.
 func (d *StackDeployer) updateS3Bucket(
 	ctx context.Context, logicalID string, prior DeployedResource,
@@ -438,4 +500,211 @@ func (d *StackDeployer) updateS3Bucket(
 		dr.Error = err.Error()
 	}
 	return dr, cost, nil
+}
+
+// cfnS3WebsiteXML renders the template's WebsiteConfiguration — IndexDocument and ErrorDocument as
+// plain strings, RedirectAllRequestsTo, and RoutingRules whose members are RoutingRuleCondition and
+// RedirectRule — as the WebsiteConfiguration PutBucketWebsite takes.
+func cfnS3WebsiteXML(v interface{}, cctx *cfnContext) ([]byte, error) {
+	web, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
+	var cfg s3WebsiteConfiguration
+	if idx := cfnScalarString(web["IndexDocument"]); idx != "" {
+		cfg.IndexDocument = &s3WebsiteIndexDocument{Suffix: idx}
+	}
+	if errDoc := cfnScalarString(web["ErrorDocument"]); errDoc != "" {
+		cfg.ErrorDocument = &s3WebsiteErrorDocument{Key: errDoc}
+	}
+	if r, ok := web["RedirectAllRequestsTo"].(map[string]interface{}); ok {
+		cfg.RedirectAllRequestsTo = &s3WebsiteRedirectAll{
+			HostName: cfnScalarString(r["HostName"]), Protocol: cfnScalarString(r["Protocol"]),
+		}
+	}
+	for _, rule := range cfnListOrOne(web["RoutingRules"], nil) {
+		var out s3WebsiteRoutingRule
+		if c, ok := rule["RoutingRuleCondition"].(map[string]interface{}); ok {
+			out.Condition = &s3WebsiteCondition{
+				HTTPErrorCodeReturnedEquals: cfnScalarString(c["HttpErrorCodeReturnedEquals"]),
+				KeyPrefixEquals:             cfnScalarString(c["KeyPrefixEquals"]),
+			}
+		}
+		if r, ok := rule["RedirectRule"].(map[string]interface{}); ok {
+			out.Redirect = &s3WebsiteRedirect{
+				HostName:             cfnScalarString(r["HostName"]),
+				HTTPRedirectCode:     cfnScalarString(r["HttpRedirectCode"]),
+				Protocol:             cfnScalarString(r["Protocol"]),
+				ReplaceKeyPrefixWith: cfnScalarString(r["ReplaceKeyPrefixWith"]),
+				ReplaceKeyWith:       cfnScalarString(r["ReplaceKeyWith"]),
+			}
+		}
+		if cfg.RoutingRules == nil {
+			cfg.RoutingRules = &s3WebsiteRoutingRules{}
+		}
+		cfg.RoutingRules.Rules = append(cfg.RoutingRules.Rules, out)
+	}
+	out, err := xml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cfn bucket website marshal: %w", err)
+	}
+	return out, nil
+}
+
+// cfnS3LoggingXML renders the template's LoggingConfiguration — DestinationBucketName,
+// LogFilePrefix and TargetObjectKeyFormat — as the BucketLoggingStatus PutBucketLogging takes. The
+// AWS::S3::Bucket page says logs are stored in the bucket itself when DestinationBucketName is
+// absent, and TargetPrefix, which the API requires, is the empty prefix when LogFilePrefix is.
+func cfnS3LoggingXML(v interface{}, bucket string, cctx *cfnContext) ([]byte, error) {
+	lc, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
+	target := cfnScalarString(lc["DestinationBucketName"])
+	if target == "" {
+		target = bucket
+	}
+	prefix := cfnScalarString(lc["LogFilePrefix"])
+	enabled := &s3LoggingEnabled{TargetBucket: target, TargetPrefix: &prefix}
+	if f, ok := lc["TargetObjectKeyFormat"].(map[string]interface{}); ok {
+		enabled.TargetObjectKeyFormat = &s3TargetObjectKeyFormat{}
+		if pp, isMap := f["PartitionedPrefix"].(map[string]interface{}); isMap {
+			enabled.TargetObjectKeyFormat.PartitionedPrefix = &s3PartitionedPrefix{
+				PartitionDateSource: cfnScalarString(pp["PartitionDateSource"]),
+			}
+		}
+		if _, isMap := f["SimplePrefix"].(map[string]interface{}); isMap {
+			enabled.TargetObjectKeyFormat.SimplePrefix = &struct{}{}
+		}
+	}
+	out, err := xml.Marshal(s3BucketLoggingStatus{LoggingEnabled: enabled})
+	if err != nil {
+		return nil, fmt.Errorf("cfn bucket logging marshal: %w", err)
+	}
+	return out, nil
+}
+
+// cfnS3AccelerateXML renders the template's AccelerateConfiguration, whose one member is
+// AccelerationStatus, as the AccelerateConfiguration PutBucketAccelerateConfiguration takes.
+func cfnS3AccelerateXML(v interface{}, cctx *cfnContext) ([]byte, error) {
+	acc, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
+	out, err := xml.Marshal(s3AccelerateConfiguration{Status: cfnScalarString(acc["AccelerationStatus"])})
+	if err != nil {
+		return nil, fmt.Errorf("cfn bucket accelerate marshal: %w", err)
+	}
+	return out, nil
+}
+
+// cfnS3ReplicationXML renders the template's ReplicationConfiguration — Role and Rules, whose
+// Filter spells its tags TagFilter and TagFilters and whose ID is Id — as the
+// ReplicationConfiguration PutBucketReplication takes.
+func cfnS3ReplicationXML(v interface{}, cctx *cfnContext) ([]byte, error) {
+	rc, _ := cfnResolveStructured(v, cctx).(map[string]interface{})
+	cfg := s3ReplicationConfiguration{Role: cfnScalarString(rc["Role"])}
+	for _, r := range cfnListOrOne(rc["Rules"], nil) {
+		rule := s3ReplicationRule{
+			ID:                      cfnScalarString(r["Id"]),
+			Status:                  cfnScalarString(r["Status"]),
+			Priority:                cfnIntPtr(r["Priority"]),
+			DeleteMarkerReplication: cfnS3ReplicationStatus(r, "DeleteMarkerReplication"),
+		}
+		if p, ok := r["Prefix"]; ok {
+			prefix := cfnScalarString(p)
+			rule.Prefix = &prefix
+		}
+		if f, ok := r["Filter"].(map[string]interface{}); ok {
+			rule.Filter = cfnS3ReplicationFilter(f)
+		}
+		if sc, ok := r["SourceSelectionCriteria"].(map[string]interface{}); ok {
+			rule.SourceSelectionCriteria = &s3ReplicationSourceCriteria{
+				ReplicaModifications:   cfnS3ReplicationStatus(sc, "ReplicaModifications"),
+				SseKmsEncryptedObjects: cfnS3ReplicationStatus(sc, "SseKmsEncryptedObjects"),
+			}
+		}
+		if d, ok := r["Destination"].(map[string]interface{}); ok {
+			rule.Destination = cfnS3ReplicationDestination(d)
+		}
+		cfg.Rules = append(cfg.Rules, rule)
+	}
+	out, err := xml.Marshal(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("cfn bucket replication marshal: %w", err)
+	}
+	return out, nil
+}
+
+// cfnS3ReplicationFilter renders a replication rule's Filter: Prefix, TagFilter, or And with a
+// Prefix and TagFilters.
+func cfnS3ReplicationFilter(f map[string]interface{}) *s3ReplicationFilter {
+	out := &s3ReplicationFilter{Prefix: cfnStringPtr(f, "Prefix")}
+	if t, ok := f["TagFilter"].(map[string]interface{}); ok {
+		tag := cfnS3ReplicationTag(t)
+		out.Tag = &tag
+	}
+	if and, ok := f["And"].(map[string]interface{}); ok {
+		out.And = &s3ReplicationAndOp{Prefix: cfnStringPtr(and, "Prefix")}
+		for _, t := range cfnListOrOne(and["TagFilters"], nil) {
+			out.And.Tags = append(out.And.Tags, cfnS3ReplicationTag(t))
+		}
+	}
+	return out
+}
+
+// cfnS3ReplicationDestination renders a replication rule's Destination.
+func cfnS3ReplicationDestination(d map[string]interface{}) *s3ReplicationDestination {
+	dest := &s3ReplicationDestination{
+		Bucket:       cfnScalarString(d["Bucket"]),
+		Account:      cfnScalarString(d["Account"]),
+		StorageClass: cfnScalarString(d["StorageClass"]),
+	}
+	if a, ok := d["AccessControlTranslation"].(map[string]interface{}); ok {
+		dest.AccessControlTranslation = &s3ReplicationACLTranslate{Owner: cfnScalarString(a["Owner"])}
+	}
+	if e, ok := d["EncryptionConfiguration"].(map[string]interface{}); ok {
+		dest.EncryptionConfiguration = &s3ReplicationEncryption{ReplicaKmsKeyID: cfnScalarString(e["ReplicaKmsKeyID"])}
+	}
+	if rt, ok := d["ReplicationTime"].(map[string]interface{}); ok {
+		dest.ReplicationTime = &s3ReplicationTime{Status: cfnScalarString(rt["Status"]), Time: cfnS3ReplicationMinutes(rt, "Time")}
+	}
+	if m, ok := d["Metrics"].(map[string]interface{}); ok {
+		dest.Metrics = &s3ReplicationMetrics{Status: cfnScalarString(m["Status"]), EventThreshold: cfnS3ReplicationMinutes(m, "EventThreshold")}
+	}
+	return dest
+}
+
+// cfnS3ReplicationStatus renders the {Status} container at m[key], or nil when it is absent.
+func cfnS3ReplicationStatus(m map[string]interface{}, key string) *s3ReplicationStatus {
+	if c, ok := m[key].(map[string]interface{}); ok {
+		return &s3ReplicationStatus{Status: cfnScalarString(c["Status"])}
+	}
+	return nil
+}
+
+// cfnS3ReplicationMinutes renders the {Minutes} container at m[key], or nil when it is absent.
+func cfnS3ReplicationMinutes(m map[string]interface{}, key string) *s3ReplicationMinutes {
+	c, ok := m[key].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	return &s3ReplicationMinutes{Minutes: cfnIntPtr(c["Minutes"])}
+}
+
+// cfnS3ReplicationTag renders one TagFilter.
+func cfnS3ReplicationTag(m map[string]interface{}) s3ReplicationTag {
+	return s3ReplicationTag{Key: cfnScalarString(m["Key"]), Value: cfnScalarString(m["Value"])}
+}
+
+// cfnIntPtr returns a resolved template scalar as an integer, or nil when it is absent or is not
+// one.
+func cfnIntPtr(v interface{}) *int {
+	n, err := strconv.Atoi(cfnScalarString(v))
+	if err != nil {
+		return nil
+	}
+	return &n
+}
+
+// cfnStringPtr returns m[key] as a string when the key is present, or nil when it is absent, so an
+// empty prefix stays distinct from none.
+func cfnStringPtr(m map[string]interface{}, key string) *string {
+	v, ok := m[key]
+	if !ok {
+		return nil
+	}
+	s := cfnScalarString(v)
+	return &s
 }

@@ -51,7 +51,7 @@ import (
 //
 // # Unit outputs
 //
-// Eight of the fourteen CloudWatch operations substrate routes are modeled with a smithy.api#Unit output, and the
+// Eight of the eighteen CloudWatch operations substrate routes are modeled with a smithy.api#Unit output, and the
 // RPC v2 CBOR protocol tests are explicit that such a response carries no body and
 // MUST NOT set Content-Type (`no_output` in
 // smithy-protocol-tests/model/rpcv2Cbor/empty-input-output.smithy lists Content-Type in

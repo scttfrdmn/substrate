@@ -37,34 +37,22 @@ type s3BucketSubresource struct {
 // substrate does not route, and the operation each one is.
 var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 	"GET": {
-		"accelerate":            {name: "GetBucketAccelerateConfiguration"},
 		"analytics":             {name: "GetBucketAnalyticsConfiguration", listName: "ListBucketAnalyticsConfigurations"},
 		"intelligent-tiering":   {name: "GetBucketIntelligentTieringConfiguration", listName: "ListBucketIntelligentTieringConfigurations"},
 		"inventory":             {name: "GetBucketInventoryConfiguration", listName: "ListBucketInventoryConfigurations"},
-		"logging":               {name: "GetBucketLogging"},
 		"metadataConfiguration": {name: "GetBucketMetadataConfiguration"},
 		"metadataTable":         {name: "GetBucketMetadataTableConfiguration"},
 		"metrics":               {name: "GetBucketMetricsConfiguration", listName: "ListBucketMetricsConfigurations"},
-		"object-lock":           {name: "GetObjectLockConfiguration"},
 		"policyStatus":          {name: "GetBucketPolicyStatus"},
-		"replication":           {name: "GetBucketReplication"},
-		"requestPayment":        {name: "GetBucketRequestPayment"},
 		"session":               {name: "CreateSession"},
-		"website":               {name: "GetBucketWebsite"},
 	},
 	"PUT": {
-		"accelerate":             {name: "PutBucketAccelerateConfiguration"},
 		"analytics":              {name: "PutBucketAnalyticsConfiguration"},
 		"intelligent-tiering":    {name: "PutBucketIntelligentTieringConfiguration"},
 		"inventory":              {name: "PutBucketInventoryConfiguration"},
-		"logging":                {name: "PutBucketLogging"},
 		"metadataInventoryTable": {name: "UpdateBucketMetadataInventoryTableConfiguration"},
 		"metadataJournalTable":   {name: "UpdateBucketMetadataJournalTableConfiguration"},
 		"metrics":                {name: "PutBucketMetricsConfiguration"},
-		"object-lock":            {name: "PutObjectLockConfiguration"},
-		"replication":            {name: "PutBucketReplication"},
-		"requestPayment":         {name: "PutBucketRequestPayment"},
-		"website":                {name: "PutBucketWebsite"},
 	},
 	"DELETE": {
 		"analytics":             {name: "DeleteBucketAnalyticsConfiguration"},
@@ -73,8 +61,6 @@ var s3UnroutedBucketSubresources = map[string]map[string]s3BucketSubresource{
 		"metadataConfiguration": {name: "DeleteBucketMetadataConfiguration"},
 		"metadataTable":         {name: "DeleteBucketMetadataTableConfiguration"},
 		"metrics":               {name: "DeleteBucketMetricsConfiguration"},
-		"replication":           {name: "DeleteBucketReplication"},
-		"website":               {name: "DeleteBucketWebsite"},
 	},
 	"POST": {
 		"metadataConfiguration": {name: "CreateBucketMetadataConfiguration"},

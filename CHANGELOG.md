@@ -19,9 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Organizations: `CreateOrganization` and `DeleteOrganization` (#1627).
 - Organizations: `EnableAWSServiceAccess`, `DisableAWSServiceAccess` and `ListAWSServiceAccessForOrganization`, which Terraform's `aws_organizations_organization` reads (#1627).
 - Kinesis and Organizations: the new refusals' messages are substrate's own, except `AWSOrganizationsNotInUseException`, `AlreadyInOrganizationException`, `OrganizationNotEmptyException` and `ORGANIZATION_NOT_IN_ALL_FEATURES_MODE`, which use the API reference's descriptions (#1613, #1627).
+- S3: website, logging, Transfer Acceleration, request-payment and replication configurations are recorded and answered back, never acted on; most error texts are observed AWS answers, cited in the code (#1613, #1658).
+- S3: `CreateBucket`'s `x-amz-bucket-object-lock-enabled` and CloudFormation's `ObjectLockEnabled` enable Object Lock and versioning, `PutObjectLockConfiguration` without a `Rule` enables it on a versioned bucket, and `GetObjectLockConfiguration` reports it; default retention, retention and legal hold stay unmodeled (#1658, #1693).
+- CloudWatch: `PutDashboard`, `GetDashboard`, `ListDashboards` and `DeleteDashboards`, global per account; several validation messages are substrate's own (#1613).
+- CloudFormation: `AWS::S3::Bucket` applies `ObjectLockEnabled` on create, and `WebsiteConfiguration`, `LoggingConfiguration`, `AccelerateConfiguration` and `ReplicationConfiguration`; `AWS::CloudWatch::Dashboard` deploys, updates in place and deletes (#1613).
 
 ### Changed
 
+- S3: a `Grantee` in `GetBucketAcl`, `GetObjectAcl` and `GetBucketLogging` is written with `xsi:type` and the `xmlns:xsi` declaration, so botocore reads its type (#1613).
 - Dependencies: `golang.org/x/text` 0.44.0 with `test/e2e` and `test/iac` tidied, the CDK example on TypeScript 7.0.2, and CI typechecks the CDK app; `@types/node` stays on Node 24's major (#1678, #1663, #1662).
 
 ### Fixed
@@ -36,6 +41,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Organizations: `DescribeOrganization`'s `AvailablePolicyTypes` reports the root's policy types, so it is absent after `DisablePolicyType` (#1627).
 - Organizations: the trusted-service-access operations answer `ConstraintViolationException`/`ORGANIZATION_NOT_IN_ALL_FEATURES_MODE` under `CONSOLIDATED_BILLING` (#1627).
 - CloudFormation: deleting an `AWS::Kinesis::Stream` sends `EnforceConsumerDeletion`, so consumers registered outside the stack go with it; this is substrate's reading (#1613).
+- S3: `PutBucketVersioning` with `Suspended` answers `InvalidBucketState`/409 on a bucket with Object Lock or a replication configuration; the replication case's message is the error-code list's description (#1613, #1658).
+- S3: the reads of these configurations, which the AWS provider for Terraform makes on every `aws_s3_bucket` refresh, answer AWS's "not configured" document or error instead of `501 NotImplemented`. Their Puts and Deletes are routed, and `PutBucketReplication` requires versioning on both buckets (#1658).
+- S3: authorization uses the published actions: `s3:GetAccelerateConfiguration`/`s3:PutAccelerateConfiguration`, `s3:GetReplicationConfiguration`, `s3:PutReplicationConfiguration` (also for `DeleteBucketReplication`) and `s3:Get/PutBucketObjectLockConfiguration` (#1613).
+- CloudWatch: a Query-protocol error's `<Code>` is the model's Query code where it differs from the code a handler raised; only a missing dashboard (`ResourceNotFound`, shape `DashboardNotFoundError`) differs today (#1613).
 
 ## [v0.133.0] - 2026-11-24
 

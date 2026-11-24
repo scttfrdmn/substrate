@@ -276,6 +276,34 @@ func (p *S3Plugin) HandleRequest(ctx *RequestContext, req *AWSRequest) (*AWSResp
 		return p.getBucketOwnershipControls(ctx, req, bucket)
 	case "DeleteBucketOwnershipControls":
 		return p.deleteBucketOwnershipControls(ctx, req, bucket)
+	case "PutBucketWebsite":
+		return p.putBucketWebsite(ctx, req, bucket)
+	case "GetBucketWebsite":
+		return p.getBucketWebsite(ctx, req, bucket)
+	case "DeleteBucketWebsite":
+		return p.deleteBucketWebsite(ctx, req, bucket)
+	case "PutBucketLogging":
+		return p.putBucketLogging(ctx, req, bucket)
+	case "GetBucketLogging":
+		return p.getBucketLogging(ctx, req, bucket)
+	case "PutBucketAccelerateConfiguration":
+		return p.putBucketAccelerateConfiguration(ctx, req, bucket)
+	case "GetBucketAccelerateConfiguration":
+		return p.getBucketAccelerateConfiguration(ctx, req, bucket)
+	case "PutBucketRequestPayment":
+		return p.putBucketRequestPayment(ctx, req, bucket)
+	case "GetBucketRequestPayment":
+		return p.getBucketRequestPayment(ctx, req, bucket)
+	case "PutBucketReplication":
+		return p.putBucketReplication(ctx, req, bucket)
+	case "GetBucketReplication":
+		return p.getBucketReplication(ctx, req, bucket)
+	case "DeleteBucketReplication":
+		return p.deleteBucketReplication(ctx, req, bucket)
+	case "GetObjectLockConfiguration":
+		return p.getObjectLockConfiguration(ctx, req, bucket)
+	case "PutObjectLockConfiguration":
+		return p.putObjectLockConfiguration(ctx, req, bucket)
 	case "SelectObjectContent":
 		return p.selectObjectContent(ctx, req, bucket, key)
 	default:
@@ -386,6 +414,24 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			if _, ok := req.Params["ownershipControls"]; ok {
 				return bucket, "", "PutBucketOwnershipControls"
 			}
+			if _, ok := req.Params["website"]; ok {
+				return bucket, "", "PutBucketWebsite"
+			}
+			if _, ok := req.Params["logging"]; ok {
+				return bucket, "", "PutBucketLogging"
+			}
+			if _, ok := req.Params["accelerate"]; ok {
+				return bucket, "", "PutBucketAccelerateConfiguration"
+			}
+			if _, ok := req.Params["requestPayment"]; ok {
+				return bucket, "", "PutBucketRequestPayment"
+			}
+			if _, ok := req.Params["replication"]; ok {
+				return bucket, "", "PutBucketReplication"
+			}
+			if _, ok := req.Params["object-lock"]; ok {
+				return bucket, "", "PutObjectLockConfiguration"
+			}
 			// Before the CreateBucket fall-through: an unrouted sub-resource is named for what it is
 			// and refused, rather than answered as a create (#1349).
 			if op := s3UnroutedBucketOperation(method, req.Params); op != "" {
@@ -417,6 +463,12 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["ownershipControls"]; ok {
 				return bucket, "", "DeleteBucketOwnershipControls"
+			}
+			if _, ok := req.Params["website"]; ok {
+				return bucket, "", "DeleteBucketWebsite"
+			}
+			if _, ok := req.Params["replication"]; ok {
+				return bucket, "", "DeleteBucketReplication"
 			}
 			// Before the DeleteBucket fall-through, for every sub-resource #446 did not name: each of
 			// them used to delete the bucket (#1349).
@@ -463,6 +515,24 @@ func parseS3Operation(req *AWSRequest) (bucket, key, op string) {
 			}
 			if _, ok := req.Params["location"]; ok {
 				return bucket, "", "GetBucketLocation"
+			}
+			if _, ok := req.Params["website"]; ok {
+				return bucket, "", "GetBucketWebsite"
+			}
+			if _, ok := req.Params["logging"]; ok {
+				return bucket, "", "GetBucketLogging"
+			}
+			if _, ok := req.Params["accelerate"]; ok {
+				return bucket, "", "GetBucketAccelerateConfiguration"
+			}
+			if _, ok := req.Params["requestPayment"]; ok {
+				return bucket, "", "GetBucketRequestPayment"
+			}
+			if _, ok := req.Params["replication"]; ok {
+				return bucket, "", "GetBucketReplication"
+			}
+			if _, ok := req.Params["object-lock"]; ok {
+				return bucket, "", "GetObjectLockConfiguration"
 			}
 			// Before the ListObjects fall-through: an unrouted sub-resource such as ?location is named
 			// for what it is and refused, rather than answered as a listing (#1349).
@@ -657,6 +727,14 @@ func (p *S3Plugin) createBucket(reqCtx *RequestContext, req *AWSRequest, bucket 
 		return nil, err
 	}
 
+	// x-amz-bucket-object-lock-enabled: true enables Object Lock and versioning; see
+	// s3_object_lock.go.
+	if s3CreateBucketObjectLockRequested(req.Headers) {
+		if err := p.s3EnableObjectLockAtCreate(ctx, bucket); err != nil {
+			return nil, err
+		}
+	}
+
 	return &AWSResponse{
 		StatusCode: http.StatusOK,
 		Headers:    map[string]string{"Location": "/" + bucket},
@@ -829,6 +907,12 @@ var s3BucketSubresourcePrefixes = []string{
 	s3CORSKeyPrefix,
 	s3BucketEncryptionKeyPrefix,
 	s3OwnershipControlsKeyPrefix,
+	s3WebsiteKeyPrefix,
+	s3LoggingKeyPrefix,
+	s3AccelerateKeyPrefix,
+	s3RequestPaymentKeyPrefix,
+	s3ReplicationKeyPrefix,
+	s3ObjectLockKeyPrefix,
 }
 
 // deleteBucket handles DELETE /<bucket>.
@@ -4405,6 +4489,11 @@ func (p *S3Plugin) putBucketVersioning(_ *RequestContext, req *AWSRequest, bucke
 	if cfg.Status != "Enabled" && cfg.Status != "Suspended" {
 		return s3ErrorResponse("IllegalVersioningConfigurationException",
 			"The versioning configuration specified is not valid.", http.StatusBadRequest), nil
+	}
+	if cfg.Status == "Suspended" {
+		if refusal, err := p.s3VersioningSuspendRefusal(ctx, bucket); refusal != nil || err != nil {
+			return refusal, err
+		}
 	}
 
 	if err := p.state.Put(ctx, s3Namespace, "bucket_versioning:"+bucket, []byte(cfg.Status)); err != nil {

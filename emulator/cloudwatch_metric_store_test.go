@@ -31,9 +31,14 @@ type cwEnv struct {
 
 func newCWEnv(t *testing.T, options map[string]any) *cwEnv {
 	t.Helper()
+	return newCWEnvWithState(t, emulator.NewMemoryStateManager(), options)
+}
+
+// newCWEnvWithState is newCWEnv over a caller-supplied state store, for tests that need it to fail.
+func newCWEnvWithState(t *testing.T, state emulator.StateManager, options map[string]any) *cwEnv {
+	t.Helper()
 	cfg := emulator.DefaultConfig()
 	registry := emulator.NewPluginRegistry()
-	state := emulator.NewMemoryStateManager()
 	logger := emulator.NewDefaultLogger(slog.LevelError, false)
 	store := emulator.NewEventStore(cfg.EventStore.ToEventStoreConfig())
 	tc := emulator.NewTimeController(cwStoreNow)
