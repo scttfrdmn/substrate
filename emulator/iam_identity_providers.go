@@ -88,6 +88,10 @@ type IAMSAMLProvider struct {
 	// ValidUntil is the metadata document's `validUntil`, when it declares one.
 	ValidUntil *time.Time `json:"ValidUntil,omitempty"`
 
+	// EntityIDs are the `entityID`s the metadata document declares, which an assertion's Issuer
+	// must name for AssumeRoleWithSAML to accept it.
+	EntityIDs []string `json:"EntityIds,omitempty"`
+
 	// PrivateKeyList holds the identifiers of the decryption keys added to the provider.
 	PrivateKeyList []IAMSAMLPrivateKey `json:"PrivateKeyList,omitempty"`
 
@@ -296,7 +300,11 @@ func (p *IAMPlugin) createOpenIDConnectProvider(ctx *RequestContext, req *AWSReq
 	}
 
 	hostPath := iamOIDCHostPath(params.URL)
-	if seeded := p.oidcCreateSeed(goCtx, params.URL); seeded != nil {
+	seeded, err := p.oidcCreateSeed(goCtx, params.URL)
+	if err != nil {
+		return nil, err
+	}
+	if seeded != nil {
 		return seeded, nil
 	}
 
@@ -330,17 +338,20 @@ func (p *IAMPlugin) createOpenIDConnectProvider(ctx *RequestContext, req *AWSReq
 // oidcCreateSeed returns the OpenIdIdpCommunicationError seeded for url (or "*"), or nil. IAM
 // would contact the provider to fetch a thumbprint; substrate contacts nothing, so the error is
 // reachable only through the seed. The message is substrate's own.
-func (p *IAMPlugin) oidcCreateSeed(goCtx context.Context, url string) *AWSResponse {
+func (p *IAMPlugin) oidcCreateSeed(goCtx context.Context, url string) (*AWSResponse, error) {
 	for _, key := range []string{url, "*"} {
 		raw, err := p.state.Get(goCtx, iamCtrlNamespace, iamCtrlOIDCOutcomeKey(key))
-		if err != nil || raw == nil {
+		if err != nil {
+			return nil, fmt.Errorf("get oidc provider seed: %w", err)
+		}
+		if raw == nil {
 			continue
 		}
 		return iamErrorResponse("OpenIdIdpCommunicationError",
 			fmt.Sprintf("Could not communicate with the OpenID Connect provider at %s.", url),
-			http.StatusBadRequest)
+			http.StatusBadRequest), nil
 	}
-	return nil
+	return nil, nil
 }
 
 // iamOIDCProviderARNParam reads the OpenIDConnectProviderArn every operation after the create
@@ -522,18 +533,24 @@ func (p *IAMPlugin) removeClientIDFromOpenIDConnectProvider(ctx *RequestContext,
 
 // --- SAML providers ------------------------------------------------------------
 
-// iamSAMLMetadata is what substrate reads out of a SAML metadata document: that it is one, and its
-// `validUntil`. The keys it carries are not read, because substrate verifies no signature.
+// iamSAMLMetadata is what substrate reads out of a SAML metadata document: that it is one, its
+// `validUntil`, and the `entityID`s an assertion's Issuer is checked against. The keys it carries
+// are not read, because substrate verifies no signature.
 type iamSAMLMetadata struct {
 	XMLName    xml.Name
 	ValidUntil string `xml:"validUntil,attr"`
+	EntityID   string `xml:"entityID,attr"`
+	Entities   []struct {
+		EntityID string `xml:"entityID,attr"`
+	} `xml:"EntityDescriptor"`
 }
 
 // iamParseSAMLMetadata parses a metadata document, accepting it as XML or as base64-encoded XML
-// (the CreateSAMLProvider sample sends the latter). A document that is neither, or whose root is
-// not an EntityDescriptor, is refused with the IAM troubleshooting guide's wording, "Could not
-// parse metadata.".
-func iamParseSAMLMetadata(doc string) (*time.Time, *AWSResponse) {
+// (the CreateSAMLProvider sample sends the latter), and returns its validUntil and entity IDs. A
+// document that is neither, whose root is not an EntityDescriptor or EntitiesDescriptor, or that
+// declares no entityID, is refused with the IAM troubleshooting guide's wording, "Could not parse
+// metadata.".
+func iamParseSAMLMetadata(doc string) (*time.Time, []string, *AWSResponse) {
 	parse := func(text []byte) (*iamSAMLMetadata, bool) {
 		var md iamSAMLMetadata
 		if err := xml.Unmarshal(text, &md); err != nil {
@@ -550,18 +567,31 @@ func iamParseSAMLMetadata(doc string) (*time.Time, *AWSResponse) {
 			md, ok = parse(decoded)
 		}
 	}
+	unparseable := iamErrorResponse("InvalidInput", "Could not parse metadata.", http.StatusBadRequest)
 	if !ok {
-		return nil, iamErrorResponse("InvalidInput", "Could not parse metadata.", http.StatusBadRequest)
+		return nil, nil, unparseable
+	}
+	var entityIDs []string
+	if md.EntityID != "" {
+		entityIDs = append(entityIDs, md.EntityID)
+	}
+	for _, e := range md.Entities {
+		if e.EntityID != "" {
+			entityIDs = append(entityIDs, e.EntityID)
+		}
+	}
+	if len(entityIDs) == 0 {
+		return nil, nil, unparseable
 	}
 	if md.ValidUntil == "" {
-		return nil, nil
+		return nil, entityIDs, nil
 	}
 	t, err := time.Parse(time.RFC3339, md.ValidUntil)
 	if err != nil {
-		return nil, iamErrorResponse("InvalidInput", "Could not parse metadata.", http.StatusBadRequest)
+		return nil, nil, unparseable
 	}
 	t = t.UTC()
-	return &t, nil
+	return &t, entityIDs, nil
 }
 
 // iamSAMLEncryptionModes are the values AssertionEncryptionMode documents.
@@ -603,7 +633,7 @@ func (p *IAMPlugin) createSAMLProvider(ctx *RequestContext, req *AWSRequest) (*A
 	if resp := iamSAMLCheckEncryption(params.AssertionEncryptionMode, params.AddPrivateKey != "", false); resp != nil {
 		return resp, nil
 	}
-	validUntil, errResp := iamParseSAMLMetadata(params.SAMLMetadataDocument)
+	validUntil, entityIDs, errResp := iamParseSAMLMetadata(params.SAMLMetadataDocument)
 	if errResp != nil {
 		return errResp, nil
 	}
@@ -631,6 +661,7 @@ func (p *IAMPlugin) createSAMLProvider(ctx *RequestContext, req *AWSRequest) (*A
 		AssertionEncryptionMode: params.AssertionEncryptionMode,
 		CreateDate:              now,
 		ValidUntil:              validUntil,
+		EntityIDs:               entityIDs,
 		Tags:                    tags,
 	}
 	if params.AddPrivateKey != "" {
@@ -789,11 +820,11 @@ func (p *IAMPlugin) updateSAMLProvider(ctx *RequestContext, req *AWSRequest) (*A
 		return iamSAMLNotFound(arn), nil
 	}
 	if params.SAMLMetadataDocument != "" {
-		validUntil, mdResp := iamParseSAMLMetadata(params.SAMLMetadataDocument)
+		validUntil, entityIDs, mdResp := iamParseSAMLMetadata(params.SAMLMetadataDocument)
 		if mdResp != nil {
 			return mdResp, nil
 		}
-		prov.SAMLMetadataDocument, prov.ValidUntil = params.SAMLMetadataDocument, validUntil
+		prov.SAMLMetadataDocument, prov.ValidUntil, prov.EntityIDs = params.SAMLMetadataDocument, validUntil, entityIDs
 	}
 	if params.AddPrivateKey != "" {
 		if len(prov.PrivateKeyList) >= iamSAMLMaxPrivateKeys {

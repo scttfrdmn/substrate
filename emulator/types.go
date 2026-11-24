@@ -195,10 +195,24 @@ type Principal struct {
 	// them after a key is minted: a snapshot taken at `CreateAccessKey` time would
 	// authorize a long-lived key against tags its principal no longer has.
 	//
-	// Session tags are not modeled. Substrate's `AssumeRole` reads no `Tags`
-	// parameter, so an assumed role's tags here are the *role's* own, where AWS would
-	// also publish whatever the session passed (#771).
+	// For a federated session — AssumeRoleWithWebIdentity or AssumeRoleWithSAML — the
+	// session tags the token or assertion passed are merged over the role's, a session
+	// tag replacing a role tag of the same key regardless of case, as the IAM User Guide
+	// documents. `AssumeRole` reads no `Tags` parameter, so its sessions carry the role's
+	// own tags only (#771).
 	Tags map[string]string
+
+	// SessionPolicies are the session policies the credential was minted with — the
+	// `Policy` and `PolicyArns` an AssumeRole* call passed — or nil when it passed none.
+	// A session's permissions are "the intersection of the role's identity-based policy
+	// and the session policies", so every authorization door evaluates these after the
+	// identity policies and the permissions boundary, and a request they do not allow is
+	// refused.
+	SessionPolicies []PolicyDocument
+
+	// SourceIdentity is the source identity the session was minted with, published as
+	// `aws:SourceIdentity` on every request the session makes, or empty.
+	SourceIdentity string
 }
 
 // StateManager defines the interface for reading and writing emulator state.

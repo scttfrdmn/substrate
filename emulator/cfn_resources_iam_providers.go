@@ -151,8 +151,10 @@ func (d *StackDeployer) updateIAMOIDCProvider(
 			return cost, nil
 		},
 		func() (float64, error) {
+			// A ThumbprintList the declaration no longer carries clears the live list: substrate
+			// fetches no thumbprint in its place.
 			want := resolveStringList(props["ThumbprintList"], cctx)
-			if len(want) == 0 || slices.Equal(want, live.Thumbprints) {
+			if slices.Equal(want, live.Thumbprints) || (len(want) == 0 && len(live.Thumbprints) == 0) {
 				return 0, nil
 			}
 			_, cost, err := d.iamCall(ctx, "UpdateOpenIDConnectProviderThumbprint",
@@ -228,7 +230,13 @@ func (d *StackDeployer) updateIAMSAMLProvider(
 	if doc := resolveStringProp(props, "SamlMetadataDocument", "", cctx); doc != "" && doc != live.Metadata {
 		body["SAMLMetadataDocument"] = doc
 	}
-	if mode := resolveStringProp(props, "AssertionEncryptionMode", "", cctx); mode != "" && mode != live.Encryption {
+	// An AssertionEncryptionMode the declaration no longer carries returns the provider to
+	// Allowed, the mode that accepts the unencrypted assertions a provider created without one does.
+	mode := resolveStringProp(props, "AssertionEncryptionMode", "", cctx)
+	if mode == "" && live.Encryption == "Required" {
+		mode = "Allowed"
+	}
+	if mode != "" && mode != live.Encryption {
 		body["AssertionEncryptionMode"] = mode
 	}
 	if len(body) > 1 {

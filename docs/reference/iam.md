@@ -96,7 +96,7 @@
 | TagOpenIDConnectProvider | |
 | UntagOpenIDConnectProvider | |
 | ListOpenIDConnectProviderTags | |
-| CreateSAMLProvider | The metadata document is parsed (XML or base64 XML) for `validUntil` only; its keys are not read |
+| CreateSAMLProvider | The metadata document is parsed (XML or base64 XML) for `validUntil` and its `entityID`s, which an assertion's `Issuer` must name; its keys are not read. A document declaring no `entityID` is "Could not parse metadata." |
 | GetSAMLProvider | Reports `SAMLProviderUUID`, `ValidUntil` and the private keys' IDs; a key's text is never stored |
 | ListSAMLProviders | |
 | UpdateSAMLProvider | Metadata, `AssertionEncryptionMode` and one private key added or removed per call, refused in the troubleshooting guide's words |

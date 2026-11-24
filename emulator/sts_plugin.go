@@ -278,9 +278,17 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 		return nil, err
 	}
 
+	policies, refusal, err := p.stsSessionPolicies(goCtx, req)
+	if err != nil {
+		return nil, err
+	}
+	if refusal != nil {
+		return nil, refusal
+	}
+
 	now := p.now()
 	creds, err := p.mintRoleSession(goCtx, ctx, ctx.AccountID, roleName, role.RoleID, sessionName,
-		now.Add(time.Duration(duration)*time.Second))
+		now.Add(time.Duration(duration)*time.Second), stsSessionExtras{policies: policies})
 	if err != nil {
 		return nil, err
 	}
@@ -343,6 +351,7 @@ func (p *STSPlugin) assumeRole(ctx *RequestContext, req *AWSRequest) (*AWSRespon
 // against it (#771).
 func (p *STSPlugin) mintRoleSession(
 	goCtx context.Context, ctx *RequestContext, accountID, roleName, roleID, sessionName string, expiry time.Time,
+	extras stsSessionExtras,
 ) (STSSessionCredentials, error) {
 	assumedRoleARN := fmt.Sprintf("arn:aws:sts::%s:assumed-role/%s/%s", accountID, roleName, sessionName)
 	creds := STSSessionCredentials{
@@ -353,6 +362,9 @@ func (p *STSPlugin) mintRoleSession(
 		PrincipalARN:    assumedRoleARN,
 		AccountID:       accountID,
 		PrincipalID:     roleID + ":" + sessionName,
+		SessionPolicies: extras.policies,
+		SessionTags:     extras.tags,
+		SourceIdentity:  extras.sourceIdentity,
 	}
 	credRaw, err := json.Marshal(creds)
 	if err != nil {
@@ -622,6 +634,17 @@ type STSSessionCredentials struct {
 	// would have to be read back from may since have been deleted or replaced with a
 	// new ID (#771).
 	PrincipalID string `json:"PrincipalId,omitempty"`
+
+	// SessionPolicies are the session policies the assume passed (`Policy` and the documents
+	// `PolicyArns` named), which narrow every request the session makes; see
+	// [Principal.SessionPolicies].
+	SessionPolicies []PolicyDocument `json:"SessionPolicies,omitempty"`
+
+	// SessionTags are the session tags a federated assume's token or assertion passed.
+	SessionTags map[string]string `json:"SessionTags,omitempty"`
+
+	// SourceIdentity is the source identity a federated assume's token or assertion set.
+	SourceIdentity string `json:"SourceIdentity,omitempty"`
 }
 
 // responseMetadata is the XML response metadata included in all STS responses.

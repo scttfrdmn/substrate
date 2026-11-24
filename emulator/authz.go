@@ -126,12 +126,42 @@ func authzPrincipalContext(ctx map[string]string, principal *Principal) {
 	if principal.UserID != "" {
 		ctx["aws:userid"] = principal.UserID
 	}
+	if principal.SourceIdentity != "" {
+		ctx["aws:SourceIdentity"] = principal.SourceIdentity
+	}
 	for key, value := range principal.Tags {
 		// One key per tag, which is the shape AWS documents: "aws:PrincipalTag/tag-key".
 		// A tag whose value is empty publishes an empty value, and [condKeyPresent] reads
 		// that as absent — the same reading it takes of every other key, and the one that
 		// makes a Null condition answer for a tag that exists with no value.
 		ctx["aws:PrincipalTag/"+key] = value
+	}
+}
+
+// authzSessionPolicyCheck refuses a request the principal's session policies do not allow. A
+// session policy narrows like a permissions boundary: the session may do only what both its
+// identity policies and its session policies allow. A principal with no session policies is not
+// narrowed.
+func authzSessionPolicyCheck(principal *Principal, action, resource string, condCtx map[string]string,
+	multi map[string][]string, deniedCode string) error {
+	if principal == nil || len(principal.SessionPolicies) == 0 {
+		return nil
+	}
+	result := Evaluate(principal.SessionPolicies, EvaluationRequest{
+		Principal:    principal.ARN,
+		Action:       action,
+		Resource:     resource,
+		Context:      condCtx,
+		MultiContext: multi,
+	})
+	if result.Decision == DecisionAllow {
+		return nil
+	}
+	return &AWSError{
+		Code: deniedCode,
+		Message: fmt.Sprintf("User: %s is not authorized to perform: %s (blocked by session policy)",
+			principal.ARN, action),
+		HTTPStatus: http.StatusForbidden,
 	}
 }
 
@@ -318,6 +348,9 @@ func (a *AuthController) CheckAccess(reqCtx *RequestContext, req *AWSRequest) er
 					HTTPStatus: http.StatusForbidden,
 				}
 			}
+		}
+		if err := authzSessionPolicyCheck(reqCtx.Principal, action, res.ARN, condCtx, multi, deniedCode); err != nil {
+			return err
 		}
 	}
 

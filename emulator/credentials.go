@@ -226,8 +226,10 @@ func resolvePrincipal(ctx context.Context, state StateManager, accountID, access
 				// minted because neither is recoverable from PrincipalARN (#771).
 				UserID: sess.PrincipalID,
 				// The role's own tags for an assumed role, the user's for a session
-				// token. Session tags are not modeled; see [Principal.Tags].
-				Tags: iamPrincipalTags(ctx, state, sess.PrincipalARN),
+				// token, with a federated session's tags over them; see [Principal.Tags].
+				Tags:            stsMergeSessionTags(iamPrincipalTags(ctx, state, sess.PrincipalARN), sess.SessionTags),
+				SessionPolicies: sess.SessionPolicies,
+				SourceIdentity:  sess.SourceIdentity,
 			}, sess.AccountID
 		}
 	}

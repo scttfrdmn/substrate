@@ -8,7 +8,7 @@
 | Operation | Notes |
 |-----------|-------|
 | GetCallerIdentity | Returns account 123456789012 by default |
-| AssumeRole | Evaluates the role's trust policy, then returns temporary credentials |
+| AssumeRole | Evaluates the role's trust policy, then returns temporary credentials. `Policy` and `PolicyArns` narrow the session — see [Session policies](#session-policies-narrow-the-session) |
 | GetSessionToken | Returns stub temporary credentials |
 | AssumeRoleWithWebIdentity | Unsigned. Checks the token's `iss`, `aud` and `exp` against a registered OIDC provider and the simulated clock, then the role's trust policy — see [below](#federated-assumes-check-claims-not-signatures) |
 | AssumeRoleWithSAML | Unsigned. Checks the assertion's provider, Role attribute and `NotOnOrAfter`, then the trust policy with the `saml:` keys |
@@ -95,11 +95,13 @@ Substrate decodes the token and verifies no signature. What it checks is what a 
 
 | Check | Web identity | SAML | Refusal |
 |-------|--------------|------|---------|
-| The provider is registered in the role's account | `iss`, without `https://`, names an [OIDC provider](/reference/iam#identity-providers) | `PrincipalArn` names a SAML provider | `InvalidIdentityToken`/400 |
-| The audience is registered | `aud` is in the provider's client IDs | — | `InvalidIdentityToken` "Incorrect token audience" |
-| The token is current on the simulated clock | `exp` | every `NotOnOrAfter` | `ExpiredTokenException`/400 |
-| The assertion names this role | — | a `Role` attribute pairs `RoleArn` with `PrincipalArn`, and there is a `NameID` and a `RoleSessionName` | `AccessDenied`/403, or `InvalidIdentityToken` for the session name |
-| The trust policy admits the provider | a `Federated` entry naming it, for `sts:AssumeRoleWithWebIdentity` | the same, for `sts:AssumeRoleWithSAML` | `AccessDenied` "Not authorized to perform sts:AssumeRoleWithWebIdentity" |
+| The provider is registered in the role's account | `iss`, without `https://`, names an [OIDC provider](/reference/iam#identity-providers) exactly (AWS: "The URL is case-sensitive") | `PrincipalArn` names a SAML provider, and the assertion's `Issuer` is an `entityID` its metadata declares | `InvalidIdentityToken`/400 |
+| The audience is AWS's | `aud` is in the provider's client IDs | an `Audience` is `https://signin.aws.amazon.com/saml` (or a regional one) or `urn:amazon:webservices` | `InvalidIdentityToken` "Incorrect token audience", "Response does not contain the required audience." |
+| The token names a subject | `sub` (REQUIRED by OpenID Connect Core §2) | a `NameID` | `InvalidIdentityToken`, `AccessDenied` |
+| The token is current on the simulated clock | `exp`, and `nbf` when present | every `NotOnOrAfter` and `NotBefore` | `ExpiredTokenException`/400 for an expiry, `InvalidIdentityToken` for a token not yet valid |
+| The assertion names this role | — | a `Role` attribute pairs `RoleArn` with `PrincipalArn`, and there is a `RoleSessionName` | `AccessDenied`/403, or `InvalidIdentityToken` for the session name |
+| The trust policy admits the provider | a `Federated` entry naming it, for `sts:AssumeRoleWithWebIdentity`, and `sts:TagSession`/`sts:SetSourceIdentity` when the token passes tags or a source identity | the same, for `sts:AssumeRoleWithSAML` | `AccessDenied` "Not authorized to perform sts:AssumeRoleWithWebIdentity" |
+| The duration fits the role | `DurationSeconds` (default 3600) is at most the role's `MaxSessionDuration` | the same; the `SessionDuration` attribute is the console's limit, not the API default | `ValidationError` "Requested DurationSeconds exceeds MaxSessionDuration set for this role." |
 
 The trust policy is evaluated with the provider's ARN as the principal. Only a `Federated` entry
 names one, so an `"AWS": "<account>"` statement does not admit a web identity. A role with no trust
@@ -116,6 +118,31 @@ keys are `saml:aud` (the `Recipient`), `saml:iss`, `saml:sub`, `saml:sub_type`, 
 The session is the one `AssumeRole` mints: an `ASIA…` key, the
 `assumed-role/<role>/<session>` ARN, and `RoleLastUsed` on the role. A SAML session ends at the
 assertion's `SessionNotOnOrAfter` when that comes first.
+
+**Session tags and source identity** come from the token. A web identity passes tags in the
+`https://aws.amazon.com/tags` claim (`principal_tags`, `transitive_tag_keys`) or the flattened
+`https://aws.amazon.com/tags/principal_tags/<key>` claims, and a source identity in
+`https://aws.amazon.com/source_identity`. A SAML assertion uses the `PrincipalTag:<key>`,
+`TransitiveTagKeys` and `SourceIdentity` attributes. At the assume they are `aws:RequestTag/<key>`,
+`aws:TagKeys`, `sts:TransitiveTagKeys` and `sts:SourceIdentity`. Afterwards they are the session's
+`aws:PrincipalTag/<key>` (over the role's own tags, a session tag winning regardless of case) and
+`aws:SourceIdentity`. The response reports `SourceIdentity`. Role chaining is not modeled, so
+transitive keys are evaluated and not carried forward.
+
+## Session policies narrow the session
+
+`Policy` and `PolicyArns` on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` are
+session policies: "The resulting session's permissions are the intersection of the role's
+identity-based policy and the session policies." The documents are stored on the session, and
+every request signed with it must be allowed by them after the identity policies and the
+permissions boundary. A refusal says "(blocked by session policy)".
+
+Both limits are enforced: 2,048 characters for `Policy` and 10 ARNs for `PolicyArns`, each
+answering `ValidationError`. A `Policy` that is not a policy document is `MalformedPolicyDocument`,
+in substrate's own wording. A `PolicyArns` entry naming no policy is `MalformedPolicyDocument`
+"Policy <arn> does not exist or is not attachable.", observed from the service. The documents are
+read when the session is minted, so a later change to a managed policy does not reach an existing
+session.
 
 ### Seeding what the identity provider decides
 
@@ -135,9 +162,10 @@ succeeding. Without a count the seed holds until it is cleared. The seed applies
 whose provider is registered, and it is checked before the audience and the expiry.
 
 Most messages are AWS's. The web-identity provider, audience, expiry and refusal wording is
-observed from the service, and the SAML session-name, provider and signature wording is the IAM
-troubleshooting guide's. The malformed-token, missing-`exp`, SAML expiry and seeded
-`IDPRejectedClaim` and `IDPCommunicationError` messages are substrate's own.
+observed from the service. The SAML session-name, source-identity, provider, issuer, audience,
+signature and `MaxSessionDuration` wording is the IAM troubleshooting guide's. These messages are
+substrate's own: the malformed token, a missing `exp` or `sub`, `nbf`/`NotBefore`, the SAML expiry,
+the session-tag limits, and the seeded `IDPRejectedClaim` and `IDPCommunicationError`.
 
 ## The account a session credential carries reaches no response
 

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"regexp"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,12 +23,16 @@ import (
 // token's payload is decoded and its signature is not checked; a SAML assertion is parsed and its
 // signature is not checked. What is checked is what a test can arrange and assert on:
 //
-//   - the token names a provider registered in the role's account (OIDC `iss`, SAML PrincipalArn);
-//   - the OIDC `aud` is one of the provider's client IDs;
-//   - `exp`, or the assertion's NotOnOrAfter, is still ahead of the simulated clock;
+//   - the token names a provider registered in the role's account (OIDC `iss`; SAML PrincipalArn,
+//     and an assertion Issuer the provider's metadata declares);
+//   - the OIDC `aud` is one of the provider's client IDs, and a SAML assertion's Audience is AWS;
+//   - `nbf`/`exp`, or the assertion's NotBefore/NotOnOrAfter, bracket the simulated clock;
 //   - a SAML assertion's Role attribute pairs this role with this provider;
 //   - the role's trust policy admits the provider as a `Federated` principal for the action, with
-//     the provider's condition keys (`<issuer>:sub`, `<issuer>:aud`, `saml:aud`, …) in context.
+//     the provider's condition keys (`<issuer>:sub`, `<issuer>:aud`, `saml:aud`, …) in context, and
+//     allows sts:TagSession and sts:SetSourceIdentity when the token passes session tags or a
+//     source identity;
+//   - DurationSeconds is within the role's MaxSessionDuration.
 //
 // Everything that depends on the identity provider itself — a signature or thumbprint that does
 // not verify, a claim the provider rejects, a provider that cannot be reached — is seedable through
@@ -74,6 +79,9 @@ type STSFederationSeed struct {
 // stsRoleSessionNamePattern is RoleSessionName's documented pattern and length.
 var stsRoleSessionNamePattern = regexp.MustCompile(`^[\w+=,.@-]{2,64}$`)
 
+// stsSourceIdentityPattern is SourceIdentity's documented pattern and length.
+var stsSourceIdentityPattern = regexp.MustCompile(`^[\w+=,.@-]{2,256}$`)
+
 // stsFederationError is an STS error with the Query protocol's code and status.
 func stsFederationError(code, message string, status int) *AWSError {
 	return &AWSError{Code: code, Message: message, HTTPStatus: status}
@@ -81,8 +89,9 @@ func stsFederationError(code, message string, status int) *AWSError {
 
 // stsNotAuthorized is the refusal a federated assume answers when the role cannot be assumed: it
 // does not exist, the SAML assertion does not name it, or its trust policy does not admit the
-// provider. The wording is AWS's — documented for SAML in the IAM troubleshooting guide ("Not
-// authorized to perform sts:AssumeRoleWithSAML", AccessDenied/403) and observed for web identity.
+// provider (or does not allow sts:TagSession or sts:SetSourceIdentity when they are needed). The
+// wording is AWS's — documented for SAML in the IAM troubleshooting guide ("Not authorized to
+// perform sts:AssumeRoleWithSAML", AccessDenied/403) and observed for web identity.
 func stsNotAuthorized(action string) *AWSError {
 	return stsFederationError("AccessDenied", "Not authorized to perform "+action, http.StatusForbidden)
 }
@@ -112,6 +121,121 @@ func stsRequire(req *AWSRequest, names ...string) *AWSError {
 		}
 	}
 	return nil
+}
+
+// stsSessionExtras is what a session carries beyond its identity: the session policies that
+// narrow it, and a federated session's tags and source identity.
+type stsSessionExtras struct {
+	policies       []PolicyDocument
+	tags           map[string]string
+	sourceIdentity string
+}
+
+// stsSessionPolicyMaxChars and stsSessionPolicyMaxARNs are the documented session-policy limits:
+// "The plaintext that you use for both inline and managed session policies can't exceed 2,048
+// characters", and "You can provide up to 10 managed policy ARNs".
+const (
+	stsSessionPolicyMaxChars = 2048
+	stsSessionPolicyMaxARNs  = 10
+)
+
+// stsSessionPolicies reads an AssumeRole* call's session policies — the inline Policy and the
+// managed policies PolicyArns names — as documents. The session they are minted into may do only
+// what both the role's policies and these allow; [authzSessionPolicyCheck] applies them.
+//
+// A managed policy ARN that names no policy is refused with MalformedPolicyDocument, in the wording
+// AWS returns (observed through the AWS CLI). The other messages are substrate's own.
+func (p *STSPlugin) stsSessionPolicies(goCtx context.Context, req *AWSRequest) ([]PolicyDocument, *AWSError, error) {
+	text := req.Params["Policy"]
+	var arns []string
+	for _, m := range iamMemberStructs(req.Params, "PolicyArns") {
+		arns = append(arns, m["arn"])
+	}
+	if len(text) > stsSessionPolicyMaxChars {
+		return nil, stsFederationError("ValidationError",
+			fmt.Sprintf("Policy must be at most %d characters.", stsSessionPolicyMaxChars), http.StatusBadRequest), nil
+	}
+	if len(arns) > stsSessionPolicyMaxARNs {
+		return nil, stsFederationError("ValidationError",
+			fmt.Sprintf("PolicyArns can name at most %d policies.", stsSessionPolicyMaxARNs), http.StatusBadRequest), nil
+	}
+	var docs []PolicyDocument
+	if text != "" {
+		var doc PolicyDocument
+		if err := json.Unmarshal([]byte(text), &doc); err != nil || len(doc.Statement) == 0 {
+			return nil, stsFederationError("MalformedPolicyDocument",
+				"The session policy is not a valid policy document.", http.StatusBadRequest), nil
+		}
+		docs = append(docs, doc)
+	}
+	for _, arn := range arns {
+		if mp, ok := GetManagedPolicy(arn); ok {
+			docs = append(docs, mp.Document)
+			continue
+		}
+		raw, err := p.state.Get(goCtx, iamNamespace, iamPolicyKey(arn))
+		if err != nil {
+			return nil, nil, fmt.Errorf("get session policy: %w", err)
+		}
+		var pol IAMPolicy
+		if raw == nil || json.Unmarshal(raw, &pol) != nil || arn == "" {
+			return nil, stsFederationError("MalformedPolicyDocument",
+				fmt.Sprintf("Policy %s does not exist or is not attachable.", arn), http.StatusBadRequest), nil
+		}
+		docs = append(docs, pol.Document)
+	}
+	return docs, nil, nil
+}
+
+// stsValidateSessionTags checks a federated session's tags against the documented limits: "You
+// can pass a maximum of 50 session tags", keys up to 128 characters and values up to 256. The
+// message is substrate's own.
+func stsValidateSessionTags(tags map[string]string) *AWSError {
+	bad := len(tags) > 50
+	for k, v := range tags {
+		if k == "" || len(k) > 128 || len(v) > 256 {
+			bad = true
+		}
+	}
+	if bad {
+		return stsFederationError("InvalidIdentityToken",
+			"Session tags must number at most 50, with keys of 1 to 128 characters and values of at most 256.",
+			http.StatusBadRequest)
+	}
+	return nil
+}
+
+// stsValidateSourceIdentity checks a source identity in the IAM troubleshooting guide's wording.
+func stsValidateSourceIdentity(si string) *AWSError {
+	if si == "" {
+		return nil
+	}
+	if !stsSourceIdentityPattern.MatchString(si) || strings.HasPrefix(strings.ToLower(si), "aws:") {
+		return stsFederationError("InvalidIdentityToken",
+			`Source Identity must match [a-zA-Z_0-9+=,.@-]{2,256} and not begin with "aws:"`, http.StatusBadRequest)
+	}
+	return nil
+}
+
+// stsMergeSessionTags returns role tags with session tags over them; a session tag replaces a role
+// tag of the same key "regardless of character case", per the IAM User Guide.
+func stsMergeSessionTags(roleTags, sessionTags map[string]string) map[string]string {
+	if len(sessionTags) == 0 {
+		return roleTags
+	}
+	out := make(map[string]string, len(roleTags)+len(sessionTags))
+	for k, v := range roleTags {
+		out[k] = v
+	}
+	for k, v := range sessionTags {
+		for existing := range out {
+			if strings.EqualFold(existing, k) {
+				delete(out, existing)
+			}
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // federationSeed returns the error seeded for provider (exact match first, then "*"), or nil, and
@@ -195,27 +319,107 @@ type stsAssumedRoleUserXML struct {
 	Arn           string `xml:"Arn"`
 }
 
-// federatedSession admits a federated principal to role through its trust policy, mints the
+// stsFederatedAssume is one federated assume, after its token's claims have been checked.
+type stsFederatedAssume struct {
+	roleARN, providerARN, action, sessionName string
+	role                                      *IAMRole
+	roleName                                  string
+	condCtx                                   map[string]string
+	multi                                     map[string][]string
+	tags                                      map[string]string
+	transitiveKeys                            []string
+	sourceIdentity                            string
+	duration                                  int
+	sessionCap                                *time.Time
+}
+
+// stsMaxSessionDuration is the MaxSessionDuration a role reports when its record carries none:
+// "This setting can have a value from 1 hour to 12 hours", and CreateRole's default is one hour.
+const stsMaxSessionDuration = 3600
+
+// federatedSession admits a federated principal to the role through its trust policy, mints the
 // session, and stamps RoleLastUsed — the half the two federated assumes share.
-func (p *STSPlugin) federatedSession(goCtx context.Context, ctx *RequestContext, roleARN, providerARN,
-	action, sessionName string, role *IAMRole, roleName string, condCtx map[string]string,
-	multi map[string][]string, expiry func(now time.Time) time.Time) (STSSessionCredentials, *AWSError, error) {
+func (p *STSPlugin) federatedSession(goCtx context.Context, ctx *RequestContext, req *AWSRequest,
+	a stsFederatedAssume) (STSSessionCredentials, *AWSError, error) {
 	// The trust policy must name the provider: a role without one admits no federated caller,
 	// unlike AssumeRole's opt-in, because AWS's pages require "the identity provider must be
 	// specified in the role's trust policy".
-	if role == nil || len(role.AssumeRolePolicyDocument.Statement) == 0 {
-		return STSSessionCredentials{}, stsNotAuthorized(action), nil
+	if a.role == nil || len(a.role.AssumeRolePolicyDocument.Statement) == 0 {
+		return STSSessionCredentials{}, stsNotAuthorized(a.action), nil
 	}
-	if stsTrustDecision(*role, providerARN, action, condCtx, multi).Decision != DecisionAllow {
-		p.logger.Debug("sts: trust policy refused federated assume", "role", roleARN, "provider", providerARN)
-		return STSSessionCredentials{}, stsNotAuthorized(action), nil
+
+	// The session tags and source identity are part of the request every trust-policy statement
+	// is evaluated against, as aws:RequestTag/<key>, aws:TagKeys, sts:TransitiveTagKeys and
+	// sts:SourceIdentity.
+	multi := map[string][]string{}
+	for k, v := range a.multi {
+		multi[k] = v
 	}
+	if len(a.tags) > 0 {
+		keys := make([]string, 0, len(a.tags))
+		for k, v := range a.tags {
+			a.condCtx["aws:RequestTag/"+k] = v
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		multi["aws:TagKeys"] = keys
+		if len(a.transitiveKeys) > 0 {
+			multi["sts:TransitiveTagKeys"] = a.transitiveKeys
+		}
+	}
+	if a.sourceIdentity != "" {
+		a.condCtx["sts:SourceIdentity"] = a.sourceIdentity
+	}
+
+	// "When using session tags, trust policies for all roles connected to the identity provider
+	// (IdP) passing tags must have the sts:TagSession permission", and the same for a source
+	// identity and sts:SetSourceIdentity.
+	actions := []string{a.action}
+	if len(a.tags) > 0 {
+		actions = append(actions, "sts:TagSession")
+	}
+	if a.sourceIdentity != "" {
+		actions = append(actions, "sts:SetSourceIdentity")
+	}
+	for _, action := range actions {
+		if stsTrustDecision(*a.role, a.providerARN, action, a.condCtx, multi).Decision != DecisionAllow {
+			p.logger.Debug("sts: trust policy refused federated assume",
+				"role", a.roleARN, "provider", a.providerARN, "action", action)
+			return STSSessionCredentials{}, stsNotAuthorized(a.action), nil
+		}
+	}
+
+	// "If you specify a value higher than this setting, the operation fails." The wording is the
+	// IAM troubleshooting guide's.
+	maxDuration := a.role.MaxSessionDuration
+	if maxDuration == 0 {
+		maxDuration = stsMaxSessionDuration
+	}
+	if a.duration > maxDuration {
+		return STSSessionCredentials{}, stsFederationError("ValidationError",
+			"Requested DurationSeconds exceeds MaxSessionDuration set for this role.", http.StatusBadRequest), nil
+	}
+
+	policies, refusal, err := p.stsSessionPolicies(goCtx, req)
+	if err != nil || refusal != nil {
+		return STSSessionCredentials{}, refusal, err
+	}
+
 	now := p.now()
-	creds, err := p.mintRoleSession(goCtx, ctx, arnAccountID(roleARN), roleName, role.RoleID, sessionName, expiry(now))
+	expiry := now.Add(time.Duration(a.duration) * time.Second)
+	if a.sessionCap != nil && a.sessionCap.Before(expiry) {
+		expiry = a.sessionCap.UTC()
+	}
+	var tags map[string]string
+	if len(a.tags) > 0 {
+		tags = a.tags
+	}
+	creds, err := p.mintRoleSession(goCtx, ctx, arnAccountID(a.roleARN), a.roleName, a.role.RoleID, a.sessionName,
+		expiry, stsSessionExtras{policies: policies, tags: tags, sourceIdentity: a.sourceIdentity})
 	if err != nil {
 		return STSSessionCredentials{}, nil, err
 	}
-	if err := p.recordRoleLastUsed(goCtx, ctx, roleARN, roleName, role, now); err != nil {
+	if err := p.recordRoleLastUsed(goCtx, ctx, a.roleARN, a.roleName, a.role, now); err != nil {
 		return STSSessionCredentials{}, nil, err
 	}
 	return creds, nil, nil
@@ -236,7 +440,12 @@ func (c stsJWTClaims) str(name string) string {
 
 // strs returns a claim that may be a string or a list of strings, such as aud and amr.
 func (c stsJWTClaims) strs(name string) []string {
-	switch v := c.raw[name].(type) {
+	return stsStrings(c.raw[name])
+}
+
+// stsStrings reads a JSON value that may be a string or a list of strings.
+func stsStrings(v any) []string {
+	switch v := v.(type) {
 	case string:
 		return []string{v}
 	case []any:
@@ -249,6 +458,42 @@ func (c stsJWTClaims) strs(name string) []string {
 		return out
 	}
 	return nil
+}
+
+// stsJWTTagsClaim and its flattened forms are where a web identity token carries session tags,
+// per the IAM User Guide's "Passing session tags using AssumeRoleWithWebIdentity".
+const (
+	stsJWTTagsClaim           = "https://aws.amazon.com/tags"
+	stsJWTFlatTagPrefix       = "https://aws.amazon.com/tags/principal_tags/"
+	stsJWTFlatTransitiveClaim = "https://aws.amazon.com/tags/transitive_tag_keys"
+	stsJWTSourceIdentityClaim = "https://aws.amazon.com/source_identity"
+)
+
+// sessionTags returns the session tags and transitive tag keys the token passes, in either the
+// nested or the flattened claim format. Each principal tag's value is a single string, or a list
+// holding one in the nested format.
+func (c stsJWTClaims) sessionTags() (map[string]string, []string) {
+	tags := map[string]string{}
+	var transitive []string
+	if nested, ok := c.raw[stsJWTTagsClaim].(map[string]any); ok {
+		if principal, ok := nested["principal_tags"].(map[string]any); ok {
+			for k, v := range principal {
+				if values := stsStrings(v); len(values) > 0 {
+					tags[k] = values[0]
+				}
+			}
+		}
+		transitive = append(transitive, stsStrings(nested["transitive_tag_keys"])...)
+	}
+	for name, v := range c.raw {
+		if key, ok := strings.CutPrefix(name, stsJWTFlatTagPrefix); ok {
+			if values := stsStrings(v); len(values) > 0 {
+				tags[key] = values[0]
+			}
+		}
+	}
+	transitive = append(transitive, stsStrings(c.raw[stsJWTFlatTransitiveClaim])...)
+	return tags, transitive
 }
 
 // stsDecodeJWT decodes a JWT's payload without verifying its signature. A token that is not three
@@ -282,6 +527,29 @@ var stsWebIdentityDefaultMessages = map[string]string{
 	"IDPCommunicationError": "The identity provider could not be reached.",
 }
 
+// webIdentityTimes checks the token's exp and nbf against the simulated clock. exp is required
+// (OpenID Connect Core 1.0 §2 marks it REQUIRED); nbf is checked when present.
+func webIdentityTimes(claims stsJWTClaims, now time.Time) *AWSError {
+	exp, ok := stsNumericClaim(claims.raw["exp"])
+	if !ok {
+		return stsFederationError("InvalidIdentityToken", "The web identity token has no exp claim.", http.StatusBadRequest)
+	}
+	if now.Unix() >= exp {
+		// Observed AWS wording, which renders both instants as Unix seconds.
+		return stsFederationError("ExpiredTokenException",
+			fmt.Sprintf("Token expired: current date/time %d must be before the expiration date/time %d", now.Unix(), exp),
+			http.StatusBadRequest)
+	}
+	if raw, present := claims.raw["nbf"]; present {
+		nbf, ok := stsNumericClaim(raw)
+		if !ok || now.Unix() < nbf {
+			return stsFederationError("InvalidIdentityToken",
+				fmt.Sprintf("The web identity token is not valid before %v.", raw), http.StatusBadRequest)
+		}
+	}
+	return nil
+}
+
 func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	if err := stsRequire(req, "RoleArn", "RoleSessionName", "WebIdentityToken"); err != nil {
 		return nil, err
@@ -303,8 +571,10 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 	goCtx := context.Background()
 	account := arnAccountID(roleARN)
 
-	// AWS's wording when the issuer names no provider, observed through the AWS CLI and every
-	// GitHub Actions OIDC setup that skipped creating one.
+	// The provider is the one whose URL is the issuer. "The URL is case-sensitive" (IAM User
+	// Guide, Create an OpenID Connect identity provider), so the match is exact. AWS's wording
+	// when nothing matches is observed through the AWS CLI and every GitHub Actions OIDC setup
+	// that skipped creating one.
 	raw, err := p.state.Get(goCtx, iamNamespace, iamOIDCProviderKey(account, iamOIDCHostPath(iss)))
 	if err != nil {
 		return nil, fmt.Errorf("get oidc provider: %w", err)
@@ -338,18 +608,24 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 		// Observed AWS wording.
 		return nil, stsFederationError("InvalidIdentityToken", "Incorrect token audience", http.StatusBadRequest)
 	}
-
-	exp, ok := stsNumericClaim(claims.raw["exp"])
-	if !ok {
-		return nil, stsFederationError("InvalidIdentityToken",
-			"The web identity token has no exp claim.", http.StatusBadRequest)
-	}
-	now := p.now()
-	if now.Unix() >= exp {
-		// Observed AWS wording, which renders both instants as Unix seconds.
-		return nil, stsFederationError("ExpiredTokenException",
-			fmt.Sprintf("Token expired: current date/time %d must be before the expiration date/time %d", now.Unix(), exp),
+	// sub is REQUIRED in an ID token (OpenID Connect Core 1.0 §2), and AWS reports it as
+	// SubjectFromWebIdentityToken. The message is substrate's own.
+	sub := claims.str("sub")
+	if sub == "" {
+		return nil, stsFederationError("InvalidIdentityToken", "The web identity token has no sub claim.",
 			http.StatusBadRequest)
+	}
+	if refusal := webIdentityTimes(claims, p.now()); refusal != nil {
+		return nil, refusal
+	}
+
+	tags, transitive := claims.sessionTags()
+	if refusal := stsValidateSessionTags(tags); refusal != nil {
+		return nil, refusal
+	}
+	sourceIdentity := claims.str(stsJWTSourceIdentityClaim)
+	if refusal := stsValidateSourceIdentity(sourceIdentity); refusal != nil {
+		return nil, refusal
 	}
 
 	role, roleName, err := p.loadFederatedRole(goCtx, roleARN)
@@ -360,9 +636,10 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 	// The provider's condition keys are its URL without the scheme followed by the claim, with
 	// the default mapping AWS documents for an IdP it has no special case for: aud is azp when
 	// the token sets one and aud otherwise, oaud is aud, and sub, email and amr are themselves.
+	// Each is published only when the token carries the claim behind it.
 	prefix := prov.URL + ":"
 	condCtx := map[string]string{
-		prefix + "sub":        claims.str("sub"),
+		prefix + "sub":        sub,
 		prefix + "aud":        audience,
 		prefix + "oaud":       audience,
 		"sts:RoleSessionName": sessionName,
@@ -373,15 +650,16 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 	if email := claims.str("email"); email != "" {
 		condCtx[prefix+"email"] = email
 	}
-	var multi map[string][]string
+	multi := map[string][]string{}
 	if amr := claims.strs("amr"); len(amr) > 0 {
-		multi = map[string][]string{prefix + "amr": amr}
+		multi[prefix+"amr"] = amr
 	}
 
-	creds, refusal, err := p.federatedSession(goCtx, ctx, roleARN, prov.ARN, stsWebIdentityAction, sessionName,
-		role, roleName, condCtx, multi, func(now time.Time) time.Time {
-			return now.Add(time.Duration(duration) * time.Second)
-		})
+	creds, refusal, err := p.federatedSession(goCtx, ctx, req, stsFederatedAssume{
+		roleARN: roleARN, providerARN: prov.ARN, action: stsWebIdentityAction, sessionName: sessionName,
+		role: role, roleName: roleName, condCtx: condCtx, multi: multi,
+		tags: tags, transitiveKeys: transitive, sourceIdentity: sourceIdentity, duration: duration,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -395,6 +673,7 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 		AssumedRoleUser             stsAssumedRoleUserXML      `xml:"AssumedRoleUser"`
 		Provider                    string                     `xml:"Provider"`
 		Audience                    string                     `xml:"Audience"`
+		SourceIdentity              string                     `xml:"SourceIdentity,omitempty"`
 	}
 	type response struct {
 		XMLName                         xml.Name         `xml:"AssumeRoleWithWebIdentityResponse"`
@@ -407,10 +686,11 @@ func (p *STSPlugin) assumeRoleWithWebIdentity(ctx *RequestContext, req *AWSReque
 		Xmlns: "https://sts.amazonaws.com/doc/2011-06-15/",
 		AssumeRoleWithWebIdentityResult: result{
 			Credentials:                 stsCredentialsXML(creds),
-			SubjectFromWebIdentityToken: claims.str("sub"),
+			SubjectFromWebIdentityToken: sub,
 			AssumedRoleUser:             stsAssumedRoleUserXML{AssumedRoleID: creds.PrincipalID, Arn: creds.PrincipalARN},
 			Provider:                    iss,
 			Audience:                    audience,
+			SourceIdentity:              sourceIdentity,
 		},
 		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 	})
@@ -443,12 +723,19 @@ func stsNumericClaim(v any) (int64, bool) {
 
 // --- AssumeRoleWithSAML -----------------------------------------------------------
 
-// SAML attribute names AWS reads, from "Configure SAML assertions for the authentication response".
+// SAML attribute names AWS reads, from "Configure SAML assertions for the authentication
+// response" and the session-tag and source-identity pages.
 const (
 	stsSAMLRoleAttr            = "https://aws.amazon.com/SAML/Attributes/Role"
 	stsSAMLRoleSessionNameAttr = "https://aws.amazon.com/SAML/Attributes/RoleSessionName"
-	stsSAMLSessionDurationAttr = "https://aws.amazon.com/SAML/Attributes/SessionDuration"
+	stsSAMLPrincipalTagPrefix  = "https://aws.amazon.com/SAML/Attributes/PrincipalTag:"
+	stsSAMLTransitiveAttr      = "https://aws.amazon.com/SAML/Attributes/TransitiveTagKeys"
+	stsSAMLSourceIdentityAttr  = "https://aws.amazon.com/SAML/Attributes/SourceIdentity"
 )
+
+// stsSAMLAudiencePattern matches the audiences AWS accepts in a SAML assertion: the sign-in
+// endpoint, global or regional, and the `urn:amazon:webservices` URN.
+var stsSAMLAudiencePattern = regexp.MustCompile(`^(urn:amazon:webservices|https://([a-z0-9-]+\.)?signin\.aws\.amazon\.com/saml)$`)
 
 // stsSAMLAssertion is the part of a SAML assertion substrate reads. Element names are matched by
 // local name, so the saml: and saml2: prefixes both decode.
@@ -461,13 +748,16 @@ type stsSAMLAssertion struct {
 		} `xml:"NameID"`
 		Confirmations []struct {
 			Data struct {
+				NotBefore    string `xml:"NotBefore,attr"`
 				NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
 				Recipient    string `xml:"Recipient,attr"`
 			} `xml:"SubjectConfirmationData"`
 		} `xml:"SubjectConfirmation"`
 	} `xml:"Subject"`
 	Conditions struct {
-		NotOnOrAfter string `xml:"NotOnOrAfter,attr"`
+		NotBefore    string   `xml:"NotBefore,attr"`
+		NotOnOrAfter string   `xml:"NotOnOrAfter,attr"`
+		Audiences    []string `xml:"AudienceRestriction>Audience"`
 	} `xml:"Conditions"`
 	AuthnStatement struct {
 		SessionNotOnOrAfter string `xml:"SessionNotOnOrAfter,attr"`
@@ -490,6 +780,17 @@ func (a *stsSAMLAssertion) attribute(name string) []string {
 		}
 	}
 	return out
+}
+
+// sessionTags returns the PrincipalTag:<key> attributes as session tags, and TransitiveTagKeys.
+func (a *stsSAMLAssertion) sessionTags() (map[string]string, []string) {
+	tags := map[string]string{}
+	for _, attr := range a.Attributes {
+		if key, ok := strings.CutPrefix(attr.Name, stsSAMLPrincipalTagPrefix); ok && len(attr.Values) > 0 {
+			tags[key] = strings.TrimSpace(attr.Values[0])
+		}
+	}
+	return tags, a.attribute(stsSAMLTransitiveAttr)
 }
 
 // stsSAMLResponse is a SAML Response envelope around one assertion.
@@ -549,6 +850,52 @@ func stsSAMLSubjectType(format string) string {
 	return strings.TrimPrefix(format, "urn:oasis:names:tc:SAML:2.0:nameid-format:")
 }
 
+// samlTimes checks every NotBefore and NotOnOrAfter in the assertion against the simulated clock.
+// The messages are substrate's own.
+func samlTimes(a *stsSAMLAssertion, now time.Time) *AWSError {
+	notBefore := []string{a.Conditions.NotBefore}
+	notOnOrAfter := []string{a.Conditions.NotOnOrAfter}
+	for _, c := range a.Subject.Confirmations {
+		notBefore = append(notBefore, c.Data.NotBefore)
+		notOnOrAfter = append(notOnOrAfter, c.Data.NotOnOrAfter)
+	}
+	parse := func(s string) (time.Time, *AWSError) {
+		t, err := time.Parse(time.RFC3339, s)
+		if err != nil {
+			return time.Time{}, stsFederationError("InvalidIdentityToken",
+				"The SAML assertion carries an unreadable NotBefore or NotOnOrAfter.", http.StatusBadRequest)
+		}
+		return t, nil
+	}
+	for _, s := range notOnOrAfter {
+		if s == "" {
+			continue
+		}
+		t, bad := parse(s)
+		if bad != nil {
+			return bad
+		}
+		if !now.Before(t) {
+			return stsFederationError("ExpiredTokenException",
+				fmt.Sprintf("The SAML assertion expired at %s.", t.UTC().Format(time.RFC3339)), http.StatusBadRequest)
+		}
+	}
+	for _, s := range notBefore {
+		if s == "" {
+			continue
+		}
+		t, bad := parse(s)
+		if bad != nil {
+			return bad
+		}
+		if now.Before(t) {
+			return stsFederationError("InvalidIdentityToken",
+				fmt.Sprintf("The SAML assertion is not valid before %s.", t.UTC().Format(time.RFC3339)), http.StatusBadRequest)
+		}
+	}
+	return nil
+}
+
 func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	if err := stsRequire(req, "RoleArn", "PrincipalArn", "SAMLAssertion"); err != nil {
 		return nil, err
@@ -582,6 +929,13 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 	if parseErr != nil {
 		return nil, parseErr
 	}
+	// The assertion's issuer must be one the provider's metadata declares. The wording is the IAM
+	// troubleshooting guide's ("Issuer not present in specified provider"); the guide reports it
+	// from the console's sign-in path, so the code here is substrate's choice.
+	if !slices.Contains(prov.EntityIDs, issuer) {
+		return nil, stsFederationError("InvalidIdentityToken", "Issuer not present in specified provider",
+			http.StatusBadRequest)
+	}
 	seeded, err := p.federationSeed(goCtx, prov.ARN, []string{"InvalidIdentityToken", "IDPRejectedClaim"},
 		stsSAMLDefaultMessages)
 	if err != nil {
@@ -590,28 +944,20 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 	if seeded != nil {
 		return nil, seeded
 	}
-
-	now := p.now()
+	// "Response does not contain the required audience." — the IAM troubleshooting guide.
+	if !slices.ContainsFunc(assertion.Conditions.Audiences, func(a string) bool {
+		return stsSAMLAudiencePattern.MatchString(strings.TrimSpace(a))
+	}) {
+		return nil, stsFederationError("InvalidIdentityToken", "Response does not contain the required audience.",
+			http.StatusBadRequest)
+	}
+	if refusal := samlTimes(assertion, p.now()); refusal != nil {
+		return nil, refusal
+	}
 	recipient := ""
-	notOnOrAfter := []string{assertion.Conditions.NotOnOrAfter}
 	for _, c := range assertion.Subject.Confirmations {
-		notOnOrAfter = append(notOnOrAfter, c.Data.NotOnOrAfter)
 		if recipient == "" {
 			recipient = c.Data.Recipient
-		}
-	}
-	for _, s := range notOnOrAfter {
-		if s == "" {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, s)
-		if err != nil {
-			return nil, stsFederationError("InvalidIdentityToken",
-				"The SAML assertion carries an unreadable NotOnOrAfter.", http.StatusBadRequest)
-		}
-		if !now.Before(t) {
-			return nil, stsFederationError("ExpiredTokenException",
-				fmt.Sprintf("The SAML assertion expired at %s.", t.UTC().Format(time.RFC3339)), http.StatusBadRequest)
 		}
 	}
 
@@ -643,14 +989,22 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 		return nil, stsFederationError("InvalidIdentityToken",
 			"RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}", http.StatusBadRequest)
 	}
-
-	defaultDuration := stsDefaultSessionDuration
-	if v := assertion.attribute(stsSAMLSessionDurationAttr); len(v) > 0 {
-		if d, convErr := strconv.Atoi(v[0]); convErr == nil && d >= 900 && d <= 43200 {
-			defaultDuration = d
-		}
+	tags, transitive := assertion.sessionTags()
+	if refusal := stsValidateSessionTags(tags); refusal != nil {
+		return nil, refusal
 	}
-	duration, durErr := stsDurationParam(req, defaultDuration)
+	sourceIdentity := ""
+	if v := assertion.attribute(stsSAMLSourceIdentityAttr); len(v) > 0 {
+		sourceIdentity = v[0]
+	}
+	if refusal := stsValidateSourceIdentity(sourceIdentity); refusal != nil {
+		return nil, refusal
+	}
+
+	// The assertion's SessionDuration attribute is the console session's maximum, not the API's
+	// default, so the API session lasts DurationSeconds (3600 when absent), capped by
+	// SessionNotOnOrAfter.
+	duration, durErr := stsDurationParam(req, stsDefaultSessionDuration)
 	if durErr != nil {
 		return nil, durErr
 	}
@@ -674,22 +1028,19 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 		"saml:aud":           recipient,
 		"saml:iss":           issuer,
 		"saml:sub":           subject,
-		"saml:sub_type":      subjectType,
 		"saml:doc":           providerAccount + "/" + providerName,
 		"saml:namequalifier": nameQualifier,
 	}
+	if subjectType != "" {
+		condCtx["saml:sub_type"] = subjectType
+	}
 
-	creds, refusal, err := p.federatedSession(goCtx, ctx, roleARN, prov.ARN, stsSAMLAction, sessionName,
-		role, roleName, condCtx, nil, func(now time.Time) time.Time {
-			// "Your role session lasts for the duration that you specify … or until the time
-			// specified in the SAML authentication response's SessionNotOnOrAfter value, whichever
-			// is shorter."
-			expiry := now.Add(time.Duration(duration) * time.Second)
-			if sessionCap != nil && sessionCap.Before(expiry) {
-				return sessionCap.UTC()
-			}
-			return expiry
-		})
+	creds, refusal, err := p.federatedSession(goCtx, ctx, req, stsFederatedAssume{
+		roleARN: roleARN, providerARN: prov.ARN, action: stsSAMLAction, sessionName: sessionName,
+		role: role, roleName: roleName, condCtx: condCtx,
+		tags: tags, transitiveKeys: transitive, sourceIdentity: sourceIdentity,
+		duration: duration, sessionCap: sessionCap,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -705,6 +1056,7 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 		Subject         string                     `xml:"Subject"`
 		SubjectType     string                     `xml:"SubjectType"`
 		NameQualifier   string                     `xml:"NameQualifier"`
+		SourceIdentity  string                     `xml:"SourceIdentity,omitempty"`
 	}
 	type response struct {
 		XMLName                  xml.Name         `xml:"AssumeRoleWithSAMLResponse"`
@@ -722,6 +1074,7 @@ func (p *STSPlugin) assumeRoleWithSAML(ctx *RequestContext, req *AWSRequest) (*A
 			Subject:         subject,
 			SubjectType:     subjectType,
 			NameQualifier:   nameQualifier,
+			SourceIdentity:  sourceIdentity,
 		},
 		ResponseMetadata: responseMetadata{RequestID: ctx.RequestID},
 	})

@@ -275,6 +275,7 @@ func TestSTSAssumeRoleWithSAML_AssertionShapes(t *testing.T) {
 		<saml:Issuer>https://idp.example.com/saml</saml:Issuer>
 		<saml:Subject><saml:NameID>jane</saml:NameID><saml:SubjectConfirmation>
 			<saml:SubjectConfirmationData Recipient="https://signin.aws.amazon.com/saml"/></saml:SubjectConfirmation></saml:Subject>
+		<saml:Conditions><saml:AudienceRestriction><saml:Audience>urn:amazon:webservices</saml:Audience></saml:AudienceRestriction></saml:Conditions>
 		<saml:AttributeStatement>
 			<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/Role"><saml:AttributeValue>` + samlRole + `,` + samlProvider + `</saml:AttributeValue></saml:Attribute>
 			<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><saml:AttributeValue>jane</saml:AttributeValue></saml:Attribute>
@@ -282,7 +283,8 @@ func TestSTSAssumeRoleWithSAML_AssertionShapes(t *testing.T) {
 		</saml:AttributeStatement></saml:Assertion>`)
 	status, body := call(bare, nil)
 	require.Equal(t, http.StatusOK, status, body)
-	assert.Contains(t, body, "<Expiration>2025-01-01T12:30:00", "SessionDuration sets the default duration")
+	assert.Contains(t, body, "<Expiration>2025-01-01T13:00:00",
+		"SessionDuration is the console maximum, so the API session lasts the 3600-second default")
 	assert.Contains(t, body, "<SubjectType></SubjectType>")
 
 	for name, tc := range map[string]struct {
@@ -290,9 +292,10 @@ func TestSTSAssumeRoleWithSAML_AssertionShapes(t *testing.T) {
 		extra     map[string]string
 		status    int
 	}{
-		"not xml":                  {base64Std("not xml"), nil, http.StatusBadRequest},
-		"no assertion":             {base64Std(`<Response><Issuer>x</Issuer></Response>`), nil, http.StatusBadRequest},
-		"unreadable NotOnOrAfter":  {base64Std(`<Assertion><Conditions NotOnOrAfter="soon"/></Assertion>`), nil, http.StatusBadRequest},
+		"not xml":      {base64Std("not xml"), nil, http.StatusBadRequest},
+		"no assertion": {base64Std(`<Response><Issuer>x</Issuer></Response>`), nil, http.StatusBadRequest},
+		"unreadable NotOnOrAfter": {base64Std(`<Assertion><Issuer>https://idp.example.com/saml</Issuer><Conditions NotOnOrAfter="soon">` +
+			`<AudienceRestriction><Audience>urn:amazon:webservices</Audience></AudienceRestriction></Conditions></Assertion>`), nil, http.StatusBadRequest},
 		"duration out of range":    {defaultSAML().encode(), map[string]string{"DurationSeconds": "100"}, http.StatusBadRequest},
 		"principal not a provider": {defaultSAML().encode(), map[string]string{"PrincipalArn": "arn:aws:iam::123456789012:role/x"}, http.StatusBadRequest},
 		"role missing":             {defaultSAML().encode(), map[string]string{"RoleArn": "arn:aws:iam::123456789012:role/gone"}, http.StatusForbidden},

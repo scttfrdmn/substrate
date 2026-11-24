@@ -51,6 +51,14 @@ func TestCFN_IAMOIDCProviderDeploysUpdatesAndDeletes(t *testing.T) {
 	assert.Equal(t, []string{"app-2"}, cfnIAMMembers(t, got, "ClientIDList>member"))
 	assert.Empty(t, cfnIAMMembers(t, got, "Tags>member>Key"))
 
+	// A ThumbprintList the declaration drops clears the live list.
+	noThumbs := strings.Replace(tmpl(`["app-2"]`, b, `[]`), `"ThumbprintList":["`+b+`"],`, "", 1)
+	updated, err = d.UpdateStack(ctx, noThumbs, "oidc", nil, emulator.CFNDeployOptions{})
+	require.NoError(t, err)
+	require.Equal(t, "UPDATE_COMPLETE", updated.Status, updated.StatusReason)
+	got = cfnIAMOK(t, d, "GetOpenIDConnectProvider", map[string]string{"OpenIDConnectProviderArn": arn})
+	assert.Empty(t, cfnIAMMembers(t, got, "ThumbprintList>member"))
+
 	require.NoError(t, d.DeleteStack(ctx, "oidc"))
 	_, err = cfnIAMDo(t, d, "GetOpenIDConnectProvider", map[string]string{"OpenIDConnectProviderArn": arn})
 	require.Error(t, err)
@@ -75,11 +83,17 @@ func TestCFN_IAMSAMLProviderDeploysUpdatesAndDeletes(t *testing.T) {
 	assert.Equal(t, arn, result.Outputs["Ref"])
 	assert.Len(t, result.Outputs["Uuid"], 22)
 
+	// Made Required outside the stack, the provider returns to Allowed when the declaration, which
+	// names no mode, is next applied.
+	cfnIAMOK(t, d, "UpdateSAMLProvider", map[string]string{"SAMLProviderArn": arn, "AddPrivateKey": "key"})
+	cfnIAMOK(t, d, "UpdateSAMLProvider", map[string]string{"SAMLProviderArn": arn, "AssertionEncryptionMode": "Required"})
+
 	updated, err := d.UpdateStack(ctx, tmpl("2032-02-02", `[]`), "saml", nil, emulator.CFNDeployOptions{})
 	require.NoError(t, err)
 	require.Equal(t, "UPDATE_COMPLETE", updated.Status, updated.StatusReason)
 	got := cfnIAMOK(t, d, "GetSAMLProvider", map[string]string{"SAMLProviderArn": arn})
 	assert.Equal(t, []string{"2032-02-02T00:00:00Z"}, cfnIAMMembers(t, got, "ValidUntil"))
+	assert.Equal(t, []string{"Allowed"}, cfnIAMMembers(t, got, "AssertionEncryptionMode"))
 	assert.Empty(t, cfnIAMMembers(t, got, "Tags>member>Key"))
 
 	require.NoError(t, d.DeleteStack(ctx, "saml"))

@@ -356,9 +356,13 @@ type samlAssertionOpts struct {
 	roleAttr     string
 	sessionName  string
 	notOnOrAfter time.Time
+	notBefore    time.Time
 	sessionCap   time.Time
 	recipient    string
 	nameID       string
+	issuer       string
+	audience     string
+	extraAttrs   string
 }
 
 func (o samlAssertionOpts) encode() string {
@@ -371,21 +375,30 @@ func (o samlAssertionOpts) encode() string {
 		attrs += `<saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><saml:AttributeValue>` +
 			o.sessionName + `</saml:AttributeValue></saml:Attribute>`
 	}
+	attrs += o.extraAttrs
+	notBefore := ""
+	if !o.notBefore.IsZero() {
+		notBefore = ` NotBefore="` + o.notBefore.Format(time.RFC3339) + `"`
+	}
+	audience := ""
+	if o.audience != "" {
+		audience = `<saml:AudienceRestriction><saml:Audience>` + o.audience + `</saml:Audience></saml:AudienceRestriction>`
+	}
 	authn := ""
 	if !o.sessionCap.IsZero() {
 		authn = `<saml:AuthnStatement SessionNotOnOrAfter="` + o.sessionCap.Format(time.RFC3339) + `"/>`
 	}
 	doc := `<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
-<saml:Issuer>https://idp.example.com/saml</saml:Issuer>
+<saml:Issuer>` + o.issuer + `</saml:Issuer>
 <saml:Assertion>
- <saml:Issuer>https://idp.example.com/saml</saml:Issuer>
+ <saml:Issuer>` + o.issuer + `</saml:Issuer>
  <saml:Subject>
   <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">` + o.nameID + `</saml:NameID>
   <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
    <saml:SubjectConfirmationData NotOnOrAfter="` + o.notOnOrAfter.Format(time.RFC3339) + `" Recipient="` + o.recipient + `"/>
   </saml:SubjectConfirmation>
  </saml:Subject>
- <saml:Conditions NotOnOrAfter="` + o.notOnOrAfter.Format(time.RFC3339) + `"/>
+ <saml:Conditions NotOnOrAfter="` + o.notOnOrAfter.Format(time.RFC3339) + `"` + notBefore + `>` + audience + `</saml:Conditions>
  ` + authn + `
  <saml:AttributeStatement>` + attrs + `</saml:AttributeStatement>
 </saml:Assertion>
@@ -400,6 +413,8 @@ func defaultSAML() samlAssertionOpts {
 		notOnOrAfter: stsFedT0.Add(5 * time.Minute),
 		recipient:    "https://signin.aws.amazon.com/saml",
 		nameID:       "jane",
+		issuer:       "https://idp.example.com/saml",
+		audience:     "https://signin.aws.amazon.com/saml",
 	}
 }
 

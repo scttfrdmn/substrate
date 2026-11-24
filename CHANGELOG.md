@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - IAM: SAML providers: create, get, list, update (metadata, encryption mode, private-key IDs) and delete, and tags (#1613).
 - STS: `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` check the token's claims against a registered provider and the simulated clock, then the trust policy's `Federated` principal and provider condition keys (#1613).
 - STS: `POST`/`DELETE /v1/sts/federation-outcome` seeds `InvalidIdentityToken`, `IDPRejectedClaim` or `IDPCommunicationError` per provider, optionally for a count of assumes (#1613).
+- STS: the federated assumes honour `MaxSessionDuration`, `nbf`/`NotBefore`, a SAML assertion's issuer (the metadata's `entityID`) and audience, and pass session tags and `SourceIdentity` under `sts:TagSession`/`sts:SetSourceIdentity` (#1613).
+- STS: `Policy` and `PolicyArns` session policies on `AssumeRole`, `AssumeRoleWithWebIdentity` and `AssumeRoleWithSAML` narrow every request the session signs (#1613).
 - CloudFormation: `AWS::IAM::OIDCProvider` and `AWS::IAM::SAMLProvider` deploy, update in place and delete (#1613).
 
 ### Changed
@@ -56,7 +58,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Routing: an unsigned request with no other routing signal and `Action=AssumeRoleWithWebIdentity` or `AssumeRoleWithSAML` reaches STS instead of answering `ServiceNotAvailable` (#1613).
 - IAM: a trust-policy `"AWS"` principal never matches an OIDC or SAML provider; only a `Federated` entry does (#1613).
-- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, SAML-expiry and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
+- STS: `AssumeRole` with `Policy` or `PolicyArns` now mints a narrowed session where it ignored them; an unknown `PolicyArns` entry is `MalformedPolicyDocument` (#1613).
+- STS/IAM: the federation and provider limit, validation, SAML `NoSuchEntity`, malformed-token, missing-`sub`/`exp`, not-yet-valid, SAML-expiry, session-tag, session-policy and seeded `IDPRejectedClaim`/`IDPCommunicationError` messages are substrate's own (#1613).
 
 ### Fixed
 

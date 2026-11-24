@@ -2046,7 +2046,7 @@ func (p *IAMPlugin) authorizeWith(goCtx context.Context, reqCtx *RequestContext,
 		}
 	}
 
-	return nil
+	return authzSessionPolicyCheck(reqCtx.Principal, action, resource.ARN, condCtx, nil, iamAccessDeniedCode)
 }
 
 // --- Inline policies -------------------------------------------------------
