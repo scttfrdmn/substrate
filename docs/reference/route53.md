@@ -129,9 +129,13 @@ refused. Route 53 lists an enum's values in an order of its own; substrate lists
 model's.
 
 A hosted zone `Id` longer than 32 characters, a `CallerReference` outside 1–128 and a missing
-`Name` or `CallerReference` are among the refusals. `CreateHostedZone`'s own `Name` check and
-`ChangeResourceRecordSets`' own `Type` check answer in the same words for a request that reaches
-the plugin without the gate.
+`Name` or `CallerReference` are among the refusals. A request that reaches the plugin without the
+gate — a schedule's dispatch, or any request with validation off — is checked by the plugin through
+the gate's own walk: `CreateHostedZone`'s `Name`, and `ChangeResourceRecordSets`' whole
+`ChangeBatch`, so a bad `Type` and a bad `TTL` together are reported together either way. An
+empty `<Name></Name>` is refused with `Member must not be blank`, substrate's own wording, since
+the model sets `Name` no minimum length. The `Value null at` form for a missing member is
+substrate's too; no source shows Route 53's.
 
 ## Cost
 

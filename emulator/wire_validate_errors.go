@@ -122,7 +122,8 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 	// error detected: Value 'to' at 'startRecordType' failed to satisfy constraint: Member must
 	// satisfy enum value set: [AAAA, A, CAA, NS, SOA, SPF, MX, PTR, CNAME, TXT, SRV, NAPTR]"
 	// (hashicorp/terraform-provider-aws#11677). Route 53 lists the values in an order of its own;
-	// substrate lists them in the model's.
+	// substrate lists them in the model's. No source shows Route 53's answer for a missing member, so
+	// its "Value null at" form is the one the rest of this table answers, and is substrate's own.
 	"route53": {
 		missing: wireErrorCode{"InvalidInput", http.StatusBadRequest},
 		invalid: wireErrorCode{"InvalidInput", http.StatusBadRequest},
@@ -159,30 +160,28 @@ var validatedServices = map[string]wireServiceRules{ //nolint:gochecknoglobals /
 	},
 }
 
-// wireRefusal renders one failure in service's validation form. A plugin calls it for a check it
-// keeps because a request the gate never sees reaches it — a stack's or a schedule's dispatch —
-// so that request is answered exactly as the gate answers a client's.
-func wireRefusal(service string, f wireFailure) *AWSError {
-	return validatedServices[service].refusal([]wireFailure{f})
-}
-
-// wireMissingMember is the failure for an absent required member at path; wire is its name
-// on the wire, which the EC2 form reports.
-func wireMissingMember(path, wire string) wireFailure {
-	return wireFailure{kind: wireMissing, path: path, wire: wire, constraint: "Member must not be null"}
-}
-
-// wireRequireMember refuses the top-level member name, which a plugin found absent or blank, as
-// the gate does. An absent member, and a blank one the model gives a minimum length, are refused
-// through the gate's own walk over that member ([wireCheckMember]), so the answer is the gate's
-// byte for byte. A blank one the model does not bound, which the gate lets through, is refused
-// in the same form as an absent one. name is both the model's member name and, for the Query
-// services that call this, the parameter's wire name.
-func wireRequireMember(req *AWSRequest, name string) *AWSError {
-	if err := wireCheckMember(req, name, wireMissing, wireTooShort); err != nil {
+// wireRequireMember refuses the top-level member name of operation of service's input, which a
+// plugin found absent or blank in req, as the gate does. An absent member, and a blank one the
+// model gives a minimum length, are refused through the gate's own walk over that member
+// ([wireCheckMember]), so the answer is the gate's byte for byte. A blank one the model does not
+// bound, which the gate lets through, is refused with "Member must not be blank", a constraint
+// of substrate's own, or with the service's missing-member sentence where it has one, since
+// ElastiCache's sentence covers a blank value too. fallback is returned when the tables hold no
+// such member, so a plugin keeps its own refusal rather than answering an empty code.
+func wireRequireMember(service, operation string, req *AWSRequest, name string, fallback *AWSError) *AWSError {
+	if err := wireCheckMember(service, operation, req, name, wireMissing, wireTooShort); err != nil {
 		return err
 	}
-	return wireRefusal(req.Service, wireMissingMember(lowerFirst(name), name))
+	m, rules, view, ok := wirePluginMember(service, operation, req, name)
+	if !ok {
+		return fallback
+	}
+	f := wireFailure{kind: wireMissing, path: lowerFirst(m.Name), member: m.Name, wire: wireName(m),
+		constraint: "Member must not be null"}
+	if _, present := view.field(m, &wireShapes[m.Shape]); present {
+		f.kind, f.value, f.hasValue, f.constraint = wireBlank, "", true, "Member must not be blank"
+	}
+	return rules.refusal([]wireFailure{f})
 }
 
 // The EC2 API's sentences. MissingParameter and InvalidParameterValue are the codes the EC2 API
@@ -190,8 +189,9 @@ func wireRequireMember(req *AWSRequest, name string) *AWSError {
 // value specified in a parameter is not valid", both at 400. The wording is EC2's observed answer:
 // "The request must contain the parameter instanceId (Service: AmazonEC2; Status Code: 400; Error
 // Code: MissingParameter …)" (Amazon developer forums, "EC2 Missing parameter") and "MissingParameter:
-// The request must contain the parameter ebs" (hashicorp/packer#3799), which [ec2MissingParameter]
-// already answers. The value sentence is the form EC2's KeyType refusal takes in
+// The request must contain the parameter ebs" (hashicorp/packer#3799). Both name the parameter by
+// the model's lower-camel locationName, so the sentence does too, and by the member name where the
+// model gives none; that rule is substrate's reading of the two answers. The value sentence is the form EC2's KeyType refusal takes in
 // [EC2Plugin.createKeyPair]; no source publishes it for a model constraint, so it is substrate's.
 const (
 	wireEC2MissingSentence = "The request must contain the parameter %s"
@@ -212,8 +212,17 @@ const (
 // invalid code otherwise.
 func (r wireServiceRules) refusal(failures []wireFailure) *AWSError {
 	first := failures[0]
-	if r.missingSentence != "" && first.kind == wireMissing {
-		return &AWSError{Code: r.missing.code, Message: fmt.Sprintf(r.missingSentence, first.wire), HTTPStatus: r.missing.status}
+	if r.missingSentence != "" {
+		// The sentence names one parameter, the first absent or blank one in the model's order,
+		// even when another failure precedes it: the service's own refusal for a missing
+		// parameter is the answer, and a nested member is named by its own wire name alone,
+		// which is substrate's choice, since no source shows the sentence for one.
+		for _, f := range failures {
+			if f.kind == wireMissing || f.kind == wireBlank {
+				return &AWSError{Code: r.missing.code, Message: fmt.Sprintf(r.missingSentence, f.wire),
+					HTTPStatus: r.missing.status}
+			}
+		}
 	}
 	if r.style == wireStyleEC2 {
 		return &AWSError{Code: r.invalid.code, Message: fmt.Sprintf(wireEC2InvalidSentence, first.value, first.wire),

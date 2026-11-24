@@ -71,32 +71,27 @@ func r53IsApexDefault(rrType, name, zoneName string) bool {
 	return (t == "SOA" || t == "NS") && r53CanonicalName(name) == r53CanonicalName(zoneName)
 }
 
-// r53RRTypeOrder is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
-// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"), in that order,
-// which is the model's. The values are upper case, and an enum member is matched exactly, so "a" is
-// not "A".
-var r53RRTypeOrder = []string{ //nolint:gochecknoglobals // published enum
-	"SOA", "A", "TXT", "NS", "CNAME", "MX", "NAPTR", "PTR", "SRV", "SPF", "AAAA", "CAA", "DS", "TLSA",
-	"SSHFP", "SVCB", "HTTPS",
-}
-
-// r53IsRRType reports whether t is one of [r53RRTypeOrder].
-func r53IsRRType(t string) bool {
-	return slices.Contains(r53RRTypeOrder, t)
+// r53RRTypes is the Type enum API_ResourceRecordSet publishes ("Valid Values: SOA | A | TXT | NS |
+// CNAME | MX | NAPTR | PTR | SRV | SPF | AAAA | CAA | DS | TLSA | SSHFP | SVCB | HTTPS"), read from the
+// vendored model so that it is the list request validation checks. The values are upper case, and
+// an enum member is matched exactly, so "a" is not "A".
+func r53RRTypes() []string {
+	return wireEnumAt("route53", "ChangeResourceRecordSets", "ChangeBatch", "Changes", "ResourceRecordSet", "Type")
 }
 
 // r53InvalidType refuses the record set Type of the change at index i (counting from 0) when it is
-// outside [r53RRTypeOrder], with InvalidInput (400), "The input is not valid.", which
-// API_ChangeResourceRecordSets publishes. Request validation refuses it first for a client's
-// request; this answers a request the gate does not see in the same words (see validatedServices).
+// outside [r53RRTypes], with InvalidInput (400), "The input is not valid.", which
+// API_ChangeResourceRecordSets publishes. The handler checks the whole ChangeBatch through the
+// gate's own walk first ([wireCheckMember]), which refuses a bad Type in the gate's words with
+// every other failure in the batch; this answers only a Type that walk did not see, for a body it
+// could not read, and its message is substrate's own.
 func r53InvalidType(i int, rrType string) *AWSError {
-	return wireRefusal("route53", wireFailure{
-		kind:       wireNotInEnum,
-		path:       fmt.Sprintf("changeBatch.changes.%d.member.resourceRecordSet.type", i+1),
-		value:      rrType,
-		hasValue:   true,
-		constraint: "Member must satisfy enum value set: [" + strings.Join(r53RRTypeOrder, ", ") + "]",
-	})
+	return &AWSError{
+		Code: "InvalidInput",
+		Message: fmt.Sprintf("change %d: %q is not a valid resource record set Type; the valid values are %s.",
+			i+1, rrType, strings.Join(r53RRTypes(), ", ")),
+		HTTPStatus: http.StatusBadRequest,
+	}
 }
 
 // The InvalidChangeBatch messages for a batch that would leave a zone without its apex SOA or NS.

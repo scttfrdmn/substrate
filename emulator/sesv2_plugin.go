@@ -110,7 +110,7 @@ func (p *SESv2Plugin) createEmailIdentity(reqCtx *RequestContext, req *AWSReques
 	if input.EmailIdentity == "" {
 		// Request validation refuses a client's request without one first; a dispatch the gate does
 		// not see is answered in the same words.
-		return nil, wireRequireMember(req, "EmailIdentity")
+		return nil, wireRequireMember("sesv2", "CreateEmailIdentity", req, "EmailIdentity", sesv2BadRequest("EmailIdentity is required"))
 	}
 
 	goCtx := context.Background()

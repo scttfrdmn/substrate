@@ -122,3 +122,19 @@ func WireOperationCoveredForTest(plugin, op string) bool {
 	_, ok := wireOperations[plugin][op]
 	return ok
 }
+
+// WireRequireMemberFallbackForTest calls wireRequireMember for a service the tables do not
+// validate, which must answer the plugin's own fallback.
+func WireRequireMemberFallbackForTest() *AWSError {
+	fallback := &AWSError{Code: "Fallback", Message: "the plugin's own", HTTPStatus: 400}
+	return wireRequireMember("no-such-service", "Op", &AWSRequest{}, "Name", fallback)
+}
+
+// WireMissingAfterInvalidForTest renders ElastiCache's refusal for a length failure followed by
+// a missing member.
+func WireMissingAfterInvalidForTest() string {
+	return validatedServices["elasticache"].refusal([]wireFailure{
+		{kind: wireTooLong, path: "a", wire: "A", value: "x", hasValue: true, constraint: "Member must have length less than or equal to 0"},
+		{kind: wireMissing, path: "b", wire: "B", constraint: "Member must not be null"},
+	}).Message
+}

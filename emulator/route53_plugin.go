@@ -91,7 +91,8 @@ func (p *Route53Plugin) createHostedZone(reqCtx *RequestContext, req *AWSRequest
 	if name == "" {
 		// Request validation refuses a client's request without one first; a dispatch the gate does
 		// not see is answered in the same words.
-		return nil, wireRequireMember(req, "Name")
+		return nil, wireRequireMember("route53", "CreateHostedZone", req, "Name",
+			&AWSError{Code: "InvalidInput", Message: "Name is required", HTTPStatus: http.StatusBadRequest})
 	}
 	if !strings.HasSuffix(name, ".") {
 		name += "."
@@ -451,6 +452,13 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 		return nil, &AWSError{Code: "MalformedXML", Message: "could not parse change batch: " + err.Error(), HTTPStatus: http.StatusBadRequest}
 	}
 
+	// Request validation checks a client's batch before the plugin runs; a batch the gate did not
+	// see, a schedule's dispatch or any request with validation off, is checked here through the
+	// gate's own walk, so it is answered in the same words with every failure the gate reports.
+	if awsErr := wireCheckMember("route53", "ChangeResourceRecordSets", req, "ChangeBatch"); awsErr != nil {
+		return nil, awsErr
+	}
+
 	index, err := p.loadList(id, "rrset_keys")
 	if err != nil {
 		return nil, fmt.Errorf("route53 changeResourceRecordSets list: %w", err)
@@ -462,7 +470,7 @@ func (p *Route53Plugin) changeResourceRecordSets(reqCtx *RequestContext, req *AW
 	apex := make([]r53ApexChange, 0, len(xmlReq.ChangeBatch.Changes))
 	for i, change := range xmlReq.ChangeBatch.Changes {
 		rrs := change.ResourceRecordSet
-		if !r53IsRRType(rrs.Type) {
+		if !slices.Contains(r53RRTypes(), rrs.Type) {
 			return nil, r53InvalidType(i, rrs.Type)
 		}
 		apex = append(apex, r53ApexChange{action: change.Action, rrType: rrs.Type, name: rrs.Name})

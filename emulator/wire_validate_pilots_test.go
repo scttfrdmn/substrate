@@ -176,10 +176,10 @@ func TestWireValidation_PilotsRefuseWhatTheModelForbids(t *testing.T) {
 		{"ec2: CreateKeyPair without KeyName", "MissingParameter",
 			"The request must contain the parameter KeyName", ec2Call("CreateKeyPair", nil)},
 		{"ec2: ImportKeyPair without PublicKeyMaterial", "MissingParameter",
-			"The request must contain the parameter PublicKeyMaterial",
+			"The request must contain the parameter publicKeyMaterial",
 			ec2Call("ImportKeyPair", map[string]string{"KeyName": "k"})},
 		{"ec2: DeletePlacementGroup without GroupName", "MissingParameter",
-			"The request must contain the parameter GroupName", ec2Call("DeletePlacementGroup", nil)},
+			"The request must contain the parameter groupName", ec2Call("DeletePlacementGroup", nil)},
 		{"ec2: a blank KeyName, answered by the plugin in the same words", "MissingParameter",
 			"The request must contain the parameter KeyName", ec2Call("CreateKeyPair", map[string]string{"KeyName": ""})},
 	} {

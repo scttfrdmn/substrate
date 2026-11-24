@@ -54,6 +54,9 @@ const (
 	wirePatternMismatch
 	// wireElementInvalid is a list whose scalar elements fail their own constraints.
 	wireElementInvalid
+	// wireBlank is a required member present but empty where the model sets no minimum length,
+	// which only a plugin's own check refuses.
+	wireBlank
 )
 
 // wireFailure is one failed constraint.
@@ -220,52 +223,96 @@ func (w *wireWalker) member(view inputView, m *wireMember, path string) {
 	if !present {
 		if m.Required {
 			w.failures = append(w.failures, wireFailure{kind: wireMissing, path: child, member: m.Name,
-				wire: queryWireName(m, w.ec2), constraint: "Member must not be null"})
+				wire: wireName(m), constraint: "Member must not be null"})
 		}
 		return
 	}
 	w.value(v, m, m.Shape, child)
 }
 
-// wireCheckMember checks one top-level member of req's operation input exactly as the gate
-// does — the same view, the same walk, the same refusal — and reports only failures of the given
-// kinds, or of any kind when none is given. A plugin calls it for a check it keeps because a
-// request the gate never sees reaches it (a stack's or a schedule's dispatch, or any request with
-// the gate off), so the answer is the gate's byte for byte. A request the tables do not cover, or
-// that cannot be read, returns nil, as the gate would.
-func wireCheckMember(req *AWSRequest, name string, kinds ...wireFailureKind) *AWSError {
-	rules, ok := validatedServices[req.Service]
-	if !ok || !rules.covers(req.Operation) {
-		return nil
-	}
-	op, ok := wireOperations[req.Service][req.Operation]
-	if !ok || op.Input == 0 {
-		return nil
-	}
-	view, ok := pluginView(req, op)
+// wireCheckMember checks the top-level member name of operation of service's input in req
+// exactly as the gate does — the same view, the same walk, the same refusal — and reports only
+// failures of the given kinds, or of any kind when none is given. A plugin calls it for a check it
+// keeps because a request the gate never sees reaches it (a stack's or a schedule's dispatch, or
+// any request with the gate off), so the answer is the gate's byte for byte. The plugin names its
+// own service and operation, because a request built in process may carry neither. A request the
+// tables do not cover, or that cannot be read, returns nil, as the gate would.
+func wireCheckMember(service, operation string, req *AWSRequest, name string, kinds ...wireFailureKind) *AWSError {
+	m, rules, view, ok := wirePluginMember(service, operation, req, name)
 	if !ok {
 		return nil
 	}
+	op := wireOperations[service][operation]
+	w := wireWalker{rules: rules, ec2: wireModels[op.Model].Protocol == "ec2"}
+	w.member(view, m, "")
+	if w.unreadable {
+		return nil
+	}
+	var kept []wireFailure
+	for _, f := range w.failures {
+		if len(kinds) == 0 || slices.Contains(kinds, f.kind) {
+			kept = append(kept, f)
+		}
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	return rules.refusal(kept)
+}
+
+// wirePluginMember finds the top-level member name of operation of service's input, with the
+// service's rules and req read as the plugin's view. ok is false when the service is not
+// validated, the operation or member is not in the tables, or req cannot be read.
+func wirePluginMember(service, operation string, req *AWSRequest, name string) (*wireMember, wireServiceRules, inputView, bool) {
+	rules, ok := validatedServices[service]
+	if !ok || !rules.covers(operation) {
+		return nil, rules, nil, false
+	}
+	op, ok := wireOperations[service][operation]
+	if !ok || op.Input == 0 {
+		return nil, rules, nil, false
+	}
+	view, ok := pluginView(req, op)
+	if !ok {
+		return nil, rules, nil, false
+	}
 	sh := &wireShapes[op.Input]
 	for i := range sh.Members {
-		if sh.Members[i].Name != name {
-			continue
+		if sh.Members[i].Name == name {
+			return &sh.Members[i], rules, view, true
 		}
-		w := wireWalker{rules: rules, ec2: wireModels[op.Model].Protocol == "ec2"}
-		w.member(view, &sh.Members[i], "")
-		if w.unreadable {
-			return nil
+	}
+	return nil, rules, nil, false
+}
+
+// wireEnumAt returns the enum values of the member at path in operation of service's input — the
+// member names from the input structure down, a list taken as its element — or nil when the
+// tables hold no enum there. A plugin that checks an enum the gate also checks reads the values
+// from here, so the two cannot drift when the model is refreshed.
+func wireEnumAt(service, operation string, path ...string) []string {
+	op, ok := wireOperations[service][operation]
+	if !ok {
+		return nil
+	}
+	shape := op.Input
+	for _, name := range path {
+		sh := &wireShapes[shape]
+		if sh.Kind == wireList {
+			sh = &wireShapes[sh.Member.Shape]
 		}
-		var kept []wireFailure
-		for _, f := range w.failures {
-			if len(kinds) == 0 || slices.Contains(kinds, f.kind) {
-				kept = append(kept, f)
+		next := 0
+		for i := range sh.Members {
+			if sh.Members[i].Name == name {
+				next = sh.Members[i].Shape
 			}
 		}
-		if len(kept) == 0 {
+		if next == 0 {
 			return nil
 		}
-		return rules.refusal(kept)
+		shape = next
+	}
+	if e := wireShapes[shape].Enum; e != 0 {
+		return wireEnums[e]
 	}
 	return nil
 }
@@ -299,7 +346,7 @@ func (w *wireWalker) value(v inputView, m *wireMember, shape int, path string) {
 	fail := func(kind wireFailureKind, constraint string) {
 		f := wireFailure{kind: kind, path: path, constraint: constraint}
 		if m != nil {
-			f.member, f.wire = m.Name, queryWireName(m, w.ec2)
+			f.member, f.wire = m.Name, wireName(m)
 		}
 		f.value, f.hasValue = renderValue(v, sh)
 		w.failures = append(w.failures, f)

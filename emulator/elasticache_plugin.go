@@ -93,7 +93,7 @@ func (p *ElastiCachePlugin) HandleRequest(ctx *RequestContext, req *AWSRequest) 
 func (p *ElastiCachePlugin) createCacheCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["CacheClusterId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "CacheClusterId")
+		return nil, elasticacheMissing("CreateCacheCluster", req, "CacheClusterId")
 	}
 	engine := req.Params["Engine"]
 	if engine == "" {
@@ -205,7 +205,7 @@ func (p *ElastiCachePlugin) describeCacheClusters(reqCtx *RequestContext, req *A
 func (p *ElastiCachePlugin) modifyCacheCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["CacheClusterId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "CacheClusterId")
+		return nil, elasticacheMissing("ModifyCacheCluster", req, "CacheClusterId")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	stateKey := "cachecluster:" + scope + "/" + id
@@ -248,7 +248,7 @@ func (p *ElastiCachePlugin) modifyCacheCluster(reqCtx *RequestContext, req *AWSR
 func (p *ElastiCachePlugin) deleteCacheCluster(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["CacheClusterId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "CacheClusterId")
+		return nil, elasticacheMissing("DeleteCacheCluster", req, "CacheClusterId")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	stateKey := "cachecluster:" + scope + "/" + id
@@ -281,7 +281,7 @@ func (p *ElastiCachePlugin) deleteCacheCluster(reqCtx *RequestContext, req *AWSR
 func (p *ElastiCachePlugin) createReplicationGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["ReplicationGroupId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "ReplicationGroupId")
+		return nil, elasticacheMissing("CreateReplicationGroup", req, "ReplicationGroupId")
 	}
 	autoFailover := req.Params["AutomaticFailoverEnabled"]
 	if autoFailover == "true" {
@@ -391,7 +391,7 @@ func (p *ElastiCachePlugin) describeReplicationGroups(reqCtx *RequestContext, re
 func (p *ElastiCachePlugin) modifyReplicationGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["ReplicationGroupId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "ReplicationGroupId")
+		return nil, elasticacheMissing("ModifyReplicationGroup", req, "ReplicationGroupId")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	stateKey := "replgroup:" + scope + "/" + id
@@ -440,7 +440,7 @@ func (p *ElastiCachePlugin) modifyReplicationGroup(reqCtx *RequestContext, req *
 func (p *ElastiCachePlugin) deleteReplicationGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	id := req.Params["ReplicationGroupId"]
 	if id == "" {
-		return nil, elasticacheMissing(req, "ReplicationGroupId")
+		return nil, elasticacheMissing("DeleteReplicationGroup", req, "ReplicationGroupId")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	stateKey := "replgroup:" + scope + "/" + id
@@ -473,7 +473,7 @@ func (p *ElastiCachePlugin) deleteReplicationGroup(reqCtx *RequestContext, req *
 func (p *ElastiCachePlugin) createCacheSubnetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["CacheSubnetGroupName"]
 	if name == "" {
-		return nil, elasticacheMissing(req, "CacheSubnetGroupName")
+		return nil, elasticacheMissing("CreateCacheSubnetGroup", req, "CacheSubnetGroupName")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	sg := ElastiCacheCacheSubnetGroup{
@@ -563,7 +563,7 @@ func (p *ElastiCachePlugin) describeCacheSubnetGroups(reqCtx *RequestContext, re
 func (p *ElastiCachePlugin) deleteCacheSubnetGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["CacheSubnetGroupName"]
 	if name == "" {
-		return nil, elasticacheMissing(req, "CacheSubnetGroupName")
+		return nil, elasticacheMissing("DeleteCacheSubnetGroup", req, "CacheSubnetGroupName")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, "cachesubnetgroup:"+scope+"/"+name); err != nil {
@@ -581,7 +581,7 @@ func (p *ElastiCachePlugin) deleteCacheSubnetGroup(reqCtx *RequestContext, req *
 func (p *ElastiCachePlugin) createCacheParameterGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["CacheParameterGroupName"]
 	if name == "" {
-		return nil, elasticacheMissing(req, "CacheParameterGroupName")
+		return nil, elasticacheMissing("CreateCacheParameterGroup", req, "CacheParameterGroupName")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	pg := ElastiCacheCacheParameterGroup{
@@ -671,7 +671,7 @@ func (p *ElastiCachePlugin) describeCacheParameterGroups(reqCtx *RequestContext,
 func (p *ElastiCachePlugin) deleteCacheParameterGroup(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	name := req.Params["CacheParameterGroupName"]
 	if name == "" {
-		return nil, elasticacheMissing(req, "CacheParameterGroupName")
+		return nil, elasticacheMissing("DeleteCacheParameterGroup", req, "CacheParameterGroupName")
 	}
 	scope := reqCtx.AccountID + "/" + reqCtx.Region
 	if err := p.state.Delete(context.Background(), elasticacheNamespace, "cacheparamgroup:"+scope+"/"+name); err != nil {
@@ -689,7 +689,7 @@ func (p *ElastiCachePlugin) deleteCacheParameterGroup(reqCtx *RequestContext, re
 func (p *ElastiCachePlugin) listTagsForResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
-		return nil, elasticacheMissing(req, "ResourceName")
+		return nil, elasticacheMissing("ListTagsForResource", req, "ResourceName")
 	}
 	tags, err := p.loadTagsByARN(resourceARN)
 	if err != nil {
@@ -739,7 +739,7 @@ func elasticacheTagListResult(tags map[string]string) elasticacheTagListMessage 
 func (p *ElastiCachePlugin) addTagsToResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
-		return nil, elasticacheMissing(req, "ResourceName")
+		return nil, elasticacheMissing("AddTagsToResource", req, "ResourceName")
 	}
 	newTags := elasticacheTagsFromParams(req.Params)
 	tags, err := p.updateTagsByARN(resourceARN, newTags, nil)
@@ -754,7 +754,7 @@ func (p *ElastiCachePlugin) addTagsToResource(reqCtx *RequestContext, req *AWSRe
 func (p *ElastiCachePlugin) removeTagsFromResource(reqCtx *RequestContext, req *AWSRequest) (*AWSResponse, error) {
 	resourceARN := req.Params["ResourceName"]
 	if resourceARN == "" {
-		return nil, elasticacheMissing(req, "ResourceName")
+		return nil, elasticacheMissing("RemoveTagsFromResource", req, "ResourceName")
 	}
 	keys := extractIndexedParams(req.Params, "TagKeys.member")
 	tags, err := p.updateTagsByARN(resourceARN, nil, keys)
@@ -993,6 +993,7 @@ func elasticacheOKResponse(reqCtx *RequestContext, operation string, result any)
 // ElastiCache's own sentence (see validatedServices), through [wireRequireMember]. Request validation
 // answers an absent one for a client's request first; a blank one, and any request a stack or a
 // schedule sends without the gate, reaches this and is answered the same way.
-func elasticacheMissing(req *AWSRequest, param string) *AWSError {
-	return wireRequireMember(req, param)
+func elasticacheMissing(operation string, req *AWSRequest, param string) *AWSError {
+	return wireRequireMember("elasticache", operation, req, param, &AWSError{
+		Code: "InvalidParameterValue", Message: param + " is required", HTTPStatus: http.StatusBadRequest})
 }

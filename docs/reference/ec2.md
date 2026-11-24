@@ -4227,9 +4227,16 @@ EC2's key-pair and placement-group operations — `CreateKeyPair`, `ImportKeyPai
 `DeleteKeyPair`, `DescribeKeyPairs`, `CreatePlacementGroup`, `DeletePlacementGroup` and
 `DescribePlacementGroups` — are validated against the service model before any plugin sees a
 client's request (#1612; see [Request validation](/reference/concepts/validation)). The rest of
-EC2 is not yet. A missing required parameter is `MissingParameter`/400, `The request must contain
-the parameter KeyName`, naming the parameter as it is sent; the plugin answers a blank one the
-same way. The EC2 model publishes no length or range on these operations, and enum checks are off.
+EC2 is not yet. Of the seven, three have a member the model requires — `KeyName` on
+`CreateKeyPair` and `ImportKeyPair`, `PublicKeyMaterial` on `ImportKeyPair`, and `GroupName` on
+`DeletePlacementGroup` — and a request missing one is `MissingParameter`/400, `The request must
+contain the parameter KeyName`; the plugin answers a blank one the same way. The parameter is named
+by the model's `locationName` where it has one (`publicKeyMaterial`, `groupName`), as EC2's
+observed answers name `instanceId` and `ebs`, and by the member name otherwise (`KeyName`); that
+rule is substrate's reading of those two answers. `DeleteKeyPair`'s and `CreatePlacementGroup`'s
+own checks are the plugin's, not the model's: `CreatePlacementGroup`'s `GroupName` is `Required:
+No` in the model and the reference. The EC2 model publishes no length or range on these
+operations, and enum checks are off.
 
 ## Every response carries its requestId
 

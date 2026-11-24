@@ -68,7 +68,11 @@ withhold the value: ACM answers `Value of the input at 'domainName' …`, and SE
 
 Two services answer a missing member in a sentence of their own and name only the first:
 ElastiCache, `The parameter SubnetIds must be provided and must not be blank.`, and EC2, `The
-request must contain the parameter KeyName`. Both name the parameter as it is sent.
+request must contain the parameter KeyName`. ElastiCache names the parameter as it is sent; EC2
+names it by the model's `locationName` where it has one (`groupName`), as its observed answers
+do. A required member present but blank where the model sets no minimum length is refused by the
+plugin, with the sentence where the service has one and otherwise with `Member must not be
+blank`, which is substrate's own.
 
 The path is the member names from the model with the first letter lowered, joined by dots. A
 list element is `<list>.<n>.member`, counting from 1, so the second tag's key is

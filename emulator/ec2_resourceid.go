@@ -325,7 +325,7 @@ func ec2RequireNamedResource(kind ec2IDKind, paramName, id string, found bool) e
 
 // ec2MissingParameter returns the error EC2 raises for a required-but-absent
 // request parameter.
-func ec2MissingParameter(name string) error {
+func ec2MissingParameter(name string) *AWSError {
 	return &AWSError{
 		Code:       "MissingParameter",
 		Message:    fmt.Sprintf("The request must contain the parameter %s", name),
