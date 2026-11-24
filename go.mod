@@ -17,7 +17,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.47.0
 	go.opentelemetry.io/otel/trace v1.47.0
 	go.yaml.in/yaml/v3 v3.0.6
-	golang.org/x/text v0.43.0
+	golang.org/x/text v0.44.0
 	modernc.org/sqlite v1.62.0
 )
 
