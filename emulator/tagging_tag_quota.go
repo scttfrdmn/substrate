@@ -129,6 +129,8 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 	switch ns {
 	case ec2Namespace:
 		return taggingQuotaRefusal(taggingEC2QuotaRefusal(raw, addTags, removeKeys))
+	case s3Namespace:
+		return taggingQuotaRefusal(s3BucketTagQuotaRefusal(raw, addTags, removeKeys))
 	case elbNamespace:
 		if !elbKeyIsTaggable(key) {
 			return nil
@@ -159,22 +161,6 @@ func taggingCheckTagQuota(ns, key string, raw []byte, addTags map[string]string,
 // back, so a partial decode costs nothing either.
 func taggingDecodeForQuota(raw []byte, into any) bool {
 	return json.Unmarshal(raw, into) == nil
-}
-
-// taggingEC2QuotaRefusal applies [ec2CheckTagLimit] to a stored EC2 record.
-//
-// Every taggable EC2 record spells the member `tags` in lowercase and holds [EC2Tag], so one shape
-// covers all fourteen of them.
-func taggingEC2QuotaRefusal(raw []byte, addTags map[string]string, removeKeys []string) *AWSError {
-	var record struct {
-		Tags []EC2Tag `json:"tags"`
-	}
-	if !taggingDecodeForQuota(raw, &record) {
-		return nil
-	}
-	return ec2CheckTagLimit(
-		taggingDropRemovedTags(record.Tags, removeKeys, func(t EC2Tag) string { return t.Key }),
-		taggingTagsAsEC2(addTags))
 }
 
 // taggingELBQuotaRefusal applies [elbCheckTagLimit] to a stored ELB record of either generation.

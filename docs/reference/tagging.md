@@ -24,9 +24,25 @@ distributions, CloudWatch Logs log groups, CloudWatch alarms (`cloudwatch:alarm`
 KMS keys, SNS topics, Secrets Manager secrets, Systems Manager parameters, and ELBv2 load
 balancers, target groups, listeners and listener rules.
 
+CloudWatch, EC2 and S3 list and tag their own resources for the tagging API (#1609). A write
+through `TagResources` or `UntagResources` takes the lock the service's own tag operation holds
+(`TagResource`, `CreateTags`/`DeleteTags`, `PutBucketTagging`/`DeleteBucketTagging`), and so do
+CloudFormation's stamps on those services' resources. The lock orders tag writes with each other
+only: for EC2 and S3, another operation that rewrites the same record does not take it (#1674). The
+tagging plugin reads and merges every other service's records itself.
+
+`TagResources` and `UntagResources` refuse an `aws:` key for every resource. AWS reserves the prefix
+("You can't edit or delete a tag that begins with the `aws:` prefix"). The match is case-sensitive,
+as EC2's tag restrictions give it ("Tag keys and values are case-sensitive"), so `AWS:owner` is an
+ordinary tag. EC2 and S3 answer with their own refusals (`InvalidParameterValue`, `InvalidTag`),
+and every other service with `InvalidParameterException`/400. An EC2 or S3 resource is also held to
+its service's key, value and 50-tag rules, with `aws:` tags not counted. A key the rules refuse is
+answered before a missing resource. All of this is the same whether or not the owning plugin is
+registered.
+
 A CloudWatch alarm is reported under `arn:aws:cloudwatch:{region}:{account}:alarm:{name}`, the
-ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` route to
-CloudWatch's own `TagResource` and `UntagResource` rather than editing the alarm, so CloudWatch
+ARN CloudWatch's own `TagResource` takes. `TagResources` and `UntagResources` are applied by
+CloudWatch itself, under the lock its own `TagResource` and `UntagResource` hold, so CloudWatch
 serializes every write to an alarm and its 50-tag quota and refusals apply unchanged. Like a log group, its previously-tagged state is a
 side-car key rather than a member of its record; see [Alarm tags](/reference/monitoring#alarm-tags).
 
@@ -793,12 +809,13 @@ reached through substrate's own API. Two earlier statements in the reference and
 `CHANGELOG.md` claimed Kinesis was the first quota of any service and that the merge
 covered sixteen arms; both were wrong when written and are corrected with that issue.
 
-**Each service's own checker is called rather than a shared count, because the four
+**Each service's own checker is called rather than a shared count, because they
 disagree in ways a shared count would have to flatten:**
 
 | Service | Cap | Code | Status | Reserved `aws:` keys |
 |---------|-----|------|--------|----------------------|
 | EC2 | 50 | `TagLimitExceeded` | 400 | Excluded from the count |
+| S3 (buckets) | 50 | `InvalidTag` | 400 | Excluded from the count |
 | ELBv2 | 50 | `TooManyTags` | 400 | Excluded from the count |
 | ELB Classic | **10** | `TooManyTags` | 400 | Excluded from the count |
 | IAM | 50 | `LimitExceeded` | **409** | Counted |

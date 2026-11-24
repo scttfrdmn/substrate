@@ -286,7 +286,7 @@ var cfnConfigStampableTypes = map[string]bool{
 // A resource of a type no arm knows reports false and is skipped by the caller in
 // silence. That is the documented behavior, not an omission — see the header above.
 func cfnStampResourceTags(
-	state StateManager, reqCtx *RequestContext, dr DeployedResource, tags []EC2Tag,
+	state StateManager, owners *PluginRegistry, reqCtx *RequestContext, dr DeployedResource, tags []EC2Tag,
 ) (bool, error) {
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnStampELBResource(state, reqCtx, dr, tags)
@@ -306,7 +306,7 @@ func cfnStampResourceTags(
 	// skipTagQuota: every key here carries the `aws:` prefix, which the services that publish a
 	// per-resource tag quota exclude from the count (#1000, and [taggingCheckTagQuota]).
 	if err := mergeResourceTags(
-		context.Background(), state, target.namespace, target.stateKey, add, nil, skipTagQuota,
+		context.Background(), owners, state, target.namespace, target.stateKey, add, nil, skipTagQuota,
 	); err != nil {
 		return true, fmt.Errorf("stamp %s %s: %w", dr.Type, dr.PhysicalID, err)
 	}

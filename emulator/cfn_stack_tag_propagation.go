@@ -126,7 +126,7 @@ func cfnStackTagChanges(existing, prev, next map[string]string) (map[string]stri
 // A resource nothing can reach reports false and is skipped in silence, as the stamp is: the
 // services that model no tags at all are the majority of what a stack creates.
 func cfnPropagateStackTags(
-	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+	state StateManager, owners *PluginRegistry, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	if cfnELBStampableTypes[dr.Type] {
 		return cfnPropagateELBStackTags(state, reqCtx, dr, prev, next)
@@ -135,9 +135,9 @@ func cfnPropagateStackTags(
 		return cfnPropagateConfigStackTags(state, reqCtx, dr, prev, next)
 	}
 	if target, ok := cfnResolveStampTarget(dr, reqCtx.AccountID, reqCtx.Region); ok {
-		return cfnPropagateRecordStackTags(state, target, dr, prev, next)
+		return cfnPropagateRecordStackTags(state, owners, target, dr, prev, next)
 	}
-	return cfnPropagateEC2StackTags(state, reqCtx, dr, prev, next)
+	return cfnPropagateEC2StackTags(state, owners, reqCtx, dr, prev, next)
 }
 
 // cfnPropagateRecordStackTags reconciles the tags on a record [cfnResolveStampTarget] resolves,
@@ -149,7 +149,7 @@ func cfnPropagateStackTags(
 // Resource Groups Tagging API uses, so a propagated tag and a `TagResources` call cannot end up
 // merging differently.
 func cfnPropagateRecordStackTags(
-	state StateManager, target cfnStampTarget, dr DeployedResource, prev, next map[string]string,
+	state StateManager, owners *PluginRegistry, target cfnStampTarget, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	existing, found, err := cfnRecordTags(state, target)
 	if err != nil {
@@ -169,7 +169,7 @@ func cfnPropagateRecordStackTags(
 	// "Propagation does not enforce the target's own tag quota" section for the decision and the
 	// search behind it (#1077, decided; #1000 filed it).
 	if err := mergeResourceTags(
-		context.Background(), state, target.namespace, target.stateKey, write, remove, skipTagQuota,
+		context.Background(), owners, state, target.namespace, target.stateKey, write, remove, skipTagQuota,
 	); err != nil {
 		return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
 	}
@@ -272,7 +272,7 @@ func cfnDecodeRecordTags(member json.RawMessage) map[string]string {
 // [mergeResourceTags], so there is no mode to pass. [ec2CheckTagLimit] would have to be called directly.
 // See the file's quota section for why none of the four arms checks (#1077).
 func cfnPropagateEC2StackTags(
-	state StateManager, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
+	state StateManager, owners *PluginRegistry, reqCtx *RequestContext, dr DeployedResource, prev, next map[string]string,
 ) (bool, error) {
 	current, found, err := ec2ResourceTags(state, reqCtx, dr.PhysicalID)
 	if err != nil {
@@ -289,8 +289,8 @@ func cfnPropagateEC2StackTags(
 	write, remove := cfnStackTagChanges(existing, prev, next)
 
 	if len(write) > 0 {
-		if err := ec2ApplyTagsToResource(
-			state, reqCtx, dr.PhysicalID, cfnSortedEC2Tags(write), false,
+		if err := ec2ApplyTagsThroughOwner(
+			owners, state, reqCtx, dr.PhysicalID, cfnSortedEC2Tags(write), false,
 		); err != nil {
 			return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
 		}
@@ -300,7 +300,7 @@ func cfnPropagateEC2StackTags(
 		for _, key := range remove {
 			gone = append(gone, EC2Tag{Key: key})
 		}
-		if err := ec2ApplyTagsToResource(state, reqCtx, dr.PhysicalID, gone, true); err != nil {
+		if err := ec2ApplyTagsThroughOwner(owners, state, reqCtx, dr.PhysicalID, gone, true); err != nil {
 			return true, fmt.Errorf("stack tags %s %s: %w", dr.Type, dr.PhysicalID, err)
 		}
 	}

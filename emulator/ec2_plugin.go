@@ -60,6 +60,12 @@ type EC2Plugin struct {
 	// AttachInternetGateway, DetachInternetGateway, DeleteInternetGateway, and DeleteVpc's
 	// dependency check. Where both locks are held, igwMu is taken first.
 	igwMu sync.Mutex
+
+	// tagMu serializes tag writes with each other: CreateTags, DeleteTags, the tagging API's writes
+	// through [EC2Plugin.tagRecord], and CloudFormation's stamps and stack-tag propagation through
+	// [EC2Plugin.applyTagsByID] (#1609). It orders only those. Another operation that rewrites the
+	// same record, such as an instance state change, does not take it.
+	tagMu sync.Mutex
 }
 
 // Name returns the service name "ec2".
@@ -3732,6 +3738,8 @@ func (p *EC2Plugin) createTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	for _, id := range resourceIDs {
 		existing, found, err := ec2ResourceTags(p.state, reqCtx, id)
 		if err != nil {
@@ -3783,6 +3791,8 @@ func (p *EC2Plugin) deleteTags(reqCtx *RequestContext, req *AWSRequest) (*AWSRes
 	if awsErr := ec2CheckTagResourceIDs(p.state, reqCtx, resourceIDs); awsErr != nil {
 		return nil, awsErr
 	}
+	p.tagMu.Lock()
+	defer p.tagMu.Unlock()
 	for _, id := range resourceIDs {
 		if err := ec2ApplyTagsToResource(p.state, reqCtx, id, tags, true); err != nil {
 			return nil, err
